@@ -1,5 +1,6 @@
 """Local filesystem storage backend implementation."""
 
+import contextlib
 import logging
 from pathlib import Path
 from typing import Any
@@ -75,6 +76,12 @@ class LocalFileStorage(BaseStorageBackend):
         """
         Write data to a file at the specified path.
 
+        The data goes to a temp file in the same directory and is moved
+        into place with an atomic rename, so a process crash mid-write
+        never leaves a truncated file at the final path. A replayed batch
+        rewriting its committed file therefore lands all-or-nothing
+        (issue #306).
+
         Args:
             path: Relative path from base_path
             data: File contents
@@ -88,8 +95,17 @@ class LocalFileStorage(BaseStorageBackend):
         # Ensure parent directory exists
         full_path.parent.mkdir(parents=True, exist_ok=True)
 
-        async with aiofiles.open(full_path, "wb") as f:
-            await f.write(data)
+        # Same directory keeps the rename on one filesystem; the extra
+        # suffix keeps the temp file out of extension globs.
+        tmp_path = full_path.with_name(full_path.name + ".tmp")
+        try:
+            async with aiofiles.open(tmp_path, "wb") as f:
+                await f.write(data)
+            await aiofiles.os.replace(tmp_path, full_path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                await aiofiles.os.remove(tmp_path)
+            raise
 
         logger.debug(f"Wrote {len(data)} bytes to: {full_path}")
         return str(full_path)

@@ -322,7 +322,9 @@ Each batch file's name carries the first 16 hex chars of
 SHA-256(serialized bytes) (issue #319), and there is no batch-level
 commit ledger (issue #306). The write itself is the idempotency
 mechanism: a true replay serializes to the same bytes, hashes to the
-same filename, and overwrites the same file — while a same-run restart,
+same filename, and overwrites the same file — atomically, via a temp
+file renamed into place, so a crash mid-rewrite cannot truncate
+committed output — while a same-run restart,
 which re-reads the inclusive cursor boundary and re-batches those rows
 into different content, lands in a new file instead of being skipped as
 a replay (the row-drop class of issue #282) or overwriting committed
