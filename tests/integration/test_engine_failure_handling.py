@@ -43,7 +43,7 @@ class MockBatchResult:
 
 
 @pytest.fixture
-def engine(temp_dir):
+def engine(temp_dir, tmp_project_root):
     """Create a StreamingEngine instance for testing."""
     return StreamingEngine(
         pipeline_id="test-pipeline",
