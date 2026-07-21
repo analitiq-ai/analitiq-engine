@@ -35,23 +35,7 @@ jobs:
         run: poetry install --no-interaction
 
       - name: Run tests
-        # These six modules already fail on main independent of this PR (there
-        # was no pytest CI to catch it): some are coupled to the gitignored
-        # on-disk registry (connectors/, pipelines/manifest.json) -- which is
-        # absent by design, since connector/pipeline/stream/endpoint/connection
-        # shapes come from the published contract schemas, not sample fixtures
-        # kept here -- and some are stale tests out of sync with current
-        # signatures (e.g. ConnectionRuntime now requires connector_id). They
-        # cannot gate CI as-is; the ~1740 self-contained tests do. Decoupling
-        # and repairing them is tracked in issue #278.
-        run: |
-          poetry run pytest \
-            --ignore=tests/integration/test_api_connector.py \
-            --ignore=tests/integration/test_config_payload_structure.py \
-            --ignore=tests/integration/test_engine_failure_handling.py \
-            --ignore=tests/unit/analitiq_stream/core/test_engine_unit.py \
-            --ignore=tests/unit/cdk_tests/sql/test_ddl.py \
-            --ignore=tests/unit/cdk_tests/sql/test_discovery.py
+        run: poetry run pytest
 
   lint:
     name: pre-commit (all files)

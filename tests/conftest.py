@@ -17,11 +17,7 @@ from tests.fixtures.api import (
 )
 
 # Import specific fixtures from modules
-from tests.fixtures.database import (
-    mock_database_connector,
-    postgres_driver,
-    sample_database_config,
-)
+from tests.fixtures.database import mock_database_connector, postgres_driver
 from tests.fixtures.pipeline_config_prep import (
     environment_variables,
     multi_stream_pipeline_config,
@@ -43,7 +39,6 @@ __all__ = [
     "sample_api_response",
     "mock_database_connector",
     "postgres_driver",
-    "sample_database_config",
     "environment_variables",
     "multi_stream_pipeline_config",
     "sample_database_endpoint_config",
@@ -75,6 +70,23 @@ def temp_dir():
     """Create a temporary directory for tests."""
     with tempfile.TemporaryDirectory() as temp_dir:
         yield temp_dir
+
+
+@pytest.fixture
+def tmp_project_root(tmp_path, monkeypatch):
+    """Chdir into a synthetic project root with a ``pipelines/manifest.json``.
+
+    ``StreamingEngine.__init__`` wires its worker client by walking up from
+    CWD to the nearest ``pipelines/manifest.json``. Tests that construct an
+    engine must run inside this synthetic root so the walk never escapes into
+    an ambient developer checkout (whose gitignored registry would be silently
+    picked up) and never fails in a clean checkout such as CI, where no
+    manifest exists at all.
+    """
+    (tmp_path / "pipelines").mkdir()
+    (tmp_path / "pipelines" / "manifest.json").write_text('{"pipelines": []}')
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
 
 
 @pytest.fixture
