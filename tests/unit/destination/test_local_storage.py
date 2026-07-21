@@ -81,24 +81,28 @@ class TestWriteFile:
         await s.write_file("a/b/c.txt", b"nested")
         assert (base / "a" / "b" / "c.txt").read_bytes() == b"nested"
 
-    async def test_no_tmp_file_left_after_write(self, connected_storage):
+    @staticmethod
+    async def test_no_tmp_file_left_after_write(connected_storage):
         s, base = connected_storage
         await s.write_file("out.jsonl", b"data")
         assert [p.name for p in base.iterdir()] == ["out.jsonl"]
 
-    async def test_failed_write_leaves_committed_file_intact(self, connected_storage):
+    @staticmethod
+    async def test_failed_write_leaves_committed_file_intact(connected_storage):
         """The write is atomic (temp + rename, issue #306): a failure
         mid-write must not truncate a previously committed file at the
         final path, and must not leave the temp file behind."""
         s, base = connected_storage
         (base / "f.jsonl").write_bytes(b"committed")
 
-        with patch(
-            "src.destination.storage.local.aiofiles.open",
-            side_effect=OSError(5, "boom"),
+        with (
+            patch(
+                "src.destination.storage.local.aiofiles.open",
+                side_effect=OSError(5, "boom"),
+            ),
+            pytest.raises(OSError, match="boom"),
         ):
-            with pytest.raises(OSError, match="boom"):
-                await s.write_file("f.jsonl", b"replacement")
+            await s.write_file("f.jsonl", b"replacement")
 
         assert (base / "f.jsonl").read_bytes() == b"committed"
         assert not (base / "f.jsonl.tmp").exists()
