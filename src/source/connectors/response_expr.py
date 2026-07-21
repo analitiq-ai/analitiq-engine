@@ -3,18 +3,21 @@
 The api-endpoint contract declares per-page read behavior against the
 provider's response: ``pagination.stop_when`` is a predicate over the parsed
 body, and ``cursor.next_cursor`` / ``link.next_url`` are value expressions
-resolved from it. This module owns that evaluation, mirroring the contract's
-grammar (spec: §Stop Conditions):
+resolved from it. Value resolution goes through the shared CDK
+:class:`~cdk.resolver.Resolver` — the engine's one resolution vocabulary —
+with the ``response`` scope holding the page body, so every expression form
+(``ref`` / ``template`` / ``literal`` / ``function``) behaves here exactly
+as it does in request binding. This module layers the contract's
+stop-condition predicate grammar (spec: §Stop Conditions) over that shared
+resolution.
 
-* ``{"ref": "response.body[.path]"}`` walks the parsed body; any other ref
-  scope is not resolvable from a response and fails loud.
-* ``{"literal": value}`` and plain scalars pass through.
-* ``template`` / ``function`` forms are declared by the contract's expression
-  union but have no response-scope semantics here yet — they fail loud rather
-  than being silently skipped or sent on as their raw structure.
-
-Failures raise :class:`ValueError`; the connector translates them into its
-deterministic read errors.
+Expression nodes arrive in two forms: parsed models where the contract
+types the field with the expression union (``cursor.next_cursor``,
+``link.next_url``), and raw nodes where it types the slot ``Any``
+(predicate operands). Both resolve identically; a value that addresses
+nothing resolves to ``None`` (the pagination loops' stop signal), while
+authoring defects (a typo'd scope, an unknown function) raise through the
+resolver's own error surface.
 """
 
 from __future__ import annotations
@@ -41,62 +44,23 @@ from analitiq.contracts.endpoints import (
     TemplateExpr,
 )
 
-from ...shared.dict_path import walk_path
+from cdk.resolver import Resolver
 
-_BODY_PREFIX = "response.body"
-
-
-def _resolve_ref(ref: str, data: Any) -> Any:
-    if ref == _BODY_PREFIX:
-        return data
-    if ref.startswith(_BODY_PREFIX + "."):
-        return walk_path(data, ref[len(_BODY_PREFIX) + 1 :].split("."))
-    raise ValueError(
-        f"ref {ref!r} is not response-scoped; only "
-        f"'{_BODY_PREFIX}[.path]' refs can be resolved from a response"
-    )
+_EXPRESSION_MODELS = (RefExpr, LiteralExpr, TemplateExpr, FunctionExpr)
 
 
-def resolve_response_expr(expr: Any, data: Any) -> Any:
-    """Resolve a contract value expression against a parsed response body.
+def resolve_response_expr(expr: Any, resolver: Resolver) -> Any:
+    """Resolve a contract value expression through a response-scoped resolver.
 
-    ``data`` is the decoded JSON payload of the current page. Returns the
-    resolved value, with ``None`` meaning the addressed value is absent
-    (or stored as null — the two are indistinguishable per ``walk_path``).
-
-    Expression nodes arrive in two forms: parsed models where the contract
-    types the field with the expression union (``cursor.next_cursor``,
-    ``link.next_url``), and raw single-operator dicts where it types the
-    slot ``Any`` (predicate operands). Both follow the same grammar and
-    resolve identically; anything that is neither form passes through as a
-    literal operand value.
+    ``resolver`` carries the page's parsed body in its ``response`` scope
+    (``Resolver.with_response({"body": data})``). Parsed expression models
+    are dumped back to their authored node shape; raw nodes and plain
+    operand values go through as-is — ``resolve_for_request`` owns the
+    grammar, including passing non-expression values through unchanged.
     """
-    if isinstance(expr, RefExpr):
-        return _resolve_ref(expr.ref, data)
-    if isinstance(expr, LiteralExpr):
-        return expr.literal
-    if isinstance(expr, (TemplateExpr, FunctionExpr)):
-        form = "template" if isinstance(expr, TemplateExpr) else "function"
-        raise ValueError(f"{form!r} expressions are not supported in response scope")
-    if isinstance(expr, dict):
-        if "function" in expr:
-            # Function nodes carry sibling keys (input/map/safe); detect on
-            # the operator key alone.
-            raise ValueError(
-                "'function' expressions are not supported in response scope"
-            )
-        if len(expr) == 1:
-            key, value = next(iter(expr.items()))
-            if key == "ref" and isinstance(value, str):
-                return _resolve_ref(value, data)
-            if key == "literal":
-                return value
-            if key == "template":
-                raise ValueError(
-                    "'template' expressions are not supported in response scope"
-                )
-    # A plain operand value (e.g. the 0 in {"eq": [{"ref": ...}, 0]}).
-    return expr
+    if isinstance(expr, _EXPRESSION_MODELS):
+        expr = expr.model_dump(mode="json", by_alias=True, exclude_unset=True)
+    return resolver.resolve_for_request(expr)
 
 
 def _is_empty(value: Any) -> bool:
@@ -113,8 +77,8 @@ def _is_empty(value: Any) -> bool:
     return False
 
 
-def evaluate_predicate(pred: Any, data: Any) -> bool:
-    """Evaluate a contract stop-condition predicate against a response body.
+def evaluate_predicate(pred: Any, resolver: Resolver) -> bool:
+    """Evaluate a contract stop-condition predicate against a page.
 
     Comparison operators resolve both operands through
     :func:`resolve_response_expr`; an incomparable pair (e.g. ordering
@@ -122,19 +86,19 @@ def evaluate_predicate(pred: Any, data: Any) -> bool:
     predicate rather than guessing a truth value.
     """
     if isinstance(pred, PredAnd):
-        return all(evaluate_predicate(p, data) for p in pred.and_)
+        return all(evaluate_predicate(p, resolver) for p in pred.and_)
     if isinstance(pred, PredOr):
-        return any(evaluate_predicate(p, data) for p in pred.or_)
+        return any(evaluate_predicate(p, resolver) for p in pred.or_)
     if isinstance(pred, PredNot):
-        return not evaluate_predicate(pred.not_, data)
+        return not evaluate_predicate(pred.not_, resolver)
     if isinstance(pred, PredExists):
-        return resolve_response_expr(pred.exists, data) is not None
+        return resolve_response_expr(pred.exists, resolver) is not None
     if isinstance(pred, PredMissing):
-        return resolve_response_expr(pred.missing, data) is None
+        return resolve_response_expr(pred.missing, resolver) is None
     if isinstance(pred, PredEmpty):
-        return _is_empty(resolve_response_expr(pred.empty, data))
+        return _is_empty(resolve_response_expr(pred.empty, resolver))
     if isinstance(pred, PredNotEmpty):
-        return not _is_empty(resolve_response_expr(pred.not_empty, data))
+        return not _is_empty(resolve_response_expr(pred.not_empty, resolver))
 
     comparisons = (
         (PredEq, "eq", lambda a, b: a == b),
@@ -147,7 +111,8 @@ def evaluate_predicate(pred: Any, data: Any) -> bool:
     for cls, op, compare in comparisons:
         if isinstance(pred, cls):
             left, right = (
-                resolve_response_expr(operand, data) for operand in getattr(pred, op)
+                resolve_response_expr(operand, resolver)
+                for operand in getattr(pred, op)
             )
             try:
                 return bool(compare(left, right))

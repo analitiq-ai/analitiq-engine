@@ -782,9 +782,11 @@ class TestReadBatchesKeysetPagination:
         assert session.calls[2][2]["after_id"] == 2
 
     @pytest.mark.asyncio
-    async def test_keyset_full_page_without_key_field_raises(self):
+    async def test_keyset_full_page_without_key_field_raises_before_yield(self):
         """A full page whose last record lacks order_by_field cannot advance —
-        that is malformed data, not a stop signal."""
+        malformed data, not a stop signal — and it fails BEFORE the page is
+        yielded, so the engine can never commit a page the read cannot
+        correctly follow."""
         session = _FakeSession(
             [
                 _FakeResponse(
@@ -797,18 +799,16 @@ class TestReadBatchesKeysetPagination:
         connector = APIConnector("test")
 
         endpoint = _endpoint_doc_with_records(pagination=self._keyset_pagination())
+        reader = connector.read_batches(
+            runtime,
+            {"endpoint_document": endpoint, "stream_source": _stream_source()},
+            checkpoint=MagicMock(),
+            stream_name="items",
+            batch_size=2,
+        )
+        # The very first advance raises: no batch was handed downstream.
         with pytest.raises(ReadError, match="order_by_field"):
-            await _consume(
-                connector,
-                runtime,
-                config={
-                    "endpoint_document": endpoint,
-                    "stream_source": _stream_source(),
-                },
-                state_manager=MagicMock(),
-                stream_name="items",
-                batch_size=2,
-            )
+            await reader.__anext__()
 
 
 class TestReadBatchesLinkPagination:
@@ -886,6 +886,38 @@ class TestReadBatchesLinkPagination:
         assert session.calls[1][1] == "https://api.example.test/items/p2"
 
     @pytest.mark.asyncio
+    async def test_link_equivalent_origin_spellings_accepted(self):
+        """An explicit default port or different host casing is the same
+        origin and must not be rejected."""
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={
+                        "records": [{"id": 1, "name": "a"}],
+                        "next": "https://API.example.test:443/items/p2",
+                    },
+                ),
+                _FakeResponse(status=200, body={"records": [{"id": 2, "name": "b"}]}),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(pagination=self._link_pagination())
+        batches = await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        assert [b.num_rows for b in batches] == [1, 1]
+        assert session.calls[1][1] == "https://API.example.test:443/items/p2"
+
+    @pytest.mark.asyncio
     async def test_link_cross_origin_next_url_refused(self):
         """An absolute next_url on another host is refused: the shared
         session would send the connection's auth headers to it."""
@@ -946,6 +978,53 @@ class TestReadBatchesLinkPagination:
                 stream_name="items",
                 batch_size=10,
             )
+
+
+class TestReadBatchesCursorTemplate:
+    """The next_cursor value expression supports the full grammar."""
+
+    @pytest.mark.asyncio
+    async def test_template_next_cursor_interpolates_response(self):
+        """A template next_cursor builds the token from response values
+        through the shared resolver's response scope."""
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}], "next_page": 2},
+                ),
+                _FakeResponse(status=200, body={"records": [{"id": 2, "name": "b"}]}),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "cursor",
+                "cursor": {
+                    "param": "page_token",
+                    "next_cursor": {"template": "page-${response.body.next_page}"},
+                },
+                "limit": {"param": "limit"},
+                # Templates render missing placeholders leniently ("page-"),
+                # so the declared stop condition — not token absence — ends
+                # this loop.
+                "stop_when": {"missing": {"ref": "response.body.next_page"}},
+            },
+        )
+        batches = await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        assert [b.num_rows for b in batches] == [1, 1]
+        assert session.calls[1][2]["page_token"] == "page-2"
+        assert len(session.calls) == 2
 
 
 class TestReadBatchesStopWhen:

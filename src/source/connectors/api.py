@@ -38,7 +38,7 @@ from collections.abc import AsyncIterator, Callable
 from datetime import timezone
 from decimal import Decimal
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 import aiohttp
 import pyarrow as pa
@@ -58,6 +58,7 @@ from analitiq.contracts.endpoints import (
 from pydantic import ValidationError
 
 from cdk.connection_runtime import ConnectionRuntime
+from cdk.exceptions import TransportSpecError
 from cdk.rate_limiter import RateLimiter
 from cdk.request_binding import bind_param_refs, resolve_param_defaults
 from cdk.resolver import Resolver
@@ -328,6 +329,7 @@ class APIConnector(BaseConnector):
             pagination=read.pagination,
             batch_size=batch_size,
             records_ref=records_ref,
+            resolver=resolver,
             build_request=build_request,
         ):
             if not batch:
@@ -647,20 +649,40 @@ class APIConnector(BaseConnector):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _stop_requested(stop_when: Predicate, data: Any) -> bool:
-        """Evaluate the strategy's declared ``stop_when`` against a page body."""
+    def _stop_requested(stop_when: Predicate, page_resolver: Resolver) -> bool:
+        """Evaluate the strategy's declared ``stop_when`` against a page."""
         try:
-            return evaluate_predicate(stop_when, data)
-        except ValueError as err:
+            return evaluate_predicate(stop_when, page_resolver)
+        except (ValueError, KeyError, TransportSpecError) as err:
             raise ReadError(f"pagination stop_when failed to evaluate: {err}") from err
 
     @staticmethod
-    def _resolve_response_value(expr: Any, data: Any, *, context: str) -> Any:
+    def _resolve_response_value(
+        expr: Any, page_resolver: Resolver, *, context: str
+    ) -> Any:
         """Resolve a response-scope value expression, failing deterministically."""
         try:
-            return resolve_response_expr(expr, data)
-        except ValueError as err:
+            return resolve_response_expr(expr, page_resolver)
+        except (ValueError, KeyError, TransportSpecError) as err:
             raise ReadError(f"pagination {context} failed to resolve: {err}") from err
+
+    @staticmethod
+    def _same_origin(base: SplitResult, target: SplitResult) -> bool:
+        """Whether two split URLs share scheme, host, and effective port.
+
+        Compares normalized parts (case-insensitive scheme/host, default
+        ports made explicit) so ``https://api.example.test:443`` and
+        ``https://API.example.test`` count as the origin they are.
+        """
+        default_ports = {"http": 80, "https": 443}
+        base_scheme = base.scheme.lower()
+        target_scheme = target.scheme.lower()
+        return (
+            base_scheme == target_scheme
+            and (base.hostname or "").lower() == (target.hostname or "").lower()
+            and (base.port or default_ports.get(base_scheme))
+            == (target.port or default_ports.get(target_scheme))
+        )
 
     # One loop per pagination strategy; the pre-#346 version carried the same
     # branching and is a tolerated occurrence on the default branch.
@@ -673,6 +695,7 @@ class APIConnector(BaseConnector):
         pagination: Pagination | None,
         batch_size: int,
         records_ref: str,
+        resolver: Resolver,
         build_request: Callable[[dict[str, Any]], tuple[dict[str, Any], Any]],
     ) -> AsyncIterator[list[dict[str, Any]]]:
         """Drive the pagination loop, building each page request.
@@ -680,11 +703,16 @@ class APIConnector(BaseConnector):
         Each page request is built via ``build_request``: it maps the page's
         full param table to the ``(query_params, body)`` actually sent,
         applying declared param placement and per-page body binding.
+        ``resolver`` gains the page's body as its ``response`` scope for the
+        per-page expressions (``stop_when``, ``next_cursor``, ``next_url``).
 
         Every strategy stops when its declared ``stop_when`` predicate holds
         for the page's response. An empty page always stops (there is nothing
         left to yield), and the count-driven strategies (offset, page, keyset)
-        also stop on a short page, which no non-empty page can follow.
+        also stop on a short page, which no non-empty page can follow. Each
+        page's continuation — the stop decision and the value it advances
+        on — is computed BEFORE the page is yielded, so a page that cannot
+        be followed correctly fails before the engine can commit it.
         """
         if pagination is None:
             query, body = build_request(dict(base_params))
@@ -702,6 +730,7 @@ class APIConnector(BaseConnector):
                 base_params=base_params,
                 pagination=pagination,
                 records_ref=records_ref,
+                resolver=resolver,
                 build_request=build_request,
             ):
                 yield records
@@ -729,10 +758,11 @@ class APIConnector(BaseConnector):
                 )
                 if not records:
                     return
+                page_resolver = resolver.with_response({"body": data})
+                stop = self._stop_requested(pagination.stop_when, page_resolver)
+                short = len(records) < batch_size
                 yield records
-                if self._stop_requested(pagination.stop_when, data):
-                    return
-                if len(records) < batch_size:
+                if stop or short:
                     return
                 offset += offset_step
 
@@ -755,10 +785,11 @@ class APIConnector(BaseConnector):
                 )
                 if not records:
                     return
+                page_resolver = resolver.with_response({"body": data})
+                stop = self._stop_requested(pagination.stop_when, page_resolver)
+                short = len(records) < batch_size
                 yield records
-                if self._stop_requested(pagination.stop_when, data):
-                    return
-                if len(records) < batch_size:
+                if stop or short:
                     return
                 page += page_step
 
@@ -779,13 +810,17 @@ class APIConnector(BaseConnector):
                 )
                 if not records:
                     return
+                page_resolver = resolver.with_response({"body": data})
+                stop = self._stop_requested(pagination.stop_when, page_resolver)
+                cursor_token = None
+                if not stop:
+                    cursor_token = self._resolve_response_value(
+                        pagination.cursor.next_cursor,
+                        page_resolver,
+                        context="cursor.next_cursor",
+                    )
                 yield records
-                if self._stop_requested(pagination.stop_when, data):
-                    return
-                cursor_token = self._resolve_response_value(
-                    pagination.cursor.next_cursor, data, context="cursor.next_cursor"
-                )
-                if cursor_token is None or cursor_token == "":  # nosec B105
+                if stop or cursor_token is None or cursor_token == "":  # nosec B105
                     return
 
         else:
@@ -814,18 +849,24 @@ class APIConnector(BaseConnector):
                 )
                 if not records:
                     return
+                page_resolver = resolver.with_response({"body": data})
+                stop = self._stop_requested(pagination.stop_when, page_resolver)
+                short = limit_sent and len(records) < batch_size
+                if not stop and not short:
+                    # Validate the continuation before yielding: a page the
+                    # loop cannot advance from must fail before the engine
+                    # can commit it downstream.
+                    last_key = records[-1].get(order_by_field)
+                    if last_key is None:
+                        raise ReadError(
+                            f"keyset pagination: the last record of a page "
+                            f"has no {order_by_field!r} value to advance "
+                            f"from; keyset.order_by_field must be present "
+                            f"on every record"
+                        )
                 yield records
-                if self._stop_requested(pagination.stop_when, data):
+                if stop or short:
                     return
-                if limit_sent and len(records) < batch_size:
-                    return
-                last_key = records[-1].get(order_by_field)
-                if last_key is None:
-                    raise ReadError(
-                        f"keyset pagination: the last record of a page has "
-                        f"no {order_by_field!r} value to advance from; "
-                        f"keyset.order_by_field must be present on every record"
-                    )
 
     async def _iterate_link_pages(
         self,
@@ -835,6 +876,7 @@ class APIConnector(BaseConnector):
         base_params: dict[str, Any],
         pagination: LinkPagination,
         records_ref: str,
+        resolver: Resolver,
         build_request: Callable[[dict[str, Any]], tuple[dict[str, Any], Any]],
     ) -> AsyncIterator[list[dict[str, Any]]]:
         """Follow ``link.next_url`` from each response to the next page.
@@ -846,7 +888,9 @@ class APIConnector(BaseConnector):
         connection's origin — the shared session sends the connection's
         default headers (auth included) on every request, so following a
         response-supplied URL to another host would hand those credentials
-        to it.
+        to it. The next URL is resolved and vetted BEFORE its page is
+        yielded, so a malformed link fails before the engine can commit
+        the page.
         """
         base_url = self.base_url
         if base_url is None:
@@ -862,32 +906,36 @@ class APIConnector(BaseConnector):
         while True:
             if not records:
                 return
-            yield records
-            if self._stop_requested(pagination.stop_when, data):
-                return
-            next_url = self._resolve_response_value(
-                pagination.link.next_url, data, context="link.next_url"
-            )
-            if next_url is None or next_url == "":
-                return
-            if not isinstance(next_url, str):
-                raise ReadError(
-                    f"link pagination: next_url resolved to a "
-                    f"{type(next_url).__name__}, expected a URL string"
+            page_resolver = resolver.with_response({"body": data})
+            stop = self._stop_requested(pagination.stop_when, page_resolver)
+            next_target: str | None = None
+            if not stop:
+                next_url = self._resolve_response_value(
+                    pagination.link.next_url, page_resolver, context="link.next_url"
                 )
-            if next_url.startswith(("http://", "https://")):
-                target = urlsplit(next_url)
-                if (target.scheme, target.netloc) != (origin.scheme, origin.netloc):
-                    raise ReadError(
-                        f"link pagination: next_url {next_url!r} leaves the "
-                        f"connection's origin {origin.scheme}://{origin.netloc}; "
-                        f"refusing to send the connection's headers to another "
-                        f"host"
-                    )
-            else:
-                next_url = join_url(base_url, next_url)
+                if next_url is not None and next_url != "":
+                    if not isinstance(next_url, str):
+                        raise ReadError(
+                            f"link pagination: next_url resolved to a "
+                            f"{type(next_url).__name__}, expected a URL string"
+                        )
+                    if next_url.startswith(("http://", "https://")):
+                        if not self._same_origin(origin, urlsplit(next_url)):
+                            raise ReadError(
+                                f"link pagination: next_url {next_url!r} "
+                                f"leaves the connection's origin "
+                                f"{origin.scheme}://{origin.netloc}; refusing "
+                                f"to send the connection's headers to "
+                                f"another host"
+                            )
+                        next_target = next_url
+                    else:
+                        next_target = join_url(base_url, next_url)
+            yield records
+            if next_target is None:
+                return
             data, records = await self._request_payload(
-                next_url, method, {}, records_ref
+                next_target, method, {}, records_ref
             )
 
     # ------------------------------------------------------------------

@@ -116,6 +116,20 @@ class ResolutionContext:
             response=self.response,
         )
 
+    def with_response(self, response: Mapping[str, Any]) -> ResolutionContext:
+        """Return a copy with ``response`` replaced — useful per-page."""
+        return ResolutionContext(
+            connector=self.connector,
+            connection=self.connection,
+            secrets=self.secrets,
+            auth=self.auth,
+            runtime=self.runtime,
+            state=self.state,
+            derived=self.derived,
+            request=self.request,
+            response=response,
+        )
+
 
 # A registered derived function takes the expression node and the active
 # resolver and returns a JSON-compatible value.
@@ -161,6 +175,16 @@ class Resolver:
     @property
     def context(self) -> ResolutionContext:
         return self._ctx
+
+    def with_response(self, response: Mapping[str, Any]) -> Resolver:
+        """Return a resolver whose ``response`` scope holds *response*.
+
+        Per-page pagination expressions (``next_cursor`` / ``next_url`` /
+        ``stop_when`` operands) resolve against the page's parsed body
+        through the same grammar and function set as every other scope —
+        one resolution vocabulary, response included.
+        """
+        return Resolver(self._ctx.with_response(response), functions=self._functions)
 
     def register(self, name: str, fn: DerivedFunction) -> None:
         if name in self._functions:

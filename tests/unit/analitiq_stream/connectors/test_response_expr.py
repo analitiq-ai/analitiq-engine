@@ -1,16 +1,19 @@
 """Unit tests for :mod:`src.source.connectors.response_expr`.
 
 The module evaluates contract value expressions and stop-condition
-predicates against a parsed response body; these pin the grammar's
-semantics directly (the pagination tests exercise them end-to-end).
+predicates against a page through the shared CDK resolver's ``response``
+scope; these pin the grammar's semantics directly (the pagination tests
+exercise them end-to-end).
 """
 
 from __future__ import annotations
 
 import pytest
-from analitiq.contracts.endpoints import Predicate
+from analitiq.contracts.endpoints import Cursor, Predicate
 from pydantic import TypeAdapter
 
+from cdk.derived_functions import DEFAULT_FUNCTIONS
+from cdk.resolver import ResolutionContext, Resolver
 from src.source.connectors.response_expr import (
     evaluate_predicate,
     resolve_response_expr,
@@ -26,80 +29,124 @@ def _pred(raw: dict) -> object:
 
 def _expr(raw: object) -> object:
     """Parse a raw value-expression node the way the contract models do."""
-    from analitiq.contracts.endpoints import Cursor
-
     return Cursor.model_validate({"param": "p", "next_cursor": raw}).next_cursor
+
+
+def _resolver(data: object, *, parameters: dict | None = None) -> Resolver:
+    """Response-scoped resolver over *data*, mirroring the connector's."""
+    return Resolver(
+        ResolutionContext(
+            connection={"parameters": parameters or {}},
+            response={"body": data},
+        ),
+        functions=DEFAULT_FUNCTIONS,
+    )
 
 
 class TestResolveResponseExpr:
     def test_body_ref_returns_whole_body(self):
         """``response.body`` addresses the payload itself."""
-        assert resolve_response_expr(_expr({"ref": "response.body"}), [1, 2]) == [1, 2]
+        assert resolve_response_expr(
+            _expr({"ref": "response.body"}), _resolver([1, 2])
+        ) == [1, 2]
 
     def test_dotted_ref_walks_the_body(self):
         """A dotted ref walks nested objects to the terminal value."""
-        data = {"meta": {"next": "tok"}}
+        resolver = _resolver({"meta": {"next": "tok"}})
         assert (
-            resolve_response_expr(_expr({"ref": "response.body.meta.next"}), data)
+            resolve_response_expr(_expr({"ref": "response.body.meta.next"}), resolver)
             == "tok"
         )
 
     def test_missing_path_resolves_to_none(self):
         """An absent path is ``None`` — the loop's stop signal, not an error."""
         assert (
-            resolve_response_expr(_expr({"ref": "response.body.next"}), {"a": 1})
+            resolve_response_expr(
+                _expr({"ref": "response.body.next"}), _resolver({"a": 1})
+            )
             is None
         )
 
-    def test_non_response_ref_raises(self):
-        """Only response-scoped refs are resolvable from a page body."""
-        with pytest.raises(ValueError, match="not response-scoped"):
-            resolve_response_expr(_expr({"ref": "connection.parameters.token"}), {})
+    def test_connection_scope_resolves_through_shared_vocabulary(self):
+        """Every resolver scope is addressable — one resolution vocabulary."""
+        resolver = _resolver({}, parameters={"token": "t-1"})
+        assert (
+            resolve_response_expr(
+                _expr({"ref": "connection.parameters.token"}), resolver
+            )
+            == "t-1"
+        )
+
+    def test_unknown_scope_raises(self):
+        """A typo'd scope is an authoring defect, never silently absorbed."""
+        with pytest.raises(KeyError, match="scope"):
+            resolve_response_expr(_expr({"ref": "bogus.path"}), _resolver({}))
 
     def test_literal_passes_through(self):
         """A literal expression yields its value."""
-        assert resolve_response_expr(_expr({"literal": 5}), {}) == 5
+        assert resolve_response_expr(_expr({"literal": 5}), _resolver({})) == 5
 
     def test_plain_scalar_passes_through(self):
         """Predicate operands may be plain scalars, not expression nodes."""
-        assert resolve_response_expr(10, {}) == 10
+        assert resolve_response_expr(10, _resolver({})) == 10
 
-    def test_template_raises(self):
-        """Template expressions have no response-scope semantics yet."""
-        with pytest.raises(ValueError, match="template"):
-            resolve_response_expr(_expr({"template": "${response.body.x}"}), {})
+    def test_template_interpolates_response_values(self):
+        """Template expressions interpolate response-scope placeholders."""
+        resolver = _resolver({"next_page": 3})
+        assert (
+            resolve_response_expr(
+                _expr({"template": "/items?page=${response.body.next_page}"}),
+                resolver,
+            )
+            == "/items?page=3"
+        )
+
+    def test_function_over_response_values(self):
+        """Function expressions run the shared derived-function catalog."""
+        import base64
+
+        resolver = _resolver({"token": "abc"})
+        assert resolve_response_expr(
+            _expr(
+                {
+                    "function": "base64_encode",
+                    "input": {"ref": "response.body.token"},
+                }
+            ),
+            resolver,
+        ) == base64.b64encode(b"abc").decode("ascii")
 
 
 class TestEvaluatePredicate:
     def test_empty_on_absent_and_empty_list(self):
         """``empty`` holds for an absent path and for a zero-length list."""
         pred = _pred({"empty": {"ref": "response.body.records"}})
-        assert evaluate_predicate(pred, {}) is True
-        assert evaluate_predicate(pred, {"records": []}) is True
-        assert evaluate_predicate(pred, {"records": [1]}) is False
+        assert evaluate_predicate(pred, _resolver({})) is True
+        assert evaluate_predicate(pred, _resolver({"records": []})) is True
+        assert evaluate_predicate(pred, _resolver({"records": [1]})) is False
 
     def test_scalars_are_never_empty(self):
         """``empty`` asks "is there nothing here" — 0 and False are values."""
         pred = _pred({"empty": {"ref": "response.body.count"}})
-        assert evaluate_predicate(pred, {"count": 0}) is False
-        assert evaluate_predicate(pred, {"count": False}) is False
+        assert evaluate_predicate(pred, _resolver({"count": 0})) is False
+        assert evaluate_predicate(pred, _resolver({"count": False})) is False
 
     def test_exists_and_missing(self):
         """``exists``/``missing`` test presence of the addressed value."""
-        data = {"next": "tok"}
+        resolver = _resolver({"next": "tok"})
         assert evaluate_predicate(
-            _pred({"exists": {"ref": "response.body.next"}}), data
+            _pred({"exists": {"ref": "response.body.next"}}), resolver
         )
         assert not evaluate_predicate(
-            _pred({"missing": {"ref": "response.body.next"}}), data
+            _pred({"missing": {"ref": "response.body.next"}}), resolver
         )
         assert evaluate_predicate(
-            _pred({"missing": {"ref": "response.body.gone"}}), data
+            _pred({"missing": {"ref": "response.body.gone"}}), resolver
         )
 
     def test_comparisons_resolve_both_operands(self):
         """Comparison operands each resolve through the expression grammar."""
-        data = {"page": 3, "total_pages": 3}
+        resolver = _resolver({"page": 3, "total_pages": 3})
         assert evaluate_predicate(
             _pred(
                 {
@@ -109,26 +156,28 @@ class TestEvaluatePredicate:
                     ]
                 }
             ),
-            data,
+            resolver,
         )
         assert not evaluate_predicate(
-            _pred({"lt": [{"ref": "response.body.page"}, 3]}), data
+            _pred({"lt": [{"ref": "response.body.page"}, 3]}), resolver
         )
         assert evaluate_predicate(
-            _pred({"eq": [{"ref": "response.body.page"}, 3]}), data
+            _pred({"eq": [{"ref": "response.body.page"}, 3]}), resolver
         )
         assert evaluate_predicate(
-            _pred({"neq": [{"ref": "response.body.page"}, 4]}), data
+            _pred({"neq": [{"ref": "response.body.page"}, 4]}), resolver
         )
 
     def test_incomparable_operands_raise(self):
         """Ordering ``None`` against a number is unanswerable — fail loud."""
         with pytest.raises(ValueError, match="cannot compare"):
-            evaluate_predicate(_pred({"lt": [{"ref": "response.body.absent"}, 10]}), {})
+            evaluate_predicate(
+                _pred({"lt": [{"ref": "response.body.absent"}, 10]}), _resolver({})
+            )
 
     def test_boolean_composition(self):
         """``and``/``or``/``not`` recurse over their branches."""
-        data = {"records": [], "has_more": False}
+        resolver = _resolver({"records": [], "has_more": False})
         pred = _pred(
             {
                 "and": [
@@ -137,8 +186,11 @@ class TestEvaluatePredicate:
                 ]
             }
         )
-        assert evaluate_predicate(pred, data) is True
-        assert evaluate_predicate(pred, {"records": [1], "has_more": False}) is False
+        assert evaluate_predicate(pred, resolver) is True
+        assert (
+            evaluate_predicate(pred, _resolver({"records": [1], "has_more": False}))
+            is False
+        )
         assert evaluate_predicate(
             _pred(
                 {
@@ -148,5 +200,5 @@ class TestEvaluatePredicate:
                     ]
                 }
             ),
-            data,
+            resolver,
         )
