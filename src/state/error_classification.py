@@ -635,22 +635,29 @@ def dominant_error_code(codes: Iterable[ErrorCode]) -> ErrorCode | None:
 
 
 def _read_failure_category(exc: BaseException) -> FailureCategory:
-    """Return the first declared failure category in the exception chain.
+    """Return the dominant declared failure category in the exception chain.
 
     The engine stamps the batch ack's category onto the exception it raises
     (``StreamProcessingError.failure_category``); this walks the chain so a
-    wrapped or aggregated failure still surfaces it. Matched duck-typed (an
-    attribute holding a :class:`FailureCategory`) so this module does not
-    import engine exception types. UNSPECIFIED means nothing was declared.
+    wrapped or aggregated failure still surfaces it. Dominant = the category
+    whose mapped code ranks highest in :data:`_CODE_PRIORITY` -- the same
+    rule :func:`read_failure_tag` applies to tags -- so an aggregated group
+    resolves to its most actionable leaf instead of ``_walk_chain``'s
+    traversal order. Matched duck-typed (an attribute holding a
+    :class:`FailureCategory`) so this module does not import engine
+    exception types. UNSPECIFIED means nothing was declared.
     """
-    for member in _walk_chain(exc):
-        category = getattr(member, "failure_category", None)
-        if (
-            isinstance(category, FailureCategory)
-            and category != FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
-        ):
-            return category
-    return FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+    declared = [
+        category
+        for member in _walk_chain(exc)
+        if isinstance(
+            category := getattr(member, "failure_category", None), FailureCategory
+        )
+        and category != FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+    ]
+    if not declared:
+        return FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+    return min(declared, key=lambda c: _CODE_PRIORITY.index(_CATEGORY_TO_CODE[c]))
 
 
 def classify_destination_failure(exc: BaseException) -> ErrorCode:

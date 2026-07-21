@@ -294,6 +294,27 @@ def test_declared_category_survives_wrapping():
     assert classify_destination_failure(wrapped) is ErrorCode.CONFIG_INVALID
 
 
+def test_aggregated_categories_resolve_to_dominant_not_traversal_order():
+    # A group with several declared categories must resolve by the
+    # read_failure_tag dominance rule (a config defect outranks not-ready),
+    # not by whichever leaf _walk_chain happens to visit first -- so the
+    # verdict is order-independent.
+    from src.engine.exceptions import StreamProcessingError
+    from src.state.error_classification import classify_destination_failure
+
+    not_ready = StreamProcessingError(
+        "Batch 2 failed after 3 retries: Handler not connected",
+        failure_category=FailureCategory.FAILURE_CATEGORY_NOT_READY,
+    )
+    config_defect = StreamProcessingError(
+        "Batch 5 fatal failure: type-map: no reverse rule",
+        failure_category=FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
+    )
+    for leaves in ([not_ready, config_defect], [config_defect, not_ready]):
+        group = ExceptionGroup("All streams failed", leaves)
+        assert classify_destination_failure(group) is ErrorCode.CONFIG_INVALID
+
+
 @pytest.mark.parametrize(
     "summary,expected",
     [
