@@ -1,0 +1,215 @@
+name: codex-gate
+
+# Translates the Codex review verdict into a `codex-review` commit status on
+# the PR head so branch protection can require a clean Codex review before
+# merge (issue #355). The only honored signal is Codex's verdict comment or
+# review saying "Didn't find any major issues" and naming the reviewed commit;
+# the newest verdict naming the current head decides. Codex's +1-reaction form
+# is deliberately not honored: a reaction names no commit, so tying it to a
+# head requires timestamp heuristics that are either forgeable or wedge valid
+# approvals. When Codex answers with a bare +1, re-request the review so it
+# posts a verdict comment. A scheduled sweep retries PRs whose event-triggered
+# runs failed or were never delivered.
+#
+# pull_request_target (not pull_request) because posting a commit status needs
+# a write token even for fork PRs; it is safe here because the job never checks
+# out or executes PR code -- it only reads PR metadata and posts a status.
+
+# No pull_request_review trigger and no workflow_dispatch, ever: review events
+# execute the workflow file from the PR merge ref, and manual dispatch runs
+# whichever ref is selected -- either lets a PR that edits this file post its
+# own success with the write token and walk through the gate. Every trigger
+# here runs the file from the default branch; verdicts delivered as PR reviews
+# are picked up by the sweep instead.
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+  issue_comment:
+    types: [created, edited]
+  schedule:
+    - cron: "*/15 * * * *"
+
+permissions:
+  statuses: write
+  pull-requests: read
+  issues: read
+
+concurrency:
+  group: codex-gate-${{ github.event.pull_request.number || github.event.issue.number || 'sweep' }}
+
+jobs:
+  # The job must not be displayed as "codex-review": a check run sharing the
+  # required context's name would be counted against the requirement alongside
+  # the commit status, and this job succeeds whenever the script runs -- not
+  # when Codex approves. The commit status must be the only `codex-review`
+  # reporter.
+  gate:
+    runs-on: ubuntu-latest
+    # Comment events fire for every author; only Codex's own comments can
+    # change the verdict, so skip the rest.
+    if: >-
+      github.event_name != 'issue_comment' ||
+      (github.event.issue.pull_request &&
+       github.event.comment.user.login == 'chatgpt-codex-connector[bot]')
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const CODEX = 'chatgpt-codex-connector[bot]';
+            const CONTEXT = 'codex-review';
+            // Anchored to Codex's clean-verdict template, and any body carrying
+            // the findings preamble is rejected outright: an unanchored phrase
+            // match would let a findings review that merely contains "didn't
+            // find any major issues elsewhere" -- or a PR that baits Codex into
+            // quoting the phrase -- go green.
+            const CLEAN = /^Codex Review: Didn.t find any major issues/im;
+            const FINDINGS = /Here are some automated review suggestions/i;
+            // Codex renders the commit marker both bolded and plain depending
+            // on surface, so the asterisks are optional. Codex always emits at
+            // least 10 hex characters; accepting shorter prefixes would make a
+            // ground SHA-prefix collision (~2^28 for 7 chars) cheap enough to
+            // reuse a stale verdict after a force-push.
+            const REVIEWED_COMMIT = /\*{0,2}Reviewed commit:\*{0,2}\s*`([0-9a-f]{10,40})`/i;
+
+            async function evaluate(prNumber) {
+              const { owner, repo } = context.repo;
+              const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+              if (pr.state !== 'open') return;
+              const head = pr.head.sha;
+
+              try {
+                await evaluateHead(pr, head);
+              } catch (error) {
+                // Surface the crash on the PR itself: an event run that dies
+                // here is otherwise visible only in the base repo's Actions
+                // tab, and the author would read the stuck gate as "Codex is
+                // slow". The error state still blocks merge.
+                try {
+                  await github.rest.repos.createCommitStatus({
+                    owner,
+                    repo,
+                    sha: head,
+                    context: CONTEXT,
+                    state: 'error',
+                    description: `codex-gate failed: ${String(error).slice(0, 110)}`,
+                    target_url: pr.html_url,
+                  });
+                } catch (statusError) {
+                  core.error(`PR #${prNumber}: could not post error status: ${statusError}`);
+                }
+                throw error;
+              }
+            }
+
+            async function readVerdict(prNumber, head) {
+              const { owner, repo } = context.repo;
+              const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: prNumber, per_page: 100 });
+              const reviews = await github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: prNumber, per_page: 100 });
+
+              // Comments are ordered by their last content change, not
+              // creation: this workflow reacts to edited events, so an edit
+              // must be able to reorder which verdict is newest. Reviews carry
+              // no update timestamp; their submission time is the best there
+              // is.
+              const codexResponses = comments
+                .filter((c) => c.user.login === CODEX)
+                .map((c) => ({ body: c.body || '', at: c.updated_at || c.created_at }))
+                .concat(reviews
+                  // A dismissed review was explicitly invalidated by a
+                  // maintainer; it must not stay a live verdict.
+                  .filter((r) => r.user.login === CODEX && r.state !== 'DISMISSED')
+                  .map((r) => ({ body: r.body || '', at: r.submitted_at })));
+
+              // A verdict counts only for the exact commit Codex says it
+              // reviewed, and the newest verdict for that commit decides: a
+              // clean verdict is void if a later re-review of the same commit
+              // raised findings.
+              const verdicts = codexResponses
+                .filter((v) => {
+                  const match = v.body.match(REVIEWED_COMMIT);
+                  return match !== null && head.startsWith(match[1]);
+                })
+                .sort((a, b) => new Date(a.at) - new Date(b.at));
+              const latest = verdicts[verdicts.length - 1];
+              return {
+                approved: latest !== undefined && CLEAN.test(latest.body) && !FINDINGS.test(latest.body),
+                responded: codexResponses.length > 0,
+              };
+            }
+
+            async function evaluateHead(pr, head) {
+              const { owner, repo } = context.repo;
+              const prNumber = pr.number;
+
+              let { approved, responded } = await readVerdict(prNumber, head);
+
+              const { data: combined } = await github.rest.repos.getCombinedStatusForRef({ owner, repo, ref: head });
+              const existing = combined.statuses.find((s) => s.context === CONTEXT);
+
+              if (!approved && (!existing || existing.state === 'success')) {
+                // About to write pending over a success or over no status at
+                // all, and statuses are last-writer-wins: a sweep working from
+                // a comment snapshot taken before a verdict landed would
+                // otherwise overwrite the event run's newer success (or race
+                // past it on a brand-new head). Re-read once; a demotion or
+                // first pending goes out only if the fresh read still says
+                // pending.
+                ({ approved, responded } = await readVerdict(prNumber, head));
+              }
+
+              const state = approved ? 'success' : 'pending';
+              const description = approved
+                ? `Codex found no major issues in ${head.slice(0, 10)}`
+                : responded
+                  ? `No clean Codex verdict for ${head.slice(0, 10)} yet`
+                  : `Waiting for a Codex review of ${head.slice(0, 10)}`;
+
+              if (!approved && responded) {
+                // Distinguishes "findings open or verdict stale" from template
+                // drift: if Codex rewords its verdict, this is the only trace
+                // that it responded at all.
+                core.notice(`PR #${prNumber}: Codex responded but no clean verdict matches head ${head.slice(0, 10)}`);
+              }
+
+              // GitHub caps statuses per commit and context, and the scheduled
+              // sweep would otherwise re-post an identical status every run;
+              // skip when the latest status for this context already matches.
+              if (existing && existing.state === state) {
+                core.info(`PR #${prNumber} @ ${head.slice(0, 10)}: already ${state}`);
+                return;
+              }
+
+              await github.rest.repos.createCommitStatus({
+                owner,
+                repo,
+                sha: head,
+                context: CONTEXT,
+                state,
+                description,
+                target_url: pr.html_url,
+              });
+              core.info(`PR #${prNumber} @ ${head.slice(0, 10)}: ${state}`);
+            }
+
+            if (context.payload.pull_request) {
+              await evaluate(context.payload.pull_request.number);
+            } else if (context.payload.issue) {
+              await evaluate(context.payload.issue.number);
+            } else {
+              const { owner, repo } = context.repo;
+              const open = await github.paginate(github.rest.pulls.list, { owner, repo, state: 'open', per_page: 100 });
+              const failures = [];
+              for (const pr of open) {
+                try {
+                  await evaluate(pr.number);
+                } catch (error) {
+                  // One broken PR must not starve the rest: the sweep is the
+                  // retry net for event runs that failed or never arrived.
+                  failures.push(`#${pr.number}: ${error}`);
+                  core.error(`PR #${pr.number}: ${error}`);
+                }
+              }
+              if (failures.length > 0) {
+                core.setFailed(`sweep failed for ${failures.length} PR(s): ${failures.join('; ')}`);
+              }
+            }

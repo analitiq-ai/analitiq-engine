@@ -80,3 +80,25 @@ and the gate agree. Docstring presence is not mandated (only style, via
 5. Use `/pr-review-toolkit` to review again.
 6. Continue doing this cycle until the PR is approved by the review executor.
 7. Once the PR is approved, run the tests to make sure they all pass.
+
+## Merge Requirements
+
+A PR can merge into `main` only when every required status check on its head
+commit is green:
+
+1. **Codex review is clean** -- the `codex-review` status, posted by
+   `.github/workflows/codex-gate.yml`. It turns green only when Codex's newest
+   verdict naming the PR's current head commit says "Didn't find any major
+   issues". A bare +1 reaction does not count -- re-request the review so Codex
+   posts a verdict comment. Pushing new commits resets the gate until Codex
+   reviews the new head.
+2. **CI is green** -- `pytest`, `pre-commit (all files)`, and
+   `Scan for secrets`.
+3. **DeepSource Code Review Summary is all passed** -- the `DeepSource: Docker`,
+   `DeepSource: Python`, `DeepSource: Shell`, and `DeepSource: Secrets`
+   statuses, which mirror the analyzer table in DeepSource's PR comment.
+
+These are enforced by branch protection on `main`, along with one approving
+review, resolved conversations, and a branch up to date with `main`. Admins see
+failing checks but can override per-merge; everyone else is blocked until all
+checks pass.
