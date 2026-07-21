@@ -102,7 +102,7 @@ The engine computes it as the **MAX** watermark across the batch (`compute_max_c
 enum AckStatus {
   ACK_STATUS_UNSPECIFIED = 0;
   ACK_STATUS_SUCCESS = 1;            // all written, cursor advanced
-  ACK_STATUS_ALREADY_COMMITTED = 2;  // idempotent replay, no-op (file destination's manifest; the SQL destination writes idempotently and returns SUCCESS)
+  ACK_STATUS_ALREADY_COMMITTED = 2;  // idempotent replay, no-op — for a handler that detects a prior commit; no in-tree destination returns it (sinks that dedup — SQL, file — do it in the write and return SUCCESS; per-handler verdicts below)
   ACK_STATUS_RETRYABLE_FAILURE = 3;  // no commit, safe to retry whole batch
   ACK_STATUS_FATAL_FAILURE = 4;      // no commit, do not retry, send to DLQ
 }
@@ -146,7 +146,7 @@ A destination that does not dedup itself is **at-least-once on a same-`RUN_ID` r
 - **API, `upsert` mode** — exactly-once: the endpoint dedups on its `conflict_keys`; a re-sent record updates in place.
 - **API, `insert` or `upsert` mode with a declared `idempotency` block** — exactly-once within the provider's replay window. The api-endpoint contract's `operations.write.<mode>.idempotency` (`{"in": "header" | "body", "name": "<key>"}`, infra#890) declares **where** the key lands; the engine owns the **value**, per write mode: `insert` sends the identity-derived `record_id` (primary-key fields when declared, else full content — SQL-insert parity: first occurrence of an identity wins), `upsert` sends a full-content hash (an identical replay dedups; a changed row gets a new key so the provider applies the update). Excluded with a `batching` block (the contract has no batching mode — a present block IS the multi-record case; both the schema and `configure_schema` reject the combination, because a restart re-batches records and a per-request key spanning several records can never dedup); `in: "body"` additionally requires a JSON-object request body, and the key name must not collide with engine/connection-owned headers or already-declared body fields.
 - **API, `insert` mode without the block** — at-least-once: the engine rents the sink and has no key to dedup on.
-- **file / S3** — not replay-safe across a restart: the manifest dedups by batch position (`run_id`, `stream_id`, `batch_seq`), which is sound for an in-run replay of the same batch but skips a committed position that re-arrives carrying different re-batched rows (the row-drop class of #282). Reported as at-least-once until the manifest keys on content.
+- **file / S3** — batch files are content-addressed (the filename carries a hash of the serialized bytes, #319), so a true replay overwrites the same file with the same bytes — atomically: the local backend writes temp-then-rename, so a crash mid-rewrite cannot truncate committed output. There is no batch-level commit ledger, so nothing can misclassify a restart batch as a replay and drop its rows (#306). A same-run restart re-reads the inclusive cursor boundary and writes those rows into a new file — duplicates possible, drops not. Reported as at-least-once.
 - **SQL `truncate_insert`** — the truncate runs on the read's first batch only (issue #307) and the append phase has no row-identity dedup (deduping a full refresh would collapse legitimate duplicate rows), so a replayed already-committed later batch re-inserts its rows (a replayed *first* batch re-truncates, landing exactly once). Reported as at-least-once. The restart data-loss case is gone: the engine never resumes a truncate_insert stream from a cursor, so a restart is a fresh full refresh, not a resumed slice.
 - **stdout** — at-least-once by construction: it only prints, so a replayed batch prints again.
 
@@ -159,7 +159,7 @@ A batch wholly succeeds or wholly fails. The cursor advances only on `SUCCESS`, 
 | Failure | AckStatus | Engine action |
 |---------|-----------|---------------|
 | ACK lost after write (replay), SQL destination | `SUCCESS` | Row identity dedups the rewrite; persist cursor, continue |
-| ACK lost after write (replay), file destination | `ALREADY_COMMITTED` | Manifest recognizes the batch; persist cursor, continue |
+| ACK lost after write (replay), file destination | `SUCCESS` | Same bytes hash to the same filename; the rewrite overwrites the same file; persist cursor, continue |
 | Connection drop / timeout / deadlock | `RETRYABLE_FAILURE` | Retry whole batch with backoff |
 | Constraint violation / type error | `FATAL_FAILURE` | Send whole batch to DLQ, continue |
 
@@ -192,7 +192,7 @@ Engine                                    Destination
   |-- SchemaMessage (stream_id, write_mode) ->|
   |<-- SchemaAck (accepted=true) -------------|
   |-- RecordBatch (seq=1, Arrow IPC, cursor) ->|
-  |                      [key not in commits -> write rows -> record commit]
+  |                      [write rows, deduped by row identity / content]
   |<-- BatchAck (SUCCESS, committed_cursor) --|
   | [persist committed_cursor to state]       |
 ```
@@ -200,8 +200,8 @@ Engine                                    Destination
 ### Idempotent replay
 ```
   |-- RecordBatch (seq=1, same run_id) ------->|
-  |                      [key found -> no rewrite]
-  |<-- BatchAck (ALREADY_COMMITTED, stored cursor) -|
+  |          [identity dedups: SQL MERGE no-ops, file rewrites same bytes]
+  |<-- BatchAck (SUCCESS, committed_cursor) --|
 ```
 
 ### Retryable failure

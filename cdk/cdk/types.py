@@ -72,7 +72,7 @@ class RetryVerdict:
     """A handler's retry-safety verdict for one configured stream.
 
     ``reason`` names the mechanism behind the verdict (the dedup key, the
-    manifest, the declared idempotency key, or the gap) so the engine's
+    declared idempotency key, or the gap) so the engine's
     per-stream log line is actionable, not just a label. A verdict must
     commit to exactly-once or at-least-once: UNSPECIFIED is the wire's
     absent value, and letting a handler construct it would silently

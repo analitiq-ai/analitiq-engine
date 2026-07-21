@@ -706,7 +706,7 @@ class TestSchemaAckRetrySemantics:
         handler.retry_semantics = MagicMock(
             return_value=RetryVerdict(
                 semantics=RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE,
-                reason="the manifest dedups replays",
+                reason="writes are idempotent by content",
             )
         )
 
@@ -722,7 +722,7 @@ class TestSchemaAckRetrySemantics:
         assert ack.retry_semantics == WireRetrySemantics.Value(
             "RETRY_SEMANTICS_EXACTLY_ONCE"
         )
-        assert ack.retry_semantics_reason == "the manifest dedups replays"
+        assert ack.retry_semantics_reason == "writes are idempotent by content"
         handler.retry_semantics.assert_called_once_with("s1")
 
     @pytest.mark.asyncio

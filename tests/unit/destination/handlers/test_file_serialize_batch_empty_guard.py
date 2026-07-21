@@ -25,9 +25,6 @@ def _handler_with_formatter_returning(data) -> FileDestinationHandler:
     handler._storage = MagicMock()
     handler._storage.build_path = MagicMock(return_value="/tmp/output.jsonl")
     handler._storage.write_file = AsyncMock(return_value="/tmp/output.jsonl")
-    handler._manifest = MagicMock()
-    handler._manifest.check_committed = AsyncMock(return_value=None)
-    handler._manifest.record_commit = AsyncMock()
     handler._path_template = None
     handler._config = {"path": "/tmp", "prefix": ""}
     return handler
@@ -81,21 +78,6 @@ async def test_serialize_batch_empty_bytes_does_not_write_file():
 
 
 @pytest.mark.asyncio
-async def test_serialize_batch_empty_bytes_does_not_commit():
-    """Manifest must not be updated when the guard fires."""
-    handler = _handler_with_formatter_returning(b"")
-    await handler.write_batch(
-        run_id="r1",
-        stream_id="s1",
-        batch_seq=1,
-        record_batch=_record_batch(),
-        record_ids=["1"],
-        cursor=_cursor(),
-    )
-    handler._manifest.record_commit.assert_not_called()
-
-
-@pytest.mark.asyncio
 async def test_serialize_batch_none_returns_fatal():
     """serialize_batch() → None (missing return) must yield FATAL, not TypeError.
 
@@ -115,7 +97,6 @@ async def test_serialize_batch_none_returns_fatal():
     assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
     assert result.records_written == 0
     handler._storage.write_file.assert_not_called()
-    handler._manifest.record_commit.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -133,14 +114,6 @@ async def test_serialize_batch_non_empty_succeeds():
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
     assert result.records_written == 1
     handler._storage.write_file.assert_called_once()
-    handler._manifest.record_commit.assert_called_once_with(
-        run_id="r1",
-        stream_id="s1",
-        batch_seq=1,
-        records_written=1,
-        cursor_bytes=b"tok",
-        file_path="/tmp/output.jsonl",
-    )
 
 
 @pytest.mark.asyncio
@@ -163,9 +136,6 @@ async def test_serialize_batch_failure_summary_includes_formatter_name():
     handler._storage = MagicMock()
     handler._storage.build_path = MagicMock(return_value="/tmp/output.jsonl")
     handler._storage.write_file = AsyncMock(return_value="/tmp/output.jsonl")
-    handler._manifest = MagicMock()
-    handler._manifest.check_committed = AsyncMock(return_value=None)
-    handler._manifest.record_commit = AsyncMock()
     handler._path_template = None
     handler._config = {"path": "/tmp", "prefix": ""}
     result = await handler.write_batch(

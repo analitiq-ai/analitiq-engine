@@ -39,18 +39,10 @@ class TestFileHandlerSecretRetention:
 
         mock_storage = AsyncMock()
         mock_storage.health_check = AsyncMock(return_value=True)
-        mock_manifest = AsyncMock()
-        mock_manifest.load = AsyncMock()
 
-        with (
-            patch(
-                "src.destination.connectors.file.get_storage_backend",
-                return_value=mock_storage,
-            ),
-            patch(
-                "src.destination.connectors.file.ManifestTracker",
-                return_value=mock_manifest,
-            ),
+        with patch(
+            "src.destination.connectors.file.get_storage_backend",
+            return_value=mock_storage,
         ):
             await handler.connect(runtime)
 
@@ -64,18 +56,10 @@ class TestFileHandlerSecretRetention:
         handler = FileDestinationHandler()
 
         mock_storage = AsyncMock()
-        mock_manifest = AsyncMock()
-        mock_manifest.load = AsyncMock()
 
-        with (
-            patch(
-                "src.destination.connectors.file.get_storage_backend",
-                return_value=mock_storage,
-            ),
-            patch(
-                "src.destination.connectors.file.ManifestTracker",
-                return_value=mock_manifest,
-            ),
+        with patch(
+            "src.destination.connectors.file.get_storage_backend",
+            return_value=mock_storage,
         ):
             await handler.connect(runtime)
 
@@ -88,18 +72,10 @@ class TestFileHandlerSecretRetention:
         handler = FileDestinationHandler()
 
         mock_storage = AsyncMock()
-        mock_manifest = AsyncMock()
-        mock_manifest.load = AsyncMock()
 
-        with (
-            patch(
-                "src.destination.connectors.file.get_storage_backend",
-                return_value=mock_storage,
-            ),
-            patch(
-                "src.destination.connectors.file.ManifestTracker",
-                return_value=mock_manifest,
-            ),
+        with patch(
+            "src.destination.connectors.file.get_storage_backend",
+            return_value=mock_storage,
         ):
             await handler.connect(runtime)
 
@@ -138,19 +114,11 @@ class TestFileHandlerSecretRetention:
         handler = FileDestinationHandler()
 
         mock_storage = AsyncMock()
-        mock_manifest = AsyncMock()
-        mock_manifest.load = AsyncMock()
 
-        with (
-            patch(
-                "src.destination.connectors.file.get_storage_backend",
-                return_value=mock_storage,
-            ) as get_backend,
-            patch(
-                "src.destination.connectors.file.ManifestTracker",
-                return_value=mock_manifest,
-            ),
-        ):
+        with patch(
+            "src.destination.connectors.file.get_storage_backend",
+            return_value=mock_storage,
+        ) as get_backend:
             await handler.connect(runtime)
 
         get_backend.assert_called_once_with("s3")
@@ -164,10 +132,6 @@ class TestFileHandlerSecretRetention:
         mock_storage = AsyncMock()
         mock_storage.build_path.return_value = "/tmp/output/stream-1/0.jsonl"
         mock_storage.write_file.return_value = "/tmp/output/stream-1/0.jsonl"
-        mock_manifest = AsyncMock()
-        mock_manifest.load = AsyncMock()
-        mock_manifest.check_committed = AsyncMock(return_value=None)
-        mock_manifest.record_commit = AsyncMock()
         mock_formatter = MagicMock()
         mock_formatter.serialize_batch.return_value = b'{"id": 1}\n'
         mock_formatter.file_extension = ".jsonl"
@@ -177,10 +141,6 @@ class TestFileHandlerSecretRetention:
             patch(
                 "src.destination.connectors.file.get_storage_backend",
                 return_value=mock_storage,
-            ),
-            patch(
-                "src.destination.connectors.file.ManifestTracker",
-                return_value=mock_manifest,
             ),
             patch(
                 "src.destination.connectors.file.get_formatter",

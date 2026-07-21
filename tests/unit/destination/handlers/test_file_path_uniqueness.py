@@ -99,11 +99,6 @@ def _make_handler(serialize_return: bytes) -> FileDestinationHandler:
     mock_storage.write_file = AsyncMock(return_value="/tmp/out/s/0_abc.jsonl")
     handler._storage = mock_storage
 
-    mock_manifest = MagicMock()
-    mock_manifest.check_committed = AsyncMock(return_value=None)
-    mock_manifest.record_commit = AsyncMock()
-    handler._manifest = mock_manifest
-
     handler._path_template = None
     handler._config = {"path": "/tmp/out", "prefix": ""}
     return handler
@@ -163,20 +158,19 @@ async def test_same_run_id_restart_different_content_gets_different_path():
 
 
 @pytest.mark.asyncio
-async def test_in_run_replay_same_content_gets_same_path():
-    """Same content always produces the same content hash (hash stability).
+async def test_in_run_replay_same_content_overwrites_same_path():
+    """A replayed batch reaches the write and lands on the same path.
 
-    In production an in-run replay is gated by check_committed before
-    serialization runs, so build_path is never reached a second time.
-    This test stubs check_committed to None so both calls reach build_path,
-    verifying the hash-stability property directly: identical data always
-    maps to the same hash and therefore the same file path.
+    There is no batch-level commit ledger (issue #306): a replay is not
+    skipped, it is re-written. Identical data always maps to the same
+    hash and therefore the same file path, so the rewrite overwrites the
+    same file with the same bytes — the write itself is the dedup.
     """
     data = b'{"id":1}\n'
     handler = _make_handler(serialize_return=data)
 
     for _ in range(2):
-        await handler.write_batch(
+        result = await handler.write_batch(
             run_id="run-1",
             stream_id="s",
             batch_seq=0,
@@ -184,10 +178,40 @@ async def test_in_run_replay_same_content_gets_same_path():
             record_ids=["r1"],
             cursor=Cursor(token=b"c"),
         )
+        assert result.status == AckStatus.ACK_STATUS_SUCCESS
 
     calls = handler._storage.build_path.call_args_list
     assert len(calls) == 2
     assert calls[0][1]["content_hash"] == calls[1][1]["content_hash"]
+    assert handler._storage.write_file.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_restart_batch_at_committed_seq_is_written_not_skipped():
+    """A same-RUN_ID restart batch is never skipped as a replay (issue #306).
+
+    The removed manifest keyed commits on (run_id, stream_id, batch_seq)
+    and answered ALREADY_COMMITTED for a committed position — dropping the
+    different rows a restart re-batches onto that position (the #282 row-
+    drop class). Both writes at the same position must reach storage and
+    ack SUCCESS.
+    """
+    handler = _make_handler(serialize_return=b'{"id":1}\n')
+
+    for data in (b'{"id":1}\n', b'{"id":2}\n'):
+        handler._formatter.serialize_batch.return_value = data
+        result = await handler.write_batch(
+            run_id="run-1",
+            stream_id="s",
+            batch_seq=0,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["r1"],
+            cursor=Cursor(token=b"c"),
+        )
+        assert result.status == AckStatus.ACK_STATUS_SUCCESS
+        assert result.records_written == 1
+
+    assert handler._storage.write_file.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -203,6 +227,7 @@ async def test_write_batch_result_is_success():
         cursor=Cursor(token=b"c"),
     )
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
+    assert result.committed_cursor.token == b"c"
 
 
 @pytest.mark.asyncio
@@ -223,6 +248,8 @@ async def test_empty_batch_skips_serialize_and_build_path():
     )
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
     assert result.records_written == 0
+    # The branch exists to keep the checkpoint advancing on empty batches.
+    assert result.committed_cursor.token == b"c"
     handler._formatter.serialize_batch.assert_not_called()
     handler._storage.build_path.assert_not_called()
 
