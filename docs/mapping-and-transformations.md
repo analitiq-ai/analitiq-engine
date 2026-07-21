@@ -178,12 +178,12 @@ back to the former per-record behavior at the edges (null equality, string
 truthiness, boolean/ISO handling), but a few differences are inherent to typed,
 vectorized evaluation and are accepted:
 
-- **Typed intermediates.** Each pipe stage produces a typed Arrow column, so a
-  value cannot change type mid-pipe the way an untyped Python value could. A
-  `coalesce`/`default` whose alternative has a *different concrete type* than the
-  column (e.g. a string fallback on a numeric column, resolved only by a later
-  stage) fails loud instead of carrying a mixed-type value forward. Author the
-  fallback at the column's type, or convert first.
+- **Typed intermediates.** Every sub-expression produces a typed Arrow column,
+  so a value cannot change type mid-expression the way an untyped Python value
+  could. A `coalesce` whose args have *different concrete types* (e.g. a string
+  fallback for a numeric column, resolved only by a later stage) fails loud
+  instead of carrying a mixed-type value forward. Author the fallback at the
+  column's type, or convert first.
 - **Boolean truthiness** covers scalars and strings (non-empty is true); a List
   or Object condition in `if`/`and`/`or` is not supported and fails loud.
 - **`to_string` of a temporal** uses Arrow's ISO formatting, which can differ in
@@ -204,8 +204,6 @@ Built-in functions (`_FUNCTION_CATALOG` in `data_transformer.py`):
 | `to_int`, `to_float`, `to_string` | 1 | Type coercion |
 | `abs` | 1 | Numeric absolute value |
 | `now` | 1 | Current UTC datetime |
-| `default` | 1 | Substitute fallback when input is null |
-| `coalesce` | 1 | First non-null value |
 
 Function versions are pinned in the AST (`"version": 1`) so the catalog
 can evolve without rewriting existing mappings. New versions must be

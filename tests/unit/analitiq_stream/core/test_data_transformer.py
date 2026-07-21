@@ -175,10 +175,29 @@ class TestExpressionOps:
         )
         assert out == [{"v": "fallback"}]
 
+    def test_coalesce_keeps_first_operand_where_present(self):
+        # Two rows make column a concrete string with a partial null, so this
+        # exercises row-wise precedence on a typed column, not null-type adoption.
+        node = {"op": "coalesce", "args": [_get("a"), _get("b")]}
+        out = _run(
+            [{"a": None, "b": "fb"}, {"a": "keep", "b": "fb"}],
+            [_assignment("v", "Utf8", _expr(node))],
+        )
+        assert out == [{"v": "fb"}, {"v": "keep"}]
+
     def test_coalesce_all_null_stays_null(self):
         node = {"op": "coalesce", "args": [_get("a"), _get("b")]}
         out = _run([{"a": None, "b": None}], [_assignment("v", "Utf8", _expr(node))])
         assert out == [{"v": None}]
+
+    def test_coalesce_mixed_concrete_types_fails_loud(self):
+        # Args of different concrete types share no kernel; the documented
+        # Typed-intermediates divergence is to fail the batch, never to carry
+        # a mixed-type value forward.
+        node = {"op": "coalesce", "args": [_get("a"), _const_node("fallback")]}
+        compiled = compile_transform([_assignment("v", "Utf8", _expr(node))])
+        with pytest.raises(TransformationError, match="coalesce expression failed"):
+            compiled.run(pa.RecordBatch.from_pylist([{"a": 1}, {"a": None}]))
 
     def test_unknown_op_raises_at_compile(self):
         with pytest.raises(TransformationError, match="Unknown expression op"):
@@ -242,7 +261,7 @@ class TestFunctionCatalog:
     def _v1(self, name):
         return _FUNCTION_CATALOG[name][1]
 
-    def test_catalog_has_the_expected_thirteen_functions(self):
+    def test_catalog_has_the_expected_eleven_functions(self):
         assert set(_FUNCTION_CATALOG) == {
             "iso_to_date",
             "iso_to_datetime",
@@ -255,8 +274,6 @@ class TestFunctionCatalog:
             "to_string",
             "abs",
             "now",
-            "default",
-            "coalesce",
         }
 
     def test_trim_lower_upper(self):
@@ -296,14 +313,6 @@ class TestFunctionCatalog:
     def test_abs_raises_on_non_numeric(self):
         with pytest.raises(TransformationError, match="abs"):
             self._v1("abs")(pa.array(["hello"]))
-
-    def test_default_fills_nulls_with_literal(self):
-        out = self._v1("default")(pa.array([1, None, 3], pa.int64()), 99).to_pylist()
-        assert out == [1, 99, 3]
-
-    def test_coalesce_kernel_uses_literal_alternatives(self):
-        out = self._v1("coalesce")(pa.array([None, 2], pa.int64()), 99).to_pylist()
-        assert out == [99, 2]
 
     def test_iso_to_date_renders_naive_date_part(self):
         out = self._v1("iso_to_date")(
@@ -606,21 +615,12 @@ class TestPerRecordParity:
         )
         assert out == [{"r": "missing"}, {"r": "present"}]
 
-    def test_default_fills_a_missing_source_column(self):
-        node = {
-            "op": "pipe",
-            "args": [_get("absent"), {"op": "fn", "name": "default", "args": ["N/A"]}],
-        }
+    def test_coalesce_op_fills_a_missing_source_column(self):
+        # A missing column infers Arrow null type; it must adopt the fallback's
+        # concrete type instead of failing on a missing kernel.
+        node = {"op": "coalesce", "args": [_get("absent"), _const_node("N/A")]}
         out = _run([{"x": 1}], [_assignment("v", "Utf8", _expr(node))])
         assert out == [{"v": "N/A"}]
-
-    def test_coalesce_fn_emits_fallback_for_all_null_input(self):
-        node = {
-            "op": "pipe",
-            "args": [_get("absent"), {"op": "fn", "name": "coalesce", "args": ["fb"]}],
-        }
-        out = _run([{"x": 1}], [_assignment("v", "Utf8", _expr(node))])
-        assert out == [{"v": "fb"}]
 
     def test_iso_to_date_rejects_trailing_junk(self):
         with pytest.raises(TransformationError, match="iso_to_date"):
