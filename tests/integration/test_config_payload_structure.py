@@ -212,6 +212,7 @@ def _make_runtime(connection_id, connector_type, config, driver=None):
     return ConnectionRuntime(
         raw_config=config,
         connection_id=connection_id,
+        connector_id=config["connector_id"],
         connector_type=connector_type,
         driver=driver,
         resolver=AsyncMock(),

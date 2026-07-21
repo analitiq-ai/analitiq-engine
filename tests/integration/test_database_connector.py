@@ -18,6 +18,7 @@ from cdk.connection_runtime import ConnectionRuntime, materialize_runtime
 from cdk.database_utils import acquire_connection
 from cdk.secrets.resolvers.memory import InMemorySecretsResolver
 from cdk.sql.generic import GenericSQLConnector
+from tests.fixtures.database import postgres_connector_spec
 
 
 def _postgres_available() -> bool:
@@ -42,26 +43,33 @@ pytestmark = pytest.mark.skipif(
 def database_config():
     """Connection configuration for real database tests."""
     return {
-        "driver": "postgresql",
-        "host": os.getenv("POSTGRES_HOST", "localhost"),
         "parameters": {
+            "host": os.getenv("POSTGRES_HOST", "localhost"),
             "port": int(os.getenv("POSTGRES_PORT", "5432")),
             "database": os.getenv("POSTGRES_DB", "analitiq_test"),
             "username": os.getenv("POSTGRES_USER", "postgres"),
-            "password": os.getenv("POSTGRES_PASSWORD", ""),
             "ssl_mode": os.getenv("POSTGRES_SSL_MODE", "prefer"),
         },
+        "secret_refs": {"password": "env:POSTGRES_PASSWORD"},
     }
 
 
 def _make_runtime(database_config) -> ConnectionRuntime:
-    """A fresh runtime for one read or one setup/teardown phase."""
+    """A fresh runtime for one read or one setup/teardown phase.
+
+    Carries the synthesized postgres connector definition so materialize()
+    builds a real SQLAlchemy transport — the same path the engine takes with
+    a registry connector.
+    """
     return ConnectionRuntime(
         raw_config=database_config,
         connection_id="test-conn",
+        connector_id="postgres",
         connector_type="database",
-        driver="postgresql",
-        resolver=InMemorySecretsResolver({}),
+        connector_definition=postgres_connector_spec("postgresql+asyncpg"),
+        resolver=InMemorySecretsResolver(
+            {"test-conn": {"password": os.getenv("POSTGRES_PASSWORD", "")}}
+        ),
     )
 
 
@@ -125,6 +133,7 @@ class TestGenericSQLSourceRealIntegration:
                     f"INSERT INTO public.{unique_table_name} "
                     f"(id, name, email) VALUES {values}"
                 )
+                await conn.commit()
         finally:
             await setup_runtime.close()
 
@@ -163,5 +172,6 @@ class TestGenericSQLSourceRealIntegration:
                     await conn.exec_driver_sql(
                         f"DROP TABLE IF EXISTS public.{unique_table_name}"
                     )
+                    await conn.commit()
             finally:
                 await teardown_runtime.close()

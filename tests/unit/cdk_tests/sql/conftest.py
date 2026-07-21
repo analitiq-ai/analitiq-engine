@@ -4,44 +4,73 @@ The discovery / create_table helpers run SQL over a ``ConnectionRuntime``. These
 tests drive them through a fake ADBC runtime (a programmable in-memory DBAPI
 that records every executed statement and returns canned Arrow results) and,
 for the SQLAlchemy execution path, a real in-process ``aiosqlite`` engine. The
-type mapping uses the *real* postgres / snowflake connector type-maps so the
-canonical<->native round-trip is exercised end to end, not against a stub.
+type mapping uses synthetic postgres/snowflake-shaped rule sets authored in the
+published type-map grammar and built through the same validation path as the
+file loaders (``build_type_mapper``), so the canonical<->native round-trip —
+exact and regex rules, ``${token}`` substitution — is exercised end to end
+without depending on the gitignored on-disk connector registry.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
 import pytest
 
-from cdk.type_map.loader import load_type_map
-
-_REPO_ROOT = Path(__file__).resolve().parents[4]
-_CONNECTORS_DIR = _REPO_ROOT / "connectors"
+from cdk.type_map.loader import build_type_mapper
 
 # A responder maps an executed (sql, params) to the rows the cursor returns.
 Responder = Callable[[str, Sequence[Any]], list[dict[str, Any]]]
 
+# Postgres-shaped rules covering the native/canonical types the DDL and
+# discovery tests drive through the mapper. Deliberately no rule for
+# ``geometry`` (read) or ``LargeList`` (write): the unmapped-type error paths
+# rely on those missing.
+_PG_READ_RULES = [
+    {"match": "exact", "native": "BIGINT", "canonical": "Int64"},
+    {"match": "exact", "native": "INTEGER", "canonical": "Int32"},
+    {"match": "exact", "native": "TEXT", "canonical": "Utf8"},
+    {"match": "exact", "native": "CHARACTER VARYING", "canonical": "Utf8"},
+    {"match": "exact", "native": "NUMERIC", "canonical": "Decimal128(38, 9)"},
+    {
+        "match": "exact",
+        "native": "TIMESTAMP WITH TIME ZONE",
+        "canonical": "Timestamp(MICROSECOND, UTC)",
+    },
+]
+_PG_WRITE_RULES = [
+    {"match": "exact", "canonical": "Int64", "native": "BIGINT"},
+    {"match": "exact", "canonical": "Utf8", "native": "TEXT"},
+    {
+        "match": "regex",
+        "canonical": r"Decimal128\((?<precision>\d+), (?<scale>\d+)\)",
+        "native": "NUMERIC(${precision}, ${scale})",
+    },
+    {
+        "match": "exact",
+        "canonical": "Timestamp(MICROSECOND, UTC)",
+        "native": "TIMESTAMPTZ",
+    },
+]
+
+# Snowflake-shaped read rules: just what the discovery tests look up.
+_SF_READ_RULES = [
+    {"match": "exact", "native": "NUMBER", "canonical": "Decimal128(38, 0)"},
+]
+
 
 @pytest.fixture
 def pg_mapper():
-    """Real postgres TypeMapper (read + write rules)."""
-    return load_type_map(_CONNECTORS_DIR, "postgres")
+    """Postgres-shaped TypeMapper (read + write rules)."""
+    return build_type_mapper("postgres", _PG_READ_RULES, _PG_WRITE_RULES)
 
 
 @pytest.fixture
 def sf_mapper():
-    """Real snowflake TypeMapper (read + write rules)."""
-    return load_type_map(_CONNECTORS_DIR, "snowflake")
-
-
-@pytest.fixture
-def bq_mapper():
-    """Real bigquery TypeMapper (read rules only — no write-type-map shipped)."""
-    return load_type_map(_CONNECTORS_DIR, "bigquery")
+    """Snowflake-shaped TypeMapper (read rules only)."""
+    return build_type_mapper("snowflake", _SF_READ_RULES)
 
 
 class FakeArrowCursor:
