@@ -544,6 +544,43 @@ class TestReadBatchesOffsetPagination:
 # ---------------------------------------------------------------------------
 
 
+class TestReadBatchesOffsetIncrementBy:
+    """An authored ``offset.increment_by`` fixes the advance step."""
+
+    @pytest.mark.asyncio
+    async def test_authored_increment_by_overrides_page_size_step(self):
+        """The offset advances by the declared step, not the page size."""
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]},
+                ),
+                _FakeResponse(status=200, body={"records": [{"id": 3, "name": "c"}]}),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "offset",
+                "offset": {"param": "offset", "initial": 0, "increment_by": 10},
+                "limit": {"param": "limit"},
+            },
+        )
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=2,
+        )
+
+        assert [c[2].get("offset") for c in session.calls] == [0, 10]
+
+
 class TestReadBatchesPagePagination:
     @pytest.mark.asyncio
     async def test_page_loop_increments_page_and_stops_on_short_page(self):

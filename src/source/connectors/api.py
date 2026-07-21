@@ -717,6 +717,13 @@ class APIConnector(BaseConnector):
         if isinstance(pagination, OffsetPagination):
             offset_param = pagination.offset.param
             offset = int(pagination.offset.initial)
+            # An authored ``increment_by`` fixes the step; otherwise the
+            # offset advances by the page size actually requested.
+            offset_step = (
+                int(pagination.offset.increment_by)
+                if pagination.offset.increment_by is not None
+                else batch_size
+            )
             while True:
                 params = dict(base_params)
                 params[offset_param] = offset
@@ -731,11 +738,18 @@ class APIConnector(BaseConnector):
                     return
                 if len(records) < batch_size:
                     return
-                offset += batch_size
+                offset += offset_step
 
         elif isinstance(pagination, PagePagination):
             page_param = pagination.page.param
             page = int(pagination.page.initial)
+            # An authored ``increment_by`` fixes the step; page numbers
+            # advance by one otherwise.
+            page_step = (
+                int(pagination.page.increment_by)
+                if pagination.page.increment_by is not None
+                else 1
+            )
             while True:
                 params = dict(base_params)
                 params[page_param] = page
@@ -750,7 +764,7 @@ class APIConnector(BaseConnector):
                     return
                 if len(records) < batch_size:
                     return
-                page += 1
+                page += page_step
 
         elif isinstance(pagination, CursorPagination):
             cursor_param = pagination.cursor.param
