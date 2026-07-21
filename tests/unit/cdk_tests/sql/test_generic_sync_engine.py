@@ -304,6 +304,7 @@ class TestSyncRuntimeWiring:
 
     @pytest.mark.asyncio
     async def test_connect_ddl_and_write_through_sync_runtime(self):
+        """connect -> DDL -> write flows through the sync-engine runtime."""
         engine = _sqlite_sync_engine()
         try:
             handler = GenericSQLConnector()
@@ -320,8 +321,13 @@ class TestSyncRuntimeWiring:
                 write_mode="insert",
                 endpoint_document={
                     "columns": [
-                        {"name": "id", "native_type": "INTEGER", "nullable": False},
-                        {"name": "name", "native_type": "TEXT"},
+                        {
+                            "name": "id",
+                            "native_type": "INTEGER",
+                            "arrow_type": "Int64",
+                            "nullable": False,
+                        },
+                        {"name": "name", "native_type": "TEXT", "arrow_type": "Utf8"},
                     ],
                 },
             )

@@ -79,6 +79,11 @@ repos:
           - python-dateutil
           - protobuf
           - grpcio
+          # Published contract packages: the [tool.mypy] override follows
+          # their untyped imports (no py.typed yet), so the isolated hook
+          # env must be able to resolve them. Pinned to the pyproject pin.
+          - analitiq-contract-models==1.0.0rc4
+          - analitiq-validator==1.0.0rc4
         exclude: ^(tests/|docs/)
 
   # Security linting. Config lives in [tool.bandit] in pyproject.toml (read via

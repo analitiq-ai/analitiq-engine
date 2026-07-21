@@ -166,10 +166,10 @@ class _StreamState:
     table: Table | None = None
     primary_keys: list[str] = field(default_factory=list)
     # Columns used as the ON CONFLICT / MERGE target for upsert. Set at
-    # configure_schema time from ``endpoint_doc["_write_conflict_keys"]``,
-    # which main.py copies verbatim from the stream's Infra-validated
-    # ``write.conflict_keys``. Empty here means INSERT mode — an upsert
-    # always carries an explicit conflict target under the contract.
+    # configure_schema time from the ``set_stream_conflict_keys`` map,
+    # which carries the stream's Infra-validated ``write.conflict_keys``
+    # verbatim. Empty here means INSERT mode — an upsert always carries
+    # an explicit conflict target under the contract.
     conflict_keys: list[str] = field(default_factory=list)
     write_mode: WriteMode = "upsert"
     endpoint_document: dict[str, Any] = field(default_factory=dict)
@@ -290,6 +290,11 @@ class GenericSQLConnector(BaseDestinationHandler):
         # at startup.
         self._stream_endpoints: dict[str, dict[str, Any]] = {}
 
+        # Stream-id -> upsert conflict keys (the stream's validated
+        # ``write.conflict_keys``). Populated by set_stream_conflict_keys()
+        # at startup; absent/empty means INSERT mode.
+        self._stream_conflict_keys: dict[str, list[str]] = {}
+
         # Cached ADBC DBAPI connection for ADBC-only mode (Snowflake /
         # BigQuery / Postgres), opened eagerly in connect() via
         # runtime.open_adbc_connection(). Nulled on any failure under
@@ -351,6 +356,21 @@ class GenericSQLConnector(BaseDestinationHandler):
         """
         self._stream_endpoints = {
             sid: dict(doc) for sid, doc in stream_endpoints.items()
+        }
+
+    def set_stream_conflict_keys(
+        self, stream_conflict_keys: Mapping[str, list[str]]
+    ) -> None:
+        """Register stream_id → upsert conflict keys for each stream.
+
+        The keys are the stream's Infra-validated ``write.conflict_keys``,
+        forwarded verbatim on their own channel (they are stream
+        configuration, not part of the contract endpoint document).
+        ``configure_schema`` reads them as the ON CONFLICT / MERGE target;
+        absent or empty means INSERT mode.
+        """
+        self._stream_conflict_keys = {
+            sid: list(keys) for sid, keys in stream_conflict_keys.items()
         }
 
     def set_statement_timeout(self, seconds: float | None) -> None:
@@ -714,11 +734,11 @@ class GenericSQLConnector(BaseDestinationHandler):
             return False
 
         primary_keys = list(endpoint_doc.get("primary_keys") or [])
-        # ``_write_conflict_keys`` is the stream's Infra-validated upsert
-        # conflict target, copied verbatim by main.py. Absent or empty
-        # means no conflict target (INSERT mode); the engine never derives
-        # one from ``primary_keys``.
-        conflict_keys = list(endpoint_doc.get("_write_conflict_keys") or [])
+        # The stream's Infra-validated upsert conflict target, forwarded
+        # verbatim via set_stream_conflict_keys(). Absent or empty means
+        # no conflict target (INSERT mode); the engine never derives one
+        # from ``primary_keys``.
+        conflict_keys = list(self._stream_conflict_keys.get(stream_id) or [])
         raw_schema = database_object.get("schema")
         if self._adbc_only:
             # Snowflake's default schema is account-/role-dependent;
@@ -800,18 +820,19 @@ class GenericSQLConnector(BaseDestinationHandler):
             )
         return mode_map[proto_write_mode]
 
-    def _build_column_defs(
-        self, state: _StreamState, type_mapper: TypeMapper
-    ) -> list[ColumnDef]:
+    def _build_column_defs(self, state: _StreamState) -> list[ColumnDef]:
         """Contract endpoint columns -> ColumnDefs for the shared DDL builder.
 
-        Each column's native type goes through the READ map to its canonical
-        Arrow string; the builder renders it back through the WRITE map for
-        this destination — the two declarative surfaces are the entire type
-        vocabulary, for every transport. ``_synced_at`` is appended as a
-        server-defaulted audit column when the endpoint doesn't declare it; a
-        keyless insert stream also gets ``_record_hash`` as its synthetic
-        primary key (see :meth:`_needs_record_hash`).
+        Each column's canonical Arrow type is the document's stored
+        ``arrow_type`` — the same declaration ``SchemaContract`` casts
+        incoming batches with, so DDL and cast share one source of truth
+        (issue #349). The builder renders it through the WRITE map for this
+        destination; the stored ``native_type`` is the *source* system's
+        type and plays no part in destination DDL. ``_synced_at`` is
+        appended as a server-defaulted audit column when the endpoint
+        doesn't declare it; a keyless insert stream also gets
+        ``_record_hash`` as its synthetic primary key (see
+        :meth:`_needs_record_hash`).
         """
         columns: list[ColumnDef] = []
         declared: set[str] = set()
@@ -821,16 +842,16 @@ class GenericSQLConnector(BaseDestinationHandler):
                 raise SchemaConfigurationError(
                     f"endpoint column at index {index} has no 'name' field"
                 )
-            native_type = col_def.get("native_type")
-            if not native_type:
+            arrow_type = col_def.get("arrow_type")
+            if not arrow_type:
                 raise SchemaConfigurationError(
-                    f"column {col_name!r} has no 'native_type' field"
+                    f"column {col_name!r} has no 'arrow_type' field"
                 )
             raw_default = col_def.get("default")
             columns.append(
                 ColumnDef(
                     name=col_name,
-                    canonical_type=type_mapper.to_arrow_type(native_type),
+                    canonical_type=arrow_type,
                     nullable=bool(col_def.get("nullable", True)),
                     primary_key=col_name in state.primary_keys,
                     default=(
@@ -934,7 +955,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             type_mapper,
             state.schema_name,
             state.table_name,
-            self._build_column_defs(state, type_mapper),
+            self._build_column_defs(state),
             self._identity_columns(state),
             if_not_exists=True,
         )

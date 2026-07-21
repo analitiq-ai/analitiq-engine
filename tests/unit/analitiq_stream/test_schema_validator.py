@@ -7,6 +7,7 @@ model from ``analitiq-contract-models``. No network, no schema mirror.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -56,12 +57,22 @@ class TestValidate:
         assert ei.value.kind == "pipeline"
         assert len(ei.value.errors) >= 1
 
-    def test_schema_host_is_ignored(self) -> None:
+    def test_schema_host_is_ignored(self, caplog: pytest.LogCaptureFixture) -> None:
         """The ``$schema`` value is an informational host pointer; a document
-        advertising a non-canonical host still validates on its body alone."""
+        advertising a non-canonical host still validates on its body alone.
+        The returned model carries the environment's canonical URL (derived
+        via the contract's own ``schema_url_for``, never a hardcoded host)
+        and the substitution is logged."""
+        from analitiq.contracts.shared.common import schema_url_for
+
         doc = _valid_pipeline()
         doc["$schema"] = "https://schemas.analitiq.work/pipeline/latest.json"
-        validate("pipeline", doc)
+        with caplog.at_level(logging.WARNING, logger="src.config.schema_validator"):
+            model = validate("pipeline", doc)
+        assert model.schema_url == schema_url_for("pipeline")
+        assert any(
+            "schemas.analitiq.work" in record.getMessage() for record in caplog.records
+        )
 
     def test_error_message_truncated_at_ten_errors(self) -> None:
         # A stream document with many malformed fields yields >10 errors.
@@ -80,10 +91,14 @@ class TestValidate:
 
 class TestValidateFile:
     def test_valid_file_parses_and_validates(self, tmp_path: Path) -> None:
+        """A valid file parses into the typed model that dumps back verbatim."""
         doc_path = tmp_path / "conn.json"
         doc_path.write_text(json.dumps(_valid_connection()))
         result = validate_file("connection", doc_path)
-        assert result == _valid_connection()
+        # validate_file returns the typed contract model; its dump matches
+        # the authored document.
+        dumped = result.model_dump(mode="json", by_alias=True, exclude_unset=True)
+        assert dumped == _valid_connection()
 
     def test_missing_file_raises_file_not_found(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError):

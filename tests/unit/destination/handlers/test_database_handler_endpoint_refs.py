@@ -146,6 +146,7 @@ class TestColumnDefStrictness:
     check in ``schema_contract``."""
 
     def test_unnamed_column_raises(self):
+        """A column without a name fails DDL construction loudly."""
         from cdk.sql.generic import _StreamState
 
         handler = GenericSQLConnector()
@@ -156,13 +157,34 @@ class TestColumnDefStrictness:
             table_name="t",
             endpoint_document={
                 "columns": [
-                    {"native_type": "BIGINT"},  # missing 'name'
-                    {"name": "valid", "native_type": "BIGINT"},
+                    {"arrow_type": "Int64"},  # missing 'name'
+                    {"name": "valid", "arrow_type": "Int64"},
                 ]
             },
         )
         with pytest.raises(SchemaConfigurationError, match="has no 'name' field"):
-            handler._build_column_defs(state, _mapper("pg"))
+            handler._build_column_defs(state)
+
+    def test_column_without_arrow_type_raises(self):
+        from cdk.sql.generic import _StreamState
+
+        handler = GenericSQLConnector()
+        handler._runtime = _runtime(connector_mapper=_mapper("pg"))
+
+        state = _StreamState(
+            schema_name="public",
+            table_name="t",
+            endpoint_document={
+                "columns": [
+                    # native_type alone is not enough: DDL consumes the
+                    # stored arrow_type (the same declaration the schema
+                    # contract casts with), never the read map.
+                    {"name": "id", "native_type": "BIGINT"},
+                ]
+            },
+        )
+        with pytest.raises(SchemaConfigurationError, match="has no 'arrow_type'"):
+            handler._build_column_defs(state)
 
 
 class TestWriteBatchFatalOnTypeMapError:
@@ -591,6 +613,7 @@ class TestDDLLockSerialization:
 
     @pytest.mark.asyncio
     async def test_ddl_lock_serializes_concurrent_table_creation(self, monkeypatch):
+        """The DDL lock serializes concurrent table creation."""
         import asyncio
 
         from cdk.sql import generic as generic_module
@@ -641,12 +664,18 @@ class TestDDLLockSerialization:
         type_mapper = _mapper("pg")
 
         async def _drive(stream_id: str):
+            """Configure one stream end-to-end against the shared handler."""
             state = _StreamState(
                 schema_name="public",
                 table_name=f"t_{stream_id}",
                 endpoint_document={
                     "columns": [
-                        {"name": "id", "native_type": "BIGINT", "nullable": False}
+                        {
+                            "name": "id",
+                            "native_type": "BIGINT",
+                            "arrow_type": "Int64",
+                            "nullable": False,
+                        }
                     ],
                     "primary_keys": ["id"],
                     "database_object": {"name": f"t_{stream_id}", "schema": "public"},

@@ -474,6 +474,7 @@ class TestAdbcDdlBuilders:
 
     @staticmethod
     def _build_target_ddl(handler, state, mapper):
+        """Assemble the target-table DDL the way _ensure_tables_exist does."""
         from cdk.sql.ddl import build_create_table_sql
 
         return build_create_table_sql(
@@ -481,12 +482,13 @@ class TestAdbcDdlBuilders:
             mapper,
             state.schema_name,
             state.table_name,
-            handler._build_column_defs(state, mapper),
+            handler._build_column_defs(state),
             list(state.primary_keys),
             if_not_exists=True,
         )
 
     def test_synced_at_appended_when_missing(self):
+        """_synced_at is appended when the contract does not declare it."""
         from cdk.sql.generic import _StreamState
 
         class _TypeMapperStub:
@@ -498,8 +500,18 @@ class TestAdbcDdlBuilders:
             table_name="orders",
             endpoint_document={
                 "columns": [
-                    {"name": "id", "native_type": "BIGINT", "nullable": False},
-                    {"name": "status", "native_type": "TEXT", "nullable": True},
+                    {
+                        "name": "id",
+                        "native_type": "BIGINT",
+                        "arrow_type": "Int64",
+                        "nullable": False,
+                    },
+                    {
+                        "name": "status",
+                        "native_type": "TEXT",
+                        "arrow_type": "Utf8",
+                        "nullable": True,
+                    },
                 ],
             },
             primary_keys=["id"],
@@ -515,6 +527,7 @@ class TestAdbcDdlBuilders:
         assert '"status" STRING' in ddl
 
     def test_synced_at_not_double_declared(self):
+        """A declared _synced_at column is not declared twice."""
         from cdk.sql.generic import _StreamState
 
         class _TypeMapperStub:
@@ -528,10 +541,16 @@ class TestAdbcDdlBuilders:
             table_name="orders",
             endpoint_document={
                 "columns": [
-                    {"name": "id", "native_type": "BIGINT", "nullable": False},
+                    {
+                        "name": "id",
+                        "native_type": "BIGINT",
+                        "arrow_type": "Int64",
+                        "nullable": False,
+                    },
                     {
                         "name": "_synced_at",
                         "native_type": "TIMESTAMP",
+                        "arrow_type": "Timestamp(MICROSECOND)",
                         "nullable": True,
                     },
                 ],
@@ -574,7 +593,12 @@ class TestAdbcDdlBuilders:
             primary_keys=[],  # keyless
             endpoint_document={
                 "columns": [
-                    {"name": "payload", "native_type": "TEXT", "nullable": True}
+                    {
+                        "name": "payload",
+                        "native_type": "TEXT",
+                        "arrow_type": "Utf8",
+                        "nullable": True,
+                    }
                 ]
             },
         )
@@ -587,7 +611,7 @@ class TestAdbcDdlBuilders:
             _TypeMapperStub(),
             state.schema_name,
             state.table_name,
-            h._build_column_defs(state, _TypeMapperStub()),
+            h._build_column_defs(state),
             h._identity_columns(state),
             if_not_exists=True,
         )
