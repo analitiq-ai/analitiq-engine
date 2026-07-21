@@ -918,6 +918,37 @@ class TestReadBatchesLinkPagination:
         assert session.calls[1][1] == "https://API.example.test:443/items/p2"
 
     @pytest.mark.asyncio
+    async def test_link_uppercase_scheme_classified_as_absolute(self):
+        """Absolute/relative classification parses the URL: an uppercase
+        scheme is still absolute, not a relative path to mangle."""
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={
+                        "records": [{"id": 1, "name": "a"}],
+                        "next": "HTTPS://api.example.test/items/p2",
+                    },
+                ),
+                _FakeResponse(status=200, body={"records": [{"id": 2, "name": "b"}]}),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(pagination=self._link_pagination())
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        assert session.calls[1][1] == "HTTPS://api.example.test/items/p2"
+
+    @pytest.mark.asyncio
     async def test_link_cross_origin_next_url_refused(self):
         """An absolute next_url on another host is refused: the shared
         session would send the connection's auth headers to it."""

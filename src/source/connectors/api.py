@@ -919,8 +919,14 @@ class APIConnector(BaseConnector):
                             f"link pagination: next_url resolved to a "
                             f"{type(next_url).__name__}, expected a URL string"
                         )
-                    if next_url.startswith(("http://", "https://")):
-                        if not self._same_origin(origin, urlsplit(next_url)):
+                    # Classify by parsing, not by string prefix: a URL
+                    # carrying any scheme or authority is absolute (case
+                    # included), and must then pass the origin check —
+                    # which also rejects non-HTTP schemes and ambiguous
+                    # protocol-relative URLs loudly.
+                    target = urlsplit(next_url)
+                    if target.scheme or target.netloc:
+                        if not self._same_origin(origin, target):
                             raise ReadError(
                                 f"link pagination: next_url {next_url!r} "
                                 f"leaves the connection's origin "
