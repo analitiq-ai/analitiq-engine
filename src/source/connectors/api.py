@@ -877,8 +877,10 @@ class APIConnector(BaseConnector):
                 if not stop and not short:
                     # Validate the continuation before yielding: a page the
                     # loop cannot advance from must fail before the engine
-                    # can commit it downstream.
-                    last_key = records[-1].get(order_by_field)
+                    # can commit it downstream. order_by_field is a dotted
+                    # record path per the contract, so walk it like every
+                    # other record-field access in this module.
+                    last_key = walk_path(records[-1], order_by_field.split("."))
                     if last_key is None:
                         raise ReadError(
                             f"keyset pagination: the last record of a page "

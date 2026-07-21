@@ -756,6 +756,52 @@ class TestReadBatchesKeysetPagination:
         assert [c[2].get("limit") for c in session.calls] == [2, 2]
 
     @pytest.mark.asyncio
+    async def test_keyset_dotted_order_by_field_walks_nested_records(self):
+        """order_by_field is a dotted record path per the contract; the key
+        advances from the nested value, not a flat lookup of the literal
+        dotted name."""
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={
+                        "records": [
+                            {"id": 1, "name": "a", "meta": {"cursor_id": 7}},
+                            {"id": 2, "name": "b", "meta": {"cursor_id": 9}},
+                        ]
+                    },
+                ),
+                _FakeResponse(
+                    status=200,
+                    body={
+                        "records": [{"id": 3, "name": "c", "meta": {"cursor_id": 11}}]
+                    },
+                ),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "keyset",
+                "keyset": {"param": "after_id", "order_by_field": "meta.cursor_id"},
+                "limit": {"param": "limit"},
+            },
+        )
+        batches = await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=2,
+        )
+
+        assert [b.num_rows for b in batches] == [2, 1]
+        assert session.calls[1][2]["after_id"] == 9
+
+    @pytest.mark.asyncio
     async def test_keyset_initial_seeds_the_first_request(self):
         """An authored ``initial`` rides the first request, including 0."""
         session = _FakeSession(
