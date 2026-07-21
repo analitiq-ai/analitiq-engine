@@ -6,8 +6,10 @@ IF NOT EXISTS toggle, and the error paths — driven through the ANSI-neutral
 ``SqlDialect`` base. Quoting and PK-clause variants (backtick, NOT ENFORCED,
 schema folding) are supplied by small fixture dialects standing in for the
 connector packages, where the real per-system dialects live. The native type
-text (TIMESTAMPTZ, NUMBER, ...) still comes from the *real* connector
-write-type-maps, so the canonical->native round-trip is exercised end to end.
+text (TIMESTAMPTZ, NUMERIC, ...) comes from the synthetic postgres-shaped
+write-type-map in conftest, authored in the published type-map grammar, so the
+canonical->native round-trip is exercised end to end without the on-disk
+connector registry.
 """
 
 from __future__ import annotations
@@ -45,8 +47,8 @@ class _BacktickNotEnforcedDialect(SqlDialect):
 
 class TestBuildAnsi:
     def test_full_ddl_round_trip(self, pg_mapper):
-        # Native type text comes from the real postgres write-type-map; quoting
-        # and the PK clause come from the ANSI base dialect.
+        # Native type text comes from the postgres-shaped write-type-map;
+        # quoting and the PK clause come from the ANSI base dialect.
         columns = [
             ColumnDef("id", "Int64", nullable=False, primary_key=True),
             ColumnDef("name", "Utf8"),

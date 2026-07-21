@@ -18,9 +18,10 @@ def _make_api_runtime(config):
     """Create a ConnectionRuntime for API tests."""
     return ConnectionRuntime(
         raw_config=config,
+        connection_id="test-conn",
+        connector_id="test-api",
         connector_type="api",
         driver=None,
-        connection_id="test-conn",
         resolver=InMemorySecretsResolver({}),
     )
 
@@ -106,8 +107,6 @@ class TestConnection:
     @pytest.mark.asyncio
     async def test_connect_with_rate_limit(self, connector):
         """Connector exposes the runtime's rate limiter when present."""
-        from cdk.rate_limiter import RateLimiter
-
         runtime = _make_api_runtime({"host": "https://api.example.com"})
         runtime._session = AsyncMock()
         runtime._base_url = "https://api.example.com"

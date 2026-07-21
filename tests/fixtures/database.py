@@ -16,7 +16,7 @@ from cdk.resolver import ResolutionContext
 from cdk.transport_factory import build_transport
 
 
-def _postgres_connector_spec(driver_string: str) -> dict:
+def postgres_connector_spec(driver_string: str) -> dict:
     """Build a minimal postgres connector definition for fixtures.
 
     Matches the current connector schema shape (``transport_type`` +
@@ -109,7 +109,7 @@ async def postgres_driver():
         }
         secrets = {"password": os.getenv("POSTGRES_PASSWORD", "")}
 
-    connector = _postgres_connector_spec("postgresql+asyncpg")
+    connector = postgres_connector_spec("postgresql+asyncpg")
     context = ResolutionContext(
         connector=connector,
         connection={"parameters": parameters, "selections": {}, "discovered": {}},
@@ -133,27 +133,3 @@ def mock_database_connector():
     connector.supports_incremental_read = Mock(return_value=True)
     connector.health_check = AsyncMock(return_value=True)
     return connector
-
-
-@pytest.fixture
-def sample_database_config():
-    """Sample database configuration for testing.
-
-    Shape matches the new connection.json schema (``parameters`` plus
-    ``secret_refs``); the password lives in a sibling ``secrets`` dict so
-    callers can feed both into a :class:`ResolutionContext` if they want
-    to drive the transport factory directly.
-    """
-    return {
-        "connector_slug": "postgres",
-        "parameters": {
-            "host": os.getenv("POSTGRES_HOST", "localhost"),
-            "port": int(os.getenv("POSTGRES_PORT", "5432")),
-            "database": os.getenv("POSTGRES_DB", "analitiq_test"),
-            "username": os.getenv("POSTGRES_USER", "postgres"),
-            "ssl_mode": os.getenv("POSTGRES_SSL_MODE", "prefer"),
-        },
-        "secret_refs": {
-            "password": "tests/postgres/password",
-        },
-    }

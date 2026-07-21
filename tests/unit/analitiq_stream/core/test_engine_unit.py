@@ -88,7 +88,7 @@ class TestStreamingEngine:
     """Test suite for StreamingEngine functionality."""
 
     @pytest.fixture
-    def engine(self, temp_dir):
+    def engine(self, temp_dir, tmp_project_root):
         """Create a StreamingEngine instance."""
         return StreamingEngine(
             pipeline_id="test-pipeline",
@@ -108,7 +108,6 @@ class TestStreamingEngine:
         assert engine.batch_size == 10
         assert engine.max_concurrent_batches == 2
         assert engine.buffer_size == 100
-        assert engine.data_transformer is not None
         assert engine.metrics is not None
 
     @pytest.mark.asyncio
@@ -218,7 +217,7 @@ class TestEngineMetrics:
     """Test metrics tracking in StreamingEngine."""
 
     @pytest.fixture
-    def engine(self, temp_dir):
+    def engine(self, temp_dir, tmp_project_root):
         """Create a StreamingEngine instance."""
         return StreamingEngine(
             pipeline_id="metrics-test",
@@ -255,7 +254,7 @@ class TestEngineStateManager:
     """Test state manager integration in StreamingEngine."""
 
     @pytest.fixture
-    def engine(self, temp_dir):
+    def engine(self, temp_dir, tmp_project_root):
         """Create a StreamingEngine instance."""
         return StreamingEngine(
             pipeline_id="state-test",
@@ -291,7 +290,7 @@ class TestEngineStateManager:
 class TestEngineConfiguration:
     """Test engine configuration validation."""
 
-    def test_engine_with_custom_params(self, temp_dir):
+    def test_engine_with_custom_params(self, temp_dir, tmp_project_root):
         """Test engine with custom parameters."""
         engine = StreamingEngine(
             pipeline_id="custom-config",
@@ -303,7 +302,7 @@ class TestEngineConfiguration:
         assert engine.max_concurrent_batches == 5
         assert engine.buffer_size == 500
 
-    def test_engine_default_values(self, temp_dir):
+    def test_engine_default_values(self, temp_dir, tmp_project_root):
         """A default RuntimeConfig carries the settings-sourced defaults."""
         engine = StreamingEngine(
             pipeline_id="defaults", runtime=RuntimeConfig(), dlq_path=temp_dir
@@ -313,7 +312,7 @@ class TestEngineConfiguration:
         assert engine.max_concurrent_batches == 3  # ANALITIQ_MAX_CONCURRENT_BATCHES
         assert engine.buffer_size == 5000  # ANALITIQ_BUFFER_SIZE default
 
-    def test_engine_with_custom_config_params(self, temp_dir):
+    def test_engine_with_custom_config_params(self, temp_dir, tmp_project_root):
         """Test engine with explicit config parameters."""
         engine = StreamingEngine(
             pipeline_id="with-config",

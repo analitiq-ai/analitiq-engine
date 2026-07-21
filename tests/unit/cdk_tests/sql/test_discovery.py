@@ -1,9 +1,10 @@
 """Discovery: list_schemas / list_tables / list_columns.
 
-Driven through the fake ADBC runtime with the *real* postgres type-map, so the
-native -> canonical mapping (and its failure mode) is exercised end to end. The
-fake ignores the WHERE filters and just returns canned rows keyed by which
-catalog view the query hits.
+Driven through the fake ADBC runtime with the synthetic postgres-/
+snowflake-shaped type-maps from conftest, so the native -> canonical mapping
+(and its failure mode) is exercised end to end. The fake ignores the WHERE
+filters and just returns canned rows keyed by which catalog view the query
+hits.
 
 The dialect is now an explicit ``dialect=`` keyword. The generic-machinery
 tests pass the ANSI-neutral ``SqlDialect`` base. Dialect-specific mechanisms
@@ -55,7 +56,9 @@ class _UpperSchemaDialect(SqlDialect):
 
     name = "upper"
 
-    def normalize_schema(self, schema: str) -> str:
+    # Overrides an instance method of the dialect interface; a staticmethod
+    # would diverge from the shape connector dialects implement.
+    def normalize_schema(self, schema: str) -> str:  # skipcq: PYL-R0201
         return schema.upper()
 
 
