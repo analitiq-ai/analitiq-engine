@@ -192,7 +192,7 @@ Engine                                    Destination
   |-- SchemaMessage (stream_id, write_mode) ->|
   |<-- SchemaAck (accepted=true) -------------|
   |-- RecordBatch (seq=1, Arrow IPC, cursor) ->|
-  |                      [key not in commits -> write rows -> record commit]
+  |                      [write rows, deduped by row identity / content]
   |<-- BatchAck (SUCCESS, committed_cursor) --|
   | [persist committed_cursor to state]       |
 ```
@@ -200,8 +200,8 @@ Engine                                    Destination
 ### Idempotent replay
 ```
   |-- RecordBatch (seq=1, same run_id) ------->|
-  |                      [key found -> no rewrite]
-  |<-- BatchAck (ALREADY_COMMITTED, stored cursor) -|
+  |          [identity dedups: SQL MERGE no-ops, file rewrites same bytes]
+  |<-- BatchAck (SUCCESS, committed_cursor) --|
 ```
 
 ### Retryable failure

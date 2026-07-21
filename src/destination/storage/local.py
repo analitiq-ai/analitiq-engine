@@ -2,6 +2,7 @@
 
 import contextlib
 import logging
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -96,8 +97,12 @@ class LocalFileStorage(BaseStorageBackend):
         full_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Same directory keeps the rename on one filesystem; the extra
-        # suffix keeps the temp file out of extension globs.
-        tmp_path = full_path.with_name(full_path.name + ".tmp")
+        # suffix keeps the temp file out of extension globs. The unique
+        # component keeps overlapping retries of the same batch (an ACK
+        # timeout racing the first attempt) on separate temp files, so
+        # neither can keep writing into an inode the other already
+        # renamed into place.
+        tmp_path = full_path.with_name(f"{full_path.name}.{uuid.uuid4().hex[:8]}.tmp")
         try:
             async with aiofiles.open(tmp_path, "wb") as f:
                 await f.write(data)

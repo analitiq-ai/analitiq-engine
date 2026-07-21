@@ -105,7 +105,7 @@ class TestWriteFile:
             await s.write_file("f.jsonl", b"replacement")
 
         assert (base / "f.jsonl").read_bytes() == b"committed"
-        assert not (base / "f.jsonl.tmp").exists()
+        assert not list(base.glob("*.tmp"))
 
 
 class TestFileExists:

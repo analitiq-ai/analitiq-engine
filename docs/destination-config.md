@@ -383,9 +383,12 @@ the engine logs it at stream start.
 | `cursor` | Opaque token produced by the engine, stored verbatim by the destination |
 | `record_ids` | Content-derived row identities (SHA-256) for DLQ correlation; the `_record_hash` value for a keyless insert |
 
-Every destination writes idempotently — the SQL destination by row
-identity, the file destination by content-addressed filename — and
-returns `ACK_STATUS_SUCCESS` on a replay. Full protocol semantics are in
+The SQL destination writes idempotently by row identity and the file
+destination by content-addressed filename; both return
+`ACK_STATUS_SUCCESS` on a replay. Destinations with no dedup mechanism
+(stdout; API `insert` without an `idempotency` block) replay as
+duplicates and say so in their retry verdict. Full protocol semantics
+are in
 [`grpc-streaming-architecture.md`](grpc-streaming-architecture.md).
 
 ## Adding a New Destination
