@@ -57,7 +57,6 @@ src/
 │   ├── connectors/              # API / File / Stream handlers + destination_registry / get_handler
 │   ├── formatters/              # JSONL / CSV / Parquet
 │   ├── storage/                 # Local file storage
-│   ├── idempotency/             # file _manifest.json tracker (SQL dedups on row identity)
 │   └── server.py                # gRPC server
 │
 ├── engine/                  # Core engine

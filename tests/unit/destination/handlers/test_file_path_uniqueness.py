@@ -227,6 +227,7 @@ async def test_write_batch_result_is_success():
         cursor=Cursor(token=b"c"),
     )
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
+    assert result.committed_cursor.token == b"c"
 
 
 @pytest.mark.asyncio
@@ -247,6 +248,8 @@ async def test_empty_batch_skips_serialize_and_build_path():
     )
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
     assert result.records_written == 0
+    # The branch exists to keep the checkpoint advancing on empty batches.
+    assert result.committed_cursor.token == b"c"
     handler._formatter.serialize_batch.assert_not_called()
     handler._storage.build_path.assert_not_called()
 
