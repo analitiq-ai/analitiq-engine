@@ -60,8 +60,14 @@ rm -f "$OUT"
 # COPYFILE_DISABLE=1 stops macOS tar embedding AppleDouble ("._*") resource-fork
 # entries, which stay invisible on macOS but extract as junk "._*" files on Linux
 # and break the engine's "streams/*.json" glob. Harmless no-op on Linux builders.
-COPYFILE_DISABLE=1 tar -czf "$OUT" -C "$REPO_ROOT" \
-    --exclude='__pycache__' --exclude='*.pyc' --exclude='*.egg-info' \
+#
+# -h (--dereference) follows symlinks so a connector symlinked into this repo from
+# a local DIP registry checkout (connectors/<name> -> ../../analitiq-dip-registry/<name>)
+# is captured as its real files. Without it tar stores a dangling link and the
+# bundle ships an empty connector. --exclude='.git' keeps each connector's own repo
+# history out of the bundle now that its real tree is dereferenced in.
+COPYFILE_DISABLE=1 tar -czhf "$OUT" -C "$REPO_ROOT" \
+    --exclude='__pycache__' --exclude='*.pyc' --exclude='*.egg-info' --exclude='.git' \
     -T "$LIST"
 
 echo "[build-bundle] wrote $OUT ($(du -h "$OUT" | cut -f1))"

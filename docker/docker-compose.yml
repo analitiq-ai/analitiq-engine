@@ -30,6 +30,13 @@ services:
       - ../src:/app/src
       - ../cdk:/app/cdk  # CDK package on PYTHONPATH, live like src
       - ../connectors:/app/connectors
+      # connectors/<name> may be relative symlinks into a local DIP registry
+      # checkout (../../analitiq-dip-registry/<name>), which resolve to
+      # /analitiq-dip-registry/<name> inside the container. Mounting the registry
+      # at that path lets the engine read connectors straight from the registry -
+      # edits there are picked up live, with no copy into this repo. A no-op when
+      # connectors are real dirs. Override the host path with DIP_REGISTRY_PATH.
+      - ${DIP_REGISTRY_PATH:-../../analitiq-dip-registry}:/analitiq-dip-registry:ro
       - ../connections:/app/connections
       - ../pipelines:/app/pipelines
 
@@ -113,6 +120,9 @@ services:
       - ../src:/app/src  # Live code changes without rebuild
       - ../cdk:/app/cdk  # CDK package on PYTHONPATH, live like src
       - ../connectors:/app/connectors
+      # See destination service: mounts the local DIP registry at the path the
+      # connector symlinks resolve to, so symlinked connectors read live.
+      - ${DIP_REGISTRY_PATH:-../../analitiq-dip-registry}:/analitiq-dip-registry:ro
       - ../connections:/app/connections  # includes .secrets/ per connection
       - ../pipelines:/app/pipelines
       # Mount state, logs, and deadletter directories for persistence
