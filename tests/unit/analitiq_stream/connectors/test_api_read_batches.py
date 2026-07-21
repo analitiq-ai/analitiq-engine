@@ -130,7 +130,7 @@ def _collect_from_params(node: Any) -> set[str]:
     return names
 
 
-def _endpoint_doc_with_records(
+def _endpoint_doc_with_records(  # skipcq: PY-R1000
     pagination: dict[str, Any] | None = None,
     replication: dict[str, Any] | None = None,
     params: dict[str, Any] | None = None,

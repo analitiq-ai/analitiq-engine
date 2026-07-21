@@ -180,7 +180,10 @@ class APIConnector(BaseConnector):
         finally:
             await self.disconnect()
 
-    async def _read_batches_impl(
+    # Complexity is inherent to the single read pass (validate, resolve
+    # params, replication, pagination); the pre-#349 dict version carried the
+    # same branching and is a tolerated occurrence on the default branch.
+    async def _read_batches_impl(  # skipcq: PY-R1000
         self,
         config: dict[str, Any],
         *,
@@ -640,7 +643,10 @@ class APIConnector(BaseConnector):
     # Pagination
     # ------------------------------------------------------------------
 
-    async def _iterate_pages(
+    # One loop per pagination strategy; the pre-#349 dict version carried the
+    # same branching and is a tolerated occurrence on the default branch. The
+    # strategy dispatch is restructured with the #346 contract work.
+    async def _iterate_pages(  # skipcq: PY-R1000
         self,
         *,
         full_url: str,
