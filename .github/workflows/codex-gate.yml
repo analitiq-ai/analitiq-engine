@@ -15,11 +15,12 @@ name: codex-gate
 # a write token even for fork PRs; it is safe here because the job never checks
 # out or executes PR code -- it only reads PR metadata and posts a status.
 
-# No pull_request_review trigger, ever: that event executes the workflow file
-# from the PR's merge ref, so a PR editing this file could post its own
-# success with the write token and bypass the gate. Every trigger here runs
-# the file from the default branch; verdicts delivered as PR reviews are
-# picked up by the sweep instead.
+# No pull_request_review trigger and no workflow_dispatch, ever: review events
+# execute the workflow file from the PR merge ref, and manual dispatch runs
+# whichever ref is selected -- either lets a PR that edits this file post its
+# own success with the write token and walk through the gate. Every trigger
+# here runs the file from the default branch; verdicts delivered as PR reviews
+# are picked up by the sweep instead.
 on:
   pull_request_target:
     types: [opened, reopened, synchronize, ready_for_review]
@@ -27,7 +28,6 @@ on:
     types: [created, edited]
   schedule:
     - cron: "*/15 * * * *"
-  workflow_dispatch:
 
 permissions:
   statuses: write
@@ -115,7 +115,9 @@ jobs:
                 .filter((c) => c.user.login === CODEX)
                 .map((c) => ({ body: c.body || '', at: c.updated_at || c.created_at }))
                 .concat(reviews
-                  .filter((r) => r.user.login === CODEX)
+                  // A dismissed review was explicitly invalidated by a
+                  // maintainer; it must not stay a live verdict.
+                  .filter((r) => r.user.login === CODEX && r.state !== 'DISMISSED')
                   .map((r) => ({ body: r.body || '', at: r.submitted_at })));
 
               // A verdict counts only for the exact commit Codex says it
@@ -144,17 +146,15 @@ jobs:
               const { data: combined } = await github.rest.repos.getCombinedStatusForRef({ owner, repo, ref: head });
               const existing = combined.statuses.find((s) => s.context === CONTEXT);
 
-              if (!approved && existing && existing.state === 'success') {
-                // A sweep can compute pending from a comment snapshot taken
-                // before the verdict that earned the success it now observes,
-                // and statuses are last-writer-wins. Demotion is legitimate
-                // only if a fresh read still says pending (a findings
-                // re-review of the same head).
+              if (!approved && (!existing || existing.state === 'success')) {
+                // About to write pending over a success or over no status at
+                // all, and statuses are last-writer-wins: a sweep working from
+                // a comment snapshot taken before a verdict landed would
+                // otherwise overwrite the event run's newer success (or race
+                // past it on a brand-new head). Re-read once; a demotion or
+                // first pending goes out only if the fresh read still says
+                // pending.
                 ({ approved, responded } = await readVerdict(prNumber, head));
-                if (approved) {
-                  core.info(`PR #${prNumber} @ ${head.slice(0, 10)}: success confirmed on re-read`);
-                  return;
-                }
               }
 
               const state = approved ? 'success' : 'pending';
