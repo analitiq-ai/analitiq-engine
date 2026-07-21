@@ -43,8 +43,20 @@ if [ -d "$CONNECTORS_DIR" ]; then
         name=$(basename "$dir")
         if [ -f "$dir/pyproject.toml" ]; then
             echo "[entrypoint] installing connector package: $name"
-            pip install --user -q --no-build-isolation "$dir" \
-                || echo "[entrypoint] WARNING: connector package install failed: $name (continuing)"
+            # Connector sources may be bind-mounted read-only (a symlink into a
+            # DIP registry checkout mounted :ro). pip builds the wheel in-tree,
+            # which fails on a read-only source, so stage a writable copy first.
+            # -L dereferences the registry symlink; .git is dropped so the
+            # connector's own repo history is not dragged into the build.
+            stage=$(mktemp -d)
+            if cp -RL "$dir." "$stage/" 2>/dev/null; then
+                rm -rf "$stage/.git"
+                pip install --user -q --no-build-isolation "$stage" \
+                    || echo "[entrypoint] WARNING: connector package install failed: $name (continuing)"
+            else
+                echo "[entrypoint] WARNING: could not stage connector for install: $name (continuing)"
+            fi
+            rm -rf "$stage"
         elif [ -f "$dir/requirements.txt" ]; then
             echo "[entrypoint] installing connector driver requirements: $name"
             pip install --user -q -r "$dir/requirements.txt" \
