@@ -175,10 +175,29 @@ class TestExpressionOps:
         )
         assert out == [{"v": "fallback"}]
 
+    def test_coalesce_keeps_first_operand_where_present(self):
+        # Two rows make column a concrete string with a partial null, so this
+        # exercises row-wise precedence on a typed column, not null-type adoption.
+        node = {"op": "coalesce", "args": [_get("a"), _get("b")]}
+        out = _run(
+            [{"a": None, "b": "fb"}, {"a": "keep", "b": "fb"}],
+            [_assignment("v", "Utf8", _expr(node))],
+        )
+        assert out == [{"v": "fb"}, {"v": "keep"}]
+
     def test_coalesce_all_null_stays_null(self):
         node = {"op": "coalesce", "args": [_get("a"), _get("b")]}
         out = _run([{"a": None, "b": None}], [_assignment("v", "Utf8", _expr(node))])
         assert out == [{"v": None}]
+
+    def test_coalesce_mixed_concrete_types_fails_loud(self):
+        # Args of different concrete types share no kernel; the documented
+        # Typed-intermediates divergence is to fail the batch, never to carry
+        # a mixed-type value forward.
+        node = {"op": "coalesce", "args": [_get("a"), _const_node("fallback")]}
+        compiled = compile_transform([_assignment("v", "Utf8", _expr(node))])
+        with pytest.raises(TransformationError, match="coalesce expression failed"):
+            compiled.run(pa.RecordBatch.from_pylist([{"a": 1}, {"a": None}]))
 
     def test_unknown_op_raises_at_compile(self):
         with pytest.raises(TransformationError, match="Unknown expression op"):
