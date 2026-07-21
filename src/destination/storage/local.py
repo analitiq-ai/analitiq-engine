@@ -112,7 +112,7 @@ class LocalFileStorage(BaseStorageBackend):
                 await aiofiles.os.remove(tmp_path)
             raise
 
-        logger.debug(f"Wrote {len(data)} bytes to: {full_path}")
+        logger.debug("Wrote %s bytes to: %s", len(data), full_path)
         return str(full_path)
 
     async def file_exists(self, path: str) -> bool:
