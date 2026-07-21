@@ -150,7 +150,7 @@ def _make_pipeline(
 class TestDumpEndpointDocument:
     """dump_endpoint_document restores the authored JSON shape."""
 
-    def test_round_trips_authored_shape(self):  # skipcq: PYL-R0201
+    def test_round_trips_authored_shape(self):
         """The dump restores aliases, omits unset fields, and revalidates."""
         doc = _database_endpoint_doc()
         dumped = dump_endpoint_document(doc)
@@ -162,7 +162,7 @@ class TestDumpEndpointDocument:
         assert "display_name" not in dumped
         assert DatabaseEndpointDoc.model_validate(dumped) == doc
 
-    def test_api_doc_round_trips(self):  # skipcq: PYL-R0201
+    def test_api_doc_round_trips(self):
         """An API document round-trips through the dump unchanged."""
         doc = _api_endpoint_doc()
         dumped = dump_endpoint_document(doc)
@@ -206,7 +206,7 @@ class TestTranslateSourceConfig:
         )
         assert "stream_source" in result
 
-    def test_api_kind_gets_same_pass_through(self):  # skipcq: PYL-R0201
+    def test_api_kind_gets_same_pass_through(self):
         """The api kind carries the identical contract-document shape; the
         connector reads filters directly off ``stream_source``."""
         stream_source = {"filters": [{"field": "x"}]}

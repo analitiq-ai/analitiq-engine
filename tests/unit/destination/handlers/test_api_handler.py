@@ -1033,9 +1033,7 @@ class TestApiHandlerConfigureSchemaModeDispatch:
         ok = await handler.configure_schema(msg)
         assert ok is False
 
-    def test_document_without_path_rejected_at_registration(  # skipcq: PYL-R0201
-        self, handler
-    ):
+    def test_document_without_path_rejected_at_registration(self, handler):
         """A write block with no request.path cannot be authored: the
         contract model rejects the document at set_stream_endpoints, the
         handler's one parse point (issue #349)."""

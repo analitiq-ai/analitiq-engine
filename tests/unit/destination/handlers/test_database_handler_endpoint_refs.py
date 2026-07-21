@@ -165,7 +165,7 @@ class TestColumnDefStrictness:
         with pytest.raises(SchemaConfigurationError, match="has no 'name' field"):
             handler._build_column_defs(state)
 
-    def test_column_without_arrow_type_raises(self):  # skipcq: PYL-R0201
+    def test_column_without_arrow_type_raises(self):
         from cdk.sql.generic import _StreamState
 
         handler = GenericSQLConnector()
