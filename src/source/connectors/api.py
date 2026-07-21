@@ -684,6 +684,24 @@ class APIConnector(BaseConnector):
             == (target.port or default_ports.get(target_scheme))
         )
 
+    @staticmethod
+    def _positive_step(value: Any, *, context: str) -> int:
+        """Parse an authored ``increment_by`` into a positive int step.
+
+        A step of zero or less can never advance its loop — the same
+        request would repeat unbounded — and a non-numeric one is an
+        authoring defect; both fail deterministically before any request.
+        """
+        try:
+            step = int(value)
+        except (TypeError, ValueError) as err:
+            raise ReadError(
+                f"pagination {context} must be an integer, got {value!r}"
+            ) from err
+        if step <= 0:
+            raise ReadError(f"pagination {context} must be positive, got {step}")
+        return step
+
     # One loop per pagination strategy; the pre-#346 version carried the same
     # branching and is a tolerated occurrence on the default branch.
     async def _iterate_pages(  # skipcq: PY-R1000
@@ -745,7 +763,9 @@ class APIConnector(BaseConnector):
             # An authored ``increment_by`` fixes the step; otherwise the
             # offset advances by the page size actually requested.
             offset_step = (
-                int(pagination.offset.increment_by)
+                self._positive_step(
+                    pagination.offset.increment_by, context="offset.increment_by"
+                )
                 if pagination.offset.increment_by is not None
                 else batch_size
             )
@@ -772,7 +792,9 @@ class APIConnector(BaseConnector):
             # An authored ``increment_by`` fixes the step; page numbers
             # advance by one otherwise.
             page_step = (
-                int(pagination.page.increment_by)
+                self._positive_step(
+                    pagination.page.increment_by, context="page.increment_by"
+                )
                 if pagination.page.increment_by is not None
                 else 1
             )

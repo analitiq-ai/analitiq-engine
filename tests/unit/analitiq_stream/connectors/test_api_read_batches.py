@@ -580,6 +580,40 @@ class TestReadBatchesOffsetIncrementBy:
 
         assert [c[2].get("offset") for c in session.calls] == [0, 10]
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("increment_by", [0, -5])
+    async def test_non_positive_increment_by_raises(self, increment_by):
+        """A step of zero or less can never advance the loop — the same
+        request would repeat unbounded — so it fails before any request."""
+        session = _FakeSession([])
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "offset",
+                "offset": {
+                    "param": "offset",
+                    "initial": 0,
+                    "increment_by": increment_by,
+                },
+                "limit": {"param": "limit"},
+            },
+        )
+        with pytest.raises(ReadError, match="must be positive"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=2,
+            )
+        assert session.calls == []
+
 
 class TestReadBatchesPagePagination:
     @pytest.mark.asyncio
