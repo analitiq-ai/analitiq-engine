@@ -38,6 +38,7 @@ import sys
 from typing import Any
 
 from src.config import settings
+from src.models.resolved import dump_endpoint_document
 from src.models.stream import WriteMode
 
 # Set up logging
@@ -208,22 +209,24 @@ async def run_destination_mode() -> None:
     #     by the handler to pick the right TypeMapper (connector-scoped
     #     vs connection-scoped endpoints) for each SchemaMessage.
     #   - stream_endpoints: stream_id -> resolved contract endpoint
-    #     document. Engine and destination both load these via
-    #     PipelineConfigPrep, so handlers read schema details from this
-    #     map instead of unpacking them off the wire.
+    #     document, dumped back to its authored JSON shape. Engine and
+    #     destination both load these via PipelineConfigPrep, so handlers
+    #     read schema details from this map instead of unpacking them off
+    #     the wire.
+    #   - stream_conflict_keys: stream_id -> the stream's Infra-validated
+    #     ``write.conflict_keys``, copied verbatim. Stream configuration,
+    #     not endpoint contract, so it travels on its own channel.
     endpoint_refs: dict[str, dict[str, Any]] = {}
     stream_endpoints: dict[str, dict[str, Any]] = {}
+    stream_conflict_keys: dict[str, list[str]] = {}
     for stream in stream_configs:
         for dest in stream.destinations:
             if dest.connection_ref != dest_connection_id:
                 continue
             stream_id = stream.stream_id
             endpoint_refs[stream_id] = dest.endpoint_ref.to_dict()
-            endpoint_doc = dest.endpoint_document
-            # Infra validates and supplies the upsert conflict target on
-            # the stream; the engine copies it verbatim. The mode is
-            # parsed only to reject an unknown value at startup (format
-            # validation) — the engine no longer derives or enforces
+            # The mode is parsed only to reject an unknown value at startup
+            # (format validation) — the engine no longer derives or enforces
             # conflict keys, so a misconfigured upsert surfaces loudly at
             # the write path rather than being silently downgraded here.
             mode_value = dest.write.get("mode") or "upsert"
@@ -234,11 +237,10 @@ async def run_destination_mode() -> None:
                     f"Stream {stream_id!r} destination has unknown write.mode "
                     f"{mode_value!r}; expected one of {[m.value for m in WriteMode]}"
                 ) from e
-            enriched_endpoint = dict(endpoint_doc)
-            enriched_endpoint["_write_conflict_keys"] = list(
+            stream_endpoints[stream_id] = dump_endpoint_document(dest.endpoint_document)
+            stream_conflict_keys[stream_id] = list(
                 dest.write.get("conflict_keys") or []
             )
-            stream_endpoints[stream_id] = enriched_endpoint
             break
     logger.info(
         "Registered %d stream(s) targeting %s",
@@ -259,6 +261,7 @@ async def run_destination_mode() -> None:
     )
     handler.set_endpoint_refs(endpoint_refs)
     handler.set_stream_endpoints(stream_endpoints)
+    handler.set_stream_conflict_keys(stream_conflict_keys)
     await handler.connect(runtime)
 
     server = DestinationGRPCServer(handler, port=grpc_port)

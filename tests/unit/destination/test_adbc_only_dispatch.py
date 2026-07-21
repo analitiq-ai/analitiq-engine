@@ -481,7 +481,7 @@ class TestAdbcDdlBuilders:
             mapper,
             state.schema_name,
             state.table_name,
-            handler._build_column_defs(state, mapper),
+            handler._build_column_defs(state),
             list(state.primary_keys),
             if_not_exists=True,
         )
@@ -498,8 +498,18 @@ class TestAdbcDdlBuilders:
             table_name="orders",
             endpoint_document={
                 "columns": [
-                    {"name": "id", "native_type": "BIGINT", "nullable": False},
-                    {"name": "status", "native_type": "TEXT", "nullable": True},
+                    {
+                        "name": "id",
+                        "native_type": "BIGINT",
+                        "arrow_type": "Int64",
+                        "nullable": False,
+                    },
+                    {
+                        "name": "status",
+                        "native_type": "TEXT",
+                        "arrow_type": "Utf8",
+                        "nullable": True,
+                    },
                 ],
             },
             primary_keys=["id"],
@@ -528,10 +538,16 @@ class TestAdbcDdlBuilders:
             table_name="orders",
             endpoint_document={
                 "columns": [
-                    {"name": "id", "native_type": "BIGINT", "nullable": False},
+                    {
+                        "name": "id",
+                        "native_type": "BIGINT",
+                        "arrow_type": "Int64",
+                        "nullable": False,
+                    },
                     {
                         "name": "_synced_at",
                         "native_type": "TIMESTAMP",
+                        "arrow_type": "Timestamp(MICROSECOND)",
                         "nullable": True,
                     },
                 ],
@@ -574,7 +590,12 @@ class TestAdbcDdlBuilders:
             primary_keys=[],  # keyless
             endpoint_document={
                 "columns": [
-                    {"name": "payload", "native_type": "TEXT", "nullable": True}
+                    {
+                        "name": "payload",
+                        "native_type": "TEXT",
+                        "arrow_type": "Utf8",
+                        "nullable": True,
+                    }
                 ]
             },
         )
@@ -587,7 +608,7 @@ class TestAdbcDdlBuilders:
             _TypeMapperStub(),
             state.schema_name,
             state.table_name,
-            h._build_column_defs(state, _TypeMapperStub()),
+            h._build_column_defs(state),
             h._identity_columns(state),
             if_not_exists=True,
         )

@@ -83,7 +83,10 @@ class TestValidateFile:
         doc_path = tmp_path / "conn.json"
         doc_path.write_text(json.dumps(_valid_connection()))
         result = validate_file("connection", doc_path)
-        assert result == _valid_connection()
+        # validate_file returns the typed contract model; its dump matches
+        # the authored document.
+        dumped = result.model_dump(mode="json", by_alias=True, exclude_unset=True)
+        assert dumped == _valid_connection()
 
     def test_missing_file_raises_file_not_found(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError):

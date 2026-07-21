@@ -122,6 +122,24 @@ class BaseDestinationHandler(ABC):
         """
         _ = stream_endpoints  # no-op default
 
+    def set_stream_conflict_keys(
+        self, stream_conflict_keys: Mapping[str, list[str]]
+    ) -> None:
+        """Register the ``stream_id → upsert conflict keys`` index.
+
+        The conflict keys are the stream's validated ``write.conflict_keys``,
+        copied verbatim by the destination entrypoint. They are stream
+        configuration, not part of the contract endpoint document, so they
+        travel on their own channel instead of being smuggled into the
+        document map. An absent or empty entry means INSERT mode — an
+        upsert always carries an explicit conflict target under the
+        contract.
+
+        Called once by the destination entrypoint before the gRPC server
+        starts. Default is a no-op; handlers that upsert override it.
+        """
+        _ = stream_conflict_keys  # no-op default
+
     def set_statement_timeout(self, seconds: float | None) -> None:
         """Bound each destination statement to *seconds*.
 

@@ -320,8 +320,13 @@ class TestSyncRuntimeWiring:
                 write_mode="insert",
                 endpoint_document={
                     "columns": [
-                        {"name": "id", "native_type": "INTEGER", "nullable": False},
-                        {"name": "name", "native_type": "TEXT"},
+                        {
+                            "name": "id",
+                            "native_type": "INTEGER",
+                            "arrow_type": "Int64",
+                            "nullable": False,
+                        },
+                        {"name": "name", "native_type": "TEXT", "arrow_type": "Utf8"},
                     ],
                 },
             )

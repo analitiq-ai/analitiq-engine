@@ -32,17 +32,23 @@ from analitiq.contracts.endpoints import ApiEndpointDoc, DatabaseEndpointDoc
 from analitiq.contracts.pipelines.config import PipelineInput
 from analitiq.contracts.stream import StreamInput
 from analitiq.validator import validate_pipeline_bundle
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from src.config.utils import load_json_file
 
 logger = logging.getLogger(__name__)
 
 
+# The two endpoint-document variants. Endpoint documents are the artifacts
+# the engine carries as typed models end-to-end (issue #349); the other kinds
+# are validated the same way but their call sites still consume the raw dict.
+EndpointDocument = ApiEndpointDoc | DatabaseEndpointDoc
+
 # One model per artifact kind. The model is the authored-document ("Input")
 # variant, matching what the engine loads from disk and what the published
-# ``{kind}/latest.json`` schema is rendered from.
-_MODELS: dict[str, type] = {
+# ``{kind}/latest.json`` schema is rendered from. Values are typed ``Any``
+# because a contract entry may be an Annotated union alias, not a class.
+_MODELS: dict[str, Any] = {
     "connector": ConnectorConfig,
     "connection": ConnectionInput,
     "pipeline": PipelineInput,
@@ -88,36 +94,51 @@ def _adapter_for(kind: str) -> TypeAdapter[Any]:
         ) from None
 
 
-def validate(kind: str, document: dict[str, Any], *, source: str = "<inline>") -> None:
-    """Validate ``document`` against the contract model for ``kind``.
+def validate(
+    kind: str, document: dict[str, Any], *, source: str = "<inline>"
+) -> BaseModel:
+    """Validate ``document`` and return the typed contract model for ``kind``.
 
     Raises :class:`ContractValidationError` on failure. The ``source``
     parameter is woven into the error message so callers can include the
     file path or other context.
 
-    Errors anchored at the top-level ``$schema`` field are dropped before
-    raising. The ``$schema`` value is an informational pointer to the
-    contract URL; whether a document advertises ``schemas.analitiq.ai`` or
-    another host is independent of the contract body, which is what actually
-    governs correctness.
+    Errors anchored at the top-level ``$schema`` field are dropped. The
+    ``$schema`` value is an informational pointer to the contract URL;
+    whether a document advertises ``schemas.analitiq.ai`` or another host
+    is independent of the contract body, which is what actually governs
+    correctness. When ``$schema`` is the only failing field, validation
+    retries with the field set to the kind's canonical URL so a typed
+    model can still be produced; the model then carries the canonical URL
+    instead of the document's advertised one.
     """
     adapter = _adapter_for(kind)
     try:
-        adapter.validate_python(document)
+        model: BaseModel = adapter.validate_python(document)
     except ValidationError as exc:
         errors = [e for e in exc.errors() if tuple(e["loc"]) != ("$schema",)]
         if errors:
             raise ContractValidationError(kind, source, errors) from exc
+        patched = {
+            **document,
+            "$schema": f"https://schemas.analitiq.ai/{kind}/latest.json",
+        }
+        try:
+            model = adapter.validate_python(patched)
+        except ValidationError:
+            # The canonical URL did not satisfy the model either — surface
+            # the original findings rather than the retry's.
+            raise ContractValidationError(kind, source, exc.errors()) from exc
     logger.debug("Contract %r validated %s", kind, source)
+    return model
 
 
-def validate_file(kind: str, path: Path) -> dict[str, Any]:
-    """Read a JSON file, validate it, and return the parsed dict."""
+def validate_file(kind: str, path: Path) -> BaseModel:
+    """Read a JSON file, validate it, and return the typed contract model."""
     if not path.is_file():
         raise FileNotFoundError(f"Artifact not found: {path}")
     document = load_json_file(path)
-    validate(kind, document, source=str(path))
-    return document
+    return validate(kind, document, source=str(path))
 
 
 class BundleValidationError(ValueError):

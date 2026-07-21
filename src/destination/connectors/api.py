@@ -12,12 +12,19 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 import aiohttp
 import orjson
 import pyarrow as pa
 from aiohttp_retry import ExponentialRetry, RetryClient
+from analitiq.contracts.endpoints import (
+    ApiEndpointDoc,
+    Batching,
+    Idempotency,
+    WriteOperation,
+)
+from pydantic import ValidationError
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult, reject_batch
 from cdk.connection_runtime import ConnectionRuntime
@@ -26,7 +33,6 @@ from cdk.rate_limiter import RateLimiter
 from cdk.request_binding import (
     bind_param_refs,
     bind_record_inputs,
-    collect_from_input_selectors,
     resolve_param_defaults,
 )
 from cdk.resolver import Resolver
@@ -41,63 +47,30 @@ logger = logging.getLogger(__name__)
 # api-endpoint contract's ``operations.write`` is a closed map keyed by
 # mode name (v1 keys: ``insert``, ``upsert``); the destination handler
 # must dispatch to the block matching the stream's write_mode.
-_API_WRITE_MODE_KEYS: dict[int, str] = {
+_API_WRITE_MODE_KEYS: dict[int, Literal["insert", "upsert"]] = {
     1: "insert",
     2: "upsert",
 }
 
 
 def _endpoint_write_mode_block(
-    endpoint_doc: Mapping[str, Any], mode_key: str
-) -> dict[str, Any] | None:
+    endpoint_doc: ApiEndpointDoc, mode_key: Literal["insert", "upsert"]
+) -> WriteOperation | None:
     """Return the ``operations.write.<mode_key>`` block, or ``None``.
 
-    The block is returned when it is a usable request definition.
-    A block is usable when it is a dict carrying a truthy ``request.path``.
-    This is the single acceptance predicate for an API write mode:
-    ``supports_upsert`` (capability advertisement) and ``configure_schema``
-    (per-stream dispatch) both apply it, so the two cannot disagree on
-    whether a given write-mode block is usable.
-
-    Tolerant of malformed contract documents: any level that is not the
-    expected mapping yields ``None`` rather than raising, so capability
-    advertisement over arbitrary endpoint docs never crashes.
+    Presence is the whole acceptance predicate: the typed contract model
+    guarantees a present block is usable (non-empty ``request.path``, a
+    valid body binding). ``supports_upsert`` (capability advertisement)
+    and ``configure_schema`` (per-stream dispatch) both go through here,
+    so the two cannot disagree on whether a given write mode is offered.
     """
-    operations = endpoint_doc.get("operations")
-    write = operations.get("write") if isinstance(operations, Mapping) else None
-    mode_block = write.get(mode_key) if isinstance(write, Mapping) else None
-    if not isinstance(mode_block, Mapping):
-        return None
-    request = mode_block.get("request")
-    if not isinstance(request, Mapping) or not request.get("path"):
-        return None
-    return dict(mode_block)
-
-
-def _batching_max_records(batching: Any) -> int | None:
-    """``max_records`` from a contract-valid ``batching`` block, else ``None``.
-
-    The api-endpoint contract's Batching shape is
-    ``{"max_records": <int >= 2>}`` — required and closed, so unknown
-    sibling keys (a typo, or the pre-contract ``mode``/``size`` blended
-    in) make the block non-contract and must not be waved through. This
-    is the single acceptance predicate for a batching block:
-    ``supports_bulk_load`` (capability advertisement) and
-    ``configure_schema`` (per-stream acceptance) both apply it, so the
-    two cannot disagree on whether a given block enables multi-record
-    requests.
-    """
-    if not isinstance(batching, Mapping) or set(batching) != {"max_records"}:
-        return None
-    value = batching.get("max_records")
-    if isinstance(value, bool) or not isinstance(value, int) or value < 2:
-        return None
-    return value
+    write = endpoint_doc.operations.write or {}
+    return write.get(mode_key)
 
 
 def _idempotency_config_problem(
-    idempotency: Any,
-    batching: Any,
+    idempotency: Idempotency,
+    batching: Batching | None,
     state: "_StreamState",
     *,
     reserved_headers: frozenset[str] | set[str],
@@ -105,24 +78,20 @@ def _idempotency_config_problem(
 ) -> str | None:
     """Why this ``idempotency`` block cannot work for the stream, or ``None``.
 
-    Mirrors the api-endpoint schema's own constraints (infra#890) so a
-    document that slipped past contract validation still fails loud at
-    configure time instead of writing without the key it promised. The
-    contract has no batching mode: a present ``batching`` block IS the
-    multi-record case, so the schema's exclusion — and this mirror — key
-    on its presence. ``reserved_headers`` are the lowercased engine- and
-    connection-owned request headers; ``declared_input_fields`` are the
-    write input schema's field names, which shape the pass-through body
-    when no body template is declared.
+    Mirrors the api-endpoint schema's cross-block constraints (infra#890)
+    that the per-model contract validation cannot express: the header
+    namespace this connection owns, the batching exclusion, and body-field
+    collisions. The block's own shape (``in`` enum, non-empty ``name``) is
+    contract-guaranteed by the typed model. The contract has no batching
+    mode: a present ``batching`` block IS the multi-record case, so the
+    schema's exclusion — and this mirror — key on its presence.
+    ``reserved_headers`` are the lowercased engine- and connection-owned
+    request headers; ``declared_input_fields`` are the write input
+    schema's field names, which shape the pass-through body when no body
+    template is declared.
     """
-    if not isinstance(idempotency, Mapping):
-        return f"idempotency must be an object, got {type(idempotency).__name__}"
-    target = idempotency.get("in")
-    name = idempotency.get("name")
-    if target not in ("header", "body"):
-        return f"idempotency.in must be 'header' or 'body', got {target!r}"
-    if not isinstance(name, str) or not name:
-        return f"idempotency.name must be a non-empty string, got {name!r}"
+    target = idempotency.location
+    name = idempotency.name
     if target == "header" and name.lower() in reserved_headers:
         # Same rule as the body reserved-field check: these headers are
         # engine-owned (Content-Type) or carry the connection's own
@@ -134,7 +103,7 @@ def _idempotency_config_problem(
             f"connection-owned request header; pick a header the "
             f"connection does not already send"
         )
-    if batching:
+    if batching is not None:
         return (
             "idempotency cannot be combined with a batching block: a "
             "restart re-batches records, so a per-request key over several "
@@ -245,14 +214,15 @@ def _orjson_default(obj: Any) -> Any:
     )
 
 
-def _collect_json_fields(mode_block: Mapping[str, Any]) -> set[str]:
+def _collect_json_fields(mode_block: WriteOperation) -> set[str]:
     """Body field names declared with ``arrow_type: "Json"``.
 
-    Handles both shapes the api-endpoint contract permits:
-    JSON-Schema-style ``input.schema.properties`` (most common) and the
-    flat ``input.schema.columns`` array.
+    The write input schema is free-form JSON Schema in the contract
+    (``input.schema`` is ``dict[str, Any]``), so both shapes it permits
+    are walked as dicts: JSON-Schema-style ``properties`` (most common)
+    and the flat ``columns`` array.
     """
-    schema = (mode_block.get("input") or {}).get("schema") or {}
+    schema = mode_block.input.schema_ or {}
     names: set[str] = set()
     for name, prop in (schema.get("properties") or {}).items():
         if isinstance(prop, dict) and prop.get("arrow_type") == "Json":
@@ -265,9 +235,9 @@ def _collect_json_fields(mode_block: Mapping[str, Any]) -> set[str]:
     return names
 
 
-def _collect_input_field_names(mode_block: Mapping[str, Any]) -> set[str]:
+def _collect_input_field_names(mode_block: WriteOperation) -> set[str]:
     """Every field name the write input schema declares (both shapes)."""
-    schema = (mode_block.get("input") or {}).get("schema") or {}
+    schema = mode_block.input.schema_ or {}
     names: set[str] = {
         name for name in (schema.get("properties") or {}) if isinstance(name, str)
     }
@@ -423,10 +393,10 @@ class ApiDestinationHandler(BaseDestinationHandler):
         # streams sharing this handler do not race shared state.
         self._streams: dict[str, _StreamState] = {}
 
-        # stream_id -> contract API endpoint document. Populated by
+        # stream_id -> typed contract API endpoint document. Populated by
         # set_stream_endpoints() at startup so configure_schema() can read
-        # operations.write.<mode>.* directly from the contract.
-        self._stream_endpoints: dict[str, dict[str, Any]] = {}
+        # operations.write.<mode>.* directly from the contract model.
+        self._stream_endpoints: dict[str, ApiEndpointDoc] = {}
 
         # HTTP statuses that trigger retry with exponential backoff; the
         # attempt count comes from ``runtime.raw_config["max_retries"]`` at
@@ -450,16 +420,26 @@ class ApiDestinationHandler(BaseDestinationHandler):
     def set_stream_endpoints(
         self, stream_endpoints: Mapping[str, Mapping[str, Any]]
     ) -> None:
-        """Register stream_id to its contract API endpoint document.
+        """Register stream_id to its typed contract API endpoint document.
 
-        The handler reads ``operations.write.<mode>.request.{path,method}``
-        and optional ``operations.write.<mode>.batching`` from the document
-        at ``configure_schema`` time, where ``<mode>`` matches the
-        stream's ``write.mode``.
+        Each document is validated into
+        :class:`~analitiq.contracts.endpoints.ApiEndpointDoc` here — the
+        one parse point for this handler (issue #349); ``configure_schema``
+        reads ``operations.write.<mode>.*`` off the model, where ``<mode>``
+        matches the stream's ``write.mode``. The documents were already
+        contract-validated engine-side, so a failure here is a defect and
+        fails the worker loudly at startup.
         """
-        self._stream_endpoints = {
-            sid: dict(doc) for sid, doc in stream_endpoints.items()
-        }
+        parsed: dict[str, ApiEndpointDoc] = {}
+        for sid, doc in stream_endpoints.items():
+            try:
+                parsed[sid] = ApiEndpointDoc.model_validate(dict(doc))
+            except ValidationError as err:
+                raise ValueError(
+                    f"stream {sid!r}: endpoint document failed api-endpoint "
+                    f"contract validation: {err}"
+                ) from err
+        self._stream_endpoints = parsed
 
     @property
     def connector_type(self) -> str:
@@ -498,12 +478,12 @@ class ApiDestinationHandler(BaseDestinationHandler):
         exist only where an endpoint's ``operations.write.<mode>.batching``
         block declares the provider's per-request cap; without one every
         write is one request per record, so advertising bulk load would
-        promise a capability no configured stream can use. The block must
-        pass the same acceptance predicate ``configure_schema`` applies —
-        a block configure would reject enables nothing.
+        promise a capability no configured stream can use. A present block
+        is always usable: the typed contract model guarantees its shape
+        (``max_records`` >= 2).
         """
         return any(
-            _batching_max_records(block.get("batching")) is not None
+            block.batching is not None
             for doc in self._stream_endpoints.values()
             for mode_key in _API_WRITE_MODE_KEYS.values()
             if (block := _endpoint_write_mode_block(doc, mode_key)) is not None
@@ -603,74 +583,55 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
         mode_block = _endpoint_write_mode_block(endpoint_doc, mode_key)
         if mode_block is None:
-            operations = endpoint_doc.get("operations")
-            write = operations.get("write") if isinstance(operations, Mapping) else None
-            available = sorted(write.keys()) if isinstance(write, Mapping) else None
+            write = endpoint_doc.operations.write
+            available = sorted(write.keys()) if write else None
             return self._reject_schema(
                 stream_id,
-                f"endpoint document does not define a usable "
-                f"operations.write.{mode_key} block (needs a dict with a "
-                f"truthy request.path); write modes present: {available}",
+                f"endpoint document does not define an "
+                f"operations.write.{mode_key} block; "
+                f"write modes present: {available}",
             )
 
-        request = mode_block.get("request") or {}
         state = _StreamState(
-            endpoint=request["path"],
-            method=(request.get("method") or "POST").upper(),
+            endpoint=mode_block.request.path,
+            method=mode_block.request.method,
             json_fields=_collect_json_fields(mode_block),
-            body_spec=request.get("body"),
-            params_spec=dict(mode_block.get("params") or {}),
+            body_spec=mode_block.request.body,
+            # The write params feed the CDK's dict-consuming default
+            # resolution and body binding at write time, so they are
+            # dumped back to the authored JSON shape at this boundary.
+            params_spec={
+                n: p.model_dump(mode="json", by_alias=True, exclude_unset=True)
+                for n, p in (mode_block.params or {}).items()
+            },
         )
 
         # Contract shape (infra#890): a present ``batching`` block IS the
-        # multi-record case and must carry ``max_records`` (int >= 2);
-        # absence/null means one request per record. Any other shape is a
-        # non-contract document — fail the stream loud instead of silently
-        # running single-record (issue #305).
-        batching = mode_block.get("batching")
+        # multi-record case and carries ``max_records`` (int >= 2, model-
+        # guaranteed); absence/null means one request per record.
+        batching = mode_block.batching
         if batching is not None:
-            max_records = _batching_max_records(batching)
-            if max_records is None:
-                return self._reject_schema(
-                    stream_id,
-                    f'batching must be {{"max_records": <int >= 2>}} per '
-                    f"the api-endpoint contract, got {batching!r}",
-                )
-            state.max_records = max_records
+            state.max_records = batching.max_records
 
         # A body spec whose from_input selectors contradict the batching
-        # declaration can never build a valid request — reject the stream
-        # now rather than failing every record at write time.
-        if state.body_spec is not None:
-            selectors = collect_from_input_selectors(state.body_spec)
-            is_single = state.max_records is None
-            wants_batch = "records" in selectors
-            wants_single = any(
-                s == "record" or s.startswith("record.") for s in selectors
-            )
-            if (wants_batch and is_single) or (wants_single and not is_single):
-                return self._reject_schema(
-                    stream_id,
-                    f"request.body from_input selectors {sorted(selectors)} "
-                    f"do not match the batching declaration ('records' "
-                    f"needs a batching block; 'record' needs none)",
-                )
+        # declaration cannot be authored: the contract model enforces the
+        # selector/batching pairing when the document is parsed.
 
         state.write_mode_key = mode_key
 
-        idempotency = mode_block.get("idempotency")
+        idempotency = mode_block.idempotency
         if idempotency is not None:
             problem = _idempotency_config_problem(
                 idempotency,
-                mode_block.get("batching"),
+                batching,
                 state,
                 reserved_headers={"content-type"} | self._session_header_names,
                 declared_input_fields=_collect_input_field_names(mode_block),
             )
             if problem is not None:
                 return self._reject_schema(stream_id, problem)
-            state.idempotency_in = idempotency["in"]
-            state.idempotency_name = idempotency["name"]
+            state.idempotency_in = idempotency.location
+            state.idempotency_name = idempotency.name
 
         state.retry_verdict = _retry_verdict(mode_key, state)
 

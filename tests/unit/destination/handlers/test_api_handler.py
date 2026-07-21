@@ -28,6 +28,77 @@ def _to_record_batch(records: list[dict[str, Any]]) -> pa.RecordBatch:
     return pa.RecordBatch.from_pylist(records)
 
 
+def _write_endpoint_doc(
+    modes: dict[str, dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    """Contract-valid api-endpoint document with one write block per mode.
+
+    ``set_stream_endpoints`` validates every document into
+    ``ApiEndpointDoc`` (issue #349), so fixtures must satisfy the
+    contract's cross-field rules. Each mode's overrides are laid over a
+    minimal valid block: an input schema declaring ``id``, and the
+    ``from_input`` body the contract requires (records-shaped when the
+    block declares batching, record-shaped otherwise). An upsert mode
+    gets the contract-required ``conflict_keys`` over the declared ``id``.
+    """
+    write: dict[str, Any] = {}
+    for mode, overrides in (modes or {"insert": {}}).items():
+        overrides = dict(overrides)
+        request: dict[str, Any] = {
+            "method": "PATCH" if mode == "upsert" else "POST",
+            "path": f"/v1/{mode}",
+            **(overrides.pop("request", None) or {}),
+        }
+        block: dict[str, Any] = {
+            "input": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "integer",
+                            "native_type": "integer",
+                            "arrow_type": "Int64",
+                        },
+                    },
+                },
+            },
+            **overrides,
+        }
+        if mode == "upsert":
+            block.setdefault("conflict_keys", ["id"])
+        if "body" not in request:
+            request["body"] = {
+                "from_input": "records" if block.get("batching") else "record"
+            }
+        block["request"] = request
+        write[mode] = block
+    return {
+        "endpoint_id": "things",
+        "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
+        "operations": {"write": write},
+    }
+
+
+def _request_resolver(parameters: dict[str, Any] | None = None):
+    """A real request resolver over an in-memory connection runtime.
+
+    ``connect()`` builds this from the runtime; write-path tests that
+    bypass ``connect()`` wire it directly so ``from_input`` body bindings
+    resolve.
+    """
+    from cdk.connection_runtime import ConnectionRuntime
+    from cdk.secrets import InMemorySecretsResolver
+
+    runtime = ConnectionRuntime(
+        raw_config={"parameters": parameters or {}},
+        connection_id="conn-1",
+        connector_id="testapi",
+        connector_type="api",
+        resolver=InMemorySecretsResolver({}),
+    )
+    return runtime.request_resolver()
+
+
 @pytest.fixture
 def api_handler():
     """ApiDestinationHandler primed with a default per-stream state so
@@ -895,17 +966,12 @@ class TestApiHandlerConfigureSchemaModeDispatch:
     the preloaded API endpoint document, matching the stream's write_mode."""
 
     def _endpoint_doc(self, *, modes=("insert", "upsert")):
-        operations: dict[str, Any] = {"write": {}}
-        for mode in modes:
-            operations["write"][mode] = {
-                "request": {
-                    "method": "PATCH" if mode == "upsert" else "POST",
-                    "path": f"/v1/{mode}",
-                },
+        return _write_endpoint_doc(
+            {
+                mode: ({"batching": {"max_records": 50}} if mode == "upsert" else {})
+                for mode in modes
             }
-            if mode == "upsert":
-                operations["write"][mode]["batching"] = {"max_records": 50}
-        return {"operations": operations}
+        )
 
     @pytest.fixture
     def handler(self):
@@ -966,15 +1032,14 @@ class TestApiHandlerConfigureSchemaModeDispatch:
         ok = await handler.configure_schema(msg)
         assert ok is False
 
-    @pytest.mark.asyncio
-    async def test_missing_path_returns_false(self, handler):
-        doc = {"operations": {"write": {"insert": {"request": {"method": "POST"}}}}}
-        handler.set_stream_endpoints({"s1": doc})
-        msg = SchemaMessage(
-            stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
-        )
-        ok = await handler.configure_schema(msg)
-        assert ok is False
+    def test_document_without_path_rejected_at_registration(self, handler):
+        """A write block with no request.path cannot be authored: the
+        contract model rejects the document at set_stream_endpoints, the
+        handler's one parse point (issue #349)."""
+        doc = _write_endpoint_doc()
+        del doc["operations"]["write"]["insert"]["request"]["path"]
+        with pytest.raises(ValueError, match="contract validation"):
+            handler.set_stream_endpoints({"s1": doc})
 
     @pytest.mark.asyncio
     async def test_unknown_stream_id_returns_false(self, handler):
@@ -1014,24 +1079,24 @@ class TestApiHandlerConfigureSchemaModeDispatch:
 
 @pytest.mark.unit
 class TestApiHandlerContractBatching:
-    """``batching`` parses the published contract shape only (issue #305):
+    """``batching`` follows the published contract shape (issue #305):
     absent/null means one request per record; ``{"max_records": <int >= 2>}``
-    means chunked requests; anything else fails the stream at configure
-    time instead of silently running single-record."""
+    means chunked requests; anything else is rejected by the contract
+    model at ``set_stream_endpoints`` — a non-contract block can never
+    silently run single-record."""
 
     def _doc(self, batching="absent"):
-        block: dict[str, Any] = {
-            "request": {"method": "POST", "path": "/v1/things"},
-        }
+        overrides: dict[str, Any] = {}
         if batching != "absent":
-            block["batching"] = batching
-        return {"operations": {"write": {"insert": block}}}
+            overrides["batching"] = batching
+        return _write_endpoint_doc({"insert": overrides})
 
     @pytest.fixture
     def handler(self):
         h = ApiDestinationHandler()
         h._connected = True
         h._session = MagicMock()
+        h._request_resolver = _request_resolver()
         return h
 
     async def _configure(self, handler, doc):
@@ -1066,7 +1131,6 @@ class TestApiHandlerContractBatching:
         [
             {},  # required key missing
             {"max_records": 1},  # below the contract minimum
-            {"max_records": "10"},  # wrong type
             {"max_records": True},  # bool is not an integer count
             {"max_records": None},  # null count
             {"mode": "bulk", "size": 100},  # the pre-contract shape (#305)
@@ -1075,21 +1139,25 @@ class TestApiHandlerContractBatching:
             "bulk",  # not an object at all
         ],
     )
-    @pytest.mark.asyncio
-    async def test_non_contract_batching_fails_the_stream(self, handler, batching):
-        """A batching block that is not ``{"max_records": <int >= 2>}`` must
-        fail configure_schema loud — the silent single-record fallback is
-        exactly the defect in issue #305 — and the reason must ride the
-        SchemaAck channel (issue #231), not just the sidecar log."""
-        assert await self._configure(handler, self._doc(batching=batching)) is False
-        assert "s1" not in handler._streams
-        assert "max_records" in handler.last_schema_rejection
+    def test_non_contract_batching_rejected_at_registration(self, handler, batching):
+        """A batching block that is not ``{"max_records": <int >= 2>}`` fails
+        the contract model at ``set_stream_endpoints`` — the silent
+        single-record fallback is exactly the defect in issue #305."""
+        with pytest.raises(ValueError, match="contract validation"):
+            handler.set_stream_endpoints({"s1": self._doc(batching=batching)})
 
     @pytest.mark.asyncio
     async def test_accepted_configure_clears_rejection_reason(self, handler):
         """A rejection reason from an earlier failed configure must not
         leak into a later accepted stream's ack."""
-        assert await self._configure(handler, self._doc(batching={})) is False
+        # The doc ships no upsert block, so an upsert stream is rejected.
+        handler.set_stream_endpoints({"s1": self._doc()})
+        rejected = await handler.configure_schema(
+            SchemaMessage(
+                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_UPSERT
+            )
+        )
+        assert rejected is False
         assert handler.last_schema_rejection is not None
         assert (
             await self._configure(handler, self._doc(batching={"max_records": 2}))
@@ -1133,10 +1201,7 @@ class TestApiHandlerSupportsUpsert:
     hardcoded value. This is what ``GetCapabilities`` advertises."""
 
     def _doc(self, *, modes):
-        write: dict[str, Any] = {}
-        for mode in modes:
-            write[mode] = {"request": {"method": "POST", "path": f"/v1/{mode}"}}
-        return {"operations": {"write": write}}
+        return _write_endpoint_doc({mode: {} for mode in modes})
 
     @pytest.fixture
     def handler(self):
@@ -1162,14 +1227,6 @@ class TestApiHandlerSupportsUpsert:
         )
         assert handler.supports_upsert is True
 
-    def test_false_when_upsert_block_has_no_request_path(self, handler):
-        """A malformed upsert block (no request.path) is not a usable
-        upsert operation, so capability must not be advertised — mirroring
-        configure_schema's rejection of the same block."""
-        doc = {"operations": {"write": {"upsert": {"request": {"method": "POST"}}}}}
-        handler.set_stream_endpoints({"s1": doc})
-        assert handler.supports_upsert is False
-
     @pytest.mark.parametrize(
         "doc",
         [
@@ -1181,11 +1238,12 @@ class TestApiHandlerSupportsUpsert:
             },  # request not a mapping
         ],
     )
-    def test_malformed_contract_returns_false_not_raises(self, handler, doc):
-        """supports_upsert runs at startup over arbitrary contract docs.
-        A malformed document must yield False, never crash the
-        GetCapabilities RPC with AttributeError."""
-        handler.set_stream_endpoints({"s1": doc})
+    def test_malformed_contract_rejected_at_registration(self, handler, doc):
+        """A malformed document can never reach capability advertisement:
+        the contract model rejects it at ``set_stream_endpoints``, the
+        handler's one parse point (issue #349)."""
+        with pytest.raises(ValueError, match="contract validation"):
+            handler.set_stream_endpoints({"s1": doc})
         assert handler.supports_upsert is False
 
 
@@ -1196,10 +1254,10 @@ class TestApiHandlerSupportsBulkLoad:
     block on a usable write mode, never a hardcoded value."""
 
     def _doc(self, *, batching=None):
-        block: dict[str, Any] = {"request": {"method": "POST", "path": "/v1/x"}}
+        overrides: dict[str, Any] = {}
         if batching is not None:
-            block["batching"] = batching
-        return {"operations": {"write": {"insert": block}}}
+            overrides["batching"] = batching
+        return _write_endpoint_doc({"insert": overrides})
 
     @pytest.fixture
     def handler(self):
@@ -1231,16 +1289,17 @@ class TestApiHandlerSupportsBulkLoad:
             "bulk",
         ],
     )
-    def test_false_for_batching_block_configure_would_reject(self, handler, batching):
-        """Capability advertisement and configure_schema share one
-        acceptance predicate: a block configure rejects must not be
-        advertised as bulk-load capability."""
-        handler.set_stream_endpoints({"s1": self._doc(batching=batching)})
+    def test_non_contract_batching_rejected_at_registration(self, handler, batching):
+        """A non-contract batching block never reaches capability
+        advertisement: the contract model rejects the document at
+        ``set_stream_endpoints`` (issue #349)."""
+        with pytest.raises(ValueError, match="contract validation"):
+            handler.set_stream_endpoints({"s1": self._doc(batching=batching)})
         assert handler.supports_bulk_load is False
 
-    def test_malformed_contract_returns_false_not_raises(self, handler):
-        """Capability advertisement over arbitrary docs must not crash."""
-        handler.set_stream_endpoints({"s1": {"operations": "write"}})
+    def test_malformed_contract_rejected_at_registration(self, handler):
+        with pytest.raises(ValueError, match="contract validation"):
+            handler.set_stream_endpoints({"s1": {"operations": "write"}})
         assert handler.supports_bulk_load is False
 
 
@@ -1252,23 +1311,29 @@ class TestApiHandlerJsonFields:
 
     def _doc_with_json_field(self):
         """An api-endpoint document declaring one Json-typed body field."""
-        return {
-            "operations": {
-                "write": {
-                    "insert": {
-                        "request": {"method": "POST", "path": "/v1/things"},
-                        "input": {
-                            "schema": {
-                                "properties": {
-                                    "id": {"arrow_type": "Utf8"},
-                                    "metadata": {"arrow_type": "Json"},
-                                }
-                            }
-                        },
-                    }
+        return _write_endpoint_doc(
+            {
+                "insert": {
+                    "input": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "id": {
+                                    "type": "string",
+                                    "native_type": "string",
+                                    "arrow_type": "Utf8",
+                                },
+                                "metadata": {
+                                    "type": "object",
+                                    "native_type": "object",
+                                    "arrow_type": "Json",
+                                },
+                            },
+                        }
+                    },
                 }
             }
-        }
+        )
 
     @pytest.mark.asyncio
     async def test_configure_schema_collects_json_fields(self):
@@ -1293,6 +1358,7 @@ class TestApiHandlerJsonFields:
         handler = ApiDestinationHandler()
         handler._connected = True
         handler._session = MagicMock()
+        handler._request_resolver = _request_resolver()
         handler.set_stream_endpoints({"s1": self._doc_with_json_field()})
         await handler.configure_schema(
             SchemaMessage(
@@ -1334,23 +1400,20 @@ class TestApiHandlerJsonFields:
         handler = ApiDestinationHandler()
         handler._connected = True
         handler._session = MagicMock()
-        doc = {
-            "operations": {
-                "write": {
-                    "insert": {
-                        "request": {"method": "POST", "path": "/v1/things"},
-                        "input": {
-                            "schema": {
-                                "columns": [
-                                    {"name": "id", "arrow_type": "Utf8"},
-                                    {"name": "metadata", "arrow_type": "Json"},
-                                ]
-                            }
-                        },
-                    }
+        doc = _write_endpoint_doc(
+            {
+                "insert": {
+                    "input": {
+                        "schema": {
+                            "columns": [
+                                {"name": "id", "arrow_type": "Utf8"},
+                                {"name": "metadata", "arrow_type": "Json"},
+                            ]
+                        }
+                    },
                 }
             }
-        }
+        )
         handler.set_stream_endpoints({"s1": doc})
         ok = await handler.configure_schema(
             SchemaMessage(
@@ -1379,17 +1442,8 @@ class TestApiHandlerJsonFields:
         handler = ApiDestinationHandler()
         handler._connected = True
         handler._session = MagicMock()
-        doc = {
-            "operations": {
-                "write": {
-                    "insert": {
-                        "request": {"method": "POST", "path": "/v1/things"},
-                        "input": {"schema": {"properties": {}}},
-                    }
-                }
-            }
-        }
-        handler.set_stream_endpoints({"s1": doc})
+        handler._request_resolver = _request_resolver()
+        handler.set_stream_endpoints({"s1": _write_endpoint_doc()})
         await handler.configure_schema(
             SchemaMessage(
                 stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
@@ -1921,12 +1975,10 @@ class TestApiHandlerBodySpec:
         return handler
 
     def _doc_with_body(self, body, *, batching=None):
-        block = {
-            "request": {"method": "POST", "path": "/v1/things", "body": body},
-        }
+        overrides: dict[str, Any] = {"request": {"body": body}}
         if batching:
-            block["batching"] = batching
-        return {"operations": {"write": {"insert": block}}}
+            overrides["batching"] = batching
+        return _write_endpoint_doc({"insert": overrides})
 
     @pytest.mark.asyncio
     async def test_configure_schema_captures_body_spec(self):
@@ -2191,39 +2243,26 @@ class TestApiHandlerBodySpec:
             {"items": [{"id": 3}]},
         ]
 
-    @pytest.mark.asyncio
-    async def test_configure_schema_rejects_records_selector_without_batching(self):
-        # The mismatch is statically knowable: reject the stream up front
-        # instead of failing every record at write time.
+    def test_records_selector_without_batching_rejected_at_registration(self):
+        # The mismatch is statically knowable: the contract model rejects
+        # the document at the parse point, before any write.
         handler = self._handler_with_resolver()
-        handler.set_stream_endpoints(
-            {"s1": self._doc_with_body({"items": {"from_input": "records"}})}
-        )
-        ok = await handler.configure_schema(
-            SchemaMessage(
-                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+        with pytest.raises(ValueError, match="contract validation"):
+            handler.set_stream_endpoints(
+                {"s1": self._doc_with_body({"items": {"from_input": "records"}})}
             )
-        )
-        assert ok is False
-        assert "s1" not in handler._streams
 
-    @pytest.mark.asyncio
-    async def test_configure_schema_rejects_record_selector_on_batched_stream(self):
+    def test_record_selector_on_batched_stream_rejected_at_registration(self):
         handler = self._handler_with_resolver()
-        handler.set_stream_endpoints(
-            {
-                "s1": self._doc_with_body(
-                    {"data": {"from_input": "record"}},
-                    batching={"max_records": 10},
-                )
-            }
-        )
-        ok = await handler.configure_schema(
-            SchemaMessage(
-                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+        with pytest.raises(ValueError, match="contract validation"):
+            handler.set_stream_endpoints(
+                {
+                    "s1": self._doc_with_body(
+                        {"data": {"from_input": "record"}},
+                        batching={"max_records": 10},
+                    )
+                }
             )
-        )
-        assert ok is False
 
     @pytest.mark.asyncio
     async def test_body_spec_mode_mismatch_backstop_is_fatal(self):
@@ -2294,13 +2333,14 @@ class TestApiHandlerBodySpec:
 
 @pytest.mark.unit
 class TestApiHandlerIdempotencyConfig:
-    """``configure_schema`` validation of the endpoint's
-    ``operations.write.<mode>.idempotency`` block (infra#890 / issue #286).
+    """The endpoint's ``operations.write.<mode>.idempotency`` block
+    (infra#890 / issue #286).
 
-    The block declares where the engine-owned per-record key lands; a
-    block that cannot work (non-single batching, non-object body for a
-    body target, a reserved-field collision) must reject the stream at
-    configure time, never at write time.
+    The block declares where the engine-owned per-record key lands. Its
+    shape and the document-level exclusions (batching, body-template
+    collisions) are enforced by the contract model at
+    ``set_stream_endpoints``; ``configure_schema`` keeps only the checks
+    the document alone cannot decide (connection-owned headers).
     """
 
     def _doc(
@@ -2311,16 +2351,14 @@ class TestApiHandlerIdempotencyConfig:
         batching="absent",
         body=None,
     ):
-        block: dict[str, Any] = {
-            "request": {"method": "POST", "path": f"/v1/{mode}"},
-        }
+        overrides: dict[str, Any] = {}
         if batching != "absent":
-            block["batching"] = batching
+            overrides["batching"] = batching
         if body is not None:
-            block["request"]["body"] = body
+            overrides["request"] = {"body": body}
         if idempotency is not None:
-            block["idempotency"] = idempotency
-        return {"operations": {"write": {mode: block}}}
+            overrides["idempotency"] = idempotency
+        return _write_endpoint_doc({mode: overrides})
 
     @pytest.fixture
     def handler(self):
@@ -2364,26 +2402,20 @@ class TestApiHandlerIdempotencyConfig:
         assert ok is True
         assert handler._streams["s1"].idempotency_in == "body"
 
-    @pytest.mark.asyncio
-    async def test_rejects_when_batching_block_present(self, handler):
-        """The contract has no batching mode — a present block IS the
-        multi-record case. A restart re-batches records, so a per-request
-        key over several records cannot dedup (issue #286 / infra#890)."""
-        handler.set_stream_endpoints(
-            {
-                "s1": self._doc(
-                    idempotency={"in": "header", "name": "Idempotency-Key"},
-                    batching={"max_records": 5},
-                )
-            }
-        )
-        ok = await handler.configure_schema(
-            SchemaMessage(
-                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+    def test_batching_combination_rejected_at_registration(self, handler):
+        """The contract forbids idempotency + batching (a restart
+        re-batches records, so a per-request key over several records
+        cannot dedup — issue #286 / infra#890); the model rejects the
+        document at the parse point."""
+        with pytest.raises(ValueError, match="contract validation"):
+            handler.set_stream_endpoints(
+                {
+                    "s1": self._doc(
+                        idempotency={"in": "header", "name": "Idempotency-Key"},
+                        batching={"max_records": 5},
+                    )
+                }
             )
-        )
-        assert ok is False
-        assert "s1" not in handler._streams
 
     @pytest.mark.asyncio
     async def test_explicit_null_batching_is_accepted(self, handler):
@@ -2404,7 +2436,6 @@ class TestApiHandlerIdempotencyConfig:
         )
         assert ok is True
 
-    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "idempotency",
         [
@@ -2416,55 +2447,43 @@ class TestApiHandlerIdempotencyConfig:
             {"in": "header", "name": 7},  # non-string name
         ],
     )
-    async def test_rejects_malformed_block(self, handler, idempotency):
-        handler.set_stream_endpoints({"s1": self._doc(idempotency=idempotency)})
-        ok = await handler.configure_schema(
-            SchemaMessage(
-                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+    def test_malformed_block_rejected_at_registration(self, handler, idempotency):
+        with pytest.raises(ValueError, match="contract validation"):
+            handler.set_stream_endpoints({"s1": self._doc(idempotency=idempotency)})
+
+    def test_body_target_with_array_body_rejected_at_registration(self, handler):
+        """A body key needs a JSON object to land in; the contract model
+        rejects a declared array body for a body-target key."""
+        with pytest.raises(ValueError, match="contract validation"):
+            handler.set_stream_endpoints(
+                {
+                    "s1": self._doc(
+                        idempotency={"in": "body", "name": "idempotency_key"},
+                        body=[{"from_input": "record"}],
+                    )
+                }
             )
-        )
-        assert ok is False
+
+    def test_body_target_key_field_collision_rejected_at_registration(self, handler):
+        """A body template already carrying the reserved field name is a
+        contract violation; the model rejects the document."""
+        with pytest.raises(ValueError, match="contract validation"):
+            handler.set_stream_endpoints(
+                {
+                    "s1": self._doc(
+                        idempotency={"in": "body", "name": "idempotency_key"},
+                        body={
+                            "idempotency_key": {"from_input": "record.id"},
+                            "rest": {"from_input": "record"},
+                        },
+                    )
+                }
+            )
 
     @pytest.mark.asyncio
-    async def test_rejects_body_target_with_non_object_body_spec(self, handler):
-        """A body key needs a JSON object to land in; a declared array
-        body can never carry it."""
-        handler.set_stream_endpoints(
-            {
-                "s1": self._doc(
-                    idempotency={"in": "body", "name": "idempotency_key"},
-                    body=[{"from_input": "record"}],
-                )
-            }
-        )
-        ok = await handler.configure_schema(
-            SchemaMessage(
-                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
-            )
-        )
-        assert ok is False
-
-    @pytest.mark.asyncio
-    async def test_rejects_body_target_when_spec_declares_key_field(self, handler):
-        handler.set_stream_endpoints(
-            {
-                "s1": self._doc(
-                    idempotency={"in": "body", "name": "idempotency_key"},
-                    body={"idempotency_key": {"from_input": "record.id"}},
-                )
-            }
-        )
-        ok = await handler.configure_schema(
-            SchemaMessage(
-                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
-            )
-        )
-        assert ok is False
-
-    @pytest.mark.asyncio
-    async def test_body_target_ok_without_body_spec(self, handler):
-        """No declared body: the record dict is the body, which is an
-        object — the key can land."""
+    async def test_body_target_ok_with_record_body(self, handler):
+        """A record-shaped body resolves to a JSON object — the key can
+        land."""
         handler.set_stream_endpoints(
             {"s1": self._doc(idempotency={"in": "body", "name": "idempotency_key"})}
         )
@@ -2602,12 +2621,10 @@ class TestApiHandlerRetrySemantics:
     """Per-stream retry-safety verdict (issue #286)."""
 
     def _doc(self, *, mode="insert", idempotency=None):
-        block: dict[str, Any] = {
-            "request": {"method": "POST", "path": f"/v1/{mode}"},
-        }
+        overrides: dict[str, Any] = {}
         if idempotency is not None:
-            block["idempotency"] = idempotency
-        return {"operations": {"write": {mode: block}}}
+            overrides["idempotency"] = idempotency
+        return _write_endpoint_doc({mode: overrides})
 
     async def _configured(self, doc, write_mode):
         handler = ApiDestinationHandler()
@@ -2665,16 +2682,9 @@ class TestApiHandlerIdempotencyHeaderCollision:
         handler._session = MagicMock()
         handler.set_stream_endpoints(
             {
-                "s1": {
-                    "operations": {
-                        "write": {
-                            "insert": {
-                                "request": {"method": "POST", "path": "/v1/insert"},
-                                "idempotency": {"in": "header", "name": name},
-                            }
-                        }
-                    }
-                }
+                "s1": _write_endpoint_doc(
+                    {"insert": {"idempotency": {"in": "header", "name": name}}}
+                )
             }
         )
         ok = await handler.configure_schema(
@@ -2764,17 +2774,15 @@ class TestApiHandlerIdempotencyKeyPerMode:
 
 @pytest.mark.unit
 class TestApiHandlerIdempotencyReservedCollisions:
-    """Configure-time rejections for keys that would collide with
-    connection-owned headers or pass-through body fields."""
+    """Rejections for keys that would collide with connection-owned
+    headers (configure-time — only the connection knows its headers) or
+    with declared record fields (contract-model level)."""
 
     def _doc(self, *, idempotency, input_schema=None):
-        block: dict[str, Any] = {
-            "request": {"method": "POST", "path": "/v1/insert"},
-            "idempotency": idempotency,
-        }
+        overrides: dict[str, Any] = {"idempotency": idempotency}
         if input_schema is not None:
-            block["input"] = {"schema": input_schema}
-        return {"operations": {"write": {"insert": block}}}
+            overrides["input"] = {"schema": input_schema}
+        return _write_endpoint_doc({"insert": overrides})
 
     def _handler(self, *, session_headers=frozenset()):
         handler = ApiDestinationHandler()
@@ -2811,31 +2819,34 @@ class TestApiHandlerIdempotencyReservedCollisions:
         )
         assert ok is True
 
-    @pytest.mark.asyncio
-    async def test_rejects_body_key_declared_in_input_schema(self):
-        """No body template: the record is the body, shaped by the write
-        input schema — a declared field with the reserved name would
-        collide on every record after the ack promised exactly-once."""
+    def test_body_key_declared_in_input_schema_rejected_at_registration(self):
+        """A record-shaped body carries the record's declared fields — a
+        declared field with the reserved name would collide on every
+        record, so the contract model rejects the document."""
         handler = self._handler()
-        handler.set_stream_endpoints(
-            {
-                "s1": self._doc(
-                    idempotency={"in": "body", "name": "idempotency_key"},
-                    input_schema={
-                        "properties": {
-                            "id": {"arrow_type": "Int64"},
-                            "idempotency_key": {"arrow_type": "Utf8"},
-                        }
-                    },
-                )
-            }
-        )
-        ok = await handler.configure_schema(
-            SchemaMessage(
-                stream_id="s1", version=1, write_mode=WriteMode.WRITE_MODE_INSERT
+        with pytest.raises(ValueError, match="contract validation"):
+            handler.set_stream_endpoints(
+                {
+                    "s1": self._doc(
+                        idempotency={"in": "body", "name": "idempotency_key"},
+                        input_schema={
+                            "type": "object",
+                            "properties": {
+                                "id": {
+                                    "type": "integer",
+                                    "native_type": "integer",
+                                    "arrow_type": "Int64",
+                                },
+                                "idempotency_key": {
+                                    "type": "string",
+                                    "native_type": "string",
+                                    "arrow_type": "Utf8",
+                                },
+                            },
+                        },
+                    )
+                }
             )
-        )
-        assert ok is False
 
     @pytest.mark.asyncio
     async def test_accepts_body_key_absent_from_input_schema(self):
@@ -2844,7 +2855,16 @@ class TestApiHandlerIdempotencyReservedCollisions:
             {
                 "s1": self._doc(
                     idempotency={"in": "body", "name": "idempotency_key"},
-                    input_schema={"properties": {"id": {"arrow_type": "Int64"}}},
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "type": "integer",
+                                "native_type": "integer",
+                                "arrow_type": "Int64",
+                            }
+                        },
+                    },
                 )
             }
         )

@@ -94,6 +94,15 @@ class EndpointRef:
         if isinstance(data, EndpointRef):
             return data
         parsed = validate_endpoint_ref(data)
+        if parsed.endpoint_id is None:
+            # The contract validator derives a connection-scoped ref's
+            # endpoint_id from database_object; the engine resolves endpoint
+            # files by that id, so a ref without one is unusable.
+            raise ValueError(
+                f"endpoint_ref {parsed.scope}:{parsed.connection_id} resolved "
+                f"with no endpoint_id; the contract validator should have "
+                f"derived it"
+            )
         database_object = None
         if isinstance(parsed, ConnectionEndpointRef):
             obj = parsed.database_object

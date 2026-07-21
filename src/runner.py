@@ -60,7 +60,6 @@ def _build_config_dict(
         source_config = _translate_source_config(
             stream=stream,
             source=stream.source,
-            endpoint=stream.source.endpoint_document,
             runtime=stream.source.runtime,
         )
         dest_config = _build_destination_config(dest)
@@ -91,47 +90,44 @@ def _translate_source_config(
     *,
     stream: ResolvedStream,
     source: ResolvedSource,
-    endpoint: dict[str, Any],
     runtime: ConnectionRuntime,
 ) -> dict[str, Any]:
     """Attach the contract documents to the source-side runtime payload.
 
     The connectors (API + database) read replication, filters, columns,
     pagination, etc. directly off the contract ``endpoint_document`` and
-    ``stream_source`` dicts. The translator only injects the runtime
-    handle and the connector type discriminator so the engine knows which
-    connector class to instantiate.
+    ``stream_source``. ``ResolvedSource.to_source_config`` is the one
+    serializer of those documents (the endpoint document is dumped back
+    to its authored JSON shape there); the translator only injects the
+    runtime handle and the connector type discriminator so the engine
+    knows which connector class to instantiate.
 
-    All kinds except ``api`` — including built-ins (``database``,
-    ``file``, ``stdout``) and any non-built-in kinds — receive the same
-    contract-document pass-through (``endpoint_document`` +
-    ``stream_source``). The worker registry raises
-    ``ConnectorNotRegisteredError`` at class-resolution time if no
-    connector is registered for the given kind.
+    All kinds — built-ins (``api``, ``database``, ``file``, ``stdout``)
+    and non-built-in kinds — receive the same contract-document
+    pass-through. ``api`` additionally gets ``stream_filters``,
+    materialised from the nested filters inside ``stream_source`` so the
+    connector can iterate a flat list without re-reading the document
+    structure. The worker registry raises ``ConnectorNotRegisteredError``
+    at class-resolution time if no connector is registered for the given
+    kind.
     """
     _ = stream  # received from _build_config_dict but not needed at this layer
     kind = runtime.connector_type
     base: dict[str, Any] = {
         "connector_type": kind,
         "_resolved_source": source,
-        "endpoint_ref": source.endpoint_ref.to_dict(),
-        "connection_ref": source.connection_ref,
+        **source.to_source_config(),
     }
     if kind == "api":
-        base.update(_translate_api_source(source, endpoint, runtime))
-    else:
-        # "api" is handled above. All other built-in kinds ("database",
-        # "file", "stdout") and non-built-in kinds use the same
-        # contract-document pass-through: endpoint_document + stream_source.
-        if kind not in ("database", "file", "stdout"):
-            logger.warning(
-                "Connector kind %r is not a recognised built-in kind; passing "
-                "contract documents through as endpoint_document + stream_source. "
-                "The worker registry will raise ConnectorNotRegisteredError if "
-                "no connector is registered for this kind.",
-                kind,
-            )
-        base.update(_translate_database_source(source, endpoint))
+        base["stream_filters"] = list(source.stream_source.get("filters") or [])
+    elif kind not in ("database", "file", "stdout"):
+        logger.warning(
+            "Connector kind %r is not a recognised built-in kind; passing "
+            "contract documents through as endpoint_document + stream_source. "
+            "The worker registry will raise ConnectorNotRegisteredError if "
+            "no connector is registered for this kind.",
+            kind,
+        )
     return base
 
 
@@ -145,46 +141,6 @@ def _build_destination_config(destination: ResolvedDestination) -> dict[str, Any
     ``PipelineConfigPrep``.
     """
     return {"write_mode": destination.write.get("mode", "upsert")}
-
-
-def _translate_database_source(
-    source: ResolvedSource, endpoint: dict[str, Any]
-) -> dict[str, Any]:
-    """Pass the contract documents through to ``GenericSQLConnector``.
-
-    The connector consumes ``database_object``, ``columns``,
-    ``primary_keys``, plus the stream's ``selected_columns``, ``filters``,
-    and ``replication`` block directly. This seam only attaches the
-    documents to the source config dict.
-    """
-    return {
-        "endpoint_document": endpoint,
-        "stream_source": source.stream_source,
-    }
-
-
-def _translate_api_source(
-    source: ResolvedSource,
-    endpoint: dict[str, Any],
-    runtime: ConnectionRuntime,
-) -> dict[str, Any]:
-    """Pass the contract documents through to ``APIConnector``.
-
-    The connector consumes ``operations.read.{request,params,pagination,
-    response,replication}`` directly and resolves value expressions
-    against the connection runtime; this seam only attaches the
-    documents to the source config dict.
-
-    ``stream_filters`` is materialised separately from the nested filters
-    inside ``stream_source`` so the connector can iterate it as a flat list
-    without re-reading the document structure.
-    """
-    _ = runtime  # passed for call-site symmetry with _translate_database_source
-    return {
-        "endpoint_document": endpoint,
-        "stream_source": source.stream_source,
-        "stream_filters": list(source.stream_source.get("filters") or []),
-    }
 
 
 def _translate_assignment(assignment: dict[str, Any]) -> dict[str, Any]:

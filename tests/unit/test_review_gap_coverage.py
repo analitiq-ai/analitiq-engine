@@ -12,14 +12,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 # --------------------------------------------------------------------------- #
-# Gap #12: _write_conflict_keys threads end-to-end through configure_schema   #
+# Gap #12: stream conflict keys thread end-to-end through configure_schema    #
 # --------------------------------------------------------------------------- #
 
 
 class TestWriteConflictKeysWiring:
-    """The destination handler consumes ``_write_conflict_keys`` from the
-    enriched endpoint document verbatim. When the key is absent or empty
-    the conflict target is empty — the engine never derives one from
+    """The destination handler consumes the stream's conflict keys verbatim
+    from the ``set_stream_conflict_keys`` channel. When the stream has no
+    entry the conflict target is empty — the engine never derives one from
     ``primary_keys``."""
 
     @pytest.mark.asyncio
@@ -62,9 +62,9 @@ class TestWriteConflictKeysWiring:
                     },
                 ],
                 "primary_keys": ["id"],
-                "_write_conflict_keys": ["tenant_id", "id"],
             },
         }
+        handler.set_stream_conflict_keys({"s1": ["tenant_id", "id"]})
         handler._ensure_tables_exist = AsyncMock()
 
         from src.grpc.generated.analitiq.v1 import SchemaMessage, WriteMode
@@ -129,7 +129,7 @@ class TestWriteConflictKeysWiring:
         )
         await handler.configure_schema(msg)
 
-        # No ``_write_conflict_keys`` on the endpoint doc: the conflict
+        # No set_stream_conflict_keys entry for the stream: the conflict
         # target is empty. The engine does NOT fabricate one from
         # ``primary_keys`` (the misconfiguration surfaces loudly later, at
         # the write path).

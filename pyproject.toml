@@ -243,12 +243,21 @@ module = [
     "msgpack.*",
     "pyarrow.*",
     "dateutil.*",
-    # Published contract packages (PyPI). Not in the pre-commit mypy hook's
-    # additional_dependencies, so the isolated hook env cannot resolve them.
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = [
+    # Published contract packages (PyPI). They ship no py.typed marker yet,
+    # but their pydantic models are fully annotated: follow the untyped
+    # imports so every consumer is checked against the real contract shapes
+    # (issue #349) instead of Any. The pre-commit hook installs both
+    # packages via additional_dependencies so its isolated env resolves
+    # them the same way.
     "analitiq.contracts.*",
     "analitiq.validator.*",
 ]
-ignore_missing_imports = true
+follow_untyped_imports = true
 
 [tool.pytest.ini_options]
 minversion = "7.0"
