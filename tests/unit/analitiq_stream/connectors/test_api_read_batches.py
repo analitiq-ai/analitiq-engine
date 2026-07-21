@@ -747,6 +747,41 @@ class TestReadBatchesKeysetPagination:
         assert session.calls[0][2]["after_id"] == 0
 
     @pytest.mark.asyncio
+    async def test_keyset_without_limit_continues_past_provider_sized_pages(self):
+        """Without a declared limit param the provider's own page size bounds
+        every page, so a short page must not stop the loop — only an empty
+        page (or stop_when) may."""
+        session = _FakeSession(
+            [
+                _FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]}),
+                _FakeResponse(status=200, body={"records": [{"id": 2, "name": "b"}]}),
+                _FakeResponse(status=200, body={"records": []}),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "keyset",
+                "keyset": {"param": "after_id", "order_by_field": "id"},
+            },
+        )
+        batches = await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        # Two provider-default-sized pages, then the empty page stops the loop.
+        assert [b.num_rows for b in batches] == [1, 1]
+        assert session.calls[1][2]["after_id"] == 1
+        assert session.calls[2][2]["after_id"] == 2
+
+    @pytest.mark.asyncio
     async def test_keyset_full_page_without_key_field_raises(self):
         """A full page whose last record lacks order_by_field cannot advance —
         that is malformed data, not a stop signal."""
@@ -849,6 +884,40 @@ class TestReadBatchesLinkPagination:
         )
 
         assert session.calls[1][1] == "https://api.example.test/items/p2"
+
+    @pytest.mark.asyncio
+    async def test_link_cross_origin_next_url_refused(self):
+        """An absolute next_url on another host is refused: the shared
+        session would send the connection's auth headers to it."""
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={
+                        "records": [{"id": 1, "name": "a"}],
+                        "next": "https://evil.example.org/items?page=2",
+                    },
+                ),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(pagination=self._link_pagination())
+        with pytest.raises(ReadError, match="origin"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=10,
+            )
+        # Exactly one request went out — the cross-origin URL was never hit.
+        assert len(session.calls) == 1
 
     @pytest.mark.asyncio
     async def test_link_non_string_next_url_raises(self):

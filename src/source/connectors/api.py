@@ -38,6 +38,7 @@ from collections.abc import AsyncIterator, Callable
 from datetime import timezone
 from decimal import Decimal
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiohttp
 import pyarrow as pa
@@ -798,10 +799,16 @@ class APIConnector(BaseConnector):
             keyset_param = pagination.keyset.param
             order_by_field = pagination.keyset.order_by_field
             # The declared ``initial`` seeds the first request when authored;
-            # afterwards the key advances from the last record of each full
-            # page. The key keeps its native type (int/str/Decimal) — the
+            # afterwards the key advances from the last record of each page.
+            # The key keeps its native type (int/str/Decimal) — the
             # query/body sinks in ``build_request`` own serialization.
             last_key: Any = pagination.keyset.initial
+            # A short page ends the loop only when this read controls the
+            # page size (a declared limit param was sent as batch_size).
+            # Without one, the provider's own page size bounds every page,
+            # so a short page says nothing about whether a next key exists —
+            # only an empty page or stop_when may end the loop then.
+            limit_sent = pagination.limit is not None and bool(pagination.limit.param)
             while True:
                 params = dict(base_params)
                 if last_key is not None:
@@ -815,13 +822,13 @@ class APIConnector(BaseConnector):
                 yield records
                 if self._stop_requested(pagination.stop_when, data):
                     return
-                if len(records) < batch_size:
+                if limit_sent and len(records) < batch_size:
                     return
                 last_key = records[-1].get(order_by_field)
                 if last_key is None:
                     raise ReadError(
-                        f"keyset pagination: the last record of a full page "
-                        f"has no {order_by_field!r} value to advance from; "
+                        f"keyset pagination: the last record of a page has "
+                        f"no {order_by_field!r} value to advance from; "
                         f"keyset.order_by_field must be present on every record"
                     )
 
@@ -840,8 +847,19 @@ class APIConnector(BaseConnector):
         Per the contract, the resolved URL replaces the entire request:
         follow-up pages carry no query params and no body (spec: §Pagination
         Strategies — link, "no params traverse"). A relative next URL joins
-        the connection's base URL.
+        the connection's base URL; an absolute one must stay on the
+        connection's origin — the shared session sends the connection's
+        default headers (auth included) on every request, so following a
+        response-supplied URL to another host would hand those credentials
+        to it.
         """
+        base_url = self.base_url
+        if base_url is None:
+            raise ReadError(
+                "APIConnector: link pagination attempted before connect() "
+                "materialized the base URL"
+            )
+        origin = urlsplit(base_url)
         query, body = build_request(dict(base_params))
         data, records = await self._request_payload(
             full_url, method, query, records_ref, body=body
@@ -862,13 +880,16 @@ class APIConnector(BaseConnector):
                     f"link pagination: next_url resolved to a "
                     f"{type(next_url).__name__}, expected a URL string"
                 )
-            if not next_url.startswith(("http://", "https://")):
-                base_url = self.base_url
-                if base_url is None:
+            if next_url.startswith(("http://", "https://")):
+                target = urlsplit(next_url)
+                if (target.scheme, target.netloc) != (origin.scheme, origin.netloc):
                     raise ReadError(
-                        "APIConnector: link pagination attempted before "
-                        "connect() materialized the base URL"
+                        f"link pagination: next_url {next_url!r} leaves the "
+                        f"connection's origin {origin.scheme}://{origin.netloc}; "
+                        f"refusing to send the connection's headers to another "
+                        f"host"
                     )
+            else:
                 next_url = join_url(base_url, next_url)
             data, records = await self._request_payload(
                 next_url, method, {}, records_ref
