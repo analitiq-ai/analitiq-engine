@@ -11,7 +11,7 @@ from typing import Any
 
 import pyarrow as pa
 
-from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
+from cdk.base_handler import BaseDestinationHandler, BatchWriteResult, reject_batch
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.types import AckStatus, Cursor, RetrySemantics, RetryVerdict, SchemaSpec
 
@@ -147,10 +147,17 @@ class StreamDestinationHandler(BaseDestinationHandler):
         once at this boundary.
         """
         if not self._connected or self._formatter is None:
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
-                records_written=0,
-                failure_summary="Handler not connected",
+            reason = (
+                "Handler not connected"
+                if not self._connected
+                else "Handler components not initialized: formatter"
+            )
+            return reject_batch(
+                logger,
+                reason,
+                run_id=run_id,
+                stream_id=stream_id,
+                batch_seq=batch_seq,
             )
 
         try:
@@ -194,10 +201,15 @@ class StreamDestinationHandler(BaseDestinationHandler):
                 else AckStatus.ACK_STATUS_RETRYABLE_FAILURE
             )
             logger.error(
-                "%s I/O error writing to stdout: %s",
+                "%s I/O error writing to stdout "
+                "(run=%s, stream=%s, seq=%s, errno=%s): %s",
                 "Fatal"
                 if status == AckStatus.ACK_STATUS_FATAL_FAILURE
                 else "Retryable",
+                run_id,
+                stream_id,
+                batch_seq,
+                errno_code,
                 e,
                 exc_info=True,
             )
@@ -207,7 +219,19 @@ class StreamDestinationHandler(BaseDestinationHandler):
                 failure_summary=(f"OSError[{errno_code}]: {e}"),
             )
         except Exception as e:
-            logger.error("Fatal error writing to stdout: %s", e, exc_info=True)
+            # The formatter is pluggable and sits inside this try, so its
+            # identity is what distinguishes one serialization failure from
+            # another (#328).
+            logger.error(
+                "Fatal error writing to stdout "
+                "(run=%s, stream=%s, seq=%s, formatter=%s): %s",
+                run_id,
+                stream_id,
+                batch_seq,
+                type(self._formatter).__name__,
+                e,
+                exc_info=True,
+            )
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,

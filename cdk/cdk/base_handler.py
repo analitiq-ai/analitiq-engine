@@ -5,13 +5,21 @@ destination types (PostgreSQL, MySQL, APIs, etc.). The gRPC server
 delegates all data operations to these handlers.
 """
 
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 
-from .types import BatchWriteResult, Cursor, RetrySemantics, RetryVerdict, SchemaSpec
+from .types import (
+    AckStatus,
+    BatchWriteResult,
+    Cursor,
+    RetrySemantics,
+    RetryVerdict,
+    SchemaSpec,
+)
 
 if TYPE_CHECKING:
     from .connection_runtime import ConnectionRuntime
@@ -22,7 +30,41 @@ if TYPE_CHECKING:
 # translates protobuf <-> these types at the wire boundary. ``BatchWriteResult``
 # is re-exported here because handlers/tests import it as
 # ``from cdk.base_handler import BaseDestinationHandler, BatchWriteResult``.
-__all__ = ["BaseDestinationHandler", "BatchWriteResult"]
+__all__ = ["BaseDestinationHandler", "BatchWriteResult", "reject_batch"]
+
+
+def reject_batch(
+    logger: logging.Logger,
+    reason: str,
+    *,
+    run_id: str,
+    stream_id: str,
+    batch_seq: int,
+    status: AckStatus = AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+) -> BatchWriteResult:
+    """Log and build the result for a batch rejected before any write.
+
+    A ``write_batch`` pre-flight guard rejects without raising, so nothing
+    downstream records why -- the engine sees only a retry, and the first
+    readable signal is retry exhaustion (issue #327). Routing every guard
+    through one function keeps the log and the returned status in step, and
+    means a new guard cannot be added without one.
+
+    *logger* is the calling handler's module logger, so the record names the
+    handler that rejected the batch.
+    """
+    logger.error(
+        "write_batch rejected: %s (run=%s, stream=%s, seq=%s)",
+        reason,
+        run_id,
+        stream_id,
+        batch_seq,
+    )
+    return BatchWriteResult(
+        status=status,
+        records_written=0,
+        failure_summary=reason,
+    )
 
 
 class BaseDestinationHandler(ABC):

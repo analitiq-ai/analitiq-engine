@@ -20,7 +20,7 @@ from typing import Any
 
 import pyarrow as pa
 
-from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
+from cdk.base_handler import BaseDestinationHandler, BatchWriteResult, reject_batch
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.types import (
     SUCCESS_STATUSES,
@@ -275,10 +275,12 @@ class WorkerProxyHandler(BaseDestinationHandler):
     ) -> BatchWriteResult:
         client = self._streams.get(stream_id)
         if client is None:
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
-                records_written=0,
-                failure_summary="worker stream not configured",
+            return reject_batch(
+                logger,
+                "worker stream not configured",
+                run_id=run_id,
+                stream_id=stream_id,
+                batch_seq=batch_seq,
             )
         # The servicer hands the handler the CDK cursor; the forwarding
         # client builds proto messages — convert at the boundary.

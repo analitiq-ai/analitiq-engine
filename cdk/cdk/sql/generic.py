@@ -40,7 +40,7 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from cdk.adbc_registry import AdbcConfigurationError
-from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
+from cdk.base_handler import BaseDestinationHandler, BatchWriteResult, reject_batch
 from cdk.connection_runtime import (
     DETERMINISTIC_CONNECT_ERRORS,
     ConnectionRuntime,
@@ -1072,26 +1072,34 @@ class GenericSQLConnector(BaseDestinationHandler):
         last SQLAlchemy boundary.
         """
         if not self._connected:
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
-                records_written=0,
-                failure_summary="Handler not connected",
+            return reject_batch(
+                logger,
+                "Handler not connected",
+                run_id=run_id,
+                stream_id=stream_id,
+                batch_seq=batch_seq,
             )
         if not self._adbc_only and self._engine is None and self._sync_engine is None:
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
-                records_written=0,
-                failure_summary="Handler not connected",
+            return reject_batch(
+                logger,
+                "Handler not connected: no SQLAlchemy engine",
+                run_id=run_id,
+                stream_id=stream_id,
+                batch_seq=batch_seq,
             )
 
         state = self._streams.get(stream_id)
         if state is None or (not self._adbc_only and state.table is None):
             # ADBC writes never build SQLAlchemy table objects; readiness
             # there is the configured state + schema contract.
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
-                records_written=0,
-                failure_summary="Schema not configured",
+            return reject_batch(
+                logger,
+                "Schema not configured"
+                if state is None
+                else "Schema not configured: no table object for the stream",
+                run_id=run_id,
+                stream_id=stream_id,
+                batch_seq=batch_seq,
             )
 
         try:
@@ -1167,7 +1175,14 @@ class GenericSQLConnector(BaseDestinationHandler):
             # Type-map errors are deterministic — retrying cannot succeed.
             # Classify as a fatal failure so the engine stops burning
             # cycles on a batch that will never go through.
-            logger.error(f"Type-map error writing batch: {e}", exc_info=True)
+            logger.error(
+                "Type-map error writing batch (run=%s, stream=%s, seq=%s): %s",
+                run_id,
+                stream_id,
+                batch_seq,
+                e,
+                exc_info=True,
+            )
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,
@@ -1176,7 +1191,15 @@ class GenericSQLConnector(BaseDestinationHandler):
         except UnsupportedDialectOperationError as e:
             # The dialect lacks the requested operation (e.g. upsert with
             # no connector package installed). Deterministic — fail fast.
-            logger.error("Dialect operation unsupported: %s", e, exc_info=True)
+            logger.error(
+                "Dialect operation unsupported writing batch "
+                "(run=%s, stream=%s, seq=%s): %s",
+                run_id,
+                stream_id,
+                batch_seq,
+                e,
+                exc_info=True,
+            )
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,
@@ -1186,7 +1209,14 @@ class GenericSQLConnector(BaseDestinationHandler):
             # The stream is misconfigured for this write (e.g. upsert with
             # no conflict_keys). Deterministic — retrying cannot heal it, so
             # fail fatally instead of silently degrading or looping forever.
-            logger.error("Write configuration error: %s", e, exc_info=True)
+            logger.error(
+                "Write configuration error (run=%s, stream=%s, seq=%s): %s",
+                run_id,
+                stream_id,
+                batch_seq,
+                e,
+                exc_info=True,
+            )
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,
@@ -1195,7 +1225,15 @@ class GenericSQLConnector(BaseDestinationHandler):
         except AdbcConfigurationError as e:
             # ADBC misconfiguration cannot heal between attempts; bail
             # fatally so the engine does not retry forever.
-            logger.error("ADBC configuration error: %s", e, exc_info=True)
+            logger.error(
+                "ADBC configuration error writing batch "
+                "(run=%s, stream=%s, seq=%s): %s",
+                run_id,
+                stream_id,
+                batch_seq,
+                e,
+                exc_info=True,
+            )
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,
@@ -1214,7 +1252,14 @@ class GenericSQLConnector(BaseDestinationHandler):
                 # cancellation - classify it generically rather than claiming
                 # a statement was cancelled. A bare TimeoutError often
                 # stringifies empty; never ack a reason-less failure.
-                logger.error(f"Error writing batch: {e}", exc_info=True)
+                logger.error(
+                    "Error writing batch (run=%s, stream=%s, seq=%s): %s",
+                    run_id,
+                    stream_id,
+                    batch_seq,
+                    e,
+                    exc_info=True,
+                )
                 return BatchWriteResult(
                     status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                     records_written=0,
@@ -1229,14 +1274,30 @@ class GenericSQLConnector(BaseDestinationHandler):
                 f"statement timeout (likely a lock or slow write); the statement "
                 f"was cancelled"
             )
-            logger.error("Timeout writing batch: %s", summary)
+            logger.error(
+                "Timeout writing batch (run=%s, stream=%s, seq=%s): %s",
+                run_id,
+                stream_id,
+                batch_seq,
+                summary,
+            )
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 failure_summary=summary,
             )
         except Exception as e:
-            logger.error(f"Error writing batch: {e}", exc_info=True)
+            # The transport (ADBC vs SQLAlchemy) decides which driver raised,
+            # so name it -- otherwise the two paths log identically (#328).
+            logger.error(
+                "Error writing batch (run=%s, stream=%s, seq=%s, transport=%s): %s",
+                run_id,
+                stream_id,
+                batch_seq,
+                "adbc" if self._adbc_only else "sqlalchemy",
+                e,
+                exc_info=True,
+            )
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,

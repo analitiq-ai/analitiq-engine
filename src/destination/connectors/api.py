@@ -19,7 +19,7 @@ import orjson
 import pyarrow as pa
 from aiohttp_retry import ExponentialRetry, RetryClient
 
-from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
+from cdk.base_handler import BaseDestinationHandler, BatchWriteResult, reject_batch
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.json_utils import decode_json_fields
 from cdk.rate_limiter import RateLimiter
@@ -701,18 +701,22 @@ class ApiDestinationHandler(BaseDestinationHandler):
         once at this boundary.
         """
         if not self._session or not self._connected:
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
-                records_written=0,
-                failure_summary="Handler not connected",
+            return reject_batch(
+                logger,
+                "Handler not connected",
+                run_id=run_id,
+                stream_id=stream_id,
+                batch_seq=batch_seq,
             )
 
         state = self._streams.get(stream_id)
         if state is None:
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
-                records_written=0,
-                failure_summary="Schema not configured",
+            return reject_batch(
+                logger,
+                "Schema not configured",
+                run_id=run_id,
+                stream_id=stream_id,
+                batch_seq=batch_seq,
             )
 
         # Materialise once, stay row-oriented. Arrow-native Python types
