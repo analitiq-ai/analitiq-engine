@@ -530,7 +530,7 @@ class TestZeroBatchTruncate:
         return engine
 
     async def _invoke_process_stream(
-        self, engine, ack_statuses, write_mode="truncate_insert"
+        self, engine, ack_statuses, write_mode="truncate_insert", failure_category=None
     ):
         """Drive the zero-batch truncate section of _process_stream.
 
@@ -549,11 +549,18 @@ class TestZeroBatchTruncate:
         status_iter = iter(ack_statuses)
 
         def _make_result(status):
+            from cdk.types import FailureCategory
+
             r = MagicMock()
             r.status = status
             r.failure_summary = f"ack={status}"
             r.committed_cursor = None
             r.records_written = 0
+            r.failure_category = (
+                failure_category
+                if failure_category is not None
+                else FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+            )
             return r
 
         async def _send_batch_side_effect(**_kw):
@@ -650,6 +657,49 @@ class TestZeroBatchTruncate:
             await self._invoke_process_stream(
                 engine, [AckStatus.ACK_STATUS_FATAL_FAILURE]
             )
+
+    @pytest.mark.asyncio
+    async def test_outer_scope_failure_classifies_from_declared_category(self):
+        """The synthetic-truncate raise site classifies from the ack's
+        declared failure category (issue #351), not a hardcoded
+        DESTINATION_WRITE_FAILED: a NOT_READY rejection (the destination
+        attempted nothing) must tag INTERNAL."""
+        from cdk.types import FailureCategory
+        from src.engine.exceptions import StreamProcessingError
+        from src.grpc.generated.analitiq.v1 import AckStatus
+        from src.state.error_classification import ErrorCode, read_failure_tag
+
+        engine = self._process_stream_engine()
+        with pytest.raises(StreamProcessingError) as exc_info:
+            await self._invoke_process_stream(
+                engine,
+                [AckStatus.ACK_STATUS_FATAL_FAILURE],
+                failure_category=FailureCategory.FAILURE_CATEGORY_NOT_READY,
+            )
+        tag = read_failure_tag(exc_info.value)
+        assert tag is not None
+        assert tag.code is ErrorCode.INTERNAL
+
+    @pytest.mark.asyncio
+    async def test_outer_scope_unknown_status_ignores_declared_category(self):
+        """An ack whose status the engine cannot interpret must not have its
+        advisory category trusted -- the same rule as the regular batch
+        loop's unknown-status branch (issue #351). The declared NOT_READY
+        must be ignored and the failure take the load-stage default."""
+        from cdk.types import FailureCategory
+        from src.engine.exceptions import StreamProcessingError
+        from src.state.error_classification import ErrorCode, read_failure_tag
+
+        engine = self._process_stream_engine()
+        with pytest.raises(StreamProcessingError) as exc_info:
+            await self._invoke_process_stream(
+                engine,
+                [99],  # not a status this engine build knows
+                failure_category=FailureCategory.FAILURE_CATEGORY_NOT_READY,
+            )
+        tag = read_failure_tag(exc_info.value)
+        assert tag is not None
+        assert tag.code is ErrorCode.DESTINATION_WRITE_FAILED
 
     @pytest.mark.asyncio
     async def test_outer_scope_no_send_for_non_truncate_insert(self):

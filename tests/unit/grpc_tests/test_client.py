@@ -109,6 +109,59 @@ class TestBatchResult:
         assert "Constraint" in result.failure_summary
 
 
+class TestProcessAckFailureCategory:
+    """_process_ack is where the failure category comes off the wire (#351).
+
+    On the worker-proxy hop the sender is the untrusted connector process, so
+    the value must be bounds-checked: an unrecognised integer degrades to
+    UNSPECIFIED (text-matching fallback) instead of aborting the stream, and a
+    category paired with a success status is zeroed so the field is only ever
+    meaningful on a failure result.
+    """
+
+    def test_declared_category_passes_through(self):
+        from cdk.types import FailureCategory
+        from src.grpc.generated.analitiq.v1 import BatchAck
+        from src.grpc.generated.analitiq.v1 import (
+            FailureCategory as WireFailureCategory,
+        )
+
+        ack = BatchAck(
+            status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+            failure_summary="type-map: no rule",
+            failure_category=WireFailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
+        )
+        result = DestinationGRPCClient()._process_ack(ack)
+        assert result.failure_category is FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
+
+    def test_unknown_category_degrades_to_unspecified(self):
+        from cdk.types import FailureCategory
+        from src.grpc.generated.analitiq.v1 import BatchAck
+
+        # A worker sending an integer this engine build does not know:
+        # proto3 enums are open, so 99 survives assignment and the wire.
+        ack = BatchAck(status=AckStatus.ACK_STATUS_FATAL_FAILURE, failure_category=99)
+        assert ack.failure_category == 99
+        result = DestinationGRPCClient()._process_ack(ack)
+        assert result.failure_category is FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+
+    def test_category_on_success_ack_is_zeroed(self):
+        from cdk.types import FailureCategory
+        from src.grpc.generated.analitiq.v1 import BatchAck
+        from src.grpc.generated.analitiq.v1 import (
+            FailureCategory as WireFailureCategory,
+        )
+
+        ack = BatchAck(
+            status=AckStatus.ACK_STATUS_SUCCESS,
+            records_written=1,
+            failure_category=WireFailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
+        )
+        result = DestinationGRPCClient()._process_ack(ack)
+        assert result.success is True
+        assert result.failure_category is FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+
+
 class TestDestinationGRPCClient:
     """Tests for DestinationGRPCClient."""
 

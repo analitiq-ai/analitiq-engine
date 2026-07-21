@@ -250,7 +250,7 @@ aggregated `ExceptionGroup` (every stream failed) the highest-priority tag acros
 the leaves wins, and `error_detail` keeps every per-stream leaf rather than
 collapsing to `All streams failed (N sub-exceptions)`.
 
-Two structured signals cross process boundaries so the tag survives isolation:
+Three structured signals cross process boundaries so the tag survives isolation:
 
 - The source worker's `deterministic` flag (a config/contract error retrying
   cannot heal) is preserved across the gRPC worker boundary as a `CONFIG_INVALID`
@@ -261,11 +261,19 @@ Two structured signals cross process boundaries so the tag survives isolation:
   raise site by `classify_handshake_failure`, so a proxied destination outage
   classifies `DESTINATION_WRITE_FAILED` and a destination-config defect
   `CONFIG_INVALID` — no schema-vs-transport guessing.
+- The batch ack's `FailureCategory` (`BatchAck` field 9, issue #351): the
+  destination declares config-defect / write-rejected / not-ready where the
+  failure is caught, and `classify_destination_failure` maps the declared
+  category directly (`CONFIG_INVALID` / `DESTINATION_WRITE_FAILED` /
+  `INTERNAL`) instead of substring-matching the `failure_summary` prose.
 
-The name/phrase heuristics remain in two narrow roles only: the
+The name/phrase heuristics remain in three narrow roles only: the
 **source-extract fine split** (`classify_source_extract`), which picks
 auth-vs-unreachable-vs-rate for an opaque source driver/HTTP error — a split a
-tag genuinely cannot make without inspecting the error — and a defensive
+tag genuinely cannot make without inspecting the error; the
+**destination-load fallback** (`classify_destination_failure`) for a batch
+failure whose ack declares no category — a thick connector's own ack, or a
+failure with no ack at all; and a defensive
 **fallback** (`classify_exception` over class names + message text, mirroring
 `cdk.sql.generic._is_fatal_adbc_error`) for any exception that reaches the runner
 with no tag. Because the source split runs *only* at the source boundary, a
