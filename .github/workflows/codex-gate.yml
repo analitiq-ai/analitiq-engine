@@ -64,8 +64,11 @@ jobs:
             const CLEAN = /^Codex Review: Didn.t find any major issues/im;
             const FINDINGS = /Here are some automated review suggestions/i;
             // Codex renders the commit marker both bolded and plain depending
-            // on surface, so the asterisks are optional.
-            const REVIEWED_COMMIT = /\*{0,2}Reviewed commit:\*{0,2}\s*`([0-9a-f]{7,40})`/i;
+            // on surface, so the asterisks are optional. Codex always emits at
+            // least 10 hex characters; accepting shorter prefixes would make a
+            // ground SHA-prefix collision (~2^28 for 7 chars) cheap enough to
+            // reuse a stale verdict after a force-push.
+            const REVIEWED_COMMIT = /\*{0,2}Reviewed commit:\*{0,2}\s*`([0-9a-f]{10,40})`/i;
 
             async function evaluate(prNumber) {
               const { owner, repo } = context.repo;
@@ -97,16 +100,19 @@ jobs:
               }
             }
 
-            async function evaluateHead(pr, head) {
+            async function readVerdict(prNumber, head) {
               const { owner, repo } = context.repo;
-              const prNumber = pr.number;
-
               const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: prNumber, per_page: 100 });
               const reviews = await github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: prNumber, per_page: 100 });
 
+              // Comments are ordered by their last content change, not
+              // creation: this workflow reacts to edited events, so an edit
+              // must be able to reorder which verdict is newest. Reviews carry
+              // no update timestamp; their submission time is the best there
+              // is.
               const codexResponses = comments
                 .filter((c) => c.user.login === CODEX)
-                .map((c) => ({ body: c.body || '', at: c.created_at }))
+                .map((c) => ({ body: c.body || '', at: c.updated_at || c.created_at }))
                 .concat(reviews
                   .filter((r) => r.user.login === CODEX)
                   .map((r) => ({ body: r.body || '', at: r.submitted_at })));
@@ -122,16 +128,42 @@ jobs:
                 })
                 .sort((a, b) => new Date(a.at) - new Date(b.at));
               const latest = verdicts[verdicts.length - 1];
-              const approved = latest !== undefined && CLEAN.test(latest.body) && !FINDINGS.test(latest.body);
+              return {
+                approved: latest !== undefined && CLEAN.test(latest.body) && !FINDINGS.test(latest.body),
+                responded: codexResponses.length > 0,
+              };
+            }
+
+            async function evaluateHead(pr, head) {
+              const { owner, repo } = context.repo;
+              const prNumber = pr.number;
+
+              let { approved, responded } = await readVerdict(prNumber, head);
+
+              const { data: combined } = await github.rest.repos.getCombinedStatusForRef({ owner, repo, ref: head });
+              const existing = combined.statuses.find((s) => s.context === CONTEXT);
+
+              if (!approved && existing && existing.state === 'success') {
+                // A sweep can compute pending from a comment snapshot taken
+                // before the verdict that earned the success it now observes,
+                // and statuses are last-writer-wins. Demotion is legitimate
+                // only if a fresh read still says pending (a findings
+                // re-review of the same head).
+                ({ approved, responded } = await readVerdict(prNumber, head));
+                if (approved) {
+                  core.info(`PR #${prNumber} @ ${head.slice(0, 10)}: success confirmed on re-read`);
+                  return;
+                }
+              }
 
               const state = approved ? 'success' : 'pending';
               const description = approved
                 ? `Codex found no major issues in ${head.slice(0, 10)}`
-                : codexResponses.length > 0
+                : responded
                   ? `No clean Codex verdict for ${head.slice(0, 10)} yet`
                   : `Waiting for a Codex review of ${head.slice(0, 10)}`;
 
-              if (!approved && codexResponses.length > 0) {
+              if (!approved && responded) {
                 // Distinguishes "findings open or verdict stale" from template
                 // drift: if Codex rewords its verdict, this is the only trace
                 // that it responded at all.
@@ -141,8 +173,6 @@ jobs:
               // GitHub caps statuses per commit and context, and the scheduled
               // sweep would otherwise re-post an identical status every run;
               // skip when the latest status for this context already matches.
-              const { data: combined } = await github.rest.repos.getCombinedStatusForRef({ owner, repo, ref: head });
-              const existing = combined.statuses.find((s) => s.context === CONTEXT);
               if (existing && existing.state === state) {
                 core.info(`PR #${prNumber} @ ${head.slice(0, 10)}: already ${state}`);
                 return;
