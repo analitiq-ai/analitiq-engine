@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 
 from cdk.exceptions import TransportSpecError, UnresolvedValueError
@@ -387,12 +388,14 @@ class Resolver:
             # Templates are concatenation primitives; a non-scalar value
             # would be silently spliced as its repr, masking the most
             # common authoring mistake (referencing an object instead of
-            # a leaf field).
-            if not isinstance(value, (str, int, float, bool)):
+            # a leaf field). Decimal counts as a scalar: response bodies
+            # are parsed losslessly, so fractional response values arrive
+            # as Decimal and str() renders them exactly.
+            if not isinstance(value, (str, int, float, bool, Decimal)):
                 raise TransportSpecError(
                     f"Template substitution {path!r} in {template!r} resolved "
                     f"to {type(value).__name__}; only scalars (str/int/float/"
-                    f"bool) are allowed inside ${{...}}"
+                    f"bool/Decimal) are allowed inside ${{...}}"
                 )
             out.append(str(value))
             i = k + 1

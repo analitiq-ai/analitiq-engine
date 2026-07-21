@@ -101,6 +101,19 @@ class TestResolveResponseExpr:
             == "/items?page=3"
         )
 
+    def test_template_interpolates_decimal_response_values(self):
+        """Fractional response values arrive as Decimal (lossless parse)
+        and must interpolate exactly, not raise as non-scalar."""
+        from decimal import Decimal
+
+        resolver = _resolver({"next_score": Decimal("1234567890.12345678")})
+        assert (
+            resolve_response_expr(
+                _expr({"template": "after=${response.body.next_score}"}), resolver
+            )
+            == "after=1234567890.12345678"
+        )
+
     def test_function_over_response_values(self):
         """Function expressions run the shared derived-function catalog."""
         import base64
