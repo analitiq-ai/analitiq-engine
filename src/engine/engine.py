@@ -11,7 +11,7 @@ from typing import Any
 import pyarrow as pa
 
 from cdk.contract import Readable
-from cdk.types import CheckpointStore
+from cdk.types import CheckpointStore, FailureCategory
 
 # gRPC imports for destination streaming
 from ..grpc.client import (
@@ -131,6 +131,13 @@ class StreamingEngine:
         # runner classifies it so a partial run with a failed stream is not
         # reported as success.
         self._dominant_stream_error: BaseException | None = None
+
+        # Classified cause of each stream that completed PARTIAL (dlq/skip
+        # exhausted batches without raising). The exception channel above
+        # never sees these -- nothing raised -- so the runner reads the
+        # dominant of this list for its no-exception partial classification
+        # (issue #351).
+        self._partial_error_codes: list[ErrorCode] = []
 
         # Connector code never runs in the engine process: every source read
         # goes through an isolated worker subprocess that owns the connector
@@ -437,10 +444,21 @@ class StreamingEngine:
                         )
                         await asyncio.sleep(delay)
                         continue
+                    # An ack whose status the engine cannot interpret must not
+                    # have its advisory category trusted -- the same rule as
+                    # the unknown-status branch of the regular batch loop.
+                    known_failure_status = result.status in (
+                        AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+                        AckStatus.ACK_STATUS_FATAL_FAILURE,
+                    )
                     truncate_failure = StreamProcessingError(
                         f"Stream {stream_name}: zero-batch truncate failed: "
                         f"{result.failure_summary}",
-                        failure_category=result.failure_category,
+                        failure_category=(
+                            result.failure_category
+                            if known_failure_status
+                            else FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+                        ),
                     )
                     raise tag_failure(
                         truncate_failure,
@@ -464,6 +482,11 @@ class StreamingEngine:
                     )
                     or ErrorCode.DESTINATION_WRITE_FAILED
                 )
+                # Surface the stream's partial cause at pipeline level too:
+                # nothing raises on this path, so this list is the only way
+                # the runner's no-exception partial classification can see
+                # the cause instead of hardcoding a write failure (#351).
+                self._partial_error_codes.append(error_code)
                 error_message = customer_message(error_code)
                 # 'skip' drops exhausted batches without a DLQ entry, so those
                 # records are NOT recoverable; do not imply dead-lettering. The
@@ -1239,6 +1262,16 @@ class StreamingEngine:
         cause across all failed streams to classify the partial run.
         """
         return self._dominant_stream_error
+
+    def get_partial_error_code(self) -> ErrorCode | None:
+        """Return the dominant classified cause across partial streams.
+
+        A dlq/skip stream exhausts batches without raising, so no exception
+        reaches the runner; each such stream's already-classified code lands
+        here instead. None when no stream completed partial -- the runner
+        then keeps its load-stage default (issue #351).
+        """
+        return dominant_error_code(self._partial_error_codes)
 
     def get_state_manager(self) -> StateManager:
         """Get the state manager instance."""

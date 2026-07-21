@@ -306,10 +306,18 @@ class PipelineRunner:
                 )
             elif records_failed > 0:
                 status = "partial"
-                # A destination write rejection completed without a raised
-                # exception. error_detail carries only allowlisted-safe fields;
-                # any DLQ failure_summary stays in the dead-letter queue and logs.
-                error_code = ErrorCode.DESTINATION_WRITE_FAILED
+                # A destination failure completed without a raised exception.
+                # The engine classified each exhausted batch where it broke
+                # (declared category first, text fallback -- issue #351); the
+                # dominant across partial streams names the run, so the
+                # pipeline-level code matches what the fail strategy would
+                # report for the same cause. error_detail carries only
+                # allowlisted-safe fields; any DLQ failure_summary stays in
+                # the dead-letter queue and logs.
+                error_code = (
+                    engine.get_partial_error_code()
+                    or ErrorCode.DESTINATION_WRITE_FAILED
+                )
                 error_message = customer_message(error_code)
                 # 'skip' drops exhausted batches without a DLQ entry, so those
                 # records are NOT recoverable; do not point operators at the DLQ.

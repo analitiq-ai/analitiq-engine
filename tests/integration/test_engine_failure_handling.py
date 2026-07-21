@@ -766,6 +766,19 @@ class TestEngineFatalFailureHandling:
             ErrorCode.DESTINATION_WRITE_FAILED
         ]
 
+    def test_get_partial_error_code_reports_dominant_partial_cause(
+        self, engine: StreamingEngine
+    ):
+        """The runner's no-exception partial classification reads this
+        accessor; it must resolve several partial streams by the same
+        dominance rule the exception path uses, and answer None when no
+        stream completed partial so the runner keeps its default (#351)."""
+        assert engine.get_partial_error_code() is None
+        engine._partial_error_codes.append(ErrorCode.INTERNAL)
+        assert engine.get_partial_error_code() is ErrorCode.INTERNAL
+        engine._partial_error_codes.append(ErrorCode.DESTINATION_WRITE_FAILED)
+        assert engine.get_partial_error_code() is ErrorCode.DESTINATION_WRITE_FAILED
+
     @pytest.mark.asyncio
     async def test_load_stage_retryable_exhaustion_skips_with_skip_strategy(
         self,
