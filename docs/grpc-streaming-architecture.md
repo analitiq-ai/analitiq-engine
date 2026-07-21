@@ -102,7 +102,7 @@ The engine computes it as the **MAX** watermark across the batch (`compute_max_c
 enum AckStatus {
   ACK_STATUS_UNSPECIFIED = 0;
   ACK_STATUS_SUCCESS = 1;            // all written, cursor advanced
-  ACK_STATUS_ALREADY_COMMITTED = 2;  // idempotent replay, no-op — for a handler that detects a prior commit; every in-tree destination writes idempotently and returns SUCCESS
+  ACK_STATUS_ALREADY_COMMITTED = 2;  // idempotent replay, no-op — for a handler that detects a prior commit; no in-tree destination returns it (sinks that dedup — SQL, file — do it in the write and return SUCCESS; per-handler verdicts below)
   ACK_STATUS_RETRYABLE_FAILURE = 3;  // no commit, safe to retry whole batch
   ACK_STATUS_FATAL_FAILURE = 4;      // no commit, do not retry, send to DLQ
 }
