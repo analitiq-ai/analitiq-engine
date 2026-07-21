@@ -613,10 +613,10 @@ if _unmapped:
 def code_for_declared_category(category: FailureCategory) -> ErrorCode | None:
     """Return the engine-side :class:`ErrorCode` for a declared category.
 
-    None for UNSPECIFIED -- nothing was declared, so the caller falls back to
-    its own default (text matching, or the load-stage default code). Defined
-    once so the raise path (:func:`classify_destination_failure`) and the
-    non-raising dlq/skip partial-run path map a declared category identically.
+    None for UNSPECIFIED -- nothing was declared, so classification falls back
+    to the name/phrase rules. The category -> code mapping read by
+    :func:`classify_destination_failure`, public so the strategy-parity tests
+    can pin it directly.
     """
     return _CATEGORY_TO_CODE.get(category)
 

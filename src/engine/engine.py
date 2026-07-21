@@ -34,7 +34,6 @@ from ..state.error_classification import (
     classify_for_metrics,
     classify_handshake_failure,
     classify_source_extract,
-    code_for_declared_category,
     customer_message,
     detail_for_code,
     dominant_error_code,
@@ -453,14 +452,15 @@ class StreamingEngine:
                 # The dlq/skip strategies complete the stream without raising
                 # after exhausting retries; reflect that it only partly succeeded
                 # and carry the destination cause rather than reporting success.
-                # A category the destination declared on the exhausted acks wins
-                # (dominant across batches, the read_failure_tag rule), so the
-                # same failure classifies identically under fail and dlq/skip
-                # (#351); undeclared failures keep the load-stage default.
+                # Every exhausted batch was classified when it broke, exactly
+                # as the fail strategy's raise path would have classified it;
+                # the dominant code across them (the read_failure_tag rule)
+                # names the run, so the same failure classifies identically
+                # under fail and dlq/skip (#351).
                 status = "partial"
                 error_code = (
                     dominant_error_code(
-                        stream_metrics.pop("_declared_failure_codes", [])
+                        stream_metrics.pop("_exhausted_failure_codes", [])
                     )
                     or ErrorCode.DESTINATION_WRITE_FAILED
                 )
@@ -913,18 +913,20 @@ class StreamingEngine:
                             stream_metrics["records_failed"] += record_count
                             stream_metrics["batches_failed"] += 1
                             # The dlq/skip strategies break without raising, so
-                            # the declared category would die with this scope.
-                            # Stash its code for the partial-run classification
-                            # -- the same mapping the raise path gets via
-                            # classify_destination_failure, so the reported
+                            # this batch's cause would die with this scope.
+                            # Classify it exactly as the fail strategy's raise
+                            # would -- declared category first, text fallback
+                            # for an undeclared ack -- and stash the code for
+                            # the partial-run classification, so the reported
                             # code cannot depend on the error strategy (#351).
-                            declared = code_for_declared_category(
-                                result.failure_category
+                            exhausted_failure = StreamProcessingError(
+                                f"Batch {batch_seq} failed after {max_retries} "
+                                f"retries: {result.failure_summary}",
+                                failure_category=result.failure_category,
                             )
-                            if declared is not None:
-                                stream_metrics.setdefault(
-                                    "_declared_failure_codes", []
-                                ).append(declared)
+                            stream_metrics.setdefault(
+                                "_exhausted_failure_codes", []
+                            ).append(classify_destination_failure(exhausted_failure))
                             if batch_seq == 1 and self._is_truncate_insert(config):
                                 # The destination truncates on batch_seq 1
                                 # (issue #307). Dropping the first batch via
