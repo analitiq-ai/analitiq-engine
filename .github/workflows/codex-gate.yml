@@ -32,8 +32,12 @@ concurrency:
   group: codex-gate-${{ github.event.pull_request.number || github.event.issue.number || 'sweep' }}
 
 jobs:
+  # The job must not be displayed as "codex-review": a check run sharing the
+  # required context's name would be counted against the requirement alongside
+  # the commit status, and this job succeeds whenever the script runs -- not
+  # when Codex approves. The commit status must be the only `codex-review`
+  # reporter.
   gate:
-    name: codex-review
     runs-on: ubuntu-latest
     # Comment events fire for every comment on the repo; only Codex's own
     # comments and "@codex review" requests can change the verdict, so skip the
@@ -50,7 +54,14 @@ jobs:
         with:
           script: |
             const CODEX = 'chatgpt-codex-connector[bot]';
-            const CLEAN = /didn.t find any major issues/i;
+            const CONTEXT = 'codex-review';
+            // Anchored to Codex's clean-verdict template, and any body carrying
+            // the findings preamble is rejected outright: an unanchored phrase
+            // match would let a findings review that merely contains "didn't
+            // find any major issues elsewhere" -- or a PR that baits Codex into
+            // quoting the phrase -- go green.
+            const CLEAN = /^Codex Review: Didn.t find any major issues/im;
+            const FINDINGS = /Here are some automated review suggestions/i;
             const REVIEWED_COMMIT = /\*\*Reviewed commit:\*\*\s*`([0-9a-f]{7,40})`/i;
             const RE_REQUEST = /@codex review/;
 
@@ -59,6 +70,34 @@ jobs:
               const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
               if (pr.state !== 'open') return;
               const head = pr.head.sha;
+
+              try {
+                await evaluateHead(pr, head);
+              } catch (error) {
+                // Surface the crash on the PR itself: an event run that dies
+                // here is otherwise visible only in the base repo's Actions
+                // tab, and the author would read the stuck gate as "Codex is
+                // slow". The error state still blocks merge.
+                try {
+                  await github.rest.repos.createCommitStatus({
+                    owner,
+                    repo,
+                    sha: head,
+                    context: CONTEXT,
+                    state: 'error',
+                    description: `codex-gate failed: ${String(error).slice(0, 110)}`,
+                    target_url: pr.html_url,
+                  });
+                } catch (statusError) {
+                  core.error(`PR #${prNumber}: could not post error status: ${statusError}`);
+                }
+                throw error;
+              }
+            }
+
+            async function evaluateHead(pr, head) {
+              const { owner, repo } = context.repo;
+              const prNumber = pr.number;
 
               const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: prNumber, per_page: 100 });
               const reviews = await github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: prNumber, per_page: 100 });
@@ -72,35 +111,50 @@ jobs:
               // reviewed; a verdict for an older commit is stale once new
               // commits are pushed.
               let approved = codexBodies.some((body) => {
-                if (!CLEAN.test(body)) return false;
+                if (!CLEAN.test(body) || FINDINGS.test(body)) return false;
                 const match = body.match(REVIEWED_COMMIT);
                 return match !== null && head.startsWith(match[1]);
               });
 
-              if (!approved) {
+              const { data: combined } = await github.rest.repos.getCombinedStatusForRef({ owner, repo, ref: head });
+              const existing = combined.statuses.find((s) => s.context === CONTEXT);
+
+              if (!approved && existing) {
                 // The reaction form: Codex reacts +1 on the latest "@codex
                 // review" request instead of commenting. A reaction names no
-                // commit, so it speaks for the current head only if the
-                // request it sits on was posted after the last commit.
-                const requests = comments.filter((c) => RE_REQUEST.test(c.body || ''));
+                // commit, so it speaks for the current head only if the request
+                // it sits on postdates the head's arrival. The watermark for
+                // "arrival" is this gate's own existing status on the head
+                // (posted by the run that first saw it) -- a server-side
+                // timestamp, unlike commit dates, which the author can
+                // backdate to smuggle unpushed commits under a stale +1.
+                // Codex's own comments quote the trigger phrase in their
+                // boilerplate, so they must not count as requests.
+                const requests = comments.filter((c) => c.user.login !== CODEX && RE_REQUEST.test(c.body || ''));
                 const latest = requests[requests.length - 1];
-                if (latest) {
-                  const commits = await github.paginate(github.rest.pulls.listCommits, { owner, repo, pull_number: prNumber, per_page: 100 });
-                  const lastCommitAt = new Date(commits[commits.length - 1].commit.committer.date);
-                  if (new Date(latest.created_at) > lastCommitAt) {
-                    const reactions = await github.paginate(github.rest.reactions.listForIssueComment, { owner, repo, comment_id: latest.id, per_page: 100 });
-                    approved = reactions.some((r) => r.user.login === CODEX && r.content === '+1');
-                  }
+                if (latest && new Date(latest.created_at) > new Date(existing.created_at)) {
+                  const reactions = await github.paginate(github.rest.reactions.listForIssueComment, { owner, repo, comment_id: latest.id, per_page: 100 });
+                  approved = reactions.some((r) => r.user.login === CODEX && r.content === '+1');
                 }
               }
 
               const state = approved ? 'success' : 'pending';
+              const description = approved
+                ? `Codex found no major issues in ${head.slice(0, 10)}`
+                : codexBodies.length > 0
+                  ? `No clean Codex verdict for ${head.slice(0, 10)} yet`
+                  : `Waiting for a Codex review of ${head.slice(0, 10)}`;
 
-              // GitHub caps statuses per commit, and the scheduled sweep would
-              // otherwise re-post an identical status every run; skip when the
-              // latest status for this context already matches.
-              const { data: combined } = await github.rest.repos.getCombinedStatusForRef({ owner, repo, ref: head });
-              const existing = combined.statuses.find((s) => s.context === 'codex-review');
+              if (!approved && codexBodies.length > 0) {
+                // Distinguishes "findings open or verdict stale" from template
+                // drift: if Codex rewords its verdict, this is the only trace
+                // that it responded at all.
+                core.notice(`PR #${prNumber}: Codex responded but no clean verdict matches head ${head.slice(0, 10)}`);
+              }
+
+              // GitHub caps statuses per commit and context, and the scheduled
+              // sweep would otherwise re-post an identical status every run;
+              // skip when the latest status for this context already matches.
               if (existing && existing.state === state) {
                 core.info(`PR #${prNumber} @ ${head.slice(0, 10)}: already ${state}`);
                 return;
@@ -110,11 +164,9 @@ jobs:
                 owner,
                 repo,
                 sha: head,
-                context: 'codex-review',
+                context: CONTEXT,
                 state,
-                description: approved
-                  ? `Codex found no major issues in ${head.slice(0, 10)}`
-                  : `Waiting for a clean Codex review of ${head.slice(0, 10)}`,
+                description,
                 target_url: pr.html_url,
               });
               core.info(`PR #${prNumber} @ ${head.slice(0, 10)}: ${state}`);
@@ -127,7 +179,18 @@ jobs:
             } else {
               const { owner, repo } = context.repo;
               const open = await github.paginate(github.rest.pulls.list, { owner, repo, state: 'open', per_page: 100 });
+              const failures = [];
               for (const pr of open) {
-                await evaluate(pr.number);
+                try {
+                  await evaluate(pr.number);
+                } catch (error) {
+                  // One broken PR must not starve the rest: the sweep is the
+                  // only observer of reactions, which emit no webhook events.
+                  failures.push(`#${pr.number}: ${error}`);
+                  core.error(`PR #${pr.number}: ${error}`);
+                }
+              }
+              if (failures.length > 0) {
+                core.setFailed(`sweep failed for ${failures.length} PR(s): ${failures.join('; ')}`);
               }
             }

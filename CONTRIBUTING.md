@@ -98,4 +98,5 @@ commit is green:
    statuses, which mirror the analyzer table in DeepSource's PR comment.
 
 These are enforced by branch protection on `main` (including for admins), along
-with one approving review and resolved conversations.
+with one approving review, resolved conversations, and a branch up to date with
+`main`.
