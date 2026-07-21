@@ -580,34 +580,6 @@ def _fn_now(column: pa.Array) -> pa.Array:
     return pa.array([datetime.now(timezone.utc)] * len(column))
 
 
-def _fn_default(column: pa.Array, default_value: Any = None) -> pa.Array:
-    """Substitute *default_value* wherever the column is null.
-
-    A wholly-null column infers Arrow ``null`` type (a missing or all-null source
-    field), which cannot hold a typed default; it is rebuilt from the default so
-    ``missing | default("N/A")`` still fills, as the per-record path did.
-    """
-    if pa.types.is_null(column.type):
-        return pa.array([default_value] * len(column))
-    try:
-        return pc.fill_null(column, pa.scalar(default_value, column.type))
-    except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as e:
-        raise TransformationError(
-            f"default: cannot fill {column.type} with {default_value!r}: {e}"
-        ) from e
-
-
-def _fn_coalesce(column: pa.Array, *alternatives: Any) -> pa.Array:
-    """Return the first non-null among the column and the literal alternatives.
-
-    The alternatives are broadcast to columns and unified with the input, so a
-    wholly-null (``null``-typed) input still adopts the alternatives' type and
-    emits the fallback, as the per-record path did.
-    """
-    arrays = [column] + [pa.array([alt] * len(column)) for alt in alternatives]
-    return _coalesce(arrays)
-
-
 # A trailing 'Z' or numeric offset, used to strip the zone marker before a naive
 # parse. pyarrow 12 has no single string cast that accepts naive, 'Z', and
 # offset forms together, so the zone is dropped and the value stamped UTC.
@@ -688,8 +660,6 @@ _FUNCTION_CATALOG: dict[str, dict[int, Callable[..., pa.Array]]] = {
     "to_string": {1: _fn_to_string},
     "abs": {1: _fn_abs},
     "now": {1: _fn_now},
-    "default": {1: _fn_default},
-    "coalesce": {1: _fn_coalesce},
 }
 
 
