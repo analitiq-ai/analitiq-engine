@@ -11,7 +11,7 @@ from typing import Any
 
 import pyarrow as pa
 
-from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
+from cdk.base_handler import BaseDestinationHandler, BatchWriteResult, reject_batch
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.types import AckStatus, Cursor, RetrySemantics, RetryVerdict, SchemaSpec
 
@@ -197,17 +197,30 @@ class FileDestinationHandler(BaseDestinationHandler):
         this boundary.
         """
         if not self._connected:
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
-                records_written=0,
-                failure_summary="Handler not connected",
+            return reject_batch(
+                logger,
+                "Handler not connected",
+                run_id=run_id,
+                stream_id=stream_id,
+                batch_seq=batch_seq,
             )
 
         if self._storage is None or self._formatter is None or self._manifest is None:
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
-                records_written=0,
-                failure_summary="Handler components not initialized",
+            missing = [
+                name
+                for name, component in (
+                    ("storage", self._storage),
+                    ("formatter", self._formatter),
+                    ("manifest", self._manifest),
+                )
+                if component is None
+            ]
+            return reject_batch(
+                logger,
+                f"Handler components not initialized: {', '.join(missing)}",
+                run_id=run_id,
+                stream_id=stream_id,
+                batch_seq=batch_seq,
             )
 
         try:
@@ -345,11 +358,17 @@ class FileDestinationHandler(BaseDestinationHandler):
                 failure_summary=f"OSError[{errno_label}]: {e}",
             )
         except Exception as e:
+            # The formatter and the storage backend are both pluggable and
+            # both sit inside this try, so without their identities a broken
+            # Parquet formatter and a broken CSV one log identically (#328).
             logger.error(
-                "Fatal error writing batch (run=%s, stream=%s, seq=%s): %s",
+                "Fatal error writing batch "
+                "(run=%s, stream=%s, seq=%s, formatter=%s, storage=%s): %s",
                 run_id,
                 stream_id,
                 batch_seq,
+                type(self._formatter).__name__,
+                type(self._storage).__name__,
                 e,
                 exc_info=True,
             )
