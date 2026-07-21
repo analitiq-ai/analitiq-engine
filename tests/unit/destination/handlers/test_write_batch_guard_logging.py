@@ -1,9 +1,10 @@
 """Every ``write_batch`` pre-flight guard must say why it rejected a batch.
 
-A guard rejects without raising, so nothing downstream records the reason:
-the engine sees a RETRYABLE ack and retries, and the first readable signal
-is retry exhaustion (issue #327). These tests pin the invariant across all
-five destination handlers, so a new guard added without a log fails CI.
+A guard rejects without raising, so the destination -- the process that
+made the decision -- recorded nothing; the reason surfaced only in the
+engine's retry warning one hop away, naming neither the handler nor the
+guard (issue #327). These tests pin the invariant across all five
+destination handlers, so a new guard added without a log fails CI.
 
 The assertions are deliberately on the log *content* (run/stream/seq and a
 reason), not on an exact message: an operator correlating a DLQ entry with
@@ -19,7 +20,7 @@ from unittest.mock import MagicMock
 import pyarrow as pa
 import pytest
 
-from cdk.sql.generic import GenericSQLConnector
+from cdk.sql.generic import GenericSQLConnector, _StreamState
 from cdk.types import AckStatus, Cursor
 from src.destination.connectors.api import ApiDestinationHandler
 from src.destination.connectors.file import FileDestinationHandler
@@ -78,6 +79,18 @@ def _disconnected_stream() -> StreamDestinationHandler:
     return handler
 
 
+def _formatterless_stream() -> StreamDestinationHandler:
+    """Connected, but connect() never built the formatter.
+
+    The other arm of the same guard as ``_disconnected_stream`` -- the two
+    report different reasons, so both need pinning.
+    """
+    handler = StreamDestinationHandler()
+    handler._connected = True
+    handler._formatter = None
+    return handler
+
+
 def _disconnected_api() -> ApiDestinationHandler:
     handler = ApiDestinationHandler()
     handler._connected = False
@@ -117,6 +130,20 @@ def _unconfigured_sql() -> GenericSQLConnector:
     return handler
 
 
+def _tableless_sql() -> GenericSQLConnector:
+    """Stream configured, but the SQLAlchemy path never reflected a table.
+
+    The other arm of the same guard as ``_unconfigured_sql``; only the
+    SQLAlchemy path needs a table object, so ADBC cannot reach it.
+    """
+    handler = GenericSQLConnector()
+    handler._connected = True
+    handler._adbc_only = False
+    handler._engine = MagicMock()
+    handler._streams = {STREAM_ID: _StreamState(table_name="t", table=None)}
+    return handler
+
+
 def _unconfigured_proxy() -> WorkerProxyHandler:
     handler = WorkerProxyHandler(
         connectors_dir=Path("/nonexistent/connectors"),
@@ -130,11 +157,13 @@ ALL_GUARDS = [
     pytest.param(_disconnected_file, id="file-disconnected"),
     pytest.param(_uninitialized_file, id="file-uninitialized"),
     pytest.param(_disconnected_stream, id="stream-disconnected"),
+    pytest.param(_formatterless_stream, id="stream-formatterless"),
     pytest.param(_disconnected_api, id="api-disconnected"),
     pytest.param(_unconfigured_api, id="api-unconfigured"),
     pytest.param(_disconnected_sql, id="sql-disconnected"),
     pytest.param(_engineless_sql, id="sql-engineless"),
     pytest.param(_unconfigured_sql, id="sql-unconfigured"),
+    pytest.param(_tableless_sql, id="sql-tableless"),
     pytest.param(_unconfigured_proxy, id="proxy-unconfigured"),
 ]
 
@@ -167,3 +196,31 @@ async def test_file_uninitialized_guard_names_the_missing_components(
     message = _assert_rejection_logged(caplog)
     assert "formatter" in message and "manifest" in message
     assert "storage" not in result.failure_summary
+
+
+# Both arms of a two-condition guard must be told apart. A guard that
+# collapses back to one generic reason still satisfies the invariant above,
+# so these pin the distinction directly.
+@pytest.mark.parametrize(
+    ("build_handler", "expected", "not_expected"),
+    [
+        pytest.param(
+            _disconnected_stream, "not connected", "formatter", id="stream-connected"
+        ),
+        pytest.param(
+            _formatterless_stream, "formatter", "not connected", id="stream-formatter"
+        ),
+        pytest.param(
+            _unconfigured_sql, "Schema not configured", "table", id="sql-none"
+        ),
+        pytest.param(_tableless_sql, "table", None, id="sql-table"),
+    ],
+)
+async def test_two_condition_guards_distinguish_their_arms(
+    build_handler, expected, not_expected
+):
+    result = await _write(build_handler())
+
+    assert expected in result.failure_summary
+    if not_expected is not None:
+        assert not_expected not in result.failure_summary

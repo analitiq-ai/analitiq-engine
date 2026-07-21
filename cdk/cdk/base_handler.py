@@ -44,11 +44,15 @@ def reject_batch(
 ) -> BatchWriteResult:
     """Log and build the result for a batch rejected before any write.
 
-    A ``write_batch`` pre-flight guard rejects without raising, so nothing
-    downstream records why -- the engine sees only a retry, and the first
-    readable signal is retry exhaustion (issue #327). Routing every guard
-    through one function keeps the log and the returned status in step, and
-    means a new guard cannot be added without one.
+    A ``write_batch`` pre-flight guard rejects without raising, so the
+    rejecting process -- the destination -- recorded nothing at all. The
+    reason only ever surfaced one hop away, in the engine's retry warning
+    (``src/engine/engine.py``), which names neither the handler nor which
+    guard fired. Logging here puts the rejection in the log of the process
+    that made it (issue #327).
+
+    Routing every guard through one function keeps the log and the returned
+    status in step, and means a new guard cannot be added without one.
 
     *logger* is the calling handler's module logger, so the record names the
     handler that rejected the batch.

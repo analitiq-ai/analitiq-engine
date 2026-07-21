@@ -350,7 +350,13 @@ class DestinationServicer(DestinationServiceServicer):
                     batch_msg = request.batch
 
                     if not schema_configured:
-                        logger.error("Received batch before schema was configured")
+                        logger.error(
+                            "Received batch before schema was configured "
+                            "(run=%s, stream=%s, seq=%s)",
+                            batch_msg.run_id,
+                            batch_msg.stream_id,
+                            batch_msg.batch_seq,
+                        )
                         yield StreamResponse(
                             ack=BatchAck(
                                 run_id=batch_msg.run_id,
