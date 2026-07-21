@@ -99,6 +99,20 @@ jobs:
               const { owner, repo } = context.repo;
               const prNumber = pr.number;
 
+              const { data: combined } = await github.rest.repos.getCombinedStatusForRef({ owner, repo, ref: head });
+              const existing = combined.statuses.find((s) => s.context === CONTEXT);
+
+              // Statuses are keyed to the immutable head SHA, so a success
+              // earned for this exact commit cannot become less reviewed --
+              // never demote it. Without this exit a reaction-earned success
+              // would flap back: posting it advances the latest-status
+              // timestamp past the request that earned it, so the next sweep
+              // would fail the watermark test and revert to pending.
+              if (existing && existing.state === 'success') {
+                core.info(`PR #${prNumber} @ ${head.slice(0, 10)}: already success`);
+                return;
+              }
+
               const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: prNumber, per_page: 100 });
               const reviews = await github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: prNumber, per_page: 100 });
 
@@ -115,9 +129,6 @@ jobs:
                 const match = body.match(REVIEWED_COMMIT);
                 return match !== null && head.startsWith(match[1]);
               });
-
-              const { data: combined } = await github.rest.repos.getCombinedStatusForRef({ owner, repo, ref: head });
-              const existing = combined.statuses.find((s) => s.context === CONTEXT);
 
               if (!approved && existing) {
                 // The reaction form: Codex reacts +1 on the latest "@codex
