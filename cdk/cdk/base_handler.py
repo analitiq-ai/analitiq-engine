@@ -122,7 +122,9 @@ class BaseDestinationHandler(ABC):
         """
         _ = stream_endpoints  # no-op default
 
-    def set_stream_conflict_keys(
+    # Template method: the no-op default ignores self so handlers can
+    # override with instance state (same shape as its siblings above).
+    def set_stream_conflict_keys(  # skipcq: PYL-R0201
         self, stream_conflict_keys: Mapping[str, list[str]]
     ) -> None:
         """Register the ``stream_id → upsert conflict keys`` index.

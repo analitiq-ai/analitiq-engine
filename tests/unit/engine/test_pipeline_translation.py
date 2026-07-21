@@ -144,7 +144,7 @@ def _make_pipeline(
 
 
 class TestDumpEndpointDocument:
-    def test_round_trips_authored_shape(self):
+    def test_round_trips_authored_shape(self):  # skipcq: PYL-R0201
         doc = _database_endpoint_doc()
         dumped = dump_endpoint_document(doc)
         # Aliases restored, unset fields omitted, revalidates to the same
@@ -155,7 +155,7 @@ class TestDumpEndpointDocument:
         assert "display_name" not in dumped
         assert DatabaseEndpointDoc.model_validate(dumped) == doc
 
-    def test_api_doc_round_trips(self):
+    def test_api_doc_round_trips(self):  # skipcq: PYL-R0201
         doc = _api_endpoint_doc()
         dumped = dump_endpoint_document(doc)
         assert dumped["operations"]["read"]["request"]["path"] == "/invoices"
@@ -209,7 +209,7 @@ class TestTranslateSourceConfig:
         assert result["connector_type"] == "api"
         assert result["stream_filters"] == [{"field": "x"}]
 
-    def test_api_kind_empty_filters_when_absent(self):
+    def test_api_kind_empty_filters_when_absent(self):  # skipcq: PYL-R0201
         source = _make_source(connector_type="api", stream_source={})
 
         result = _translate_source_config(
@@ -220,7 +220,9 @@ class TestTranslateSourceConfig:
 
         assert result["stream_filters"] == []
 
-    def test_api_kind_none_filters_normalised_to_empty_list(self):
+    def test_api_kind_none_filters_normalised_to_empty_list(  # skipcq: PYL-R0201
+        self,
+    ):
         source = _make_source(connector_type="api", stream_source={"filters": None})
 
         result = _translate_source_config(
