@@ -8,6 +8,7 @@ build their own short-lived runtimes for table setup/teardown and drive the
 connector with the contract endpoint document.
 """
 
+import importlib.util
 import os
 import uuid
 from unittest.mock import AsyncMock
@@ -34,9 +35,15 @@ def _postgres_available() -> bool:
         return False
 
 
-pytestmark = pytest.mark.skipif(
-    not _postgres_available(), reason="PostgreSQL not reachable"
-)
+pytestmark = [
+    # The engine pins no database drivers (they ship with connector packages),
+    # so a reachable local postgres without the driver must skip, not error.
+    pytest.mark.skipif(
+        importlib.util.find_spec("asyncpg") is None,
+        reason="asyncpg not installed",
+    ),
+    pytest.mark.skipif(not _postgres_available(), reason="PostgreSQL not reachable"),
+]
 
 
 @pytest.fixture
