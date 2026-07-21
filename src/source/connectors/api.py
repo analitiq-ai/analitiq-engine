@@ -38,7 +38,7 @@ from collections.abc import AsyncIterator, Callable
 from datetime import timezone
 from decimal import Decimal
 from typing import Any
-from urllib.parse import SplitResult, urlsplit
+from urllib.parse import SplitResult, urljoin, urlsplit
 
 import aiohttp
 import pyarrow as pa
@@ -855,12 +855,12 @@ class APIConnector(BaseConnector):
             # The key keeps its native type (int/str/Decimal) — the
             # query/body sinks in ``build_request`` own serialization.
             last_key: Any = pagination.keyset.initial
-            # A short page ends the loop only when this read controls the
-            # page size (a declared limit param was sent as batch_size).
-            # Without one, the provider's own page size bounds every page,
-            # so a short page says nothing about whether a next key exists —
-            # only an empty page or stop_when may end the loop then.
-            limit_sent = pagination.limit is not None and bool(pagination.limit.param)
+            # No short-page stop for keyset: a provider may clamp the
+            # requested page size below batch_size, making every page
+            # "short" while records remain — stopping there would truncate
+            # the read. Key advance is size-independent, so only an empty
+            # page or stop_when ends the loop; the cost is at most one
+            # extra (empty) request, never a lost tail.
             while True:
                 params = dict(base_params)
                 if last_key is not None:
@@ -873,8 +873,7 @@ class APIConnector(BaseConnector):
                     return
                 page_resolver = resolver.with_response({"body": data})
                 stop = self._stop_requested(pagination.stop_when, page_resolver)
-                short = limit_sent and len(records) < batch_size
-                if not stop and not short:
+                if not stop:
                     # Validate the continuation before yielding: a page the
                     # loop cannot advance from must fail before the engine
                     # can commit it downstream. order_by_field is a dotted
@@ -889,7 +888,7 @@ class APIConnector(BaseConnector):
                             f"on every record"
                         )
                 yield records
-                if stop or short:
+                if stop:
                     return
 
     async def _iterate_link_pages(
@@ -923,6 +922,7 @@ class APIConnector(BaseConnector):
                 "materialized the base URL"
             )
         origin = urlsplit(base_url)
+        current_url = full_url
         query, body = build_request(dict(base_params))
         data, records = await self._request_payload(
             full_url, method, query, records_ref, body=body
@@ -960,10 +960,17 @@ class APIConnector(BaseConnector):
                             )
                         next_target = next_url
                     else:
-                        next_target = join_url(base_url, next_url)
+                        # A path/query-relative reference resolves against
+                        # the CURRENT page URL (RFC 3986), so a query-only
+                        # link like "?page=2" continues from the endpoint
+                        # path instead of the connection root. Absolute and
+                        # protocol-relative URLs were classified above, so
+                        # the join can never change the origin.
+                        next_target = urljoin(current_url, next_url)
             yield records
             if next_target is None:
                 return
+            current_url = next_target
             data, records = await self._request_payload(
                 next_target, method, {}, records_ref
             )

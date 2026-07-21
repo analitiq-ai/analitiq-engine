@@ -724,8 +724,9 @@ class TestReadBatchesKeysetPagination:
 
     @pytest.mark.asyncio
     async def test_keyset_advances_key_from_last_record(self):
-        """The key advances from the last record's order_by_field value and
-        the loop stops on a short page."""
+        """The key advances from the last record's order_by_field value; a
+        short page does NOT terminate (a provider may clamp the requested
+        page size) — only the empty page does."""
         session = _FakeSession(
             [
                 _FakeResponse(
@@ -733,6 +734,7 @@ class TestReadBatchesKeysetPagination:
                     body={"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]},
                 ),
                 _FakeResponse(status=200, body={"records": [{"id": 3, "name": "c"}]}),
+                _FakeResponse(status=200, body={"records": []}),
             ]
         )
         runtime = _runtime_with_session(session)
@@ -750,10 +752,12 @@ class TestReadBatchesKeysetPagination:
 
         assert [b.num_rows for b in batches] == [2, 1]
         # First request carries no key (no initial authored); the second
-        # carries the last id of page 1, natively typed.
+        # carries the last id of page 1, natively typed; the third advances
+        # past the clamped page and finds the empty terminator.
         assert "after_id" not in session.calls[0][2]
         assert session.calls[1][2]["after_id"] == 2
-        assert [c[2].get("limit") for c in session.calls] == [2, 2]
+        assert session.calls[2][2]["after_id"] == 3
+        assert [c[2].get("limit") for c in session.calls] == [2, 2, 2]
 
     @pytest.mark.asyncio
     async def test_keyset_dotted_order_by_field_walks_nested_records(self):
@@ -777,6 +781,7 @@ class TestReadBatchesKeysetPagination:
                         "records": [{"id": 3, "name": "c", "meta": {"cursor_id": 11}}]
                     },
                 ),
+                _FakeResponse(status=200, body={"records": []}),
             ]
         )
         runtime = _runtime_with_session(session)
@@ -807,6 +812,7 @@ class TestReadBatchesKeysetPagination:
         session = _FakeSession(
             [
                 _FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]}),
+                _FakeResponse(status=200, body={"records": []}),
             ]
         )
         runtime = _runtime_with_session(session)
@@ -996,6 +1002,39 @@ class TestReadBatchesLinkPagination:
 
         assert [b.num_rows for b in batches] == [1, 1]
         assert session.calls[1][1] == "https://API.example.test:443/items/p2"
+
+    @pytest.mark.asyncio
+    async def test_link_query_only_relative_resolves_against_current_page(self):
+        """A query-only relative link continues from the current page URL
+        (RFC 3986), keeping the endpoint path — not the connection root."""
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}], "next": "?page=2"},
+                ),
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 2, "name": "b"}], "next": "?page=3"},
+                ),
+                _FakeResponse(status=200, body={"records": [{"id": 3, "name": "c"}]}),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(pagination=self._link_pagination())
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        assert session.calls[1][1] == "https://api.example.test/items?page=2"
+        assert session.calls[2][1] == "https://api.example.test/items?page=3"
 
     @pytest.mark.asyncio
     async def test_link_uppercase_scheme_classified_as_absolute(self):
@@ -2016,6 +2055,7 @@ class TestReadBatchesDecimalPrecision:
             [
                 _FakeResponse(status=200, body=page1),
                 _FakeResponse(status=200, body=page2),
+                _FakeResponse(status=200, body='{"records": []}'),
             ]
         )
         runtime = _runtime_with_session(session)
@@ -2090,6 +2130,7 @@ class TestReadBatchesDecimalPrecision:
                     body={"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]},
                 ),
                 _FakeResponse(status=200, body={"records": [{"id": 3, "name": "c"}]}),
+                _FakeResponse(status=200, body={"records": []}),
             ]
         )
         runtime = _runtime_with_session(session)
