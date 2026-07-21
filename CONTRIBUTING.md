@@ -97,6 +97,7 @@ commit is green:
    `DeepSource: Python`, `DeepSource: Shell`, and `DeepSource: Secrets`
    statuses, which mirror the analyzer table in DeepSource's PR comment.
 
-These are enforced by branch protection on `main` (including for admins), along
-with one approving review, resolved conversations, and a branch up to date with
-`main`.
+These are enforced by branch protection on `main`, along with one approving
+review, resolved conversations, and a branch up to date with `main`. Admins see
+failing checks but can override per-merge; everyone else is blocked until all
+checks pass.
