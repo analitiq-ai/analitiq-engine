@@ -4,9 +4,9 @@ name: codex-gate
 # the PR head so branch protection can require a clean Codex review before
 # merge (issue #355). Codex signals a clean PR in one of two ways: a comment or
 # review saying "Didn't find any major issues" that names the reviewed commit,
-# or a +1 reaction on the latest "@codex review" request. Reactions emit no
-# webhook events, so a scheduled sweep re-evaluates open PRs to catch that
-# form.
+# or a +1 reaction -- on the latest "@codex review" request, or on the PR
+# itself for auto-triggered reviews. Reactions emit no webhook events, so a
+# scheduled sweep re-evaluates open PRs to catch that form.
 #
 # pull_request_target (not pull_request) because posting a commit status needs
 # a write token even for fork PRs; it is safe here because the job never checks
@@ -27,6 +27,7 @@ permissions:
   statuses: write
   pull-requests: read
   issues: read
+  checks: read
 
 concurrency:
   group: codex-gate-${{ github.event.pull_request.number || github.event.issue.number || 'sweep' }}
@@ -62,7 +63,9 @@ jobs:
             // quoting the phrase -- go green.
             const CLEAN = /^Codex Review: Didn.t find any major issues/im;
             const FINDINGS = /Here are some automated review suggestions/i;
-            const REVIEWED_COMMIT = /\*\*Reviewed commit:\*\*\s*`([0-9a-f]{7,40})`/i;
+            // Codex renders the commit marker both bolded and plain depending
+            // on surface, so the asterisks are optional.
+            const REVIEWED_COMMIT = /\*{0,2}Reviewed commit:\*{0,2}\s*`([0-9a-f]{7,40})`/i;
             const RE_REQUEST = /@codex review/;
 
             async function evaluate(prNumber) {
@@ -130,22 +133,39 @@ jobs:
                 return match !== null && head.startsWith(match[1]);
               });
 
-              if (!approved && existing) {
-                // The reaction form: Codex reacts +1 on the latest "@codex
-                // review" request instead of commenting. A reaction names no
-                // commit, so it speaks for the current head only if the request
-                // it sits on postdates the head's arrival. The watermark for
-                // "arrival" is this gate's own existing status on the head
-                // (posted by the run that first saw it) -- a server-side
-                // timestamp, unlike commit dates, which the author can
-                // backdate to smuggle unpushed commits under a stale +1.
-                // Codex's own comments quote the trigger phrase in their
-                // boilerplate, so they must not count as requests.
-                const requests = comments.filter((c) => c.user.login !== CODEX && RE_REQUEST.test(c.body || ''));
-                const latest = requests[requests.length - 1];
-                if (latest && new Date(latest.created_at) > new Date(existing.created_at)) {
-                  const reactions = await github.paginate(github.rest.reactions.listForIssueComment, { owner, repo, comment_id: latest.id, per_page: 100 });
-                  approved = reactions.some((r) => r.user.login === CODEX && r.content === '+1');
+              if (!approved) {
+                // The reaction form: Codex reacts +1 instead of commenting --
+                // on the request comment when triggered by "@codex review", or
+                // on the PR itself when auto-triggered by open/ready (no
+                // request comment exists then). A reaction names no commit, so
+                // it speaks for the current head only if it postdates the
+                // head's arrival. The arrival watermark is the earliest
+                // server-side timestamp attached to this SHA: check runs start
+                // seconds after any push -- before this gate's own first
+                // status, so a request posted right after a push is not
+                // wrongly rejected. Commit dates are not usable here: authors
+                // can backdate them to smuggle unpushed commits under a stale
+                // +1.
+                const checkRuns = await github.paginate(github.rest.checks.listForRef, { owner, repo, ref: head, per_page: 100 });
+                const timestamps = checkRuns.map((c) => c.started_at).filter(Boolean);
+                if (existing) timestamps.push(existing.created_at);
+                const arrivedAt = timestamps.length > 0
+                  ? new Date(Math.min(...timestamps.map((t) => new Date(t).getTime())))
+                  : null;
+
+                if (arrivedAt) {
+                  // Codex's own comments quote the trigger phrase in their
+                  // boilerplate, so they must not count as requests.
+                  const requests = comments.filter((c) => c.user.login !== CODEX && RE_REQUEST.test(c.body || ''));
+                  const latest = requests[requests.length - 1];
+                  if (latest && new Date(latest.created_at) > arrivedAt) {
+                    const reactions = await github.paginate(github.rest.reactions.listForIssueComment, { owner, repo, comment_id: latest.id, per_page: 100 });
+                    approved = reactions.some((r) => r.user.login === CODEX && r.content === '+1');
+                  }
+                  if (!approved) {
+                    const prReactions = await github.paginate(github.rest.reactions.listForIssue, { owner, repo, issue_number: prNumber, per_page: 100 });
+                    approved = prReactions.some((r) => r.user.login === CODEX && r.content === '+1' && new Date(r.created_at) > arrivedAt);
+                  }
                 }
               }
 
