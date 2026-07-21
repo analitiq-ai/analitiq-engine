@@ -26,6 +26,7 @@ from src.models.stream import EndpointRef
 from src.state.error_classification import (
     ErrorCode,
     FailureStage,
+    classify_for_metrics,
     read_failure_tag,
     tag_failure,
 )
@@ -1070,8 +1071,6 @@ class TestEngineStreamFailurePropagation:
 
         # The failed stream's exception is surfaced so the runner can classify
         # the partial run instead of reporting success (issue #258).
-        from src.state.error_classification import ErrorCode, classify_for_metrics
-
         dominant = engine.get_dominant_stream_error()
         assert dominant is not None
         code, _, _ = classify_for_metrics(dominant)
