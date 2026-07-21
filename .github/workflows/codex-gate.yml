@@ -15,13 +15,16 @@ name: codex-gate
 # a write token even for fork PRs; it is safe here because the job never checks
 # out or executes PR code -- it only reads PR metadata and posts a status.
 
+# No pull_request_review trigger, ever: that event executes the workflow file
+# from the PR's merge ref, so a PR editing this file could post its own
+# success with the write token and bypass the gate. Every trigger here runs
+# the file from the default branch; verdicts delivered as PR reviews are
+# picked up by the sweep instead.
 on:
   pull_request_target:
     types: [opened, reopened, synchronize, ready_for_review]
   issue_comment:
     types: [created, edited]
-  pull_request_review:
-    types: [submitted, edited]
   schedule:
     - cron: "*/15 * * * *"
   workflow_dispatch:
@@ -42,14 +45,12 @@ jobs:
   # reporter.
   gate:
     runs-on: ubuntu-latest
-    # Comment and review events fire for every author; only Codex's own
-    # comments and reviews can change the verdict, so skip the rest.
+    # Comment events fire for every author; only Codex's own comments can
+    # change the verdict, so skip the rest.
     if: >-
-      (github.event_name != 'issue_comment' ||
-       (github.event.issue.pull_request &&
-        github.event.comment.user.login == 'chatgpt-codex-connector[bot]')) &&
-      (github.event_name != 'pull_request_review' ||
-       github.event.review.user.login == 'chatgpt-codex-connector[bot]')
+      github.event_name != 'issue_comment' ||
+      (github.event.issue.pull_request &&
+       github.event.comment.user.login == 'chatgpt-codex-connector[bot]')
     steps:
       - uses: actions/github-script@v7
         with:
