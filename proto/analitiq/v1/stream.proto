@@ -94,6 +94,21 @@ enum AckStatus {
   // Note: No PARTIAL_SUCCESS - all-or-nothing per batch for simpler semantics
 }
 
+// Machine-readable category of a failed batch write, carried beside
+// failure_summary (which stays the human-readable "what went wrong").
+// The category answers "who owns the fix" so the engine maps it to a
+// customer-facing error code without parsing summary text (issue #351).
+// Engine-owned vocabulary: only CDK base-class / engine-owned handler code
+// sets it. A thick connector that overrides write_batch leaves it
+// UNSPECIFIED and the engine falls back to summary matching - the engine
+// does not believe a connector's self-classification.
+enum FailureCategory {
+  FAILURE_CATEGORY_UNSPECIFIED = 0;    // Nothing declared; engine falls back to summary matching
+  FAILURE_CATEGORY_CONFIG_DEFECT = 1;  // Deterministic, user-fixable configuration defect
+  FAILURE_CATEGORY_WRITE_REJECTED = 2; // Write attempted and failed: constraint, permission, driver error
+  FAILURE_CATEGORY_NOT_READY = 3;      // Nothing attempted: never connected / schema never configured
+}
+
 // Batch acknowledgment from destination to engine
 message BatchAck {
   // Echo back idempotency keys for correlation
@@ -114,6 +129,10 @@ message BatchAck {
   // Engine sends ENTIRE batch to DLQ regardless of this field
   repeated string failed_record_ids = 7;
   string failure_summary = 8;  // Human-readable summary: "constraint violation on column X"
+
+  // Machine-readable failure category (issue #351). Set on failure acks by
+  // CDK base-class / engine-owned handler code; UNSPECIFIED otherwise.
+  FailureCategory failure_category = 9;
 }
 
 // Request wrapper for bidirectional stream (engine -> destination)

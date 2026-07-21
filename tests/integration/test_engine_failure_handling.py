@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pyarrow as pa
 import pytest
 
+from cdk.types import FailureCategory
 from src.engine.engine import StreamingEngine
 from src.engine.exceptions import StreamProcessingError
 from src.grpc.generated.analitiq.v1 import AckStatus
@@ -40,6 +41,7 @@ class MockBatchResult:
     committed_cursor: MagicMock | None
     failed_record_ids: list[str]
     failure_summary: str
+    failure_category: FailureCategory = FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
 
 
 @pytest.fixture
@@ -253,10 +255,11 @@ class TestEngineFatalFailureHandling:
         sample_stream_config: dict[str, Any],
         temp_dir: str,
     ):
-        """A fatal destination ACK whose summary is a deterministic write-config
-        defect (a controlled type-map/dialect/write-config/adbc prefix) must tag
+        """A fatal destination ACK that declares FAILURE_CATEGORY_CONFIG_DEFECT
+        (the deterministic write-config excepts in cdk/sql/generic.py) must tag
         CONFIG_INVALID, not the generic DESTINATION_WRITE_FAILED -- so a
-        user-fixable destination config error is reported as such (issue #264)."""
+        user-fixable destination config error is reported as such (issues
+        #264, #351). The summary prose plays no part in the classification."""
         from src.state.dead_letter_queue import DeadLetterQueue
 
         input_queue = asyncio.Queue()
@@ -271,6 +274,7 @@ class TestEngineFatalFailureHandling:
             committed_cursor=None,
             failed_record_ids=[],
             failure_summary="type-map: no reverse rule for 'geography'",
+            failure_category=FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
         )
         mock_grpc_client.send_batch = AsyncMock(return_value=fatal_result)
 
@@ -615,6 +619,64 @@ class TestEngineFatalFailureHandling:
 
         # No record was sent to the DLQ under 'fail'
         assert await stream_dlq.get_failed_records() == []
+
+    @pytest.mark.asyncio
+    async def test_not_ready_exhaustion_tags_internal_not_write_failed(
+        self,
+        engine: StreamingEngine,
+        mock_grpc_client: AsyncMock,
+        sample_stream_config: dict[str, Any],
+        temp_dir: str,
+    ):
+        """A destination readiness guard (reject_batch) declares NOT_READY:
+        nothing was ever attempted, so exhausting retries must classify
+        INTERNAL -- not DESTINATION_WRITE_FAILED, which claims the destination
+        rejected data it never saw (issue #351). Before the typed category,
+        this case was indistinguishable from a constraint violation."""
+        from src.state.dead_letter_queue import DeadLetterQueue
+
+        input_queue = asyncio.Queue()
+        output_queue = asyncio.Queue()
+        await input_queue.put(pa.RecordBatch.from_pylist([{"id": 1}]))
+        await input_queue.put(None)
+
+        not_ready_result = MockBatchResult(
+            success=False,
+            status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+            records_written=0,
+            committed_cursor=None,
+            failed_record_ids=[],
+            failure_summary="Handler not connected",
+            failure_category=FailureCategory.FAILURE_CATEGORY_NOT_READY,
+        )
+        mock_grpc_client.send_batch = AsyncMock(return_value=not_ready_result)
+
+        stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
+        engine.error_strategy = "fail"
+        engine.retry_delay = 0.01
+
+        stream_metrics = {
+            "records_processed": 0,
+            "records_failed": 0,
+            "batches_processed": 0,
+            "batches_failed": 0,
+        }
+
+        with pytest.raises(StreamProcessingError) as exc_info:
+            await engine._load_stage(
+                input_queue=input_queue,
+                output_queue=output_queue,
+                grpc_client=mock_grpc_client,
+                config=dict(sample_stream_config),
+                stream_dlq=stream_dlq,
+                run_id="test-run-001",
+                stream_metrics=stream_metrics,
+            )
+
+        tag = read_failure_tag(exc_info.value)
+        assert tag is not None
+        assert tag.code is ErrorCode.INTERNAL
+        assert tag.stage is FailureStage.DESTINATION_LOAD
 
     @pytest.mark.asyncio
     async def test_load_stage_retryable_exhaustion_skips_with_skip_strategy(

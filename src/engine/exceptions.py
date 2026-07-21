@@ -1,17 +1,31 @@
 """Custom exceptions for the streaming engine."""
 
+from cdk.types import FailureCategory
+
 
 class StreamProcessingError(Exception):
-    """Exception for stream processing errors with context."""
+    """Exception for stream processing errors with context.
+
+    ``failure_category`` carries the destination's machine-readable failure
+    category from the batch ack into classification (issue #351): the raise
+    site that consumed the ack stamps it here so
+    ``classify_destination_failure`` reads the declared category instead of
+    re-deriving it from the message text. UNSPECIFIED means nothing was
+    declared and classification falls back to text matching.
+    """
 
     def __init__(
         self,
         message: str,
         stream_id: str | None = None,
         original_error: Exception | None = None,
+        failure_category: FailureCategory = (
+            FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+        ),
     ):
         self.stream_id = stream_id
         self.original_error = original_error
+        self.failure_category = failure_category
         super().__init__(message)
 
     def __str__(self) -> str:

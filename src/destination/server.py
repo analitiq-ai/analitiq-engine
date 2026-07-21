@@ -25,6 +25,7 @@ from cdk.sql.exceptions import (
 )
 from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
 from cdk.types import Cursor as CdkCursor
+from cdk.types import FailureCategory as CdkFailureCategory
 from cdk.types import SchemaSpec
 from cdk.types import WriteMode as CdkWriteMode
 from grpc import aio as grpc_aio
@@ -365,6 +366,11 @@ class DestinationServicer(DestinationServiceServicer):
                                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                                 records_written=0,
                                 failure_summary="Schema not configured",
+                                # Nothing was attempted: the batch arrived
+                                # before any schema handshake (issue #351).
+                                failure_category=(
+                                    CdkFailureCategory.FAILURE_CATEGORY_NOT_READY
+                                ),
                             )
                         )
                         continue
@@ -401,6 +407,9 @@ class DestinationServicer(DestinationServiceServicer):
                             ),
                             failed_record_ids=result.failed_record_ids,
                             failure_summary=result.failure_summary,
+                            # CDK IntEnum values mirror the proto enum 1:1,
+                            # so the category crosses without a lookup table.
+                            failure_category=result.failure_category,
                         )
                     )
 

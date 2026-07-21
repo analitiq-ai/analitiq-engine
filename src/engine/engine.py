@@ -436,12 +436,14 @@ class StreamingEngine:
                         )
                         await asyncio.sleep(delay)
                         continue
+                    truncate_failure = StreamProcessingError(
+                        f"Stream {stream_name}: zero-batch truncate failed: "
+                        f"{result.failure_summary}",
+                        failure_category=result.failure_category,
+                    )
                     raise tag_failure(
-                        StreamProcessingError(
-                            f"Stream {stream_name}: zero-batch truncate failed: "
-                            f"{result.failure_summary}"
-                        ),
-                        code=ErrorCode.DESTINATION_WRITE_FAILED,
+                        truncate_failure,
+                        code=classify_destination_failure(truncate_failure),
                         stage=FailureStage.DESTINATION_LOAD,
                     )
 
@@ -912,7 +914,8 @@ class StreamingEngine:
                                     f"failed after {max_retries} retries; "
                                     f"dropping it would append the rest of "
                                     f"the refresh onto the previous run's "
-                                    f"rows: {result.failure_summary}"
+                                    f"rows: {result.failure_summary}",
+                                    failure_category=result.failure_category,
                                 )
                             if error_strategy == "dlq":
                                 await stream_dlq.send_batch(
@@ -924,7 +927,8 @@ class StreamingEngine:
                             elif error_strategy == "fail":
                                 raise StreamProcessingError(
                                     f"Batch {batch_seq} failed after {max_retries} "
-                                    f"retries: {result.failure_summary}"
+                                    f"retries: {result.failure_summary}",
+                                    failure_category=result.failure_category,
                                 )
                             elif error_strategy == "skip":
                                 # Skipped batches are dropped, NOT dead-lettered,
@@ -979,7 +983,9 @@ class StreamingEngine:
 
                         # Raise exception to mark stream as failed
                         raise StreamProcessingError(
-                            f"Batch {batch_seq} fatal failure: {result.failure_summary}"
+                            f"Batch {batch_seq} fatal failure: "
+                            f"{result.failure_summary}",
+                            failure_category=result.failure_category,
                         )
 
                     else:
@@ -1026,10 +1032,10 @@ class StreamingEngine:
             await output_queue.put(None)
             # A load-stage failure is destination-side by construction; tag it so
             # a driver/HTTP code in the cause can never be misread as source auth.
-            # A deterministic destination write-config defect (a type-map/dialect/
-            # write-config/adbc fatal-ack summary) still routes to CONFIG_INVALID
-            # so it stays user-fixable. tag_failure is no-overwrite, so a deeper
-            # tag still wins.
+            # A defect the destination declared on the ack (a failure_category
+            # the raise site stamped onto the exception, #351) still routes to
+            # its own code -- e.g. CONFIG_DEFECT -> CONFIG_INVALID stays
+            # user-fixable. tag_failure is no-overwrite, so a deeper tag wins.
             tag_failure(
                 e,
                 code=classify_destination_failure(e),

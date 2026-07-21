@@ -34,6 +34,28 @@ class AckStatus(IntEnum):
     ACK_STATUS_FATAL_FAILURE = 4  # No commit occurred, do not retry, send to DLQ
 
 
+class FailureCategory(IntEnum):
+    """Machine-readable category of a failed batch write (issue #351).
+
+    Answers "who owns the fix" beside ``failure_summary``'s "what went
+    wrong", so the engine maps a failure to a customer-facing error code
+    without parsing summary text. Integer values mirror the
+    ``FailureCategory`` enum in ``stream.proto`` exactly, so the engine
+    passes a value straight into a protobuf ``BatchAck`` without a lookup
+    table.
+
+    Engine-owned vocabulary: only CDK base-class / engine-owned handler
+    code sets it. A thick connector that overrides ``write_batch`` leaves
+    it UNSPECIFIED and the engine falls back to summary matching — the
+    engine does not believe a connector's self-classification.
+    """
+
+    FAILURE_CATEGORY_UNSPECIFIED = 0  # Nothing declared; engine matches summary text
+    FAILURE_CATEGORY_CONFIG_DEFECT = 1  # Deterministic, user-fixable config defect
+    FAILURE_CATEGORY_WRITE_REJECTED = 2  # Write attempted and failed at the destination
+    FAILURE_CATEGORY_NOT_READY = 3  # Nothing attempted: not connected / not configured
+
+
 class WriteMode(IntEnum):
     """Destination write mode for a stream.
 
@@ -146,6 +168,13 @@ class BatchWriteResult:
     persists the cursor as the stream checkpoint, so a cursor on a failed
     batch would advance the checkpoint past records that were never
     written. ``__post_init__`` rejects the combination at construction.
+
+    ``failure_category`` is the machine-readable channel beside
+    ``failure_summary`` (issue #351): the site that builds a failure result
+    knows the caught exception type, so it declares the category here
+    instead of the engine re-deriving it from summary text seven hops
+    later. Read only on failure results; UNSPECIFIED means the engine
+    falls back to summary matching.
     """
 
     status: AckStatus
@@ -153,6 +182,7 @@ class BatchWriteResult:
     committed_cursor: Cursor | None = None
     failed_record_ids: tuple[str, ...] = ()
     failure_summary: str = ""
+    failure_category: FailureCategory = FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
 
     def __post_init__(self) -> None:
         if self.records_written < 0:

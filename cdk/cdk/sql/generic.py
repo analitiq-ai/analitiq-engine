@@ -55,6 +55,7 @@ from cdk.types import (
     CheckpointStore,
     Cursor,
     EndpointScope,
+    FailureCategory,
     RetrySemantics,
     RetryVerdict,
     SchemaSpec,
@@ -1156,6 +1157,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 failure_summary=str(e) or f"driver timeout ({type(e).__name__})",
+                failure_category=FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED,
             )
         # The bounded SQLAlchemy statement was cancelled (issue #231). A lock
         # or slow write may clear, so stay retryable; carry the reason so it
@@ -1177,6 +1179,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
             records_written=0,
             failure_summary=summary,
+            failure_category=FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED,
         )
 
     async def write_batch(
@@ -1285,6 +1288,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,
                 failure_summary=f"type-map: {e}",
+                failure_category=FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
             )
         except UnsupportedDialectOperationError as e:
             # The dialect lacks the requested operation (e.g. upsert with
@@ -1302,6 +1306,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,
                 failure_summary=f"dialect: {e}",
+                failure_category=FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
             )
         except SchemaConfigurationError as e:
             # The stream is misconfigured for this write (e.g. upsert with
@@ -1319,6 +1324,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,
                 failure_summary=f"write-config: {e}",
+                failure_category=FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
             )
         except AdbcConfigurationError as e:
             # ADBC misconfiguration cannot heal between attempts; bail
@@ -1336,6 +1342,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,
                 failure_summary=f"adbc: {e}",
+                failure_category=FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
             )
         except TimeoutError as e:
             return self._timeout_failure(
@@ -1361,6 +1368,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,
                 failure_summary=str(e),
+                failure_category=FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED,
             )
 
     def _apply_write_in_txn(

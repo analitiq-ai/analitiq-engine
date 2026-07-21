@@ -107,6 +107,13 @@ enum AckStatus {
   ACK_STATUS_FATAL_FAILURE = 4;      // no commit, do not retry, send to DLQ
 }
 
+enum FailureCategory {
+  FAILURE_CATEGORY_UNSPECIFIED = 0;    // nothing declared; engine falls back to summary matching
+  FAILURE_CATEGORY_CONFIG_DEFECT = 1;  // deterministic, user-fixable configuration defect
+  FAILURE_CATEGORY_WRITE_REJECTED = 2; // write attempted and failed: constraint, permission, driver error
+  FAILURE_CATEGORY_NOT_READY = 3;      // nothing attempted: never connected / schema never configured
+}
+
 message BatchAck {
   string run_id = 1; string stream_id = 2; uint64 batch_seq = 3;
   AckStatus status = 4;
@@ -114,10 +121,13 @@ message BatchAck {
   Cursor committed_cursor = 6;        // returned on SUCCESS and ALREADY_COMMITTED
   repeated string failed_record_ids = 7;  // optional, may be incomplete
   string failure_summary = 8;
+  FailureCategory failure_category = 9;   // machine-readable, set on failure acks (issue #351)
 }
 ```
 
 There is no `PARTIAL_SUCCESS` — batches are all-or-nothing (below).
+
+`failure_summary` answers *what went wrong* (human-readable, free text); `failure_category` answers *who owns the fix* (machine-readable), so the engine maps a failed batch to a customer-facing error code without parsing summary text. The vocabulary is engine-owned: only CDK base-class / engine-owned handler code sets a category (the config-defect excepts and write-failure excepts in `cdk/sql/generic.py`, and every pre-flight guard via `reject_batch`). A thick connector that overrides `write_batch` leaves it `UNSPECIFIED` and the engine falls back to matching the summary — the engine does not believe a connector's self-classification, and the value is bounds-checked when read off the wire (an unrecognised integer degrades to `UNSPECIFIED`).
 
 ## Key Design Decisions
 

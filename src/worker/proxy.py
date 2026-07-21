@@ -344,6 +344,9 @@ class WorkerProxyHandler(BaseDestinationHandler):
             committed_cursor=committed,
             failed_record_ids=tuple(result.failed_record_ids),
             failure_summary=result.failure_summary,
+            # Already bounds-checked (and zeroed on success) by the client's
+            # _process_ack on this untrusted hop; forward like the summary.
+            failure_category=result.failure_category,
         )
 
     async def health_check(self) -> bool:

@@ -57,6 +57,8 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 
+from cdk.types import FailureCategory
+
 
 class ErrorCode(str, Enum):
     """Stable, machine-readable, customer-safe pipeline failure category.
@@ -367,12 +369,6 @@ _CONFIG_PHRASES = (
     "transformationerror",
     "configvalidationerror",
     "connectornotregisterederror",
-    # Controlled write_batch fatal-ack summary prefixes (cdk/sql/generic.py):
-    # deterministic destination write-configuration defects.
-    "type-map:",
-    "dialect:",
-    "write-config:",
-    "adbc:",
 )
 
 # Source-system auth failures surface only as driver/HTTP text (this engine has
@@ -578,20 +574,73 @@ def classify_handshake_failure(reason: str | None) -> ErrorCode:
     return ErrorCode.CONFIG_INVALID
 
 
+# The engine-side meaning of each declared destination failure category
+# (issue #351). CONFIG_DEFECT is a deterministic, user-fixable configuration
+# defect; WRITE_REJECTED is a write the destination attempted and failed.
+# NOT_READY means nothing was attempted at all -- the handler was never
+# connected or its schema never configured when the batch arrived. That is an
+# orchestration fault, not a destination rejection and not a user-fixable
+# config defect, so it maps to INTERNAL -- the interim choice from issue #351
+# that avoids adding a member to the published ErrorCode contract (a dedicated
+# DESTINATION_NOT_READY code remains open, coordinated with the control
+# plane's error-code catalog).
+_CATEGORY_TO_CODE: dict[FailureCategory, ErrorCode] = {
+    FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT: ErrorCode.CONFIG_INVALID,
+    FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED: ErrorCode.DESTINATION_WRITE_FAILED,
+    FailureCategory.FAILURE_CATEGORY_NOT_READY: ErrorCode.INTERNAL,
+}
+
+# Totality, enforced at import (same instinct as _CODE_PRIORITY above): every
+# declarable category must map to a code, so a future FailureCategory member
+# cannot silently fall through to text matching.
+_unmapped = (
+    set(FailureCategory)
+    - {FailureCategory.FAILURE_CATEGORY_UNSPECIFIED}
+    - set(_CATEGORY_TO_CODE)
+)
+if _unmapped:
+    raise RuntimeError(
+        f"_CATEGORY_TO_CODE must map every declarable FailureCategory; "
+        f"missing: {sorted(c.name for c in _unmapped)}"
+    )
+
+
+def _read_failure_category(exc: BaseException) -> FailureCategory:
+    """Return the first declared failure category in the exception chain.
+
+    The engine stamps the batch ack's category onto the exception it raises
+    (``StreamProcessingError.failure_category``); this walks the chain so a
+    wrapped or aggregated failure still surfaces it. Matched duck-typed (an
+    attribute holding a :class:`FailureCategory`) so this module does not
+    import engine exception types. UNSPECIFIED means nothing was declared.
+    """
+    for member in _walk_chain(exc):
+        category = getattr(member, "failure_category", None)
+        if (
+            isinstance(category, FailureCategory)
+            and category != FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+        ):
+            return category
+    return FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+
+
 def classify_destination_failure(exc: BaseException) -> ErrorCode:
     """Classify a destination-load failure as config-defect vs write-failure.
 
-    The load stage knows the failure is destination-side, but a deterministic
-    write-configuration defect is user-fixable config, not a generic write
-    failure: the destination forwards it in a fatal-ack ``failure_summary`` with a
-    controlled prefix (``type-map:`` / ``dialect:`` / ``write-config:`` / ``adbc:``
-    from cdk/sql/generic.py) that crosses the gRPC boundary as text, so no typed
-    exception survives to tag it deeper. Check the config rules first -- the same
-    controlled names/prefixes :func:`classify_exception` uses -- and default to
-    DESTINATION_WRITE_FAILED, so a genuine write failure (constraint, permission,
-    transport) still routes there. Only the load boundary calls it, so a
-    source-side cause can never reach it.
+    Structured-first, mirroring :func:`classify_exception`: the destination
+    declares the failure category on the batch ack at the site that caught the
+    exception (``BatchWriteResult.failure_category``, issue #351), and the
+    engine stamps it onto the exception it raises -- so when a category is
+    declared it is used verbatim, no text matching. Only an undeclared
+    (UNSPECIFIED) failure -- a thick connector's own ack, or a failure with no
+    ack at all -- falls back to the name/phrase rules, defaulting to
+    DESTINATION_WRITE_FAILED so a genuine write failure (constraint,
+    permission, transport) still routes there. Only the load boundary calls
+    it, so a source-side cause can never reach it.
     """
+    declared = _CATEGORY_TO_CODE.get(_read_failure_category(exc))
+    if declared is not None:
+        return declared
     names, text = _signature(exc)
     if _is_local_filesystem_error(names):
         # The load stage's try also runs engine-owned local I/O (checkpoint save,

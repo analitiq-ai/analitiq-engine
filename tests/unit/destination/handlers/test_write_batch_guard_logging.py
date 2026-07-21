@@ -21,7 +21,7 @@ import pyarrow as pa
 import pytest
 
 from cdk.sql.generic import GenericSQLConnector, _StreamState
-from cdk.types import AckStatus, Cursor
+from cdk.types import AckStatus, Cursor, FailureCategory
 from src.destination.connectors.api import ApiDestinationHandler
 from src.destination.connectors.file import FileDestinationHandler
 from src.destination.connectors.stream import StreamDestinationHandler
@@ -177,6 +177,10 @@ async def test_guard_logs_and_returns_retryable(
     assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
     assert result.records_written == 0
     assert result.failure_summary
+    # Every pre-flight guard attempted nothing, so every rejection must
+    # declare NOT_READY -- the engine tells it apart from a write the
+    # destination actually rejected without parsing the reason (#351).
+    assert result.failure_category == FailureCategory.FAILURE_CATEGORY_NOT_READY
     # The ack and the log must carry the same reason, so an operator reading
     # either one reaches the same conclusion.
     assert result.failure_summary in _assert_rejection_logged(caplog)

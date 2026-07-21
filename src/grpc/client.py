@@ -15,6 +15,7 @@ from typing import Any
 import pyarrow as pa
 
 import grpc
+from cdk.types import FailureCategory
 from grpc import aio as grpc_aio
 from src.config import settings
 
@@ -89,6 +90,11 @@ class BatchResult:
     # restart the peer (the worker proxy) treat this as retryable; the
     # cross-container engine path keeps its existing fatal handling.
     transport_failure: bool = False
+    # Machine-readable failure category from the ack (issue #351), already
+    # bounds-checked by _process_ack. UNSPECIFIED on success results, on
+    # synthesized transport failures (no verdict was rendered), and when
+    # the sender declared nothing.
+    failure_category: FailureCategory = FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
 
 
 class DestinationGRPCClient:
@@ -914,6 +920,26 @@ class DestinationGRPCClient:
             AckStatus.ACK_STATUS_ALREADY_COMMITTED,
         )
 
+        # Bounds-check the category off the wire: on the worker-proxy hop
+        # the sender is the untrusted connector process, so an unrecognised
+        # integer degrades to UNSPECIFIED (falling back to summary matching)
+        # instead of propagating (issue #351). The category is advisory --
+        # unlike status, a bad value must not abort the stream.
+        try:
+            failure_category = FailureCategory(ack.failure_category)
+        except ValueError:
+            logger.warning(
+                "Unknown failure_category %r on ack for batch %d; "
+                "degrading to UNSPECIFIED",
+                ack.failure_category,
+                ack.batch_seq,
+            )
+            failure_category = FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+        if success:
+            # A category paired with a success status is meaningless; zero it
+            # so the field is only ever read off a failure result.
+            failure_category = FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+
         return BatchResult(
             success=success,
             status=ack.status,
@@ -921,6 +947,7 @@ class DestinationGRPCClient:
             committed_cursor=ack.committed_cursor if ack.committed_cursor else None,
             failed_record_ids=list(ack.failed_record_ids),
             failure_summary=ack.failure_summary,
+            failure_category=failure_category,
         )
 
 
