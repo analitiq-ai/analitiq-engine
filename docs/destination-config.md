@@ -59,7 +59,6 @@ Handler source lives under `src/destination/`:
   - `stream.py` — `StreamDestinationHandler` (stdout).
 - `formatters/` — JSONL / CSV / Parquet serializers.
 - `storage/` — local filesystem backend.
-- `idempotency/` — file `_manifest.json` tracker (the SQL destination dedups on row identity, with no commit-ledger table).
 - `server.py` — gRPC server.
 
 Shared building blocks moved to the CDK at `cdk/cdk/`:
@@ -317,19 +316,19 @@ ADBC-only transports (Snowflake/BigQuery) do not yet do the keyless
 `insert` anti-join — plain `insert` there is at-least-once (a noted
 follow-up); `upsert` remains idempotent.
 
-### File / S3 (`_manifest.json`)
+### File / S3 (content-addressed filenames)
 
-A single `_manifest.json` in the base path records `commits[]` with
-`run_id`, `stream_id`, `batch_seq`, `records_written`, `cursor_bytes`,
-`file_path`, `committed_at`. Replays match by `(run_id, stream_id,
-batch_seq)` and become no-ops.
-
-This positional match is sound for an in-run replay of the same batch,
-but not across a same-run restart: the source resumes from the committed
-cursor while `batch_seq` restarts, so a committed position can re-arrive
-carrying different rows and be skipped as a replay. The file destination
-therefore reports itself as not replay-safe (at-least-once) in the
-schema ack (issue #286).
+Each batch file's name carries the first 16 hex chars of
+SHA-256(serialized bytes) (issue #319), and there is no batch-level
+commit ledger (issue #306). The write itself is the idempotency
+mechanism: a true replay serializes to the same bytes, hashes to the
+same filename, and overwrites the same file — while a same-run restart,
+which re-reads the inclusive cursor boundary and re-batches those rows
+into different content, lands in a new file instead of being skipped as
+a replay (the row-drop class of issue #282) or overwriting committed
+data. Duplicates are possible across a restart, drops are not; the file
+destination reports itself as at-least-once in the schema ack
+(issue #286).
 
 ### API (per-record idempotency key)
 
@@ -382,10 +381,9 @@ the engine logs it at stream start.
 | `cursor` | Opaque token produced by the engine, stored verbatim by the destination |
 | `record_ids` | Content-derived row identities (SHA-256) for DLQ correlation; the `_record_hash` value for a keyless insert |
 
-The SQL destination writes idempotently by row identity and returns
-`ACK_STATUS_SUCCESS` on a replay; the file destination returns
-`ACK_STATUS_ALREADY_COMMITTED` for replayed batches. Full protocol
-semantics are in
+Every destination writes idempotently — the SQL destination by row
+identity, the file destination by content-addressed filename — and
+returns `ACK_STATUS_SUCCESS` on a replay. Full protocol semantics are in
 [`grpc-streaming-architecture.md`](grpc-streaming-architecture.md).
 
 ## Adding a New Destination

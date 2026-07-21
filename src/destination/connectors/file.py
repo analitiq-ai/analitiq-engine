@@ -17,7 +17,6 @@ from cdk.types import AckStatus, Cursor, RetrySemantics, RetryVerdict, SchemaSpe
 
 from ..formatters import get_formatter
 from ..formatters.base import BaseFormatter
-from ..idempotency.manifest import ManifestTracker
 from ..storage import get_storage_backend
 from ..storage.base import BaseStorageBackend
 
@@ -31,7 +30,8 @@ class FileDestinationHandler(BaseDestinationHandler):
     Supports:
     - Multiple storage backends (local, s3)
     - Multiple output formats (jsonl, csv, parquet)
-    - Manifest-based idempotency tracking
+    - Content-addressed filenames (a replayed batch overwrites the same
+      file with the same bytes)
     - Configurable file paths with partitioning
 
     The storage backend follows the runtime's connector kind ("file" or
@@ -48,7 +48,6 @@ class FileDestinationHandler(BaseDestinationHandler):
         self._runtime: ConnectionRuntime | None = None
         self._storage: BaseStorageBackend | None = None
         self._formatter: BaseFormatter | None = None
-        self._manifest: ManifestTracker | None = None
         self._config: dict[str, Any] = {}
         self._connector_type: str = "file"
         self._connected: bool = False
@@ -75,26 +74,25 @@ class FileDestinationHandler(BaseDestinationHandler):
         return True
 
     def retry_semantics(self, stream_id: str) -> RetryVerdict:
-        """File replay safety does not hold across a restart (issue #286).
+        """Report at-least-once: a restart may duplicate boundary rows (#306).
 
-        The manifest dedups by batch position (run_id, stream_id,
-        batch_seq), which is sound for an in-run replay of the same batch
-        but not for a same-run restart: the source resumes from the
-        committed cursor while batch_seq restarts, so a committed position
-        can re-arrive carrying different rows and be skipped as a replay
-        (the row-drop class of issue #282). File overwrites on restart are
-        prevented by the content hash in the filename (issue #319), but
-        manifest dedup by batch position still drops new rows. Until the
-        manifest keys on content (issue #306), the honest claim is that a
-        restart is not replay-safe.
+        Batch files are content-addressed: the filename carries a hash of
+        the serialized bytes (issue #319), so a true replay of the same
+        batch overwrites the same file with the same bytes. A same-run
+        restart, however, re-reads the inclusive watermark boundary and
+        re-batches those rows into different content, which lands in a new
+        file alongside the old one. Duplicates are possible, drops are not
+        — an append-only sink with no per-row dedup key cannot claim
+        exactly-once across a restart.
         """
         _ = stream_id
         return RetryVerdict(
             semantics=RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE,
             reason=(
-                "the manifest dedups by batch position, and a same-run "
-                "restart re-numbers re-batched rows; a committed position "
-                "carrying different rows would be skipped as a replay"
+                "batch files are content-addressed, so a replay overwrites "
+                "the same bytes, but a same-run restart re-reads the "
+                "inclusive cursor boundary and writes those rows into a "
+                "new file"
             ),
         )
 
@@ -131,15 +129,6 @@ class FileDestinationHandler(BaseDestinationHandler):
             # Configure formatter with any format-specific options
             formatter_config = connection_config.get("formatter_config", {})
             self._formatter.configure(formatter_config)
-
-            # Determine base path
-            base_path = connection_config.get("path", "")
-            if self._connector_type == "s3":
-                base_path = connection_config.get("prefix", "")
-
-            # Create manifest tracker for idempotency
-            self._manifest = ManifestTracker(self._storage, base_path)
-            await self._manifest.load()
 
             # Store path template if provided
             self._path_template = connection_config.get("path_template")
@@ -205,13 +194,12 @@ class FileDestinationHandler(BaseDestinationHandler):
                 batch_seq=batch_seq,
             )
 
-        if self._storage is None or self._formatter is None or self._manifest is None:
+        if self._storage is None or self._formatter is None:
             missing = [
                 name
                 for name, component in (
                     ("storage", self._storage),
                     ("formatter", self._formatter),
-                    ("manifest", self._manifest),
                 )
                 if component is None
             ]
@@ -226,30 +214,8 @@ class FileDestinationHandler(BaseDestinationHandler):
         try:
             records = record_batch.to_pylist()
 
-            existing_commit = await self._manifest.check_committed(
-                run_id, stream_id, batch_seq
-            )
-            if existing_commit:
-                logger.info(
-                    f"Batch already committed: run={run_id}, stream={stream_id}, "
-                    f"seq={batch_seq}"
-                )
-                return BatchWriteResult(
-                    status=AckStatus.ACK_STATUS_ALREADY_COMMITTED,
-                    records_written=existing_commit.records_written,
-                    committed_cursor=Cursor(token=existing_commit.cursor_bytes),
-                )
-
             if not records:
-                # Empty batch - still record the commit for idempotency
-                await self._manifest.record_commit(
-                    run_id=run_id,
-                    stream_id=stream_id,
-                    batch_seq=batch_seq,
-                    records_written=0,
-                    cursor_bytes=cursor.token,
-                    file_path="",
-                )
+                # Nothing to write; ack success so the cursor still advances.
                 return BatchWriteResult(
                     status=AckStatus.ACK_STATUS_SUCCESS,
                     records_written=0,
@@ -257,7 +223,10 @@ class FileDestinationHandler(BaseDestinationHandler):
                 )
 
             # Serialize before building path so the filename includes a content
-            # hash — prevents same-batch_seq overwrites on restart (issue #319).
+            # hash: different content at the same batch_seq lands in a new file
+            # (issue #319), while identical content overwrites the same file
+            # with the same bytes — the write itself is the replay dedup, with
+            # no batch-level commit ledger (issue #306).
             data = self._formatter.serialize_batch(records)
 
             if not data:
@@ -295,16 +264,6 @@ class FileDestinationHandler(BaseDestinationHandler):
                 path=file_path,
                 data=data,
                 content_type=self._formatter.content_type,
-            )
-
-            # Record commit in manifest
-            await self._manifest.record_commit(
-                run_id=run_id,
-                stream_id=stream_id,
-                batch_seq=batch_seq,
-                records_written=len(records),
-                cursor_bytes=cursor.token,
-                file_path=written_path,
             )
 
             logger.info(

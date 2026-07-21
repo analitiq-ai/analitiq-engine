@@ -85,7 +85,8 @@ class BaseDestinationHandler(ABC):
     - A retried or replayed batch must not duplicate or drop rows; the
       mechanism is the handler's (a SQL handler dedups on the write mode's
       keys -- MERGE on conflict_keys, or the synthetic _record_hash for a
-      keyless insert; a file handler may use a manifest)
+      keyless insert; a file handler content-addresses each batch file so
+      a replay overwrites the same bytes)
     - A handler that detects a prior commit may return ALREADY_COMMITTED with
       the stored cursor; a sink that writes idempotently returns SUCCESS
     - All writes within a batch must be atomic (all-or-nothing)

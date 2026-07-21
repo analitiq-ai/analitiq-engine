@@ -6,8 +6,8 @@ root cause. These tests pin the errno → status mapping so a regression
 that drops an errno from the fatal set fails CI loudly.
 
 Also covers operations that were previously outside the try/except —
-to_pylist, check_committed, and the empty-batch record_commit — which
-would propagate as bare exceptions instead of a BatchWriteResult.
+to_pylist — which would propagate as bare exceptions instead of a
+BatchWriteResult.
 """
 
 import errno
@@ -39,8 +39,6 @@ async def _drive_file(handler: FileDestinationHandler, raise_exc: BaseException)
     handler._storage = MagicMock()
     handler._storage.build_path = MagicMock(return_value="/tmp/output.jsonl")
     handler._storage.write_file = AsyncMock(side_effect=raise_exc)
-    handler._manifest = MagicMock()
-    handler._manifest.check_committed = AsyncMock(return_value=None)
     handler._path_template = None
     handler._config = {"path": "/tmp", "prefix": "out/"}
     return await handler.write_batch(
@@ -172,16 +170,11 @@ async def test_stream_handler_to_pylist_arrow_invalid_is_fatal():
     assert "ArrowInvalid" in result.failure_summary
 
 
-def _make_file_handler(
-    *,
-    check_committed_result=None,
-    check_committed_exc=None,
-    record_commit_exc=None,
-):
+def _make_file_handler():
     """Return a wired FileDestinationHandler for early write_batch path tests.
 
-    Verifies that to_pylist, check_committed, and the empty-batch
-    record_commit are caught by the try/except rather than propagating.
+    Verifies that to_pylist is caught by the try/except rather than
+    propagating.
     """
     handler = FileDestinationHandler()
     handler._connected = True
@@ -192,12 +185,6 @@ def _make_file_handler(
     handler._storage = MagicMock()
     handler._storage.build_path = MagicMock(return_value="/tmp/out.jsonl")
     handler._storage.write_file = AsyncMock(return_value="/tmp/out.jsonl")
-    handler._manifest = MagicMock()
-    handler._manifest.check_committed = AsyncMock(
-        return_value=check_committed_result,
-        side_effect=check_committed_exc,
-    )
-    handler._manifest.record_commit = AsyncMock(side_effect=record_commit_exc)
     handler._path_template = None
     handler._config = {"path": "/tmp", "prefix": ""}
     return handler
@@ -242,104 +229,6 @@ async def test_to_pylist_memory_error_is_fatal():
     assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
 
 
-@pytest.mark.asyncio
-async def test_check_committed_runtime_error_is_fatal():
-    """RuntimeError from check_committed must not propagate — returns FATAL."""
-    handler = _make_file_handler(check_committed_exc=RuntimeError("manifest corrupted"))
-
-    result = await handler.write_batch(
-        run_id="r",
-        stream_id="s",
-        batch_seq=1,
-        record_batch=_record_batch(),
-        record_ids=["1"],
-        cursor=_cursor(),
-    )
-
-    assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
-    assert "RuntimeError" in result.failure_summary
-
-
-@pytest.mark.asyncio
-async def test_check_committed_fatal_oserror_is_fatal():
-    """Fatal OSError (ENOSPC) from check_committed must not propagate."""
-    handler = _make_file_handler(check_committed_exc=OSError(errno.ENOSPC, "disk full"))
-
-    result = await handler.write_batch(
-        run_id="r",
-        stream_id="s",
-        batch_seq=1,
-        record_batch=_record_batch(),
-        record_ids=["1"],
-        cursor=_cursor(),
-    )
-
-    assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
-    assert "ENOSPC" in result.failure_summary
-
-
-@pytest.mark.asyncio
-async def test_check_committed_eio_is_retryable():
-    """Transient OSError (EIO) from check_committed must not propagate — RETRYABLE."""
-    handler = _make_file_handler(
-        check_committed_exc=OSError(errno.EIO, "storage unreachable")
-    )
-
-    result = await handler.write_batch(
-        run_id="r",
-        stream_id="s",
-        batch_seq=1,
-        record_batch=_record_batch(),
-        record_ids=["1"],
-        cursor=_cursor(),
-    )
-
-    assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
-    assert "EIO" in result.failure_summary
-
-
-@pytest.mark.asyncio
-async def test_empty_batch_record_commit_io_error_is_retryable():
-    """Transient OSError from empty-batch record_commit must not propagate."""
-    handler = _make_file_handler(
-        record_commit_exc=OSError(errno.EIO, "storage unreachable")
-    )
-    empty_batch = pa.RecordBatch.from_pylist([])
-
-    result = await handler.write_batch(
-        run_id="r",
-        stream_id="s",
-        batch_seq=1,
-        record_batch=empty_batch,
-        record_ids=[],
-        cursor=_cursor(),
-    )
-
-    assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
-    assert "EIO" in result.failure_summary
-
-
-@pytest.mark.asyncio
-async def test_empty_batch_record_commit_runtime_error_is_fatal():
-    """RuntimeError from empty-batch record_commit must not propagate — FATAL."""
-    handler = _make_file_handler(
-        record_commit_exc=RuntimeError("manifest write failed")
-    )
-    empty_batch = pa.RecordBatch.from_pylist([])
-
-    result = await handler.write_batch(
-        run_id="r",
-        stream_id="s",
-        batch_seq=1,
-        record_batch=empty_batch,
-        record_ids=[],
-        cursor=_cursor(),
-    )
-
-    assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
-    assert "RuntimeError" in result.failure_summary
-
-
 async def _drive_file_with_context(
     handler: FileDestinationHandler, raise_exc: BaseException
 ):
@@ -352,8 +241,6 @@ async def _drive_file_with_context(
     handler._storage = MagicMock()
     handler._storage.build_path = MagicMock(return_value="/tmp/output.jsonl")
     handler._storage.write_file = AsyncMock(side_effect=raise_exc)
-    handler._manifest = MagicMock()
-    handler._manifest.check_committed = AsyncMock(return_value=None)
     handler._path_template = None
     handler._config = {"path": "/tmp", "prefix": "out/"}
     return await handler.write_batch(

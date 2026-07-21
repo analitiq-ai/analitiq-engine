@@ -69,7 +69,6 @@ def _uninitialized_file() -> FileDestinationHandler:
     handler._connected = True
     handler._storage = None
     handler._formatter = None
-    handler._manifest = None
     return handler
 
 
@@ -188,13 +187,13 @@ async def test_file_uninitialized_guard_names_the_missing_components(
 ):
     """A bare "components not initialized" is useless without naming them (#328)."""
     handler = _uninitialized_file()
-    handler._storage = MagicMock()  # only formatter and manifest are missing
+    handler._storage = MagicMock()  # only the formatter is missing
 
     with caplog.at_level(logging.ERROR):
         result = await _write(handler)
 
     message = _assert_rejection_logged(caplog)
-    assert "formatter" in message and "manifest" in message
+    assert "formatter" in message
     assert "storage" not in result.failure_summary
 
 

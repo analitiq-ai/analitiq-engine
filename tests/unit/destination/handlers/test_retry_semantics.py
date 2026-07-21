@@ -2,9 +2,9 @@
 
 Every destination handler reports, per configured stream, whether a
 same-``RUN_ID`` restart can duplicate writes. The SQL verdict is write
-mode x key x transport aware; file dedups through its manifest; stdout
-has nothing to dedup with. The base default is the only honest claim for
-a handler that declares nothing: at-least-once.
+mode x key x transport aware; file writes content-addressed files;
+stdout has nothing to dedup with. The base default is the only honest
+claim for a handler that declares nothing: at-least-once.
 """
 
 from typing import Any
@@ -61,13 +61,13 @@ class TestBaseDefaultVerdict:
 @pytest.mark.unit
 class TestFileAndStdoutVerdicts:
     def test_file_reports_not_replay_safe(self):
-        """The manifest dedups by batch position; a same-run restart
-        re-numbers re-batched rows, so a committed position carrying
-        different rows would be skipped (issue #282 row-drop class) —
+        """Content-addressed filenames make a true replay overwrite the
+        same bytes, but a same-run restart re-reads the inclusive cursor
+        boundary and writes those rows into a new file (issue #306) —
         the verdict must not claim exactly-once."""
         verdict = FileDestinationHandler().retry_semantics("s1")
         assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE
-        assert "batch position" in verdict.reason
+        assert "content-addressed" in verdict.reason
 
     def test_stdout_reports_at_least_once(self):
         verdict = StreamDestinationHandler().retry_semantics("s1")
