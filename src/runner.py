@@ -238,9 +238,9 @@ class PipelineRunner:
             (
                 pipeline_config,
                 stream_configs,
-                resolved_connections,
-                resolved_endpoints,
-                connectors,
+                _resolved_connections,
+                _resolved_endpoints,
+                _connectors,
             ) = pipeline_config_prep.create_config()
 
             # Translate the resolved contract into the engine config dict. This

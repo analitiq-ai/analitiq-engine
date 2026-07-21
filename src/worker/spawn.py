@@ -59,7 +59,7 @@ def redact(line: str) -> str:
 def _child_limits() -> None:
     """Resource limits applied in the child before exec."""
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    _soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     cap = min(1024, hard if hard != resource.RLIM_INFINITY else 1024)
     resource.setrlimit(resource.RLIMIT_NOFILE, (cap, cap))
     as_mb = settings.worker_rlimit_as_mb()

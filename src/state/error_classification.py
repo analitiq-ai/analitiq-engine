@@ -407,9 +407,14 @@ _RATE_PHRASES = (
 _HTTP_AUTH_STATUS = re.compile(r"(?<![\w/])40[13](?![\w/])")
 _HTTP_RATE_STATUS = re.compile(r"(?<![\w/])429(?![\w/])")
 
+# Matched against every class name in the exception chain's MRO.
+# ``ConnectorConnectionError`` is the source connectors' own class (it does not
+# derive from the builtin ``ConnectionError``), so it has to be named here in
+# its own right for an API connect failure to classify as unreachable.
 _UNREACHABLE_NAMES = frozenset(
     {
         "ConnectionError",
+        "ConnectorConnectionError",
         "ConnectionRefusedError",
         "ConnectionResetError",
         "ConnectionAbortedError",

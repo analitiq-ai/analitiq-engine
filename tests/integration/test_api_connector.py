@@ -10,7 +10,7 @@ from cdk.connection_runtime import ConnectionRuntime
 from cdk.rate_limiter import RateLimiter
 from cdk.secrets.resolvers.memory import InMemorySecretsResolver
 from src.source.connectors.api import APIConnector
-from src.source.connectors.base import ConnectionError
+from src.source.connectors.base import ConnectorConnectionError
 from src.state.state_manager import StateManager
 
 
@@ -124,7 +124,7 @@ class TestConnection:
         """Test connection with invalid configuration."""
         runtime = _make_api_runtime({"invalid": "config"})
 
-        with pytest.raises(ConnectionError, match="API connection failed"):
+        with pytest.raises(ConnectorConnectionError, match="API connection failed"):
             await connector.connect(runtime)
 
     @pytest.mark.asyncio
@@ -132,7 +132,7 @@ class TestConnection:
         """Test connection with missing host."""
         runtime = _make_api_runtime({"parameters": {}})
 
-        with pytest.raises(ConnectionError, match="API connection failed"):
+        with pytest.raises(ConnectorConnectionError, match="API connection failed"):
             await connector.connect(runtime)
 
     @pytest.mark.asyncio

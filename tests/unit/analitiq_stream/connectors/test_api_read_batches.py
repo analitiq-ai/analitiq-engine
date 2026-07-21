@@ -940,7 +940,7 @@ class TestReadBatchesLifecycle:
     async def test_runtime_released_when_connect_fails(self):
         # connect() runs inside read_batches' try, so a materialize failure
         # still reaches disconnect() and releases the acquired ref.
-        from src.source.connectors.base import ConnectionError as ApiConnectionError
+        from src.source.connectors.base import ConnectorConnectionError
 
         runtime = _runtime_with_session(_FakeSession([]))
 
@@ -950,7 +950,7 @@ class TestReadBatchesLifecycle:
         runtime.materialize = _boom  # type: ignore[method-assign]
 
         connector = APIConnector("test")
-        with pytest.raises(ApiConnectionError):
+        with pytest.raises(ConnectorConnectionError):
             await _consume(
                 connector,
                 runtime,

@@ -179,8 +179,14 @@ class ConnectorError(Exception):
     pass
 
 
-class ConnectionError(ConnectorError):
-    """Exception raised when connection fails."""
+class ConnectorConnectionError(ConnectorError):
+    """Exception raised when connection fails.
+
+    Deliberately not named ``ConnectionError``: that shadows the builtin
+    (an ``OSError`` subclass) for every module importing from this package,
+    so an ``except ConnectionError`` there would catch connector failures
+    and miss real socket errors.
+    """
 
     pass
 

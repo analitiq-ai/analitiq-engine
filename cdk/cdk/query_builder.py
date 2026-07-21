@@ -489,9 +489,7 @@ class QueryBuilder:
         }
         sa_dialect = self._sa_dialect
         if sa_dialect.name == "mssql":
-            from sqlalchemy.dialects import mssql as _mssql
-
-            sa_dialect = _mssql.dialect(paramstyle="qmark")
+            sa_dialect = mssql.dialect(paramstyle="qmark")
 
         compiled = query.compile(dialect=sa_dialect, compile_kwargs=compile_kwargs)
 
