@@ -24,6 +24,7 @@ logger = logging.getLogger("src.worker")
 
 
 async def _run_destination(bootstrap: WorkerBootstrap) -> int:
+    """Serve the destination role for the bootstrap's connector."""
     from src.destination.server import DestinationGRPCServer
 
     _, destination_registry = build_worker_registries()

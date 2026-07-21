@@ -25,6 +25,7 @@ from src.runner import (
 
 
 def _database_endpoint_doc(endpoint_id="orders-ep", **extra):
+    """Minimal contract-valid database endpoint document model."""
     return DatabaseEndpointDoc.model_validate(
         {
             "endpoint_id": endpoint_id,
@@ -44,6 +45,7 @@ def _database_endpoint_doc(endpoint_id="orders-ep", **extra):
 
 
 def _api_endpoint_doc(endpoint_id="invoices-ep"):
+    """Minimal contract-valid API endpoint document model."""
     return ApiEndpointDoc.model_validate(
         {
             "endpoint_id": endpoint_id,
@@ -80,6 +82,7 @@ def _make_runtime(connector_type="database"):
 
 
 def _make_source(connector_type="database", stream_source=None, endpoint_document=None):
+    """ResolvedSource over a typed endpoint document and mock runtime."""
     ref = _make_endpoint_ref()
     rt = _make_runtime(connector_type)
     if endpoint_document is None:
@@ -96,6 +99,7 @@ def _make_source(connector_type="database", stream_source=None, endpoint_documen
 
 
 def _make_destination(write=None):
+    """ResolvedDestination over a typed endpoint document."""
     ref = _make_endpoint_ref(
         scope="connection", connection_id="dest", endpoint_id="orders"
     )
@@ -144,7 +148,10 @@ def _make_pipeline(
 
 
 class TestDumpEndpointDocument:
+    """dump_endpoint_document restores the authored JSON shape."""
+
     def test_round_trips_authored_shape(self):  # skipcq: PYL-R0201
+        """The dump restores aliases, omits unset fields, and revalidates."""
         doc = _database_endpoint_doc()
         dumped = dump_endpoint_document(doc)
         # Aliases restored, unset fields omitted, revalidates to the same
@@ -156,6 +163,7 @@ class TestDumpEndpointDocument:
         assert DatabaseEndpointDoc.model_validate(dumped) == doc
 
     def test_api_doc_round_trips(self):  # skipcq: PYL-R0201
+        """An API document round-trips through the dump unchanged."""
         doc = _api_endpoint_doc()
         dumped = dump_endpoint_document(doc)
         assert dumped["operations"]["read"]["request"]["path"] == "/invoices"
@@ -181,6 +189,7 @@ class TestBuildDestinationConfig:
 
 class TestTranslateSourceConfig:
     def test_database_kind_adds_endpoint_and_stream_source(self):
+        """The wire dict carries the dumped contract documents."""
         source = _make_source(connector_type="database")
         stream = _make_stream(connector_type="database")
 
@@ -254,6 +263,7 @@ class TestTranslateSourceConfig:
         assert any("nosql" in r.message for r in caplog.records)
 
     def test_endpoint_ref_is_serialised(self):
+        """The endpoint_ref is serialised to its dict payload."""
         source = _make_source(connector_type="database")
         stream = _make_stream()
 

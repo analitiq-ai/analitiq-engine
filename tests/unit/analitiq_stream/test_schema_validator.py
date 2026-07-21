@@ -91,6 +91,7 @@ class TestValidate:
 
 class TestValidateFile:
     def test_valid_file_parses_and_validates(self, tmp_path: Path) -> None:
+        """A valid file parses into the typed model that dumps back verbatim."""
         doc_path = tmp_path / "conn.json"
         doc_path.write_text(json.dumps(_valid_connection()))
         result = validate_file("connection", doc_path)

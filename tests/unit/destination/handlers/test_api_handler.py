@@ -966,6 +966,7 @@ class TestApiHandlerConfigureSchemaModeDispatch:
     the preloaded API endpoint document, matching the stream's write_mode."""
 
     def _endpoint_doc(self, *, modes=("insert", "upsert")):
+        """Contract-valid doc with one write block per requested mode."""
         return _write_endpoint_doc(
             {
                 mode: ({"batching": {"max_records": 50}} if mode == "upsert" else {})
@@ -1088,6 +1089,7 @@ class TestApiHandlerContractBatching:
     silently run single-record."""
 
     def _doc(self, batching="absent"):
+        """Insert-mode doc with the given batching declaration."""
         overrides: dict[str, Any] = {}
         if batching != "absent":
             overrides["batching"] = batching
@@ -1095,6 +1097,7 @@ class TestApiHandlerContractBatching:
 
     @pytest.fixture
     def handler(self):
+        """Connected handler with a real request resolver wired."""
         h = ApiDestinationHandler()
         h._connected = True
         h._session = MagicMock()
@@ -1203,6 +1206,7 @@ class TestApiHandlerSupportsUpsert:
     hardcoded value. This is what ``GetCapabilities`` advertises."""
 
     def _doc(self, *, modes):
+        """Doc declaring the requested write modes."""
         return _write_endpoint_doc({mode: {} for mode in modes})
 
     @pytest.fixture
@@ -1256,6 +1260,7 @@ class TestApiHandlerSupportsBulkLoad:
     block on a usable write mode, never a hardcoded value."""
 
     def _doc(self, *, batching=None):
+        """Insert-mode doc, optionally declaring batching."""
         overrides: dict[str, Any] = {}
         if batching is not None:
             overrides["batching"] = batching
@@ -1300,6 +1305,7 @@ class TestApiHandlerSupportsBulkLoad:
         assert handler.supports_bulk_load is False
 
     def test_malformed_contract_rejected_at_registration(self, handler):
+        """A malformed document is rejected at the parse point."""
         with pytest.raises(ValueError, match="contract validation"):
             handler.set_stream_endpoints({"s1": {"operations": "write"}})
         assert handler.supports_bulk_load is False
@@ -1977,6 +1983,7 @@ class TestApiHandlerBodySpec:
         return handler
 
     def _doc_with_body(self, body, *, batching=None):
+        """Insert-mode doc carrying the given request body template."""
         overrides: dict[str, Any] = {"request": {"body": body}}
         if batching:
             overrides["batching"] = batching
@@ -2353,6 +2360,7 @@ class TestApiHandlerIdempotencyConfig:
         batching="absent",
         body=None,
     ):
+        """Doc with the given idempotency/batching/body combination."""
         overrides: dict[str, Any] = {}
         if batching != "absent":
             overrides["batching"] = batching
@@ -2450,6 +2458,7 @@ class TestApiHandlerIdempotencyConfig:
         ],
     )
     def test_malformed_block_rejected_at_registration(self, handler, idempotency):
+        """A malformed idempotency block is rejected at the parse point."""
         with pytest.raises(ValueError, match="contract validation"):
             handler.set_stream_endpoints({"s1": self._doc(idempotency=idempotency)})
 
@@ -2623,6 +2632,7 @@ class TestApiHandlerRetrySemantics:
     """Per-stream retry-safety verdict (issue #286)."""
 
     def _doc(self, *, mode="insert", idempotency=None):
+        """Doc for the mode, optionally declaring an idempotency block."""
         overrides: dict[str, Any] = {}
         if idempotency is not None:
             overrides["idempotency"] = idempotency
@@ -2679,6 +2689,7 @@ class TestApiHandlerIdempotencyHeaderCollision:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("name", ["Content-Type", "content-type"])
     async def test_rejects_content_type_as_key_name(self, name):
+        """An engine-owned header name is rejected as the key name."""
         handler = ApiDestinationHandler()
         handler._connected = True
         handler._session = MagicMock()
@@ -2781,6 +2792,7 @@ class TestApiHandlerIdempotencyReservedCollisions:
     with declared record fields (contract-model level)."""
 
     def _doc(self, *, idempotency, input_schema=None):
+        """Insert doc with the idempotency block and optional input schema."""
         overrides: dict[str, Any] = {"idempotency": idempotency}
         if input_schema is not None:
             overrides["input"] = {"schema": input_schema}
@@ -2852,6 +2864,7 @@ class TestApiHandlerIdempotencyReservedCollisions:
 
     @pytest.mark.asyncio
     async def test_accepts_body_key_absent_from_input_schema(self):
+        """A body key absent from the input schema is accepted."""
         handler = self._handler()
         handler.set_stream_endpoints(
             {

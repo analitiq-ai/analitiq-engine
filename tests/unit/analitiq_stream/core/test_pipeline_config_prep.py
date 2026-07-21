@@ -336,6 +336,7 @@ def pipeline_tree(
 
 class TestCreateConfigHappyPath:
     def test_returns_five_tuple_with_expected_shapes(self, pipeline_tree: Path) -> None:
+        """create_config returns the typed five-tuple with resolved shapes."""
         prep = PipelineConfigPrep()
         (
             pipeline_config,
@@ -920,6 +921,7 @@ class TestConnectionScopedEndpoints:
     def test_destination_endpoint_resolves_from_connection_tree(
         self, connection_scoped_tree: Path
     ) -> None:
+        """A connection-scoped ref resolves the private endpoint document."""
         prep = PipelineConfigPrep()
         _, stream_configs, connections, _, _ = prep.create_config()
 

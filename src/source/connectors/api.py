@@ -189,6 +189,7 @@ class APIConnector(BaseConnector):
         partition: dict[str, Any] | None = None,
         batch_size: int = 1000,
     ) -> AsyncIterator[pa.RecordBatch]:
+        """Drive the contract-typed read: validate, page, and yield batches."""
         if partition is None:
             partition = {}
 
@@ -562,6 +563,7 @@ class APIConnector(BaseConnector):
         cursor_field: str | None,
         safety_window_seconds: int | None,
     ) -> None:
+        """Write the stored cursor (minus safety window) into its mapped param."""
         if not cursor_field:
             return
         mappings = replication.cursor_mappings if replication is not None else []

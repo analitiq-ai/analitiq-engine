@@ -474,6 +474,7 @@ class TestAdbcDdlBuilders:
 
     @staticmethod
     def _build_target_ddl(handler, state, mapper):
+        """Assemble the target-table DDL the way _ensure_tables_exist does."""
         from cdk.sql.ddl import build_create_table_sql
 
         return build_create_table_sql(
@@ -487,6 +488,7 @@ class TestAdbcDdlBuilders:
         )
 
     def test_synced_at_appended_when_missing(self):
+        """_synced_at is appended when the contract does not declare it."""
         from cdk.sql.generic import _StreamState
 
         class _TypeMapperStub:
@@ -525,6 +527,7 @@ class TestAdbcDdlBuilders:
         assert '"status" STRING' in ddl
 
     def test_synced_at_not_double_declared(self):
+        """A declared _synced_at column is not declared twice."""
         from cdk.sql.generic import _StreamState
 
         class _TypeMapperStub:

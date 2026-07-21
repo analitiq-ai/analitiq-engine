@@ -304,6 +304,7 @@ class TestSyncRuntimeWiring:
 
     @pytest.mark.asyncio
     async def test_connect_ddl_and_write_through_sync_runtime(self):
+        """connect -> DDL -> write flows through the sync-engine runtime."""
         engine = _sqlite_sync_engine()
         try:
             handler = GenericSQLConnector()

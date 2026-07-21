@@ -24,6 +24,7 @@ class TestWriteConflictKeysWiring:
 
     @pytest.mark.asyncio
     async def test_conflict_keys_consumed_verbatim(self):
+        """Registered conflict keys land verbatim in the stream state."""
         from cdk.sql.generic import GenericSQLConnector
         from cdk.type_map import TypeMapper
         from cdk.type_map.rules import parse_rules
@@ -84,6 +85,7 @@ class TestWriteConflictKeysWiring:
     async def test_absent_write_conflict_keys_yields_empty_no_primary_keys_fallback(
         self,
     ):
+        """No registered entry means an empty conflict target, no PK fallback."""
         from cdk.sql.generic import GenericSQLConnector
         from cdk.type_map import TypeMapper
         from cdk.type_map.rules import parse_rules

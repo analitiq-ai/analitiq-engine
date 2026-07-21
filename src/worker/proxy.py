@@ -50,6 +50,7 @@ class WorkerProxyHandler(BaseDestinationHandler):
     """Forwards the destination handler contract to a connector worker."""
 
     def __init__(self, *, connectors_dir: Path, connections_dir: Path) -> None:
+        """Wire the shell-side proxy with the config directories it forwards."""
         self._connectors_dir = connectors_dir
         self._connections_dir = connections_dir
         self._endpoint_refs: dict[str, Any] = {}
@@ -95,6 +96,7 @@ class WorkerProxyHandler(BaseDestinationHandler):
     def set_stream_conflict_keys(
         self, stream_conflict_keys: Mapping[str, list[str]]
     ) -> None:
+        """Record stream_id -> upsert conflict keys for the worker bootstrap."""
         self._stream_conflict_keys = {
             k: list(v) for k, v in stream_conflict_keys.items()
         }
@@ -104,6 +106,7 @@ class WorkerProxyHandler(BaseDestinationHandler):
     # ------------------------------------------------------------------
 
     async def connect(self, runtime: ConnectionRuntime) -> None:
+        """Spawn the connector worker and open its control channel."""
         self._label = f"dest-worker:{runtime.connector_id}"
         bootstrap = await build_bootstrap(
             runtime,

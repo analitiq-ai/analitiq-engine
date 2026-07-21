@@ -146,6 +146,7 @@ class TestColumnDefStrictness:
     check in ``schema_contract``."""
 
     def test_unnamed_column_raises(self):
+        """A column without a name fails DDL construction loudly."""
         from cdk.sql.generic import _StreamState
 
         handler = GenericSQLConnector()
@@ -612,6 +613,7 @@ class TestDDLLockSerialization:
 
     @pytest.mark.asyncio
     async def test_ddl_lock_serializes_concurrent_table_creation(self, monkeypatch):
+        """The DDL lock serializes concurrent table creation."""
         import asyncio
 
         from cdk.sql import generic as generic_module
@@ -662,6 +664,7 @@ class TestDDLLockSerialization:
         type_mapper = _mapper("pg")
 
         async def _drive(stream_id: str):
+            """Configure one stream end-to-end against the shared handler."""
             state = _StreamState(
                 schema_name="public",
                 table_name=f"t_{stream_id}",

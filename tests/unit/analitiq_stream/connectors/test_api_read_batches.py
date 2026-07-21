@@ -463,6 +463,7 @@ class TestReadBatchesRecordsRefShapes:
         # The ref points at a field the response schema does not declare:
         # the contract model's own cross-field validation rejects the
         # document at the connector's parse point, before any HTTP request.
+        """A records.ref naming an undeclared field fails at the parse point."""
         session = _FakeSession([])
         runtime = _runtime_with_session(session)
         connector = APIConnector("test")
@@ -586,6 +587,7 @@ class TestReadBatchesCursorPagination:
     @pytest.mark.asyncio
     async def test_cursor_pagination_follows_next_cursor_until_absent(self):
         # First response carries next_cursor; second omits it -> loop stops.
+        """The cursor loop follows the next_cursor response field until absent."""
         session = _FakeSession(
             [
                 _FakeResponse(
@@ -635,8 +637,11 @@ class TestReadBatchesCursorPagination:
 
 
 class TestReadBatchesKeysetPagination:
+    """Contract-declared strategies this read path does not implement."""
+
     @pytest.mark.asyncio
     async def test_contract_valid_keyset_raises_unsupported(self):
+        """A contract-valid keyset document fails loud before any request."""
         # The keyset strategy is declared by the contract but not
         # implemented by this read path yet (#346): a contract-valid
         # keyset document fails loud before any HTTP request.
@@ -667,6 +672,7 @@ class TestReadBatchesKeysetPagination:
 
     @pytest.mark.asyncio
     async def test_contract_valid_link_raises_unsupported(self):
+        """A contract-valid link document fails loud before any request."""
         # Same for the link strategy: declared by the contract, not
         # implemented yet (#346).
         session = _FakeSession([])
@@ -702,6 +708,7 @@ class TestReadBatchesKeysetPagination:
 class TestReadBatchesIncrementalReplication:
     @pytest.mark.asyncio
     async def test_incremental_cursor_flows_into_params_with_safety_window(self):
+        """The stored cursor minus the safety window rides the mapped param."""
         session = _FakeSession(
             [
                 _FakeResponse(
@@ -756,6 +763,7 @@ class TestReadBatchesIncrementalReplication:
 
     @pytest.mark.asyncio
     async def test_first_run_with_no_prior_cursor_skips_filter(self):
+        """With no prior cursor the first run sends no incremental filter."""
         session = _FakeSession(
             [
                 _FakeResponse(
@@ -969,6 +977,7 @@ class TestReadBatchesParamDefaults:
     async def test_function_form_default_resolves(self):
         # The pre-#166 lightweight resolver only knew literal/ref/template;
         # a function-form default fell through as the raw expression dict.
+        """A function-form param default resolves through the expression grammar."""
         import base64
 
         session = _FakeSession(
@@ -1006,6 +1015,7 @@ class TestReadBatchesParamDefaults:
     async def test_unresolved_default_omits_param(self):
         # Contract rule 7: a default that cannot resolve omits the
         # parameter instead of sending the raw expression structure.
+        """A default that cannot resolve omits the param from the request."""
         session = _FakeSession(
             [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
         )
@@ -1037,6 +1047,7 @@ class TestReadBatchesParamDefaults:
     async def test_runtime_batch_size_ref_resolves_to_effective_page_size(self):
         # ``runtime.batch_size`` is the effective page size driving the
         # pagination loops — the ``batch_size`` argument, not a config key.
+        """A runtime.batch_size ref resolves to the effective page size."""
         session = _FakeSession(
             [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
         )
@@ -1068,6 +1079,7 @@ class TestReadBatchesParamDefaults:
     async def test_template_default_with_missing_placeholder_is_kept_partial(self):
         # Plain template defaults resolve leniently: the missing placeholder
         # renders empty and the partially-resolved param still goes out.
+        """A template default with a missing placeholder resolves partially."""
         session = _FakeSession(
             [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
         )
@@ -1112,6 +1124,7 @@ class TestReadBatchesRequestBody:
         # POST-read endpoints declare ``request.body``; expression nodes
         # inside it resolve against the connection scopes, unresolved
         # fields are omitted, and the result rides as the JSON body.
+        """A declared POST-read body resolves and rides as the JSON body."""
         session = _FakeSession(
             [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
         )
@@ -1169,6 +1182,7 @@ class TestReadBatchesRequestBody:
     async def test_body_is_sent_on_every_page(self):
         # Pagination loops must carry the body on each page request, not
         # just the first.
+        """Pagination re-sends the declared body on every page request."""
         session = _FakeSession(
             [
                 _FakeResponse(
@@ -1209,6 +1223,7 @@ class TestReadBatchesRequestBody:
         # Bodies may mix literals with {"from_param": ...} per the contract;
         # a param declared ``in: body`` lands in the body via its binding
         # and stays out of the query string.
+        """An in-body param binds via from_param and stays out of the query."""
         session = _FakeSession(
             [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
         )
@@ -1254,6 +1269,7 @@ class TestReadBatchesRequestBody:
         # A from_param naming a param with no resolved value (declared but
         # no default) binds None, which the expression pass omits — never
         # the raw binding dict.
+        """A from_param over an unresolved param drops the body field."""
         session = _FakeSession(
             [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
         )
@@ -1283,6 +1299,7 @@ class TestReadBatchesRequestBody:
     async def test_replication_param_binds_into_body(self):
         # Incremental POST-search endpoints carry the cursor filter in the
         # body: the replication-derived param value must reach from_param.
+        """The replication-derived param value binds into the request body."""
         session = _FakeSession(
             [
                 _FakeResponse(
@@ -1345,6 +1362,7 @@ class TestReadBatchesRequestBody:
         # Pagination params declared ``in: body`` ride inside the body via
         # from_param — rebuilt per page so the offset actually advances —
         # and never appear in the query string.
+        """Body-placed pagination params advance per page and skip the query."""
         session = _FakeSession(
             [
                 _FakeResponse(

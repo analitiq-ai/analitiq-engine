@@ -200,6 +200,7 @@ class PipelineConfigPrep:
     """Loads, validates, and assembles a pipeline's runtime configuration."""
 
     def __init__(self) -> None:
+        """Resolve project paths and the PIPELINE_ID this run executes."""
         self._paths = self._discover_paths()
 
         self.pipeline_id_input = os.getenv("PIPELINE_ID", "")
@@ -505,6 +506,7 @@ class PipelineConfigPrep:
     # ------------------------------------------------------------------
 
     def _resolve_endpoint(self, endpoint_ref: Any) -> EndpointDocument:
+        """Resolve one endpoint reference to its typed contract document."""
         ref = EndpointRef.from_dict(endpoint_ref)
         if ref in self._resolved_endpoints:
             return self._resolved_endpoints[ref]
