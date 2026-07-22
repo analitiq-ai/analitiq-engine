@@ -66,6 +66,9 @@ class TableAddress:
     dialect's catalog capability — so DDL, DML, ingest kwargs, query
     building, and logs all work from the same components and none can
     diverge. Empty string means "absent" (no catalog / no schema).
+    Construct directly only with already-normalized components (tests on
+    the identity-normalizing base, engine-generated names via
+    ``dataclasses.replace``); everything else goes through the factory.
 
     Frozen so an address can live on shared per-stream state and cross
     worker-thread boundaries without defensive copying.
@@ -74,6 +77,21 @@ class TableAddress:
     table: str
     schema: str = ""
     catalog: str = ""
+
+    def __post_init__(self) -> None:
+        """Reject the one ill-formed shape no dialect can render safely.
+
+        Catalog-implies-schema is dialect-independent, so it lives on the
+        type itself: a two-part ``catalog.table`` would be misread as
+        ``schema.table`` by every SQL sink. Runs on direct construction
+        and ``dataclasses.replace`` alike, so no bypass of the factory can
+        produce the shape.
+        """
+        if self.catalog and not self.schema:
+            raise CatalogAddressingError(
+                f"catalog {self.catalog!r} requires an explicit schema; a "
+                f"two-part catalog.table address has no portable meaning"
+            )
 
     def __str__(self) -> str:
         """Dotted display form for logs and error messages."""
@@ -169,18 +187,18 @@ class SqlDialect:
         The one entry point for table-addressing intent: normalization
         happens here (once), and a catalog the dialect cannot address
         fails loud here — before any SQL is composed — instead of
-        compiling into a statement the system would misread.
+        compiling into a statement the system would misread. The
+        catalog-implies-schema rule is dialect-independent and enforced by
+        :class:`TableAddress` itself. Normalization runs before the
+        capability gate so both entry doors (here and the discovery
+        queries) report the same catalog spelling.
         """
+        catalog = self.normalize_ident(catalog) if catalog else ""
         self._check_catalog(catalog)
-        if catalog and not schema:
-            raise CatalogAddressingError(
-                f"catalog {catalog!r} requires an explicit schema; a "
-                f"two-part catalog.table address has no portable meaning"
-            )
         return TableAddress(
             table=self.normalize_ident(table),
             schema=self.normalize_ident(schema) if schema else "",
-            catalog=self.normalize_ident(catalog) if catalog else "",
+            catalog=catalog,
         )
 
     def quote_table(self, address: TableAddress) -> str:

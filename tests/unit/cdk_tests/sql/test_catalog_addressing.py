@@ -136,17 +136,126 @@ class TestConfigureSchemaGate:
         assert '"proj"."ds"."events"' in create_table
 
 
+class TestConfigureSchemaAddress:
+    @pytest.mark.asyncio
+    async def test_sqlalchemy_schema_fallback_lands_in_the_address(self):
+        # A catalog-free SA stream with no declared schema resolves the
+        # explicit "public" fallback into the stored address — not an
+        # unqualified name the connection's search path would resolve.
+        handler = _handler(adbc_only=False)
+        doc = {k: v for k, v in ENDPOINT_DOC.items()}
+        doc["database_object"] = {"name": "events"}
+        handler.set_stream_endpoints({STREAM: doc})
+        with patch.object(handler, "_ensure_tables_exist", new=AsyncMock()):
+            assert await handler.configure_schema(_schema_spec()) is True
+        assert handler._streams[STREAM].address == TableAddress(
+            table="events", schema="public"
+        )
+
+
+def _checkpoint() -> AsyncMock:
+    cp = AsyncMock()
+    cp.get_cursor = AsyncMock(return_value=None)
+    cp.save_cursor = AsyncMock()
+    return cp
+
+
+async def _drain(connector, runtime, config, checkpoint):
+    out = []
+    async for batch in connector.read_batches(
+        runtime, config, checkpoint=checkpoint, stream_name="s", batch_size=2
+    ):
+        out.append(batch)
+    return out
+
+
+class _FakeRuntime:
+    def __init__(self, *, is_adbc: bool, engine=None):
+        self.is_adbc = is_adbc
+        self.is_sync_sqlalchemy = False
+        self.driver = "postgresql"
+        self.engine = engine
+        self.close = AsyncMock()
+
+
 class TestReadPathGate:
     @pytest.mark.asyncio
     async def test_catalog_on_unsupporting_dialect_fails_before_extraction(self):
         connector = GenericSQLConnector()
         config = {"endpoint_document": ENDPOINT_DOC, "stream_source": {}}
-        checkpoint = AsyncMock()
         with pytest.raises(ReadError, match="default catalog"):
-            async for _ in connector.read_batches(
-                MagicMock(), config, checkpoint=checkpoint, stream_name="s"
-            ):
-                pass  # pragma: no cover - the gate fires before any batch
+            await _drain(connector, MagicMock(), config, _checkpoint())
+
+
+class TestReadPathCatalog:
+    """The read path must emit the catalog it was given — on both
+    transports. A dropped ``catalog_name`` silently reads the session
+    catalog: the exact silent-drop class this PR closes (#330)."""
+
+    def _config(self):
+        return {
+            "endpoint_document": ENDPOINT_DOC,
+            "stream_source": {},
+        }
+
+    @pytest.mark.asyncio
+    async def test_sqlalchemy_read_compiles_catalog_qualified_from(self):
+        runtime = _FakeRuntime(is_adbc=False, engine=object())
+        executed: list[str] = []
+
+        class _RecordingConn:
+            def exec_driver_sql(self, sql, params=None):
+                executed.append(sql)
+                return []
+
+            async def run_sync(self, fn, *args):
+                return fn(self, *args)
+
+        class _AcquireCM:
+            async def __aenter__(self):
+                return _RecordingConn()
+
+            async def __aexit__(self, *exc):
+                return False
+
+        connector = _CatalogConnector()
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            patch("cdk.sql.generic.acquire_connection", return_value=_AcquireCM()),
+            patch("cdk.sql.generic.SchemaContract") as sc,
+        ):
+            sc.return_value.from_pylist.side_effect = lambda rows: rows
+            await _drain(connector, runtime, self._config(), _checkpoint())
+
+        assert "FROM proj.ds.events" in executed[0]
+
+    @pytest.mark.asyncio
+    async def test_adbc_read_compiles_catalog_qualified_from(self):
+        runtime = _FakeRuntime(is_adbc=True)
+        calls: list[str] = []
+
+        class _Reader:
+            async def fetch_page(self, sql, params=()):
+                calls.append(sql)
+                return []
+
+        class _CM:
+            async def __aenter__(self):
+                return _Reader()
+
+            async def __aexit__(self, *exc):
+                return False
+
+        connector = _CatalogConnector()
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            patch("cdk.sql.generic.open_adbc_reader", return_value=_CM()),
+            patch("cdk.sql.generic.SchemaContract") as sc,
+        ):
+            sc.return_value.cast_arrow_batch.side_effect = lambda b: b
+            await _drain(connector, runtime, self._config(), _checkpoint())
+
+        assert 'FROM "proj"."ds"."events"' in calls[0]
 
 
 class _CapturingCursor:

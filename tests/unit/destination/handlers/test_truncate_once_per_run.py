@@ -813,6 +813,9 @@ class TestZeroBatchTruncate:
             cursor=MagicMock(),
         )
         assert r.success
-        handler._adbc_truncate_sync.assert_called_once()
+        # The stream's own address reaches the truncate — not a rebuilt one.
+        handler._adbc_truncate_sync.assert_called_once_with(
+            handler._streams["s1"].address
+        )
         handler._truncate_then_ingest_sync.assert_not_called()
         handler._adbc_only_ingest_sync.assert_not_called()

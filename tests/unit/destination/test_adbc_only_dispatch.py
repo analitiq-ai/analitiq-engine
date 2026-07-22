@@ -319,7 +319,7 @@ class TestAdbcIngestSchemaNormalization:
         class _FakeCursor:
             # ``db_schema_name`` is an optional kwarg on the real ADBC cursor
             # (default None); the empty-schema path omits it entirely
-            # (adbc_ingest_schema_kwargs returns {}), so it must default here.
+            # (adbc_ingest_kwargs returns {}), so it must default here.
             def adbc_ingest(self, table, batch, mode, db_schema_name=None):
                 captured["table"] = table
                 captured["mode"] = mode
@@ -921,6 +921,59 @@ class TestMergeIngestInsertOnly:
             )
         warnings = [r for r in caplog.records if "no non-key columns" in r.message]
         assert warnings
+
+
+class TestMergeIngestStageNameOnFoldingDialect:
+    """The stage address is derived with ``dataclasses.replace`` — the
+    engine-generated name is used verbatim, never re-normalized — so the
+    quoted stage DDL and the raw ``adbc_ingest`` name stay the same string
+    even on a folding dialect. A "consistency" edit that re-normalizes
+    inside ``quote_table`` would fold the DDL name but not the ingest
+    name, and every stage ingest would target a nonexistent table."""
+
+    def test_stage_ddl_and_ingest_share_the_exact_name(self):
+        executed: list[str] = []
+        ingests: list[str] = []
+
+        class _FakeCursor:
+            def execute(self, sql, *args):
+                executed.append(sql)
+
+            def adbc_ingest(self, table, batch, mode, **kwargs):
+                ingests.append(table)
+
+            def close(self):
+                pass
+
+        class _FakeConn:
+            def cursor(self):
+                return _FakeCursor()
+
+            def commit(self):
+                pass
+
+        h = _FixtureConnector()  # folds identifiers upper-case
+        h._adbc_only = True
+        h._adbc_conn = _FakeConn()
+
+        address = h.dialect.table_address("orders", schema="public")
+        assert address.table == "ORDERS"  # target folded at construction
+        h._merge_ingest_sync(
+            pa.RecordBatch.from_pydict({"id": [1], "v": ["a"]}),
+            address,
+            ["id", "v"],
+            ["id"],
+            "btok",
+        )
+
+        # The engine-generated prefix stays verbatim; only the embedded
+        # target component carries the fold it got at address time.
+        assert ingests == ["_analitiq_stage_ORDERS_btok"]
+        quoted_stage = '"_analitiq_stage_ORDERS_btok"'
+        for stmt in ("DROP TABLE IF EXISTS", "CREATE TABLE", "MERGE INTO"):
+            assert any(
+                quoted_stage in s for s in executed if s.startswith(stmt)
+            ), f"stage name missing from {stmt}"
 
 
 class TestWriteBatchAdbcOnlyKeylessInsert:
