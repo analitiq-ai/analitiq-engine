@@ -654,6 +654,276 @@ class TestReadBatchesPagePagination:
 
 
 # ---------------------------------------------------------------------------
+# Effective page size — limit.default / limit.max (#364)
+# ---------------------------------------------------------------------------
+
+# The sevdesk shape: the authored default wires the engine's batch size in
+# by reference, and the provider caps the page size at ``max``.
+_CLAMPED_LIMIT = {
+    "param": "limit",
+    "default": {"ref": "runtime.batch_size"},
+    "max": 2,
+}
+
+
+class TestReadBatchesEffectivePageSize:
+    """The declared ``limit`` block sets the effective page size.
+
+    An authored ``limit.default`` expression declares the page size
+    (``runtime.batch_size`` in scope); ``limit.max`` clamps it. The
+    effective size is what rides the wire, what the offset step advances
+    by, and what the short-page stops compare against — raw ``batch_size``
+    appears nowhere once a smaller effective size is declared.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "pagination, bodies",
+        [
+            pytest.param(
+                {
+                    "type": "offset",
+                    "offset": {"param": "offset", "initial": 0},
+                    "limit": _CLAMPED_LIMIT,
+                },
+                [{"records": [{"id": 1, "name": "a"}]}],
+                id="offset",
+            ),
+            pytest.param(
+                {
+                    "type": "page",
+                    "page": {"param": "page", "initial": 1},
+                    "limit": _CLAMPED_LIMIT,
+                },
+                [{"records": [{"id": 1, "name": "a"}]}],
+                id="page",
+            ),
+            pytest.param(
+                {
+                    "type": "cursor",
+                    "cursor": {
+                        "param": "page_token",
+                        "next_cursor": {"ref": "response.body.next_cursor"},
+                    },
+                    "limit": _CLAMPED_LIMIT,
+                },
+                [{"records": [{"id": 1, "name": "a"}]}],
+                id="cursor",
+            ),
+            pytest.param(
+                {
+                    "type": "keyset",
+                    "keyset": {"param": "after_id", "order_by_field": "id"},
+                    "limit": _CLAMPED_LIMIT,
+                },
+                [{"records": [{"id": 1, "name": "a"}]}, {"records": []}],
+                id="keyset",
+            ),
+        ],
+    )
+    async def test_limit_max_clamps_engine_batch_size(self, pagination, bodies):
+        """batch_size above the declared max sends the max on every request."""
+        session = _FakeSession([_FakeResponse(status=200, body=b) for b in bodies])
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(pagination=pagination)
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=5,
+        )
+
+        assert session.calls, "expected at least one request"
+        assert [c[2]["limit"] for c in session.calls] == [2] * len(session.calls)
+
+    @pytest.mark.asyncio
+    async def test_offset_short_page_and_step_use_effective_size(self):
+        """A page full at the clamped size continues the loop and steps the
+        offset by the effective size — comparing against raw batch_size
+        would call it short and silently truncate the read."""
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]},
+                ),
+                _FakeResponse(status=200, body={"records": [{"id": 3, "name": "c"}]}),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "offset",
+                "offset": {"param": "offset", "initial": 0},
+                "limit": _CLAMPED_LIMIT,
+            },
+        )
+        batches = await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=5,
+        )
+
+        assert [b.num_rows for b in batches] == [2, 1]
+        assert [c[2].get("offset") for c in session.calls] == [0, 2]
+        assert [c[2].get("limit") for c in session.calls] == [2, 2]
+
+    @pytest.mark.asyncio
+    async def test_page_short_page_stop_uses_effective_size(self):
+        """The page loop's short-page stop compares against the clamped
+        size, so a full clamped page continues to the next page number."""
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]},
+                ),
+                _FakeResponse(status=200, body={"records": [{"id": 3, "name": "c"}]}),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "page",
+                "page": {"param": "page", "initial": 1},
+                "limit": _CLAMPED_LIMIT,
+            },
+        )
+        batches = await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=5,
+        )
+
+        assert [b.num_rows for b in batches] == [2, 1]
+        assert [c[2].get("page") for c in session.calls] == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_authored_literal_default_overrides_engine_batch_size(self):
+        """A literal ``limit.default`` is the author's page size; the
+        engine's batch_size no longer wins over the declared expression."""
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={
+                        "records": [
+                            {"id": 1, "name": "a"},
+                            {"id": 2, "name": "b"},
+                            {"id": 3, "name": "c"},
+                        ]
+                    },
+                ),
+                _FakeResponse(status=200, body={"records": [{"id": 4, "name": "d"}]}),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "offset",
+                "offset": {"param": "offset", "initial": 0},
+                "limit": {"param": "limit", "default": 3},
+            },
+        )
+        batches = await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        assert [b.num_rows for b in batches] == [3, 1]
+        assert [c[2].get("limit") for c in session.calls] == [3, 3]
+        assert [c[2].get("offset") for c in session.calls] == [0, 3]
+
+    @pytest.mark.asyncio
+    async def test_unresolved_default_falls_back_to_batch_size(self):
+        """A default whose data is missing resolves to nothing (the
+        resolver warns); the engine's batch_size applies instead."""
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "offset",
+                "offset": {"param": "offset", "initial": 0},
+                "limit": {
+                    "param": "limit",
+                    "default": {"ref": "connection.parameters.missing_page_size"},
+                },
+            },
+        )
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=2,
+        )
+
+        assert session.calls[0][2]["limit"] == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "default, match",
+        [
+            pytest.param("not-a-size", "must be an integer", id="non-numeric"),
+            pytest.param(0, "must be positive", id="zero"),
+            pytest.param(-3, "must be positive", id="negative"),
+        ],
+    )
+    async def test_invalid_default_raises_before_any_request(self, default, match):
+        """A default that resolves to a non-positive or non-numeric page
+        size is an authoring defect and fails before any request."""
+        session = _FakeSession([])
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "offset",
+                "offset": {"param": "offset", "initial": 0},
+                "limit": {"param": "limit", "default": default},
+            },
+        )
+        with pytest.raises(ReadError, match=match):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=2,
+            )
+        assert session.calls == []
+
+
+# ---------------------------------------------------------------------------
 # Cursor pagination
 # ---------------------------------------------------------------------------
 

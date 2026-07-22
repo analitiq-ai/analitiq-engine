@@ -48,6 +48,7 @@ from analitiq.contracts.endpoints import (
     LinkPagination,
     OffsetPagination,
     PagePagination,
+    PageSize,
     Pagination,
     Predicate,
     ReadOperation,
@@ -244,7 +245,8 @@ class APIConnector(BaseConnector):
         # declared param defaults and the optional request body. Expression
         # nodes that do not resolve are omitted (with a warning) instead of
         # being serialized verbatim onto the wire. ``runtime.batch_size`` is
-        # the effective page size driving the pagination loops.
+        # the engine's requested page size; each strategy's declared
+        # ``limit`` block may replace or clamp it (``_effective_page_size``).
         resolver = self._runtime.request_resolver(
             runtime_values={"batch_size": batch_size}
         )
@@ -686,11 +688,13 @@ class APIConnector(BaseConnector):
 
     @staticmethod
     def _positive_step(value: Any, *, context: str) -> int:
-        """Parse an authored ``increment_by`` into a positive int step.
+        """Parse an authored pagination value into a positive int.
 
-        A step of zero or less can never advance its loop — the same
-        request would repeat unbounded — and a non-numeric one is an
-        authoring defect; both fail deterministically before any request.
+        Used for ``increment_by`` steps and the resolved ``limit.default``
+        page size. A step or page size of zero or less can never advance
+        its loop — the same request would repeat unbounded — and a
+        non-numeric one is an authoring defect; both fail
+        deterministically before any request.
         """
         try:
             step = int(value)
@@ -701,6 +705,34 @@ class APIConnector(BaseConnector):
         if step <= 0:
             raise ReadError(f"pagination {context} must be positive, got {step}")
         return step
+
+    def _effective_page_size(
+        self, limit: PageSize | None, batch_size: int, resolver: Resolver
+    ) -> int:
+        """Resolve the page size a paginated read requests and advances by.
+
+        Per the contract's ``PageSize`` block, an authored ``limit.default``
+        value expression declares the page size (``runtime.batch_size`` is
+        in scope, so connectors wire the engine's batch size in by
+        reference — sevdesk does exactly this); without one, the engine's
+        ``batch_size`` applies. ``limit.max`` is the provider's cap and
+        clamps the result either way, so the engine never asks for more
+        than the provider declares it can serve.
+
+        The default resolves under the per-request policy: missing data
+        falls back to the engine's ``batch_size`` (the resolver already
+        logged the warning), while authoring errors raise. A resolved
+        value that is not a positive integer is an authoring defect and
+        fails loud before any request.
+        """
+        size = batch_size
+        if limit is not None and limit.default is not None:
+            resolved = resolver.resolve_for_request(limit.default)
+            if resolved is not None:
+                size = self._positive_step(resolved, context="limit.default")
+        if limit is not None and limit.max is not None:
+            size = min(size, limit.max)
+        return size
 
     # One loop per pagination strategy; the pre-#346 version carried the same
     # branching and is a tolerated occurrence on the default branch.
@@ -724,10 +756,18 @@ class APIConnector(BaseConnector):
         ``resolver`` gains the page's body as its ``response`` scope for the
         per-page expressions (``stop_when``, ``next_cursor``, ``next_url``).
 
+        The strategy's declared ``limit`` block sets the *effective* page
+        size via :meth:`_effective_page_size` (authored ``default``
+        expression, clamped by the provider's ``max``); it is what the
+        request carries, what the offset step defaults to, and what the
+        short-page stops compare against — comparing against a raw
+        ``batch_size`` the provider clamps below would make every page
+        look short and silently truncate the read.
+
         Every strategy stops when its declared ``stop_when`` predicate holds
         for the page's response. An empty page always stops (there is nothing
-        left to yield), and the count-driven strategies (offset, page, keyset)
-        also stop on a short page, which no non-empty page can follow. Each
+        left to yield), and the count-driven strategies (offset, page) also
+        stop on a short page, which no non-empty page can follow. Each
         page's continuation — the stop decision and the value it advances
         on — is computed BEFORE the page is yielded, so a page that cannot
         be followed correctly fails before the engine can commit it.
@@ -761,20 +801,23 @@ class APIConnector(BaseConnector):
                 yield records
             return
 
+        page_size = self._effective_page_size(pagination.limit, batch_size, resolver)
         if pagination.limit is not None and pagination.limit.param:
-            base_params[pagination.limit.param] = batch_size
+            base_params[pagination.limit.param] = page_size
 
         if isinstance(pagination, OffsetPagination):
             offset_param = pagination.offset.param
             offset = int(pagination.offset.initial)
             # An authored ``increment_by`` fixes the step; otherwise the
-            # offset advances by the page size actually requested.
+            # offset advances by the page size actually requested (the
+            # contract: increment_by defaults to the resolved effective
+            # limit).
             offset_step = (
                 self._positive_step(
                     pagination.offset.increment_by, context="offset.increment_by"
                 )
                 if pagination.offset.increment_by is not None
-                else batch_size
+                else page_size
             )
             while True:
                 params = dict(base_params)
@@ -787,7 +830,7 @@ class APIConnector(BaseConnector):
                     return
                 page_resolver = resolver.with_response({"body": data})
                 stop = self._stop_requested(pagination.stop_when, page_resolver)
-                short = len(records) < batch_size
+                short = len(records) < page_size
                 yield records
                 if stop or short:
                     return
@@ -816,7 +859,7 @@ class APIConnector(BaseConnector):
                     return
                 page_resolver = resolver.with_response({"body": data})
                 stop = self._stop_requested(pagination.stop_when, page_resolver)
-                short = len(records) < batch_size
+                short = len(records) < page_size
                 yield records
                 if stop or short:
                     return
