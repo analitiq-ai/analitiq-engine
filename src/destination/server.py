@@ -311,26 +311,28 @@ class DestinationServicer(DestinationServiceServicer):
                         # CreateTableError comes only from the DDL builder
                         # (build_create_table_sql) on this path: no columns,
                         # a primary key missing from the column list, or a
-                        # missing type-map write rule wrapped with its
-                        # table/column context. DDL *execution* failures
-                        # raise raw driver errors and still fail the RPC.
-                        logger.error(
-                            "configuration error for stream %s: %s",
-                            schema_msg.stream_id,
-                            e,
-                        )
+                        # type-map error wrapped with its table/column
+                        # context. DDL *execution* failures raise raw driver
+                        # errors and still fail the RPC.
                         accepted = False
                         if isinstance(
                             e.__cause__, (UnmappedTypeError, InvalidTypeMapError)
                         ):
-                            # The DDL builder wraps a missing type-map write
-                            # rule as CreateTableError (ddl.py); keep the
-                            # "type-map: " signal the dedicated clause above
-                            # produces for the unwrapped form, so the engine
-                            # log reads the same either way.
-                            ack_message = f"type-map: {e}"
+                            # The DDL builder wraps a type-map error as
+                            # CreateTableError (ddl.py); keep the "type-map: "
+                            # signal the dedicated clause above produces for
+                            # the unwrapped form, and append the cause: for a
+                            # malformed map (InvalidTypeMapError) the wrapper
+                            # text alone reads as a missing rule and the
+                            # actual defect would be lost from ack and log.
+                            ack_message = f"type-map: {e} (caused by: {e.__cause__})"
                         else:
                             ack_message = f"{type(e).__name__}: {e}"
+                        logger.error(
+                            "configuration error for stream %s: %s",
+                            schema_msg.stream_id,
+                            ack_message,
+                        )
                     except (KeyError, TypeError, ValueError) as e:
                         logger.exception(
                             "deterministic error configuring stream %s",

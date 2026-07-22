@@ -232,19 +232,22 @@ class TestSchemaAckTypeMapError:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "cause",
+        ("cause", "cause_detail"),
         [
-            UnmappedTypeError("pg", "write", "money"),
-            InvalidTypeMapError("rule 3 uses lookahead"),
+            (UnmappedTypeError("pg", "reverse", "money"), "connector 'pg'"),
+            (InvalidTypeMapError("rule 3 uses lookahead"), "lookahead"),
         ],
         ids=["unmapped", "invalid-map"],
     )
-    async def test_create_table_error_with_type_map_cause_keeps_prefix(self, cause):
-        """The DDL builder wraps a missing type-map write rule as
-        CreateTableError with the original as ``__cause__`` (ddl.py), so the
-        dedicated type-map clause never matches by type; the servicer must
-        still reject with the "type-map: " signal instead of failing the
-        RPC (issue #365)."""
+    async def test_create_table_error_with_type_map_cause_keeps_prefix(
+        self, cause, cause_detail
+    ):
+        """The DDL builder wraps a type-map error as CreateTableError with
+        the original as ``__cause__`` (ddl.py), so the dedicated type-map
+        clause never matches by type; the servicer must still reject with
+        the "type-map: " signal instead of failing the RPC (issue #365).
+        The cause's own message rides along: for a malformed map the
+        wrapper text alone reads as a missing rule."""
         from cdk.sql.exceptions import CreateTableError
 
         exc = CreateTableError(
@@ -268,6 +271,8 @@ class TestSchemaAckTypeMapError:
         assert ack.message.startswith("type-map: ")
         # The wrapped message keeps the table/column context the builder adds.
         assert "'amount'" in ack.message
+        # And the cause's own detail is not lost behind the wrapper text.
+        assert cause_detail in ack.message
 
     @pytest.mark.asyncio
     async def test_create_table_error_without_cause_is_surfaced_in_schema_ack(

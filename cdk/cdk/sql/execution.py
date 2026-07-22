@@ -149,6 +149,13 @@ async def execute_ddl(runtime: Any, statements: str | Sequence[str]) -> None:
     except SqlIntrospectionError:
         raise
     except Exception as err:
+        # This wrap makes CreateTableError cover transient driver failures
+        # too, which is fine for the standalone control-plane create_table()
+        # -- its only caller. Do NOT route the streaming handler's DDL
+        # execution (_ensure_tables_exist) through here: the destination
+        # handshake (src/destination/server.py) treats CreateTableError as a
+        # deterministic config rejection, so a transient failure wrapped here
+        # would be misreported as CONFIG_INVALID instead of failing the RPC.
         raise CreateTableError(f"DDL execution failed: {err}") from err
 
 
