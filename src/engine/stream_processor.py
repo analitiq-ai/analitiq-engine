@@ -196,12 +196,8 @@ class StreamProcessor:
             # _resolved_source).
             source_readable = self._resolve_source_readable(source_cfg)
 
-            self.stream_dlq = DeadLetterQueue(
-                str(Path(self.dlq_root) / self.stream_id)
-            )
-            self.run_id = (
-                self.state_manager.current_run_id or get_or_generate_run_id()
-            )
+            self.stream_dlq = DeadLetterQueue(str(Path(self.dlq_root) / self.stream_id))
+            self.run_id = self.state_manager.current_run_id or get_or_generate_run_id()
             self.grpc_client = self._create_grpc_client(destination_cfg)
 
             await self._open_destination_stream(destination_cfg)
@@ -218,9 +214,12 @@ class StreamProcessor:
             if self.zero_batch_truncate_needed:
                 await self._send_synthetic_truncate()
 
-            status, error_code, error_message, error_detail = (
-                self._classify_completion()
-            )
+            (
+                status,
+                error_code,
+                error_message,
+                error_detail,
+            ) = self._classify_completion()
 
         except Exception as e:
             status = "failed"
@@ -268,9 +267,7 @@ class StreamProcessor:
             )
         return self.worker_readable
 
-    def _create_grpc_client(
-        self, dest_config: dict[str, Any]
-    ) -> DestinationGRPCClient:
+    def _create_grpc_client(self, dest_config: dict[str, Any]) -> DestinationGRPCClient:
         """Create a gRPC client for destination streaming.
 
         Configuration priority:
@@ -302,9 +299,7 @@ class StreamProcessor:
             max_message_size=max_message_size,
         )
 
-    async def _open_destination_stream(
-        self, destination_cfg: dict[str, Any]
-    ) -> None:
+    async def _open_destination_stream(self, destination_cfg: dict[str, Any]) -> None:
         """Connect the gRPC client and run the schema handshake."""
         client = self.grpc_client
         assert client is not None  # created by run() just before this call
@@ -345,9 +340,7 @@ class StreamProcessor:
                 code=classify_handshake_failure(reason),
                 stage=FailureStage.DESTINATION_LOAD,
             )
-        logger.info(
-            f"Stream {self.stream_name}: gRPC stream started, schema accepted"
-        )
+        logger.info(f"Stream {self.stream_name}: gRPC stream started, schema accepted")
         # Surface the destination's retry-safety verdict per stream
         # (issue #286): an at-least-once stream re-sends committed
         # records on a same-run restart, and the operator should learn
@@ -476,9 +469,7 @@ class StreamProcessor:
         """Transform data with field mappings and validation."""
         logger.debug(f"Starting transform stage for stream {self.stream_name}")
 
-        assignments = (self.stream_config.get("mapping") or {}).get(
-            "assignments"
-        ) or []
+        assignments = (self.stream_config.get("mapping") or {}).get("assignments") or []
         # The assignments are static, so the transform is compiled once here into
         # vectorized Arrow compute and applied to every batch -- the data never
         # leaves Arrow (no per-record Python, no to_pylist/from_pylist).
@@ -708,9 +699,7 @@ class StreamProcessor:
             if result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE:
                 retry_count += 1
                 if retry_count > self.max_retries:
-                    return _BatchSendOutcome(
-                        _AckDisposition.RETRIES_EXHAUSTED, result
-                    )
+                    return _BatchSendOutcome(_AckDisposition.RETRIES_EXHAUSTED, result)
                 # Exponential backoff
                 delay = self.retry_delay * (2 ** (retry_count - 1))
                 logger.warning(
@@ -742,16 +731,12 @@ class StreamProcessor:
         """
         result = outcome.result
         if outcome.disposition is _AckDisposition.COMMITTED:
-            cursor_data, hwm = self._persist_committed_cursor(
-                result.committed_cursor
-            )
+            cursor_data, hwm = self._persist_committed_cursor(result.committed_cursor)
             logger.debug(
                 f"Stream {self.stream_name}: Batch {batch_seq} committed, "
                 f"{result.records_written} records written"
             )
-            self.pipeline_metrics.increment_records_processed(
-                result.records_written
-            )
+            self.pipeline_metrics.increment_records_processed(result.records_written)
             self.metrics.records_processed += result.records_written
             self._emit_batch_metrics(batch_seq, result, cursor_data, hwm)
             await output_queue.put(batch)
@@ -798,9 +783,7 @@ class StreamProcessor:
             f"{result.status}"
         )
         if self.error_strategy == "dlq":
-            await self._dlq_batch(
-                record_dicts, f"Unknown ACK status: {result.status}"
-            )
+            await self._dlq_batch(record_dicts, f"Unknown ACK status: {result.status}")
         raise StreamProcessingError(
             f"Batch {batch_seq} unknown ACK status: {result.status}"
         )
@@ -1052,9 +1035,7 @@ class StreamProcessor:
                 "cumulative_batches_processed": (
                     self.pipeline_metrics.batches_processed
                 ),
-                "cursor": json.dumps(cursor_data).encode().hex()
-                if cursor_data
-                else "",
+                "cursor": json.dumps(cursor_data).encode().hex() if cursor_data else "",
                 "cursor_value": hwm,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
@@ -1073,8 +1054,7 @@ class StreamProcessor:
         """Create the stream's metrics record and emit it when enabled."""
         try:
             record = create_metrics_record(
-                run_id=self.state_manager.current_run_id
-                or get_or_generate_run_id(),
+                run_id=self.state_manager.current_run_id or get_or_generate_run_id(),
                 pipeline_id=self.pipeline_id,
                 start_time=start_time,
                 end_time=end_time,
