@@ -701,6 +701,10 @@ class APIConnector(BaseConnector):
         records advances by it. Built here so every strategy's per-page
         expressions — ``stop_when``, ``next_cursor``, ``next_url``,
         ``increment_by`` — see the same scope.
+
+        Two of the contract's six reserved response names; ``headers``,
+        ``status``, ``records`` and ``metadata`` are not exposed to page
+        expressions yet, so a ref naming one resolves to nothing.
         """
         return {"body": data, "record_count": len(records)}
 
@@ -869,7 +873,6 @@ class APIConnector(BaseConnector):
             # default it) and lets it be a per-page value expression, hence
             # the step is resolved against each page rather than once.
             while True:
-                offset_step = 0
                 params = dict(base_params)
                 params[offset_param] = offset
                 query, body = build_request(params)
@@ -882,10 +885,12 @@ class APIConnector(BaseConnector):
                 stop = self._stop_requested(pagination.stop_when, page_resolver)
                 short = len(records) < page_size
                 if not (stop or short):
-                    # Validate the continuation before yielding: a page the
-                    # loop cannot advance from must fail before the engine
-                    # can commit it.
-                    offset_step = self._advance_step(
+                    # Advance before the page is yielded: a page the loop
+                    # cannot advance from must fail before the engine can
+                    # commit it. The next request is the only reader of
+                    # ``offset``, so advancing here and stopping below are
+                    # independent.
+                    offset += self._advance_step(
                         pagination.offset.increment_by,
                         page_resolver,
                         context="offset.increment_by",
@@ -893,7 +898,6 @@ class APIConnector(BaseConnector):
                 yield records
                 if stop or short:
                     return
-                offset += offset_step
 
         elif isinstance(pagination, PagePagination):
             page_param = pagination.page.param

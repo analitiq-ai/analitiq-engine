@@ -627,9 +627,14 @@ class TestReadBatchesIncrementBy:
 
     @pytest.mark.asyncio
     async def test_record_count_expression_steps_by_records_returned(self):
-        """A record-counting offset steps by the page's own record count —
-        the value only that page's response carries, so the step must
-        resolve per page rather than once before the loop."""
+        """A record-counting offset steps by the page's own record count,
+        not by the page size asked for.
+
+        The provider over-serves: three records under a requested window of
+        two. Stepping by the requested size would re-read the third record;
+        the declared expression resolves against that page's response, so
+        the next request starts past it.
+        """
         session = _FakeSession(
             [
                 _FakeResponse(
@@ -670,17 +675,23 @@ class TestReadBatchesIncrementBy:
             config={"endpoint_document": endpoint, "stream_source": _stream_source()},
             state_manager=MagicMock(),
             stream_name="items",
-            batch_size=3,
+            batch_size=2,
         )
 
         assert [b.num_rows for b in batches] == [3, 1]
+        # 3, the records the page actually carried — not 2, the window asked
+        # for, which would hand back record 3 a second time.
         assert [c[2].get("offset") for c in session.calls] == [0, 3]
 
     @pytest.mark.asyncio
     async def test_batch_size_expression_steps_by_the_effective_limit(self):
-        """A window-counting offset steps by the effective request limit:
-        the expression resolves against ``runtime.batch_size``, the same
-        value the clamped limit put on the wire."""
+        """A window-counting offset steps by the window it requested.
+
+        With no ``limit.max`` in play, ``runtime.batch_size`` is the
+        effective limit, so the contract's ``{ref: runtime.batch_size}`` is
+        the step. (Under a smaller cap the author must declare the capped
+        value instead — the engine exposes no token for the clamped limit.)
+        """
         session = _FakeSession(
             [
                 _FakeResponse(
