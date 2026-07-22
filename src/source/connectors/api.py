@@ -691,10 +691,10 @@ class APIConnector(BaseConnector):
         """Parse an authored pagination value into a positive int.
 
         Used for ``increment_by`` steps and the resolved ``limit.default``
-        page size. A step or page size of zero or less can never advance
-        its loop — the same request would repeat unbounded — and a
-        non-numeric one is an authoring defect; both fail
-        deterministically before any request.
+        page size. A non-positive step cannot advance its loop (the same
+        request would repeat unbounded), a non-positive page size is a
+        meaningless request, and a non-numeric value is an authoring
+        defect; all fail deterministically before any request.
         """
         try:
             step = int(value)
@@ -720,16 +720,31 @@ class APIConnector(BaseConnector):
         than the provider declares it can serve.
 
         The default resolves under the per-request policy: missing data
-        falls back to the engine's ``batch_size`` (the resolver already
-        logged the warning), while authoring errors raise. A resolved
-        value that is not a positive integer is an authoring defect and
-        fails loud before any request.
+        falls back to the engine's ``batch_size`` with a warning naming
+        the fallback, while authoring errors surface as deterministic
+        :class:`ReadError` — same classification the other pagination
+        expressions get. (A plain ``template`` default renders unresolved
+        placeholders empty per the contract's lenient-template rule, so a
+        partial render fails the positive-int parse rather than falling
+        back.) A resolved value that is not a positive integer is an
+        authoring defect and fails loud before any request.
         """
         size = batch_size
         if limit is not None and limit.default is not None:
-            resolved = resolver.resolve_for_request(limit.default)
+            try:
+                resolved = resolver.resolve_for_request(limit.default)
+            except (ValueError, KeyError, TransportSpecError) as err:
+                raise ReadError(
+                    f"pagination limit.default failed to resolve: {err}"
+                ) from err
             if resolved is not None:
                 size = self._positive_step(resolved, context="limit.default")
+            else:
+                logger.warning(
+                    "pagination limit.default did not resolve; "
+                    "falling back to engine batch_size %d",
+                    batch_size,
+                )
         if limit is not None and limit.max is not None:
             size = min(size, limit.max)
         return size
@@ -759,10 +774,11 @@ class APIConnector(BaseConnector):
         The strategy's declared ``limit`` block sets the *effective* page
         size via :meth:`_effective_page_size` (authored ``default``
         expression, clamped by the provider's ``max``); it is what the
-        request carries, what the offset step defaults to, and what the
-        short-page stops compare against — comparing against a raw
-        ``batch_size`` the provider clamps below would make every page
-        look short and silently truncate the read.
+        request carries (when ``limit.param`` is declared), what the
+        offset step defaults to, and what the short-page stops compare
+        against — comparing against a raw ``batch_size`` the provider
+        clamps below would make every page look short and silently
+        truncate the read.
 
         Every strategy stops when its declared ``stop_when`` predicate holds
         for the page's response. An empty page always stops (there is nothing
@@ -788,7 +804,8 @@ class APIConnector(BaseConnector):
             # first-request page size is authored as an ordinary param
             # default over runtime.batch_size instead. A drift-guard test
             # pins this; if the contract ever adds link.limit, that test
-            # fails and this dispatch must start injecting batch_size.
+            # fails and this dispatch must start computing and injecting
+            # the effective page size (``_effective_page_size``).
             async for records in self._iterate_link_pages(
                 full_url=full_url,
                 method=method,
@@ -905,10 +922,11 @@ class APIConnector(BaseConnector):
             # The key keeps its native type (int/str/Decimal) — the
             # query/body sinks in ``build_request`` own serialization.
             last_key: Any = pagination.keyset.initial
-            # No short-page stop for keyset: a provider may clamp the
-            # requested page size below batch_size, making every page
-            # "short" while records remain — stopping there would truncate
-            # the read. Key advance is size-independent, so only an empty
+            # No short-page stop for keyset: a provider may return fewer
+            # records than the requested effective page size while records
+            # remain (an undeclared server-side clamp), making every page
+            # "short" — stopping there would truncate the read. Key
+            # advance is size-independent, so only an empty
             # page or stop_when ends the loop; the cost is at most one
             # extra (empty) request, never a lost tail.
             while True:
