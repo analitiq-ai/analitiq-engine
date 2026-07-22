@@ -20,6 +20,7 @@ from cdk.adbc_registry import AdbcConfigurationError
 from cdk.base_handler import BaseDestinationHandler
 from cdk.secrets.exceptions import PlaceholderExpansionError
 from cdk.sql.exceptions import (
+    CreateTableError,
     SchemaConfigurationError,
     UnsupportedDialectOperationError,
 )
@@ -44,6 +45,7 @@ from ..grpc.generated.analitiq.v1 import (
     HealthCheckResponse,
     PayloadFormat,
     SchemaAck,
+    SchemaMessage,
     ShutdownAck,
     ShutdownRequest,
     StreamRequest,
@@ -228,122 +230,8 @@ class DestinationServicer(DestinationServiceServicer):
                         f"version {schema_msg.version}"
                     )
 
-                    # Configure handler with schema. Deterministic errors
-                    # (type-map, SchemaConfigurationError, KeyError/
-                    # ValueError/TypeError on a malformed endpoint document)
-                    # surface in the SchemaAck with the exception type and
-                    # message, so the engine logs a precise rejection
-                    # reason instead of a generic "schema configuration
-                    # failed". Anything else is a defect: it escapes to the
-                    # stream's outer except, which logs the traceback and
-                    # re-raises, failing the RPC with the real error instead
-                    # of a generic schema rejection.
-                    try:
-                        if not schema_msg.ack_timeout_seconds:
-                            # Every conforming sender stamps its ack budget on
-                            # the handshake (issue #234); without it the
-                            # destination cannot bound its statements below
-                            # the sender's wait. Reject loudly instead of
-                            # running statements unbounded.
-                            raise ValueError(
-                                "schema message carries no ack_timeout_seconds;"
-                                " the destination cannot derive its statement"
-                                " timeout (issue #234)"
-                            )
-                        # Translate the wire message to the CDK-native SchemaSpec
-                        # the handler contract now takes (the CDK must not import
-                        # gRPC types). Field-for-field; structurally identical.
-                        schema_spec = SchemaSpec(
-                            stream_id=schema_msg.stream_id,
-                            version=schema_msg.version,
-                            write_mode=CdkWriteMode(schema_msg.write_mode),
-                            ack_timeout_seconds=schema_msg.ack_timeout_seconds,
-                        )
-                        # Bound statements before configure_schema runs DDL:
-                        # the CREATE TABLE handshake is exactly the statement
-                        # that must be cancelled ahead of the sender's ack
-                        # wait (issues #230/#231). Only the async-SQLAlchemy
-                        # handler path can enforce the bound; ADBC and
-                        # sync-engine statements run on worker threads and
-                        # rely on driver timeouts (the handler logs a warning
-                        # when it accepts a budget it cannot enforce). No-op
-                        # for handlers that run no SQL (API, file, stdout,
-                        # the worker proxy).
-                        self.handler.set_statement_timeout(
-                            derive_statement_timeout_seconds(
-                                schema_msg.ack_timeout_seconds
-                            )
-                        )
-                        accepted = await self.handler.configure_schema(schema_spec)
-                        # A handler that proxies to a worker (WorkerProxyHandler)
-                        # records the worker's real rejection reason; surface it
-                        # verbatim so the engine ack is not the generic message
-                        # (issue #231). Handlers that raise instead are caught
-                        # below; those that return False with no reason fall back.
-                        ack_message = (
-                            ""
-                            if accepted
-                            else (
-                                getattr(self.handler, "last_schema_rejection", None)
-                                or "Schema configuration failed"
-                            )
-                        )
-                    except (UnmappedTypeError, InvalidTypeMapError) as e:
-                        logger.error(
-                            "type-map error configuring stream %s: %s",
-                            schema_msg.stream_id,
-                            e,
-                        )
-                        accepted = False
-                        ack_message = f"type-map: {e}"
-                    except (
-                        AdbcConfigurationError,
-                        SchemaConfigurationError,
-                        UnsupportedDialectOperationError,
-                        PlaceholderExpansionError,
-                    ) as e:
-                        # The handler's configure_schema deliberately
-                        # propagates these deterministic errors so the
-                        # SchemaAck carries the precise reason; translate
-                        # them here instead of crashing the stream.
-                        logger.error(
-                            "configuration error for stream %s: %s",
-                            schema_msg.stream_id,
-                            e,
-                        )
-                        accepted = False
-                        ack_message = f"{type(e).__name__}: {e}"
-                    except (KeyError, TypeError, ValueError) as e:
-                        logger.exception(
-                            "deterministic error configuring stream %s",
-                            schema_msg.stream_id,
-                        )
-                        accepted = False
-                        ack_message = f"{type(e).__name__}: {e}"
-                    schema_configured = accepted
-
-                    if accepted:
-                        # The handler decides the stream's retry safety
-                        # (write mode, keys, transport, declared
-                        # idempotency); the ack carries the verdict so the
-                        # engine can log which streams may duplicate on a
-                        # same-run restart (issue #286). The worker proxy
-                        # forwards the worker's verdict, so this holds
-                        # across both hops.
-                        verdict = self.handler.retry_semantics(schema_msg.stream_id)
-                        schema_ack = SchemaAck(
-                            stream_id=schema_msg.stream_id,
-                            accepted=True,
-                            message=ack_message,
-                            retry_semantics=verdict.semantics,
-                            retry_semantics_reason=verdict.reason,
-                        )
-                    else:
-                        schema_ack = SchemaAck(
-                            stream_id=schema_msg.stream_id,
-                            accepted=False,
-                            message=ack_message,
-                        )
+                    schema_ack = await self._handle_schema_message(schema_msg)
+                    schema_configured = schema_ack.accepted
                     yield StreamResponse(schema_ack=schema_ack)
 
                 elif msg_type == "batch":
@@ -425,6 +313,130 @@ class DestinationServicer(DestinationServiceServicer):
                 "StreamRecords: Stream ended%s",
                 f" (stream_id={current_stream_id!r})" if current_stream_id else "",
             )
+
+    async def _handle_schema_message(self, schema_msg: SchemaMessage) -> SchemaAck:
+        """Configure the handler from a schema message and build its ack.
+
+        Deterministic errors (type-map, SchemaConfigurationError, KeyError/
+        ValueError/TypeError on a malformed endpoint document) surface in
+        the SchemaAck with the exception type and message, so the engine
+        logs a precise rejection reason instead of a generic "schema
+        configuration failed". Anything else is a defect: it propagates to
+        ``StreamRecords``' outer except, which logs the traceback and
+        re-raises, failing the RPC with the real error instead of a generic
+        schema rejection.
+        """
+        try:
+            if not schema_msg.ack_timeout_seconds:
+                # Every conforming sender stamps its ack budget on the
+                # handshake (issue #234); without it the destination cannot
+                # bound its statements below the sender's wait. Reject
+                # loudly instead of running statements unbounded.
+                raise ValueError(
+                    "schema message carries no ack_timeout_seconds;"
+                    " the destination cannot derive its statement"
+                    " timeout (issue #234)"
+                )
+            # Translate the wire message to the CDK-native SchemaSpec
+            # the handler contract now takes (the CDK must not import
+            # gRPC types). Field-for-field; structurally identical.
+            schema_spec = SchemaSpec(
+                stream_id=schema_msg.stream_id,
+                version=schema_msg.version,
+                write_mode=CdkWriteMode(schema_msg.write_mode),
+                ack_timeout_seconds=schema_msg.ack_timeout_seconds,
+            )
+            # Bound statements before configure_schema runs DDL: the
+            # CREATE TABLE handshake is exactly the statement that must be
+            # cancelled ahead of the sender's ack wait (issues #230/#231).
+            # Only the async-SQLAlchemy handler path can enforce the bound;
+            # ADBC and sync-engine statements run on worker threads and
+            # rely on driver timeouts (the handler logs a warning when it
+            # accepts a budget it cannot enforce). No-op for handlers that
+            # run no SQL (API, file, stdout, the worker proxy).
+            self.handler.set_statement_timeout(
+                derive_statement_timeout_seconds(schema_msg.ack_timeout_seconds)
+            )
+            accepted = await self.handler.configure_schema(schema_spec)
+            # A handler that proxies to a worker (WorkerProxyHandler)
+            # records the worker's real rejection reason; surface it
+            # verbatim so the engine ack is not the generic message
+            # (issue #231). Handlers that raise instead are caught
+            # below; those that return False with no reason fall back.
+            ack_message = (
+                ""
+                if accepted
+                else (
+                    getattr(self.handler, "last_schema_rejection", None)
+                    or "Schema configuration failed"
+                )
+            )
+        except (UnmappedTypeError, InvalidTypeMapError) as e:
+            logger.error(
+                "type-map error configuring stream %s: %s",
+                schema_msg.stream_id,
+                e,
+            )
+            accepted = False
+            ack_message = f"type-map: {e}"
+        except (
+            AdbcConfigurationError,
+            CreateTableError,
+            SchemaConfigurationError,
+            UnsupportedDialectOperationError,
+            PlaceholderExpansionError,
+        ) as e:
+            # The handler's configure_schema deliberately propagates these
+            # deterministic errors so the SchemaAck carries the precise
+            # reason; translate them here instead of crashing the stream.
+            # CreateTableError comes only from the DDL builder
+            # (build_create_table_sql) on this path: no columns, a primary
+            # key missing from the column list, or a type-map error wrapped
+            # with its table/column context. DDL *execution* failures raise
+            # raw driver errors and still fail the RPC.
+            accepted = False
+            if isinstance(e.__cause__, (UnmappedTypeError, InvalidTypeMapError)):
+                # The DDL builder wraps a type-map error as CreateTableError
+                # (ddl.py); keep the "type-map: " signal the dedicated
+                # clause above produces for the unwrapped form, and append
+                # the cause: for a malformed map (InvalidTypeMapError) the
+                # wrapper text alone reads as a missing rule and the actual
+                # defect would be lost from ack and log.
+                ack_message = f"type-map: {e} (caused by: {e.__cause__})"
+            else:
+                ack_message = f"{type(e).__name__}: {e}"
+            logger.error(
+                "configuration error for stream %s: %s",
+                schema_msg.stream_id,
+                ack_message,
+            )
+        except (KeyError, TypeError, ValueError) as e:
+            logger.exception(
+                "deterministic error configuring stream %s",
+                schema_msg.stream_id,
+            )
+            accepted = False
+            ack_message = f"{type(e).__name__}: {e}"
+
+        if accepted:
+            # The handler decides the stream's retry safety (write mode,
+            # keys, transport, declared idempotency); the ack carries the
+            # verdict so the engine can log which streams may duplicate on
+            # a same-run restart (issue #286). The worker proxy forwards
+            # the worker's verdict, so this holds across both hops.
+            verdict = self.handler.retry_semantics(schema_msg.stream_id)
+            return SchemaAck(
+                stream_id=schema_msg.stream_id,
+                accepted=True,
+                message=ack_message,
+                retry_semantics=verdict.semantics,
+                retry_semantics_reason=verdict.reason,
+            )
+        return SchemaAck(
+            stream_id=schema_msg.stream_id,
+            accepted=False,
+            message=ack_message,
+        )
 
     async def HealthCheck(
         self,
