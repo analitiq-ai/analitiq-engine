@@ -544,12 +544,18 @@ class TestReadBatchesOffsetPagination:
 # ---------------------------------------------------------------------------
 
 
-class TestReadBatchesOffsetIncrementBy:
-    """The declared ``increment_by`` fixes the advance step."""
+class TestReadBatchesIncrementBy:
+    """The declared ``increment_by`` fixes the advance step.
+
+    The contract types it as a positive-integer literal or a value
+    expression: an offset counting records returned steps by
+    ``response.record_count``, one counting the requested window steps by
+    the effective request limit.
+    """
 
     @pytest.mark.asyncio
-    async def test_authored_increment_by_overrides_page_size_step(self):
-        """The offset advances by the declared step, not the page size."""
+    async def test_literal_increment_by_fixes_the_step(self):
+        """The offset advances by the declared literal, not the page size."""
         session = _FakeSession(
             [
                 _FakeResponse(
@@ -586,9 +592,9 @@ class TestReadBatchesOffsetIncrementBy:
         """A step of zero or less can never advance the loop — the same
         request would repeat unbounded — so it fails before any request.
 
-        Declared on the page strategy, whose ``increment_by`` the contract
-        types loosely; the offset strategy's is a positive-int-or-expression
-        the contract model rejects before the engine ever sees it.
+        Declared on the page strategy, whose step is resolved before the
+        first request; the offset strategy's literal branch is a positive
+        int the contract model rejects before the engine ever sees it.
         """
         session = _FakeSession([])
         runtime = _runtime_with_session(session)
@@ -618,6 +624,136 @@ class TestReadBatchesOffsetIncrementBy:
                 batch_size=2,
             )
         assert session.calls == []
+
+    @pytest.mark.asyncio
+    async def test_record_count_expression_steps_by_records_returned(self):
+        """A record-counting offset steps by the page's own record count —
+        the value only that page's response carries, so the step must
+        resolve per page rather than once before the loop."""
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={
+                        "records": [
+                            {"id": 1, "name": "a"},
+                            {"id": 2, "name": "b"},
+                            {"id": 3, "name": "c"},
+                        ],
+                        "has_more": True,
+                    },
+                ),
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 4, "name": "d"}], "has_more": False},
+                ),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "offset",
+                "offset": {
+                    "param": "offset",
+                    "initial": 0,
+                    "increment_by": {"ref": "response.record_count"},
+                },
+                "limit": {"param": "limit"},
+                "stop_when": {"eq": [{"ref": "response.body.has_more"}, False]},
+            },
+        )
+        batches = await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=3,
+        )
+
+        assert [b.num_rows for b in batches] == [3, 1]
+        assert [c[2].get("offset") for c in session.calls] == [0, 3]
+
+    @pytest.mark.asyncio
+    async def test_batch_size_expression_steps_by_the_effective_limit(self):
+        """A window-counting offset steps by the effective request limit:
+        the expression resolves against ``runtime.batch_size``, the same
+        value the clamped limit put on the wire."""
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]},
+                ),
+                _FakeResponse(status=200, body={"records": [{"id": 3, "name": "c"}]}),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "offset",
+                "offset": {
+                    "param": "offset",
+                    "initial": 0,
+                    "increment_by": {"ref": "runtime.batch_size"},
+                },
+                "limit": {"param": "limit"},
+            },
+        )
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=2,
+        )
+
+        assert [c[2].get("offset") for c in session.calls] == [0, 2]
+
+    @pytest.mark.asyncio
+    async def test_unresolvable_step_expression_raises_before_advancing(self):
+        """A step expression that resolves to nothing cannot advance the
+        loop; it fails on the page it was read from rather than repeating
+        the same request or guessing a step."""
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={"records": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]},
+                ),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination={
+                "type": "offset",
+                "offset": {
+                    "param": "offset",
+                    "initial": 0,
+                    "increment_by": {"ref": "response.body.page_size"},
+                },
+                "limit": {"param": "limit"},
+            },
+        )
+        with pytest.raises(ReadError, match="offset.increment_by"):
+            await _consume(
+                connector,
+                runtime,
+                config={
+                    "endpoint_document": endpoint,
+                    "stream_source": _stream_source(),
+                },
+                state_manager=MagicMock(),
+                stream_name="items",
+                batch_size=2,
+            )
 
 
 class TestReadBatchesPagePagination:

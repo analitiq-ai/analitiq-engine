@@ -255,8 +255,9 @@ class APIConnector(BaseConnector):
 
         replication_block = stream_source.get("replication") or {}
         replication_method = replication_block.get("method", "full_refresh")
-        # cursor_field is a contract string|null (validated upstream), so no
-        # list normalization is needed.
+        # cursor_field is a required non-empty string on the contract's
+        # incremental replication variant and absent from the full-refresh
+        # one (validated upstream), so no list normalization is needed.
         cursor_field = replication_block.get("cursor_field")
         safety_window = replication_block.get("safety_window_seconds")
 
@@ -692,6 +693,34 @@ class APIConnector(BaseConnector):
         )
 
     @staticmethod
+    def _page_scope(data: Any, records: list[dict[str, Any]]) -> dict[str, Any]:
+        """Build the ``response`` scope a page's expressions resolve against.
+
+        ``record_count`` is the contract's name for how many records the
+        page carried (RESERVED_RESPONSE_SCOPES); an offset that counts
+        records advances by it. Built here so every strategy's per-page
+        expressions — ``stop_when``, ``next_cursor``, ``next_url``,
+        ``increment_by`` — see the same scope.
+        """
+        return {"body": data, "record_count": len(records)}
+
+    def _advance_step(
+        self, increment_by: Any, resolver: Resolver, *, context: str
+    ) -> int:
+        """Resolve a declared per-page advance step to a positive int.
+
+        The contract types the step as either a positive-integer literal or
+        a value expression: ``{ref: response.record_count}`` where the
+        offset counts records returned, ``{ref: runtime.batch_size}`` where
+        it counts the requested window. Literals pass through the grammar
+        untouched, so both forms take one path.
+        """
+        return self._positive_step(
+            self._resolve_response_value(increment_by, resolver, context=context),
+            context=context,
+        )
+
+    @staticmethod
     def _positive_step(value: Any, *, context: str) -> int:
         """Parse an authored pagination value into a positive int.
 
@@ -719,7 +748,7 @@ class APIConnector(BaseConnector):
     def _effective_page_size(
         self, limit: PageSize | None, batch_size: int, resolver: Resolver
     ) -> int:
-        """Resolve the page size a paginated read requests and advances by.
+        """Resolve the page size a paginated read requests.
 
         Per the contract's ``PageSize`` block, an authored ``limit.default``
         value expression declares the page size (``runtime.batch_size`` is
@@ -834,14 +863,13 @@ class APIConnector(BaseConnector):
         if isinstance(pagination, OffsetPagination):
             offset_param = pagination.offset.param
             offset = int(pagination.offset.initial)
-            # The contract requires an authored ``offset.increment_by``: the
-            # two offset families (record-counting vs window-counting) cannot
-            # be told apart from the document, so there is no safe default to
-            # fall back to.
-            offset_step = self._positive_step(
-                pagination.offset.increment_by, context="offset.increment_by"
-            )
+            # The contract requires an authored ``offset.increment_by`` (the
+            # two offset families -- record-counting vs window-counting --
+            # cannot be told apart from the document, so it refuses to
+            # default it) and lets it be a per-page value expression, hence
+            # the step is resolved against each page rather than once.
             while True:
+                offset_step = 0
                 params = dict(base_params)
                 params[offset_param] = offset
                 query, body = build_request(params)
@@ -850,9 +878,18 @@ class APIConnector(BaseConnector):
                 )
                 if not records:
                     return
-                page_resolver = resolver.with_response({"body": data})
+                page_resolver = resolver.with_response(self._page_scope(data, records))
                 stop = self._stop_requested(pagination.stop_when, page_resolver)
                 short = len(records) < page_size
+                if not (stop or short):
+                    # Validate the continuation before yielding: a page the
+                    # loop cannot advance from must fail before the engine
+                    # can commit it.
+                    offset_step = self._advance_step(
+                        pagination.offset.increment_by,
+                        page_resolver,
+                        context="offset.increment_by",
+                    )
                 yield records
                 if stop or short:
                     return
@@ -862,10 +899,12 @@ class APIConnector(BaseConnector):
             page_param = pagination.page.param
             page = int(pagination.page.initial)
             # An authored ``increment_by`` fixes the step; page numbers
-            # advance by one otherwise.
+            # advance by one otherwise. Resolved once, before any request:
+            # unlike an offset, a page number cannot advance by a per-page
+            # response value, so nothing here depends on a page.
             page_step = (
-                self._positive_step(
-                    pagination.page.increment_by, context="page.increment_by"
+                self._advance_step(
+                    pagination.page.increment_by, resolver, context="page.increment_by"
                 )
                 if pagination.page.increment_by is not None
                 else 1
@@ -879,7 +918,7 @@ class APIConnector(BaseConnector):
                 )
                 if not records:
                     return
-                page_resolver = resolver.with_response({"body": data})
+                page_resolver = resolver.with_response(self._page_scope(data, records))
                 stop = self._stop_requested(pagination.stop_when, page_resolver)
                 short = len(records) < page_size
                 yield records
@@ -904,7 +943,7 @@ class APIConnector(BaseConnector):
                 )
                 if not records:
                     return
-                page_resolver = resolver.with_response({"body": data})
+                page_resolver = resolver.with_response(self._page_scope(data, records))
                 stop = self._stop_requested(pagination.stop_when, page_resolver)
                 cursor_token = None
                 if not stop:
@@ -944,7 +983,7 @@ class APIConnector(BaseConnector):
                 )
                 if not records:
                     return
-                page_resolver = resolver.with_response({"body": data})
+                page_resolver = resolver.with_response(self._page_scope(data, records))
                 stop = self._stop_requested(pagination.stop_when, page_resolver)
                 if not stop:
                     # Validate the continuation before yielding: a page the
@@ -1006,7 +1045,7 @@ class APIConnector(BaseConnector):
         while True:
             if not records:
                 return
-            page_resolver = resolver.with_response({"body": data})
+            page_resolver = resolver.with_response(self._page_scope(data, records))
             stop = self._stop_requested(pagination.stop_when, page_resolver)
             next_target: str | None = None
             if not stop:
