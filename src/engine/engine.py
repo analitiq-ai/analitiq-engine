@@ -99,8 +99,7 @@ class StreamingEngine:
         run_id = self.state_manager.start_run(pipeline_config)
         logger.info("Started state run: %s", run_id)
 
-        stream_exceptions = []
-        stream_tasks = []
+        stream_tasks: list[tuple[str, str, asyncio.Task[None]]] = []
 
         try:
             # Create a task for each stream with names for better debugging
@@ -123,46 +122,8 @@ class StreamingEngine:
                 *[task for _, _, task in stream_tasks], return_exceptions=True
             )
 
-            # Collect exceptions using Python 3.11+ pattern
-            for (stream_id, stream_name, _), result in zip(stream_tasks, results):
-                if isinstance(result, Exception):
-                    stream_error = StreamProcessingError(
-                        f"Stream processing failed: {result}",
-                        stream_id=stream_id,
-                        original_error=result,
-                    )
-                    stream_exceptions.append(stream_error)
-                    self.metrics.increment_streams_failed()
-                    logger.error("Stream %s failed: %s", stream_name, result)
-                else:
-                    self.metrics.increment_streams_processed()
-                    logger.info("Stream %s completed successfully", stream_name)
-
-            # Handle collected exceptions with ExceptionGroup
-            if stream_exceptions:
-                if len(stream_exceptions) == len(streams):
-                    # All streams failed - critical failure
-                    logger.error("All streams failed - pipeline failed completely")
-                    raise ExceptionGroup("All streams failed", stream_exceptions)
-                else:
-                    # Partial failure - log but allow pipeline to complete. Keep
-                    # ALL failed-stream exceptions as a group (like the all-failed
-                    # path) so the runner classifies the dominant cause across
-                    # every failure, not just the first.
-                    logger.warning(
-                        "Pipeline completed with %s failed streams out of %s",
-                        len(stream_exceptions),
-                        len(streams),
-                    )
-                    self._dominant_stream_error = ExceptionGroup(
-                        "Partial stream failures", stream_exceptions
-                    )
-            else:
-                logger.info(
-                    "Pipeline %s completed successfully - all %s streams processed",
-                    pipeline_id,
-                    len(streams),
-                )
+            stream_exceptions = self._collect_stream_results(stream_tasks, results)
+            self._report_pipeline_outcome(pipeline_id, len(streams), stream_exceptions)
 
         except* StreamProcessingError as eg:
             # Handle stream processing errors specifically (Python 3.11+)
@@ -172,21 +133,77 @@ class StreamingEngine:
             )
             for exc in eg.exceptions:
                 logger.error("  - %s", exc)
-            # Cancel remaining tasks
-            for _, _, task in stream_tasks:
-                if not task.done():
-                    task.cancel()
+            self._cancel_unfinished(stream_tasks)
             raise
         except* Exception as eg:
             # Handle other unexpected errors (Python 3.11+)
             logger.error("Unexpected errors in pipeline: %s errors", len(eg.exceptions))
             for unexpected_exc in eg.exceptions:
                 logger.error("  - Unexpected error: %s", unexpected_exc)
-            # Cancel remaining tasks
-            for _, _, task in stream_tasks:
-                if not task.done():
-                    task.cancel()
+            self._cancel_unfinished(stream_tasks)
             raise
+
+    def _collect_stream_results(
+        self,
+        stream_tasks: list[tuple[str, str, asyncio.Task[None]]],
+        results: list[Any],
+    ) -> list[StreamProcessingError]:
+        """Wrap each failed stream's result and count per-stream outcomes."""
+        stream_exceptions = []
+        for (stream_id, stream_name, _), result in zip(stream_tasks, results):
+            if isinstance(result, Exception):
+                stream_error = StreamProcessingError(
+                    f"Stream processing failed: {result}",
+                    stream_id=stream_id,
+                    original_error=result,
+                )
+                stream_exceptions.append(stream_error)
+                self.metrics.increment_streams_failed()
+                logger.error("Stream %s failed: %s", stream_name, result)
+            else:
+                self.metrics.increment_streams_processed()
+                logger.info("Stream %s completed successfully", stream_name)
+        return stream_exceptions
+
+    def _report_pipeline_outcome(
+        self,
+        pipeline_id: str,
+        stream_count: int,
+        stream_exceptions: list[StreamProcessingError],
+    ) -> None:
+        """Raise when every stream failed; record the group for a partial run."""
+        if not stream_exceptions:
+            logger.info(
+                "Pipeline %s completed successfully - all %s streams processed",
+                pipeline_id,
+                stream_count,
+            )
+            return
+        if len(stream_exceptions) == stream_count:
+            # All streams failed - critical failure
+            logger.error("All streams failed - pipeline failed completely")
+            raise ExceptionGroup("All streams failed", stream_exceptions)
+        # Partial failure - log but allow pipeline to complete. Keep ALL
+        # failed-stream exceptions as a group (like the all-failed path) so
+        # the runner classifies the dominant cause across every failure, not
+        # just the first.
+        logger.warning(
+            "Pipeline completed with %s failed streams out of %s",
+            len(stream_exceptions),
+            stream_count,
+        )
+        self._dominant_stream_error = ExceptionGroup(
+            "Partial stream failures", stream_exceptions
+        )
+
+    @staticmethod
+    def _cancel_unfinished(
+        stream_tasks: list[tuple[str, str, asyncio.Task[None]]],
+    ) -> None:
+        """Cancel every stream task that has not finished."""
+        for _, _, task in stream_tasks:
+            if not task.done():
+                task.cancel()
 
     async def _process_stream(
         self,
