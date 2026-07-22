@@ -6,7 +6,8 @@ into :class:`~analitiq.contracts.endpoints.ApiEndpointDoc` once per read
 (issue #349), and every declaration is read as a model attribute:
 
 * ``operations.read.request.{method, path}`` — URL + HTTP verb.
-* ``operations.read.request.body`` — optional JSON body; built per page
+* ``operations.read.request.body`` — optional JSON body, declared only by
+  the contract's POST read request (a GET read has no body); built per page
   request: ``{"from_param": ...}`` nodes bind the page's param values
   (including pagination-controlled ones), then the body is deep-resolved
   through the value-expression grammar. Params declared ``in: body``
@@ -50,6 +51,7 @@ from analitiq.contracts.endpoints import (
     PagePagination,
     PageSize,
     Pagination,
+    PostReadRequest,
     Predicate,
     ReadOperation,
     Replication,
@@ -287,8 +289,11 @@ class APIConnector(BaseConnector):
         # nodes against the same table and resolves expressions. Built
         # per page so controlled params (limit, offset, cursor) reach a
         # body-paginated endpoint instead of freezing at their initial
-        # values.
-        raw_body = read.request.body
+        # values. Only the POST branch of the contract's method-discriminated
+        # read request declares a body; a GET read structurally has none.
+        raw_body = (
+            read.request.body if isinstance(read.request, PostReadRequest) else None
+        )
 
         def build_request(
             page_params: dict[str, Any],
@@ -779,11 +784,12 @@ class APIConnector(BaseConnector):
         The strategy's declared ``limit`` block sets the *effective* page
         size via :meth:`_effective_page_size` (authored ``default``
         expression, clamped by the provider's ``max``); it is what the
-        request carries (when ``limit.param`` is declared), what the
-        offset step defaults to, and what the short-page stops compare
-        against — comparing against a raw ``batch_size`` the provider
-        clamps below would make every page look short and silently
-        truncate the read.
+        request carries (when ``limit.param`` is declared) and what the
+        short-page stops compare against — comparing against a raw
+        ``batch_size`` the provider clamps below would make every page look
+        short and silently truncate the read. All five strategies declare a
+        ``limit``, so all five bind it the same way; link differs only in
+        that its follow-up requests replay a URL and so carry no params.
 
         Every strategy stops when its declared ``stop_when`` predicate holds
         for the page's response. An empty page always stops (there is nothing
@@ -802,15 +808,17 @@ class APIConnector(BaseConnector):
                 yield records
             return
 
+        # Every strategy binds its declared limit identically: resolve the
+        # effective page size and write it into the param the limit block
+        # names. For link this reaches the first request only -- follow-up
+        # pages replay the response's next_url verbatim and carry no params
+        # (see :meth:`_iterate_link_pages`), so a declared limit never
+        # modifies a followed link.
+        page_size = self._effective_page_size(pagination.limit, batch_size, resolver)
+        if pagination.limit is not None and pagination.limit.param:
+            base_params[pagination.limit.param] = page_size
+
         if isinstance(pagination, LinkPagination):
-            # LinkPagination is dispatched before the limit injection below
-            # because the contract gives it NO limit field (its shape is
-            # type/link/stop_when, extra="forbid") — a link endpoint's
-            # first-request page size is authored as an ordinary param
-            # default over runtime.batch_size instead. A drift-guard test
-            # pins this; if the contract ever adds link.limit, that test
-            # fails and this dispatch must start computing and injecting
-            # the effective page size (``_effective_page_size``).
             async for records in self._iterate_link_pages(
                 full_url=full_url,
                 method=method,
@@ -823,23 +831,15 @@ class APIConnector(BaseConnector):
                 yield records
             return
 
-        page_size = self._effective_page_size(pagination.limit, batch_size, resolver)
-        if pagination.limit is not None and pagination.limit.param:
-            base_params[pagination.limit.param] = page_size
-
         if isinstance(pagination, OffsetPagination):
             offset_param = pagination.offset.param
             offset = int(pagination.offset.initial)
-            # An authored ``increment_by`` fixes the step; otherwise the
-            # offset advances by the page size actually requested (the
-            # contract: increment_by defaults to the resolved effective
-            # limit).
-            offset_step = (
-                self._positive_step(
-                    pagination.offset.increment_by, context="offset.increment_by"
-                )
-                if pagination.offset.increment_by is not None
-                else page_size
+            # The contract requires an authored ``offset.increment_by``: the
+            # two offset families (record-counting vs window-counting) cannot
+            # be told apart from the document, so there is no safe default to
+            # fall back to.
+            offset_step = self._positive_step(
+                pagination.offset.increment_by, context="offset.increment_by"
             )
             while True:
                 params = dict(base_params)
@@ -977,11 +977,14 @@ class APIConnector(BaseConnector):
     ) -> AsyncIterator[list[dict[str, Any]]]:
         """Follow ``link.next_url`` from each response to the next page.
 
-        Per the contract, the resolved URL replaces the entire request:
-        follow-up pages carry no query params and no body (spec: §Pagination
-        Strategies — link, "no params traverse"). A relative next URL joins
-        the connection's base URL; an absolute one must stay on the
-        connection's origin — the shared session sends the connection's
+        The first request is built from ``base_params`` like any other
+        strategy's, so a declared ``limit`` (already bound by the caller)
+        rides on it. Per the contract, the resolved URL then replaces the
+        entire request: follow-up pages carry no query params and no body
+        (spec: §Pagination Strategies — link, "no params traverse"), which
+        is what makes the declared limit first-request-only. A relative
+        next URL joins the connection's base URL; an absolute one must stay
+        on the connection's origin — the shared session sends the connection's
         default headers (auth included) on every request, so following a
         response-supplied URL to another host would hand those credentials
         to it. The next URL is resolved and vetted BEFORE its page is

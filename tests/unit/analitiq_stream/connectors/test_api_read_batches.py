@@ -518,7 +518,7 @@ class TestReadBatchesOffsetPagination:
         endpoint = _endpoint_doc_with_records(
             pagination={
                 "type": "offset",
-                "offset": {"param": "offset", "initial": 0},
+                "offset": {"param": "offset", "initial": 0, "increment_by": 2},
                 "limit": {"param": "limit"},
             },
         )
@@ -545,7 +545,7 @@ class TestReadBatchesOffsetPagination:
 
 
 class TestReadBatchesOffsetIncrementBy:
-    """An authored ``offset.increment_by`` fixes the advance step."""
+    """The declared ``increment_by`` fixes the advance step."""
 
     @pytest.mark.asyncio
     async def test_authored_increment_by_overrides_page_size_step(self):
@@ -584,17 +584,22 @@ class TestReadBatchesOffsetIncrementBy:
     @pytest.mark.parametrize("increment_by", [0, -5])
     async def test_non_positive_increment_by_raises(self, increment_by):
         """A step of zero or less can never advance the loop — the same
-        request would repeat unbounded — so it fails before any request."""
+        request would repeat unbounded — so it fails before any request.
+
+        Declared on the page strategy, whose ``increment_by`` the contract
+        types loosely; the offset strategy's is a positive-int-or-expression
+        the contract model rejects before the engine ever sees it.
+        """
         session = _FakeSession([])
         runtime = _runtime_with_session(session)
         connector = APIConnector("test")
 
         endpoint = _endpoint_doc_with_records(
             pagination={
-                "type": "offset",
-                "offset": {
-                    "param": "offset",
-                    "initial": 0,
+                "type": "page",
+                "page": {
+                    "param": "page",
+                    "initial": 1,
                     "increment_by": increment_by,
                 },
                 "limit": {"param": "limit"},
@@ -671,9 +676,9 @@ class TestReadBatchesEffectivePageSize:
 
     An authored ``limit.default`` expression declares the page size
     (``runtime.batch_size`` in scope); ``limit.max`` clamps it. The
-    effective size is what rides the wire, what the offset step advances
-    by, and what the short-page stops compare against — raw ``batch_size``
-    appears nowhere once a smaller effective size is declared.
+    effective size is what rides the wire and what the short-page stops
+    compare against — raw ``batch_size`` appears nowhere once a smaller
+    effective size is declared.
     """
 
     @pytest.mark.asyncio
@@ -683,7 +688,7 @@ class TestReadBatchesEffectivePageSize:
             pytest.param(
                 {
                     "type": "offset",
-                    "offset": {"param": "offset", "initial": 0},
+                    "offset": {"param": "offset", "initial": 0, "increment_by": 2},
                     "limit": _CLAMPED_LIMIT,
                 },
                 [{"records": [{"id": 1, "name": "a"}]}],
@@ -769,7 +774,7 @@ class TestReadBatchesEffectivePageSize:
         endpoint = _endpoint_doc_with_records(
             pagination={
                 "type": "offset",
-                "offset": {"param": "offset", "initial": 0},
+                "offset": {"param": "offset", "initial": 0, "increment_by": 2},
                 "limit": {"param": "limit", "max": 2},
             },
         )
@@ -787,10 +792,10 @@ class TestReadBatchesEffectivePageSize:
         assert [c[2].get("offset") for c in session.calls] == [0, 2]
 
     @pytest.mark.asyncio
-    async def test_offset_short_page_and_step_use_effective_size(self):
-        """A page full at the clamped size continues the loop and steps the
-        offset by the effective size — comparing against raw batch_size
-        would call it short and silently truncate the read."""
+    async def test_offset_short_page_stop_uses_effective_size(self):
+        """A page full at the clamped size continues the loop — comparing
+        against raw batch_size would call it short and silently truncate
+        the read."""
         session = _FakeSession(
             [
                 _FakeResponse(
@@ -806,7 +811,7 @@ class TestReadBatchesEffectivePageSize:
         endpoint = _endpoint_doc_with_records(
             pagination={
                 "type": "offset",
-                "offset": {"param": "offset", "initial": 0},
+                "offset": {"param": "offset", "initial": 0, "increment_by": 2},
                 "limit": _CLAMPED_LIMIT,
             },
         )
@@ -883,7 +888,7 @@ class TestReadBatchesEffectivePageSize:
         endpoint = _endpoint_doc_with_records(
             pagination={
                 "type": "offset",
-                "offset": {"param": "offset", "initial": 0},
+                "offset": {"param": "offset", "initial": 0, "increment_by": 3},
                 "limit": {"param": "limit", "default": 3},
             },
         )
@@ -913,7 +918,7 @@ class TestReadBatchesEffectivePageSize:
         endpoint = _endpoint_doc_with_records(
             pagination={
                 "type": "offset",
-                "offset": {"param": "offset", "initial": 0},
+                "offset": {"param": "offset", "initial": 0, "increment_by": 2},
                 "limit": {
                     "param": "limit",
                     "default": {"ref": "connection.parameters.missing_page_size"},
@@ -963,7 +968,7 @@ class TestReadBatchesEffectivePageSize:
         endpoint = _endpoint_doc_with_records(
             pagination={
                 "type": "offset",
-                "offset": {"param": "offset", "initial": 0},
+                "offset": {"param": "offset", "initial": 0, "increment_by": 2},
                 "limit": {"param": "limit", "default": default},
             },
         )
@@ -1230,25 +1235,16 @@ class TestReadBatchesLinkPagination:
     """Link pagination per the contract: the resolved next_url replaces the
     entire request, no params traverse."""
 
-    def test_contract_declares_no_link_limit_field(self):
-        """Drift guard for the early link dispatch: LinkPagination carries
-        no limit field in the published contract, so no limit injection is
-        needed (or possible) before dispatching it — a link endpoint's
-        first-request page size is an ordinary param default over
-        runtime.batch_size. If the contract ever adds link.limit, this
-        fails and the dispatch must start computing and injecting the
-        effective page size."""
-        from analitiq.contracts.endpoints import LinkPagination
-
-        assert set(LinkPagination.model_fields) == {"type", "link", "stop_when"}
-
-    def _link_pagination(self):
+    def _link_pagination(self, limit: dict[str, Any] | None = None):
         """Link block following ``response.body.next`` until absent."""
-        return {
+        block: dict[str, Any] = {
             "type": "link",
             "link": {"next_url": {"ref": "response.body.next"}},
             "stop_when": {"empty": {"ref": "response.body.records"}},
         }
+        if limit is not None:
+            block["limit"] = limit
+        return block
 
     @pytest.mark.asyncio
     async def test_link_follows_next_url_until_absent(self):
@@ -1470,6 +1466,90 @@ class TestReadBatchesLinkPagination:
                 batch_size=10,
             )
 
+    @pytest.mark.asyncio
+    async def test_declared_limit_rides_the_first_request_only(self):
+        """The declared limit binds into the initial request like every
+        other strategy's; the followed link is sent verbatim, so no limit
+        (and no other param) traverses to it."""
+        session = _FakeSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body={
+                        "records": [{"id": 1, "name": "a"}],
+                        "next": "https://api.example.test/items?page=2",
+                    },
+                ),
+                _FakeResponse(status=200, body={"records": [{"id": 2, "name": "b"}]}),
+            ]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination=self._link_pagination(
+                limit={"param": "limit", "default": {"ref": "runtime.batch_size"}}
+            )
+        )
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=7,
+        )
+
+        assert session.calls[0][2] == {"limit": 7}
+        assert session.calls[1][1] == "https://api.example.test/items?page=2"
+        assert session.calls[1][2] == {}
+
+    @pytest.mark.asyncio
+    async def test_declared_limit_max_clamps_the_first_request(self):
+        """``limit.max`` caps the first request's page size, so the engine
+        never asks a link endpoint for more than the provider serves."""
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(
+            pagination=self._link_pagination(limit=_CLAMPED_LIMIT)
+        )
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=50,
+        )
+
+        assert session.calls[0][2] == {"limit": 2}
+
+    @pytest.mark.asyncio
+    async def test_without_a_limit_block_no_page_size_is_injected(self):
+        """A link endpoint declaring no limit sends no page-size param: the
+        engine binds what the contract declares, never a guessed default."""
+        session = _FakeSession(
+            [_FakeResponse(status=200, body={"records": [{"id": 1, "name": "a"}]})]
+        )
+        runtime = _runtime_with_session(session)
+        connector = APIConnector("test")
+
+        endpoint = _endpoint_doc_with_records(pagination=self._link_pagination())
+        await _consume(
+            connector,
+            runtime,
+            config={"endpoint_document": endpoint, "stream_source": _stream_source()},
+            state_manager=MagicMock(),
+            stream_name="items",
+            batch_size=10,
+        )
+
+        assert session.calls[0][2] == {}
+
 
 class TestReadBatchesCursorTemplate:
     """The next_cursor value expression supports the full grammar."""
@@ -1542,7 +1622,7 @@ class TestReadBatchesStopWhen:
         endpoint = _endpoint_doc_with_records(
             pagination={
                 "type": "offset",
-                "offset": {"param": "offset", "initial": 0},
+                "offset": {"param": "offset", "initial": 0, "increment_by": 2},
                 "limit": {"param": "limit"},
                 "stop_when": {"eq": [{"ref": "response.body.has_more"}, False]},
             },
@@ -1578,7 +1658,7 @@ class TestReadBatchesStopWhen:
         endpoint = _endpoint_doc_with_records(
             pagination={
                 "type": "offset",
-                "offset": {"param": "offset", "initial": 0},
+                "offset": {"param": "offset", "initial": 0, "increment_by": 2},
                 "limit": {"param": "limit"},
                 # ``total`` is absent from the body: ordering None against a
                 # number cannot be answered.
@@ -2098,7 +2178,7 @@ class TestReadBatchesRequestBody:
         endpoint = _endpoint_doc_with_records(
             pagination={
                 "type": "offset",
-                "offset": {"param": "offset", "initial": 0},
+                "offset": {"param": "offset", "initial": 0, "increment_by": 2},
                 "limit": {"param": "limit"},
             },
             request={
@@ -2278,7 +2358,7 @@ class TestReadBatchesRequestBody:
         endpoint = _endpoint_doc_with_records(
             pagination={
                 "type": "offset",
-                "offset": {"param": "offset", "initial": 0},
+                "offset": {"param": "offset", "initial": 0, "increment_by": 2},
                 "limit": {"param": "limit"},
             },
             params={

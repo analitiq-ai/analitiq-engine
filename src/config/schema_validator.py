@@ -8,7 +8,7 @@ schema it downloaded separately from the models that produced it.
 
 Each artifact kind maps to one model:
 
-    ``connector``          -> ``ConnectorConfig``
+    ``connector``          -> ``Connector``
     ``connection``         -> ``ConnectionInput``
     ``pipeline``           -> ``PipelineInput``
     ``stream``             -> ``StreamInput``
@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from analitiq.contracts.connection import ConnectionInput
-from analitiq.contracts.connector import ConnectorConfig
+from analitiq.contracts.connector import Connector
 from analitiq.contracts.endpoints import ApiEndpointDoc, DatabaseEndpointDoc
 from analitiq.contracts.pipelines.config import PipelineInput
 from analitiq.contracts.shared.common import schema_url_for
@@ -50,7 +50,7 @@ EndpointDocument = ApiEndpointDoc | DatabaseEndpointDoc
 # ``{kind}/latest.json`` schema is rendered from. Values are typed ``Any``
 # because a contract entry may be an Annotated union alias, not a class.
 _MODELS: dict[str, Any] = {
-    "connector": ConnectorConfig,
+    "connector": Connector,
     "connection": ConnectionInput,
     "pipeline": PipelineInput,
     "stream": StreamInput,

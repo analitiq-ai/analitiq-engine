@@ -26,28 +26,33 @@ from decimal import Decimal
 from typing import Any
 
 from analitiq.contracts.endpoints import (
-    FunctionExpr,
-    LiteralExpr,
-    PredAnd,
-    PredEmpty,
-    PredEq,
-    PredExists,
-    PredGt,
-    PredGte,
-    PredLt,
-    PredLte,
-    PredMissing,
-    PredNeq,
-    PredNot,
-    PredNotEmpty,
-    PredOr,
-    RefExpr,
-    TemplateExpr,
+    FunctionExpression,
+    LiteralExpression,
+    PredicateAnd,
+    PredicateEmpty,
+    PredicateEq,
+    PredicateExists,
+    PredicateGt,
+    PredicateGte,
+    PredicateLt,
+    PredicateLte,
+    PredicateMissing,
+    PredicateNeq,
+    PredicateNot,
+    PredicateNotEmpty,
+    PredicateOr,
+    RefExpression,
+    TemplateExpression,
 )
 
 from cdk.resolver import Resolver
 
-_EXPRESSION_MODELS = (RefExpr, LiteralExpr, TemplateExpr, FunctionExpr)
+_EXPRESSION_MODELS = (
+    RefExpression,
+    LiteralExpression,
+    TemplateExpression,
+    FunctionExpression,
+)
 
 
 def resolve_response_expr(expr: Any, resolver: Resolver) -> Any:
@@ -104,28 +109,28 @@ def evaluate_predicate(pred: Any, resolver: Resolver) -> bool:  # skipcq: PY-R10
     ``None`` against a number) raises :class:`ValueError` naming the
     predicate rather than guessing a truth value.
     """
-    if isinstance(pred, PredAnd):
+    if isinstance(pred, PredicateAnd):
         return all(evaluate_predicate(p, resolver) for p in pred.and_)
-    if isinstance(pred, PredOr):
+    if isinstance(pred, PredicateOr):
         return any(evaluate_predicate(p, resolver) for p in pred.or_)
-    if isinstance(pred, PredNot):
+    if isinstance(pred, PredicateNot):
         return not evaluate_predicate(pred.not_, resolver)
-    if isinstance(pred, PredExists):
+    if isinstance(pred, PredicateExists):
         return resolve_response_expr(pred.exists, resolver) is not None
-    if isinstance(pred, PredMissing):
+    if isinstance(pred, PredicateMissing):
         return resolve_response_expr(pred.missing, resolver) is None
-    if isinstance(pred, PredEmpty):
+    if isinstance(pred, PredicateEmpty):
         return _is_empty(resolve_response_expr(pred.empty, resolver))
-    if isinstance(pred, PredNotEmpty):
+    if isinstance(pred, PredicateNotEmpty):
         return not _is_empty(resolve_response_expr(pred.not_empty, resolver))
 
     comparisons = (
-        (PredEq, "eq", lambda a, b: a == b),
-        (PredNeq, "neq", lambda a, b: a != b),
-        (PredLt, "lt", lambda a, b: a < b),
-        (PredLte, "lte", lambda a, b: a <= b),
-        (PredGt, "gt", lambda a, b: a > b),
-        (PredGte, "gte", lambda a, b: a >= b),
+        (PredicateEq, "eq", lambda a, b: a == b),
+        (PredicateNeq, "neq", lambda a, b: a != b),
+        (PredicateLt, "lt", lambda a, b: a < b),
+        (PredicateLte, "lte", lambda a, b: a <= b),
+        (PredicateGt, "gt", lambda a, b: a > b),
+        (PredicateGte, "gte", lambda a, b: a >= b),
     )
     for cls, op, compare in comparisons:
         if isinstance(pred, cls):
