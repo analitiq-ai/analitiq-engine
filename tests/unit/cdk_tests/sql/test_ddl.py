@@ -190,6 +190,28 @@ class TestCreateTableExecution:
         assert conn.closed is True
 
     @pytest.mark.asyncio
+    async def test_connection_write_rules_compose_over_connector(
+        self, pg_mapper, pg_connection_mapper
+    ):
+        # A connection-scoped type-map-write.json takes effect in control-plane
+        # create_table (#368): the connection's Utf8 -> CITEXT override wins,
+        # while Int64 (no connection rule) still renders through the
+        # connector's write map.
+        runtime = FakeAdbcRuntime(
+            "postgresql", mapper=pg_mapper, connection_mapper=pg_connection_mapper
+        )
+        columns = [
+            ColumnDef("id", "Int64", nullable=False, primary_key=True),
+            ColumnDef("email", "Utf8"),
+        ]
+        await create_table(
+            runtime, "public", "users", columns, ["id"], dialect=SqlDialect()
+        )
+        executed = runtime.connections[-1].executed[-1][0]
+        assert '"email" CITEXT' in executed
+        assert '"id" BIGINT NOT NULL' in executed
+
+    @pytest.mark.asyncio
     async def test_explicit_type_mapper_overrides_runtime_default(self):
         # Runtime has no mapper; passing one explicitly must be used instead.
         runtime = FakeAdbcRuntime("bigquery", mapper=None)

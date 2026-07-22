@@ -20,6 +20,8 @@ import pyarrow as pa
 import pytest
 
 from cdk.type_map.loader import build_type_mapper
+from cdk.type_map.mapper import TypeMapper
+from cdk.types import EndpointScope
 
 # A responder maps an executed (sql, params) to the rows the cursor returns.
 Responder = Callable[[str, Sequence[Any]], list[dict[str, Any]]]
@@ -60,6 +62,18 @@ _SF_READ_RULES = [
     {"match": "exact", "native": "NUMBER", "canonical": "Decimal128(38, 0)"},
 ]
 
+# Connection-scoped rules standing in for a connections/{id}/definition
+# type-map (issue #368): a native outside the connector's vocabulary (CITEXT),
+# an override of a native the connector also maps (TEXT), and a write override
+# for a canonical the connector's write map also renders (Utf8).
+_CONN_READ_RULES = [
+    {"match": "exact", "native": "CITEXT", "canonical": "Utf8"},
+    {"match": "exact", "native": "TEXT", "canonical": "LargeUtf8"},
+]
+_CONN_WRITE_RULES = [
+    {"match": "exact", "canonical": "Utf8", "native": "CITEXT"},
+]
+
 
 @pytest.fixture
 def pg_mapper():
@@ -71,6 +85,27 @@ def pg_mapper():
 def sf_mapper():
     """Snowflake-shaped TypeMapper (read rules only)."""
     return build_type_mapper("snowflake", _SF_READ_RULES)
+
+
+@pytest.fixture
+def pg_connection_mapper():
+    """Connection-scoped TypeMapper composed over ``pg_mapper`` in the fakes."""
+    return build_type_mapper("connection:acme", _CONN_READ_RULES, _CONN_WRITE_RULES)
+
+
+def _scoped_mapper(
+    connector_mapper: Any, connection_mapper: Any, scope: EndpointScope
+) -> Any:
+    """Mirror ``ConnectionRuntime.type_mapper_for`` for the fake runtimes.
+
+    Connection scope composes connection-over-connector per-type; connector
+    scope (or no connection map) is the connector mapper alone.
+    """
+    if scope == EndpointScope.CONNECTION and connection_mapper is not None:
+        if connector_mapper is None:
+            return connection_mapper
+        return TypeMapper.compose(connection_mapper, connector_mapper)
+    return connector_mapper
 
 
 class FakeArrowCursor:
@@ -142,6 +177,7 @@ class FakeAdbcRuntime:
         driver: str,
         *,
         mapper: Any = None,
+        connection_mapper: Any = None,
         responder: Responder | None = None,
         fail_execute: Exception | None = None,
         fail_close: Exception | None = None,
@@ -150,6 +186,7 @@ class FakeAdbcRuntime:
         self.is_adbc = True
         self.is_sync_sqlalchemy = False
         self._mapper = mapper
+        self._connection_mapper = connection_mapper
         self._responder = responder
         self._fail_execute = fail_execute
         self._fail_close = fail_close
@@ -158,6 +195,9 @@ class FakeAdbcRuntime:
     @property
     def connector_type_mapper(self) -> Any:
         return self._mapper
+
+    def type_mapper_for(self, *, scope: EndpointScope) -> Any:
+        return _scoped_mapper(self._mapper, self._connection_mapper, scope)
 
     def open_adbc_connection(self) -> FakeAdbcConnection:
         conn = FakeAdbcConnection(self._responder, self._fail_execute, self._fail_close)
@@ -243,6 +283,7 @@ class FakeSaRuntime:
         driver: str = "postgresql",
         *,
         mapper: Any = None,
+        connection_mapper: Any = None,
         rows: list[dict[str, Any]] | None = None,
         fail: Exception | None = None,
     ) -> None:
@@ -250,8 +291,12 @@ class FakeSaRuntime:
         self.is_adbc = False
         self.is_sync_sqlalchemy = False
         self._mapper = mapper
+        self._connection_mapper = connection_mapper
         self.engine = FakeAsyncEngine(rows=rows, fail=fail)
 
     @property
     def connector_type_mapper(self) -> Any:
         return self._mapper
+
+    def type_mapper_for(self, *, scope: EndpointScope) -> Any:
+        return _scoped_mapper(self._mapper, self._connection_mapper, scope)
