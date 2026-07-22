@@ -10,7 +10,6 @@ import asyncio
 import json
 import logging
 import os
-from asyncio import Queue
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum, auto
@@ -363,9 +362,9 @@ class StreamProcessor:
         self, source_readable: Readable
     ) -> list[asyncio.Task[None]]:
         """Create the four pipeline stage tasks wired with fresh queues."""
-        extract_queue: Queue[Any] = Queue(maxsize=self.buffer_size)
-        transform_queue: Queue[Any] = Queue(maxsize=self.buffer_size)
-        load_queue: Queue[Any] = Queue(maxsize=self.buffer_size)
+        extract_queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=self.buffer_size)
+        transform_queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=self.buffer_size)
+        load_queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=self.buffer_size)
         return [
             asyncio.create_task(
                 self._extract_stage(source_readable, extract_queue),
@@ -391,7 +390,7 @@ class StreamProcessor:
         return str(mode).lower() == "truncate_insert"
 
     async def _extract_stage(
-        self, source_readable: Readable, queue: Queue[Any]
+        self, source_readable: Readable, queue: asyncio.Queue[Any]
     ) -> None:
         """Extract data from source in batches with state management."""
         logger.debug(f"Starting extract stage for stream {self.stream_name}")
@@ -468,7 +467,7 @@ class StreamProcessor:
             raise
 
     async def _transform_stage(
-        self, input_queue: Queue[Any], output_queue: Queue[Any]
+        self, input_queue: asyncio.Queue[Any], output_queue: asyncio.Queue[Any]
     ) -> None:
         """Transform data with field mappings and validation."""
         logger.debug(f"Starting transform stage for stream {self.stream_name}")
@@ -561,7 +560,7 @@ class StreamProcessor:
         return cursor_data, hwm
 
     async def _load_stage(
-        self, input_queue: Queue[Any], output_queue: Queue[Any]
+        self, input_queue: asyncio.Queue[Any], output_queue: asyncio.Queue[Any]
     ) -> None:
         """Load transformed data to destination via gRPC streaming.
 
@@ -726,7 +725,7 @@ class StreamProcessor:
         batch_seq: int,
         batch: pa.RecordBatch,
         record_dicts: list[dict[str, Any]],
-        output_queue: Queue[Any],
+        output_queue: asyncio.Queue[Any],
     ) -> None:
         """React to a batch's final ack with the stream's failure policy.
 
@@ -927,7 +926,7 @@ class StreamProcessor:
             stage=FailureStage.DESTINATION_LOAD,
         )
 
-    async def _checkpoint_stage(self, input_queue: Queue[Any]) -> None:
+    async def _checkpoint_stage(self, input_queue: asyncio.Queue[Any]) -> None:
         """Checkpoint processing progress with state management."""
         logger.debug(f"Starting checkpoint stage for stream {self.stream_name}")
 
