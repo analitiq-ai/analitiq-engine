@@ -8,9 +8,10 @@ those Protocol methods by delegating to these functions.
 Public surface:
 
 * ``list_schemas`` / ``list_tables`` / ``list_columns`` — INFORMATION_SCHEMA
-  discovery, native types canonicalized via the connector read type-map.
+  discovery, native types canonicalized via the connection-scoped read
+  type-map (connection rules over connector rules).
 * ``create_table`` / ``build_create_table_sql`` — DDL from ``ColumnDef``s via
-  the write type-map + dialect strategy.
+  the connection-scoped write type-map + dialect strategy.
 * ``SqlDialect`` / ``TableAddress`` — the ANSI-neutral dialect base and its
   once-normalized ``catalog.schema.table`` address (per-system dialects live
   in connector packages).

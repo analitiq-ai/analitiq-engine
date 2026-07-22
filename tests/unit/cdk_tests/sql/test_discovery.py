@@ -297,7 +297,7 @@ class TestConnectionScopedTypeMap:
     """``list_columns`` resolves through the connection-composed read map (#368).
 
     A connection-authored ``type-map-read.json`` must take effect during
-    engine-side discovery exactly as it does at stream run time: connection
+    control-plane discovery exactly as it does at stream run time: connection
     rules first, connector rules filling the gaps.
     """
 
