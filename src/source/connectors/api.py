@@ -497,7 +497,7 @@ class APIConnector(BaseConnector):
                 except UnmappedTypeError as err:
                     raise ReadError(
                         f"field {name!r}: JSON type {native!r} has no rule in "
-                        f"the connector's read type-map"
+                        f"the endpoint's read type-map"
                     ) from err
         arrow_type = field.get("arrow_type")
         if arrow_type == "Object":

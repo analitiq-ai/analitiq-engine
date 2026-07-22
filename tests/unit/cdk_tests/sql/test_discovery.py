@@ -293,6 +293,77 @@ class TestListColumns:
             await list_schemas(runtime, dialect=SqlDialect())
 
 
+class TestConnectionScopedTypeMap:
+    """``list_columns`` resolves through the connection-composed read map (#368).
+
+    A connection-authored ``type-map-read.json`` must take effect during
+    control-plane discovery exactly as it does at stream run time: connection
+    rules first, connector rules filling the gaps.
+    """
+
+    @pytest.mark.asyncio
+    async def test_connection_only_native_resolves(
+        self, pg_mapper, pg_connection_mapper
+    ):
+        # CITEXT exists only in the connection map — the exact case the map
+        # was authored for. Before the fix this raised DiscoveryError.
+        runtime = FakeAdbcRuntime(
+            "postgresql",
+            mapper=pg_mapper,
+            connection_mapper=pg_connection_mapper,
+            responder=_route(
+                {
+                    "pks": [],
+                    "columns": [
+                        {
+                            "column_name": "email",
+                            "data_type": "citext",
+                            "is_nullable": "YES",
+                        },
+                    ],
+                }
+            ),
+        )
+        columns, _ = await list_columns(
+            runtime, "public", "users", dialect=SqlDialect()
+        )
+        assert columns == [ColumnDef("email", "Utf8", nullable=True, primary_key=False)]
+
+    @pytest.mark.asyncio
+    async def test_connection_rule_wins_and_connector_fills_gaps(
+        self, pg_mapper, pg_connection_mapper
+    ):
+        # TEXT is mapped by both: the connection's rule (LargeUtf8) is
+        # authoritative over the connector's (Utf8). BIGINT has no connection
+        # rule and falls through to the connector map.
+        runtime = FakeAdbcRuntime(
+            "postgresql",
+            mapper=pg_mapper,
+            connection_mapper=pg_connection_mapper,
+            responder=_route(
+                {
+                    "pks": [],
+                    "columns": [
+                        {
+                            "column_name": "body",
+                            "data_type": "text",
+                            "is_nullable": "YES",
+                        },
+                        {
+                            "column_name": "id",
+                            "data_type": "bigint",
+                            "is_nullable": "NO",
+                        },
+                    ],
+                }
+            ),
+        )
+        columns, _ = await list_columns(
+            runtime, "public", "posts", dialect=SqlDialect()
+        )
+        assert [c.canonical_type for c in columns] == ["LargeUtf8", "Int64"]
+
+
 class TestNormalizingDialectDiscovery:
     """A normalizing dialect's binds propagate through list_columns too."""
 

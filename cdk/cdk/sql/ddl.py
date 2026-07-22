@@ -1,10 +1,13 @@
 """Standalone ``create_table`` — the ``TableCreator`` contract (ADR §6).
 
 Builds and runs ``CREATE TABLE`` DDL from a list of ``ColumnDef`` (canonical
-Arrow types) using the connector's **write** type-map (``to_native_type``,
-shipped in Phase 0) to render each native column type, and the dialect strategy
-for quoting and the PRIMARY KEY clause. Callable with no gRPC server running:
-the control-plane invokes it directly to pre-create a destination table.
+Arrow types) using the connection-scoped **write** type-map
+(``to_native_type``; connection rules first, connector rules on a miss —
+issue #368) to render each native column type, and the dialect strategy for
+quoting and the PRIMARY KEY clause. Callable with no gRPC server running: the
+control-plane invokes it directly to pre-create a destination table — a table
+in the connection's own database, so the connection scope is inherent, exactly
+as in ``cdk.sql.discovery``.
 
 Deliberately minimal versus the streaming handler's table creation: it emits
 exactly the columns it is given plus the PK clause. It does **not** append the
@@ -19,6 +22,7 @@ from typing import Any
 
 from ..contract import ColumnDef
 from ..type_map.exceptions import InvalidTypeMapError, UnmappedTypeError
+from ..types import EndpointScope
 from .dialects import SqlDialect, TableAddress
 from .exceptions import CreateTableError
 from .execution import execute_ddl
@@ -100,14 +104,19 @@ async def create_table(
     """Build and execute ``CREATE TABLE`` DDL over *runtime*'s transport.
 
     *dialect* is the connector's dialect strategy (per-system dialects live
-    in the connector packages). Uses the connector's write type-map
-    (``runtime.connector_type_mapper``) unless an explicit *type_mapper* is
-    supplied. The ``catalog``/``schema``/``table`` intent resolves through
+    in the connector packages). Uses the connection-scoped write type-map
+    (``runtime.type_mapper_for(scope=CONNECTION)`` — connection write rules
+    over the connector's) unless an explicit *type_mapper* is supplied. The
+    ``catalog``/``schema``/``table`` intent resolves through
     ``dialect.table_address`` — a catalog the dialect cannot address fails
     loud there (:class:`~cdk.sql.exceptions.CatalogAddressingError`) before
     any DDL is composed.
     """
-    mapper = type_mapper if type_mapper is not None else runtime.connector_type_mapper
+    mapper = (
+        type_mapper
+        if type_mapper is not None
+        else runtime.type_mapper_for(scope=EndpointScope.CONNECTION)
+    )
     ddl = build_create_table_sql(
         dialect,
         mapper,

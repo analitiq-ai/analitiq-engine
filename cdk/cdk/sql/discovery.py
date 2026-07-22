@@ -4,9 +4,13 @@ These implement the ``Discoverable`` contract (``cdk.contract``) as plain
 functions over a materialized ``ConnectionRuntime``. They run the dialect's
 ``INFORMATION_SCHEMA`` queries (``cdk.sql.dialects``) through the
 transport-agnostic executor (``cdk.sql.execution``) and map each native column
-type to its canonical Arrow string via the connector's **read** type-map — so a
-``ColumnDef`` carries the canonical type ``create_table`` consumes downstream
-(ADR §6, CONFIRM-1), not the raw native string.
+type to its canonical Arrow string via the connection-scoped **read** type-map
+(``runtime.type_mapper_for(scope=CONNECTION)`` — connection rules first, the
+connector map filling the gaps; issue #368) — so a ``ColumnDef`` carries the
+canonical type ``create_table`` consumes downstream (ADR §6, CONFIRM-1), not
+the raw native string. Discovery introspects the connection's own database, so
+its objects are private endpoints by definition and the connection scope is
+inherent, not a caller choice.
 
 No gRPC server, engine state, or orchestration is involved: the control-plane
 calls these directly.
@@ -18,6 +22,7 @@ from typing import Any
 
 from ..contract import ColumnDef
 from ..type_map.exceptions import UnmappedTypeError
+from ..types import EndpointScope
 from .dialects import SqlDialect
 from .exceptions import DiscoveryError
 from .execution import Row, fetch_rows
@@ -74,13 +79,17 @@ async def list_columns(
 ) -> tuple[list[ColumnDef], list[str]]:
     """Describe *table*: its columns (canonical types) and its primary keys.
 
-    Returns ``(columns, primary_keys)``. Each column's native type is mapped to
-    its canonical Arrow string through the connector's read type-map; an
-    unmapped native type raises :class:`DiscoveryError` naming the offending
-    column (the underlying ``UnmappedTypeError`` is chained). A *catalog*
-    scopes both queries to that catalog.
+    Returns ``(columns, primary_keys)``. Each column's native type is mapped
+    to its canonical Arrow string through the connection-scoped read type-map
+    — the connection's own rules first, the connector map on a miss — so a
+    connection-authored rule for a native outside the connector's vocabulary
+    (a pgvector ``vector(N)``, a custom domain) resolves here exactly as it
+    does at stream run time. An unmapped native type raises
+    :class:`DiscoveryError` naming the offending column (the underlying
+    ``UnmappedTypeError`` is chained). A *catalog* scopes both queries to that
+    catalog.
     """
-    type_mapper = runtime.connector_type_mapper
+    type_mapper = runtime.type_mapper_for(scope=EndpointScope.CONNECTION)
 
     pk_sql, pk_params = dialect.primary_keys_query(schema, table, catalog)
     pk_rows = await fetch_rows(runtime, pk_sql, pk_params)

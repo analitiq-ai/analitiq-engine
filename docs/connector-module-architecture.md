@@ -188,9 +188,11 @@ reality.
 2. **Introspection operations exist.** `list_schemas` / `list_tables` /
    `list_columns` ship in the CDK (`cdk/cdk/sql/discovery.py`, exposed on
    `GenericSQLConnector`), running `INFORMATION_SCHEMA` queries over the same
-   transport the data path uses and canonicalizing native types via the read
-   type-map. `list_columns` returns **both** the columns and the primary keys
-   (`tuple[list[ColumnDef], list[str]]`).
+   transport the data path uses and canonicalizing native types via the
+   connection-scoped read type-map (`runtime.type_mapper_for(scope=CONNECTION)`
+   — connection rules over connector rules, since discovery introspects the
+   connection's own database; #368). `list_columns` returns **both** the
+   columns and the primary keys (`tuple[list[ColumnDef], list[str]]`).
 3. **`create_table` is standalone.** DDL is decoupled from the gRPC streaming
    flow: the destination base and the contract speak CDK-native DTOs
    (`SchemaSpec` / `Cursor` / `AckStatus` in `cdk/cdk/types.py`), with the gRPC
