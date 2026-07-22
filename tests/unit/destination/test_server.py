@@ -231,6 +231,75 @@ class TestSchemaAckTypeMapError:
         assert "write_mode=99" in ack.message
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "cause",
+        [
+            UnmappedTypeError("pg", "write", "money"),
+            InvalidTypeMapError("rule 3 uses lookahead"),
+        ],
+        ids=["unmapped", "invalid-map"],
+    )
+    async def test_create_table_error_with_type_map_cause_keeps_prefix(self, cause):
+        """The DDL builder wraps a missing type-map write rule as
+        CreateTableError with the original as ``__cause__`` (ddl.py), so the
+        dedicated type-map clause never matches by type; the servicer must
+        still reject with the "type-map: " signal instead of failing the
+        RPC (issue #365)."""
+        from cdk.sql.exceptions import CreateTableError
+
+        exc = CreateTableError(
+            "create_table for 'events': column 'amount' canonical "
+            "type 'money' has no type-map-write rule"
+        )
+        exc.__cause__ = cause
+        handler = MagicMock()
+        handler.configure_schema = AsyncMock(side_effect=exc)
+
+        servicer = DestinationServicer(handler, server=MagicMock())
+        responses = []
+        async for resp in servicer.StreamRecords(
+            _iter_once(_schema_request("s8")), context=MagicMock()
+        ):
+            responses.append(resp)
+
+        assert len(responses) == 1
+        ack = responses[0].schema_ack
+        assert ack.accepted is False
+        assert ack.message.startswith("type-map: ")
+        # The wrapped message keeps the table/column context the builder adds.
+        assert "'amount'" in ack.message
+
+    @pytest.mark.asyncio
+    async def test_create_table_error_without_cause_is_surfaced_in_schema_ack(
+        self,
+    ):
+        """A CreateTableError with no type-map cause (no columns, a primary
+        key missing from the column list) is deterministic too; it must land
+        in the SchemaAck under its own name, not fail the RPC (issue #365)."""
+        from cdk.sql.exceptions import CreateTableError
+
+        handler = MagicMock()
+        handler.configure_schema = AsyncMock(
+            side_effect=CreateTableError(
+                "create_table for 'events': primary key column(s) "
+                "['id'] are not in the column list"
+            )
+        )
+
+        servicer = DestinationServicer(handler, server=MagicMock())
+        responses = []
+        async for resp in servicer.StreamRecords(
+            _iter_once(_schema_request("s9")), context=MagicMock()
+        ):
+            responses.append(resp)
+
+        assert len(responses) == 1
+        ack = responses[0].schema_ack
+        assert ack.accepted is False
+        assert ack.message.startswith("CreateTableError: ")
+        assert "not in the column list" in ack.message
+
+    @pytest.mark.asyncio
     async def test_unsupported_dialect_error_is_surfaced_in_schema_ack(self):
         """UnsupportedDialectOperationError is in configure_schema's
         propagate tuple; it must land in the SchemaAck as well."""

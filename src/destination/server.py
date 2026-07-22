@@ -20,6 +20,7 @@ from cdk.adbc_registry import AdbcConfigurationError
 from cdk.base_handler import BaseDestinationHandler
 from cdk.secrets.exceptions import PlaceholderExpansionError
 from cdk.sql.exceptions import (
+    CreateTableError,
     SchemaConfigurationError,
     UnsupportedDialectOperationError,
 )
@@ -298,6 +299,7 @@ class DestinationServicer(DestinationServiceServicer):
                         ack_message = f"type-map: {e}"
                     except (
                         AdbcConfigurationError,
+                        CreateTableError,
                         SchemaConfigurationError,
                         UnsupportedDialectOperationError,
                         PlaceholderExpansionError,
@@ -306,13 +308,29 @@ class DestinationServicer(DestinationServiceServicer):
                         # propagates these deterministic errors so the
                         # SchemaAck carries the precise reason; translate
                         # them here instead of crashing the stream.
+                        # CreateTableError comes only from the DDL builder
+                        # (build_create_table_sql) on this path: no columns,
+                        # a primary key missing from the column list, or a
+                        # missing type-map write rule wrapped with its
+                        # table/column context. DDL *execution* failures
+                        # raise raw driver errors and still fail the RPC.
                         logger.error(
                             "configuration error for stream %s: %s",
                             schema_msg.stream_id,
                             e,
                         )
                         accepted = False
-                        ack_message = f"{type(e).__name__}: {e}"
+                        if isinstance(
+                            e.__cause__, (UnmappedTypeError, InvalidTypeMapError)
+                        ):
+                            # The DDL builder wraps a missing type-map write
+                            # rule as CreateTableError (ddl.py); keep the
+                            # "type-map: " signal the dedicated clause above
+                            # produces for the unwrapped form, so the engine
+                            # log reads the same either way.
+                            ack_message = f"type-map: {e}"
+                        else:
+                            ack_message = f"{type(e).__name__}: {e}"
                     except (KeyError, TypeError, ValueError) as e:
                         logger.exception(
                             "deterministic error configuring stream %s",
