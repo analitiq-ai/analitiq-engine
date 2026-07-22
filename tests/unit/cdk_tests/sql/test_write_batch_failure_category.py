@@ -17,6 +17,7 @@ import pyarrow as pa
 import pytest
 
 from cdk.adbc_registry import AdbcConfigurationError
+from cdk.sql.dialects import TableAddress
 from cdk.sql.exceptions import (
     SchemaConfigurationError,
     UnsupportedDialectOperationError,
@@ -35,7 +36,7 @@ def _ready_handler(write_error: Exception) -> GenericSQLConnector:
     handler = GenericSQLConnector()
     handler._connected = True
     handler._adbc_only = True
-    handler._streams = {STREAM_ID: _StreamState(table_name="t")}
+    handler._streams = {STREAM_ID: _StreamState(address=TableAddress(table="t"))}
     handler._write_batch_adbc_only = AsyncMock(side_effect=write_error)
     return handler
 

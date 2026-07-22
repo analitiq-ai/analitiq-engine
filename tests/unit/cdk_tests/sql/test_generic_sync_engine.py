@@ -19,6 +19,7 @@ import pytest
 from sqlalchemy import MetaData, Table, create_engine
 from sqlalchemy.pool import StaticPool
 
+from cdk.sql.dialects import TableAddress
 from cdk.sql.generic import GenericSQLConnector, _StreamState
 from cdk.types import AckStatus, Cursor
 
@@ -60,8 +61,7 @@ def _connected_handler(engine, write_mode: str = "insert") -> GenericSQLConnecto
     handler._connected = True
     handler._sync_engine = engine
     handler._streams["s1"] = _StreamState(
-        schema_name="",
-        table_name="events",
+        address=TableAddress(table="events"),
         table=table,
         write_mode=write_mode,
         primary_keys=["id"],
@@ -190,7 +190,7 @@ class TestSyncEngineDdl:
         try:
             handler = GenericSQLConnector()
             handler._sync_engine = engine
-            state = _StreamState(schema_name="", table_name="events")
+            state = _StreamState(address=TableAddress(table="events"))
             import asyncio
 
             table = await asyncio.to_thread(
@@ -315,8 +315,7 @@ class TestSyncRuntimeWiring:
             assert handler._adbc_only is False
 
             state = _StreamState(
-                schema_name="",
-                table_name="events",
+                address=TableAddress(table="events"),
                 primary_keys=["id"],
                 write_mode="insert",
                 endpoint_document={
@@ -421,8 +420,7 @@ class TestAsyncEngineParity:
         handler._connected = True
         handler._engine = engine
         handler._streams["s1"] = _StreamState(
-            schema_name="",
-            table_name="events",
+            address=TableAddress(table="events"),
             table=table,
             write_mode="insert",
             primary_keys=["id"],

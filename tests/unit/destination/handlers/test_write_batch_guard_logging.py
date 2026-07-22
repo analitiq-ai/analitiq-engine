@@ -20,6 +20,7 @@ from unittest.mock import MagicMock
 import pyarrow as pa
 import pytest
 
+from cdk.sql.dialects import TableAddress
 from cdk.sql.generic import GenericSQLConnector, _StreamState
 from cdk.types import AckStatus, Cursor, FailureCategory
 from src.destination.connectors.api import ApiDestinationHandler
@@ -139,7 +140,9 @@ def _tableless_sql() -> GenericSQLConnector:
     handler._connected = True
     handler._adbc_only = False
     handler._engine = MagicMock()
-    handler._streams = {STREAM_ID: _StreamState(table_name="t", table=None)}
+    handler._streams = {
+        STREAM_ID: _StreamState(address=TableAddress(table="t"), table=None)
+    }
     return handler
 
 

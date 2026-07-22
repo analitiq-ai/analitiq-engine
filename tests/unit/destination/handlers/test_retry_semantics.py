@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
+from cdk.sql.dialects import TableAddress
 from cdk.sql.generic import GenericSQLConnector
 from cdk.sql.generic import _StreamState as SqlStreamState
 from cdk.types import Cursor, RetrySemantics, SchemaSpec
@@ -87,7 +88,9 @@ class TestSqlVerdicts:
         handler = GenericSQLConnector()
         handler._adbc_only = adbc_only
         handler._streams["s1"] = SqlStreamState(
-            table_name="t", endpoint_document={"x": 1}, **state_kwargs
+            address=TableAddress(table="t"),
+            endpoint_document={"x": 1},
+            **state_kwargs,
         )
         return handler
 

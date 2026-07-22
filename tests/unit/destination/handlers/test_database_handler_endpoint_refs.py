@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from cdk.connection_runtime import ConnectionRuntime
+from cdk.sql.dialects import TableAddress
 from cdk.sql.exceptions import SchemaConfigurationError
 from cdk.sql.generic import GenericSQLConnector
 from cdk.type_map import TypeMapper
@@ -153,8 +154,7 @@ class TestColumnDefStrictness:
         handler._runtime = _runtime(connector_mapper=_mapper("pg"))
 
         state = _StreamState(
-            schema_name="public",
-            table_name="t",
+            address=TableAddress(table="t", schema="public"),
             endpoint_document={
                 "columns": [
                     {"arrow_type": "Int64"},  # missing 'name'
@@ -172,8 +172,7 @@ class TestColumnDefStrictness:
         handler._runtime = _runtime(connector_mapper=_mapper("pg"))
 
         state = _StreamState(
-            schema_name="public",
-            table_name="t",
+            address=TableAddress(table="t", schema="public"),
             endpoint_document={
                 "columns": [
                     # native_type alone is not enough: DDL consumes the
@@ -203,8 +202,7 @@ class TestWriteBatchFatalOnTypeMapError:
         handler._connected = True
         handler._streams["s1"] = _StreamState(
             table=MagicMock(),
-            schema_name="myschema",
-            table_name="events",
+            address=TableAddress(table="events", schema="myschema"),
             write_mode="insert",
             primary_keys=[],
             schema_contract=None,
@@ -301,8 +299,7 @@ class TestWriteBatchFatalOnTypeMapError:
         handler._connected = True
         handler._adbc_only = True
         handler._streams["s1"] = _StreamState(
-            schema_name="myschema",
-            table_name="events",
+            address=TableAddress(table="events", schema="myschema"),
             write_mode="insert",
             primary_keys=[],
             schema_contract=None,
@@ -390,8 +387,7 @@ class TestUpsertFailsLoudWithoutConflictKeys:
         conn = MagicMock()
         state = _StreamState(
             table=MagicMock(),
-            schema_name="public",
-            table_name="events",
+            address=TableAddress(table="events", schema="public"),
             write_mode="upsert",
             primary_keys=["id"],  # present, but must NOT be used as a fallback
             conflict_keys=[],
@@ -414,8 +410,7 @@ class TestUpsertFailsLoudWithoutConflictKeys:
         handler.dialect.build_sqlalchemy_upsert.return_value = MagicMock()
         state = _StreamState(
             table=MagicMock(),
-            schema_name="public",
-            table_name="events",
+            address=TableAddress(table="events", schema="public"),
             write_mode="upsert",
             conflict_keys=["id"],
         )
@@ -445,8 +440,7 @@ class TestUpsertFailsLoudWithoutConflictKeys:
         contract = MagicMock()
         contract.cast_arrow_batch.return_value = MagicMock()
         state = _StreamState(
-            schema_name="analytics",
-            table_name="events",
+            address=TableAddress(table="events", schema="analytics"),
             write_mode="upsert",
             conflict_keys=[],
             schema_contract=contract,
@@ -483,8 +477,7 @@ class TestEnsureTablesEngineNoneRaises:
         handler = GenericSQLConnector()
         assert handler._engine is None
         state = _StreamState(
-            schema_name="public",
-            table_name="events",
+            address=TableAddress(table="events", schema="public"),
             endpoint_document={"columns": [{"name": "id"}]},
         )
 
@@ -597,7 +590,8 @@ class TestPrepareForSqlAlchemy:
 
         handler = GenericSQLConnector()
         state = _StreamState(
-            schema_name="public", table_name="events", schema_contract=None
+            address=TableAddress(table="events", schema="public"),
+            schema_contract=None,
         )
         batch = pa.RecordBatch.from_pylist([{"id": 1}])
         with pytest.raises(
@@ -666,8 +660,7 @@ class TestDDLLockSerialization:
         async def _drive(stream_id: str):
             """Configure one stream end-to-end against the shared handler."""
             state = _StreamState(
-                schema_name="public",
-                table_name=f"t_{stream_id}",
+                address=TableAddress(table=f"t_{stream_id}", schema="public"),
                 endpoint_document={
                     "columns": [
                         {

@@ -19,7 +19,7 @@ from typing import Any
 
 from ..contract import ColumnDef
 from ..type_map.exceptions import InvalidTypeMapError, UnmappedTypeError
-from .dialects import SqlDialect
+from .dialects import SqlDialect, TableAddress
 from .exceptions import CreateTableError
 from .execution import execute_ddl
 
@@ -27,21 +27,22 @@ from .execution import execute_ddl
 def build_create_table_sql(
     dialect: SqlDialect,
     type_mapper: Any,
-    schema: str,
-    table: str,
+    address: TableAddress,
     columns: Sequence[ColumnDef],
     primary_keys: Sequence[str],
     *,
     if_not_exists: bool = True,
 ) -> str:
-    """Render ``CREATE TABLE`` DDL for *table* (no execution).
+    """Render ``CREATE TABLE`` DDL for *address* (no execution).
 
     Each column's canonical Arrow type is rendered to native DDL via
     ``type_mapper.to_native_type``. A primary-key column is emitted ``NOT NULL``
     regardless of its declared nullability (matching the streaming handler), and
     the table-level PRIMARY KEY clause is appended when *primary_keys* is
-    non-empty.
+    non-empty. *address* is the dialect-built :class:`TableAddress`, so the
+    emitted name is quoted up to ``catalog.schema.table``.
     """
+    table = address.table
     if not columns:
         raise CreateTableError(
             f"create_table for {table!r} requires at least one column"
@@ -79,7 +80,7 @@ def build_create_table_sql(
     if primary_keys:
         column_defs.append(dialect.pk_clause(list(primary_keys)))
 
-    qualified = dialect.quote_qualified(schema, table)
+    qualified = dialect.quote_table(address)
     prefix = "CREATE TABLE IF NOT EXISTS" if if_not_exists else "CREATE TABLE"
     return f"{prefix} {qualified} (\n  " + ",\n  ".join(column_defs) + "\n)"
 
@@ -92,6 +93,7 @@ async def create_table(
     primary_keys: Sequence[str],
     *,
     dialect: SqlDialect,
+    catalog: str = "",
     if_not_exists: bool = True,
     type_mapper: Any | None = None,
 ) -> None:
@@ -100,14 +102,16 @@ async def create_table(
     *dialect* is the connector's dialect strategy (per-system dialects live
     in the connector packages). Uses the connector's write type-map
     (``runtime.connector_type_mapper``) unless an explicit *type_mapper* is
-    supplied.
+    supplied. The ``catalog``/``schema``/``table`` intent resolves through
+    ``dialect.table_address`` — a catalog the dialect cannot address fails
+    loud there (:class:`~cdk.sql.exceptions.CatalogAddressingError`) before
+    any DDL is composed.
     """
     mapper = type_mapper if type_mapper is not None else runtime.connector_type_mapper
     ddl = build_create_table_sql(
         dialect,
         mapper,
-        schema,
-        table,
+        dialect.table_address(table, schema=schema, catalog=catalog),
         columns,
         primary_keys,
         if_not_exists=if_not_exists,

@@ -20,6 +20,7 @@ import pytest
 from sqlalchemy import Column, Integer, MetaData, String, Table, create_engine, select
 from sqlalchemy.pool import StaticPool
 
+from cdk.sql.dialects import TableAddress
 from cdk.sql.generic import GenericSQLConnector
 from cdk.sql.generic import _StreamState as SqlStreamState
 from src.engine.engine import StreamingEngine, _FullRefreshCheckpoint
@@ -60,7 +61,7 @@ def _sqlite_handler(engine, table: Table) -> GenericSQLConnector:
     handler._connected = True
     handler._sync_engine = engine
     handler._streams["s1"] = SqlStreamState(
-        table_name=table.name,
+        address=TableAddress(table=table.name),
         table=table,
         write_mode="truncate_insert",
     )
@@ -226,7 +227,7 @@ class TestTruncateOnFirstBatchSqlAlchemy:
         table2 = _table(engine, "t2")
         handler = _sqlite_handler(engine, table)
         handler._streams["s2"] = SqlStreamState(
-            table_name="t2",
+            address=TableAddress(table="t2"),
             table=table2,
             write_mode="truncate_insert",
         )
@@ -248,7 +249,7 @@ class TestTruncateOnFirstBatchAdbc:
         contract = MagicMock()
         contract.cast_arrow_batch = lambda b: b
         handler._streams["s1"] = SqlStreamState(
-            table_name="t",
+            address=TableAddress(table="t"),
             write_mode="truncate_insert",
             schema_contract=contract,
         )
@@ -795,7 +796,7 @@ class TestZeroBatchTruncate:
         contract = MagicMock()
         contract.cast_arrow_batch = lambda b: b
         handler._streams["s1"] = SqlStreamState(
-            table_name="t",
+            address=TableAddress(table="t"),
             write_mode="truncate_insert",
             schema_contract=contract,
         )
