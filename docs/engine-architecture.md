@@ -45,8 +45,7 @@ cdk/cdk/                     # Connector Development Kit (shared by source + des
 
 src/
 ├── shared/                  # Engine-local helpers
-│   ├── placeholder.py           # ${name} expansion shim
-│   ├── expressions.py
+│   ├── dict_path.py
 │   ├── http_utils.py
 │   └── run_id.py
 │
@@ -60,28 +59,32 @@ src/
 │   └── server.py                # gRPC server
 │
 ├── engine/                  # Core engine
-│   ├── engine.py                # StreamingEngine (extract -> transform -> load -> checkpoint)
+│   ├── engine.py                # StreamingEngine (fans streams out, aggregates results)
+│   ├── stream_processor.py      # StreamProcessor (one stream: extract -> transform -> load -> checkpoint)
 │   ├── pipeline_config_prep.py  # Loads manifest/pipelines/streams/connections/connectors
 │   ├── data_transformer.py      # compile_transform (vectorized mapping AST -> Arrow compute)
-│   ├── expression_evaluator.py  # SecureExpressionEvaluator (string-form expressions)
 │   └── exceptions.py
+│
+├── worker/                  # Sandboxed connector worker (spawned subprocess)
+│   ├── readable.py              # WorkerReadable (engine-side client)
+│   ├── source_service.py        # Worker-side read loop
+│   ├── proxy.py / shell.py / spawn.py / bootstrap.py
+│   └── __init__.py              # build_worker_registries (kind + connector_id resolution)
 │
 ├── state/                   # Fault tolerance
 │   ├── state_manager.py
-│   ├── state_storage.py
-│   ├── retry_handler.py
-│   ├── circuit_breaker.py
+│   ├── store.py
+│   ├── state_emission.py        # ANALITIQ_STATE:: log lines
+│   ├── error_classification.py  # ErrorCode taxonomy + failure tagging
 │   ├── dead_letter_queue.py
-│   ├── log_storage.py
+│   ├── log_emitter.py
 │   └── metrics_storage.py       # Emits ANALITIQ_METRICS:: log lines
 │
 ├── grpc/                    # gRPC client and generated stubs
 ├── models/                  # Pydantic v2 models (engine config, metrics, stream)
 ├── config/                  # Endpoint resolver, connection loader, validators
-├── secrets/                 # Secret resolvers
-├── schema/                  # Schema drift detection
-├── transformations/         # Transformation registry
 ├── runner.py                # PipelineRunner (CLI entry from src.main)
+├── runtime_archive.py       # Runtime config archive loading (local path or URL)
 └── main.py                  # Dual-mode entrypoint (RUN_MODE = source | destination)
 ```
 
@@ -152,15 +155,22 @@ silently losing rows.
    source/destination translation helpers), then constructs a
    `StreamingEngine` with runtime tuning parameters from the pipeline
    config and calls `engine.stream_data(config_dict)`.
-4. `StreamingEngine` orchestrates multi-stream execution directly in
-   `stream_data`. Each stream runs four async stages —
-   `_extract_stage -> _transform_stage -> _load_stage ->
+4. `StreamingEngine.stream_data` creates one `StreamProcessor`
+   (`src/engine/stream_processor.py`) per stream and runs them
+   concurrently. Each processor owns everything scoped to its stream —
+   counters, the gRPC client, its dead letter queue — and runs four async
+   stages — `_extract_stage -> _transform_stage -> _load_stage ->
    _checkpoint_stage` — wired together with async queues. The transform
    stage compiles the assignment AST once (`compile_transform`) and applies
    it to each batch as vectorized Arrow compute.
 5. `_load_stage` streams batches over gRPC to the destination service
    with row-level, content-derived idempotency (protocol in
    [`grpc-streaming-architecture.md`](grpc-streaming-architecture.md)).
+   Every send — including the synthetic empty batch that truncates a
+   zero-batch full refresh — goes through one shared send/ack/retry loop
+   (`_send_batch_acked`), so retry backoff and ack handling behave
+   identically everywhere; only the failure policy (fail/dlq/skip,
+   classification) differs per call site.
 6. Metrics snapshots are emitted to logs as `ANALITIQ_METRICS::{...}`
    lines (batch-level from the engine, pipeline-level from the runner)
    and final pipeline metrics are persisted via
@@ -338,9 +348,10 @@ Connector classes are resolved through `ConnectorRegistry`
 (`cdk/cdk/registry.py`), constructed by `build_registries(...)`. There
 is no `HandlerRegistry`.
 
-- The engine builds a **source** registry in `src/engine/engine.py`
-  (`self._source_registry, _ = build_registries(...)`) and instantiates
-  a stream's source via `self._source_registry.create(connector_type)`.
+- The **source** registry is built inside the spawned worker subprocess
+  (`build_worker_registries` in `src/worker/__init__.py`); the engine
+  process holds only the `WorkerReadable` client and never loads
+  connector code.
 - The **destination** side builds its registry in
   `src/destination/connectors/__init__.py`, exporting
   `destination_registry` and the `get_handler(connector_type)` helper.

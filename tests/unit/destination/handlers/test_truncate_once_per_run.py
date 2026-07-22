@@ -22,7 +22,34 @@ from sqlalchemy.pool import StaticPool
 
 from cdk.sql.generic import GenericSQLConnector
 from cdk.sql.generic import _StreamState as SqlStreamState
-from src.engine.engine import StreamingEngine, _FullRefreshCheckpoint
+from src.engine.stream_processor import StreamProcessor, _FullRefreshCheckpoint
+
+
+def _make_processor(
+    config: dict,
+    *,
+    error_strategy: str = "fail",
+    max_retries: int = 0,
+    state_manager: MagicMock | None = None,
+) -> StreamProcessor:
+    """Build a StreamProcessor wired to mocks for load-stage tests."""
+    processor = StreamProcessor(
+        stream_id="s1",
+        stream_config=config,
+        pipeline_config={"pipeline_id": "p1"},
+        pipeline_id="p1",
+        state_manager=state_manager if state_manager is not None else MagicMock(),
+        pipeline_metrics=MagicMock(),
+        worker_readable=MagicMock(),
+        dlq_root="./deadletter",
+        batch_size=10,
+        buffer_size=10,
+        max_retries=max_retries,
+        retry_delay=0,
+        error_strategy=error_strategy,
+    )
+    processor.run_id = "run-1"
+    return processor
 
 
 def _batch(rows: list[dict]) -> pa.RecordBatch:
@@ -319,28 +346,18 @@ class TestFirstBatchDropGuard:
     skipping/DLQ-ing it and continuing would let batch 2 append onto the
     previous refresh's rows — stale data mixed into a partial snapshot."""
 
-    def _engine(self):
-        engine = StreamingEngine.__new__(StreamingEngine)
-        engine.max_retries = 0
-        engine.retry_delay = 0
-        engine.error_strategy = "dlq"
-        engine.metrics = MagicMock()
-        engine.pipeline_id = "p1"
-        return engine
-
     def _config(self, write_mode: str) -> dict:
         resolved_source = MagicMock()
         resolved_source.replication = None
         resolved_source.primary_keys = []
         return {
-            "stream_name": "s",
-            "stream_id": "s1",
+            "name": "s",
             "stream_version": 1,
             "source": {"_resolved_source": resolved_source},
             "destination": {"write_mode": write_mode},
         }
 
-    async def _run_load_stage(self, engine, config):
+    async def _run_load_stage(self, config):
         import asyncio
 
         from src.grpc.generated.analitiq.v1 import AckStatus
@@ -359,29 +376,23 @@ class TestFirstBatchDropGuard:
         stream_dlq = MagicMock()
         stream_dlq.send_batch = AsyncMock()
 
-        await engine._load_stage(
-            input_queue,
-            output_queue,
-            grpc_client,
-            config,
-            stream_dlq,
-            "run-1",
-            {"records_processed": 0, "records_failed": 0, "batches_failed": 0},
-        )
+        processor = _make_processor(config, error_strategy="dlq")
+        processor.grpc_client = grpc_client
+        processor.stream_dlq = stream_dlq
+
+        await processor._load_stage(input_queue, output_queue)
         return stream_dlq
 
     @pytest.mark.asyncio
     async def test_dropped_first_batch_fails_a_truncate_insert_stream(self):
         from src.engine.exceptions import StreamProcessingError
 
-        engine = self._engine()
         with pytest.raises(StreamProcessingError, match="truncate_insert"):
-            await self._run_load_stage(engine, self._config("truncate_insert"))
+            await self._run_load_stage(self._config("truncate_insert"))
 
     @pytest.mark.asyncio
     async def test_other_write_modes_keep_the_configured_strategy(self):
-        engine = self._engine()
-        stream_dlq = await self._run_load_stage(engine, self._config("upsert"))
+        stream_dlq = await self._run_load_stage(self._config("upsert"))
         stream_dlq.send_batch.assert_awaited_once()
 
 
@@ -417,40 +428,30 @@ class TestZeroBatchTruncate:
     Without the fix (issue #312), write_batch never fires and the
     previous run's rows survive untouched. The fix has two parts:
 
-    1. _load_stage sets stream_metrics["_zero_batch_truncate_needed"] when
-       it exits cleanly with zero batches on a truncate_insert stream.
+    1. _load_stage sets the processor's zero_batch_truncate_needed flag
+       when it exits cleanly with zero batches on a truncate_insert stream.
 
-    2. _process_stream sends the synthetic batch AFTER asyncio.gather
-       returns without exception — so an upstream (extract/transform)
-       failure never triggers a spurious truncate.
+    2. run() sends the synthetic batch AFTER asyncio.gather returns
+       without exception — so an upstream (extract/transform) failure
+       never triggers a spurious truncate.
     """
 
     # ------------------------------------------------------------------ #
     # Part 1: _load_stage flag-setting behaviour                          #
     # ------------------------------------------------------------------ #
 
-    def _engine(self, max_retries=0):
-        engine = StreamingEngine.__new__(StreamingEngine)
-        engine.max_retries = max_retries
-        engine.retry_delay = 0
-        engine.error_strategy = "fail"
-        engine.metrics = MagicMock()
-        engine.pipeline_id = "p1"
-        return engine
-
     def _config(self, write_mode: str) -> dict:
         resolved_source = MagicMock()
         resolved_source.replication = None
         resolved_source.primary_keys = []
         return {
-            "stream_name": "s",
-            "stream_id": "s1",
+            "name": "s",
             "stream_version": 1,
             "source": {"_resolved_source": resolved_source},
             "destination": {"write_mode": write_mode},
         }
 
-    async def _run_zero_batch_load_stage(self, engine, config):
+    async def _run_zero_batch_load_stage(self, config):
         import asyncio
 
         input_queue: asyncio.Queue = asyncio.Queue()
@@ -460,83 +461,61 @@ class TestZeroBatchTruncate:
         grpc_client = MagicMock()
         grpc_client.send_batch = AsyncMock()
 
-        stream_dlq = MagicMock()
-        stream_dlq.send_batch = AsyncMock()
+        processor = _make_processor(config)
+        processor.grpc_client = grpc_client
+        processor.stream_dlq = MagicMock()
 
-        stream_metrics = {
-            "records_processed": 0,
-            "records_failed": 0,
-            "records_skipped": 0,
-            "batches_processed": 0,
-            "batches_failed": 0,
-        }
-        await engine._load_stage(
-            input_queue,
-            output_queue,
-            grpc_client,
-            config,
-            stream_dlq,
-            "run-1",
-            stream_metrics,
-        )
-        return grpc_client, stream_metrics
+        await processor._load_stage(input_queue, output_queue)
+        return grpc_client, processor
 
     @pytest.mark.asyncio
     async def test_load_stage_sets_flag_for_zero_batch_truncate_insert(self):
         """_load_stage sets the deferred-truncate flag when it exits cleanly
-        with zero batches on a truncate_insert stream — the outer scope
-        (_process_stream) then sends the synthetic batch after gather."""
-        engine = self._engine()
-        grpc_client, sm = await self._run_zero_batch_load_stage(
-            engine, self._config("truncate_insert")
+        with zero batches on a truncate_insert stream — run() then sends
+        the synthetic batch after gather."""
+        grpc_client, processor = await self._run_zero_batch_load_stage(
+            self._config("truncate_insert")
         )
 
-        assert sm.get("_zero_batch_truncate_needed") is True
+        assert processor.zero_batch_truncate_needed is True
         grpc_client.send_batch.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_load_stage_sets_no_flag_for_zero_batch_insert(self):
         """Non-truncate_insert streams do not set the flag."""
-        engine = self._engine()
-        _, sm = await self._run_zero_batch_load_stage(engine, self._config("insert"))
-        assert "_zero_batch_truncate_needed" not in sm
+        _, processor = await self._run_zero_batch_load_stage(self._config("insert"))
+        assert processor.zero_batch_truncate_needed is False
 
     @pytest.mark.asyncio
     async def test_load_stage_sets_no_flag_for_zero_batch_upsert(self):
         """Upsert streams do not set the flag either."""
-        engine = self._engine()
-        _, sm = await self._run_zero_batch_load_stage(engine, self._config("upsert"))
-        assert "_zero_batch_truncate_needed" not in sm
+        _, processor = await self._run_zero_batch_load_stage(self._config("upsert"))
+        assert processor.zero_batch_truncate_needed is False
 
     # ------------------------------------------------------------------ #
-    # Part 2: outer-scope (_process_stream) retry behaviour               #
+    # Part 2: run() post-gather retry behaviour                           #
     # ------------------------------------------------------------------ #
 
-    def _process_stream_engine(self, max_retries=0):
-        """Minimal StreamingEngine for _process_stream outer-scope tests."""
-        from unittest.mock import MagicMock
+    def _run_processor(self, write_mode="truncate_insert", max_retries=0):
+        """Minimal StreamProcessor for run() outer-scope tests."""
+        stream_config = {
+            "name": "s",
+            "source": {"_resolved_source": MagicMock()},
+            "destination": {"write_mode": write_mode},
+            "mapping": {},
+        }
+        state_manager = MagicMock()
+        state_manager.current_run_id = "run-1"
+        return _make_processor(
+            stream_config, max_retries=max_retries, state_manager=state_manager
+        )
 
-        engine = StreamingEngine.__new__(StreamingEngine)
-        engine.max_retries = max_retries
-        engine.retry_delay = 0
-        engine.error_strategy = "fail"
-        engine.metrics = MagicMock()
-        engine.pipeline_id = "p1"
-        engine.buffer_size = 1
-        engine.state_manager = MagicMock()
-        engine.state_manager.current_run_id = "run-1"
-        engine.dlq = MagicMock()
-        engine.dlq.dlq_path = "/tmp/test-dlq"
-        return engine
+    async def _invoke_run(self, processor, ack_statuses, failure_category=None):
+        """Drive the zero-batch truncate section of run().
 
-    async def _invoke_process_stream(
-        self, engine, ack_statuses, write_mode="truncate_insert", failure_category=None
-    ):
-        """Drive the zero-batch truncate section of _process_stream.
-
-        Replaces all pipeline stages with a no-op task that sets the
-        deferred-truncate flag and returns immediately, so gather
-        completes synchronously and the post-gather code runs.
+        Replaces the pipeline stages with a no-op that sets the
+        deferred-truncate flag (for truncate_insert) and returns no tasks,
+        so gather completes immediately and the post-gather code runs.
         """
         from unittest.mock import patch
 
@@ -568,29 +547,20 @@ class TestZeroBatchTruncate:
 
         grpc_client.send_batch = AsyncMock(side_effect=_send_batch_side_effect)
 
-        def _fake_stages(**kwargs):
-            sm = kwargs["stream_metrics"]
-            if write_mode == "truncate_insert":
-                sm["_zero_batch_truncate_needed"] = True
-            return []  # empty list → asyncio.gather(*[]) returns immediately
-
-        stream_config = {
-            "name": "s",
-            "stream_id": "s1",
-            "source": {},
-            "destination": {"write_mode": write_mode},
-            "mapping": {},
-        }
-        pipeline_config = {"pipeline_id": "p1"}
+        def _fake_stages(source_readable):
+            processor.zero_batch_truncate_needed = processor._is_truncate_insert()
+            return []  # no tasks → asyncio.gather(*[]) returns immediately
 
         with (
-            patch.object(engine, "_create_source_connector", return_value=MagicMock()),
-            patch.object(engine, "_create_grpc_client", return_value=grpc_client),
-            patch.object(engine, "_create_pipeline_stages", side_effect=_fake_stages),
-            patch("src.engine.engine.DeadLetterQueue"),
-            patch("src.engine.engine.create_metrics_record", return_value=MagicMock()),
+            patch.object(processor, "_create_grpc_client", return_value=grpc_client),
+            patch.object(processor, "_create_stage_tasks", side_effect=_fake_stages),
+            patch("src.engine.stream_processor.DeadLetterQueue"),
+            patch(
+                "src.engine.stream_processor.create_metrics_record",
+                return_value=MagicMock(),
+            ),
         ):
-            await engine._process_stream("s1", stream_config, pipeline_config)
+            await processor.run()
 
         return grpc_client
 
@@ -599,10 +569,8 @@ class TestZeroBatchTruncate:
         """A SUCCESS ack for the synthetic batch completes without raising."""
         from src.grpc.generated.analitiq.v1 import AckStatus
 
-        engine = self._process_stream_engine()
-        grpc_client = await self._invoke_process_stream(
-            engine, [AckStatus.ACK_STATUS_SUCCESS]
-        )
+        processor = self._run_processor()
+        grpc_client = await self._invoke_run(processor, [AckStatus.ACK_STATUS_SUCCESS])
         grpc_client.send_batch.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -611,9 +579,9 @@ class TestZeroBatchTruncate:
         of a zero-batch run that was retried after a crash)."""
         from src.grpc.generated.analitiq.v1 import AckStatus
 
-        engine = self._process_stream_engine()
-        grpc_client = await self._invoke_process_stream(
-            engine, [AckStatus.ACK_STATUS_ALREADY_COMMITTED]
+        processor = self._run_processor()
+        grpc_client = await self._invoke_run(
+            processor, [AckStatus.ACK_STATUS_ALREADY_COMMITTED]
         )
         grpc_client.send_batch.assert_awaited_once()
 
@@ -623,14 +591,14 @@ class TestZeroBatchTruncate:
         retried up to max_retries times before giving up."""
         from src.grpc.generated.analitiq.v1 import AckStatus
 
-        engine = self._process_stream_engine(max_retries=2)
+        processor = self._run_processor(max_retries=2)
         # Two transient failures then a success — should complete cleanly.
         ack_seq = [
             AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
             AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
             AckStatus.ACK_STATUS_SUCCESS,
         ]
-        grpc_client = await self._invoke_process_stream(engine, ack_seq)
+        grpc_client = await self._invoke_run(processor, ack_seq)
         assert grpc_client.send_batch.await_count == 3
 
     @pytest.mark.asyncio
@@ -640,11 +608,9 @@ class TestZeroBatchTruncate:
         from src.engine.exceptions import StreamProcessingError
         from src.grpc.generated.analitiq.v1 import AckStatus
 
-        engine = self._process_stream_engine(max_retries=0)
+        processor = self._run_processor(max_retries=0)
         with pytest.raises(StreamProcessingError, match="zero-batch truncate"):
-            await self._invoke_process_stream(
-                engine, [AckStatus.ACK_STATUS_RETRYABLE_FAILURE]
-            )
+            await self._invoke_run(processor, [AckStatus.ACK_STATUS_RETRYABLE_FAILURE])
 
     @pytest.mark.asyncio
     async def test_outer_scope_fatal_failure_raises(self):
@@ -652,11 +618,9 @@ class TestZeroBatchTruncate:
         from src.engine.exceptions import StreamProcessingError
         from src.grpc.generated.analitiq.v1 import AckStatus
 
-        engine = self._process_stream_engine()
+        processor = self._run_processor()
         with pytest.raises(StreamProcessingError, match="zero-batch truncate"):
-            await self._invoke_process_stream(
-                engine, [AckStatus.ACK_STATUS_FATAL_FAILURE]
-            )
+            await self._invoke_run(processor, [AckStatus.ACK_STATUS_FATAL_FAILURE])
 
     @pytest.mark.asyncio
     async def test_outer_scope_failure_classifies_from_declared_category(self):
@@ -669,10 +633,10 @@ class TestZeroBatchTruncate:
         from src.grpc.generated.analitiq.v1 import AckStatus
         from src.state.error_classification import ErrorCode, read_failure_tag
 
-        engine = self._process_stream_engine()
+        processor = self._run_processor()
         with pytest.raises(StreamProcessingError) as exc_info:
-            await self._invoke_process_stream(
-                engine,
+            await self._invoke_run(
+                processor,
                 [AckStatus.ACK_STATUS_FATAL_FAILURE],
                 failure_category=FailureCategory.FAILURE_CATEGORY_NOT_READY,
             )
@@ -690,10 +654,10 @@ class TestZeroBatchTruncate:
         from src.engine.exceptions import StreamProcessingError
         from src.state.error_classification import ErrorCode, read_failure_tag
 
-        engine = self._process_stream_engine()
+        processor = self._run_processor()
         with pytest.raises(StreamProcessingError) as exc_info:
-            await self._invoke_process_stream(
-                engine,
+            await self._invoke_run(
+                processor,
                 [99],  # not a status this engine build knows
                 failure_category=FailureCategory.FAILURE_CATEGORY_NOT_READY,
             )
@@ -705,8 +669,8 @@ class TestZeroBatchTruncate:
     async def test_outer_scope_no_send_for_non_truncate_insert(self):
         """When write_mode is not truncate_insert, no synthetic batch is
         ever sent regardless of how many batches the source produced."""
-        engine = self._process_stream_engine()
-        grpc_client = await self._invoke_process_stream(engine, [], write_mode="insert")
+        processor = self._run_processor(write_mode="insert")
+        grpc_client = await self._invoke_run(processor, [])
         grpc_client.send_batch.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -718,7 +682,7 @@ class TestZeroBatchTruncate:
         import asyncio
         from unittest.mock import patch
 
-        engine = self._process_stream_engine()
+        processor = self._run_processor()
 
         grpc_client = MagicMock()
         grpc_client.connect = AsyncMock(return_value=True)
@@ -727,37 +691,27 @@ class TestZeroBatchTruncate:
         grpc_client.send_batch = AsyncMock()
         grpc_client.disconnect = AsyncMock()
 
-        def _failing_stages(**kwargs):
-            sm = kwargs["stream_metrics"]
+        def _failing_stages(source_readable):
             # Simulate _load_stage having set the flag before extract
             # raised — the worst-case race scenario.
-            sm["_zero_batch_truncate_needed"] = True
+            processor.zero_batch_truncate_needed = True
 
             async def _raise():
                 raise RuntimeError("source connection refused")
 
             return [asyncio.create_task(_raise())]
 
-        stream_config = {
-            "name": "s",
-            "stream_id": "s1",
-            "source": {},
-            "destination": {"write_mode": "truncate_insert"},
-            "mapping": {},
-        }
-        pipeline_config = {"pipeline_id": "p1"}
-
         with (
-            patch.object(engine, "_create_source_connector", return_value=MagicMock()),
-            patch.object(engine, "_create_grpc_client", return_value=grpc_client),
-            patch.object(
-                engine, "_create_pipeline_stages", side_effect=_failing_stages
+            patch.object(processor, "_create_grpc_client", return_value=grpc_client),
+            patch.object(processor, "_create_stage_tasks", side_effect=_failing_stages),
+            patch("src.engine.stream_processor.DeadLetterQueue"),
+            patch(
+                "src.engine.stream_processor.create_metrics_record",
+                return_value=MagicMock(),
             ),
-            patch("src.engine.engine.DeadLetterQueue"),
-            patch("src.engine.engine.create_metrics_record", return_value=MagicMock()),
         ):
             with pytest.raises(RuntimeError, match="source connection refused"):
-                await engine._process_stream("s1", stream_config, pipeline_config)
+                await processor.run()
 
         # The whole point of the post-gather placement: gather raised, so
         # the synthetic truncate block was never reached.

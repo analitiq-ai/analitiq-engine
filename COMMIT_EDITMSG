@@ -1,0 +1,8 @@
+style: lazy %-formatting in logger calls, static full-refresh get_cursor
+
+Resolves the DeepSource PYL-W1203 threads on PR #367 (f-string log
+messages are formatted even when the level is disabled) across both
+engine modules, and the no-self-use finding on
+_FullRefreshCheckpoint.get_cursor.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

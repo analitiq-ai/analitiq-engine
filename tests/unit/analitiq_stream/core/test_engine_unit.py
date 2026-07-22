@@ -146,61 +146,55 @@ class TestStreamingEngine:
         with pytest.raises(ConfigurationError, match="No streams configured"):
             await engine.stream_data(config)
 
-    def test_create_source_connector_missing_resolved_source(self, engine):
-        """Test error handling when _resolved_source is missing."""
-        config = {"type": "unknown"}
+    def _processor(self, engine, stream_config: dict[str, Any]):
+        """Build a StreamProcessor wired the way engine._process_stream does."""
+        from src.engine.stream_processor import StreamProcessor
+
+        return StreamProcessor(
+            stream_id="s1",
+            stream_config=stream_config,
+            pipeline_config={"pipeline_id": engine.pipeline_id},
+            pipeline_id=engine.pipeline_id,
+            state_manager=engine.state_manager,
+            pipeline_metrics=engine.metrics,
+            worker_readable=engine._worker_readable,
+            dlq_root=engine.dlq_path,
+            batch_size=engine.batch_size,
+            buffer_size=engine.buffer_size,
+            max_retries=engine.max_retries,
+            retry_delay=engine.retry_delay,
+            error_strategy=engine.error_strategy,
+        )
+
+    def test_resolve_source_readable_missing_resolved_source(self, engine):
+        """A source config without its resolved_source is a configuration
+        error, raised before any stage starts."""
+        processor = self._processor(engine, {"name": "s"})
 
         with pytest.raises(ValueError, match="Missing _resolved_source"):
-            engine._create_source_connector(config)
+            processor._resolve_source_readable({"type": "unknown"})
 
-    def test_create_source_connector_returns_worker_readable(self, engine):
+    def test_resolve_source_readable_returns_worker_readable(self, engine):
         """Connector code never runs in the engine process: every source —
-        regardless of kind — is served by the worker-backed Readable.
-        Registry resolution (connector_id -> package class, else the kind's
-        generic) happens inside the spawned worker."""
+        regardless of kind — is served by the engine's shared worker-backed
+        Readable. Registry resolution (connector_id -> package class, else
+        the kind's generic) happens inside the spawned worker."""
         from unittest.mock import MagicMock
 
         from src.worker.readable import WorkerReadable
 
         fake_resolved_source = MagicMock()
-        db = engine._create_source_connector({"_resolved_source": fake_resolved_source})
-        api = engine._create_source_connector(
+        db = self._processor(engine, {"name": "db"})._resolve_source_readable(
+            {"_resolved_source": fake_resolved_source}
+        )
+        api = self._processor(engine, {"name": "api"})._resolve_source_readable(
             {"_resolved_source": fake_resolved_source}
         )
         assert isinstance(db, WorkerReadable)
         assert isinstance(api, WorkerReadable)
-        # One shared client object: per-read state lives in read_batches.
+        # One shared client object across streams: per-read state lives in
+        # read_batches.
         assert db is api
-
-    def test_create_source_connector_requires_resolved_source(self, engine):
-        """A source config without its resolved_source is a configuration error."""
-        with pytest.raises(ValueError, match="_resolved_source"):
-            engine._create_source_connector({})
-
-    def test_get_stream_name(self, engine):
-        """Test stream name generation."""
-        # With structured endpoint_ref
-        config = {
-            "source": {
-                "endpoint_ref": {
-                    "scope": "connector",
-                    "connection_id": "wise",
-                    "endpoint_id": "transfers",
-                },
-            },
-        }
-        result = engine._get_stream_name(config)
-        assert result == "endpoint.connector:wise/transfers"
-
-        # Without endpoint_ref, with pipeline ID
-        config = {"pipeline_id": "test-pipeline"}
-        result = engine._get_stream_name(config)
-        assert result == "test-pipeline"
-
-        # No identifiers
-        config = {}
-        result = engine._get_stream_name(config)
-        assert result == "unknown-stream"
 
     def test_metrics_initialization(self, engine):
         """Test that metrics are properly initialized."""

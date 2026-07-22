@@ -1,6 +1,5 @@
 """Fault tolerance components for reliable data streaming."""
 
-from .circuit_breaker import CircuitBreaker
 from .dead_letter_queue import DeadLetterQueue, LocalDLQStorage
 from .metrics_storage import (
     PipelineMetricsRecord,
@@ -8,12 +7,9 @@ from .metrics_storage import (
     emit_metrics_log,
     save_pipeline_metrics,
 )
-from .retry_handler import RetryHandler
 from .state_manager import StateManager
 
 __all__ = [
-    "RetryHandler",
-    "CircuitBreaker",
     "DeadLetterQueue",
     "LocalDLQStorage",
     "StateManager",

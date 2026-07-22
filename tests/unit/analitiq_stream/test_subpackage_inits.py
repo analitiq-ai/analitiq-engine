@@ -69,16 +69,9 @@ class TestStatePackageInit:
     @pytest.mark.unit
     def test_state_modules(self):
         """Test that state modules are accessible."""
-        from src.state import (
-            circuit_breaker,
-            dead_letter_queue,
-            retry_handler,
-            state_manager,
-        )
+        from src.state import dead_letter_queue, state_manager
 
-        assert circuit_breaker is not None
         assert dead_letter_queue is not None
-        assert retry_handler is not None
         assert state_manager is not None
 
 

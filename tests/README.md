@@ -4,7 +4,7 @@ This document explains how to run different categories of tests in the Analitiq 
 
 ## Standard Test Execution
 
-Run the main test suite (excludes fault tolerance tests):
+Run the main test suite:
 
 ```bash
 poetry run pytest
@@ -32,44 +32,19 @@ poetry run pytest tests/e2e/
 poetry run pytest tests/core_pipeline/
 ```
 
-## Fault Tolerance Tests (Special Case)
+## Fault Tolerance Tests
 
-**⚠️ Important**: Fault tolerance tests must be run separately due to test isolation requirements.
-
-All fault tolerance components are fully functional, but running these tests with the main test suite causes false failures due to test infrastructure conflicts.
-
-### Run Individual Fault Tolerance Components:
+Fault tolerance tests (rate limiter, dead letter queue) live in
+`tests/unit/analitiq_stream/fault_tolerance/` and run as part of the main
+suite. To run them alone:
 
 ```bash
-# Rate Limiter Tests
-poetry run pytest tests/unit/src/fault_tolerance/test_rate_limiter.py
-
-# Retry Handler Tests
-poetry run pytest tests/unit/src/fault_tolerance/test_retry_handler.py
-
-# Circuit Breaker Tests
-poetry run pytest tests/unit/src/fault_tolerance/test_circuit_breaker.py
-
-# Dead Letter Queue Tests
-poetry run pytest tests/unit/src/fault_tolerance/test_dead_letter_queue.py
+poetry run pytest tests/unit/analitiq_stream/fault_tolerance/
 ```
-
-### Run All Fault Tolerance Tests Together:
-
-```bash
-poetry run pytest tests/unit/src/fault_tolerance/
-```
-
-## Test Status Summary
-
-- ✅ **Core Pipeline Tests**: All pass (37/37)
-- ✅ **Integration Tests**: 35/39 pass (1 legitimate failure, 3 skipped)
-- ✅ **E2E Tests**: All pass (14/14)
-- ✅ **Fault Tolerance Tests**: All pass when run separately (86/86)
-- ✅ **Unit Tests**: Most components pass individually
 
 ## Notes
 
-- The fault tolerance system (rate limiter, retry handler, circuit breaker, dead letter queue) is fully functional and production-ready
-- Test isolation issues in the full test suite do not indicate functional problems
-- All core streaming capabilities work correctly as verified by integration and E2E tests
+- The full suite is expected to pass with `poetry run pytest`; a handful of
+  tests skip when their environment is absent (live databases, optional
+  dialect packages, unpopulated `connectors/` checkouts).
+- CI runs the same suite plus the pre-commit stack; see `CONTRIBUTING.md`.
