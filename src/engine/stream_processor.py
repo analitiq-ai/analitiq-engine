@@ -67,8 +67,9 @@ class _FullRefreshCheckpoint:
     def __init__(self, inner: StateManager) -> None:
         self._inner = inner
 
+    @staticmethod
     async def get_cursor(
-        self, stream_name: str, partition: dict[str, Any] | None = None
+        stream_name: str, partition: dict[str, Any] | None = None
     ) -> dict[str, Any] | None:
         return None
 
@@ -179,7 +180,7 @@ class StreamProcessor:
         dlq/skip strategy exhausted batches without raising — nothing else
         carries that cause to the runner, issue #351), else None.
         """
-        logger.info(f"Processing stream: {self.stream_name}")
+        logger.info("Processing stream: %s", self.stream_name)
 
         tasks: list[asyncio.Task[None]] = []
         start_time = datetime.now(timezone.utc)
@@ -292,7 +293,7 @@ class StreamProcessor:
         timeout = resolve_grpc_ack_timeout_seconds()
         max_message_size = grpc_config.get("max_message_size", 16 * 1024 * 1024)
 
-        logger.info(f"Creating gRPC client for {host}:{port}")
+        logger.info("Creating gRPC client for %s:%s", host, port)
 
         return DestinationGRPCClient(
             host=host,
@@ -343,7 +344,7 @@ class StreamProcessor:
                 code=classify_handshake_failure(reason),
                 stage=FailureStage.DESTINATION_LOAD,
             )
-        logger.info(f"Stream {self.stream_name}: gRPC stream started, schema accepted")
+        logger.info("Stream %s: gRPC stream started, schema accepted", self.stream_name)
         # Surface the destination's retry-safety verdict per stream
         # (issue #286): an at-least-once stream re-sends committed
         # records on a same-run restart, and the operator should learn
@@ -393,7 +394,7 @@ class StreamProcessor:
         self, source_readable: Readable, queue: asyncio.Queue[Any]
     ) -> None:
         """Extract data from source in batches with state management."""
-        logger.debug(f"Starting extract stage for stream {self.stream_name}")
+        logger.debug("Starting extract stage for stream %s", self.stream_name)
 
         try:
             # The connectors read the contract documents directly off the
@@ -435,15 +436,18 @@ class StreamProcessor:
                 await queue.put(batch)
                 batch_count += 1
                 logger.debug(
-                    f"Stream {self.stream_name}: Extracted batch {batch_count} "
-                    f"with {len(batch)} records"
+                    "Stream %s: Extracted batch %s with %s records",
+                    self.stream_name,
+                    batch_count,
+                    len(batch),
                 )
 
             # Signal end of stream
             await queue.put(None)
             logger.info(
-                f"Stream {self.stream_name}: Extract stage completed "
-                f"with {batch_count} batches"
+                "Stream %s: Extract stage completed with %s batches",
+                self.stream_name,
+                batch_count,
             )
 
         except Exception as e:
@@ -470,7 +474,7 @@ class StreamProcessor:
         self, input_queue: asyncio.Queue[Any], output_queue: asyncio.Queue[Any]
     ) -> None:
         """Transform data with field mappings and validation."""
-        logger.debug(f"Starting transform stage for stream {self.stream_name}")
+        logger.debug("Starting transform stage for stream %s", self.stream_name)
 
         assignments = (self.stream_config.get("mapping") or {}).get("assignments") or []
         # The assignments are static, so the transform is compiled once here into
@@ -498,8 +502,9 @@ class StreamProcessor:
             # Signal end of stream
             await output_queue.put(None)
             logger.info(
-                f"Stream {self.stream_name}: Transform stage completed "
-                f"with {batch_count} batches"
+                "Stream %s: Transform stage completed with %s batches",
+                self.stream_name,
+                batch_count,
             )
 
         except Exception as e:
@@ -576,7 +581,7 @@ class StreamProcessor:
         tie_breaker_fields = replication.tie_breaker_fields if replication else None
         primary_key_fields = list(resolved_source.primary_keys)
 
-        logger.info(f"Stream {self.stream_name}: Starting gRPC load stage")
+        logger.info("Stream %s: Starting gRPC load stage", self.stream_name)
 
         batch_seq = 0
         try:
@@ -593,8 +598,10 @@ class StreamProcessor:
                 record_dicts = batch.to_pylist()
 
                 logger.debug(
-                    f"Stream {self.stream_name}: Processing batch {batch_seq} "
-                    f"with {batch.num_rows} records"
+                    "Stream %s: Processing batch %s with %s records",
+                    self.stream_name,
+                    batch_seq,
+                    batch.num_rows,
                 )
 
                 # Content-derived record identity: DLQ correlation and the
@@ -645,8 +652,9 @@ class StreamProcessor:
             # Signal end of stream
             await output_queue.put(None)
             logger.info(
-                f"Stream {self.stream_name}: gRPC load stage completed "
-                f"with {batch_seq} batches"
+                "Stream %s: gRPC load stage completed with %s batches",
+                self.stream_name,
+                batch_seq,
             )
 
         except Exception as e:
@@ -708,9 +716,13 @@ class StreamProcessor:
                 # Exponential backoff
                 delay = self.retry_delay * (2 ** (retry_count - 1))
                 logger.warning(
-                    f"Stream {self.stream_name}: {label} retryable failure, "
-                    f"retry {retry_count}/{self.max_retries} after "
-                    f"{delay:.2f}s: {result.failure_summary}"
+                    "Stream %s: %s retryable failure, retry %s/%s after %.2fs: %s",
+                    self.stream_name,
+                    label,
+                    retry_count,
+                    self.max_retries,
+                    delay,
+                    result.failure_summary,
                 )
                 await asyncio.sleep(delay)
                 continue
@@ -738,8 +750,10 @@ class StreamProcessor:
         if outcome.disposition is _AckDisposition.COMMITTED:
             cursor_data, hwm = self._persist_committed_cursor(result.committed_cursor)
             logger.debug(
-                f"Stream {self.stream_name}: Batch {batch_seq} committed, "
-                f"{result.records_written} records written"
+                "Stream %s: Batch %s committed, %s records written",
+                self.stream_name,
+                batch_seq,
+                result.records_written,
             )
             # Order matters: the Pydantic pipeline counter validates the
             # destination-reported count (rejects negatives) before the
@@ -754,8 +768,9 @@ class StreamProcessor:
             # Idempotent replay - batch was already processed
             self._persist_committed_cursor(result.committed_cursor)
             logger.info(
-                f"Stream {self.stream_name}: Batch {batch_seq} "
-                "already committed (idempotent replay)"
+                "Stream %s: Batch %s already committed (idempotent replay)",
+                self.stream_name,
+                batch_seq,
             )
             await output_queue.put(batch)
             return
@@ -772,8 +787,10 @@ class StreamProcessor:
 
         if outcome.disposition is _AckDisposition.FATAL:
             logger.error(
-                f"Stream {self.stream_name}: Batch {batch_seq} fatal failure: "
-                f"{result.failure_summary}"
+                "Stream %s: Batch %s fatal failure: %s",
+                self.stream_name,
+                batch_seq,
+                result.failure_summary,
             )
             # Send entire batch to DLQ with record_ids for correlation
             if self.error_strategy == "dlq":
@@ -787,8 +804,10 @@ class StreamProcessor:
         # Unknown status - treat as fatal, and do not trust its advisory
         # failure category (the raise below carries none).
         logger.error(
-            f"Stream {self.stream_name}: Batch {batch_seq} unknown status: "
-            f"{result.status}"
+            "Stream %s: Batch %s unknown status: %s",
+            self.stream_name,
+            batch_seq,
+            result.status,
         )
         if self.error_strategy == "dlq":
             await self._dlq_batch(record_dicts, f"Unknown ACK status: {result.status}")
@@ -808,8 +827,11 @@ class StreamProcessor:
         should continue (dlq/skip); raises when the stream must stop.
         """
         logger.error(
-            f"Stream {self.stream_name}: Batch {batch_seq} failed after "
-            f"{self.max_retries} retries: {result.failure_summary}"
+            "Stream %s: Batch %s failed after %s retries: %s",
+            self.stream_name,
+            batch_seq,
+            self.max_retries,
+            result.failure_summary,
         )
         # The dlq/skip strategies return without raising, so this batch's
         # cause would die with this scope. Classify it exactly as the fail
@@ -851,9 +873,12 @@ class StreamProcessor:
             self.metrics.records_skipped += record_count
             self.pipeline_metrics.increment_records_skipped(record_count)
             logger.warning(
-                f"Stream {self.stream_name}: Batch {batch_seq} skipped "
-                f"after {self.max_retries} retries; {record_count} "
-                f"records dropped: {result.failure_summary}"
+                "Stream %s: Batch %s skipped after %s retries; %s records dropped: %s",
+                self.stream_name,
+                batch_seq,
+                self.max_retries,
+                record_count,
+                result.failure_summary,
             )
         else:
             # Strategy is contract-validated upstream to {fail, dlq, skip};
@@ -928,7 +953,7 @@ class StreamProcessor:
 
     async def _checkpoint_stage(self, input_queue: asyncio.Queue[Any]) -> None:
         """Checkpoint processing progress with state management."""
-        logger.debug(f"Starting checkpoint stage for stream {self.stream_name}")
+        logger.debug("Starting checkpoint stage for stream %s", self.stream_name)
 
         batch_count = 0
         try:
@@ -943,8 +968,9 @@ class StreamProcessor:
                 batch_count += 1
 
             logger.info(
-                f"Stream {self.stream_name}: Checkpoint stage completed "
-                f"with {batch_count} batches"
+                "Stream %s: Checkpoint stage completed with %s batches",
+                self.stream_name,
+                batch_count,
             )
 
         except Exception as e:
@@ -969,7 +995,7 @@ class StreamProcessor:
         classifies identically under fail and dlq/skip (issue #351).
         """
         if self.metrics.records_failed == 0:
-            logger.info(f"Stream {self.stream_name} completed successfully")
+            logger.info("Stream %s completed successfully", self.stream_name)
             return "success", None, None, None
 
         error_code = (
@@ -994,8 +1020,10 @@ class StreamProcessor:
             reason=reason,
         )
         logger.warning(
-            f"Stream {self.stream_name} completed partially: "
-            f"{self.metrics.records_failed} records {action}"
+            "Stream %s completed partially: %s records %s",
+            self.stream_name,
+            self.metrics.records_failed,
+            action,
         )
         return "partial", error_code, customer_message(error_code), error_detail
 
@@ -1008,7 +1036,7 @@ class StreamProcessor:
             if self.grpc_client:
                 await self.grpc_client.disconnect()
             logger.debug(
-                f"Stream {self.stream_name} connectors disconnected successfully"
+                "Stream %s connectors disconnected successfully", self.stream_name
             )
         except Exception as e:
             logger.warning(
@@ -1083,7 +1111,7 @@ class StreamProcessor:
                         **record.model_dump(),
                     }
                 )
-                logger.info(f"Emitted stream metrics for {self.stream_name}")
+                logger.info("Emitted stream metrics for %s", self.stream_name)
         except Exception as metrics_error:
             logger.error(
                 "Failed to emit stream metrics for %s: %s",

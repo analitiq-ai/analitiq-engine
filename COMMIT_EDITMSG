@@ -1,6 +1,6 @@
-style: black formatting for stream_processor.py
+style: import asyncio once, use asyncio.Queue
 
-pre-commit --all-files ran before the new file was tracked, so black
-never saw it locally; CI's run did.
+Resolves the code-quality thread on PR #367: the module used both
+'import asyncio' and 'from asyncio import Queue'.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

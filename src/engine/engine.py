@@ -92,12 +92,12 @@ class StreamingEngine:
         if not streams:
             raise ConfigurationError("No streams configured in pipeline")
 
-        logger.info(f"Starting pipeline: {pipeline_id}")
-        logger.info(f"Processing {len(streams)} streams concurrently")
+        logger.info("Starting pipeline: %s", pipeline_id)
+        logger.info("Processing %s streams concurrently", len(streams))
 
         # Start new run
         run_id = self.state_manager.start_run(pipeline_config)
-        logger.info(f"Started state run: {run_id}")
+        logger.info("Started state run: %s", run_id)
 
         stream_exceptions = []
         stream_tasks = []
@@ -106,7 +106,7 @@ class StreamingEngine:
             # Create a task for each stream with names for better debugging
             for stream_id, stream_config in streams.items():
                 stream_name = stream_config.get("name", stream_id)
-                logger.info(f"Starting stream: {stream_name}")
+                logger.info("Starting stream: %s", stream_name)
 
                 task = asyncio.create_task(
                     self._process_stream(
@@ -133,10 +133,10 @@ class StreamingEngine:
                     )
                     stream_exceptions.append(stream_error)
                     self.metrics.increment_streams_failed()
-                    logger.error(f"Stream {stream_name} failed: {result}")
+                    logger.error("Stream %s failed: %s", stream_name, result)
                 else:
                     self.metrics.increment_streams_processed()
-                    logger.info(f"Stream {stream_name} completed successfully")
+                    logger.info("Stream %s completed successfully", stream_name)
 
             # Handle collected exceptions with ExceptionGroup
             if stream_exceptions:
@@ -150,26 +150,28 @@ class StreamingEngine:
                     # path) so the runner classifies the dominant cause across
                     # every failure, not just the first.
                     logger.warning(
-                        f"Pipeline completed with {len(stream_exceptions)} "
-                        f"failed streams out of {len(streams)}"
+                        "Pipeline completed with %s failed streams out of %s",
+                        len(stream_exceptions),
+                        len(streams),
                     )
                     self._dominant_stream_error = ExceptionGroup(
                         "Partial stream failures", stream_exceptions
                     )
             else:
                 logger.info(
-                    f"Pipeline {pipeline_id} completed successfully - "
-                    f"all {len(streams)} streams processed"
+                    "Pipeline %s completed successfully - all %s streams processed",
+                    pipeline_id,
+                    len(streams),
                 )
 
         except* StreamProcessingError as eg:
             # Handle stream processing errors specifically (Python 3.11+)
             logger.error(
-                f"Stream processing errors occurred: "
-                f"{len(eg.exceptions)} streams failed"
+                "Stream processing errors occurred: %s streams failed",
+                len(eg.exceptions),
             )
             for exc in eg.exceptions:
-                logger.error(f"  - {exc}")
+                logger.error("  - %s", exc)
             # Cancel remaining tasks
             for _, _, task in stream_tasks:
                 if not task.done():
@@ -177,9 +179,9 @@ class StreamingEngine:
             raise
         except* Exception as eg:
             # Handle other unexpected errors (Python 3.11+)
-            logger.error(f"Unexpected errors in pipeline: {len(eg.exceptions)} errors")
+            logger.error("Unexpected errors in pipeline: %s errors", len(eg.exceptions))
             for unexpected_exc in eg.exceptions:
-                logger.error(f"  - Unexpected error: {unexpected_exc}")
+                logger.error("  - Unexpected error: %s", unexpected_exc)
             # Cancel remaining tasks
             for _, _, task in stream_tasks:
                 if not task.done():
