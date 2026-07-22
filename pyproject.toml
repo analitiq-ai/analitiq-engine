@@ -261,7 +261,7 @@ follow_untyped_imports = true
 
 [tool.pytest.ini_options]
 minversion = "7.0"
-addopts = "-ra -v --strict-markers --strict-config --ignore=tests/unit/src/fault_tolerance"
+addopts = "-ra -v --strict-markers --strict-config"
 testpaths = ["tests"]
 # The CDK is a sibling package (cdk/cdk/), consumed in-tree. Put cdk/ on the
 # path so `import cdk` resolves to cdk/cdk without an editable install. Docker
@@ -274,7 +274,6 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
-    "fault_tolerance: marks tests as fault tolerance tests (run separately)",
 ]
 asyncio_mode = "auto"
 

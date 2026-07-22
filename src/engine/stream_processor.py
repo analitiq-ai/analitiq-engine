@@ -60,8 +60,9 @@ class _FullRefreshCheckpoint:
     (re)start — the destination truncates on the read's first batch, so
     a resumed slice would be the only data left in the target (issue
     #307). ``get_cursor`` therefore always answers ``None`` (full
-    re-scan); ``save_cursor`` delegates so in-run watermark tracking and
-    state emission stay exactly as they are for every other stream.
+    re-scan); ``save_cursor`` delegates so in-run watermark tracking stays
+    as it is. The durable checkpoint (``save_stream_checkpoint`` on
+    destination ACK) does not flow through this wrapper.
     """
 
     def __init__(self, inner: StateManager) -> None:
@@ -115,9 +116,7 @@ class StreamProcessor:
 
     Owns everything scoped to a single stream: the typed counters, the
     ack-protocol send loop shared by the batch loop and the zero-batch
-    synthetic truncate, and the completion classification. Values that
-    used to travel between engine methods through hidden
-    ``stream_metrics`` dict keys are typed attributes here.
+    synthetic truncate, and the completion classification.
     """
 
     def __init__(
@@ -156,28 +155,31 @@ class StreamProcessor:
         self.error_strategy = error_strategy
 
         self.metrics = StreamMetrics()
+        # stream_data starts the state run before any processor is built, so
+        # the run id is known at construction time.
+        self.run_id = state_manager.current_run_id or get_or_generate_run_id()
         # Created by run() once the destination config is known; stage-level
         # tests inject fakes directly.
         self.grpc_client: DestinationGRPCClient | None = None
         self.stream_dlq: DeadLetterQueue | None = None
-        self.run_id = ""
 
-        # Set by _load_stage when it drains cleanly with zero batches on a
-        # truncate_insert stream; run() then sends the synthetic empty batch
-        # AFTER gather succeeds, so an extract failure never wipes the
-        # previous run's rows (issue #312).
+        # Set by _load_stage when its batch loop drains with zero batches on
+        # a truncate_insert stream. run() sends the synthetic empty batch
+        # only AFTER gather succeeds — a failed extract (which also
+        # propagates the None sentinel into the batch loop) never triggers
+        # the truncate (issue #312).
         self.zero_batch_truncate_needed = False
         # Classified cause of every retry-exhausted batch the dlq/skip
         # strategies dropped without raising (issue #351).
         self.exhausted_failure_codes: list[ErrorCode] = []
-        # Classified cause when the stream completes partial. Nothing raises
-        # on the dlq/skip path, so this attribute is the only way the
-        # runner's no-exception partial classification can see the cause
-        # (issue #351); the engine reads it after run() returns.
-        self.partial_error_code: ErrorCode | None = None
 
-    async def run(self) -> None:
-        """Process the stream end to end and emit its metrics record."""
+    async def run(self) -> ErrorCode | None:
+        """Process the stream end to end and emit its metrics record.
+
+        Returns the classified cause when the stream completed partial (a
+        dlq/skip strategy exhausted batches without raising — nothing else
+        carries that cause to the runner, issue #351), else None.
+        """
         logger.info(f"Processing stream: {self.stream_name}")
 
         tasks: list[asyncio.Task[None]] = []
@@ -197,7 +199,6 @@ class StreamProcessor:
             source_readable = self._resolve_source_readable(source_cfg)
 
             self.stream_dlq = DeadLetterQueue(str(Path(self.dlq_root) / self.stream_id))
-            self.run_id = self.state_manager.current_run_id or get_or_generate_run_id()
             self.grpc_client = self._create_grpc_client(destination_cfg)
 
             await self._open_destination_stream(destination_cfg)
@@ -220,6 +221,9 @@ class StreamProcessor:
                 error_message,
                 error_detail,
             ) = self._classify_completion()
+            # error_code is only non-None on the partial path here; a failed
+            # stream raises instead, and the engine reads this return value.
+            return error_code
 
         except Exception as e:
             status = "failed"
@@ -630,10 +634,12 @@ class StreamProcessor:
                     output_queue=output_queue,
                 )
 
-            # Signal the outer scope that extract completed cleanly with no
-            # batches on a truncate_insert stream. run() sends the synthetic
-            # batch AFTER gather succeeds so the truncate is skipped if
-            # extract failed (issue #312).
+            # Record that the batch loop drained with zero batches on a
+            # truncate_insert stream. A failed extract also propagates the
+            # None sentinel here, so this flag alone cannot prove a clean
+            # read — run() sends the synthetic batch only AFTER gather
+            # succeeds, which is what keeps a failed extract from ever
+            # triggering the truncate (issue #312).
             if batch_seq == 0 and self._is_truncate_insert():
                 self.zero_batch_truncate_needed = True
 
@@ -736,6 +742,9 @@ class StreamProcessor:
                 f"Stream {self.stream_name}: Batch {batch_seq} committed, "
                 f"{result.records_written} records written"
             )
+            # Order matters: the Pydantic pipeline counter validates the
+            # destination-reported count (rejects negatives) before the
+            # unguarded stream counter takes it.
             self.pipeline_metrics.increment_records_processed(result.records_written)
             self.metrics.records_processed += result.records_written
             self._emit_batch_metrics(batch_seq, result, cursor_data, hwm)
@@ -929,8 +938,9 @@ class StreamProcessor:
                 if batch is None:
                     break
 
-                # Checkpoint is handled by the source connector during
-                # read_batches; this stage just tracks completion
+                # The durable checkpoint is written on destination ACK in
+                # _persist_committed_cursor; this stage only counts drained
+                # batches for completion logging
                 batch_count += 1
 
             logger.info(
@@ -967,7 +977,6 @@ class StreamProcessor:
             dominant_error_code(self.exhausted_failure_codes)
             or ErrorCode.DESTINATION_WRITE_FAILED
         )
-        self.partial_error_code = error_code
         # 'skip' drops exhausted batches without a DLQ entry, so those
         # records are NOT recoverable; do not imply dead-lettering. The
         # 'partial' path is only reached via the dlq/skip break, so a
@@ -1054,7 +1063,7 @@ class StreamProcessor:
         """Create the stream's metrics record and emit it when enabled."""
         try:
             record = create_metrics_record(
-                run_id=self.state_manager.current_run_id or get_or_generate_run_id(),
+                run_id=self.run_id,
                 pipeline_id=self.pipeline_id,
                 start_time=start_time,
                 end_time=end_time,

@@ -45,8 +45,7 @@ cdk/cdk/                     # Connector Development Kit (shared by source + des
 
 src/
 ├── shared/                  # Engine-local helpers
-│   ├── placeholder.py           # ${name} expansion shim
-│   ├── expressions.py
+│   ├── dict_path.py
 │   ├── http_utils.py
 │   └── run_id.py
 │
@@ -64,23 +63,28 @@ src/
 │   ├── stream_processor.py      # StreamProcessor (one stream: extract -> transform -> load -> checkpoint)
 │   ├── pipeline_config_prep.py  # Loads manifest/pipelines/streams/connections/connectors
 │   ├── data_transformer.py      # compile_transform (vectorized mapping AST -> Arrow compute)
-│   ├── expression_evaluator.py  # SecureExpressionEvaluator (string-form expressions)
 │   └── exceptions.py
+│
+├── worker/                  # Sandboxed connector worker (spawned subprocess)
+│   ├── readable.py              # WorkerReadable (engine-side client)
+│   ├── source_service.py        # Worker-side read loop
+│   ├── proxy.py / shell.py / spawn.py / bootstrap.py
+│   └── __init__.py              # build_worker_registries (kind + connector_id resolution)
 │
 ├── state/                   # Fault tolerance
 │   ├── state_manager.py
-│   ├── state_storage.py
+│   ├── store.py
+│   ├── state_emission.py        # ANALITIQ_STATE:: log lines
+│   ├── error_classification.py  # ErrorCode taxonomy + failure tagging
 │   ├── dead_letter_queue.py
-│   ├── log_storage.py
+│   ├── log_emitter.py
 │   └── metrics_storage.py       # Emits ANALITIQ_METRICS:: log lines
 │
 ├── grpc/                    # gRPC client and generated stubs
 ├── models/                  # Pydantic v2 models (engine config, metrics, stream)
 ├── config/                  # Endpoint resolver, connection loader, validators
-├── secrets/                 # Secret resolvers
-├── schema/                  # Schema drift detection
-├── transformations/         # Transformation registry
 ├── runner.py                # PipelineRunner (CLI entry from src.main)
+├── runtime_archive.py       # Runtime config archive loading (local path or URL)
 └── main.py                  # Dual-mode entrypoint (RUN_MODE = source | destination)
 ```
 

@@ -15,21 +15,12 @@ logger = logging.getLogger(__name__)
 
 
 class StreamingEngine:
-    """
-    High-performance async multi-stream engine with state management.
-
-    Features:
-    - Multi-stream concurrent processing
-    - State management for scalability
-    - Pydantic validation for configuration
-    - Async/await pattern for non-blocking I/O
-    - Fault tolerance with retries and DLQ
-    - Configurable batch processing with backpressure handling
+    """Async multi-stream engine: fans streams out, aggregates results.
 
     Everything scoped to a single stream lives in
     :class:`~.stream_processor.StreamProcessor`; the engine holds the
     pipeline-wide pieces (state manager, cumulative metrics, worker client)
-    and fans streams out.
+    and runs the streams concurrently.
     """
 
     def __init__(
@@ -60,10 +51,10 @@ class StreamingEngine:
         # Metrics tracking with Pydantic validation
         self.metrics = PipelineMetrics()
 
-        # Representative exception from a stream that failed while OTHER streams
+        # ExceptionGroup of every stream that failed while OTHER streams
         # succeeded (a partial run that stream_data does not re-raise). The
-        # runner classifies it so a partial run with a failed stream is not
-        # reported as success.
+        # runner classifies the dominant cause across the group so a partial
+        # run with failed streams is not reported as success.
         self._dominant_stream_error: BaseException | None = None
 
         # Classified cause of each stream that completed PARTIAL (dlq/skip
@@ -204,8 +195,8 @@ class StreamingEngine:
         """Run one stream through its own StreamProcessor.
 
         The processor owns everything stream-scoped; this wrapper hands it
-        the pipeline-wide pieces and surfaces a partial completion's
-        classified cause at pipeline level after the run.
+        the pipeline-wide pieces and surfaces the partial-completion cause
+        run() returns at pipeline level.
         """
         processor = StreamProcessor(
             stream_id=stream_id,
@@ -222,9 +213,9 @@ class StreamingEngine:
             retry_delay=self.retry_delay,
             error_strategy=self.error_strategy,
         )
-        await processor.run()
-        if processor.partial_error_code is not None:
-            self._partial_error_codes.append(processor.partial_error_code)
+        partial_error_code = await processor.run()
+        if partial_error_code is not None:
+            self._partial_error_codes.append(partial_error_code)
 
     def get_metrics(self) -> PipelineMetrics:
         """Get pipeline execution metrics as a validated Pydantic model."""

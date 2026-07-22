@@ -179,11 +179,12 @@ reality.
    (`analitiq.source_connectors` / `analitiq.destination_connectors`). Built-ins
    are seeded explicitly first (always available, works in editable installs and
    under pytest); entry-point discovery is additive and best-effort (a broken
-   plugin is logged and skipped, never fatal). The engine
-   (`src/engine/engine.py`) and the destination
+   plugin is logged and skipped, never fatal). The worker subprocess
+   (`build_worker_registries` in `src/worker/__init__.py`) and the destination
    (`src/destination/connectors/__init__.py`) both call `build_registries`,
-   seeding `{"database": GenericSQLConnector}` and discovering the rest. A
-   duplicate `kind` raises rather than silently shadowing.
+   seeding `{"database": GenericSQLConnector}` and discovering the rest; the
+   engine process holds only the `WorkerReadable` client. A duplicate `kind`
+   raises rather than silently shadowing.
 2. **Introspection operations exist.** `list_schemas` / `list_tables` /
    `list_columns` ship in the CDK (`cdk/cdk/sql/discovery.py`, exposed on
    `GenericSQLConnector`), running `INFORMATION_SCHEMA` queries over the same

@@ -453,6 +453,56 @@ class TestEngineFatalFailureHandling:
         )
 
     @pytest.mark.asyncio
+    async def test_load_stage_already_committed_persists_cursor_without_counting(
+        self,
+        mock_grpc_client: AsyncMock,
+        sample_stream_config: dict[str, Any],
+        temp_dir: str,
+    ):
+        """An ALREADY_COMMITTED ack (idempotent same-run replay) must record
+        the watermark exactly as SUCCESS would, forward the batch downstream,
+        and must NOT count the records as new progress."""
+        from src.grpc.cursor import encode_cursor
+        from src.state.dead_letter_queue import DeadLetterQueue
+
+        input_queue = asyncio.Queue()
+        output_queue = asyncio.Queue()
+        test_batch = pa.RecordBatch.from_pylist([{"id": 1}])
+        await input_queue.put(test_batch)
+        await input_queue.put(None)
+
+        replay_result = MockBatchResult(
+            success=True,
+            status=AckStatus.ACK_STATUS_ALREADY_COMMITTED,
+            records_written=0,
+            committed_cursor=encode_cursor("updated_at", "2025-08-18T12:00:00Z"),
+            failed_record_ids=[],
+            failure_summary="",
+        )
+        mock_grpc_client.send_batch = AsyncMock(return_value=replay_result)
+
+        state_manager = MagicMock()
+        pipeline_metrics = PipelineMetrics()
+        processor = _make_processor(
+            sample_stream_config,
+            mock_grpc_client,
+            DeadLetterQueue(f"{temp_dir}/dlq"),
+            state_manager=state_manager,
+            pipeline_metrics=pipeline_metrics,
+        )
+
+        await processor._load_stage(input_queue, output_queue)
+
+        # Watermark recorded identically to the SUCCESS path.
+        state_manager.save_stream_checkpoint.assert_called_once()
+        # Batch forwarded downstream, then the end marker.
+        assert await output_queue.get() is test_batch
+        assert await output_queue.get() is None
+        # An idempotent replay is not new progress.
+        assert pipeline_metrics.records_processed == 0
+        assert processor.metrics.records_processed == 0
+
+    @pytest.mark.asyncio
     async def test_load_stage_retryable_failure_retries_then_dlq(
         self,
         mock_grpc_client: AsyncMock,
@@ -947,6 +997,65 @@ class TestEngineStreamFailurePropagation:
         assert dominant is not None
         code, _, _ = classify_for_metrics(dominant)
         assert code is ErrorCode.SOURCE_AUTH_FAILED
+
+    @pytest.mark.asyncio
+    async def test_partial_stream_surfaces_classified_code_through_engine(
+        self,
+        engine: StreamingEngine,
+        sample_stream_config: dict[str, Any],
+    ):
+        """A dlq stream that exhausts retries completes 'partial' without
+        raising; the batch's classified cause must travel the whole
+        processor -> engine chain so the runner's no-exception partial
+        classification reports it instead of its load-stage default (#351).
+
+        Drives the real engine._process_stream wiring (processor
+        construction, run(), partial-code collection) with a real
+        StreamProcessor: only the source readable and the gRPC client are
+        faked. Asserting INTERNAL (from the declared NOT_READY) rather than
+        the default DESTINATION_WRITE_FAILED proves the classified code
+        actually traveled the chain."""
+        engine.error_strategy = "dlq"
+        engine.max_retries = 0
+        engine.retry_delay = 0
+
+        class OneBatchReadable:
+            """Yields one batch, then ends the read."""
+
+            async def read_batches(self, *args, **kwargs):
+                yield pa.RecordBatch.from_pylist(
+                    [{"id": 1, "name": "a", "updated_at": "2025-01-01T00:00:00Z"}]
+                )
+
+        engine._worker_readable = OneBatchReadable()
+
+        not_ready_result = MockBatchResult(
+            success=False,
+            status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+            records_written=0,
+            committed_cursor=None,
+            failed_record_ids=[],
+            failure_summary="Handler not connected",
+            failure_category=FailureCategory.FAILURE_CATEGORY_NOT_READY,
+        )
+        grpc_client = AsyncMock()
+        grpc_client.connect = AsyncMock(return_value=True)
+        grpc_client.start_stream = AsyncMock(return_value=True)
+        grpc_client.stream_retry_semantics = None
+        grpc_client.send_batch = AsyncMock(return_value=not_ready_result)
+        grpc_client.disconnect = AsyncMock()
+
+        with patch.object(
+            StreamProcessor, "_create_grpc_client", return_value=grpc_client
+        ):
+            # Must complete without raising: dlq drops the exhausted batch.
+            await engine._process_stream(
+                "partial-stream",
+                dict(sample_stream_config),
+                {"pipeline_id": "test-pipeline", "name": "Test Pipeline"},
+            )
+
+        assert engine.get_partial_error_code() is ErrorCode.INTERNAL
 
 
 @pytest.mark.integration

@@ -462,8 +462,9 @@ _HANDSHAKE_TRANSPORT_PHRASES = (
 # PEP-249 driver names (ProgrammingError / IntegrityError / NotSupportedError)
 # are deliberately NOT listed: they are transport-ambiguous. A destination write
 # failure never reaches the engine as a bare driver instance -- it crosses the
-# gRPC boundary as a failure_summary string wrapped by _load_stage (matched by
-# the phrases below) or is recorded as the DLQ dominant cause. A live driver
+# gRPC boundary as a failure_summary string wrapped by the StreamProcessor load
+# path (matched by the phrases below) or is recorded as the DLQ dominant cause.
+# A live driver
 # exception in the chain therefore comes from the source worker, so routing those
 # names to the destination would mislabel source read failures.
 _DESTINATION_NAMES = frozenset(
@@ -477,8 +478,9 @@ _DESTINATION_PHRASES = (
     "write to destination",
     "destination write",
     "load stage",
-    # Load-stage wrappers from the engine (_load_stage) around a destination
-    # ack failure; the wrapper text itself is the destination signal.
+    # Wrappers StreamProcessor raises around a destination ack failure
+    # (_handle_send_outcome / _handle_exhausted_batch / the synthetic
+    # truncate); the wrapper text itself is the destination signal.
     "fatal failure",
     "retries:",
     "unknown ack status",
