@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 import pyarrow as pa
 import pytest
 
+from cdk.exceptions import TransportSpecError
 from cdk.sql.exceptions import ReadError
 from cdk.type_map import UnmappedTypeError
 from src.grpc.generated.analitiq.v1.source_service_pb2 import ReadRequest
@@ -157,6 +158,10 @@ class TestReadStream:
             # same intent — it must classify identically.
             ApiReadError("source config missing 'endpoint_document'"),
             UnmappedTypeError("demo", "forward", "FANCYTYPE"),
+            # A transport-spec/value-expression authoring defect that
+            # escapes a connector unwrapped is deterministic by its own
+            # contract — retrying cannot heal a config error.
+            TransportSpecError("conflicting expression markers"),
             KeyError("endpoint_document"),
             TypeError("x"),
             ValueError("y"),
