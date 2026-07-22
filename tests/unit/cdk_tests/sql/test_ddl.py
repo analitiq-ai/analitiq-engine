@@ -18,13 +18,18 @@ import pytest
 
 from cdk.contract import ColumnDef
 from cdk.sql.ddl import build_create_table_sql, create_table
-from cdk.sql.dialects import SqlDialect
+from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.exceptions import CreateTableError
 from cdk.type_map import TypeMapper
 from cdk.type_map.exceptions import InvalidTypeMapError, UnmappedTypeError
 from cdk.type_map.rules import parse_rules
 
 from .conftest import FakeAdbcRuntime
+
+
+def _addr(table: str) -> TableAddress:
+    """A ``public``-schema address, matching the old positional call shape."""
+    return TableAddress(table=table, schema="public")
 
 
 class _StubMapper:
@@ -56,7 +61,7 @@ class TestBuildAnsi:
             ColumnDef("created", "Timestamp(MICROSECOND, UTC)"),
         ]
         ddl = build_create_table_sql(
-            SqlDialect(), pg_mapper, "public", "orders", columns, ["id"]
+            SqlDialect(), pg_mapper, _addr("orders"), columns, ["id"]
         )
         assert ddl == (
             'CREATE TABLE IF NOT EXISTS "public"."orders" (\n'
@@ -71,15 +76,13 @@ class TestBuildAnsi:
     def test_pk_column_is_not_null_even_if_declared_nullable(self, pg_mapper):
         columns = [ColumnDef("id", "Int64", nullable=True, primary_key=True)]
         ddl = build_create_table_sql(
-            SqlDialect(), pg_mapper, "public", "t", columns, ["id"]
+            SqlDialect(), pg_mapper, _addr("t"), columns, ["id"]
         )
         assert '"id" BIGINT NOT NULL' in ddl
 
     def test_no_primary_key_omits_clause(self, pg_mapper):
         columns = [ColumnDef("note", "Utf8")]
-        ddl = build_create_table_sql(
-            SqlDialect(), pg_mapper, "public", "t", columns, []
-        )
+        ddl = build_create_table_sql(SqlDialect(), pg_mapper, _addr("t"), columns, [])
         assert "PRIMARY KEY" not in ddl
         assert '"note" TEXT' in ddl
 
@@ -88,8 +91,7 @@ class TestBuildAnsi:
         ddl = build_create_table_sql(
             SqlDialect(),
             pg_mapper,
-            "",
-            "t",
+            TableAddress(table="t"),
             columns,
             [],
             if_not_exists=False,
@@ -110,8 +112,7 @@ class TestBuildBacktickNotEnforced:
         ddl = build_create_table_sql(
             _BacktickNotEnforcedDialect(),
             mapper,
-            "ds",
-            "orders",
+            TableAddress(table="orders", schema="ds"),
             columns,
             ["id", "region"],
         )
@@ -128,20 +129,20 @@ class TestBuildBacktickNotEnforced:
 class TestBuildErrors:
     def test_empty_columns_raises(self, pg_mapper):
         with pytest.raises(CreateTableError, match="at least one column"):
-            build_create_table_sql(SqlDialect(), pg_mapper, "public", "t", [], [])
+            build_create_table_sql(SqlDialect(), pg_mapper, _addr("t"), [], [])
 
     def test_primary_key_not_in_columns_raises(self, pg_mapper):
         columns = [ColumnDef("id", "Int64")]
         with pytest.raises(CreateTableError, match="not in the column list"):
             build_create_table_sql(
-                SqlDialect(), pg_mapper, "public", "t", columns, ["nope"]
+                SqlDialect(), pg_mapper, _addr("t"), columns, ["nope"]
             )
 
     def test_unmapped_canonical_raises_chaining_typemap_error(self, pg_mapper):
         # A canonical the write-map cannot render to forces the reverse miss.
         columns = [ColumnDef("weird", "LargeList")]
         with pytest.raises(CreateTableError) as exc:
-            build_create_table_sql(SqlDialect(), pg_mapper, "public", "t", columns, [])
+            build_create_table_sql(SqlDialect(), pg_mapper, _addr("t"), columns, [])
         assert "weird" in str(exc.value)
         assert isinstance(exc.value.__cause__, UnmappedTypeError)
 
@@ -159,7 +160,11 @@ class TestBuildErrors:
         columns = [ColumnDef("id", "Int64")]
         with pytest.raises(CreateTableError, match="type-map-write rule") as exc:
             build_create_table_sql(
-                SqlDialect(), read_only_mapper, "db", "t", columns, []
+                SqlDialect(),
+                read_only_mapper,
+                TableAddress(table="t", schema="db"),
+                columns,
+                [],
             )
         assert isinstance(exc.value.__cause__, InvalidTypeMapError)
 
@@ -177,7 +182,7 @@ class TestCreateTableExecution:
         )
 
         expected = build_create_table_sql(
-            SqlDialect(), pg_mapper, "public", "orders", columns, ["id"]
+            SqlDialect(), pg_mapper, _addr("orders"), columns, ["id"]
         )
         conn = runtime.connections[-1]
         assert [s for s, _ in conn.executed] == [expected]

@@ -11,7 +11,8 @@ Public surface:
   discovery, native types canonicalized via the connector read type-map.
 * ``create_table`` / ``build_create_table_sql`` — DDL from ``ColumnDef``s via
   the write type-map + dialect strategy.
-* ``SqlDialect`` — the ANSI-neutral dialect base (per-system dialects live
+* ``SqlDialect`` / ``TableAddress`` — the ANSI-neutral dialect base and its
+  once-normalized ``catalog.schema.table`` address (per-system dialects live
   in connector packages).
 * error types: ``SqlIntrospectionError`` and its subclasses.
 """
@@ -22,9 +23,10 @@ from typing import TYPE_CHECKING, Any
 
 from .._extras import reraise_for_missing_extra
 from .ddl import build_create_table_sql, create_table
-from .dialects import SqlDialect
+from .dialects import SqlDialect, TableAddress
 from .discovery import list_columns, list_schemas, list_tables
 from .exceptions import (
+    CatalogAddressingError,
     CreateTableError,
     DiscoveryError,
     ReadError,
@@ -68,6 +70,7 @@ __all__ = [
     "create_table",
     "build_create_table_sql",
     "SqlDialect",
+    "TableAddress",
     "fetch_rows",
     "execute_ddl",
     "AdbcReader",
@@ -75,6 +78,7 @@ __all__ = [
     "open_adbc_reader",
     "SqlIntrospectionError",
     "UnsupportedDialectOperationError",
+    "CatalogAddressingError",
     "DiscoveryError",
     "CreateTableError",
     "ReadError",

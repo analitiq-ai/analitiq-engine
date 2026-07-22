@@ -45,22 +45,30 @@ class ColumnDef:
     default: str | None = None
 
 
-# ---- DISCOVER (control-plane reads; implemented in a later phase) ----------
+# ---- DISCOVER (control-plane reads) ----------------------------------------
+# ``catalog`` scopes an operation to a specific catalog (database / project);
+# empty means the connection's current catalog. All three listings accept it
+# symmetrically — a connector whose system cannot address a catalog fails
+# loud rather than silently answering from the session catalog.
 @runtime_checkable
 class Discoverable(Protocol):
-    async def list_schemas(self, runtime: ConnectionRuntime) -> list[str]:
+    async def list_schemas(
+        self, runtime: ConnectionRuntime, *, catalog: str = ""
+    ) -> list[str]:
         ...
 
-    async def list_tables(self, runtime: ConnectionRuntime, schema: str) -> list[str]:
+    async def list_tables(
+        self, runtime: ConnectionRuntime, schema: str, *, catalog: str = ""
+    ) -> list[str]:
         ...
 
     async def list_columns(
-        self, runtime: ConnectionRuntime, schema: str, table: str
+        self, runtime: ConnectionRuntime, schema: str, table: str, *, catalog: str = ""
     ) -> tuple[list[ColumnDef], list[str]]:  # (columns, primary_keys)
         ...
 
 
-# ---- CREATE (control-plane DDL; standalone; implemented in a later phase) ---
+# ---- CREATE (control-plane DDL; standalone) ---------------------------------
 @runtime_checkable
 class TableCreator(Protocol):
     async def create_table(
@@ -70,6 +78,8 @@ class TableCreator(Protocol):
         table: str,
         columns: list[ColumnDef],
         primary_keys: list[str],
+        *,
+        catalog: str = "",
     ) -> None:
         ...
 

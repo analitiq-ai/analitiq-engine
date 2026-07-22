@@ -52,14 +52,14 @@ def _route(rows_by_view):
 
 
 class _UpperSchemaDialect(SqlDialect):
-    """Folds schema names upper-case before they reach the query binds."""
+    """Folds identifiers upper-case before they reach the query binds."""
 
     name = "upper"
 
     # Overrides an instance method of the dialect interface; a staticmethod
     # would diverge from the shape connector dialects implement.
-    def normalize_schema(self, schema: str) -> str:
-        return schema.upper()
+    def normalize_ident(self, name: str) -> str:
+        return name.upper()
 
 
 class _StructuralFromDialect(SqlDialect):
@@ -67,7 +67,7 @@ class _StructuralFromDialect(SqlDialect):
 
     name = "structural"
 
-    def tables_query(self, schema):
+    def tables_query(self, schema, catalog=""):
         return (
             f"SELECT table_name FROM {self.quote_ident(schema)}"
             ".information_schema.tables ORDER BY table_name",
@@ -154,6 +154,25 @@ class TestListTables:
         sql, params = runtime.connections[-1].executed[-1]
         assert '"ds".information_schema.tables' in sql
         assert params == []
+
+    @pytest.mark.asyncio
+    async def test_catalog_scope_reaches_the_query(self):
+        # A catalog-addressing dialect scopes the FROM path and the binds
+        # to the requested catalog (issue #348 item 4).
+        class _CatalogDialect(SqlDialect):
+            name = "cataloged"
+            supports_catalog_addressing = True
+
+        runtime = FakeAdbcRuntime(
+            "cataloged",
+            responder=_route({"tables": [{"table_name": "orders"}]}),
+        )
+        assert await list_tables(
+            runtime, "ds", dialect=_CatalogDialect(), catalog="proj"
+        ) == ["orders"]
+        sql, params = runtime.connections[-1].executed[-1]
+        assert '"proj".information_schema.tables' in sql
+        assert params == ["ds", "proj"]
 
 
 class TestListColumns:

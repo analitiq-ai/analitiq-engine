@@ -1,11 +1,21 @@
 """The vendor-neutral SQL dialect base — per-system dialects live in packages.
 
 ``SqlDialect`` is the **complete extension surface** for everything
-vendor-specific in the SQL path: identifier quoting, schema-name
-normalization, the PRIMARY KEY clause form, the ``INFORMATION_SCHEMA``
-discovery query shapes, the SQLAlchemy upsert statement, the pre-DDL
-statements, and the ADBC-only write machinery (native DDL type names and
-stage-table syntax).
+vendor-specific in the SQL path: identifier quoting and normalization, the
+``catalog.schema.table`` address composer (:class:`TableAddress`), the
+PRIMARY KEY clause form, the ``INFORMATION_SCHEMA`` discovery query shapes,
+the SQLAlchemy upsert statement, the pre-DDL statements, and the ADBC-only
+write machinery (native DDL type names and stage-table syntax).
+
+Table addressing follows the engine's bind-once/sink-many rule: the intent
+(``catalog``/``schema``/``table``) is resolved exactly once into a
+:class:`TableAddress` via :meth:`SqlDialect.table_address` — normalization
+and the catalog capability check happen there — and every surface consumes
+the same address through a sink (:meth:`SqlDialect.quote_table` for SQL
+text, :meth:`SqlDialect.adbc_ingest_kwargs` for ADBC ingest, the
+``QueryBuilder`` schema argument for compiled reads). A catalog on a
+dialect that cannot address one fails loud at address construction, never
+by compiling SQL the system will misread.
 
 The CDK ships **only this ANSI-neutral base**. Each connector package ships
 its own subclass next to its connector class (``connector.py``), overriding
@@ -35,15 +45,57 @@ named binds on the SQLAlchemy path.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .exceptions import UnsupportedDialectOperationError
+from .exceptions import CatalogAddressingError, UnsupportedDialectOperationError
 
 if TYPE_CHECKING:
     from cdk.type_map.mapper import TypeMapper
 
 # A discovery query: SQL text with ``?`` placeholders + its positional params.
 Query = tuple[str, list[object]]
+
+
+@dataclass(frozen=True)
+class TableAddress:
+    """A resolved ``(catalog.)schema.table`` address, normalized once.
+
+    Built via :meth:`SqlDialect.table_address`, which applies
+    :meth:`SqlDialect.normalize_ident` to every component and enforces the
+    dialect's catalog capability — so DDL, DML, ingest kwargs, query
+    building, and logs all work from the same components and none can
+    diverge. Empty string means "absent" (no catalog / no schema).
+    Construct directly only with already-normalized components (tests on
+    the identity-normalizing base, engine-generated names via
+    ``dataclasses.replace``); everything else goes through the factory.
+
+    Frozen so an address can live on shared per-stream state and cross
+    worker-thread boundaries without defensive copying.
+    """
+
+    table: str
+    schema: str = ""
+    catalog: str = ""
+
+    def __post_init__(self) -> None:
+        """Reject the one ill-formed shape no dialect can render safely.
+
+        Catalog-implies-schema is dialect-independent, so it lives on the
+        type itself: a two-part ``catalog.table`` would be misread as
+        ``schema.table`` by every SQL sink. Runs on direct construction
+        and ``dataclasses.replace`` alike, so no bypass of the factory can
+        produce the shape.
+        """
+        if self.catalog and not self.schema:
+            raise CatalogAddressingError(
+                f"catalog {self.catalog!r} requires an explicit schema; a "
+                f"two-part catalog.table address has no portable meaning"
+            )
+
+    def __str__(self) -> str:
+        """Dotted display form for logs and error messages."""
+        return ".".join(p for p in (self.catalog, self.schema, self.table) if p)
 
 
 class SqlDialect:
@@ -77,6 +129,16 @@ class SqlDialect:
     #: Whether the dialect supports the ADBC stage-table + MERGE upsert path
     #: (requires ``adbc_stage_table_sql`` and the ADBC DDL type hooks).
     supports_upsert_adbc: bool = False
+    #: Whether the system can address a catalog other than the connection's
+    #: current one per statement (three-part names, catalog-qualified
+    #: ``INFORMATION_SCHEMA``, ``adbc.ingest.target_catalog``). ANSI SQL has
+    #: no portable form — PostgreSQL/MySQL cannot cross databases, and
+    #: systems that scope the catalog at session level (Snowflake) cannot
+    #: target one per statement either — so the base declares False and a
+    #: requested catalog fails loud with "use a connection whose default
+    #: catalog is X". Connector packages whose system supports it
+    #: (BigQuery, DuckDB) declare True.
+    supports_catalog_addressing: bool = False
 
     # ---- identifiers -------------------------------------------------------
     def quote_ident(self, name: str) -> str:
@@ -90,24 +152,68 @@ class SqlDialect:
             return f"`{name}`"
         return '"' + name.replace('"', '""') + '"'
 
-    def normalize_schema(self, schema: str) -> str:
-        """Normalize a schema name before it is quoted (no-op by default).
+    def normalize_ident(self, name: str) -> str:
+        """Normalize one identifier component before quoting (no-op by default).
 
-        Shared by the source reader and the destination handler so read and
-        write resolve the same physical schema (e.g. Snowflake folds
-        unquoted identifiers upper-case, so its dialect maps the
-        conventional lowercase ``public`` to the real ``PUBLIC``).
+        Applied uniformly to catalog, schema, and table at
+        :meth:`table_address` construction and inside the discovery
+        queries, so read, write, DDL, and discovery all resolve the same
+        physical object (e.g. a case-folding system's dialect maps the
+        conventional lowercase ``public`` to the stored ``PUBLIC``).
         """
-        return schema
+        return name
 
-    def quote_qualified(self, schema: str, table: str) -> str:
-        """Quote a ``schema.table`` (or bare ``table`` when schema is empty)."""
-        if schema:
-            return (
-                f"{self.quote_ident(self.normalize_schema(schema))}"
-                f".{self.quote_ident(table)}"
+    def _check_catalog(self, catalog: str) -> None:
+        """Reject a catalog this dialect cannot address (single choke point).
+
+        Shared by :meth:`table_address` (read / write / DDL) and
+        :meth:`information_schema_ref` (discovery) — the only two doors a
+        catalog enters SQL composition through.
+        """
+        if catalog and not self.supports_catalog_addressing:
+            raise CatalogAddressingError(
+                f"dialect {self.name!r} does not support per-statement "
+                f"catalog addressing; cannot target catalog {catalog!r}. "
+                f"Use a connection whose default catalog is {catalog!r}, or "
+                f"a connector whose dialect declares "
+                f"supports_catalog_addressing."
             )
-        return self.quote_ident(table)
+
+    def table_address(
+        self, table: str, *, schema: str = "", catalog: str = ""
+    ) -> TableAddress:
+        """Build the normalized :class:`TableAddress` every SQL surface consumes.
+
+        The one entry point for table-addressing intent: normalization
+        happens here (once), and a catalog the dialect cannot address
+        fails loud here — before any SQL is composed — instead of
+        compiling into a statement the system would misread. The
+        catalog-implies-schema rule is dialect-independent and enforced by
+        :class:`TableAddress` itself. Normalization runs before the
+        capability gate so both entry doors (here and the discovery
+        queries) report the same catalog spelling.
+        """
+        catalog = self.normalize_ident(catalog) if catalog else ""
+        self._check_catalog(catalog)
+        return TableAddress(
+            table=self.normalize_ident(table),
+            schema=self.normalize_ident(schema) if schema else "",
+            catalog=catalog,
+        )
+
+    def quote_table(self, address: TableAddress) -> str:
+        """Quote *address* for SQL text (up to ``catalog.schema.table``)."""
+        qualifiers = [p for p in (address.catalog, address.schema) if p]
+        return ".".join(self.quote_ident(p) for p in (*qualifiers, address.table))
+
+    def quote_schema(self, address: TableAddress) -> str:
+        """Quote *address*'s schema path for SQL text (``catalog.schema``).
+
+        Callers guard that ``address.schema`` is set (an implicit-default
+        schema is never CREATEd, so this is only reached for explicit ones).
+        """
+        qualifiers = [p for p in (address.catalog, address.schema) if p]
+        return ".".join(self.quote_ident(p) for p in qualifiers)
 
     def pk_clause(self, columns: list[str]) -> str:
         """Render the table-level ``PRIMARY KEY (...)`` clause."""
@@ -236,62 +342,127 @@ class SqlDialect:
             "adbc_stage_table_sql", dialect=self.name
         )
 
-    def adbc_ingest_schema_kwargs(self, schema_name: str) -> dict[str, Any]:
-        """Schema-targeting kwargs for ``cursor.adbc_ingest``.
+    def adbc_ingest_kwargs(self, address: TableAddress) -> dict[str, Any]:
+        """Targeting kwargs for ``cursor.adbc_ingest``.
 
         ADBC exposes per-statement ingest targeting through the
         ``adbc.ingest.target_db_schema`` option (the ``db_schema_name``
-        kwarg). The postgres driver and most others implement it, so the
-        base targets the normalized schema explicitly — read and write then
-        resolve the same physical schema.
+        kwarg) and ``adbc.ingest.target_catalog`` (``catalog_name``).
+        Components come off the already-normalized *address*, so ingest
+        resolves the same physical objects the DDL created. The catalog
+        kwarg is only reachable on dialects that declare
+        ``supports_catalog_addressing`` — :meth:`table_address` rejects a
+        catalog on any other dialect before an address exists.
 
         Drivers that do not implement per-statement ingest targeting
-        (Snowflake rejects both ``target_db_schema`` and ``target_catalog``)
-        override this to return no kwargs; ingest follows the connection's
-        session schema instead, where the stage and target tables already
+        override this to return no kwargs; ingest then follows the
+        connection's session defaults, where the target tables already
         live.
         """
-        if schema_name:
-            return {"db_schema_name": self.normalize_schema(schema_name)}
-        return {}
+        kwargs: dict[str, Any] = {}
+        if address.schema:
+            kwargs["db_schema_name"] = address.schema
+        if address.catalog:
+            kwargs["catalog_name"] = address.catalog
+        return kwargs
 
     # ---- discovery queries (qmark placeholders + positional params) --------
-    def schemas_query(self) -> Query:
-        sql = "SELECT schema_name FROM information_schema.schemata"
+    def information_schema_ref(
+        self, view: str, *, catalog: str = "", schema: str = ""
+    ) -> str:
+        """FROM-clause reference for an ``INFORMATION_SCHEMA`` view.
+
+        The single hook governing how the metadata path is composed. The
+        base emits the session-local ``information_schema.<view>``,
+        prefixing the quoted catalog when one is requested (the shape
+        catalog-addressing systems such as DuckDB use). *schema* is part
+        of the signature so a dialect whose metadata views are
+        schema-scoped (BigQuery's ``project.dataset.INFORMATION_SCHEMA``)
+        can compose the full path in its override; the base ignores it —
+        ANSI scopes rows through ``table_schema`` filters instead. Both
+        arguments arrive pre-normalized (the query builders below
+        normalize once at entry).
+        """
+        self._check_catalog(catalog)
+        if catalog:
+            return f"{self.quote_ident(catalog)}.information_schema.{view}"
+        return f"information_schema.{view}"
+
+    def schemas_query(self, catalog: str = "") -> Query:
+        """List non-system schemas, scoped to *catalog* when one is given."""
+        catalog = self.normalize_ident(catalog) if catalog else ""
+        ref = self.information_schema_ref("schemata", catalog=catalog)
+        # The interpolated FROM path is composed of dialect-quoted
+        # identifiers (information_schema_ref); filter values bind via
+        # qmark placeholders. Same rationale for the three queries below.
+        sql = f"SELECT schema_name FROM {ref}"  # nosec B608
+        conditions: list[str] = []
         params: list[object] = []
         if self.system_schemas:
             placeholders = ", ".join("?" for _ in self.system_schemas)
-            sql += f" WHERE schema_name NOT IN ({placeholders})"
+            conditions.append(f"schema_name NOT IN ({placeholders})")
             params.extend(self.system_schemas)
+        if catalog:
+            conditions.append("catalog_name = ?")
+            params.append(catalog)
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
         sql += " ORDER BY schema_name"
         return sql, params
 
-    def tables_query(self, schema: str) -> Query:
-        return (
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema = ? ORDER BY table_name",
-            [self.normalize_schema(schema)],
-        )
+    def tables_query(self, schema: str, catalog: str = "") -> Query:
+        """List tables in *schema*, scoped to *catalog* when one is given."""
+        catalog = self.normalize_ident(catalog) if catalog else ""
+        schema = self.normalize_ident(schema)
+        ref = self.information_schema_ref("tables", catalog=catalog, schema=schema)
+        sql = f"SELECT table_name FROM {ref} WHERE table_schema = ?"  # nosec B608
+        params: list[object] = [schema]
+        if catalog:
+            sql += " AND table_catalog = ?"
+            params.append(catalog)
+        sql += " ORDER BY table_name"
+        return sql, params
 
-    def columns_query(self, schema: str, table: str) -> Query:
-        return (
-            "SELECT column_name, data_type, is_nullable "
-            "FROM information_schema.columns "
-            "WHERE table_schema = ? AND table_name = ? "
-            "ORDER BY ordinal_position",
-            [self.normalize_schema(schema), table],
+    def columns_query(self, schema: str, table: str, catalog: str = "") -> Query:
+        """Describe columns of *schema.table*, catalog-scoped when given."""
+        catalog = self.normalize_ident(catalog) if catalog else ""
+        schema = self.normalize_ident(schema)
+        ref = self.information_schema_ref("columns", catalog=catalog, schema=schema)
+        sql = (
+            "SELECT column_name, data_type, is_nullable "  # nosec B608
+            f"FROM {ref} "
+            "WHERE table_schema = ? AND table_name = ?"
         )
+        params: list[object] = [schema, self.normalize_ident(table)]
+        if catalog:
+            sql += " AND table_catalog = ?"
+            params.append(catalog)
+        sql += " ORDER BY ordinal_position"
+        return sql, params
 
-    def primary_keys_query(self, schema: str, table: str) -> Query:
-        return (
-            "SELECT kcu.column_name "
-            "FROM information_schema.table_constraints tc "
-            "JOIN information_schema.key_column_usage kcu "
+    def primary_keys_query(self, schema: str, table: str, catalog: str = "") -> Query:
+        """List PK columns of *schema.table*, catalog-scoped when given."""
+        catalog = self.normalize_ident(catalog) if catalog else ""
+        schema = self.normalize_ident(schema)
+        tc_ref = self.information_schema_ref(
+            "table_constraints", catalog=catalog, schema=schema
+        )
+        kcu_ref = self.information_schema_ref(
+            "key_column_usage", catalog=catalog, schema=schema
+        )
+        sql = (
+            "SELECT kcu.column_name "  # nosec B608
+            f"FROM {tc_ref} tc "
+            f"JOIN {kcu_ref} kcu "
             "  ON tc.constraint_name = kcu.constraint_name "
             " AND tc.table_schema = kcu.table_schema "
             " AND tc.table_name = kcu.table_name "
             "WHERE tc.constraint_type = 'PRIMARY KEY' "
-            "  AND tc.table_schema = ? AND tc.table_name = ? "
-            "ORDER BY kcu.ordinal_position",
-            [self.normalize_schema(schema), table],
+            "  AND tc.table_schema = ? AND tc.table_name = ?"
         )
+        params: list[object] = [schema, self.normalize_ident(table)]
+        if catalog:
+            sql += " AND tc.table_catalog = ?"
+            params.append(catalog)
+        sql += " ORDER BY kcu.ordinal_position"
+        return sql, params

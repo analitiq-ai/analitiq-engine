@@ -31,7 +31,7 @@ import logging
 import threading
 from collections.abc import AsyncIterator, Mapping
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 import pyarrow as pa
@@ -66,11 +66,12 @@ from ._adbc_utils import _close_cursor_quietly
 from .adbc_reader import open_adbc_reader
 from .ddl import build_create_table_sql
 from .ddl import create_table as _sql_create_table
-from .dialects import SqlDialect
+from .dialects import SqlDialect, TableAddress
 from .discovery import list_columns as _sql_list_columns
 from .discovery import list_schemas as _sql_list_schemas
 from .discovery import list_tables as _sql_list_tables
 from .exceptions import (
+    CatalogAddressingError,
     ReadError,
     SchemaConfigurationError,
     UnsupportedDialectOperationError,
@@ -148,6 +149,27 @@ def _reclassify_as_fatal(exc: BaseException) -> AdbcConfigurationError:
 WriteMode = Literal["insert", "upsert", "truncate_insert"]
 
 
+def _page_order_by(
+    order_by_field: str | None,
+    cursor_field: str | None,
+    columns: list[str],
+    table_name: str,
+) -> str:
+    """Resolve the ORDER BY column for an OFFSET-paged ADBC read.
+
+    The stream's declared order_by_field wins (a conflict with the
+    incremental cursor is rejected in ``read_batches``), then the cursor,
+    then the first projected column (warned once — an undeclared order
+    makes OFFSET paging best-effort).
+    """
+    if order_by_field:
+        return order_by_field
+    if cursor_field:
+        return cursor_field
+    _note_order_by_fallback(table_name, columns[0])
+    return columns[0]
+
+
 @dataclass
 class _StreamState:
     """Per-stream destination state.
@@ -157,10 +179,13 @@ class _StreamState:
     endpoint document lives here, keyed by ``stream_id``. Sharing handler
     instance fields directly across streams would race when the engine
     fires schema/configure calls in parallel.
+
+    ``address`` is the dialect-built :class:`TableAddress` — components
+    normalized once at ``configure_schema`` time, so every consumer (DDL,
+    DML, ingest kwargs, logs) works from identical components.
     """
 
-    schema_name: str = "public"
-    table_name: str = ""
+    address: TableAddress = field(default_factory=lambda: TableAddress(table=""))
     table: Table | None = None
     primary_keys: list[str] = field(default_factory=list)
     # Columns used as the ON CONFLICT / MERGE target for upsert. Set at
@@ -690,6 +715,59 @@ class GenericSQLConnector(BaseDestinationHandler):
         if cancelled is not None:
             raise cancelled
 
+    def _destination_address(
+        self, stream_id: str, database_object: Mapping[str, Any], table_name: str
+    ) -> TableAddress | None:
+        """Resolve the stream's target :class:`TableAddress`, or ``None`` to reject.
+
+        Owns the per-transport schema rule and the catalog gates so
+        ``configure_schema`` stays a lifecycle method. ``None`` means the
+        rejection was already logged (missing ADBC schema — the pre-typed
+        reject path); deterministic authoring errors raise
+        :class:`SchemaConfigurationError` for the SchemaAck translation.
+        """
+        raw_schema = database_object.get("schema")
+        if self._adbc_only:
+            # Snowflake's default schema is account-/role-dependent;
+            # BigQuery requires an explicit dataset. Falling back to
+            # "public" silently writes into a Postgres-shaped
+            # namespace that may not exist. Require the endpoint
+            # document to declare the schema explicitly.
+            if not raw_schema:
+                logger.error(
+                    "ADBC destination requires database_object.schema "
+                    "for stream %r (no implicit default)",
+                    stream_id,
+                )
+                return None
+            schema_name = raw_schema
+        else:
+            schema_name = raw_schema or "public"
+        try:
+            address = self.dialect.table_address(
+                table_name,
+                schema=schema_name,
+                catalog=database_object.get("catalog") or "",
+            )
+        except CatalogAddressingError as err:
+            # Deterministic authoring error — surface it in the SchemaAck
+            # (the gRPC layer translates SchemaConfigurationError) instead
+            # of failing the RPC as a wiring defect.
+            raise SchemaConfigurationError(str(err)) from err
+        if address.catalog and not self._adbc_only:
+            # The SQLAlchemy write path reflects the target table and builds
+            # DML from the reflected object; SQLAlchemy reflection cannot
+            # cross catalogs, and no dialect on this transport declares
+            # catalog addressing today. Refuse loudly rather than write to
+            # whatever the reflected two-part name resolves to.
+            raise SchemaConfigurationError(
+                f"stream {stream_id!r} targets catalog "
+                f"{address.catalog!r}, which the SQLAlchemy write transport "
+                f"cannot address; use a connection whose default catalog is "
+                f"{address.catalog!r}"
+            )
+        return address
+
     async def configure_schema(self, schema_spec: SchemaSpec) -> bool:
         """Configure the destination from the preloaded contract endpoint.
 
@@ -737,26 +815,11 @@ class GenericSQLConnector(BaseDestinationHandler):
         # no conflict target (INSERT mode); the engine never derives one
         # from ``primary_keys``.
         conflict_keys = list(self._stream_conflict_keys.get(stream_id) or [])
-        raw_schema = database_object.get("schema")
-        if self._adbc_only:
-            # Snowflake's default schema is account-/role-dependent;
-            # BigQuery requires an explicit dataset. Falling back to
-            # "public" silently writes into a Postgres-shaped
-            # namespace that may not exist. Require the endpoint
-            # document to declare the schema explicitly.
-            if not raw_schema:
-                logger.error(
-                    "ADBC destination requires database_object.schema "
-                    "for stream %r (no implicit default)",
-                    stream_id,
-                )
-                return False
-            schema_name = raw_schema
-        else:
-            schema_name = raw_schema or "public"
+        address = self._destination_address(stream_id, database_object, table_name)
+        if address is None:
+            return False
         state = _StreamState(
-            schema_name=schema_name,
-            table_name=table_name,
+            address=address,
             endpoint_document=dict(endpoint_doc),
             write_mode=self._get_write_mode(schema_spec.write_mode),
             primary_keys=primary_keys,
@@ -786,7 +849,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             # SchemaAck (server.py), so the operator gets the cancelled
             # CREATE TABLE and reason instead of a bare ACK timeout.
             raise SchemaConfigurationError(
-                f"CREATE TABLE for {state.schema_name}.{state.table_name} did "
+                f"CREATE TABLE for {state.address} did "
                 f"not complete within the {self._statement_timeout_seconds:g}s "
                 f"destination statement timeout (likely blocked on a lock or a "
                 f"slow catalog); the statement was cancelled"
@@ -796,10 +859,9 @@ class GenericSQLConnector(BaseDestinationHandler):
 
         self._streams[stream_id] = state
         logger.info(
-            "Schema configured for stream %r: %s.%s, mode=%s, pk=%s",
+            "Schema configured for stream %r: %s, mode=%s, pk=%s",
             stream_id,
-            state.schema_name,
-            state.table_name,
+            state.address,
             state.write_mode,
             state.primary_keys,
         )
@@ -873,7 +935,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             if self.RECORD_HASH_COLUMN in declared:
                 raise SchemaConfigurationError(
                     f"keyless insert stream for "
-                    f"{state.schema_name}.{state.table_name} declares a column "
+                    f"{state.address} declares a column "
                     f"named {self.RECORD_HASH_COLUMN!r}, which the engine reserves "
                     f"as its synthetic dedup primary key; rename the column"
                 )
@@ -937,7 +999,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             # dialect, and a silent plain-append fallback would reintroduce the
             # lost-ack duplication that issue #285 closes.
             raise AdbcConfigurationError(
-                f"Keyless insert on {state.schema_name}.{state.table_name} "
+                f"Keyless insert on {state.address} "
                 f"requires stage-MERGE dedup, but the ADBC dialect "
                 f"{type(self.dialect).__name__} does not support MERGE "
                 f"(supports_upsert_adbc=False). Declare a primary key for this "
@@ -945,28 +1007,26 @@ class GenericSQLConnector(BaseDestinationHandler):
             )
         if not state.endpoint_document:
             raise SchemaConfigurationError(
-                f"destination stream for {state.schema_name}.{state.table_name} "
+                f"destination stream for {state.address} "
                 f"has no endpoint document; cannot build DDL"
             )
         target_ddl = build_create_table_sql(
             self.dialect,
             type_mapper,
-            state.schema_name,
-            state.table_name,
+            state.address,
             self._build_column_defs(state),
             self._identity_columns(state),
             if_not_exists=True,
         )
 
         # Announce DDL before it runs (and before any lock wait) so a slow
-        # CREATE TABLE is attributable to a schema.table instead of a silent
+        # CREATE TABLE is attributable to a table address instead of a silent
         # stall between "Received schema" and the SchemaAck. Paired with the
         # "Destination table ready" line below, the gap renders as elapsed
         # time between two INFO logs.
         logger.info(
-            "Ensuring destination table exists for %s.%s (executing DDL)",
-            state.schema_name,
-            state.table_name,
+            "Ensuring destination table exists for %s (executing DDL)",
+            state.address,
         )
 
         if self._adbc_only:
@@ -982,7 +1042,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             # write_batch readiness guard returning RETRYABLE_FAILURE forever.
             raise AdbcConfigurationError(
                 f"SQLAlchemy engine is None during DDL for "
-                f"{state.schema_name}.{state.table_name}; "
+                f"{state.address}; "
                 "connect() must be called before configure_schema()"
             )
 
@@ -1021,16 +1081,15 @@ class GenericSQLConnector(BaseDestinationHandler):
             # message instead -- the engine adds no migration (the column is the
             # primary key, so it cannot be back-filled on existing rows).
             raise SchemaConfigurationError(
-                f"keyless insert target {state.schema_name}.{state.table_name} "
+                f"keyless insert target {state.address} "
                 f"has no {self.RECORD_HASH_COLUMN!r} column; it predates the "
                 f"content-hash dedup key (issue #282). Recreate the target so the "
                 f"engine manages {self.RECORD_HASH_COLUMN} as its primary key."
             )
 
         logger.info(
-            "Destination table ready for %s.%s",
-            state.schema_name,
-            state.table_name,
+            "Destination table ready for %s",
+            state.address,
         )
 
     def _run_ddl_and_reflect(
@@ -1052,16 +1111,16 @@ class GenericSQLConnector(BaseDestinationHandler):
         # Dialect-declared preparation (e.g. postgres' CREATE SCHEMA
         # IF NOT EXISTS for a non-default schema). The neutral base
         # declares none.
-        for stmt in self.dialect.sqlalchemy_pre_ddl(state.schema_name):
+        for stmt in self.dialect.sqlalchemy_pre_ddl(state.address.schema):
             conn.execute(text(stmt))
         conn.execute(text(target_ddl))
 
         meta = MetaData()
         return Table(
-            state.table_name,
+            state.address.table,
             meta,
             autoload_with=conn,
-            schema=state.schema_name or None,
+            schema=state.address.schema or None,
         )
 
     def _ddl_and_reflect_on_sync_engine(
@@ -1163,7 +1222,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         # or slow write may clear, so stay retryable; carry the reason so it
         # surfaces instead of an empty str(TimeoutError).
         summary = (
-            f"destination write for {state.schema_name}.{state.table_name} "
+            f"destination write for {state.address} "
             f"did not complete within the {self._statement_timeout_seconds:g}s "
             f"statement timeout (likely a lock or slow write); the statement "
             f"was cancelled"
@@ -1415,9 +1474,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         source yields no batches at all (issue #312).
         """
         if self._adbc_only:
-            await asyncio.to_thread(
-                self._adbc_truncate_sync, state.schema_name, state.table_name
-            )
+            await asyncio.to_thread(self._adbc_truncate_sync, state.address)
         elif self._sync_engine is not None:
             await asyncio.to_thread(self._write_batch_on_sync_engine, state, [], True)
         else:
@@ -1577,7 +1634,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             return
         if not state.conflict_keys:
             raise SchemaConfigurationError(
-                f"upsert requested for {state.schema_name}.{state.table_name} "
+                f"upsert requested for {state.address} "
                 f"but the stream carries no conflict_keys; refusing to fall back "
                 f"to plain INSERT (would silently duplicate rows)"
             )
@@ -1622,7 +1679,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         """
         if state.schema_contract is None:
             raise AdbcConfigurationError(
-                f"SQLAlchemy write for {state.schema_name}.{state.table_name} "
+                f"SQLAlchemy write for {state.address} "
                 "requires a configured SchemaContract; schema alignment was skipped"
             )
         return state.schema_contract.to_db_records(record_batch)
@@ -1642,23 +1699,21 @@ class GenericSQLConnector(BaseDestinationHandler):
         self, state: _StreamState, rendered_ddl: list[str]
     ) -> None:
         statements: list[str] = []
-        if not self.dialect.schema_is_implicit_default(state.schema_name):
+        if not self.dialect.schema_is_implicit_default(state.address.schema):
             # BigQuery uses ``CREATE SCHEMA`` for datasets (Standard
-            # SQL). Snowflake and Postgres both accept the same DDL.
-            # Normalize before quoting so a Snowflake ``public`` matches
-            # the warehouse's real ``PUBLIC`` schema instead of creating
-            # a quoted-lowercase sibling.
-            quoted_schema = self.dialect.quote_ident(
-                self.dialect.normalize_schema(state.schema_name)
-            )
+            # SQL). Snowflake and Postgres both accept the same DDL. The
+            # address components are already normalized, so a case-folding
+            # system's conventional lowercase name matches the stored one
+            # instead of creating a quoted-lowercase sibling; the schema
+            # path is catalog-qualified when the address carries one.
+            quoted_schema = self.dialect.quote_schema(state.address)
             statements.append(f"CREATE SCHEMA IF NOT EXISTS {quoted_schema}")
         statements.extend(rendered_ddl)
         async with self._ddl_lock:
             await asyncio.to_thread(self._execute_adbc_ddl_sync, statements)
         logger.info(
-            "Destination tables ready for %s.%s",
-            state.schema_name,
-            state.table_name,
+            "Destination tables ready for %s",
+            state.address,
         )
 
     def _execute_adbc_ddl_sync(self, statements: list[str]) -> None:
@@ -1692,9 +1747,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         configure_schema time so the operator gets a clear error message
         instead of a cryptic column-not-found DB error at first write.
         """
-        target_qualified = self.dialect.quote_qualified(
-            state.schema_name, state.table_name
-        )
+        target_qualified = self.dialect.quote_table(state.address)
         hash_col = self.dialect.quote_ident(self.RECORD_HASH_COLUMN)
         with self._adbc_op_lock:
             conn = self._reopen_adbc_if_needed_sync()
@@ -1711,8 +1764,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 self._poison_adbc_connection()
                 if _is_fatal_adbc_error(exc):
                     raise SchemaConfigurationError(
-                        f"keyless insert target "
-                        f"{state.schema_name}.{state.table_name} "
+                        f"keyless insert target {state.address} "
                         f"has no {self.RECORD_HASH_COLUMN!r} column; it predates "
                         f"the content-hash dedup key (issue #285). Recreate the "
                         f"target so the engine manages {self.RECORD_HASH_COLUMN} "
@@ -1819,7 +1871,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         """
         if state.schema_contract is None:
             raise AdbcConfigurationError(
-                f"ADBC-only write for {state.schema_name}.{state.table_name} "
+                f"ADBC-only write for {state.address} "
                 "requires a configured SchemaContract; schema alignment was skipped"
             )
         cast_batch = state.schema_contract.cast_arrow_batch(record_batch)
@@ -1828,15 +1880,13 @@ class GenericSQLConnector(BaseDestinationHandler):
             await asyncio.to_thread(
                 self._truncate_then_ingest_sync,
                 cast_batch,
-                state.schema_name,
-                state.table_name,
+                state.address,
             )
         elif state.write_mode == "truncate_insert":
             await asyncio.to_thread(
                 self._adbc_only_ingest_sync,
                 cast_batch,
-                state.schema_name,
-                state.table_name,
+                state.address,
             )
         elif state.write_mode == "upsert":
             # ``conflict_keys`` is the stream's Infra-validated upsert
@@ -1845,7 +1895,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             # loud rather than silently ingest, which would duplicate rows.
             if not state.conflict_keys:
                 raise SchemaConfigurationError(
-                    f"upsert requested for {state.schema_name}.{state.table_name} "
+                    f"upsert requested for {state.address} "
                     f"but the stream carries no conflict_keys; refusing to fall "
                     f"back to plain ingest (would silently duplicate rows)"
                 )
@@ -1868,8 +1918,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             await asyncio.to_thread(
                 self._merge_ingest_sync,
                 cast_batch,
-                state.schema_name,
-                state.table_name,
+                state.address,
                 list(cast_batch.schema.names),
                 state.conflict_keys,
                 stage_token,
@@ -1887,8 +1936,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             await asyncio.to_thread(
                 self._merge_ingest_sync,
                 hashed_batch,
-                state.schema_name,
-                state.table_name,
+                state.address,
                 list(hashed_batch.schema.names),
                 [self.RECORD_HASH_COLUMN],
                 stage_token,
@@ -1898,15 +1946,13 @@ class GenericSQLConnector(BaseDestinationHandler):
             await asyncio.to_thread(
                 self._adbc_only_ingest_sync,
                 cast_batch,
-                state.schema_name,
-                state.table_name,
+                state.address,
             )
 
     def _adbc_only_ingest_sync(
         self,
         cast_batch: pa.RecordBatch,
-        schema_name: str,
-        table_name: str,
+        address: TableAddress,
     ) -> None:
         """ADBC ingest for ADBC-only mode (poison-aware, fatal-reclassifying)."""
         with self._adbc_op_lock:
@@ -1915,10 +1961,10 @@ class GenericSQLConnector(BaseDestinationHandler):
                 cursor = conn.cursor()
                 try:
                     cursor.adbc_ingest(
-                        table_name,
+                        address.table,
                         cast_batch,
                         mode="append",
-                        **self.dialect.adbc_ingest_schema_kwargs(schema_name),
+                        **self.dialect.adbc_ingest_kwargs(address),
                     )
                     conn.commit()
                 finally:
@@ -1929,9 +1975,9 @@ class GenericSQLConnector(BaseDestinationHandler):
                     raise _reclassify_as_fatal(exc) from exc
                 raise
 
-    def _adbc_truncate_sync(self, schema_name: str, table_name: str) -> None:
+    def _adbc_truncate_sync(self, address: TableAddress) -> None:
         """TRUNCATE the target table on the ADBC connection (own commit)."""
-        qualified = self.dialect.quote_qualified(schema_name, table_name)
+        qualified = self.dialect.quote_table(address)
         with self._adbc_op_lock:
             conn = self._reopen_adbc_if_needed_sync()
             try:
@@ -1950,20 +1996,18 @@ class GenericSQLConnector(BaseDestinationHandler):
     def _truncate_then_ingest_sync(
         self,
         cast_batch: pa.RecordBatch,
-        schema_name: str,
-        table_name: str,
+        address: TableAddress,
     ) -> None:
         # RLock is reentrant: the same-thread acquires inside
         # _adbc_truncate_sync and _adbc_only_ingest_sync are safe.
         with self._adbc_op_lock:
-            self._adbc_truncate_sync(schema_name, table_name)
-            self._adbc_only_ingest_sync(cast_batch, schema_name, table_name)
+            self._adbc_truncate_sync(address)
+            self._adbc_only_ingest_sync(cast_batch, address)
 
     def _merge_ingest_sync(
         self,
         cast_batch: pa.RecordBatch,
-        schema_name: str,
-        table_name: str,
+        address: TableAddress,
         all_columns: list[str],
         conflict_keys: list[str],
         stage_token: str,
@@ -1992,18 +2036,22 @@ class GenericSQLConnector(BaseDestinationHandler):
         """
         # Suffix with the per-write token so concurrent streams and
         # retries (which may overlap before the previous DROP completes)
-        # do not collide on the stage table name.
-        stage_name = f"_analitiq_stage_{table_name}_{stage_token}"
-        target_qualified = self.dialect.quote_qualified(schema_name, table_name)
-        stage_qualified = self.dialect.quote_qualified(schema_name, stage_name)
+        # do not collide on the stage table name. The stage shares the
+        # target's schema/catalog; its engine-generated name is used
+        # verbatim (no re-normalization) so the quoted DDL and the raw
+        # ingest name stay the same string.
+        stage_address = replace(
+            address, table=f"_analitiq_stage_{address.table}_{stage_token}"
+        )
+        target_qualified = self.dialect.quote_table(address)
+        stage_qualified = self.dialect.quote_table(stage_address)
         update_cols = [c for c in all_columns if c not in conflict_keys]
         if not update_cols and not insert_only:
             logger.warning(
-                "ADBC upsert into %s.%s has no non-key columns to update "
+                "ADBC upsert into %s has no non-key columns to update "
                 "(all_columns == conflict_keys); MERGE will only INSERT "
                 "new rows. Consider write_mode='insert' for clarity.",
-                schema_name,
-                table_name,
+                address,
             )
         # _adbc_op_lock serializes the full DROP+CREATE+INGEST+MERGE+DROP
         # sequence so concurrent streams against the same handler don't
@@ -2016,8 +2064,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 cast_batch,
                 target_qualified,
                 stage_qualified,
-                stage_name,
-                schema_name,
+                stage_address,
                 all_columns,
                 conflict_keys,
                 update_cols,
@@ -2029,8 +2076,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         cast_batch: pa.RecordBatch,
         target_qualified: str,
         stage_qualified: str,
-        stage_name: str,
-        schema_name: str,
+        stage_address: TableAddress,
         all_columns: list[str],
         conflict_keys: list[str],
         update_cols: list[str],
@@ -2063,18 +2109,18 @@ class GenericSQLConnector(BaseDestinationHandler):
                     self.dialect.adbc_stage_table_sql(stage_qualified, target_qualified)
                 )
                 conn.commit()
-                # Stage lives in the target schema. Dialects that support
-                # per-statement ingest targeting resolve it via
-                # ``db_schema_name`` (same normalization as the DDL path, so
-                # Snowflake's real PUBLIC matches a connector's lowercase
-                # ``public``); dialects that don't (Snowflake) fall back to
-                # the connection's session schema, where the stage was just
-                # created.
+                # Stage lives in the target schema/catalog. Dialects that
+                # support per-statement ingest targeting resolve it via the
+                # address-derived kwargs (components pre-normalized, so a
+                # case-folding system's stored name matches the connector's
+                # conventional lowercase one); dialects that don't fall back
+                # to the connection's session defaults, where the stage was
+                # just created.
                 cursor.adbc_ingest(
-                    stage_name,
+                    stage_address.table,
                     cast_batch,
                     mode="append",
-                    **self.dialect.adbc_ingest_schema_kwargs(schema_name),
+                    **self.dialect.adbc_ingest_kwargs(stage_address),
                 )
                 conn.commit()
                 on_clause = " AND ".join(
@@ -2228,7 +2274,7 @@ class GenericSQLConnector(BaseDestinationHandler):
     # (``self._engine`` / ``self._adbc_conn``) is untouched; a source-role
     # instance and a write-role instance are distinct objects.
 
-    async def read_batches(
+    async def read_batches(  # skipcq: PY-R1000
         self,
         runtime: ConnectionRuntime,
         config: dict[str, Any],
@@ -2238,7 +2284,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         partition: dict[str, Any] | None = None,
         batch_size: int = 1000,
     ) -> AsyncIterator[pa.RecordBatch]:
-        """Read upstream rows as Arrow batches typed via the endpoint contract."""
+        """Read upstream rows as Arrow batches typed via the endpoint contract.
+
+        skipcq PY-R1000: the read entry point's complexity predates this
+        change (guard rails + two transports in one generator); splitting
+        it is its own refactor, not a side effect of catalog addressing.
+        """
         endpoint_doc = config.get("endpoint_document")
         if not endpoint_doc:
             raise ReadError(
@@ -2252,8 +2303,18 @@ class GenericSQLConnector(BaseDestinationHandler):
         # duckdb) would emit invalid ``public.<table>`` references if we
         # forced one. When the endpoint omits ``schema``, QueryBuilder emits
         # an unqualified table name and the driver uses the connection's
-        # current schema/database.
-        schema_name = database_object.get("schema")
+        # current schema/database. The address normalizes every component
+        # once (catalog, schema, AND table) so both transports and the
+        # destination resolve the same physical objects; a catalog the
+        # dialect cannot address fails loud here, before any extraction.
+        try:
+            address = self.dialect.table_address(
+                table_name,
+                schema=database_object.get("schema") or "",
+                catalog=database_object.get("catalog") or "",
+            )
+        except CatalogAddressingError as err:
+            raise ReadError(str(err)) from err
 
         try:
             await materialize_runtime(runtime, sql_dialect=self.dialect)
@@ -2351,8 +2412,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                     runtime=runtime,
                     driver=driver,
                     schema_contract=schema_contract,
-                    schema_name=schema_name,
-                    table_name=table_name,
+                    address=address,
                     columns=column_names,
                     filters=filters,
                     cursor_field=(
@@ -2384,8 +2444,9 @@ class GenericSQLConnector(BaseDestinationHandler):
                 """
                 sql, params = builder.build_select_query(
                     QueryConfig(
-                        schema_name=schema_name,
-                        table_name=table_name,
+                        schema_name=address.schema or None,
+                        table_name=address.table,
+                        catalog_name=address.catalog or None,
                         columns=column_names,
                         filters=filters,
                         cursor_field=(
@@ -2485,8 +2546,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         runtime: ConnectionRuntime,
         driver: str,
         schema_contract: SchemaContract,
-        schema_name: str | None,
-        table_name: str,
+        address: TableAddress,
         columns: list[str],
         filters: list[Filter],
         cursor_field: str | None,
@@ -2517,26 +2577,12 @@ class GenericSQLConnector(BaseDestinationHandler):
             # rather than emit an invalid statement.
             raise ReadError("ADBC-only source requires a non-empty column projection")
 
-        # The ADBC path quotes every identifier, so normalize the schema
-        # through the connector's dialect — the same rule the destination
-        # handler applies (e.g. Snowflake folds lowercase ``public`` ->
-        # ``PUBLIC``) — or the quoted name targets a different schema.
-        effective_schema = (
-            self.dialect.normalize_schema(schema_name) if schema_name else None
-        )
+        # The ADBC path quotes every identifier; *address* components were
+        # normalized once at construction (the same rule the destination
+        # handler applies), so the quoted names target the same physical
+        # objects the destination resolves.
 
-        # Page ordering: the stream's declared order_by_field wins (a
-        # conflict with the incremental cursor is rejected in
-        # read_batches), then the cursor, then the first projected column
-        # (warned once — an undeclared order makes OFFSET paging
-        # best-effort).
-        if order_by_field:
-            order_by = order_by_field
-        elif cursor_field:
-            order_by = cursor_field
-        else:
-            order_by = columns[0]
-            _note_order_by_fallback(table_name, order_by)
+        order_by = _page_order_by(order_by_field, cursor_field, columns, address.table)
 
         builder = QueryBuilder(
             driver,
@@ -2556,8 +2602,9 @@ class GenericSQLConnector(BaseDestinationHandler):
             while True:
                 sql, params = builder.build_select_query(
                     QueryConfig(
-                        schema_name=effective_schema,
-                        table_name=table_name,
+                        schema_name=address.schema or None,
+                        table_name=address.table,
+                        catalog_name=address.catalog or None,
                         columns=columns,
                         filters=filters,
                         cursor_field=cursor_field,
@@ -2678,16 +2725,24 @@ class GenericSQLConnector(BaseDestinationHandler):
     # take a materialized ``ConnectionRuntime`` directly and run no gRPC
     # server or engine orchestration — the control-plane calls them.
 
-    async def list_schemas(self, runtime: ConnectionRuntime) -> list[str]:
-        return await _sql_list_schemas(runtime, dialect=self.dialect)
+    async def list_schemas(
+        self, runtime: ConnectionRuntime, *, catalog: str = ""
+    ) -> list[str]:
+        return await _sql_list_schemas(runtime, dialect=self.dialect, catalog=catalog)
 
-    async def list_tables(self, runtime: ConnectionRuntime, schema: str) -> list[str]:
-        return await _sql_list_tables(runtime, schema, dialect=self.dialect)
+    async def list_tables(
+        self, runtime: ConnectionRuntime, schema: str, *, catalog: str = ""
+    ) -> list[str]:
+        return await _sql_list_tables(
+            runtime, schema, dialect=self.dialect, catalog=catalog
+        )
 
     async def list_columns(
-        self, runtime: ConnectionRuntime, schema: str, table: str
+        self, runtime: ConnectionRuntime, schema: str, table: str, *, catalog: str = ""
     ) -> tuple[list[ColumnDef], list[str]]:
-        return await _sql_list_columns(runtime, schema, table, dialect=self.dialect)
+        return await _sql_list_columns(
+            runtime, schema, table, dialect=self.dialect, catalog=catalog
+        )
 
     async def create_table(
         self,
@@ -2696,7 +2751,15 @@ class GenericSQLConnector(BaseDestinationHandler):
         table: str,
         columns: list[ColumnDef],
         primary_keys: list[str],
+        *,
+        catalog: str = "",
     ) -> None:
         await _sql_create_table(
-            runtime, schema, table, columns, primary_keys, dialect=self.dialect
+            runtime,
+            schema,
+            table,
+            columns,
+            primary_keys,
+            dialect=self.dialect,
+            catalog=catalog,
         )

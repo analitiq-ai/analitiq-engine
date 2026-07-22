@@ -90,10 +90,18 @@ class Filter:
 
 @dataclass
 class QueryConfig:
-    """Configuration for query building."""
+    """Configuration for query building.
+
+    ``catalog_name``/``schema_name``/``table_name`` are expected already
+    normalized — callers build them from the dialect's ``TableAddress``, so
+    the builder never re-applies (and can never diverge on) normalization.
+    A ``catalog_name`` requires a ``schema_name``; the address composer
+    enforces that before a config is built.
+    """
 
     schema_name: str | None = None
     table_name: str = ""
+    catalog_name: str | None = None
     columns: list[str] | None = None
     filters: list[Filter] | None = None
     cursor_field: str | None = None
@@ -277,11 +285,62 @@ class QueryBuilder:
         """Wrap *name* so SQLAlchemy quotes it when ``quote_identifiers``."""
         return quoted_name(name, quote=True) if self._quote_identifiers else name
 
+    def _effective_schema(self, config: QueryConfig) -> Any:
+        """Return the SQLAlchemy ``schema`` argument, encoding any catalog.
+
+        Cross-catalog systems accept a dotted ``catalog.schema`` string as
+        the SA ``schema`` kwarg. Each component is quoted individually
+        through the dialect's identifier preparer before joining — a raw
+        join would compile a hyphenated catalog (a BigQuery project id) as
+        arithmetic — and the compound is wrapped ``quoted_name(quote=False)``
+        so SA does not re-quote across the dot. On the forced-quoting path
+        (ADBC) every component is quoted; otherwise the preparer quotes
+        only components that need it, leaving plain names bare exactly as
+        the single-schema path does.
+        """
+        if not config.catalog_name:
+            return self._ident(config.schema_name) if config.schema_name else None
+        if not config.schema_name:
+            # The address composer rejects catalog-without-schema before a
+            # QueryConfig exists; reaching this means a caller bypassed it.
+            raise ValueError(
+                f"QueryConfig for table {config.table_name!r} carries "
+                f"catalog {config.catalog_name!r} without a schema"
+            )
+        prep = self._sa_dialect.identifier_preparer
+        parts = (config.catalog_name, config.schema_name)
+        if self._quote_identifiers:
+            compound = ".".join(prep.quote(quoted_name(p, quote=True)) for p in parts)
+        else:
+            compound = ".".join(prep.quote(p) for p in parts)
+        return quoted_name(compound, quote=False)
+
     def _paging_value(self, value: int) -> Any:
         """Render a LIMIT/OFFSET value as a literal int or a bound param."""
         if self._inline_paging:
             return literal_column(str(int(value)))
         return value
+
+    def _apply_ordering(self, query: Select, config: QueryConfig) -> Select:
+        """Apply the query's ordering: declared order, cursor, or fallback.
+
+        The declared ``order_by`` (or the cursor field) orders directly.
+        With neither, a paged query consults the connector dialect's
+        fallback hook (e.g. T-SQL refuses OFFSET without ORDER BY) —
+        lazily, so a hook that raises to demand an explicit ordering fires
+        only when one is actually missing.
+        """
+        order_field = config.order_by or config.cursor_field
+        if order_field:
+            order_col = Column(self._ident(order_field))
+            if config.order_direction.lower() == "desc":
+                return query.order_by(desc(order_col))
+            return query.order_by(asc(order_col))
+        if config.offset is not None and self._paging_order_fallback is not None:
+            fallback = self._paging_order_fallback()
+            if fallback is not None:
+                return query.order_by(text(fallback))
+        return query
 
     def build_select_query(self, config: QueryConfig) -> tuple[str, ParamsLike]:
         """Build a SELECT query from configuration.
@@ -297,12 +356,12 @@ class QueryBuilder:
         Callers must dispatch on the returned type before passing to
         ``exec_driver_sql``.
         """
-        # Create table reference with proper schema
+        # Create table reference with proper schema (catalog-compound when set)
         metadata = MetaData()
         table = Table(
             self._ident(config.table_name),
             metadata,
-            schema=self._ident(config.schema_name) if config.schema_name else None,
+            schema=self._effective_schema(config),
         )
 
         # Build column list
@@ -338,22 +397,7 @@ class QueryBuilder:
         if conditions:
             query = query.where(and_(*conditions))
 
-        # Apply ordering
-        order_field = config.order_by or config.cursor_field
-        if order_field:
-            order_col = Column(self._ident(order_field))
-            if config.order_direction.lower() == "desc":
-                query = query.order_by(desc(order_col))
-            else:
-                query = query.order_by(asc(order_col))
-        elif config.offset is not None and self._paging_order_fallback is not None:
-            # The connector dialect declared a fallback ordering for paged
-            # reads that specify none (e.g. T-SQL refuses OFFSET without
-            # ORDER BY). Consulted lazily so a hook that raises to demand
-            # an explicit ordering fires only when one is actually missing.
-            fallback = self._paging_order_fallback()
-            if fallback is not None:
-                query = query.order_by(text(fallback))
+        query = self._apply_ordering(query, config)
 
         # Apply limit/offset
         if config.limit is not None:

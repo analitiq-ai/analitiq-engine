@@ -33,6 +33,20 @@ class UnsupportedDialectOperationError(SqlIntrospectionError):
         )
 
 
+class CatalogAddressingError(SqlIntrospectionError):
+    """A requested catalog cannot be addressed by the active dialect.
+
+    Raised when ``database_object.catalog`` (or a discovery ``catalog``
+    argument) names a catalog but the dialect declares no per-statement
+    catalog addressing (``supports_catalog_addressing`` is False), or when
+    the address is ill-formed (a catalog with no schema). Deterministic:
+    the request is misconfigured for this system, so retrying cannot
+    succeed. The fix is authoring-side — use a connection whose default
+    catalog is the requested one, or a connector whose dialect declares
+    the capability.
+    """
+
+
 class DiscoveryError(SqlIntrospectionError):
     """A discovery query (schemas / tables / columns) failed to run or parse."""
 

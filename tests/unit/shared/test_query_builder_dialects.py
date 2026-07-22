@@ -652,6 +652,56 @@ class TestAdbcQmarkModeRealDialects:
         assert "LIMIT" in sql.upper()
 
 
+class TestCatalogCompoundSchema:
+    """``catalog_name`` compiles as a per-component-quoted ``catalog.schema``
+    compound in the SA schema position — never a raw string join, which
+    turns a hyphenated catalog (a BigQuery project id) into arithmetic
+    (issue #340). Both quoting modes go through the dialect preparer."""
+
+    def test_quoted_mode_quotes_every_component(self):
+        builder = QueryBuilder("postgresql", paramstyle="qmark", quote_identifiers=True)
+        sql, _ = builder.build_select_query(
+            QueryConfig(
+                catalog_name="proj",
+                schema_name="ds",
+                table_name="orders",
+                columns=["id"],
+            )
+        )
+        assert 'FROM "proj"."ds"."orders"' in sql
+
+    def test_unquoted_mode_quotes_only_components_that_need_it(self):
+        builder = QueryBuilder("postgresql")
+        sql, _ = builder.build_select_query(
+            QueryConfig(
+                catalog_name="my-project",
+                schema_name="ds",
+                table_name="orders",
+                columns=["id"],
+            )
+        )
+        # The hyphenated catalog is quoted (it would compile as arithmetic
+        # otherwise); the plain schema stays bare, matching the
+        # catalog-less path's conditional quoting.
+        assert 'FROM "my-project".ds.orders' in sql
+
+    def test_no_catalog_keeps_single_schema_shape(self):
+        builder = QueryBuilder("postgresql")
+        sql, _ = builder.build_select_query(
+            QueryConfig(schema_name="public", table_name="orders", columns=["id"])
+        )
+        assert "FROM public.orders" in sql
+
+    def test_catalog_without_schema_fails_loud(self):
+        # The address composer rejects this before a QueryConfig exists;
+        # a caller bypassing it must not silently compile a two-part name.
+        builder = QueryBuilder("postgresql")
+        with pytest.raises(ValueError, match="without a schema"):
+            builder.build_select_query(
+                QueryConfig(catalog_name="proj", table_name="orders", columns=["id"])
+            )
+
+
 class TestFilterFailLoud:
     """A declared filter that compiles away silently widens the result
     set, so an unmapped operator must raise instead of being skipped."""

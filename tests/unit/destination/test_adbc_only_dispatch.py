@@ -27,7 +27,7 @@ import pyarrow as pa
 import pytest
 
 from cdk.sql import generic as database_module
-from cdk.sql.dialects import SqlDialect
+from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.generic import (
     _FATAL_ADBC_ERROR_NAMES,
     AdbcConfigurationError,
@@ -47,9 +47,9 @@ class _FixtureAdbcDialect(SqlDialect):
     Stands in for a connector package's dialect: renders canonical Arrow types
     to canned native DDL strings (overriding ``render_column_type`` — the single
     write surface — rather than the old per-purpose ADBC hooks), supports ADBC
-    upsert, and folds schema names upper-case (the way Snowflake's package
-    dialect would) so the normalize-reaches-the-ingest-site coverage has
-    something to assert.
+    upsert, and folds identifiers upper-case (the way a case-folding system's
+    package dialect would) so the normalize-reaches-the-ingest-site coverage
+    has something to assert.
     """
 
     name = "fixture"
@@ -65,8 +65,8 @@ class _FixtureAdbcDialect(SqlDialect):
         "Timestamp(MICROSECOND, UTC)": "TIMESTAMPTZ",
     }
 
-    def normalize_schema(self, schema: str) -> str:
-        return schema.upper()
+    def normalize_ident(self, name: str) -> str:
+        return name.upper()
 
     def render_column_type(self, canonical, type_mapper, *, params=None) -> str:
         return self._CANONICAL_TO_DDL[canonical]
@@ -85,9 +85,9 @@ class _FixtureBacktickDialect(_FixtureAdbcDialect):
     quote_char = "`"
     pk_not_enforced = True
 
-    def normalize_schema(self, schema: str) -> str:
+    def normalize_ident(self, name: str) -> str:
         # Backtick systems (BigQuery) are case-sensitive — identity.
-        return schema
+        return name
 
 
 class _FixtureConnector(GenericSQLConnector):
@@ -180,8 +180,7 @@ class TestUnsupportedHooksAreFatal:
             build_create_table_sql(
                 h.dialect,
                 read_only,
-                "public",
-                "t",
+                h.dialect.table_address("t", schema="public"),
                 [ColumnDef("id", "Int64")],
                 [],
             )
@@ -320,7 +319,7 @@ class TestAdbcIngestSchemaNormalization:
         class _FakeCursor:
             # ``db_schema_name`` is an optional kwarg on the real ADBC cursor
             # (default None); the empty-schema path omits it entirely
-            # (adbc_ingest_schema_kwargs returns {}), so it must default here.
+            # (adbc_ingest_kwargs returns {}), so it must default here.
             def adbc_ingest(self, table, batch, mode, db_schema_name=None):
                 captured["table"] = table
                 captured["mode"] = mode
@@ -346,10 +345,12 @@ class TestAdbcIngestSchemaNormalization:
 
         h._adbc_only_ingest_sync(
             pa.record_batch([pa.array([1])], names=["id"]),
-            "public",
-            "orders",
+            h.dialect.table_address("orders", schema="public"),
         )
         assert captured["db_schema_name"] == "PUBLIC"
+        # Normalization is uniform across components: the table name folds
+        # through the same rule as the schema (issue #336).
+        assert captured["table"] == "ORDERS"
 
     def test_non_folding_dialect_keeps_schema_for_ingest(self):
         # A case-sensitive (backtick) dialect never folds the schema.
@@ -360,10 +361,10 @@ class TestAdbcIngestSchemaNormalization:
 
         h._adbc_only_ingest_sync(
             pa.record_batch([pa.array([1])], names=["id"]),
-            "analytics",
-            "orders",
+            h.dialect.table_address("orders", schema="analytics"),
         )
         assert captured["db_schema_name"] == "analytics"
+        assert captured["table"] == "orders"
 
     def test_empty_schema_yields_none(self):
         h = _FixtureConnector()
@@ -373,8 +374,7 @@ class TestAdbcIngestSchemaNormalization:
 
         h._adbc_only_ingest_sync(
             pa.record_batch([pa.array([1])], names=["id"]),
-            "",
-            "orders",
+            h.dialect.table_address("orders"),
         )
         assert captured["db_schema_name"] is None
 
@@ -388,17 +388,25 @@ class TestDialectQuoting:
     def test_backtick_dialect_quotes_with_backticks(self):
         h = _FixtureBacktickConnector()
         assert h.dialect.quote_ident("id") == "`id`"
-        assert h.dialect.quote_qualified("ds", "t") == "`ds`.`t`"
+        address = h.dialect.table_address("t", schema="ds")
+        assert h.dialect.quote_table(address) == "`ds`.`t`"
 
     def test_ansi_dialect_quotes_with_double_quotes(self):
         h = GenericSQLConnector()  # ANSI base
         assert h.dialect.quote_ident("id") == '"id"'
 
-    def test_folding_dialect_qualified_normalizes_schema(self):
-        # The folding fixture upper-cases the schema before quoting it.
+    def test_folding_dialect_qualified_normalizes_all_components(self):
+        # The folding fixture upper-cases every component before quoting —
+        # schema AND table fold through the same normalize_ident rule.
         h = _FixtureConnector()
-        assert h.dialect.quote_qualified("public", "t") == '"PUBLIC"."t"'
-        assert h.dialect.quote_qualified("analytics", "t") == '"ANALYTICS"."t"'
+        assert (
+            h.dialect.quote_table(h.dialect.table_address("t", schema="public"))
+            == '"PUBLIC"."T"'
+        )
+        assert (
+            h.dialect.quote_table(h.dialect.table_address("t", schema="analytics"))
+            == '"ANALYTICS"."T"'
+        )
 
     def test_double_quote_escaping_in_ansi_dialect(self):
         h = GenericSQLConnector()
@@ -480,8 +488,7 @@ class TestAdbcDdlBuilders:
         return build_create_table_sql(
             handler.dialect,
             mapper,
-            state.schema_name,
-            state.table_name,
+            state.address,
             handler._build_column_defs(state),
             list(state.primary_keys),
             if_not_exists=True,
@@ -495,9 +502,9 @@ class TestAdbcDdlBuilders:
             def to_arrow_type(self, native: str) -> str:
                 return {"BIGINT": "Int64", "TEXT": "Utf8"}[native]
 
+        h = _FixtureConnector()
         state = _StreamState(
-            schema_name="analytics",
-            table_name="orders",
+            address=h.dialect.table_address("orders", schema="analytics"),
             endpoint_document={
                 "columns": [
                     {
@@ -516,11 +523,11 @@ class TestAdbcDdlBuilders:
             },
             primary_keys=["id"],
         )
-        h = _FixtureConnector()
         ddl = self._build_target_ddl(h, state, _TypeMapperStub())
         assert "CREATE TABLE IF NOT EXISTS" in ddl
-        # Schema folded by the fixture dialect, table quoted verbatim.
-        assert '"ANALYTICS"."orders"' in ddl
+        # Every address component folds through normalize_ident — schema
+        # and table alike.
+        assert '"ANALYTICS"."ORDERS"' in ddl
         assert '"_synced_at" TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP' in ddl
         assert 'PRIMARY KEY ("id")' in ddl
         assert '"id" INTEGER NOT NULL' in ddl
@@ -536,9 +543,9 @@ class TestAdbcDdlBuilders:
                     native
                 ]
 
+        h = _FixtureConnector()
         state = _StreamState(
-            schema_name="analytics",
-            table_name="orders",
+            address=h.dialect.table_address("orders", schema="analytics"),
             endpoint_document={
                 "columns": [
                     {
@@ -557,7 +564,6 @@ class TestAdbcDdlBuilders:
             },
             primary_keys=["id"],
         )
-        h = _FixtureConnector()
         ddl = self._build_target_ddl(h, state, _TypeMapperStub())
         # Exactly one _synced_at declaration
         assert ddl.count('"_synced_at"') == 1
@@ -586,9 +592,10 @@ class TestAdbcDdlBuilders:
             def to_arrow_type(self, native: str) -> str:
                 return {"TEXT": "Utf8"}[native]
 
+        h = _FixtureConnector()
+        h._adbc_only = True
         state = _StreamState(
-            schema_name="public",
-            table_name="events",
+            address=h.dialect.table_address("events", schema="public"),
             write_mode="insert",
             primary_keys=[],  # keyless
             endpoint_document={
@@ -602,15 +609,12 @@ class TestAdbcDdlBuilders:
                 ]
             },
         )
-        h = _FixtureConnector()
-        h._adbc_only = True
         # Use _identity_columns (as production code does in _ensure_tables_exist)
         # not state.primary_keys — for keyless insert this returns [_record_hash].
         ddl = build_create_table_sql(
             h.dialect,
             _TypeMapperStub(),
-            state.schema_name,
-            state.table_name,
+            state.address,
             h._build_column_defs(state),
             h._identity_columns(state),
             if_not_exists=True,
@@ -702,8 +706,7 @@ class TestNeedsRecordHash:
 
     def _state(self, write_mode, primary_keys=None):
         return _StreamState(
-            schema_name="public",
-            table_name="t",
+            address=TableAddress(table="t", schema="public"),
             write_mode=write_mode,
             primary_keys=primary_keys or [],
         )
@@ -741,8 +744,7 @@ class TestAttachRecordHashToBatch:
 
     def _state(self, write_mode="insert", primary_keys=None):
         return _StreamState(
-            schema_name="public",
-            table_name="t",
+            address=TableAddress(table="t", schema="public"),
             write_mode=write_mode,
             primary_keys=primary_keys or [],
         )
@@ -869,8 +871,7 @@ class TestMergeIngestInsertOnly:
         )
         h._merge_ingest_sync(
             batch,
-            "public",
-            "orders",
+            h.dialect.table_address("orders", schema="public"),
             ["_record_hash", "name"],
             ["_record_hash"],
             "bdeadbeef1234567",
@@ -891,8 +892,7 @@ class TestMergeIngestInsertOnly:
         with caplog.at_level(logging.WARNING, logger=database_module.logger.name):
             h._merge_ingest_sync(
                 batch,
-                "public",
-                "t",
+                h.dialect.table_address("t", schema="public"),
                 ["_record_hash"],
                 ["_record_hash"],
                 "bdeadbeef1234567",
@@ -913,8 +913,7 @@ class TestMergeIngestInsertOnly:
         with caplog.at_level(logging.WARNING, logger=database_module.logger.name):
             h._merge_ingest_sync(
                 batch,
-                "public",
-                "t",
+                h.dialect.table_address("t", schema="public"),
                 ["id"],
                 ["id"],
                 "bdeadbeef1234567",
@@ -922,6 +921,59 @@ class TestMergeIngestInsertOnly:
             )
         warnings = [r for r in caplog.records if "no non-key columns" in r.message]
         assert warnings
+
+
+class TestMergeIngestStageNameOnFoldingDialect:
+    """The stage address is derived with ``dataclasses.replace`` — the
+    engine-generated name is used verbatim, never re-normalized — so the
+    quoted stage DDL and the raw ``adbc_ingest`` name stay the same string
+    even on a folding dialect. A "consistency" edit that re-normalizes
+    inside ``quote_table`` would fold the DDL name but not the ingest
+    name, and every stage ingest would target a nonexistent table."""
+
+    def test_stage_ddl_and_ingest_share_the_exact_name(self):
+        executed: list[str] = []
+        ingests: list[str] = []
+
+        class _FakeCursor:
+            def execute(self, sql, *args):
+                executed.append(sql)
+
+            def adbc_ingest(self, table, batch, mode, **kwargs):
+                ingests.append(table)
+
+            def close(self):
+                """No-op: the fake owns no resources."""
+
+        class _FakeConn:
+            def cursor(self):
+                return _FakeCursor()
+
+            def commit(self):
+                """No-op: statements are captured, not transacted."""
+
+        h = _FixtureConnector()  # folds identifiers upper-case
+        h._adbc_only = True
+        h._adbc_conn = _FakeConn()
+
+        address = h.dialect.table_address("orders", schema="public")
+        assert address.table == "ORDERS"  # target folded at construction
+        h._merge_ingest_sync(
+            pa.RecordBatch.from_pydict({"id": [1], "v": ["a"]}),
+            address,
+            ["id", "v"],
+            ["id"],
+            "btok",
+        )
+
+        # The engine-generated prefix stays verbatim; only the embedded
+        # target component carries the fold it got at address time.
+        assert ingests == ["_analitiq_stage_ORDERS_btok"]
+        quoted_stage = '"_analitiq_stage_ORDERS_btok"'
+        for stmt in ("DROP TABLE IF EXISTS", "CREATE TABLE", "MERGE INTO"):
+            assert any(
+                quoted_stage in s for s in executed if s.startswith(stmt)
+            ), f"stage name missing from {stmt}"
 
 
 class TestWriteBatchAdbcOnlyKeylessInsert:
@@ -933,8 +985,7 @@ class TestWriteBatchAdbcOnlyKeylessInsert:
         from unittest.mock import MagicMock
 
         state = _StreamState(
-            schema_name="public",
-            table_name="orders",
+            address=TableAddress(table="orders", schema="public"),
             write_mode=write_mode,
             primary_keys=primary_keys or [],
         )
@@ -962,8 +1013,8 @@ class TestWriteBatchAdbcOnlyKeylessInsert:
         mock_plain.assert_not_called()
         args, kwargs = mock_merge.call_args
         assert kwargs.get("insert_only") is True
-        # args: (batch, schema, table, all_columns, conflict_keys, stage_token)
-        assert args[4] == [GenericSQLConnector.RECORD_HASH_COLUMN]
+        # args: (batch, address, all_columns, conflict_keys, stage_token)
+        assert args[3] == [GenericSQLConnector.RECORD_HASH_COLUMN]
 
     @pytest.mark.asyncio
     async def test_keyless_insert_batch_includes_hash_column(self):
@@ -1016,7 +1067,7 @@ class TestWriteBatchAdbcOnlyKeylessInsert:
 
         tokens: list[str] = []
 
-        def capture(cb, schema, table, all_cols, conflict_keys, token, *, insert_only):
+        def capture(cb, address, all_cols, conflict_keys, token, *, insert_only):
             tokens.append(token)
 
         with patch.object(h, "_merge_ingest_sync", side_effect=capture):
@@ -1062,8 +1113,7 @@ class TestRecordHashDecimalPrecision:
 
     def _state(self):
         state = _StreamState(
-            schema_name="public",
-            table_name="t",
+            address=TableAddress(table="t", schema="public"),
             write_mode="insert",
             primary_keys=[],
         )
@@ -1116,8 +1166,7 @@ class TestKeylessInsertRequiresMergeSupport:
 
     def _state(self, primary_keys=None):
         return _StreamState(
-            schema_name="public",
-            table_name="orders",
+            address=TableAddress(table="orders", schema="public"),
             write_mode="insert",
             primary_keys=primary_keys or [],
         )

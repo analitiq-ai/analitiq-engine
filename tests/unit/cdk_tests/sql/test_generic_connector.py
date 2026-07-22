@@ -696,11 +696,14 @@ class TestControlPlaneDelegators:
             await connector.create_table(runtime, "public", "orders", [], [])
 
         # Each delegator forwards the connector instance's own dialect object
-        # as the required keyword (identity, not ANY).
+        # as the required keyword (identity, not ANY) and the catalog scope
+        # symmetrically (empty = session catalog).
         dialect = connector.dialect
-        ls.assert_awaited_once_with(runtime, dialect=dialect)
-        lt.assert_awaited_once_with(runtime, "public", dialect=dialect)
-        lc.assert_awaited_once_with(runtime, "public", "orders", dialect=dialect)
+        ls.assert_awaited_once_with(runtime, dialect=dialect, catalog="")
+        lt.assert_awaited_once_with(runtime, "public", dialect=dialect, catalog="")
+        lc.assert_awaited_once_with(
+            runtime, "public", "orders", dialect=dialect, catalog=""
+        )
         ct.assert_awaited_once_with(
-            runtime, "public", "orders", [], [], dialect=dialect
+            runtime, "public", "orders", [], [], dialect=dialect, catalog=""
         )
