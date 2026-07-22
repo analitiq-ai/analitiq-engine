@@ -936,6 +936,9 @@ class TestReadBatchesEffectivePageSize:
         "default, match",
         [
             pytest.param("not-a-size", "must be an integer", id="non-numeric"),
+            # int() would silently truncate a fractional value to a page
+            # size the author never declared; malformed data fails loud.
+            pytest.param(2.9, "must be an integer", id="fractional"),
             pytest.param(0, "must be positive", id="zero"),
             pytest.param(-3, "must be positive", id="negative"),
             # Conflicting expression markers are an authoring error the

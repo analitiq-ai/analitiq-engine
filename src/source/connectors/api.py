@@ -702,6 +702,11 @@ class APIConnector(BaseConnector):
             raise ReadError(
                 f"pagination {context} must be an integer, got {value!r}"
             ) from err
+        if not isinstance(value, str) and step != value:
+            # int() truncates fractional floats/Decimals; a fractional
+            # step or page size is malformed data, not a roundable one.
+            # (Strings either parse as exact ints above or raise.)
+            raise ReadError(f"pagination {context} must be an integer, got {value!r}")
         if step <= 0:
             raise ReadError(f"pagination {context} must be positive, got {step}")
         return step
