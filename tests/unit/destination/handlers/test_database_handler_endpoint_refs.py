@@ -14,7 +14,7 @@ import pytest
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.sql.dialects import TableAddress
 from cdk.sql.exceptions import SchemaConfigurationError
-from cdk.sql.generic import GenericSQLConnector
+from cdk.sql.generic import GenericSQLConnector, _StreamState
 from cdk.type_map import TypeMapper
 from cdk.type_map.rules import parse_rules
 
@@ -148,7 +148,6 @@ class TestColumnDefStrictness:
 
     def test_unnamed_column_raises(self):
         """A column without a name fails DDL construction loudly."""
-        from cdk.sql.generic import _StreamState
 
         handler = GenericSQLConnector()
         handler._runtime = _runtime(connector_mapper=_mapper("pg"))
@@ -166,8 +165,6 @@ class TestColumnDefStrictness:
             handler._build_column_defs(state)
 
     def test_column_without_arrow_type_raises(self):
-        from cdk.sql.generic import _StreamState
-
         handler = GenericSQLConnector()
         handler._runtime = _runtime(connector_mapper=_mapper("pg"))
 
@@ -194,7 +191,6 @@ class TestWriteBatchFatalOnTypeMapError:
         from contextlib import asynccontextmanager
         from unittest.mock import AsyncMock, MagicMock
 
-        from cdk.sql.generic import GenericSQLConnector, _StreamState
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 
         handler = GenericSQLConnector()
@@ -235,7 +231,6 @@ class TestWriteBatchFatalOnTypeMapError:
         from contextlib import asynccontextmanager
         from unittest.mock import MagicMock
 
-        from cdk.sql.generic import GenericSQLConnector, _StreamState
         from cdk.type_map import UnmappedTypeError
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 
@@ -291,8 +286,6 @@ class TestWriteBatchFatalOnTypeMapError:
     async def test_adbc_only_missing_schema_contract_names_table(self):
         # The ADBC-only guard message must carry schema.table context so
         # the failure_summary is actionable in monitoring (issue #149).
-
-        from cdk.sql.generic import GenericSQLConnector, _StreamState
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 
         handler = GenericSQLConnector()
@@ -328,7 +321,6 @@ class TestWriteBatchFatalOnTypeMapError:
         from contextlib import asynccontextmanager
         from unittest.mock import MagicMock
 
-        from cdk.sql.generic import GenericSQLConnector, _StreamState
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 
         handler = GenericSQLConnector()
@@ -379,9 +371,6 @@ class TestUpsertFailsLoudWithoutConflictKeys:
     async def test_upsert_without_conflict_keys_raises(self):
         from unittest.mock import MagicMock
 
-        from cdk.sql.exceptions import SchemaConfigurationError
-        from cdk.sql.generic import GenericSQLConnector, _StreamState
-
         handler = GenericSQLConnector()
         handler._insert_records = MagicMock()  # type: ignore[method-assign]
         conn = MagicMock()
@@ -402,8 +391,6 @@ class TestUpsertFailsLoudWithoutConflictKeys:
     @pytest.mark.asyncio
     async def test_upsert_with_conflict_keys_executes(self):
         from unittest.mock import MagicMock
-
-        from cdk.sql.generic import GenericSQLConnector, _StreamState
 
         handler = GenericSQLConnector()
         handler.dialect = MagicMock()
@@ -429,9 +416,6 @@ class TestUpsertFailsLoudWithoutConflictKeys:
         # ADBC twin of the SQLAlchemy raise: the same fail-loud semantics
         # must hold on the MERGE path (Snowflake/BigQuery), before any ingest.
         from unittest.mock import MagicMock
-
-        from cdk.sql.exceptions import SchemaConfigurationError
-        from cdk.sql.generic import GenericSQLConnector, _StreamState
 
         handler = GenericSQLConnector()
         handler._adbc_only = True
@@ -472,7 +456,6 @@ class TestEnsureTablesEngineNoneRaises:
         from unittest.mock import patch as mock_patch
 
         from cdk.adbc_registry import AdbcConfigurationError
-        from cdk.sql.generic import GenericSQLConnector, _StreamState
 
         handler = GenericSQLConnector()
         assert handler._engine is None
@@ -522,7 +505,6 @@ class TestPrepareForSqlAlchemy:
         import pyarrow as pa
 
         from cdk.schema_contract import SchemaContract
-        from cdk.sql.generic import GenericSQLConnector, _StreamState
 
         handler = GenericSQLConnector()
         contract = SchemaContract(
@@ -559,7 +541,6 @@ class TestPrepareForSqlAlchemy:
         import pyarrow as pa
 
         from cdk.schema_contract import SchemaContract
-        from cdk.sql.generic import GenericSQLConnector, _StreamState
 
         handler = GenericSQLConnector()
         contract = SchemaContract(
@@ -586,7 +567,6 @@ class TestPrepareForSqlAlchemy:
         import pyarrow as pa
 
         from cdk.adbc_registry import AdbcConfigurationError
-        from cdk.sql.generic import GenericSQLConnector, _StreamState
 
         handler = GenericSQLConnector()
         state = _StreamState(
@@ -611,7 +591,6 @@ class TestDDLLockSerialization:
         import asyncio
 
         from cdk.sql import generic as generic_module
-        from cdk.sql.generic import GenericSQLConnector, _StreamState
 
         handler = GenericSQLConnector()
         # Pretend the engine is connected; we intercept the DDL build + the

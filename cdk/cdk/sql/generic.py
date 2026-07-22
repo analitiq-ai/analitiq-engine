@@ -149,6 +149,27 @@ def _reclassify_as_fatal(exc: BaseException) -> AdbcConfigurationError:
 WriteMode = Literal["insert", "upsert", "truncate_insert"]
 
 
+def _page_order_by(
+    order_by_field: str | None,
+    cursor_field: str | None,
+    columns: list[str],
+    table_name: str,
+) -> str:
+    """Resolve the ORDER BY column for an OFFSET-paged ADBC read.
+
+    The stream's declared order_by_field wins (a conflict with the
+    incremental cursor is rejected in ``read_batches``), then the cursor,
+    then the first projected column (warned once — an undeclared order
+    makes OFFSET paging best-effort).
+    """
+    if order_by_field:
+        return order_by_field
+    if cursor_field:
+        return cursor_field
+    _note_order_by_fallback(table_name, columns[0])
+    return columns[0]
+
+
 @dataclass
 class _StreamState:
     """Per-stream destination state.
@@ -694,6 +715,59 @@ class GenericSQLConnector(BaseDestinationHandler):
         if cancelled is not None:
             raise cancelled
 
+    def _destination_address(
+        self, stream_id: str, database_object: Mapping[str, Any], table_name: str
+    ) -> TableAddress | None:
+        """Resolve the stream's target :class:`TableAddress`, or ``None`` to reject.
+
+        Owns the per-transport schema rule and the catalog gates so
+        ``configure_schema`` stays a lifecycle method. ``None`` means the
+        rejection was already logged (missing ADBC schema — the pre-typed
+        reject path); deterministic authoring errors raise
+        :class:`SchemaConfigurationError` for the SchemaAck translation.
+        """
+        raw_schema = database_object.get("schema")
+        if self._adbc_only:
+            # Snowflake's default schema is account-/role-dependent;
+            # BigQuery requires an explicit dataset. Falling back to
+            # "public" silently writes into a Postgres-shaped
+            # namespace that may not exist. Require the endpoint
+            # document to declare the schema explicitly.
+            if not raw_schema:
+                logger.error(
+                    "ADBC destination requires database_object.schema "
+                    "for stream %r (no implicit default)",
+                    stream_id,
+                )
+                return None
+            schema_name = raw_schema
+        else:
+            schema_name = raw_schema or "public"
+        try:
+            address = self.dialect.table_address(
+                table_name,
+                schema=schema_name,
+                catalog=database_object.get("catalog") or "",
+            )
+        except CatalogAddressingError as err:
+            # Deterministic authoring error — surface it in the SchemaAck
+            # (the gRPC layer translates SchemaConfigurationError) instead
+            # of failing the RPC as a wiring defect.
+            raise SchemaConfigurationError(str(err)) from err
+        if address.catalog and not self._adbc_only:
+            # The SQLAlchemy write path reflects the target table and builds
+            # DML from the reflected object; SQLAlchemy reflection cannot
+            # cross catalogs, and no dialect on this transport declares
+            # catalog addressing today. Refuse loudly rather than write to
+            # whatever the reflected two-part name resolves to.
+            raise SchemaConfigurationError(
+                f"stream {stream_id!r} targets catalog "
+                f"{address.catalog!r}, which the SQLAlchemy write transport "
+                f"cannot address; use a connection whose default catalog is "
+                f"{address.catalog!r}"
+            )
+        return address
+
     async def configure_schema(self, schema_spec: SchemaSpec) -> bool:
         """Configure the destination from the preloaded contract endpoint.
 
@@ -741,45 +815,9 @@ class GenericSQLConnector(BaseDestinationHandler):
         # no conflict target (INSERT mode); the engine never derives one
         # from ``primary_keys``.
         conflict_keys = list(self._stream_conflict_keys.get(stream_id) or [])
-        raw_schema = database_object.get("schema")
-        raw_catalog = database_object.get("catalog") or ""
-        if self._adbc_only:
-            # Snowflake's default schema is account-/role-dependent;
-            # BigQuery requires an explicit dataset. Falling back to
-            # "public" silently writes into a Postgres-shaped
-            # namespace that may not exist. Require the endpoint
-            # document to declare the schema explicitly.
-            if not raw_schema:
-                logger.error(
-                    "ADBC destination requires database_object.schema "
-                    "for stream %r (no implicit default)",
-                    stream_id,
-                )
-                return False
-            schema_name = raw_schema
-        else:
-            schema_name = raw_schema or "public"
-        try:
-            address = self.dialect.table_address(
-                table_name, schema=schema_name, catalog=raw_catalog
-            )
-        except CatalogAddressingError as err:
-            # Deterministic authoring error — surface it in the SchemaAck
-            # (the gRPC layer translates SchemaConfigurationError) instead
-            # of failing the RPC as a wiring defect.
-            raise SchemaConfigurationError(str(err)) from err
-        if address.catalog and not self._adbc_only:
-            # The SQLAlchemy write path reflects the target table and builds
-            # DML from the reflected object; SQLAlchemy reflection cannot
-            # cross catalogs, and no dialect on this transport declares
-            # catalog addressing today. Refuse loudly rather than write to
-            # whatever the reflected two-part name resolves to.
-            raise SchemaConfigurationError(
-                f"stream {stream_id!r} targets catalog "
-                f"{address.catalog!r}, which the SQLAlchemy write transport "
-                f"cannot address; use a connection whose default catalog is "
-                f"{address.catalog!r}"
-            )
+        address = self._destination_address(stream_id, database_object, table_name)
+        if address is None:
+            return False
         state = _StreamState(
             address=address,
             endpoint_document=dict(endpoint_doc),
@@ -2236,7 +2274,7 @@ class GenericSQLConnector(BaseDestinationHandler):
     # (``self._engine`` / ``self._adbc_conn``) is untouched; a source-role
     # instance and a write-role instance are distinct objects.
 
-    async def read_batches(
+    async def read_batches(  # skipcq: PY-R1000
         self,
         runtime: ConnectionRuntime,
         config: dict[str, Any],
@@ -2246,7 +2284,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         partition: dict[str, Any] | None = None,
         batch_size: int = 1000,
     ) -> AsyncIterator[pa.RecordBatch]:
-        """Read upstream rows as Arrow batches typed via the endpoint contract."""
+        """Read upstream rows as Arrow batches typed via the endpoint contract.
+
+        skipcq PY-R1000: the read entry point's complexity predates this
+        change (guard rails + two transports in one generator); splitting
+        it is its own refactor, not a side effect of catalog addressing.
+        """
         endpoint_doc = config.get("endpoint_document")
         if not endpoint_doc:
             raise ReadError(
@@ -2539,18 +2582,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         # handler applies), so the quoted names target the same physical
         # objects the destination resolves.
 
-        # Page ordering: the stream's declared order_by_field wins (a
-        # conflict with the incremental cursor is rejected in
-        # read_batches), then the cursor, then the first projected column
-        # (warned once — an undeclared order makes OFFSET paging
-        # best-effort).
-        if order_by_field:
-            order_by = order_by_field
-        elif cursor_field:
-            order_by = cursor_field
-        else:
-            order_by = columns[0]
-            _note_order_by_fallback(address.table, order_by)
+        order_by = _page_order_by(order_by_field, cursor_field, columns, address.table)
 
         builder = QueryBuilder(
             driver,

@@ -321,6 +321,27 @@ class QueryBuilder:
             return literal_column(str(int(value)))
         return value
 
+    def _apply_ordering(self, query: Select, config: QueryConfig) -> Select:
+        """Apply the query's ordering: declared order, cursor, or fallback.
+
+        The declared ``order_by`` (or the cursor field) orders directly.
+        With neither, a paged query consults the connector dialect's
+        fallback hook (e.g. T-SQL refuses OFFSET without ORDER BY) —
+        lazily, so a hook that raises to demand an explicit ordering fires
+        only when one is actually missing.
+        """
+        order_field = config.order_by or config.cursor_field
+        if order_field:
+            order_col = Column(self._ident(order_field))
+            if config.order_direction.lower() == "desc":
+                return query.order_by(desc(order_col))
+            return query.order_by(asc(order_col))
+        if config.offset is not None and self._paging_order_fallback is not None:
+            fallback = self._paging_order_fallback()
+            if fallback is not None:
+                return query.order_by(text(fallback))
+        return query
+
     def build_select_query(self, config: QueryConfig) -> tuple[str, ParamsLike]:
         """Build a SELECT query from configuration.
 
@@ -376,22 +397,7 @@ class QueryBuilder:
         if conditions:
             query = query.where(and_(*conditions))
 
-        # Apply ordering
-        order_field = config.order_by or config.cursor_field
-        if order_field:
-            order_col = Column(self._ident(order_field))
-            if config.order_direction.lower() == "desc":
-                query = query.order_by(desc(order_col))
-            else:
-                query = query.order_by(asc(order_col))
-        elif config.offset is not None and self._paging_order_fallback is not None:
-            # The connector dialect declared a fallback ordering for paged
-            # reads that specify none (e.g. T-SQL refuses OFFSET without
-            # ORDER BY). Consulted lazily so a hook that raises to demand
-            # an explicit ordering fires only when one is actually missing.
-            fallback = self._paging_order_fallback()
-            if fallback is not None:
-                query = query.order_by(text(fallback))
+        query = self._apply_ordering(query, config)
 
         # Apply limit/offset
         if config.limit is not None:
