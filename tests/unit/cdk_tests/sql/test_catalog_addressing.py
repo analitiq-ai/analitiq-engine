@@ -130,10 +130,11 @@ class TestConfigureSchemaGate:
         assert state.address == TableAddress(
             table="events", schema="ds", catalog="proj"
         )
-        create_schema = next(s for s in executed if s.startswith("CREATE SCHEMA"))
-        assert create_schema == 'CREATE SCHEMA IF NOT EXISTS "proj"."ds"'
-        create_table = next(s for s in executed if s.startswith("CREATE TABLE"))
-        assert '"proj"."ds"."events"' in create_table
+        create_schema = [s for s in executed if s.startswith("CREATE SCHEMA")]
+        assert create_schema == ['CREATE SCHEMA IF NOT EXISTS "proj"."ds"']
+        create_table = [s for s in executed if s.startswith("CREATE TABLE")]
+        assert len(create_table) == 1
+        assert '"proj"."ds"."events"' in create_table[0]
 
 
 class TestConfigureSchemaAddress:
@@ -270,7 +271,7 @@ class _CapturingCursor:
         self._ingests.append({"table": table, "mode": mode, **kwargs})
 
     def close(self):
-        pass
+        """No-op: the fake owns no resources."""
 
 
 class _CapturingConn:
@@ -282,7 +283,7 @@ class _CapturingConn:
         return _CapturingCursor(self.executed, self.ingests)
 
     def commit(self):
-        pass
+        """No-op: statements are captured, not transacted."""
 
 
 class TestAdbcWriteSinks:
@@ -329,11 +330,13 @@ class TestAdbcWriteSinks:
         )
         stage = '"proj"."ds"."_analitiq_stage_orders_btok"'
         target = '"proj"."ds"."orders"'
-        merge = next(s for s in conn.executed if s.startswith("MERGE INTO"))
-        assert f"MERGE INTO {target} t USING {stage} s" in merge
+        merges = [s for s in conn.executed if s.startswith("MERGE INTO")]
+        assert len(merges) == 1
+        assert f"MERGE INTO {target} t USING {stage} s" in merges[0]
         assert f"DROP TABLE IF EXISTS {stage}" in conn.executed[0]
-        create = next(s for s in conn.executed if s.startswith("CREATE TABLE"))
-        assert stage in create and target in create
+        creates = [s for s in conn.executed if s.startswith("CREATE TABLE")]
+        assert len(creates) == 1
+        assert stage in creates[0] and target in creates[0]
         # The stage ingest targets the stage through the same address sink.
         assert conn.ingests == [
             {
