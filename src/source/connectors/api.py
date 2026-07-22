@@ -16,10 +16,10 @@ into :class:`~analitiq.contracts.endpoints.ApiEndpointDoc` once per read
   ``function``) resolved against the connection scopes
   (``connection.parameters``/``selections``/``discovered``) and runtime
   scopes (``runtime.batch_size``).
-* ``operations.read.pagination`` — offset / page / cursor loops driven
-  by their respective ``.param`` + ``.initial`` declarations (``keyset``
-  and ``link``, and the declared ``stop_when`` / ``next_cursor``
-  expressions, are read-path behavior tracked in #346).
+* ``operations.read.pagination`` — all five contract strategies (offset /
+  page / cursor / link / keyset) driven by their declared params, with the
+  ``next_cursor`` / ``next_url`` value expressions and the strategy's
+  ``stop_when`` predicate evaluated against each page's response.
 * ``operations.read.response.records`` — record extraction path
   (e.g. ``response.body`` or ``response.body.<field>``).
 * ``operations.read.replication.cursor_mappings`` — cursor-field ↔
@@ -38,16 +38,18 @@ from collections.abc import AsyncIterator, Callable
 from datetime import timezone
 from decimal import Decimal
 from typing import Any
+from urllib.parse import SplitResult, urljoin, urlsplit
 
 import aiohttp
 import pyarrow as pa
 from analitiq.contracts.endpoints import (
     ApiEndpointDoc,
-    KeysetPagination,
+    CursorPagination,
     LinkPagination,
     OffsetPagination,
     PagePagination,
     Pagination,
+    Predicate,
     ReadOperation,
     Replication,
     ResponseExtraction,
@@ -56,6 +58,7 @@ from analitiq.contracts.endpoints import (
 from pydantic import ValidationError
 
 from cdk.connection_runtime import ConnectionRuntime
+from cdk.exceptions import TransportSpecError
 from cdk.rate_limiter import RateLimiter
 from cdk.request_binding import bind_param_refs, resolve_param_defaults
 from cdk.resolver import Resolver
@@ -67,6 +70,7 @@ from ...models.state import ReplicationConfig
 from ...shared.dict_path import walk_path
 from ...shared.http_utils import join_url
 from .base import BaseConnector, ConnectorConnectionError, ReadError, TransientReadError
+from .response_expr import evaluate_predicate, resolve_response_expr
 
 logger = logging.getLogger(__name__)
 
@@ -325,6 +329,7 @@ class APIConnector(BaseConnector):
             pagination=read.pagination,
             batch_size=batch_size,
             records_ref=records_ref,
+            resolver=resolver,
             build_request=build_request,
         ):
             if not batch:
@@ -570,10 +575,10 @@ class APIConnector(BaseConnector):
         if not cursor_field:
             return
         mappings = replication.cursor_mappings if replication is not None else []
-        # Only single-param mappings drive the incremental filter; a window
-        # mapping (start/end params) matching the cursor field falls through
-        # to the full-replication warning below, as before (read-path
-        # behavior tracked in #346).
+        # Only single-param mappings drive the incremental filter. A window
+        # mapping (start/end params) matching the cursor field is not
+        # implemented as a filter source; it falls through to the loud
+        # full-replication warning below rather than half-binding one side.
         param_name = next(
             (
                 m.param
@@ -643,9 +648,62 @@ class APIConnector(BaseConnector):
     # Pagination
     # ------------------------------------------------------------------
 
-    # One loop per pagination strategy; the pre-#349 dict version carried the
-    # same branching and is a tolerated occurrence on the default branch. The
-    # strategy dispatch is restructured with the #346 contract work.
+    @staticmethod
+    def _stop_requested(stop_when: Predicate, page_resolver: Resolver) -> bool:
+        """Evaluate the strategy's declared ``stop_when`` against a page."""
+        try:
+            return evaluate_predicate(stop_when, page_resolver)
+        except (ValueError, KeyError, TransportSpecError) as err:
+            raise ReadError(f"pagination stop_when failed to evaluate: {err}") from err
+
+    @staticmethod
+    def _resolve_response_value(
+        expr: Any, page_resolver: Resolver, *, context: str
+    ) -> Any:
+        """Resolve a response-scope value expression, failing deterministically."""
+        try:
+            return resolve_response_expr(expr, page_resolver)
+        except (ValueError, KeyError, TransportSpecError) as err:
+            raise ReadError(f"pagination {context} failed to resolve: {err}") from err
+
+    @staticmethod
+    def _same_origin(base: SplitResult, target: SplitResult) -> bool:
+        """Whether two split URLs share scheme, host, and effective port.
+
+        Compares normalized parts (case-insensitive scheme/host, default
+        ports made explicit) so ``https://api.example.test:443`` and
+        ``https://API.example.test`` count as the origin they are.
+        """
+        default_ports = {"http": 80, "https": 443}
+        base_scheme = base.scheme.lower()
+        target_scheme = target.scheme.lower()
+        return (
+            base_scheme == target_scheme
+            and (base.hostname or "").lower() == (target.hostname or "").lower()
+            and (base.port or default_ports.get(base_scheme))
+            == (target.port or default_ports.get(target_scheme))
+        )
+
+    @staticmethod
+    def _positive_step(value: Any, *, context: str) -> int:
+        """Parse an authored ``increment_by`` into a positive int step.
+
+        A step of zero or less can never advance its loop — the same
+        request would repeat unbounded — and a non-numeric one is an
+        authoring defect; both fail deterministically before any request.
+        """
+        try:
+            step = int(value)
+        except (TypeError, ValueError) as err:
+            raise ReadError(
+                f"pagination {context} must be an integer, got {value!r}"
+            ) from err
+        if step <= 0:
+            raise ReadError(f"pagination {context} must be positive, got {step}")
+        return step
+
+    # One loop per pagination strategy; the pre-#346 version carried the same
+    # branching and is a tolerated occurrence on the default branch.
     async def _iterate_pages(  # skipcq: PY-R1000
         self,
         *,
@@ -655,6 +713,7 @@ class APIConnector(BaseConnector):
         pagination: Pagination | None,
         batch_size: int,
         records_ref: str,
+        resolver: Resolver,
         build_request: Callable[[dict[str, Any]], tuple[dict[str, Any], Any]],
     ) -> AsyncIterator[list[dict[str, Any]]]:
         """Drive the pagination loop, building each page request.
@@ -662,10 +721,16 @@ class APIConnector(BaseConnector):
         Each page request is built via ``build_request``: it maps the page's
         full param table to the ``(query_params, body)`` actually sent,
         applying declared param placement and per-page body binding.
+        ``resolver`` gains the page's body as its ``response`` scope for the
+        per-page expressions (``stop_when``, ``next_cursor``, ``next_url``).
 
-        Loops stop on an empty page (or a short page for the count-driven
-        strategies); the contract's declared ``stop_when`` predicate is not
-        evaluated yet (read-path behavior tracked in #346).
+        Every strategy stops when its declared ``stop_when`` predicate holds
+        for the page's response. An empty page always stops (there is nothing
+        left to yield), and the count-driven strategies (offset, page, keyset)
+        also stop on a short page, which no non-empty page can follow. Each
+        page's continuation — the stop decision and the value it advances
+        on — is computed BEFORE the page is yielded, so a page that cannot
+        be followed correctly fails before the engine can commit it.
         """
         if pagination is None:
             query, body = build_request(dict(base_params))
@@ -676,10 +741,25 @@ class APIConnector(BaseConnector):
                 yield records
             return
 
-        if isinstance(pagination, KeysetPagination | LinkPagination):
-            # Declared by the contract but not implemented by this read
-            # path yet (#346).
-            raise ReadError(f"Unsupported pagination type: {pagination.type!r}")
+        if isinstance(pagination, LinkPagination):
+            # LinkPagination is dispatched before the limit injection below
+            # because the contract gives it NO limit field (its shape is
+            # type/link/stop_when, extra="forbid") — a link endpoint's
+            # first-request page size is authored as an ordinary param
+            # default over runtime.batch_size instead. A drift-guard test
+            # pins this; if the contract ever adds link.limit, that test
+            # fails and this dispatch must start injecting batch_size.
+            async for records in self._iterate_link_pages(
+                full_url=full_url,
+                method=method,
+                base_params=base_params,
+                pagination=pagination,
+                records_ref=records_ref,
+                resolver=resolver,
+                build_request=build_request,
+            ):
+                yield records
+            return
 
         if pagination.limit is not None and pagination.limit.param:
             base_params[pagination.limit.param] = batch_size
@@ -687,50 +767,71 @@ class APIConnector(BaseConnector):
         if isinstance(pagination, OffsetPagination):
             offset_param = pagination.offset.param
             offset = int(pagination.offset.initial)
+            # An authored ``increment_by`` fixes the step; otherwise the
+            # offset advances by the page size actually requested.
+            offset_step = (
+                self._positive_step(
+                    pagination.offset.increment_by, context="offset.increment_by"
+                )
+                if pagination.offset.increment_by is not None
+                else batch_size
+            )
             while True:
                 params = dict(base_params)
                 params[offset_param] = offset
                 query, body = build_request(params)
-                records = await self._request_records(
+                data, records = await self._request_payload(
                     full_url, method, query, records_ref, body=body
                 )
                 if not records:
                     return
+                page_resolver = resolver.with_response({"body": data})
+                stop = self._stop_requested(pagination.stop_when, page_resolver)
+                short = len(records) < batch_size
                 yield records
-                if len(records) < batch_size:
+                if stop or short:
                     return
-                offset += batch_size
+                offset += offset_step
 
         elif isinstance(pagination, PagePagination):
             page_param = pagination.page.param
             page = int(pagination.page.initial)
+            # An authored ``increment_by`` fixes the step; page numbers
+            # advance by one otherwise.
+            page_step = (
+                self._positive_step(
+                    pagination.page.increment_by, context="page.increment_by"
+                )
+                if pagination.page.increment_by is not None
+                else 1
+            )
             while True:
                 params = dict(base_params)
                 params[page_param] = page
                 query, body = build_request(params)
-                records = await self._request_records(
+                data, records = await self._request_payload(
                     full_url, method, query, records_ref, body=body
                 )
                 if not records:
                     return
+                page_resolver = resolver.with_response({"body": data})
+                stop = self._stop_requested(pagination.stop_when, page_resolver)
+                short = len(records) < batch_size
                 yield records
-                if len(records) < batch_size:
+                if stop or short:
                     return
-                page += 1
+                page += page_step
 
-        else:
-            # CursorPagination: the pinned contract's pagination union is
-            # closed, and keyset/link raised above, so narrowing makes this
-            # the only remaining strategy.
+        elif isinstance(pagination, CursorPagination):
             cursor_param = pagination.cursor.param
-            # The declared ``cursor.next_cursor`` value expression is not
-            # evaluated yet: the next-page token is read from the response
-            # field literally named ``next_cursor`` (read-path behavior
-            # tracked in #346).
-            cursor_token: str | None = None
+            # The declared ``cursor.next_cursor`` value expression names the
+            # next-page token in the response; a token that resolves to
+            # nothing ends the loop. The token keeps its native type — the
+            # query/body sinks in ``build_request`` own serialization.
+            cursor_token: Any = None
             while True:
                 params = dict(base_params)
-                if cursor_token:
+                if cursor_token is not None:
                     params[cursor_param] = cursor_token
                 query, body = build_request(params)
                 data, records = await self._request_payload(
@@ -738,10 +839,148 @@ class APIConnector(BaseConnector):
                 )
                 if not records:
                     return
+                page_resolver = resolver.with_response({"body": data})
+                stop = self._stop_requested(pagination.stop_when, page_resolver)
+                cursor_token = None
+                if not stop:
+                    cursor_token = self._resolve_response_value(
+                        pagination.cursor.next_cursor,
+                        page_resolver,
+                        context="cursor.next_cursor",
+                    )
                 yield records
-                cursor_token = _extract_next_cursor(data, "next_cursor")
-                if not cursor_token:
+                if stop or cursor_token is None or cursor_token == "":  # nosec B105
                     return
+
+        else:
+            # KeysetPagination by narrowing: the pinned contract's pagination
+            # union is closed and every other strategy is dispatched above.
+            keyset_param = pagination.keyset.param
+            order_by_field = pagination.keyset.order_by_field
+            # The declared ``initial`` seeds the first request when authored;
+            # afterwards the key advances from the last record of each page.
+            # The key keeps its native type (int/str/Decimal) — the
+            # query/body sinks in ``build_request`` own serialization.
+            last_key: Any = pagination.keyset.initial
+            # No short-page stop for keyset: a provider may clamp the
+            # requested page size below batch_size, making every page
+            # "short" while records remain — stopping there would truncate
+            # the read. Key advance is size-independent, so only an empty
+            # page or stop_when ends the loop; the cost is at most one
+            # extra (empty) request, never a lost tail.
+            while True:
+                params = dict(base_params)
+                if last_key is not None:
+                    params[keyset_param] = last_key
+                query, body = build_request(params)
+                data, records = await self._request_payload(
+                    full_url, method, query, records_ref, body=body
+                )
+                if not records:
+                    return
+                page_resolver = resolver.with_response({"body": data})
+                stop = self._stop_requested(pagination.stop_when, page_resolver)
+                if not stop:
+                    # Validate the continuation before yielding: a page the
+                    # loop cannot advance from must fail before the engine
+                    # can commit it downstream. order_by_field is a dotted
+                    # record path per the contract, so walk it like every
+                    # other record-field access in this module.
+                    last_key = walk_path(records[-1], order_by_field.split("."))
+                    if last_key is None:
+                        raise ReadError(
+                            f"keyset pagination: the last record of a page "
+                            f"has no {order_by_field!r} value to advance "
+                            f"from; keyset.order_by_field must be present "
+                            f"on every record"
+                        )
+                yield records
+                if stop:
+                    return
+
+    async def _iterate_link_pages(
+        self,
+        *,
+        full_url: str,
+        method: str,
+        base_params: dict[str, Any],
+        pagination: LinkPagination,
+        records_ref: str,
+        resolver: Resolver,
+        build_request: Callable[[dict[str, Any]], tuple[dict[str, Any], Any]],
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        """Follow ``link.next_url`` from each response to the next page.
+
+        Per the contract, the resolved URL replaces the entire request:
+        follow-up pages carry no query params and no body (spec: §Pagination
+        Strategies — link, "no params traverse"). A relative next URL joins
+        the connection's base URL; an absolute one must stay on the
+        connection's origin — the shared session sends the connection's
+        default headers (auth included) on every request, so following a
+        response-supplied URL to another host would hand those credentials
+        to it. The next URL is resolved and vetted BEFORE its page is
+        yielded, so a malformed link fails before the engine can commit
+        the page.
+        """
+        base_url = self.base_url
+        if base_url is None:
+            raise ReadError(
+                "APIConnector: link pagination attempted before connect() "
+                "materialized the base URL"
+            )
+        origin = urlsplit(base_url)
+        current_url = full_url
+        query, body = build_request(dict(base_params))
+        data, records = await self._request_payload(
+            full_url, method, query, records_ref, body=body
+        )
+        while True:
+            if not records:
+                return
+            page_resolver = resolver.with_response({"body": data})
+            stop = self._stop_requested(pagination.stop_when, page_resolver)
+            next_target: str | None = None
+            if not stop:
+                next_url = self._resolve_response_value(
+                    pagination.link.next_url, page_resolver, context="link.next_url"
+                )
+                if next_url is not None and next_url != "":
+                    if not isinstance(next_url, str):
+                        raise ReadError(
+                            f"link pagination: next_url resolved to a "
+                            f"{type(next_url).__name__}, expected a URL string"
+                        )
+                    # Classify by parsing, not by string prefix: a URL
+                    # carrying any scheme or authority is absolute (case
+                    # included), and must then pass the origin check —
+                    # which also rejects non-HTTP schemes and ambiguous
+                    # protocol-relative URLs loudly.
+                    target = urlsplit(next_url)
+                    if target.scheme or target.netloc:
+                        if not self._same_origin(origin, target):
+                            raise ReadError(
+                                f"link pagination: next_url {next_url!r} "
+                                f"leaves the connection's origin "
+                                f"{origin.scheme}://{origin.netloc}; refusing "
+                                f"to send the connection's headers to "
+                                f"another host"
+                            )
+                        next_target = next_url
+                    else:
+                        # A path/query-relative reference resolves against
+                        # the CURRENT page URL (RFC 3986), so a query-only
+                        # link like "?page=2" continues from the endpoint
+                        # path instead of the connection root. Absolute and
+                        # protocol-relative URLs were classified above, so
+                        # the join can never change the origin.
+                        next_target = urljoin(current_url, next_url)
+            yield records
+            if next_target is None:
+                return
+            current_url = next_target
+            data, records = await self._request_payload(
+                next_target, method, {}, records_ref
+            )
 
     # ------------------------------------------------------------------
     # HTTP
@@ -850,20 +1089,3 @@ def _extract_records(data: Any, records_ref: str) -> list[dict[str, Any]]:
     if isinstance(cursor, dict):
         return [cursor]
     return []
-
-
-def _extract_next_cursor(data: Any, response_field_ref: str) -> str | None:
-    """Walk a ``response.body[.<dotted.path>]`` ref to a string cursor."""
-    if not isinstance(data, dict):
-        return None
-    prefix = "response.body"
-    if response_field_ref == prefix:
-        return None
-    if response_field_ref.startswith(prefix + "."):
-        segments = response_field_ref[len(prefix) + 1 :].split(".")
-    else:
-        segments = response_field_ref.split(".")
-    cursor = walk_path(data, segments)
-    if cursor in (None, ""):
-        return None
-    return str(cursor)

@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 
 from cdk.exceptions import TransportSpecError, UnresolvedValueError
@@ -116,6 +117,20 @@ class ResolutionContext:
             response=self.response,
         )
 
+    def with_response(self, response: Mapping[str, Any]) -> ResolutionContext:
+        """Return a copy with ``response`` replaced — useful per-page."""
+        return ResolutionContext(
+            connector=self.connector,
+            connection=self.connection,
+            secrets=self.secrets,
+            auth=self.auth,
+            runtime=self.runtime,
+            state=self.state,
+            derived=self.derived,
+            request=self.request,
+            response=response,
+        )
+
 
 # A registered derived function takes the expression node and the active
 # resolver and returns a JSON-compatible value.
@@ -161,6 +176,16 @@ class Resolver:
     @property
     def context(self) -> ResolutionContext:
         return self._ctx
+
+    def with_response(self, response: Mapping[str, Any]) -> Resolver:
+        """Return a resolver whose ``response`` scope holds *response*.
+
+        Per-page pagination expressions (``next_cursor`` / ``next_url`` /
+        ``stop_when`` operands) resolve against the page's parsed body
+        through the same grammar and function set as every other scope —
+        one resolution vocabulary, response included.
+        """
+        return Resolver(self._ctx.with_response(response), functions=self._functions)
 
     def register(self, name: str, fn: DerivedFunction) -> None:
         if name in self._functions:
@@ -363,12 +388,14 @@ class Resolver:
             # Templates are concatenation primitives; a non-scalar value
             # would be silently spliced as its repr, masking the most
             # common authoring mistake (referencing an object instead of
-            # a leaf field).
-            if not isinstance(value, (str, int, float, bool)):
+            # a leaf field). Decimal counts as a scalar: response bodies
+            # are parsed losslessly, so fractional response values arrive
+            # as Decimal and str() renders them exactly.
+            if not isinstance(value, (str, int, float, bool, Decimal)):
                 raise TransportSpecError(
                     f"Template substitution {path!r} in {template!r} resolved "
                     f"to {type(value).__name__}; only scalars (str/int/float/"
-                    f"bool) are allowed inside ${{...}}"
+                    f"bool/Decimal) are allowed inside ${{...}}"
                 )
             out.append(str(value))
             i = k + 1
