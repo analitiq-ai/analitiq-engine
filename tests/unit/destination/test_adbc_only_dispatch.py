@@ -943,14 +943,14 @@ class TestMergeIngestStageNameOnFoldingDialect:
                 ingests.append(table)
 
             def close(self):
-                pass
+                """No-op: the fake owns no resources."""
 
         class _FakeConn:
             def cursor(self):
                 return _FakeCursor()
 
             def commit(self):
-                pass
+                """No-op: statements are captured, not transacted."""
 
         h = _FixtureConnector()  # folds identifiers upper-case
         h._adbc_only = True

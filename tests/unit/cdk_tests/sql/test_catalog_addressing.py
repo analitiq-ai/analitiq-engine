@@ -144,7 +144,7 @@ class TestConfigureSchemaAddress:
         # explicit "public" fallback into the stored address — not an
         # unqualified name the connection's search path would resolve.
         handler = _handler(adbc_only=False)
-        doc = {k: v for k, v in ENDPOINT_DOC.items()}
+        doc = dict(ENDPOINT_DOC)
         doc["database_object"] = {"name": "events"}
         handler.set_stream_endpoints({STREAM: doc})
         with patch.object(handler, "_ensure_tables_exist", new=AsyncMock()):
