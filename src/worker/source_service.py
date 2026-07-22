@@ -19,6 +19,7 @@ import pyarrow as pa
 
 import grpc
 from cdk.connection_runtime import ConnectionRuntime
+from cdk.exceptions import TransportSpecError
 from cdk.sql.exceptions import ReadError, UnsupportedDialectOperationError
 from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
 from src.grpc.generated.analitiq.v1 import (
@@ -46,6 +47,10 @@ _DETERMINISTIC_READ_ERRORS = (
     UnsupportedDialectOperationError,
     UnmappedTypeError,
     InvalidTypeMapError,
+    # Deterministic connector/transport-spec validation failures (its own
+    # contract): an authoring defect in a value expression that escapes a
+    # connector unwrapped must not classify as retryable.
+    TransportSpecError,
     KeyError,
     TypeError,
     ValueError,
