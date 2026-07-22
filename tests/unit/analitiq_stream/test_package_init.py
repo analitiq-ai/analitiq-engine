@@ -23,8 +23,6 @@ class TestMainPackageInit:
 
         expected_exports = [
             "StreamingEngine",
-            "RetryHandler",
-            "CircuitBreaker",
             "DeadLetterQueue",
             "BaseConnector",
             "APIConnector",
@@ -36,19 +34,10 @@ class TestMainPackageInit:
 
     def test_core_classes_importable(self):
         """Test that core classes can be imported directly."""
-        from src import (
-            APIConnector,
-            BaseConnector,
-            CircuitBreaker,
-            DeadLetterQueue,
-            RetryHandler,
-            StreamingEngine,
-        )
+        from src import APIConnector, BaseConnector, DeadLetterQueue, StreamingEngine
 
         for cls in (
             StreamingEngine,
-            RetryHandler,
-            CircuitBreaker,
             DeadLetterQueue,
             BaseConnector,
             APIConnector,

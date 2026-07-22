@@ -420,7 +420,6 @@ _UNREACHABLE_NAMES = frozenset(
         "ConnectionResetError",
         "ConnectionAbortedError",
         "TimeoutError",
-        "CircuitBreakerOpenError",
         "gaierror",
     }
 )

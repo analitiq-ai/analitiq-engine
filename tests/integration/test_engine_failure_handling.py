@@ -15,7 +15,9 @@ import pytest
 from cdk.types import FailureCategory
 from src.engine.engine import StreamingEngine
 from src.engine.exceptions import StreamProcessingError
+from src.engine.stream_processor import StreamProcessor
 from src.grpc.generated.analitiq.v1 import AckStatus
+from src.models.metrics import PipelineMetrics
 from src.models.resolved import (
     BatchingConfig,
     ReplicationConfig,
@@ -45,6 +47,39 @@ class MockBatchResult:
     failure_category: FailureCategory = FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
 
 
+def _make_processor(
+    stream_config: dict[str, Any],
+    grpc_client: AsyncMock,
+    stream_dlq: Any,
+    *,
+    error_strategy: str = "fail",
+    max_retries: int = 3,
+    retry_delay: float = 0.01,
+    pipeline_metrics: PipelineMetrics | None = None,
+    state_manager: Any | None = None,
+) -> StreamProcessor:
+    """Build a StreamProcessor wired to mocks, as run() would have wired it."""
+    processor = StreamProcessor(
+        stream_id="test-stream-001",
+        stream_config=stream_config,
+        pipeline_config={"pipeline_id": "test-pipeline", "name": "Test Pipeline"},
+        pipeline_id="test-pipeline",
+        state_manager=state_manager if state_manager is not None else MagicMock(),
+        pipeline_metrics=pipeline_metrics or PipelineMetrics(),
+        worker_readable=MagicMock(),
+        dlq_root="./deadletter",
+        batch_size=10,
+        buffer_size=100,
+        max_retries=max_retries,
+        retry_delay=retry_delay,
+        error_strategy=error_strategy,
+    )
+    processor.grpc_client = grpc_client
+    processor.stream_dlq = stream_dlq
+    processor.run_id = "test-run-001"
+    return processor
+
+
 @pytest.fixture
 def engine(temp_dir, tmp_project_root):
     """Create a StreamingEngine instance for testing."""
@@ -70,24 +105,10 @@ def mock_grpc_client():
 
 
 @pytest.fixture
-def mock_source_connector():
-    """Create a mock source connector."""
-    connector = AsyncMock()
-    connector.connect = AsyncMock()
-    connector.disconnect = AsyncMock()
-    connector.health_check = AsyncMock(return_value=True)
-    return connector
-
-
-@pytest.fixture
 def sample_stream_config():
-    """Sample stream processing config."""
+    """Sample stream config as the runner assembles it for one stream."""
     return {
-        "pipeline_id": "test-pipeline",
-        "name": "Test Pipeline",
-        "version": "1.0",
-        "stream_id": "test-stream-001",
-        "stream_name": "test-stream",
+        "name": "test-stream",
         "source": {
             "connector_type": "api",
             "host": "https://api.example.com",
@@ -121,7 +142,6 @@ class TestEngineFatalFailureHandling:
     @pytest.mark.asyncio
     async def test_load_stage_raises_exception_on_fatal_failure(
         self,
-        engine: StreamingEngine,
         mock_grpc_client: AsyncMock,
         sample_stream_config: dict[str, Any],
         temp_dir: str,
@@ -149,11 +169,6 @@ class TestEngineFatalFailureHandling:
         await input_queue.put(test_batch)
         await input_queue.put(None)  # Signal end of stream
 
-        # Mock gRPC client to return FATAL_FAILURE
-        mock_cursor = MagicMock()
-        mock_cursor.primary.field = "id"
-        mock_cursor.primary.value = "2"
-
         fatal_result = MockBatchResult(
             success=False,
             status=AckStatus.ACK_STATUS_FATAL_FAILURE,
@@ -164,27 +179,14 @@ class TestEngineFatalFailureHandling:
         )
         mock_grpc_client.send_batch = AsyncMock(return_value=fatal_result)
 
-        # Create DLQ
-        stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
-
-        # Execute and expect exception
-        stream_metrics = {
-            "records_processed": 0,
-            "records_failed": 0,
-            "batches_processed": 0,
-            "batches_failed": 0,
-        }
+        processor = _make_processor(
+            sample_stream_config,
+            mock_grpc_client,
+            DeadLetterQueue(f"{temp_dir}/dlq"),
+        )
 
         with pytest.raises(StreamProcessingError) as exc_info:
-            await engine._load_stage(
-                input_queue=input_queue,
-                output_queue=output_queue,
-                grpc_client=mock_grpc_client,
-                config=sample_stream_config,
-                stream_dlq=stream_dlq,
-                run_id="test-run-001",
-                stream_metrics=stream_metrics,
-            )
+            await processor._load_stage(input_queue, output_queue)
 
         # Assert: exception contains failure info
         assert "fatal failure" in str(exc_info.value).lower()
@@ -201,7 +203,6 @@ class TestEngineFatalFailureHandling:
     @pytest.mark.asyncio
     async def test_load_stage_does_not_clobber_a_deeper_tag(
         self,
-        engine: StreamingEngine,
         mock_grpc_client: AsyncMock,
         sample_stream_config: dict[str, Any],
         temp_dir: str,
@@ -224,24 +225,14 @@ class TestEngineFatalFailureHandling:
         )
         mock_grpc_client.send_batch = AsyncMock(side_effect=inner)
 
-        stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
-        stream_metrics = {
-            "records_processed": 0,
-            "records_failed": 0,
-            "batches_processed": 0,
-            "batches_failed": 0,
-        }
+        processor = _make_processor(
+            sample_stream_config,
+            mock_grpc_client,
+            DeadLetterQueue(f"{temp_dir}/dlq"),
+        )
 
         with pytest.raises(RuntimeError) as exc_info:
-            await engine._load_stage(
-                input_queue=input_queue,
-                output_queue=output_queue,
-                grpc_client=mock_grpc_client,
-                config=sample_stream_config,
-                stream_dlq=stream_dlq,
-                run_id="test-run-001",
-                stream_metrics=stream_metrics,
-            )
+            await processor._load_stage(input_queue, output_queue)
 
         tag = read_failure_tag(exc_info.value)
         assert tag is not None
@@ -251,7 +242,6 @@ class TestEngineFatalFailureHandling:
     @pytest.mark.asyncio
     async def test_load_stage_config_cause_fatal_ack_tags_config_not_write(
         self,
-        engine: StreamingEngine,
         mock_grpc_client: AsyncMock,
         sample_stream_config: dict[str, Any],
         temp_dir: str,
@@ -279,41 +269,32 @@ class TestEngineFatalFailureHandling:
         )
         mock_grpc_client.send_batch = AsyncMock(return_value=fatal_result)
 
-        stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
-        stream_metrics = {
-            "records_processed": 0,
-            "records_failed": 0,
-            "batches_processed": 0,
-            "batches_failed": 0,
-        }
+        processor = _make_processor(
+            sample_stream_config,
+            mock_grpc_client,
+            DeadLetterQueue(f"{temp_dir}/dlq"),
+        )
 
         with pytest.raises(StreamProcessingError) as exc_info:
-            await engine._load_stage(
-                input_queue=input_queue,
-                output_queue=output_queue,
-                grpc_client=mock_grpc_client,
-                config=sample_stream_config,
-                stream_dlq=stream_dlq,
-                run_id="test-run-001",
-                stream_metrics=stream_metrics,
-            )
+            await processor._load_stage(input_queue, output_queue)
 
         tag = read_failure_tag(exc_info.value)
         assert tag is not None
         assert tag.code is ErrorCode.CONFIG_INVALID
         assert tag.stage is FailureStage.DESTINATION_LOAD
 
-    @pytest.mark.asyncio
-    async def test_missing_resolved_source_raises_config_tagged_error(
+    def test_missing_resolved_source_raises_config_tagged_error(
         self,
-        engine: StreamingEngine,
+        mock_grpc_client: AsyncMock,
+        sample_stream_config: dict[str, Any],
     ):
-        """_create_source_connector is the real guard for a missing
-        _resolved_source (it runs before the stream's own check), so it must raise
+        """The processor's source guard is the real guard for a missing
+        _resolved_source (it runs before any stage starts), so it must raise
         a CONFIG_INVALID-tagged error rather than an untagged ValueError that
         falls back to INTERNAL (issue #264)."""
+        processor = _make_processor(sample_stream_config, mock_grpc_client, MagicMock())
         with pytest.raises(ValueError) as exc_info:
-            engine._create_source_connector({})  # no _resolved_source
+            processor._resolve_source_readable({})  # no _resolved_source
         tag = read_failure_tag(exc_info.value)
         assert tag is not None
         assert tag.code is ErrorCode.CONFIG_INVALID
@@ -322,7 +303,6 @@ class TestEngineFatalFailureHandling:
     @pytest.mark.asyncio
     async def test_load_stage_success_does_not_raise(
         self,
-        engine: StreamingEngine,
         mock_grpc_client: AsyncMock,
         sample_stream_config: dict[str, Any],
         temp_dir: str,
@@ -351,26 +331,15 @@ class TestEngineFatalFailureHandling:
         )
         mock_grpc_client.send_batch = AsyncMock(return_value=success_result)
 
-        stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
-
-        stream_metrics = {
-            "records_processed": 0,
-            "records_failed": 0,
-            "batches_processed": 0,
-            "batches_failed": 0,
-        }
+        processor = _make_processor(
+            sample_stream_config,
+            mock_grpc_client,
+            DeadLetterQueue(f"{temp_dir}/dlq"),
+        )
 
         # Execute - should NOT raise
         with patch.dict("os.environ", {"METRICS_ENABLED": "false"}):
-            await engine._load_stage(
-                input_queue=input_queue,
-                output_queue=output_queue,
-                grpc_client=mock_grpc_client,
-                config=sample_stream_config,
-                stream_dlq=stream_dlq,
-                run_id="test-run-001",
-                stream_metrics=stream_metrics,
-            )
+            await processor._load_stage(input_queue, output_queue)
 
         # Assert: batch was forwarded to output queue
         output_batch = await output_queue.get()
@@ -383,7 +352,6 @@ class TestEngineFatalFailureHandling:
     @pytest.mark.asyncio
     async def test_load_stage_full_refresh_skips_cursor(
         self,
-        engine: StreamingEngine,
         mock_grpc_client: AsyncMock,
         sample_stream_config: dict[str, Any],
         temp_dir: str,
@@ -423,24 +391,14 @@ class TestEngineFatalFailureHandling:
             primary_keys=["id"],
         )
 
-        stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
-        stream_metrics = {
-            "records_processed": 0,
-            "records_failed": 0,
-            "batches_processed": 0,
-            "batches_failed": 0,
-        }
+        processor = _make_processor(
+            config,
+            mock_grpc_client,
+            DeadLetterQueue(f"{temp_dir}/dlq"),
+        )
 
         with patch.dict("os.environ", {"METRICS_ENABLED": "false"}):
-            await engine._load_stage(
-                input_queue=input_queue,
-                output_queue=output_queue,
-                grpc_client=mock_grpc_client,
-                config=config,
-                stream_dlq=stream_dlq,
-                run_id="test-run-001",
-                stream_metrics=stream_metrics,
-            )
+            await processor._load_stage(input_queue, output_queue)
 
         # No cursor computed for a full-refresh stream.
         assert mock_grpc_client.send_batch.await_args.kwargs["cursor"] is None
@@ -451,13 +409,12 @@ class TestEngineFatalFailureHandling:
     @pytest.mark.asyncio
     async def test_load_stage_checkpoint_threads_stream_version(
         self,
-        engine: StreamingEngine,
         mock_grpc_client: AsyncMock,
         sample_stream_config: dict[str, Any],
         temp_dir: str,
     ):
-        """A committed batch threads config['stream_version'] into the
-        emitted checkpoint. Guards the engine -> save_stream_checkpoint seam,
+        """A committed batch threads the stream's version into the emitted
+        checkpoint. Guards the processor -> save_stream_checkpoint call,
         which only runs when the ACK carries a committed_cursor."""
         from src.grpc.cursor import encode_cursor
         from src.state.dead_letter_queue import DeadLetterQueue
@@ -479,39 +436,25 @@ class TestEngineFatalFailureHandling:
         )
         mock_grpc_client.send_batch = AsyncMock(return_value=success_result)
 
-        config = dict(sample_stream_config, stream_version=7)
-        engine.state_manager.save_stream_checkpoint = MagicMock()
-        stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
-        stream_metrics = {
-            "records_processed": 0,
-            "records_failed": 0,
-            "batches_processed": 0,
-            "batches_failed": 0,
-        }
+        state_manager = MagicMock()
+        processor = _make_processor(
+            dict(sample_stream_config, stream_version=7),
+            mock_grpc_client,
+            DeadLetterQueue(f"{temp_dir}/dlq"),
+            state_manager=state_manager,
+        )
 
         with patch.dict("os.environ", {"METRICS_ENABLED": "false"}):
-            await engine._load_stage(
-                input_queue=input_queue,
-                output_queue=output_queue,
-                grpc_client=mock_grpc_client,
-                config=config,
-                stream_dlq=stream_dlq,
-                run_id="test-run-001",
-                stream_metrics=stream_metrics,
-            )
+            await processor._load_stage(input_queue, output_queue)
 
-        engine.state_manager.save_stream_checkpoint.assert_called_once()
+        state_manager.save_stream_checkpoint.assert_called_once()
         assert (
-            engine.state_manager.save_stream_checkpoint.call_args.kwargs[
-                "stream_version"
-            ]
-            == 7
+            state_manager.save_stream_checkpoint.call_args.kwargs["stream_version"] == 7
         )
 
     @pytest.mark.asyncio
     async def test_load_stage_retryable_failure_retries_then_dlq(
         self,
-        engine: StreamingEngine,
         mock_grpc_client: AsyncMock,
         sample_stream_config: dict[str, Any],
         temp_dir: str,
@@ -538,27 +481,16 @@ class TestEngineFatalFailureHandling:
         )
         mock_grpc_client.send_batch = AsyncMock(return_value=retryable_result)
 
-        stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
-
-        engine.error_strategy = "dlq"
-        engine.retry_delay = 0.01  # keep exponential backoff fast in the test
-        stream_metrics = {
-            "records_processed": 0,
-            "records_failed": 0,
-            "batches_processed": 0,
-            "batches_failed": 0,
-        }
+        processor = _make_processor(
+            sample_stream_config,
+            mock_grpc_client,
+            DeadLetterQueue(f"{temp_dir}/dlq"),
+            error_strategy="dlq",
+            retry_delay=0.01,  # keep exponential backoff fast in the test
+        )
 
         # Execute - should NOT raise (goes to DLQ after retries)
-        await engine._load_stage(
-            input_queue=input_queue,
-            output_queue=output_queue,
-            grpc_client=mock_grpc_client,
-            config=sample_stream_config,
-            stream_dlq=stream_dlq,
-            run_id="test-run-001",
-            stream_metrics=stream_metrics,
-        )
+        await processor._load_stage(input_queue, output_queue)
 
         # Assert: send_batch was called multiple times (initial + retries)
         # Initial call + 3 retries (default max_retries=3) = 4 calls
@@ -567,7 +499,6 @@ class TestEngineFatalFailureHandling:
     @pytest.mark.asyncio
     async def test_load_stage_retryable_exhaustion_raises_with_fail_strategy(
         self,
-        engine: StreamingEngine,
         mock_grpc_client: AsyncMock,
         sample_stream_config: dict[str, Any],
         temp_dir: str,
@@ -595,28 +526,16 @@ class TestEngineFatalFailureHandling:
         mock_grpc_client.send_batch = AsyncMock(return_value=retryable_result)
 
         stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
-
-        config = dict(sample_stream_config)
-        engine.error_strategy = "fail"
-        engine.retry_delay = 0.01
-
-        stream_metrics = {
-            "records_processed": 0,
-            "records_failed": 0,
-            "batches_processed": 0,
-            "batches_failed": 0,
-        }
+        processor = _make_processor(
+            dict(sample_stream_config),
+            mock_grpc_client,
+            stream_dlq,
+            error_strategy="fail",
+            retry_delay=0.01,
+        )
 
         with pytest.raises(StreamProcessingError, match="failed after"):
-            await engine._load_stage(
-                input_queue=input_queue,
-                output_queue=output_queue,
-                grpc_client=mock_grpc_client,
-                config=config,
-                stream_dlq=stream_dlq,
-                run_id="test-run-001",
-                stream_metrics=stream_metrics,
-            )
+            await processor._load_stage(input_queue, output_queue)
 
         # No record was sent to the DLQ under 'fail'
         assert await stream_dlq.get_failed_records() == []
@@ -624,7 +543,6 @@ class TestEngineFatalFailureHandling:
     @pytest.mark.asyncio
     async def test_not_ready_exhaustion_tags_internal_not_write_failed(
         self,
-        engine: StreamingEngine,
         mock_grpc_client: AsyncMock,
         sample_stream_config: dict[str, Any],
         temp_dir: str,
@@ -652,27 +570,16 @@ class TestEngineFatalFailureHandling:
         )
         mock_grpc_client.send_batch = AsyncMock(return_value=not_ready_result)
 
-        stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
-        engine.error_strategy = "fail"
-        engine.retry_delay = 0.01
-
-        stream_metrics = {
-            "records_processed": 0,
-            "records_failed": 0,
-            "batches_processed": 0,
-            "batches_failed": 0,
-        }
+        processor = _make_processor(
+            dict(sample_stream_config),
+            mock_grpc_client,
+            DeadLetterQueue(f"{temp_dir}/dlq"),
+            error_strategy="fail",
+            retry_delay=0.01,
+        )
 
         with pytest.raises(StreamProcessingError) as exc_info:
-            await engine._load_stage(
-                input_queue=input_queue,
-                output_queue=output_queue,
-                grpc_client=mock_grpc_client,
-                config=dict(sample_stream_config),
-                stream_dlq=stream_dlq,
-                run_id="test-run-001",
-                stream_metrics=stream_metrics,
-            )
+            await processor._load_stage(input_queue, output_queue)
 
         tag = read_failure_tag(exc_info.value)
         assert tag is not None
@@ -682,7 +589,6 @@ class TestEngineFatalFailureHandling:
     @pytest.mark.asyncio
     async def test_dlq_exhaustion_records_batch_codes_for_partial_run(
         self,
-        engine: StreamingEngine,
         mock_grpc_client: AsyncMock,
         sample_stream_config: dict[str, Any],
         temp_dir: str,
@@ -696,25 +602,22 @@ class TestEngineFatalFailureHandling:
         from src.state.dead_letter_queue import DeadLetterQueue
 
         stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
-        engine.error_strategy = "dlq"
-        engine.retry_delay = 0.01
 
-        async def _exhaust(result, stream_metrics):
+        async def _exhaust(result):
             input_queue = asyncio.Queue()
             output_queue = asyncio.Queue()
             await input_queue.put(pa.RecordBatch.from_pylist([{"id": 1}]))
             await input_queue.put(None)
             mock_grpc_client.send_batch = AsyncMock(return_value=result)
-            await engine._load_stage(
-                input_queue=input_queue,
-                output_queue=output_queue,
-                grpc_client=mock_grpc_client,
-                config=dict(sample_stream_config),
-                stream_dlq=stream_dlq,
-                run_id="test-run-001",
-                stream_metrics=stream_metrics,
+            processor = _make_processor(
+                dict(sample_stream_config),
+                mock_grpc_client,
+                stream_dlq,
+                error_strategy="dlq",
+                retry_delay=0.01,
             )
-            return stream_metrics
+            await processor._load_stage(input_queue, output_queue)
+            return processor
 
         def _retryable(summary, category=None):
             return MockBatchResult(
@@ -731,40 +634,25 @@ class TestEngineFatalFailureHandling:
                 ),
             )
 
-        def _fresh_metrics() -> dict[str, Any]:
-            return {
-                "records_processed": 0,
-                "records_failed": 0,
-                "records_skipped": 0,
-                "batches_processed": 0,
-                "batches_failed": 0,
-            }
-
         # Declared NOT_READY -> INTERNAL, whatever the summary wording.
-        metrics = await _exhaust(
+        processor = await _exhaust(
             _retryable(
                 "Handler not connected",
                 FailureCategory.FAILURE_CATEGORY_NOT_READY,
-            ),
-            _fresh_metrics(),
+            )
         )
-        assert metrics["_exhausted_failure_codes"] == [ErrorCode.INTERNAL]
+        assert processor.exhausted_failure_codes == [ErrorCode.INTERNAL]
 
         # Undeclared acks take the same text fallback the raise path gets: a
         # config-class summary keeps CONFIG_INVALID, opaque driver text takes
         # the load-stage default.
-        metrics = await _exhaust(
-            _retryable("SchemaConfigurationError: unsupported write mode"),
-            _fresh_metrics(),
+        processor = await _exhaust(
+            _retryable("SchemaConfigurationError: unsupported write mode")
         )
-        assert metrics["_exhausted_failure_codes"] == [ErrorCode.CONFIG_INVALID]
+        assert processor.exhausted_failure_codes == [ErrorCode.CONFIG_INVALID]
 
-        metrics = await _exhaust(
-            _retryable("connection reset by peer"), _fresh_metrics()
-        )
-        assert metrics["_exhausted_failure_codes"] == [
-            ErrorCode.DESTINATION_WRITE_FAILED
-        ]
+        processor = await _exhaust(_retryable("connection reset by peer"))
+        assert processor.exhausted_failure_codes == [ErrorCode.DESTINATION_WRITE_FAILED]
 
     def test_get_partial_error_code_reports_dominant_partial_cause(
         self, engine: StreamingEngine
@@ -782,7 +670,6 @@ class TestEngineFatalFailureHandling:
     @pytest.mark.asyncio
     async def test_load_stage_retryable_exhaustion_skips_with_skip_strategy(
         self,
-        engine: StreamingEngine,
         mock_grpc_client: AsyncMock,
         sample_stream_config: dict[str, Any],
         temp_dir: str,
@@ -809,43 +696,31 @@ class TestEngineFatalFailureHandling:
         mock_grpc_client.send_batch = AsyncMock(return_value=retryable_result)
 
         stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
-
-        config = dict(sample_stream_config)
-        engine.error_strategy = "skip"
-        engine.retry_delay = 0.01
-
-        stream_metrics = {
-            "records_processed": 0,
-            "records_failed": 0,
-            "records_skipped": 0,
-            "batches_processed": 0,
-            "batches_failed": 0,
-        }
+        pipeline_metrics = PipelineMetrics()
+        processor = _make_processor(
+            dict(sample_stream_config),
+            mock_grpc_client,
+            stream_dlq,
+            error_strategy="skip",
+            retry_delay=0.01,
+            pipeline_metrics=pipeline_metrics,
+        )
 
         # Must NOT raise.
-        await engine._load_stage(
-            input_queue=input_queue,
-            output_queue=output_queue,
-            grpc_client=mock_grpc_client,
-            config=config,
-            stream_dlq=stream_dlq,
-            run_id="test-run-001",
-            stream_metrics=stream_metrics,
-        )
+        await processor._load_stage(input_queue, output_queue)
 
         # Skipped: not dead-lettered, but counted as failed AND tracked as
         # skipped (distinct from DLQ'd) at both stream and pipeline level so
         # partial-run reporting stays honest.
         assert await stream_dlq.get_failed_records() == []
-        assert stream_metrics["batches_failed"] == 1
-        assert stream_metrics["records_skipped"] == 1
-        assert stream_metrics["records_failed"] == 1
-        assert engine.get_metrics().records_skipped == 1
+        assert processor.metrics.batches_failed == 1
+        assert processor.metrics.records_skipped == 1
+        assert processor.metrics.records_failed == 1
+        assert pipeline_metrics.records_skipped == 1
 
     @pytest.mark.asyncio
     async def test_load_stage_unhandled_strategy_raises(
         self,
-        engine: StreamingEngine,
         mock_grpc_client: AsyncMock,
         sample_stream_config: dict[str, Any],
         temp_dir: str,
@@ -871,49 +746,31 @@ class TestEngineFatalFailureHandling:
         )
         mock_grpc_client.send_batch = AsyncMock(return_value=retryable_result)
 
-        stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
-
-        config = dict(sample_stream_config)
         # ErrorHandlingConfig validates the strategy enum at construction, so a
-        # bogus value can only reach the engine if that typed boundary were
-        # bypassed. Set it straight on the engine to prove the load stage's
-        # defensive `else: raise` still fails loud rather than silently
-        # completing.
-        engine.error_strategy = "bogus"
-        engine.retry_delay = 0.01
-
-        stream_metrics = {
-            "records_processed": 0,
-            "records_failed": 0,
-            "batches_processed": 0,
-            "batches_failed": 0,
-        }
+        # bogus value can only reach the processor if that typed boundary were
+        # bypassed. Set it straight on the processor to prove the exhaustion
+        # handler's defensive `else: raise` still fails loud rather than
+        # silently completing.
+        processor = _make_processor(
+            dict(sample_stream_config),
+            mock_grpc_client,
+            DeadLetterQueue(f"{temp_dir}/dlq"),
+            error_strategy="bogus",
+            retry_delay=0.01,
+        )
 
         with pytest.raises(StreamProcessingError, match="Unhandled error strategy"):
-            await engine._load_stage(
-                input_queue=input_queue,
-                output_queue=output_queue,
-                grpc_client=mock_grpc_client,
-                config=config,
-                stream_dlq=stream_dlq,
-                run_id="test-run-001",
-                stream_metrics=stream_metrics,
-            )
+            await processor._load_stage(input_queue, output_queue)
 
     @pytest.mark.asyncio
     async def test_metrics_updated_on_fatal_failure(
         self,
-        engine: StreamingEngine,
         mock_grpc_client: AsyncMock,
         sample_stream_config: dict[str, Any],
         temp_dir: str,
     ):
-        """Test that metrics are updated when fatal failure occurs."""
+        """Test that pipeline-level metrics are updated on a fatal failure."""
         from src.state.dead_letter_queue import DeadLetterQueue
-
-        # Reset metrics
-        engine.metrics.records_failed = 0
-        engine.metrics.batches_failed = 0
 
         # Setup queues
         input_queue = asyncio.Queue()
@@ -934,30 +791,23 @@ class TestEngineFatalFailureHandling:
         )
         mock_grpc_client.send_batch = AsyncMock(return_value=fatal_result)
 
-        stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
-
-        stream_metrics = {
-            "records_processed": 0,
-            "records_failed": 0,
-            "batches_processed": 0,
-            "batches_failed": 0,
-        }
+        pipeline_metrics = PipelineMetrics()
+        processor = _make_processor(
+            sample_stream_config,
+            mock_grpc_client,
+            DeadLetterQueue(f"{temp_dir}/dlq"),
+            pipeline_metrics=pipeline_metrics,
+        )
 
         # Execute
         with pytest.raises(StreamProcessingError):
-            await engine._load_stage(
-                input_queue=input_queue,
-                output_queue=output_queue,
-                grpc_client=mock_grpc_client,
-                config=sample_stream_config,
-                stream_dlq=stream_dlq,
-                run_id="test-run-001",
-                stream_metrics=stream_metrics,
-            )
+            await processor._load_stage(input_queue, output_queue)
 
-        # Assert: metrics were updated
-        assert engine.metrics.records_failed == 3
-        assert engine.metrics.batches_failed == 1
+        # Assert: metrics were updated at both stream and pipeline level
+        assert pipeline_metrics.records_failed == 3
+        assert pipeline_metrics.batches_failed == 1
+        assert processor.metrics.records_failed == 3
+        assert processor.metrics.batches_failed == 1
 
 
 @pytest.mark.integration
@@ -1106,7 +956,6 @@ class TestEngineDLQOnFailure:
     @pytest.mark.asyncio
     async def test_fatal_failure_sends_batch_to_dlq(
         self,
-        engine: StreamingEngine,
         mock_grpc_client: AsyncMock,
         sample_stream_config: dict[str, Any],
         temp_dir: str,
@@ -1136,27 +985,16 @@ class TestEngineDLQOnFailure:
         mock_grpc_client.send_batch = AsyncMock(return_value=fatal_result)
 
         dlq_path = f"{temp_dir}/dlq"
-        stream_dlq = DeadLetterQueue(dlq_path)
-
-        engine.error_strategy = "dlq"  # fatal failures DLQ before raising
-        stream_metrics = {
-            "records_processed": 0,
-            "records_failed": 0,
-            "batches_processed": 0,
-            "batches_failed": 0,
-        }
+        processor = _make_processor(
+            sample_stream_config,
+            mock_grpc_client,
+            DeadLetterQueue(dlq_path),
+            error_strategy="dlq",  # fatal failures DLQ before raising
+        )
 
         # Execute
         with pytest.raises(StreamProcessingError):
-            await engine._load_stage(
-                input_queue=input_queue,
-                output_queue=output_queue,
-                grpc_client=mock_grpc_client,
-                config=sample_stream_config,
-                stream_dlq=stream_dlq,
-                run_id="test-run-001",
-                stream_metrics=stream_metrics,
-            )
+            await processor._load_stage(input_queue, output_queue)
 
         # Assert: DLQ file was created
         dlq_files = list(os.listdir(dlq_path)) if os.path.exists(dlq_path) else []
