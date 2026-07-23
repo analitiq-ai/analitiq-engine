@@ -86,7 +86,7 @@ them as independent items.
 2. Wait for feedback from the review executor.
 3. Determine if the raised issues are legitimate or not.
    a. If the issue is legitimate and relevant to the PR, fix it.
-   b. If the issue is outside the scope of the PR, check if there is a related issue in the GitHub issue tracker. If not, create a new issue in GitHub and move on.
+   b. If the issue is outside the scope of the PR, check if there is a related issue in the GitHub issue tracker. If not, create a new issue in GitHub (subject to the Consolidation Rule above) and move on.
    c. If the issue is not a legitimate problem, summarize your thoughts on the point and move on.
 4. Once you fixed all issues that need fixing, commit fixes, push to the branch.
 5. Use `/pr-review-toolkit` to review again.
