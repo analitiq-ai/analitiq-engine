@@ -454,7 +454,11 @@ Mechanics:
   batch's row (§2) — it already holds the post-mapping batches in arrival
   order and reads `conflict_keys` from stream config, so the collapse needs
   no new contract surface and reproduces sequential-merge semantics
-  exactly. Because it runs
+  exactly. One asymmetry is pinned: the unit's MAX cursor is computed over
+  the *pre-collapse* rows — a dropped earlier duplicate may carry the
+  unit's only watermark, and a surviving later row with a null or lower
+  cursor value must not erase progress that sequential per-batch
+  checkpoints would have persisted. Because it runs
   *before* `record_ids`, the MAX-cursor computation, `emitted_at` stamping,
   and `batch_seq` assignment (`stream_processor.py:586-633`), everything
   downstream — retry stability, cursor semantics, DLQ correlation — is
@@ -474,10 +478,12 @@ Mechanics:
 - **The dlq/skip unit is the sent batch — as it always was.** Declaring
   `write_unit` consciously widens that unit: a fatally rejected coalesced
   unit is DLQ'd or skipped wholesale, good rows included, exactly as a
-  source batch is today. Nothing is lost under `dlq` — the unit replays —
-  and unit size is the operator's control over rejection granularity: a
-  deployment that needs finer DLQ isolation declares a smaller
-  `write_unit`. The engine adds no split-and-retry machinery for this:
+  source batch is today. Nothing is lost under `dlq`: every row of the unit
+  is persisted to the dead-letter queue the way a source batch's rows are
+  today (the per-record JSONL the DLQ already writes), and recovery is the
+  same operator workflow either way — over more rows. Unit size is the
+  operator's control over rejection granularity: a deployment that needs
+  finer DLQ isolation declares a smaller `write_unit`. The engine adds no split-and-retry machinery for this:
   whole-batch rejection without per-record attribution is this engine's
   recorded design stance (untrusted connectors cannot be trusted to blame
   individual rows), and wholesale rejection of a load unit is the norm for
@@ -491,7 +497,16 @@ Mechanics:
   resumes from the committed cursor with `batch_seq` starting over, so the
   same identity triple can carry a different payload. Such tokens must
   therefore also include a payload-sensitive component (a content hash of
-  the unit): an identical retry still attaches to its in-flight job, while
+  the unit) — and be scoped to one stage incarnation: an engine-level retry
+  that pre-flight-drops and rebuilds the stage (§6) submits under a fresh
+  job identity (an attempt component alongside the hash), because reusing
+  the previous attempt's completed job ID would dedupe the submission and
+  the merge would then run against the freshly rebuilt, empty stage —
+  acking rows that were never applied. Attach-instead-of-resubmit is for
+  *within* an attempt (a client polling timeout); across attempts, row
+  idempotency already lives in the mode statement, so nothing needs
+  job-level dedup. Within one attempt an identical retry still attaches to
+  its in-flight job, while
   a restart's different payload gets a fresh identity instead of a silent
   no-op.
 - **Size budget.** The hard bound is the gRPC message cap
@@ -639,8 +654,8 @@ compatibility layer, per the engine's no-legacy rule:
   in-session table.
 - Declaring `write_unit` widens the dlq/skip unit to the coalesced batch: a
   fatally rejected unit is rejected wholesale, good rows included.
-  Replayable under `dlq`; the mitigation is unit size, not engine
-  machinery.
+  All rows land in the DLQ as today; the mitigation is unit size, not
+  engine machinery.
 - The 64 MiB single-message ceiling is a real bound on write-unit size;
   chunked framing is the known, deliberately deferred escape hatch.
 
