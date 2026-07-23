@@ -9,10 +9,10 @@ from cdk.connection_runtime import ConnectionRuntime
 from src.destination.connectors.file import FileDestinationHandler
 from src.destination.connectors.stream import StreamDestinationHandler
 
+# A fixed, timezone-aware emit instant for write_batch/send_batch calls; the
+# engine stamps this per batch (issue #353). Value is arbitrary for sinks
+# that ignore it.
 _EMITTED_AT = datetime(2026, 7, 21, 9, 0, 0, tzinfo=timezone.utc)
-"""A fixed, timezone-aware emit instant for write_batch/send_batch calls;
-the engine stamps this per batch (issue #353). Value is arbitrary for sinks
-that ignore it."""
 
 
 def _make_file_runtime(*, raw_config=None):

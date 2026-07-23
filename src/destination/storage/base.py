@@ -5,7 +5,7 @@ Storage backends handle writing files to different storage systems
 """
 
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -185,13 +185,18 @@ class BaseStorageBackend(ABC):
         stem = f"{batch_seq}_{content_hash}" if content_hash else str(batch_seq)
 
         if partition_template:
-            # Replace partition placeholders from the replay-stable batch
-            # instant (UTC), so a retried batch always resolves the same dir.
+            # Read the calendar fields off the UTC projection of the instant,
+            # so partitioning is UTC by construction rather than by caller
+            # convention -- a non-UTC (but still aware) timestamp buckets into
+            # the same directory as its UTC equivalent. Derived from the
+            # replay-stable batch instant, so a retried batch always resolves
+            # the same dir.
+            utc = timestamp.astimezone(timezone.utc)
             partitions = partition_template.format(
-                year=timestamp.year,
-                month=f"{timestamp.month:02d}",
-                day=f"{timestamp.day:02d}",
-                hour=f"{timestamp.hour:02d}",
+                year=utc.year,
+                month=f"{utc.month:02d}",
+                day=f"{utc.day:02d}",
+                hour=f"{utc.hour:02d}",
             )
             return f"{base_path}/{partitions}/{stream_id}_{stem}{extension}"
 

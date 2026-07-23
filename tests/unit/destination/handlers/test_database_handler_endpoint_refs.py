@@ -19,10 +19,10 @@ from cdk.sql.generic import GenericSQLConnector, _StreamState
 from cdk.type_map import TypeMapper
 from cdk.type_map.rules import parse_rules
 
+# A fixed, timezone-aware emit instant for write_batch/send_batch calls; the
+# engine stamps this per batch (issue #353). Value is arbitrary for sinks
+# that ignore it.
 _EMITTED_AT = datetime(2026, 7, 21, 9, 0, 0, tzinfo=timezone.utc)
-"""A fixed, timezone-aware emit instant for write_batch/send_batch calls;
-the engine stamps this per batch (issue #353). Value is arbitrary for sinks
-that ignore it."""
 
 
 def _mapper(label: str) -> TypeMapper:
@@ -195,7 +195,7 @@ class TestWriteBatchFatalOnTypeMapError:
     @pytest.mark.asyncio
     async def test_missing_schema_contract_classified_as_fatal(self):
         from contextlib import asynccontextmanager
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import MagicMock
 
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 

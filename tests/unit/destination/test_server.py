@@ -742,6 +742,37 @@ class TestWireToCdkTranslation:
         assert ack.failure_category == FailureCategory.FAILURE_CATEGORY_NOT_READY
         handler.write_batch.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_out_of_range_emitted_at_fails_one_batch_not_the_stream(self):
+        # An out-of-range emitted_at_unix_ms (reachable only from a corrupt or
+        # non-conforming sender) must fail THIS batch to the DLQ and never
+        # reach the handler or tear the stream down -- the same per-batch
+        # failure the schema-not-configured guard yields (issue #353).
+        handler = MagicMock()
+        handler.configure_schema = AsyncMock(return_value=True)
+        handler.write_batch = AsyncMock()
+        _stub_retry_semantics(handler)
+        servicer = DestinationServicer(handler, server=MagicMock())
+
+        responses = []
+        async for resp in servicer.StreamRecords(
+            _iter_many(
+                _schema_request("s1"),
+                # 10**18 ms -> ~year 31,690,000: datetime.fromtimestamp raises.
+                _batch_request(stream_id="s1", emitted_at_unix_ms=10**18),
+            ),
+            context=MagicMock(),
+        ):
+            responses.append(resp)
+
+        ack = responses[-1].ack
+        assert ack.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert "emitted_at_unix_ms" in ack.failure_summary
+        # Decode failed before the write, and the stream produced exactly the
+        # schema ack + this one batch ack (no crash).
+        handler.write_batch.assert_not_called()
+        assert len(responses) == 2
+
 
 class TestServerPingProtection:
     """The gRPC server must advertise ping-flood protection options.
@@ -754,7 +785,7 @@ class TestServerPingProtection:
     async def test_server_options_include_ping_protection(self):
         """grpc.http2.min_ping_interval_without_data_ms and
         grpc.http2.max_ping_strikes must be present in the server options."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         from src.destination.server import DestinationGRPCServer
 

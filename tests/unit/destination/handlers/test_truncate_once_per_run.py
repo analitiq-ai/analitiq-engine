@@ -26,10 +26,10 @@ from cdk.sql.generic import GenericSQLConnector
 from cdk.sql.generic import _StreamState as SqlStreamState
 from src.engine.stream_processor import StreamProcessor, _FullRefreshCheckpoint
 
+# A fixed, timezone-aware emit instant for write_batch/send_batch calls; the
+# engine stamps this per batch (issue #353). Value is arbitrary for sinks
+# that ignore it.
 _EMITTED_AT = datetime(2026, 7, 21, 9, 0, 0, tzinfo=timezone.utc)
-"""A fixed, timezone-aware emit instant for write_batch/send_batch calls;
-the engine stamps this per batch (issue #353). Value is arbitrary for sinks
-that ignore it."""
 
 
 def _make_processor(

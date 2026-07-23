@@ -82,7 +82,7 @@ message RecordBatch {
 }
 ```
 
-`emitted_at_unix_ms` is the engine's per-batch emit instant (UTC epoch milliseconds), stamped once in the load stage and re-sent unchanged on every retry of the same batch (`src/engine/stream_processor.py`). The servicer decodes it to a timezone-aware `datetime` and hands it to `write_batch` as `emitted_at`. A time-partitioned destination (file/S3) resolves its `{year}/{month}/{day}/{hour}` placeholders from this value rather than its own write-time clock, so a replayed batch resolves the same output path and overwrites in place instead of drifting into a new partition directory across an hour/day boundary (issue #353). Sinks without time-based partitioning ignore it; a partitioning sink fails the batch loud if the value is unstamped (epoch 0).
+`emitted_at_unix_ms` is the engine's per-batch emit instant (UTC epoch milliseconds), stamped once in the load stage and re-sent unchanged on every retry of the same batch (`src/engine/stream_processor.py`). The servicer decodes it to a timezone-aware `datetime` and hands it to `write_batch` as `emitted_at`. A time-partitioned destination (file/S3) resolves its `{year}/{month}/{day}/{hour}` placeholders from this value rather than its own write-time clock, so a replayed batch resolves the same output path and overwrites in place instead of drifting into a new partition directory across an hour/day boundary (issue #353). Sinks without time-based partitioning ignore it; a sink whose `path_template` actually substitutes a time placeholder fails the batch loud if the value is unstamped (epoch 0).
 
 ### Cursor (opaque token)
 

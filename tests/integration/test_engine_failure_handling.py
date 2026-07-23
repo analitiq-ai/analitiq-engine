@@ -546,6 +546,19 @@ class TestEngineFatalFailureHandling:
         # Initial call + 3 retries (default max_retries=3) = 4 calls
         assert mock_grpc_client.send_batch.call_count == 4
 
+        # #353 core invariant: emitted_at is stamped ONCE per batch (before the
+        # retry loop) and reused unchanged on every retry, so all four calls
+        # carry the identical instant. Re-stamping per attempt would drift a
+        # replayed batch across an hour/day partition boundary and reintroduce
+        # the duplicate-file bug this fix removes.
+        emitted = [
+            call.kwargs["emitted_at"]
+            for call in mock_grpc_client.send_batch.call_args_list
+        ]
+        assert len(emitted) == 4
+        assert all(e.tzinfo is not None for e in emitted)
+        assert len({e.timestamp() for e in emitted}) == 1
+
     @pytest.mark.asyncio
     async def test_load_stage_retryable_exhaustion_raises_with_fail_strategy(
         self,

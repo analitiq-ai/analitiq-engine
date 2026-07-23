@@ -16,10 +16,10 @@ import pytest
 from cdk.types import AckStatus, RetrySemantics, SchemaSpec, WriteMode
 from src.worker.proxy import WorkerProxyHandler
 
+# A fixed, timezone-aware emit instant for write_batch/send_batch calls; the
+# engine stamps this per batch (issue #353). Value is arbitrary for sinks
+# that ignore it.
 _EMITTED_AT = datetime(2026, 7, 21, 9, 0, 0, tzinfo=timezone.utc)
-"""A fixed, timezone-aware emit instant for write_batch/send_batch calls;
-the engine stamps this per batch (issue #353). Value is arbitrary for sinks
-that ignore it."""
 
 
 def _proxy():
@@ -256,6 +256,11 @@ class TestProxyWriteBatch:
         # (issue #351); dropping it here would put the engine back on text
         # matching for every worker-run connector.
         assert result.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
+        # #353: emitted_at must ride the forwarded batch unchanged across the
+        # shell->worker hop, or a sandboxed file connector would see the
+        # epoch-0 default and fail every partitioned write. It is the last
+        # positional arg of the forwarded send_batch.
+        assert stream_client.send_batch.await_args.args[-1] == _EMITTED_AT
 
     async def test_cursor_on_failure_ack_is_dropped_not_fatal_to_stream(self):
         # The ack crosses an untrusted process boundary: a worker pairing

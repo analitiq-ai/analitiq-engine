@@ -24,8 +24,21 @@ from ..storage.base import BaseStorageBackend
 logger = logging.getLogger(__name__)
 
 
+# Placeholders build_path fills from the batch instant. A path_template that
+# uses any of these needs a real emitted_at; one without them (a static prefix)
+# renders a deterministic path that never touches the instant.
+_TIME_PARTITION_PLACEHOLDERS = ("{year}", "{month}", "{day}", "{hour}")
+
+
+def _template_needs_timestamp(template: str | None) -> bool:
+    """Report whether ``template`` substitutes any time placeholder."""
+    if not template:
+        return False
+    return any(p in template for p in _TIME_PARTITION_PLACEHOLDERS)
+
+
 def _is_stamped_utc(value: object) -> bool:
-    """True when ``value`` is a timezone-aware instant the engine really stamped.
+    """Report whether ``value`` is a real, engine-stamped tz-aware instant.
 
     The wire default for an unstamped emitted_at is epoch 0, which decodes to
     a tz-aware ``1970-01-01 00:00:00 UTC`` whose POSIX timestamp is 0; a naive
@@ -251,8 +264,13 @@ class FileDestinationHandler(BaseDestinationHandler):
             # hop), so validate it before writing: a missing or epoch-zero
             # stamp would silently bucket every replay under year=1970 and
             # defeat the same-path overwrite this value exists to guarantee
-            # (issue #353). Fail loud so the batch routes to the DLQ instead.
-            if self._path_template and not _is_stamped_utc(emitted_at):
+            # (issue #353). The guard fires only for a template that actually
+            # substitutes a time placeholder -- a static-prefix template never
+            # touches emitted_at, so it needs no stamp. Fail loud so the batch
+            # routes to the DLQ instead.
+            if _template_needs_timestamp(self._path_template) and not _is_stamped_utc(
+                emitted_at
+            ):
                 msg = (
                     f"file destination has a time-based path_template "
                     f"({self._path_template!r}) but the batch carries no "

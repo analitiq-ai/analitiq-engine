@@ -27,10 +27,10 @@ from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 # ---------------------------------------------------------------------------
 
 
+# A fixed, timezone-aware emit instant the engine stamps per batch (issue
+# #353). Several tests here assert the partition directory derives from it, so
+# its exact value is load-bearing, not arbitrary.
 _EMITTED_AT = datetime(2026, 7, 21, 9, 0, 0, tzinfo=timezone.utc)
-"""A fixed, timezone-aware emit instant for write_batch/send_batch calls;
-the engine stamps this per batch (issue #353). Value is arbitrary for sinks
-that ignore it."""
 
 
 class TestBuildPathContentHash:
@@ -92,10 +92,12 @@ class TestBuildPathContentHash:
         assert path.startswith("/out/year=")
 
     def test_partition_placeholders_resolve_from_timestamp_not_wall_clock(self):
-        """The #353 guarantee: the partition dir comes from the passed
-        timestamp, so two calls with the same batch timestamp but different
-        wall clocks resolve the same path -- a replayed batch overwrites in
-        place instead of drifting across an hour/day boundary.
+        """The #353 guarantee at the storage layer: the partition dir is a
+        pure function of the passed timestamp, with no hidden wall-clock read,
+        so the same batch instant always resolves the same path and a later
+        instant advances to the next partition. (What makes that instant
+        replay-stable across retries is the engine layer -- see the
+        stream_processor / engine-failure tests.)
         """
         s = self._storage()
         tmpl = "year={year}/month={month}/day={day}/hour={hour}"
@@ -382,6 +384,55 @@ async def test_partitioned_write_with_unstamped_emitted_at_is_fatal():
     assert "emitted_at" in result.failure_summary
     handler._storage.build_path.assert_not_called()
     handler._storage.write_file.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_partitioned_write_with_naive_emitted_at_is_fatal():
+    """A naive (tz-less) emitted_at is a defect for a time-partitioned sink:
+    the guard rejects it before build_path, so a local-time datetime can never
+    silently bucket into the wrong UTC partition (issue #353).
+    """
+    handler = _make_handler(serialize_return=b'{"id":1}\n')
+    handler._path_template = "year={year}/month={month}"
+    naive = datetime(2026, 7, 21, 9, 0, 0)  # no tzinfo
+
+    result = await handler.write_batch(
+        run_id="r",
+        stream_id="s",
+        batch_seq=0,
+        record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+        record_ids=["r1"],
+        cursor=Cursor(token=b"c"),
+        emitted_at=naive,
+    )
+
+    assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+    assert "emitted_at" in result.failure_summary
+    handler._storage.build_path.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_static_path_template_tolerates_unstamped_emitted_at():
+    """A path_template with no time placeholders never consumes emitted_at, so
+    the guard must not fire for it even when emitted_at is unstamped -- only a
+    time-based template requires the instant (issue #353).
+    """
+    handler = _make_handler(serialize_return=b'{"id":1}\n')
+    handler._path_template = "archive/fixed"  # no {year}/{month}/{day}/{hour}
+    unstamped = datetime.fromtimestamp(0, tz=timezone.utc)
+
+    result = await handler.write_batch(
+        run_id="r",
+        stream_id="s",
+        batch_seq=0,
+        record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+        record_ids=["r1"],
+        cursor=Cursor(token=b"c"),
+        emitted_at=unstamped,
+    )
+
+    assert result.status == AckStatus.ACK_STATUS_SUCCESS
+    handler._storage.build_path.assert_called_once()
 
 
 @pytest.mark.asyncio

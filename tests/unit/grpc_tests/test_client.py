@@ -9,10 +9,10 @@ import grpc
 from src.grpc.client import BatchResult, DestinationGRPCClient, generate_record_id
 from src.grpc.generated.analitiq.v1 import AckStatus
 
+# A fixed, timezone-aware emit instant for write_batch/send_batch calls; the
+# engine stamps this per batch (issue #353). Value is arbitrary for sinks
+# that ignore it.
 _EMITTED_AT = datetime(2026, 7, 21, 9, 0, 0, tzinfo=timezone.utc)
-"""A fixed, timezone-aware emit instant for write_batch/send_batch calls;
-the engine stamps this per batch (issue #353). Value is arbitrary for sinks
-that ignore it."""
 
 
 class TestGenerateRecordId:
@@ -1011,7 +1011,7 @@ class TestSendBatchSelfHeal:
 
         import pyarrow as pa
 
-        from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
+        from src.grpc.generated.analitiq.v1 import Cursor
 
         client = DestinationGRPCClient()
         # Simulate a stream that was started then torn down by a prior timeout:
@@ -1064,7 +1064,7 @@ class TestSendBatchSelfHeal:
         bounded retry loop handles backoff and DLQ."""
         import pyarrow as pa
 
-        from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
+        from src.grpc.generated.analitiq.v1 import Cursor
 
         client = DestinationGRPCClient()
         client._stream_params = {
@@ -1194,3 +1194,36 @@ def _batch_ack(status):
     from src.grpc.generated.analitiq.v1 import BatchAck
 
     return BatchAck(status=status, records_written=1)
+
+
+@pytest.mark.asyncio
+async def test_send_batch_encodes_emitted_at_as_unix_ms():
+    """The client encodes emitted_at as UTC epoch milliseconds on the wire
+    RecordBatch (issue #353) -- the exact value the destination decodes back
+    to derive a replay-stable partition path. Dropping the ``* 1000`` or the
+    field would silently drift the destination to 1970 or a wrong hour."""
+    import asyncio
+
+    import pyarrow as pa
+
+    from src.grpc.generated.analitiq.v1 import Cursor
+
+    client = DestinationGRPCClient()
+    client._stream_active = True
+    client._request_queue = asyncio.Queue()
+    client._response_queue = asyncio.Queue()
+    # Pre-seed the ACK so send_batch returns as soon as it enqueues the batch.
+    client._response_queue.put_nowait(_batch_ack(AckStatus.ACK_STATUS_SUCCESS))
+
+    await client.send_batch(
+        run_id="r",
+        stream_id="s",
+        batch_seq=1,
+        record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+        record_ids=["1"],
+        cursor=Cursor(token=b""),
+        emitted_at=_EMITTED_AT,
+    )
+
+    enqueued = client._request_queue.get_nowait()
+    assert enqueued.batch.emitted_at_unix_ms == int(_EMITTED_AT.timestamp() * 1000)
