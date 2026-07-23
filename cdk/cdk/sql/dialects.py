@@ -399,17 +399,17 @@ class SqlDialect:
 
         Companion guard to overriding :meth:`adbc_ingest_kwargs` to
         return no targeting kwargs: when ingest follows the connection's
-        session defaults, the engine verifies — once per connection —
-        that the session schema equals the address's schema before
-        handing ``adbc_ingest`` a bare table name (issue #377). The
-        statement must return one row whose first column is the session
-        schema name, NULL when the session has none selected.
+        session defaults, the engine verifies — probing once per
+        connection — that the session schema equals the address's schema
+        before handing ``adbc_ingest`` a bare table name (issue #377).
+        The statement must return one row whose first column is the
+        session schema name, NULL when the session has none selected.
 
-        ``SELECT CURRENT_SCHEMA()`` is understood by the
-        session-default systems shipped today (Snowflake, Postgres); a
-        dialect whose system spells the probe differently overrides.
-        Dialects that keep the default :meth:`adbc_ingest_kwargs`
-        targeting never reach this probe.
+        ``SELECT CURRENT_SCHEMA()`` is the spelling of the one
+        session-default system shipped today (Snowflake) and is equally
+        valid Postgres SQL; a dialect whose system spells the probe
+        differently overrides. Dialects that keep the default
+        :meth:`adbc_ingest_kwargs` targeting never reach this probe.
         """
         return "SELECT CURRENT_SCHEMA()"
 

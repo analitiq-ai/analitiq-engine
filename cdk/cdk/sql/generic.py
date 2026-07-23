@@ -2094,6 +2094,22 @@ class GenericSQLConnector(BaseDestinationHandler):
         # RLock is reentrant: the same-thread acquires inside
         # _adbc_truncate_sync and _adbc_only_ingest_sync are safe.
         with self._adbc_op_lock:
+            # Guard before the TRUNCATE — the destructive statement of
+            # this path. TRUNCATE is schema-qualified and commits, so on
+            # a session/target mismatch running it first would empty the
+            # correct target and then refuse the refill (issue #377).
+            # The probe result is cached, so the subsequent ingest's own
+            # check is a cache hit.
+            conn = self._reopen_adbc_if_needed_sync()
+            try:
+                self._check_adbc_session_schema_sync(
+                    conn, address, self.dialect.adbc_ingest_kwargs(address)
+                )
+            except Exception as exc:
+                self._poison_adbc_connection()
+                if _is_fatal_adbc_error(exc):
+                    raise _reclassify_as_fatal(exc) from exc
+                raise
             self._adbc_truncate_sync(address)
             self._adbc_only_ingest_sync(cast_batch, address)
 
@@ -2214,7 +2230,8 @@ class GenericSQLConnector(BaseDestinationHandler):
                 # case-folding system's stored name matches the connector's
                 # conventional lowercase one); dialects that don't fall back
                 # to the connection's session defaults — verified above to
-                # match the target schema — where the stage was just created.
+                # match the target schema (the ADBC path mandates an explicit
+                # one) — where the stage was just created.
                 cursor.adbc_ingest(
                     stage_address.table,
                     cast_batch,
