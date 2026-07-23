@@ -1238,6 +1238,160 @@ class TestMergeIngestStageNameOnFoldingDialect:
             ), f"stage name missing from {stmt}"
 
 
+class _StageDropFailConn:
+    """Fake ADBC connection whose DROPs after the MERGE step fail.
+
+    Records every executed statement. ``merge_error`` makes the MERGE
+    statement itself raise (failure-path injection); either way the
+    MERGE marks the sequence, and the next ``drop_failures`` DROP
+    statements raise ``OperationalError`` (a retryable name, so the
+    error is not the fatal-reclassification path under test elsewhere).
+    """
+
+    def __init__(self, *, drop_failures=0, merge_error=None):
+        self.drop_failures = drop_failures
+        self.merge_error = merge_error
+        self.statements: list[str] = []
+        self.merge_seen = False
+        self.closed = False
+
+    def cursor(self):
+        conn = self
+
+        class _Cursor:
+            def execute(self, sql, *args):
+                conn.statements.append(sql)
+                if sql.startswith("MERGE"):
+                    conn.merge_seen = True
+                    if conn.merge_error is not None:
+                        raise conn.merge_error
+                elif sql.startswith("DROP") and conn.merge_seen:
+                    if conn.drop_failures > 0:
+                        conn.drop_failures -= 1
+                        raise OperationalError("connection reset during DROP")
+
+            def adbc_ingest(self, table, batch, mode, **kwargs):
+                """No-op: the stage fill is not under test."""
+
+            def close(self):
+                """No-op: the fake cursor owns no resources."""
+
+        return _Cursor()
+
+    def commit(self):
+        """No-op: statements are captured, not transacted."""
+
+    def close(self):
+        self.closed = True
+
+
+class TestMergeIngestStageDropFailure:
+    """Stage-DROP failure handling on both sides of the MERGE (issue #379).
+
+    Success path: the batch is acked SUCCESS and never retried, and the
+    stage name embeds the batch fingerprint, so a failed post-MERGE DROP
+    orphans the stage permanently. The connector must retry the DROP once,
+    then poison the connection — a failed DROP implies a possibly-dead
+    handle; without the poison the next batch burns one retryable failure
+    on the cached handle before healing — and log honestly that no
+    automatic cleanup reaches the table. Failure path: the cleanup-failure
+    log must not promise retry cleanup unconditionally, because after a
+    FATAL reclassification nothing retries.
+    """
+
+    def _handler(self, conn):
+        h = _FixtureConnector()
+        h._adbc_only = True
+        h._adbc_conn = conn
+        return h
+
+    def _merge(self, h):
+        h._merge_ingest_sync(
+            pa.RecordBatch.from_pydict({"id": [1], "v": ["a"]}),
+            h.dialect.table_address("orders", schema="public"),
+            ["id", "v"],
+            ["id"],
+            "btok",
+        )
+
+    @staticmethod
+    def _post_merge_drops(conn):
+        merge_index = next(
+            i for i, s in enumerate(conn.statements) if s.startswith("MERGE")
+        )
+        return [
+            s
+            for s in conn.statements[merge_index + 1 :]
+            if s.startswith("DROP TABLE IF EXISTS")
+        ]
+
+    def test_single_drop_success_no_retry_no_poison(self, caplog):
+        conn = _StageDropFailConn()
+        h = self._handler(conn)
+        with caplog.at_level(logging.DEBUG, logger=database_module.logger.name):
+            self._merge(h)
+        assert len(self._post_merge_drops(conn)) == 1
+        assert not conn.closed
+        assert h._adbc_conn is conn
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    def test_drop_retry_second_attempt_succeeds_without_poison(self, caplog):
+        conn = _StageDropFailConn(drop_failures=1)
+        h = self._handler(conn)
+        with caplog.at_level(logging.DEBUG, logger=database_module.logger.name):
+            self._merge(h)
+        assert len(self._post_merge_drops(conn)) == 2
+        assert not conn.closed
+        assert h._adbc_conn is conn
+        # The first failed attempt surfaces at DEBUG only.
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any(
+            "attempt 1/2" in r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.DEBUG
+        )
+
+    def test_persistent_drop_failure_poisons_and_logs_orphan(self, caplog):
+        conn = _StageDropFailConn(drop_failures=2)
+        h = self._handler(conn)
+        with caplog.at_level(logging.DEBUG, logger=database_module.logger.name):
+            self._merge(h)  # must NOT raise: the MERGE itself succeeded
+        assert len(self._post_merge_drops(conn)) == 2
+        # Poisoned: the next batch reopens instead of burning a
+        # retryable failure on the dead cached handle.
+        assert conn.closed
+        assert h._adbc_conn is None
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        message = warnings[0].getMessage()
+        # Honest: names the table, says it is orphaned, promises nothing.
+        assert '"_analitiq_stage_ORDERS_btok"' in message
+        assert "orphaned" in message
+        assert "never retried" in message
+        assert "DROP-IF-EXISTS" not in message
+
+    def test_failure_path_cleanup_log_is_honest_about_fatal(self, caplog):
+        conn = _StageDropFailConn(
+            drop_failures=1, merge_error=OperationalError("merge lost connection")
+        )
+        h = self._handler(conn)
+        with caplog.at_level(logging.WARNING, logger=database_module.logger.name):
+            with pytest.raises(OperationalError, match="merge lost connection"):
+                self._merge(h)
+        assert conn.closed  # failure path poisons as before
+        warnings = [
+            r
+            for r in caplog.records
+            if "left behind after MERGE failure" in r.getMessage()
+        ]
+        assert len(warnings) == 1
+        message = warnings[0].getMessage()
+        # Cleanup-by-retry is promised only for retryable failures.
+        assert "retryable" in message
+        assert "FATAL" in message
+        assert "dropped manually" in message
+
+
 class TestWriteBatchAdbcOnlyKeylessInsert:
     """``_write_batch_adbc_only`` routes a keyless insert through
     ``_merge_ingest_sync`` with ``insert_only=True`` and ``_record_hash`` as
