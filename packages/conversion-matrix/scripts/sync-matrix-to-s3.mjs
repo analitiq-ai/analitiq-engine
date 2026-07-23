@@ -1,6 +1,6 @@
 // Sync the engine's conversion grid to S3 as versioned JSON.
 //
-// Layout under s3://$CONVERSION_MATRIX_S3_BUCKET/$CONVERSION_MATRIX_S3_PREFIX/:
+// Layout under s3://$CONVERSION_MATRIX_S3_BUCKET/conversion-matrix/:
 //   v{version}/conversion_matrix.json   immutable, one object per grid version
 //   latest.json                         mutable manifest {version, sha256, commit, publishedAt}
 //
@@ -65,13 +65,11 @@ const aws = (args, opts = {}) =>
 /**
  * True when the AWS CLI output says the manifest object itself does not exist.
  *
- * NoSuchKey is the only absence signal. It covers the never-written manifest
- * (first publish) — and a mistyped prefix, which S3 cannot tell apart; what
- * stops a prefix typo from starting a parallel history is the IAM policy
- * scoping PutObject to the real prefix. Everything else — NoSuchBucket,
- * AccessDenied, ExpiredToken, network errors — must abort the run, not be
- * misread as a first publish (which would reset versioning to 1.0.0 over an
- * existing history).
+ * NoSuchKey is the only absence signal: with the prefix a constant, the one
+ * thing it can mean is a never-written manifest — the first publish.
+ * Everything else — NoSuchBucket, AccessDenied, ExpiredToken, network errors
+ * — must abort the run, not be misread as a first publish (which would reset
+ * versioning to 1.0.0 over an existing history).
  */
 export function manifestAbsent(cliOutput) {
   return cliOutput.includes("NoSuchKey");
@@ -105,7 +103,10 @@ function requireEnv(name) {
 
 function main() {
   const bucket = requireEnv("CONVERSION_MATRIX_S3_BUCKET");
-  const prefix = process.env.CONVERSION_MATRIX_S3_PREFIX || "conversion-matrix";
+  // Fixed, not configurable: on a shared bucket whose publisher role is not
+  // prefix-scoped, a typo'd prefix variable would silently start a parallel
+  // version history. A constant removes that channel entirely.
+  const prefix = "conversion-matrix";
   // The commit of the checked-out tree the grid was read from — the workflow
   // checks out main's tip, so GITHUB_SHA (the triggering commit) can be stale.
   const commit = execFileSync("git", ["rev-parse", "HEAD"], {

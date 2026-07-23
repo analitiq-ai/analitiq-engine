@@ -8,7 +8,7 @@ name: conversion-matrix
 #      pin the typed helpers.
 #   2. Versioned raw JSON on S3 (sync-s3 job), so non-npm consumers can pin the
 #      grid without registry credentials. Authentication is GitHub OIDC
-#      (short-lived, no stored keys); the role, region, bucket, and prefix come
+#      (short-lived, no stored keys); the role, region, and bucket come
 #      exclusively from repository variables, so no cloud identifiers live in
 #      this repo. The job is gated on the role-ARN variable and skipped until
 #      it is set; the remaining variables are then required and fail loud when
@@ -89,10 +89,10 @@ jobs:
     # grant s3:ListBucket, so a missing manifest reads as absence, not as
     # Forbidden.)
     #
-    # The gate variable (and the other three) must be REPOSITORY-scoped:
-    # a job-level `if` is evaluated before the environment attaches, so an
-    # environment-scoped variable reads as empty here and would skip this job
-    # silently, forever.
+    # The gate variable must be REPOSITORY-scoped: a job-level `if` is
+    # evaluated before the environment attaches, so an environment-scoped
+    # variable reads as empty here and would skip this job silently, forever.
+    # Keep the other two variables with it rather than splitting scopes.
     if: github.event_name == 'push' && vars.CONVERSION_MATRIX_S3_ROLE_ARN != ''
     needs: verify
     runs-on: ubuntu-latest
@@ -122,5 +122,4 @@ jobs:
       - name: Sync versioned grid to S3 when the grid content changed
         env:
           CONVERSION_MATRIX_S3_BUCKET: ${{ vars.CONVERSION_MATRIX_S3_BUCKET }}
-          CONVERSION_MATRIX_S3_PREFIX: ${{ vars.CONVERSION_MATRIX_S3_PREFIX }}
         run: node scripts/sync-matrix-to-s3.mjs

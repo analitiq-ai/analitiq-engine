@@ -67,12 +67,12 @@ import matrix from "@analitiq-ai/conversion-matrix/conversion_matrix.json" with 
 ## Versioned JSON on S3
 
 For consumers that cannot (or should not) pull a private npm package, the raw
-grid is also published to S3 as versioned JSON, under a bucket/prefix
-configured outside this repo:
+grid is also published to S3 as versioned JSON, under a bucket configured
+outside this repo:
 
 ```
-{prefix}/v{version}/conversion_matrix.json   immutable, one object per grid version
-{prefix}/latest.json                         {version, sha256, commit, publishedAt}
+conversion-matrix/v{version}/conversion_matrix.json   immutable, one object per grid version
+conversion-matrix/latest.json                         {version, sha256, commit, publishedAt}
 ```
 
 Pin a version by fetching its immutable object; discover the current one via
@@ -81,19 +81,20 @@ the npm digest covers the shipped TS helpers too, while an S3 version is cut
 only when the grid content itself changes.
 
 CI publishes with short-lived GitHub OIDC credentials (`sync-s3` job in
-`.github/workflows/conversion-matrix.yml`). The role ARN, region, bucket, and
-prefix come from the variables `CONVERSION_MATRIX_S3_ROLE_ARN`,
-`CONVERSION_MATRIX_S3_REGION`, `CONVERSION_MATRIX_S3_BUCKET`, and
-`CONVERSION_MATRIX_S3_PREFIX` (default `conversion-matrix`). All four must be
-**repository-scoped** variables — an environment-scoped variable is invisible
-to the job's gate and would skip the sync silently. The job runs once the
-role ARN is set; the remaining variables are then required and fail loud when
-missing. The assumed role needs `s3:GetObject` and `s3:PutObject` on the
-prefix and `s3:ListBucket` on the bucket (so a missing manifest reads as
-absence rather than Forbidden); it needs no delete permissions. The sync
-reconciles against `latest.json` (sha256 compare, patch-bump on change,
-manifest written last as the commit point), so re-runs and partial failures
-converge without cutting spurious versions.
+`.github/workflows/conversion-matrix.yml`). The role ARN, region, and bucket
+come from the variables `CONVERSION_MATRIX_S3_ROLE_ARN`,
+`CONVERSION_MATRIX_S3_REGION`, and `CONVERSION_MATRIX_S3_BUCKET`; the
+`conversion-matrix/` prefix is fixed in the sync script, not configurable.
+`CONVERSION_MATRIX_S3_ROLE_ARN` must be a **repository-scoped** variable — it
+gates the job, and an environment-scoped variable is invisible to a job-level
+`if`, which would skip the sync silently (keep the other two with it rather
+than splitting scopes). The job runs once the role ARN is set; the remaining
+variables are then required and fail loud when missing. The assumed role needs `s3:GetObject` and
+`s3:PutObject` covering the prefix and `s3:ListBucket` on the bucket (so a
+missing manifest reads as absence rather than Forbidden); it needs no delete
+permissions. The sync reconciles against `latest.json` (sha256 compare,
+patch-bump on change, manifest written last as the commit point), so re-runs
+and partial failures converge without cutting spurious versions.
 
 ## Publishing (maintainers)
 
