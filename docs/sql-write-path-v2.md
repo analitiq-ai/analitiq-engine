@@ -104,7 +104,9 @@ applied in Arrow space before landing:
   **greatest cursor tuple**: the stream's cursor field, then its declared
   tie-breaker fields, ordered exactly as the engine's committed-cursor
   computation orders them (`compute_max_cursor`, `src/grpc/cursor.py:150-157`);
-  rows equal on the full tuple collapse to the last occurrence. Recency comes
+  rows equal on the full tuple collapse to the first occurrence — matching
+  both `compute_max_cursor`, which keeps the first row on full equality, and
+  insert's first-wins rule. Recency comes
   from the declared cursor, never from physical position — a batch may be
   unordered, the same reason the wire cursor is computed as MAX. A stream with no cursor field keeps today's loud
   failure: with no declared recency signal, duplicate keys inside one batch
@@ -119,6 +121,12 @@ applied in Arrow space before landing:
   post-mapping column names and threaded from the shared pipeline config on
   the engine side of the worker boundary (`base_handler.py:134-150` is the
   pattern); the wire `Cursor` stays opaque and `SchemaMessage` stays slim.
+  Resolution is defined only for direct assignments: a cursor or tie-breaker
+  field mapped by a plain `get` to exactly one target column. A field that
+  is wrapped in an expression, split across targets, or absent from the
+  mapping has no well-defined destination column, and the stream is not
+  collapse-capable — mappings are arbitrary expressions, so no general
+  inverse exists to guess with.
   The comparison runs on the destination batch's own columns, so the
   collapse is only possible when the mapping carries those columns into the
   written batch (`build_output_schema` builds it solely from assignment
@@ -249,9 +257,12 @@ def bulk_land(self, conn: Any, stage: TableAddress, batch: pa.RecordBatch,
     conn is the backend's native connection object. runtime is the same
     resolved ConnectionRuntime the backend connected with: a dialect whose
     mechanism runs through the system's own client rather than the
-    transport connection (load_job) ignores conn and builds -- and may
-    cache -- its client from runtime. That is the sanctioned replacement
-    for the private client state the BigQuery connector holds today.
+    transport connection (load_job) ignores conn and builds its client
+    from runtime. A built client is scoped to the backend's
+    connect/disconnect cycle -- the backend drops it on reconnect, so a
+    rotated credential or changed connection never leaves a stale client
+    cached on the dialect. That is the sanctioned replacement for the
+    private client state the BigQuery connector holds today.
     Base returns False."""
 ```
 
@@ -327,7 +338,15 @@ Properties:
 - `"load_job"` names the mechanism of systems whose bulk path is a load-job
   API driven through the system's own client rather than the transport
   connection (BigQuery). It lands into the per-batch stage table like every
-  other mechanism — which is what makes §8's quota arithmetic hold.
+  other mechanism — which is what makes §8's quota shape hold.
+- **The block reaches the worker in the resolved payload.** The isolated
+  worker never reads `connector.json` — its bootstrap carries only resolved
+  values (`build_bootstrap` / `ConnectionRuntime.from_resolved_payload`).
+  The engine validates the capability block and folds it into that payload,
+  the same channel that already delivers type maps and endpoint documents,
+  so the facade and backends consume declared capabilities from the runtime
+  in the process where writes execute — never a guessed default because the
+  definition file was out of reach.
 - Validated offline by the published validator like every other contract
   surface, and visible to any consumer of the connector definition.
 - `write_unit` sits at the connector level because it is not a SQL fact —
@@ -437,7 +456,12 @@ Mechanics:
 - The coalescer sits in the engine load stage, upstream of everything
   batch-scoped: it accumulates transform-stage output per stream until the
   declared `write_unit` is reached (rows or bytes, whichever first) or the
-  read ends, then concatenates the Arrow batches into one. Because it runs
+  read ends, then concatenates the Arrow batches into one. The declaration
+  reaches it through config preparation: the engine reads `write_unit` from
+  the destination connector's definition while assembling the pipeline
+  (`pipeline_config_prep.py`) and threads it into the runtime batching
+  config the load stage already receives — the same path that delivers
+  `batch_size` today. Because it runs
   *before* `record_ids`, the MAX-cursor computation, `emitted_at` stamping,
   and `batch_seq` assignment (`stream_processor.py:586-633`), everything
   downstream — retry stability, cursor semantics, DLQ correlation — is
@@ -455,12 +479,17 @@ Mechanics:
   which is what truncates the target after a clean zero-row read
   (`stream_processor.py:918-968`) — is sent outside the coalescer's path.
 - **Failure isolation survives coalescing.** A bigger unit must not widen
-  the dlq/skip blast radius: on a FATAL ack for a coalesced unit, the
-  engine re-sends the unit split back into its original source batches (the
-  coalescer keeps their boundary offsets), each through the normal send path
-  with its own `record_ids` and MAX cursor; only the source batches that
-  fail again are DLQ'd or skipped — the same rows that would have been lost
-  without coalescing, no more. Splits always take fresh, monotonically
+  the dlq/skip blast radius: on a FATAL ack whose declared
+  `failure_category` is `WRITE_REJECTED` — a write was attempted and the
+  data was rejected (#351) — the engine re-sends the unit split back into
+  its original source batches (the coalescer keeps their boundary offsets),
+  each through the normal send path with its own `record_ids` and MAX
+  cursor; only the source batches that fail again are DLQ'd or skipped —
+  the same rows that would have been lost without coalescing, no more.
+  Config-shaped fatals (`CONFIG_DEFECT`, `NOT_READY`, or an undeclared
+  category) stay terminal for the whole unit exactly as today: they are not
+  row-caused, splitting cannot isolate anything, and under dlq/skip it
+  would convert a configuration defect into dropped data. Splits always take fresh, monotonically
   continued `batch_seq` values: batch identity and everything derived from
   it (stage tokens, deterministic load-job IDs, bigquery#6) is never reused
   with a different payload — load-job systems dedup job insertion by ID, so
@@ -484,11 +513,13 @@ Mechanics:
   under one ack) would lift that ceiling and is explicitly out of scope —
   an additive protocol change to revisit only if a workload proves the
   single-message ceiling insufficient.
-- Quota arithmetic, recorded so the ceiling is a decision and not an
-  accident: at 64 MiB units, BigQuery's 1,500 load-jobs/table/day binds only
-  above ~90 GB/table/day — and under stage-then-merge the target table
-  receives `MERGE` **query** jobs (a far higher quota class) while load jobs
-  land in per-batch stage tables.
+- Quota shape, recorded so the ceiling is a decision and not an accident:
+  under stage-then-merge the target table receives `MERGE` **query** jobs (a
+  high-quota class), and each load job lands in its own per-batch stage
+  table — the per-table load-job quota never accumulates against any one
+  table. What unit count does bound are the project-level load-job quota and
+  the per-table/dataset operation-rate limits, all of which scale down
+  linearly with coalescing — which is exactly what `write_unit` buys.
 - `GetCapabilitiesResponse.max_batch_size` / `max_batch_bytes`
   (`destination_service.proto:83-84`) are advertised today but consumed by
   nothing on the send path; the write-unit fact now lives in
@@ -575,7 +606,9 @@ compatibility layer, per the engine's no-legacy rule:
 - #391: the conformance kit asserting §10.
 - #384: the engine coalescer with the FATAL split pass, the message-cap
   default raise, and removal of the dead `GetCapabilitiesResponse` sizing
-  fields — #384 remains open as the implementation tracker for §8.
+  fields, their field numbers and names `reserved` in the proto so a future
+  field can never reuse the tags against a mixed-version peer — #384 remains
+  open as the implementation tracker for §8.
 - Docs: the affected sections of
   [grpc-streaming-architecture.md](grpc-streaming-architecture.md) (verdict
   matrix, ADBC parity caveat, batch-size prose) and
