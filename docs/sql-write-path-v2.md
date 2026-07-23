@@ -131,10 +131,11 @@ applied in Arrow space before landing:
   collapse is only possible when the mapping carries those columns into the
   written batch (`build_output_schema` builds it solely from assignment
   targets, `src/engine/data_transformer.py:57-79`); a stream whose mapping
-  drops them keeps the loud duplicate failure, and declaring `write_unit`
-  turns that combination into a loud config error before any data moves —
-  coalescing makes intra-unit duplicates normal, so a coalesced upsert
-  stream must be collapse-capable up front.
+  drops them keeps the loud duplicate failure. Collapse-capability also
+  gates coalescing (§8): an upsert stream that cannot collapse — cursor-less,
+  or with the columns lost in its mapping — is simply not coalesced, because
+  coalescing would manufacture intra-unit duplicate keys that each source
+  batch alone never had.
 - **`truncate_insert`** — no collapsing, as above.
 
 ### Landing
@@ -370,7 +371,14 @@ retry of the same batch computes the same name, so the pre-flight
 included, since a failed batch can leave a session-temp table on the pooled
 connection — finds and clears its own leftovers: stage cleanup is
 self-healing across retries by construction, never dependent on a cleanup
-pass.
+pass. The pre-flight drop is safe against a still-running prior attempt by
+mutual exclusion, not luck: a backend runs at most one stage cycle at a
+time per handler — the whole cycle holds the backend's write lock, as the
+ADBC path already does (`_merge_ingest_locked_sync` runs under the
+connector's operation lock) — so a sync-transport attempt that cannot be
+cancelled in-band (`generic.py:424-436`) finishes or abandons its cycle
+before a retry's cycle can begin. A retry only ever meets a completed or
+abandoned stage, never a live one.
 
 **Scope is declared, temp preferred.** `stage.scope` in the capability block:
 
@@ -423,9 +431,13 @@ Declared per system as `stage.transactional_ddl`:
   commit unit (Snowflake, BigQuery) run the steps with per-step commits.
   Safety then comes from the primitive itself, not atomicity: deterministic
   stage names make retries self-healing (§6), the mode statement is
-  idempotent on identity (§9), and the poisoning rules bound connection
-  reuse after a failed step. This is the documented semantics, not a
-  degraded mode — it is how every load-job warehouse pipeline works.
+  idempotent on identity for upsert and insert (§9), and the poisoning
+  rules bound connection reuse after a failed step. This is the documented
+  semantics, not a degraded mode — it is how every load-job warehouse
+  pipeline works. `truncate_insert` is the exception it always was: its
+  append phase has no identity dedup, so an append that commits before a
+  lost ack duplicates on the retry — the mode's documented at-least-once
+  contract (§9, #307), not a stage-cycle defect.
 
 Both SQLAlchemy flavors keep sharing one sync-`Connection` transaction body,
 as they do today through `_apply_write_in_txn` (`generic.py:1473-1494`,
@@ -441,8 +453,10 @@ that only the async SQLAlchemy flavor can enforce it in-band
 
 ## 8. Batch coalescing (settles #384)
 
-**Decision: the engine coalesces source batches before sending; the wire
-protocol does not change.** The destination-side alternatives — buffered
+**Decision: the engine coalesces source batches before sending; message
+shapes and ack semantics do not change** (the only proto deltas are
+additive: one new `failure_category` value below, and the §11 field
+reservations). The destination-side alternatives — buffered
 batches with deferred or windowed acks, or a flush hook with held cursors —
 are rejected: both require the sandboxed, untrusted connector worker to hold
 data the engine has already had acked or to participate in cursor durability,
@@ -461,7 +475,11 @@ Mechanics:
   the destination connector's definition while assembling the pipeline
   (`pipeline_config_prep.py`) and threads it into the runtime batching
   config the load stage already receives — the same path that delivers
-  `batch_size` today. Because it runs
+  `batch_size` today. Not every stream is eligible: an upsert stream that is
+  not collapse-capable (§2) is excluded from coalescing and keeps one
+  source batch per send, logged at INFO — the `bulk_land` rule again: a
+  visible speed downgrade, never a manufactured failure and never a silent
+  one. Because it runs
   *before* `record_ids`, the MAX-cursor computation, `emitted_at` stamping,
   and `batch_seq` assignment (`stream_processor.py:586-633`), everything
   downstream — retry stability, cursor semantics, DLQ correlation — is
@@ -479,17 +497,25 @@ Mechanics:
   which is what truncates the target after a clean zero-row read
   (`stream_processor.py:918-968`) — is sent outside the coalescer's path.
 - **Failure isolation survives coalescing.** A bigger unit must not widen
-  the dlq/skip blast radius: on a FATAL ack whose declared
-  `failure_category` is `WRITE_REJECTED` — a write was attempted and the
-  data was rejected (#351) — the engine re-sends the unit split back into
-  its original source batches (the coalescer keeps their boundary offsets),
-  each through the normal send path with its own `record_ids` and MAX
-  cursor; only the source batches that fail again are DLQ'd or skipped —
-  the same rows that would have been lost without coalescing, no more.
-  Config-shaped fatals (`CONFIG_DEFECT`, `NOT_READY`, or an undeclared
-  category) stay terminal for the whole unit exactly as today: they are not
-  row-caused, splitting cannot isolate anything, and under dlq/skip it
-  would convert a configuration defect into dropped data. Splits always take fresh, monotonically
+  the dlq/skip blast radius: on a FATAL ack that declares the *data itself*
+  was rejected, the engine re-sends the unit split back into its original
+  source batches (the coalescer keeps their boundary offsets), each through
+  the normal send path with its own `record_ids` and MAX cursor; only the
+  source batches that fail again are DLQ'd or skipped — the same rows that
+  would have been lost without coalescing, no more. `WRITE_REJECTED` is too
+  broad to key the split on — the #351 vocabulary folds permission and
+  driver failures into it, and splitting those isolates nothing — so the
+  engine-owned vocabulary gains one value, `FAILURE_CATEGORY_DATA_REJECTED`,
+  assigned by the CDK's write-failure ladder to row-shaped rejections
+  (constraint and type violations: `IntegrityError`, `DataError`). Only
+  that category triggers the split pass. Every other fatal —
+  `WRITE_REJECTED`, `CONFIG_DEFECT`, `NOT_READY`, or an undeclared category
+  — stays terminal for the whole unit exactly as today: not row-caused,
+  splitting cannot isolate anything, and under dlq/skip it would convert a
+  configuration or environment defect into dropped data. The added enum
+  value is a vocabulary extension inside the existing `failure_category`
+  field — no message shape or ack semantics change.
+  Splits always take fresh, monotonically
   continued `batch_seq` values: batch identity and everything derived from
   it (stage tokens, deterministic load-job IDs, bigquery#6) is never reused
   with a different payload — load-job systems dedup job insertion by ID, so
@@ -501,6 +527,18 @@ Mechanics:
   re-running the refresh is the recovery. Exhausted *retryable* failures
   also keep unit granularity: they are transient, not row-caused, and a
   wholesale unit replayed from the DLQ loses nothing.
+- **Server-registered idempotency tokens include content.** Stage *names*
+  stay batch-derived (`run_id|stream_id|batch_seq`): a stale stage is
+  dropped and rebuilt, so the name only has to be deterministic per
+  attempt. A token the *system remembers* — a deterministic load-job ID
+  (bigquery#6) — is different: the system silently dedups the next
+  submission under the same ID, and a supported same-`RUN_ID` restart
+  resumes from the committed cursor with `batch_seq` starting over, so the
+  same identity triple can carry a different payload. Such tokens must
+  therefore also include a payload-sensitive component (a content hash of
+  the unit): an identical retry still attaches to its in-flight job, while
+  a restart's different payload gets a fresh identity instead of a silent
+  no-op.
 - **Size budget.** The hard bound is the gRPC message cap
   (`GRPC_MAX_MESSAGE_SIZE`, `src/config/settings.py:103`), raised from 16 MiB
   to 64 MiB by default. The unit budget counts the Arrow payload **plus**
@@ -682,8 +720,10 @@ compatibility layer, per the engine's no-legacy rule:
    #384; §8). *Rationale:* the flush-gated and windowed-ack alternatives
    hand unacked data or cursor durability to untrusted connector workers;
    engine-side merging solves the quota problem with no new trust and no
-   proto change; the FATAL split pass keeps the dlq/skip blast radius at
-   the source batch. Chunked framing is deferred until a workload needs it.
+   change to message shapes or ack semantics (the one proto delta is the
+   additive `FAILURE_CATEGORY_DATA_REJECTED` value); the data-rejection
+   split pass keeps the dlq/skip blast radius at the source batch. Chunked
+   framing is deferred until a workload needs it.
 8. **Upsert collapses intra-batch duplicate keys to the greatest cursor
    value, and stays a loud failure for cursor-less streams; insert stays
    first-wins** (§2). *Rationale:* coalescing makes intra-batch key updates
