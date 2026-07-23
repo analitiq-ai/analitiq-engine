@@ -1,5 +1,6 @@
 """Unit tests for gRPC client."""
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -7,6 +8,11 @@ import pytest
 import grpc
 from src.grpc.client import BatchResult, DestinationGRPCClient, generate_record_id
 from src.grpc.generated.analitiq.v1 import AckStatus
+
+_EMITTED_AT = datetime(2026, 7, 21, 9, 0, 0, tzinfo=timezone.utc)
+"""A fixed, timezone-aware emit instant for write_batch/send_batch calls;
+the engine stamps this per batch (issue #353). Value is arbitrary for sinks
+that ignore it."""
 
 
 class TestGenerateRecordId:
@@ -496,6 +502,7 @@ class TestStreamTaskFailurePropagation:
             record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
             record_ids=["1"],
             cursor=Cursor(token=b""),
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.success is False
@@ -534,6 +541,7 @@ class TestStreamTaskFailurePropagation:
             record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
             record_ids=["1"],
             cursor=Cursor(token=b""),
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.success is False
@@ -639,6 +647,7 @@ class TestAckTimeoutAndTeardown:
             record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
             record_ids=["1"],
             cursor=Cursor(token=b""),
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.success is False
@@ -692,6 +701,7 @@ class TestAckTimeoutAndTeardown:
             record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
             record_ids=["2"],
             cursor=Cursor(token=b""),
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.success is False
@@ -851,6 +861,7 @@ class TestAckTimeoutAndTeardown:
             record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
             record_ids=["9"],
             cursor=Cursor(token=b""),
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.success is False
@@ -908,6 +919,7 @@ class TestAckTimeoutAndTeardown:
             record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
             record_ids=["11"],
             cursor=Cursor(token=b""),
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.success is False
@@ -987,6 +999,7 @@ class TestSendBatchSelfHeal:
                 record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
                 record_ids=["1"],
                 cursor=Cursor(token=b""),
+                emitted_at=_EMITTED_AT,
             )
 
     @pytest.mark.asyncio
@@ -1034,6 +1047,7 @@ class TestSendBatchSelfHeal:
                 record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
                 record_ids=["1"],
                 cursor=Cursor(token=b""),
+                emitted_at=_EMITTED_AT,
             )
 
         connect_mock.assert_awaited_once()
@@ -1069,6 +1083,7 @@ class TestSendBatchSelfHeal:
                 record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
                 record_ids=["1"],
                 cursor=Cursor(token=b""),
+                emitted_at=_EMITTED_AT,
             )
 
         assert result.success is False
@@ -1112,6 +1127,7 @@ class TestSendBatchSelfHeal:
                 record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
                 record_ids=["1"],
                 cursor=Cursor(token=b""),
+                emitted_at=_EMITTED_AT,
             )
 
     @pytest.mark.asyncio
@@ -1142,6 +1158,7 @@ class TestSendBatchSelfHeal:
                 record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
                 record_ids=["1"],
                 cursor=Cursor(token=b""),
+                emitted_at=_EMITTED_AT,
             )
 
     @pytest.mark.asyncio

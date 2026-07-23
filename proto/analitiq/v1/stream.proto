@@ -82,6 +82,18 @@ message RecordBatch {
   // Engine computes this as max(cursor_field) across all records
   // Destination stores and returns in ACK
   Cursor cursor = 8;
+
+  // Unix epoch milliseconds (UTC) the engine emitted this batch to the
+  // destination. Stamped ONCE per batch at the load stage and re-sent
+  // unchanged on every retry, so a replayed batch resolves the same
+  // time-based partition directory instead of drifting across an
+  // hour/day boundary (issue #353). File destinations fill
+  // {year}/{month}/{day}/{hour} placeholders from this value; sinks
+  // without time-based partitioning ignore it. Always positive on a
+  // conforming send; a zero/absent value means the sender did not stamp
+  // it, and a partitioning destination must fail loud rather than fall
+  // back to its own wall clock.
+  int64 emitted_at_unix_ms = 9;
 }
 
 // ACK status values

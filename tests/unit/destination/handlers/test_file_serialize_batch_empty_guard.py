@@ -6,6 +6,7 @@ in issue #322 catches this at write time and returns FATAL so the batch is
 routed to the dead-letter queue (DLQ) rather than committed as written.
 """
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pyarrow as pa
@@ -13,6 +14,11 @@ import pytest
 
 from src.destination.connectors.file import FileDestinationHandler
 from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
+
+_EMITTED_AT = datetime(2026, 7, 21, 9, 0, 0, tzinfo=timezone.utc)
+"""A fixed, timezone-aware emit instant for write_batch/send_batch calls;
+the engine stamps this per batch (issue #353). Value is arbitrary for sinks
+that ignore it."""
 
 
 def _handler_with_formatter_returning(data) -> FileDestinationHandler:
@@ -55,6 +61,7 @@ async def test_serialize_batch_empty_bytes_returns_fatal():
         record_batch=_record_batch(),
         record_ids=["1"],
         cursor=_cursor(),
+        emitted_at=_EMITTED_AT,
     )
     assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
     assert result.records_written == 0
@@ -73,6 +80,7 @@ async def test_serialize_batch_empty_bytes_does_not_write_file():
         record_batch=_record_batch(),
         record_ids=["1"],
         cursor=_cursor(),
+        emitted_at=_EMITTED_AT,
     )
     handler._storage.write_file.assert_not_called()
 
@@ -93,6 +101,7 @@ async def test_serialize_batch_none_returns_fatal():
         record_batch=_record_batch(),
         record_ids=["1"],
         cursor=_cursor(),
+        emitted_at=_EMITTED_AT,
     )
     assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
     assert result.records_written == 0
@@ -110,6 +119,7 @@ async def test_serialize_batch_non_empty_succeeds():
         record_batch=_record_batch(),
         record_ids=["0"],
         cursor=_cursor(),
+        emitted_at=_EMITTED_AT,
     )
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
     assert result.records_written == 1
@@ -145,6 +155,7 @@ async def test_serialize_batch_failure_summary_includes_formatter_name():
         record_batch=_record_batch(),
         record_ids=["0"],
         cursor=_cursor(),
+        emitted_at=_EMITTED_AT,
     )
     assert "MyBrokenFormatter" in result.failure_summary
 
@@ -160,6 +171,7 @@ async def test_serialize_batch_failure_summary_includes_record_count():
         record_batch=_record_batch(rows=5),
         record_ids=[str(i) for i in range(5)],
         cursor=_cursor(),
+        emitted_at=_EMITTED_AT,
     )
     assert "5 records" in result.failure_summary
 
@@ -175,6 +187,7 @@ async def test_serialize_batch_failure_summary_includes_run_context():
         record_batch=_record_batch(),
         record_ids=["0"],
         cursor=_cursor(),
+        emitted_at=_EMITTED_AT,
     )
     assert "run-abc" in result.failure_summary
     assert "orders" in result.failure_summary

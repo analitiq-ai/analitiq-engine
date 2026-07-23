@@ -14,6 +14,7 @@ a log needs those three identifiers, whatever the surrounding wording.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -33,6 +34,12 @@ STREAM_ID = "stream-guard"
 BATCH_SEQ = 7
 
 
+_EMITTED_AT = datetime(2026, 7, 21, 9, 0, 0, tzinfo=timezone.utc)
+"""A fixed, timezone-aware emit instant for write_batch/send_batch calls;
+the engine stamps this per batch (issue #353). Value is arbitrary for sinks
+that ignore it."""
+
+
 def _record_batch() -> pa.RecordBatch:
     return pa.RecordBatch.from_pylist([{"id": 1}])
 
@@ -45,6 +52,7 @@ async def _write(handler) -> object:
         record_batch=_record_batch(),
         record_ids=["1"],
         cursor=Cursor(token=b""),
+        emitted_at=_EMITTED_AT,
     )
 
 

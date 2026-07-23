@@ -7,6 +7,7 @@ local storage backend.
 import errno
 import hashlib
 import logging
+from datetime import datetime
 from typing import Any
 
 import pyarrow as pa
@@ -21,6 +22,21 @@ from ..storage import get_storage_backend
 from ..storage.base import BaseStorageBackend
 
 logger = logging.getLogger(__name__)
+
+
+def _is_stamped_utc(value: object) -> bool:
+    """True when ``value`` is a timezone-aware instant the engine really stamped.
+
+    The wire default for an unstamped emitted_at is epoch 0, which decodes to
+    a tz-aware ``1970-01-01 00:00:00 UTC`` whose POSIX timestamp is 0; a naive
+    datetime is a programming error. Both mean "no real stamp", so both are
+    rejected -- only a positive-epoch aware datetime is accepted.
+    """
+    return (
+        isinstance(value, datetime)
+        and value.tzinfo is not None
+        and value.timestamp() > 0
+    )
 
 
 class FileDestinationHandler(BaseDestinationHandler):
@@ -180,11 +196,15 @@ class FileDestinationHandler(BaseDestinationHandler):
         record_batch: pa.RecordBatch,
         record_ids: list[str],
         cursor: Cursor,
+        emitted_at: datetime,
     ) -> BatchWriteResult:
         """Write an Arrow record batch to a file.
 
         Formatters consume dicts, so the batch is materialized once at
-        this boundary.
+        this boundary. When a ``path_template`` carries time placeholders,
+        the partition directory resolves from ``emitted_at`` -- the engine's
+        replay-stable per-batch instant -- so a retried batch overwrites the
+        same file instead of landing in a new partition (issue #353).
         """
         if not self._connected:
             return reject_batch(
@@ -217,10 +237,34 @@ class FileDestinationHandler(BaseDestinationHandler):
 
             if not records:
                 # Nothing to write; ack success so the cursor still advances.
+                # An empty batch never renders a partition path, so it needs
+                # no emitted_at.
                 return BatchWriteResult(
                     status=AckStatus.ACK_STATUS_SUCCESS,
                     records_written=0,
                     committed_cursor=cursor,
+                )
+
+            # A time-partitioned layout depends entirely on emitted_at being a
+            # real, replay-stable UTC instant. It crosses the process boundary
+            # from the engine (and, for a sandboxed connector, a second gRPC
+            # hop), so validate it before writing: a missing or epoch-zero
+            # stamp would silently bucket every replay under year=1970 and
+            # defeat the same-path overwrite this value exists to guarantee
+            # (issue #353). Fail loud so the batch routes to the DLQ instead.
+            if self._path_template and not _is_stamped_utc(emitted_at):
+                msg = (
+                    f"file destination has a time-based path_template "
+                    f"({self._path_template!r}) but the batch carries no "
+                    f"usable emitted_at ({emitted_at!r}); refusing to derive a "
+                    f"partition path from the write-time clock "
+                    f"(run={run_id}, stream={stream_id}, seq={batch_seq})"
+                )
+                logger.error(msg)
+                return BatchWriteResult(
+                    status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                    records_written=0,
+                    failure_summary=msg,
                 )
 
             # Serialize before building path so the filename includes a content
@@ -257,6 +301,7 @@ class FileDestinationHandler(BaseDestinationHandler):
                 batch_seq=batch_seq,
                 content_hash=content_hash,
                 extension=self._formatter.file_extension,
+                timestamp=emitted_at,
                 partition_template=self._path_template,
             )
 

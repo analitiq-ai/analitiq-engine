@@ -5,7 +5,7 @@ Storage backends handle writing files to different storage systems
 """
 
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 
@@ -138,6 +138,7 @@ class BaseStorageBackend(ABC):
         stream_id: str,
         batch_seq: int,
         extension: str,
+        timestamp: datetime,
         partition_template: str | None = None,
         content_hash: str = "",
     ) -> str:
@@ -158,11 +159,21 @@ class BaseStorageBackend(ABC):
         batch_seq resets while the source resumes from the committed cursor) land
         on distinct files instead of overwriting each other.
 
+        The partition placeholders resolve from ``timestamp`` -- the engine's
+        replay-stable per-batch instant -- never from the write-time wall clock.
+        A wall-clock read would place a replayed batch that crosses an hour/day
+        boundary under a different partition directory, breaking the content-
+        addressed replay-overwrite guarantee (issue #353): same batch must map
+        to the same path so the rewrite overwrites in place.
+
         Args:
             base_path: Base directory path
             stream_id: Stream identifier
             batch_seq: Batch sequence number
             extension: File extension including dot (e.g., '.jsonl')
+            timestamp: Timezone-aware UTC instant the partition placeholders
+                       resolve from (the engine's per-batch ``emitted_at``).
+                       Unused when ``partition_template`` is None.
             partition_template: Optional partition template with placeholders
                                (e.g., 'year={year}/month={month}')
             content_hash: First 16 hex chars of SHA-256 of the serialized batch;
@@ -171,16 +182,16 @@ class BaseStorageBackend(ABC):
         Returns:
             Constructed file path
         """
-        now = datetime.now(timezone.utc)
         stem = f"{batch_seq}_{content_hash}" if content_hash else str(batch_seq)
 
         if partition_template:
-            # Replace partition placeholders
+            # Replace partition placeholders from the replay-stable batch
+            # instant (UTC), so a retried batch always resolves the same dir.
             partitions = partition_template.format(
-                year=now.year,
-                month=f"{now.month:02d}",
-                day=f"{now.day:02d}",
-                hour=f"{now.hour:02d}",
+                year=timestamp.year,
+                month=f"{timestamp.month:02d}",
+                day=f"{timestamp.day:02d}",
+                hour=f"{timestamp.hour:02d}",
             )
             return f"{base_path}/{partitions}/{stream_id}_{stem}{extension}"
 

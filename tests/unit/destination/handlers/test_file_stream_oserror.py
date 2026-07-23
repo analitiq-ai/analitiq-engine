@@ -12,6 +12,7 @@ BatchWriteResult.
 
 import errno
 import logging
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pyarrow as pa
@@ -20,6 +21,11 @@ import pytest
 from src.destination.connectors.file import FileDestinationHandler
 from src.destination.connectors.stream import StreamDestinationHandler
 from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
+
+_EMITTED_AT = datetime(2026, 7, 21, 9, 0, 0, tzinfo=timezone.utc)
+"""A fixed, timezone-aware emit instant for write_batch/send_batch calls;
+the engine stamps this per batch (issue #353). Value is arbitrary for sinks
+that ignore it."""
 
 
 def _record_batch() -> pa.RecordBatch:
@@ -48,6 +54,7 @@ async def _drive_file(handler: FileDestinationHandler, raise_exc: BaseException)
         record_batch=_record_batch(),
         record_ids=["1"],
         cursor=_cursor(),
+        emitted_at=_EMITTED_AT,
     )
 
 
@@ -67,6 +74,7 @@ async def _drive_stream(handler: StreamDestinationHandler, raise_exc: BaseExcept
             record_batch=_record_batch(),
             record_ids=["1"],
             cursor=_cursor(),
+            emitted_at=_EMITTED_AT,
         )
 
 
@@ -164,6 +172,7 @@ async def test_stream_handler_to_pylist_arrow_invalid_is_fatal():
         record_batch=mock_batch,
         record_ids=[],
         cursor=_cursor(),
+        emitted_at=_EMITTED_AT,
     )
 
     assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
@@ -204,6 +213,7 @@ async def test_to_pylist_arrow_invalid_is_fatal():
         record_batch=mock_batch,
         record_ids=[],
         cursor=_cursor(),
+        emitted_at=_EMITTED_AT,
     )
 
     assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
@@ -224,6 +234,7 @@ async def test_to_pylist_memory_error_is_fatal():
         record_batch=mock_batch,
         record_ids=[],
         cursor=_cursor(),
+        emitted_at=_EMITTED_AT,
     )
 
     assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
@@ -250,6 +261,7 @@ async def _drive_file_with_context(
         record_batch=_record_batch(),
         record_ids=["1"],
         cursor=_cursor(),
+        emitted_at=_EMITTED_AT,
     )
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pyarrow as pa
@@ -78,7 +79,19 @@ def _arrow_ipc(batch: pa.RecordBatch) -> bytes:
     return sink.getvalue().to_pybytes()
 
 
-def _batch_request(*, stream_id: str = "s1", token: bytes = b"") -> StreamRequest:
+# A fixed emit instant and its wire epoch-ms encoding (issue #353): the engine
+# stamps emitted_at once per batch, and the servicer decodes it back to a
+# tz-aware datetime for the handler.
+_EMITTED_AT = datetime(2026, 7, 21, 9, 30, 0, tzinfo=timezone.utc)
+_EMITTED_AT_MS = int(_EMITTED_AT.timestamp() * 1000)
+
+
+def _batch_request(
+    *,
+    stream_id: str = "s1",
+    token: bytes = b"",
+    emitted_at_unix_ms: int = _EMITTED_AT_MS,
+) -> StreamRequest:
     batch = pa.RecordBatch.from_pydict({"id": [1]})
     return StreamRequest(
         batch=RecordBatch(
@@ -90,6 +103,7 @@ def _batch_request(*, stream_id: str = "s1", token: bytes = b"") -> StreamReques
             record_count=1,
             record_ids=["1"],
             cursor=Cursor(token=token),
+            emitted_at_unix_ms=emitted_at_unix_ms,
         )
     )
 
@@ -633,6 +647,11 @@ class TestWireToCdkTranslation:
         passed_cursor = handler.write_batch.call_args.kwargs["cursor"]
         assert isinstance(passed_cursor, CdkCursor)
         assert passed_cursor.token == b"inbound-abc"
+
+        # Inbound: wire emitted_at_unix_ms -> tz-aware UTC datetime (issue #353).
+        passed_emitted_at = handler.write_batch.call_args.kwargs["emitted_at"]
+        assert passed_emitted_at == _EMITTED_AT
+        assert passed_emitted_at.tzinfo is not None
 
         # Outbound: handler's CDK Cursor -> wire Cursor on the ack.
         ack = responses[-1].ack

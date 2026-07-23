@@ -6,6 +6,7 @@ document's ``operations.write.<mode>`` block selects the path / method
 / batching for the stream's write_mode).
 """
 
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -21,6 +22,11 @@ from src.destination.connectors.api import (
     _StreamState,
 )
 from src.grpc.generated.analitiq.v1 import AckStatus, SchemaMessage, WriteMode
+
+_EMITTED_AT = datetime(2026, 7, 21, 9, 0, 0, tzinfo=timezone.utc)
+"""A fixed, timezone-aware emit instant for write_batch/send_batch calls;
+the engine stamps this per batch (issue #353). Value is arbitrary for sinks
+that ignore it."""
 
 
 def _to_record_batch(records: list[dict[str, Any]]) -> pa.RecordBatch:
@@ -173,6 +179,7 @@ class TestApiHandlerWriteBatchFailures:
             record_batch=_to_record_batch(sample_records),
             record_ids=sample_record_ids,
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         # Assert: should return FATAL_FAILURE, not SUCCESS
@@ -213,6 +220,7 @@ class TestApiHandlerWriteBatchFailures:
             record_batch=_to_record_batch(sample_records),
             record_ids=sample_record_ids,
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         # Assert: partial failure should be FATAL_FAILURE
@@ -248,6 +256,7 @@ class TestApiHandlerWriteBatchFailures:
             record_batch=_to_record_batch(sample_records),
             record_ids=sample_record_ids,
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         # Assert: should return SUCCESS
@@ -275,6 +284,7 @@ class TestApiHandlerWriteBatchFailures:
             record_batch=pa.RecordBatch.from_pylist([]),
             record_ids=[],
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         # Assert: empty batch is success
@@ -303,6 +313,7 @@ class TestApiHandlerWriteBatchFailures:
             record_batch=_to_record_batch(sample_records),
             record_ids=sample_record_ids,
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         # Assert: connection issue is retryable
@@ -335,6 +346,7 @@ class TestApiHandlerWriteBatchFailures:
             record_batch=_to_record_batch(sample_records),
             record_ids=sample_record_ids,
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.success is False
@@ -366,6 +378,7 @@ class TestApiHandlerWriteBatchFailures:
             record_batch=_to_record_batch(sample_records),
             record_ids=sample_record_ids,
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.success is False
@@ -563,6 +576,7 @@ class TestApiHandlerWriteSingleMode:
             record_batch=_to_record_batch(sample_records),
             record_ids=sample_record_ids,
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.success is False
@@ -595,6 +609,7 @@ class TestApiHandlerWriteSingleMode:
             record_batch=_to_record_batch(sample_records),
             record_ids=sample_record_ids,
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.success is False
@@ -681,6 +696,7 @@ class TestApiHandlerChunkedWrites:
             record_batch=_to_record_batch(records),
             record_ids=record_ids,
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.success is False
@@ -714,6 +730,7 @@ class TestApiHandlerChunkedWrites:
             record_batch=_to_record_batch(records),
             record_ids=record_ids,
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         # Assert: partial success is still a failure, and the unsent ids carry
@@ -793,6 +810,7 @@ class TestApiHandlerChunkedWrites:
             record_batch=_to_record_batch([{"id": i} for i in range(5)]),
             record_ids=[f"r{i}" for i in range(5)],
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
@@ -897,6 +915,7 @@ class TestApiHandlerChunkedWrites:
             record_batch=_to_record_batch([{"id": i} for i in range(6)]),
             record_ids=[f"r{i}" for i in range(6)],
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
@@ -953,6 +972,7 @@ class TestApiHandlerChunkedWrites:
             record_batch=_to_record_batch([{"id": i} for i in range(5)]),
             record_ids=[f"r{i}" for i in range(5)],
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -1190,6 +1210,7 @@ class TestApiHandlerContractBatching:
             record_batch=_to_record_batch(records),
             record_ids=[f"r{i}" for i in range(5)],
             cursor=MagicMock(),
+            emitted_at=_EMITTED_AT,
         )
         assert result.status == AckStatus.ACK_STATUS_SUCCESS
         assert result.records_written == 5
@@ -1392,6 +1413,7 @@ class TestApiHandlerJsonFields:
             record_batch=batch,
             record_ids=["r1"],
             cursor=MagicMock(),
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.status == AckStatus.ACK_STATUS_SUCCESS
@@ -1489,6 +1511,7 @@ class TestApiHandlerJsonFields:
             record_batch=batch,
             record_ids=["r1"],
             cursor=MagicMock(),
+            emitted_at=_EMITTED_AT,
         )
         assert result.status == AckStatus.ACK_STATUS_SUCCESS
 
@@ -1531,6 +1554,7 @@ class TestApiHandlerJsonFields:
             record_batch=batch,
             record_ids=["r1"],
             cursor=MagicMock(),
+            emitted_at=_EMITTED_AT,
         )
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert "metadata" in (result.failure_summary or "")
@@ -1738,6 +1762,7 @@ class TestApiHandlerDeterministic4xxClassification:
             record_batch=_to_record_batch([{"id": 1}]),
             record_ids=["r1"],
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
@@ -1766,6 +1791,7 @@ class TestApiHandlerDeterministic4xxClassification:
             record_batch=_to_record_batch([{"id": 1}]),
             record_ids=["r1"],
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -1792,6 +1818,7 @@ class TestApiHandlerDeterministic4xxClassification:
             record_batch=_to_record_batch([{"id": 1}]),
             record_ids=["r1"],
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -1821,6 +1848,7 @@ class TestApiHandlerDeterministic4xxClassification:
             record_batch=_to_record_batch([{"id": 1}]),
             record_ids=["r1"],
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
@@ -1881,6 +1909,7 @@ class TestApiHandlerDeterministic4xxClassification:
             record_batch=_to_record_batch([{"id": i} for i in range(4)]),
             record_ids=[f"r{i}" for i in range(4)],
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
@@ -1945,6 +1974,7 @@ class TestApiHandlerDeterministic4xxClassification:
             record_batch=_to_record_batch([{"id": i} for i in range(5)]),
             record_ids=[f"r{i}" for i in range(5)],
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
@@ -2290,6 +2320,7 @@ class TestApiHandlerBodySpec:
             record_batch=_to_record_batch([{"id": 1}]),
             record_ids=["r1"],
             cursor=MagicMock(),
+            emitted_at=_EMITTED_AT,
         )
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert "1/1 records failed" in result.failure_summary
@@ -2326,6 +2357,7 @@ class TestApiHandlerBodySpec:
             ),
             record_ids=["r1", "r2", "r3"],
             cursor=MagicMock(),
+            emitted_at=_EMITTED_AT,
         )
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert result.records_written == 2
@@ -2619,6 +2651,7 @@ class TestApiHandlerIdempotencyInjection:
             record_batch=_to_record_batch([{"id": 1, "idempotency_key": "mine"}]),
             record_ids=["r1"],
             cursor=MagicMock(),
+            emitted_at=_EMITTED_AT,
         )
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert "1/1 records failed" in result.failure_summary

@@ -8,6 +8,7 @@ delegates all data operations to these handlers.
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
@@ -250,6 +251,7 @@ class BaseDestinationHandler(ABC):
         record_batch: pa.RecordBatch,
         record_ids: list[str],
         cursor: Cursor,
+        emitted_at: datetime,
     ) -> BatchWriteResult:
         """Write a batch of records to the destination.
 
@@ -270,6 +272,14 @@ class BaseDestinationHandler(ABC):
                 the only supported wire format.
             record_ids: Stable identifiers for each record (for DLQ correlation)
             cursor: Opaque cursor representing max watermark in batch
+            emitted_at: Timezone-aware UTC instant the engine emitted this
+                batch, stamped once and identical across every retry of the
+                same batch. A destination that renders time-based output
+                paths (file/S3 partitioning) MUST derive the path from this
+                value rather than its own wall clock, so a replayed batch
+                resolves the same path instead of drifting across an
+                hour/day boundary (issue #353). Sinks without time-based
+                partitioning ignore it.
 
         Returns:
             BatchWriteResult with status, records written, and cursor

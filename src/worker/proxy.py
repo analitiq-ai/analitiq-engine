@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -284,6 +285,7 @@ class WorkerProxyHandler(BaseDestinationHandler):
         record_batch: pa.RecordBatch,
         record_ids: list[str],
         cursor: Cursor,
+        emitted_at: datetime,
     ) -> BatchWriteResult:
         client = self._streams.get(stream_id)
         if client is None:
@@ -295,10 +297,19 @@ class WorkerProxyHandler(BaseDestinationHandler):
                 batch_seq=batch_seq,
             )
         # The servicer hands the handler the CDK cursor; the forwarding
-        # client builds proto messages — convert at the boundary.
+        # client builds proto messages — convert at the boundary. emitted_at
+        # rides the forwarded batch unchanged so the worker's file handler
+        # sees the same replay-stable instant the engine stamped, one hop back
+        # (issue #353).
         proto_cursor = ProtoCursor(token=cursor.token if cursor else b"")
         result = await client.send_batch(
-            run_id, stream_id, batch_seq, record_batch, record_ids, proto_cursor
+            run_id,
+            stream_id,
+            batch_seq,
+            record_batch,
+            record_ids,
+            proto_cursor,
+            emitted_at,
         )
         committed = (
             Cursor(token=result.committed_cursor.token)

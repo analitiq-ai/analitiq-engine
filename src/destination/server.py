@@ -11,6 +11,7 @@ import asyncio
 import io
 import logging
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import pyarrow as pa
@@ -269,6 +270,14 @@ class DestinationServicer(DestinationServiceServicer):
                     )
 
                     record_batch = self._decode_arrow_ipc(batch_msg)
+                    # Wire convention: emitted_at_unix_ms is UTC epoch
+                    # milliseconds stamped once by the engine (issue #353).
+                    # Decode to a tz-aware datetime here so the CDK contract
+                    # deals in datetimes, never raw wire ints -- the same
+                    # boundary translation applied to Cursor and WriteMode.
+                    emitted_at = datetime.fromtimestamp(
+                        batch_msg.emitted_at_unix_ms / 1000, tz=timezone.utc
+                    )
                     result = await self.handler.write_batch(
                         run_id=batch_msg.run_id,
                         stream_id=batch_msg.stream_id,
@@ -276,6 +285,7 @@ class DestinationServicer(DestinationServiceServicer):
                         record_batch=record_batch,
                         record_ids=list(batch_msg.record_ids),
                         cursor=CdkCursor(token=batch_msg.cursor.token),
+                        emitted_at=emitted_at,
                     )
 
                     # Build ACK response

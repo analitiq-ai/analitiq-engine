@@ -7,6 +7,7 @@ never leave an orphan process — and the unconfigured-stream write path.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,6 +15,11 @@ import pytest
 
 from cdk.types import AckStatus, RetrySemantics, SchemaSpec, WriteMode
 from src.worker.proxy import WorkerProxyHandler
+
+_EMITTED_AT = datetime(2026, 7, 21, 9, 0, 0, tzinfo=timezone.utc)
+"""A fixed, timezone-aware emit instant for write_batch/send_batch calls;
+the engine stamps this per batch (issue #353). Value is arbitrary for sinks
+that ignore it."""
 
 
 def _proxy():
@@ -172,6 +178,7 @@ class TestProxyWriteBatch:
             record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
             record_ids=["a"],
             cursor=None,
+            emitted_at=_EMITTED_AT,
         )
         assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
         assert result.records_written == 0
@@ -208,6 +215,7 @@ class TestProxyWriteBatch:
             record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
             record_ids=["a"],
             cursor=None,
+            emitted_at=_EMITTED_AT,
         )
         assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
         assert "before ACK" in result.failure_summary
@@ -241,6 +249,7 @@ class TestProxyWriteBatch:
             record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
             record_ids=["a"],
             cursor=None,
+            emitted_at=_EMITTED_AT,
         )
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         # The declared category is forwarded across the hop like the summary
@@ -282,6 +291,7 @@ class TestProxyWriteBatch:
             record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
             record_ids=["a"],
             cursor=None,
+            emitted_at=_EMITTED_AT,
         )
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert result.committed_cursor is None
@@ -340,6 +350,7 @@ class TestProxyWriteBatch:
             record_batch=batch,
             record_ids=["a"],
             cursor=None,
+            emitted_at=_EMITTED_AT,
         )
         # First attempt: retryable. No rebuild happened in the proxy — the same
         # cached client is retained, untouched, for the engine's retry.
@@ -355,6 +366,7 @@ class TestProxyWriteBatch:
             record_batch=batch,
             record_ids=["a"],
             cursor=None,
+            emitted_at=_EMITTED_AT,
         )
         assert retry.status == AckStatus.ACK_STATUS_SUCCESS
         assert retry.records_written == 1
@@ -399,6 +411,7 @@ class TestProxyWriteBatch:
                 record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
                 record_ids=["a"],
                 cursor=None,
+                emitted_at=_EMITTED_AT,
             )
         assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
 

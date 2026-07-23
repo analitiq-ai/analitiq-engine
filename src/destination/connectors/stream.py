@@ -7,6 +7,7 @@ It does not implement idempotency since stdout is not persistent.
 import errno
 import logging
 import sys
+from datetime import datetime
 from typing import Any
 
 import pyarrow as pa
@@ -140,11 +141,14 @@ class StreamDestinationHandler(BaseDestinationHandler):
         record_batch: pa.RecordBatch,
         record_ids: list[str],
         cursor: Cursor,
+        emitted_at: datetime,
     ) -> BatchWriteResult:
         """Write an Arrow record batch to stdout.
 
         The stdout formatter consumes dicts, so the batch is materialized
-        once at this boundary.
+        once at this boundary. ``emitted_at`` is part of the write_batch
+        contract for time-partitioned sinks; stdout has no output path, so
+        it is unused here.
         """
         if not self._connected or self._formatter is None:
             reason = (
