@@ -79,10 +79,14 @@ Per mode, the single statement from stage to target is:
   exactly-once wherever the system enforces the identity constraint (§9),
   and the ADBC keyless stage + `MERGE` special case (#285) becomes the same
   anti-join every insert uses.
-- **`truncate_insert`** — truncate once on the read's first batch
+- **`truncate_insert`** — empty the target once on the read's first batch
   (`batch_seq == 1`, #307 semantics unchanged), then a plain
-  `INSERT INTO target SELECT … FROM stage` append. No identity dedup: deduping
-  a full refresh would collapse legitimate duplicate rows (unchanged contract,
+  `INSERT INTO target SELECT … FROM stage` append. The emptying statement is
+  an ANSI `DELETE FROM target`, exactly what runs today
+  (`state.table.delete()`, `generic.py:1707`) — never the `TRUNCATE`
+  statement, which implicitly commits on Redshift and others and would break
+  the §7 single-transaction promise. No identity dedup: deduping a full
+  refresh would collapse legitimate duplicate rows (unchanged contract,
   `generic.py:1616-1619`).
 
 ### Intra-batch duplicate rules
@@ -106,7 +110,11 @@ applied in Arrow space before landing:
   rows match"), so the cursor-keyed collapse is newly sanctioned behavior,
   not a silent change — and it is required: coalescing (§8) widens the window
   a batch covers, making a key updated twice within one unit a normal event
-  rather than an anomaly.
+  rather than an anomaly. The cursor field and its tie-breakers reach the
+  facade the way `conflict_keys` already do — threaded from the shared
+  pipeline config on the engine side of the worker boundary
+  (`base_handler.py:134-150` is the pattern); the wire `Cursor` stays opaque
+  and `SchemaMessage` stays slim.
 - **`truncate_insert`** — no collapsing, as above.
 
 ### Landing
@@ -143,6 +151,8 @@ class StageWritePlan:
     scope: StageScope              # TEMP or REAL, from the declaration
     transactional: bool            # from the declaration (section 7)
     create_stage_sql: str          # dialect.stage_table_sql(...)
+    truncate_sql: str | None       # first truncate_insert batch only:
+                                   # ANSI DELETE FROM target (section 2)
     mode_sql: str                  # the one mode statement (section 2)
     drop_stage_sql: str
     columns: tuple[str, ...]       # landing column order, identity included
@@ -164,10 +174,16 @@ class TransportBackend(ABC):
 
     async def execute_write(self, plan: StageWritePlan, batch: pa.RecordBatch) -> None:
         """Create the stage, land the batch (declared bulk mechanism first,
-        executemany fallback), run plan.mode_sql, drop the stage.
+        executemany fallback), run plan.truncate_sql when set, run
+        plan.mode_sql, drop the stage.
 
-        One transaction spanning all four steps when plan.transactional;
-        stepwise commits with the section-6 poisoning rules when not.
+        One transaction spanning every step when plan.transactional -- the
+        target-emptying DELETE shares the batch transaction exactly as it
+        does today (generic.py:1698-1707), so a failed first batch rolls
+        the emptying back with it. Stepwise commits with the section-6
+        poisoning rules when not: the DELETE then commits as its own step,
+        and a failure before the append heals on retry -- the same
+        first-batch plan re-runs it.
         Success is returning without raising. Deliberately returns nothing:
         database rowcounts lie about the batch (an idempotent replay's
         anti-join affects 0 rows; MySQL upserts count 2 per updated row),
@@ -423,6 +439,17 @@ Mechanics:
   coalescer to hold, and the engine's synthetic empty `batch_seq` 1 —
   which is what truncates the target after a clean zero-row read
   (`stream_processor.py:918-968`) — is sent outside the coalescer's path.
+- **Failure isolation survives coalescing.** A bigger unit must not widen
+  the dlq/skip blast radius: on a FATAL ack for a coalesced unit, the
+  engine re-sends the unit split back into its original source batches (the
+  coalescer keeps their boundary offsets), each through the normal send path
+  with its own `record_ids` and MAX cursor; only the source batches that
+  fail again are DLQ'd or skipped — the same rows that would have been lost
+  without coalescing, no more. A `truncate_insert` first unit that fails
+  this way restarts numbering, so its first split goes out as the fresh
+  read's `batch_seq` 1 and the truncate signal survives. Exhausted
+  *retryable* failures keep unit granularity: they are transient, not
+  row-caused, and a wholesale unit replayed from the DLQ loses nothing.
 - **Size budget.** The hard bound is the gRPC message cap
   (`GRPC_MAX_MESSAGE_SIZE`, `src/config/settings.py:103`), raised from 16 MiB
   to 64 MiB by default. The unit budget counts the Arrow payload **plus**
@@ -524,9 +551,9 @@ compatibility layer, per the engine's no-legacy rule:
   renaming `adbc_stage_table_sql` overrides to `stage_table_sql` and
   removing the dead `MySQLDialect.batch_commits_key_type`.
 - #391: the conformance kit asserting §10.
-- #384: the engine coalescer, the message-cap default raise, and removal of
-  the dead `GetCapabilitiesResponse` sizing fields — #384 remains open as
-  the implementation tracker for §8.
+- #384: the engine coalescer with the FATAL split pass, the message-cap
+  default raise, and removal of the dead `GetCapabilitiesResponse` sizing
+  fields — #384 remains open as the implementation tracker for §8.
 - Docs: the affected sections of
   [grpc-streaming-architecture.md](grpc-streaming-architecture.md) (verdict
   matrix, ADBC parity caveat, batch-size prose) and
@@ -600,7 +627,8 @@ compatibility layer, per the engine's no-legacy rule:
    #384; §8). *Rationale:* the flush-gated and windowed-ack alternatives
    hand unacked data or cursor durability to untrusted connector workers;
    engine-side merging solves the quota problem with no new trust and no
-   proto change. Chunked framing is deferred until a workload needs it.
+   proto change; the FATAL split pass keeps the dlq/skip blast radius at
+   the source batch. Chunked framing is deferred until a workload needs it.
 8. **Upsert collapses intra-batch duplicate keys to the greatest cursor
    value, and stays a loud failure for cursor-less streams; insert stays
    first-wins** (§2). *Rationale:* coalescing makes intra-batch key updates
