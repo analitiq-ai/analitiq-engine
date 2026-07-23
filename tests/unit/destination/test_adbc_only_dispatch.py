@@ -379,6 +379,268 @@ class TestAdbcIngestSchemaNormalization:
         assert captured["db_schema_name"] is None
 
 
+class _FixtureSessionDefaultDialect(_FixtureAdbcDialect):
+    """Opts out of per-statement ingest targeting (stands in for Snowflake):
+    ``adbc_ingest`` follows the connection's session schema."""
+
+    name = "fixture_session_default"
+
+    def adbc_ingest_kwargs(self, address: TableAddress) -> dict:
+        return {}
+
+
+class _FixtureSessionDefaultConnector(GenericSQLConnector):
+    dialect_class = _FixtureSessionDefaultDialect
+
+
+class _SessionFakeConn:
+    """Fake ADBC connection reporting a configurable session schema.
+
+    Records every executed statement and every ``adbc_ingest`` call so
+    tests can assert what reached the wire; counts session-schema probes
+    to pin the once-per-connection cache. ``probe_error`` makes the
+    probe statement raise (driver-failure injection); ``no_row`` makes
+    ``fetchone`` return no row at all instead of a 1-tuple.
+    """
+
+    def __init__(self, session_schema, probe_sql, *, probe_error=None, no_row=False):
+        self.session_schema = session_schema
+        self.probe_sql = probe_sql
+        self.probe_error = probe_error
+        self.no_row = no_row
+        self.statements: list[str] = []
+        self.ingests: list[dict] = []
+        self.probe_count = 0
+        self.closed = False
+
+    def cursor(self):
+        conn = self
+
+        class _Cursor:
+            def execute(self, sql, params=None):
+                conn.statements.append(sql)
+                if sql == conn.probe_sql:
+                    conn.probe_count += 1
+                    if conn.probe_error is not None:
+                        raise conn.probe_error
+
+            def fetchone(self):
+                return None if conn.no_row else (conn.session_schema,)
+
+            def adbc_ingest(self, table, batch, mode, **kwargs):
+                conn.ingests.append({"table": table, "mode": mode, "kwargs": kwargs})
+
+            def close(self):
+                pass
+
+        return _Cursor()
+
+    def commit(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
+class TestAdbcSessionSchemaGuard:
+    """Issue #377: when a dialect opts out of per-statement ingest targeting,
+    bare-name ingest resolves against the connection's session schema. The
+    invariant *session schema == target schema* holds by construction today;
+    these tests pin the guard that turns a future divergence into a hard
+    error instead of a silent append into a same-named table in the wrong
+    schema (the append path's silent window)."""
+
+    def _handler(self, session_schema):
+        h = _FixtureSessionDefaultConnector()
+        h._adbc_only = True
+        conn = _SessionFakeConn(session_schema, h.dialect.adbc_session_schema_sql())
+        h._adbc_conn = conn
+        return h, conn
+
+    @staticmethod
+    def _batch():
+        return pa.record_batch([pa.array([1])], names=["id"])
+
+    def test_matching_session_schema_ingests_bare_name(self):
+        h, conn = self._handler("PUBLIC")
+        h._adbc_only_ingest_sync(
+            self._batch(), h.dialect.table_address("orders", schema="public")
+        )
+        assert conn.probe_count == 1
+        assert conn.ingests == [{"table": "ORDERS", "mode": "append", "kwargs": {}}]
+
+    def test_probe_runs_once_per_connection(self):
+        h, conn = self._handler("PUBLIC")
+        address = h.dialect.table_address("orders", schema="public")
+        h._adbc_only_ingest_sync(self._batch(), address)
+        h._adbc_only_ingest_sync(self._batch(), address)
+        assert conn.probe_count == 1
+        assert len(conn.ingests) == 2
+
+    def test_mismatch_raises_and_skips_ingest(self):
+        h, conn = self._handler("PUBLIC")
+        with pytest.raises(AdbcConfigurationError) as exc:
+            h._adbc_only_ingest_sync(
+                self._batch(),
+                h.dialect.table_address("orders", schema="analytics"),
+            )
+        # The error names both schemas and nothing was ingested.
+        assert "'PUBLIC'" in str(exc.value)
+        assert "'ANALYTICS'" in str(exc.value)
+        assert conn.ingests == []
+
+    def test_no_session_schema_raises(self):
+        h, conn = self._handler(None)
+        with pytest.raises(AdbcConfigurationError, match="no schema selected"):
+            h._adbc_only_ingest_sync(
+                self._batch(),
+                h.dialect.table_address("orders", schema="public"),
+            )
+        assert conn.ingests == []
+
+    def test_session_value_is_dialect_normalized(self):
+        # CURRENT_SCHEMA() reporting a spelling that needs folding still
+        # matches the normalized address ("normalized per dialect").
+        h, conn = self._handler("public")
+        h._adbc_only_ingest_sync(
+            self._batch(), h.dialect.table_address("orders", schema="public")
+        )
+        assert len(conn.ingests) == 1
+
+    def test_poison_resets_the_probe_cache(self):
+        h, conn = self._handler("PUBLIC")
+        address = h.dialect.table_address("orders", schema="public")
+        h._adbc_only_ingest_sync(self._batch(), address)
+        assert h._adbc_session_schema_known
+        h._poison_adbc_connection()
+        assert not h._adbc_session_schema_known
+        assert h._adbc_session_schema is None
+        assert conn.closed
+        # A replacement connection with a diverged session schema is
+        # re-probed and refused — the cache never outlives its connection.
+        h._adbc_conn = _SessionFakeConn("OTHER", h.dialect.adbc_session_schema_sql())
+        with pytest.raises(AdbcConfigurationError):
+            h._adbc_only_ingest_sync(self._batch(), address)
+
+    def test_targeting_dialect_never_probes(self):
+        # A dialect that keeps per-statement targeting kwargs bypasses the
+        # guard entirely — no probe statement reaches the connection.
+        h = _FixtureConnector()
+        h._adbc_only = True
+        conn = _SessionFakeConn("PUBLIC", h.dialect.adbc_session_schema_sql())
+        h._adbc_conn = conn
+        h._adbc_only_ingest_sync(
+            self._batch(), h.dialect.table_address("orders", schema="public")
+        )
+        assert conn.probe_count == 0
+        assert conn.ingests == [
+            {
+                "table": "ORDERS",
+                "mode": "append",
+                "kwargs": {"db_schema_name": "PUBLIC"},
+            }
+        ]
+
+    def test_merge_path_mismatch_fails_before_stage_ddl(self):
+        # The stage-upsert path guards the same invariant, and the guard
+        # runs before any stage DDL so a mismatch leaves nothing behind.
+        h, conn = self._handler("PUBLIC")
+        address = h.dialect.table_address("orders", schema="analytics")
+        with pytest.raises(AdbcConfigurationError):
+            h._merge_ingest_sync(self._batch(), address, ["id"], ["id"], "btok")
+        assert conn.ingests == []
+        assert not any("CREATE TABLE" in s for s in conn.statements)
+
+    def test_merge_path_matching_session_proceeds(self):
+        h, conn = self._handler("PUBLIC")
+        address = h.dialect.table_address("orders", schema="public")
+        h._merge_ingest_sync(self._batch(), address, ["id"], ["id"], "btok")
+        assert conn.probe_count == 1
+        assert len(conn.ingests) == 1
+        assert conn.ingests[0]["kwargs"] == {}
+        assert conn.ingests[0]["table"].startswith("_analitiq_stage_")
+
+    def test_truncate_path_mismatch_fails_before_truncate(self):
+        # truncate_insert's first batch TRUNCATEs the (schema-qualified,
+        # therefore correct) target; the guard must run first so a
+        # mismatch cannot empty a table it then refuses to refill.
+        h, conn = self._handler("PUBLIC")
+        address = h.dialect.table_address("orders", schema="analytics")
+        with pytest.raises(AdbcConfigurationError):
+            h._truncate_then_ingest_sync(self._batch(), address)
+        assert conn.ingests == []
+        assert not any("TRUNCATE" in s for s in conn.statements)
+
+    def test_truncate_path_matching_session_proceeds(self):
+        h, conn = self._handler("PUBLIC")
+        address = h.dialect.table_address("orders", schema="public")
+        h._truncate_then_ingest_sync(self._batch(), address)
+        assert conn.probe_count == 1
+        assert any("TRUNCATE" in s for s in conn.statements)
+        assert len(conn.ingests) == 1
+
+    def test_probe_fatal_driver_error_reclassified(self):
+        # A probe failing with a PEP-249 fatal name (e.g. a future
+        # session-default dialect whose system rejects the base probe
+        # SQL) must become AdbcConfigurationError so the engine bails
+        # instead of retrying a deterministic failure forever.
+        h, conn = self._handler("PUBLIC")
+        conn.probe_error = ProgrammingError("unknown function CURRENT_SCHEMA")
+        with pytest.raises(AdbcConfigurationError, match="ProgrammingError"):
+            h._adbc_only_ingest_sync(
+                self._batch(),
+                h.dialect.table_address("orders", schema="public"),
+            )
+        assert conn.ingests == []
+        assert conn.closed  # poisoned like any ingest-path driver error
+        assert not h._adbc_session_schema_known  # retry re-probes
+
+    def test_probe_transient_error_propagates_and_poisons(self):
+        h, conn = self._handler("PUBLIC")
+        conn.probe_error = OperationalError("connection reset")
+        with pytest.raises(OperationalError):
+            h._adbc_only_ingest_sync(
+                self._batch(),
+                h.dialect.table_address("orders", schema="public"),
+            )
+        assert conn.ingests == []
+        assert conn.closed
+        assert not h._adbc_session_schema_known
+
+    def test_probe_returning_no_row_is_no_schema(self):
+        # Some drivers return no row instead of a (NULL,) row; both
+        # collapse to the loud "no schema selected" refusal.
+        h = _FixtureSessionDefaultConnector()
+        h._adbc_only = True
+        conn = _SessionFakeConn(None, h.dialect.adbc_session_schema_sql(), no_row=True)
+        h._adbc_conn = conn
+        with pytest.raises(AdbcConfigurationError, match="no schema selected"):
+            h._adbc_only_ingest_sync(
+                self._batch(),
+                h.dialect.table_address("orders", schema="public"),
+            )
+        assert conn.ingests == []
+
+    def test_schemaless_address_skips_probe(self):
+        # No target schema means the session default IS the intent —
+        # the guard stays out of the way even on an opt-out dialect.
+        h, conn = self._handler("PUBLIC")
+        h._adbc_only_ingest_sync(self._batch(), h.dialect.table_address("orders"))
+        assert conn.probe_count == 0
+        assert len(conn.ingests) == 1
+
+    async def test_disconnect_resets_the_probe_cache(self):
+        h, conn = self._handler("PUBLIC")
+        h._adbc_only_ingest_sync(
+            self._batch(), h.dialect.table_address("orders", schema="public")
+        )
+        assert h._adbc_session_schema_known
+        await h.disconnect()
+        assert not h._adbc_session_schema_known
+        assert h._adbc_session_schema is None
+        assert conn.closed
+
+
 class TestDialectQuoting:
     """Quoting is a dialect hook: the ANSI base double-quotes (with escaping);
     a backtick fixture dialect quotes with backticks and rejects embedded

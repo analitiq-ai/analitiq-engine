@@ -382,7 +382,10 @@ class SqlDialect:
         Drivers that do not implement per-statement ingest targeting
         override this to return no kwargs; ingest then follows the
         connection's session defaults, where the target tables already
-        live.
+        live. That opt-out shifts the schema-correctness burden onto
+        the session, so the engine guards it: before a bare-name ingest
+        it checks :meth:`adbc_session_schema_sql` against the address's
+        schema and refuses on mismatch (issue #377).
         """
         kwargs: dict[str, Any] = {}
         if address.schema:
@@ -390,6 +393,25 @@ class SqlDialect:
         if address.catalog:
             kwargs["catalog_name"] = address.catalog
         return kwargs
+
+    def adbc_session_schema_sql(self) -> str:
+        """Return SQL yielding the connection's current session schema.
+
+        Companion guard to overriding :meth:`adbc_ingest_kwargs` to
+        return no targeting kwargs: when ingest follows the connection's
+        session defaults, the engine verifies — probing once per
+        connection — that the session schema equals the address's schema
+        before handing ``adbc_ingest`` a bare table name (issue #377).
+        The statement must return one row whose first column is the
+        session schema name, NULL when the session has none selected.
+
+        ``SELECT CURRENT_SCHEMA()`` is the spelling of the one
+        session-default system shipped today (Snowflake) and is equally
+        valid Postgres SQL; a dialect whose system spells the probe
+        differently overrides. Dialects that keep the default
+        :meth:`adbc_ingest_kwargs` targeting never reach this probe.
+        """
+        return "SELECT CURRENT_SCHEMA()"
 
     # ---- discovery queries (qmark placeholders + positional params) --------
     def information_schema_ref(

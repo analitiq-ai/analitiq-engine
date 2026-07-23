@@ -326,6 +326,16 @@ class GenericSQLConnector(BaseDestinationHandler):
         # _adbc_conn_lock so the next operation reopens instead of
         # reusing a poisoned handle.
         self._adbc_conn: Any = None
+        # Session schema reported by the live ADBC connection, probed
+        # lazily the first time a dialect that opted out of
+        # per-statement ingest targeting needs the session == target
+        # invariant checked (issue #377). Valid only for the current
+        # ``_adbc_conn``: every site that drops or replaces the
+        # connection resets both fields so a fresh connection is
+        # re-probed. ``_known`` distinguishes "not probed yet" from a
+        # session that legitimately has no schema selected (None).
+        self._adbc_session_schema: str | None = None
+        self._adbc_session_schema_known: bool = False
         # Guards mutations of ``self._adbc_conn`` from worker threads.
         # ``asyncio.to_thread`` dispatches each ADBC call to the default
         # thread pool; without this lock two concurrent failures could
@@ -632,6 +642,8 @@ class GenericSQLConnector(BaseDestinationHandler):
         self._adbc_only = False
         self._engine = None
         self._sync_engine = None
+        self._adbc_session_schema = None
+        self._adbc_session_schema_known = False
         if runtime.is_adbc:
             self._adbc_only = True
             # Open the ADBC connection eagerly so a bad credential
@@ -686,6 +698,8 @@ class GenericSQLConnector(BaseDestinationHandler):
         with self._adbc_conn_lock:
             adbc_conn = self._adbc_conn
             self._adbc_conn = None
+            self._adbc_session_schema = None
+            self._adbc_session_schema_known = False
         if adbc_conn is not None:
             try:
                 await asyncio.to_thread(adbc_conn.close)
@@ -1810,6 +1824,8 @@ class GenericSQLConnector(BaseDestinationHandler):
         with self._adbc_conn_lock:
             conn = self._adbc_conn
             self._adbc_conn = None
+            self._adbc_session_schema = None
+            self._adbc_session_schema_known = False
         if conn is not None:
             try:
                 conn.close()
@@ -1984,13 +2000,15 @@ class GenericSQLConnector(BaseDestinationHandler):
         with self._adbc_op_lock:
             conn = self._reopen_adbc_if_needed_sync()
             try:
+                ingest_kwargs = self.dialect.adbc_ingest_kwargs(address)
+                self._check_adbc_session_schema_sync(conn, address, ingest_kwargs)
                 cursor = conn.cursor()
                 try:
                     cursor.adbc_ingest(
                         address.table,
                         cast_batch,
                         mode="append",
-                        **self.dialect.adbc_ingest_kwargs(address),
+                        **ingest_kwargs,
                     )
                     conn.commit()
                 finally:
@@ -2000,6 +2018,55 @@ class GenericSQLConnector(BaseDestinationHandler):
                 if _is_fatal_adbc_error(exc):
                     raise _reclassify_as_fatal(exc) from exc
                 raise
+
+    def _check_adbc_session_schema_sync(
+        self,
+        conn: Any,
+        address: TableAddress,
+        ingest_kwargs: Mapping[str, Any],
+    ) -> None:
+        """Guard bare-name ingest against a session/target schema mismatch.
+
+        When the dialect opts out of per-statement ingest targeting (no
+        ``db_schema_name`` in *ingest_kwargs*) while the address carries
+        a schema, ``adbc_ingest`` resolves the bare table name against
+        the connection's session schema. The invariant *session schema
+        == target schema* holds by construction today (issue #377); this
+        probe makes a future divergence a hard error instead of a silent
+        append into a same-named table in the wrong schema.
+
+        Probes :meth:`SqlDialect.adbc_session_schema_sql` once per
+        connection (cached; reset whenever ``_adbc_conn`` is dropped)
+        and compares the dialect-normalized result against
+        ``address.schema``. Runs under ``_adbc_op_lock`` inside the
+        caller's poison/reclassify scope, so a failing probe is handled
+        like any other ingest-path driver error.
+        """
+        if "db_schema_name" in ingest_kwargs or not address.schema:
+            return
+        if not self._adbc_session_schema_known:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(self.dialect.adbc_session_schema_sql())
+                row = cursor.fetchone()
+            finally:
+                _close_cursor_quietly(cursor)
+            raw = row[0] if row else None
+            self._adbc_session_schema = (
+                self.dialect.normalize_ident(raw) if raw else None
+            )
+            self._adbc_session_schema_known = True
+        if self._adbc_session_schema != address.schema:
+            raise AdbcConfigurationError(
+                f"dialect {self.dialect.name!r} does not support per-statement "
+                f"ingest targeting, so adbc_ingest resolves bare table names "
+                f"against the connection's session schema "
+                f"({self._adbc_session_schema!r}"
+                f"{'' if self._adbc_session_schema else ' — no schema selected'}), "
+                f"but this write targets schema {address.schema!r}. Refusing to "
+                f"ingest into the wrong schema; align the connection's schema "
+                f"with the stream's target schema."
+            )
 
     def _adbc_truncate_sync(self, address: TableAddress) -> None:
         """TRUNCATE the target table on the ADBC connection (own commit)."""
@@ -2027,6 +2094,22 @@ class GenericSQLConnector(BaseDestinationHandler):
         # RLock is reentrant: the same-thread acquires inside
         # _adbc_truncate_sync and _adbc_only_ingest_sync are safe.
         with self._adbc_op_lock:
+            # Guard before the TRUNCATE — the destructive statement of
+            # this path. TRUNCATE is schema-qualified and commits, so on
+            # a session/target mismatch running it first would empty the
+            # correct target and then refuse the refill (issue #377).
+            # The probe result is cached, so the subsequent ingest's own
+            # check is a cache hit.
+            conn = self._reopen_adbc_if_needed_sync()
+            try:
+                self._check_adbc_session_schema_sync(
+                    conn, address, self.dialect.adbc_ingest_kwargs(address)
+                )
+            except Exception as exc:
+                self._poison_adbc_connection()
+                if _is_fatal_adbc_error(exc):
+                    raise _reclassify_as_fatal(exc) from exc
+                raise
             self._adbc_truncate_sync(address)
             self._adbc_only_ingest_sync(cast_batch, address)
 
@@ -2119,6 +2202,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         """
         conn = self._reopen_adbc_if_needed_sync()
         try:
+            # Guard before any stage DDL: a session/target schema
+            # mismatch fails here, not after a stage table was created
+            # (issue #377). The stage shares the target's schema, so
+            # checking the stage address covers the target too.
+            ingest_kwargs = self.dialect.adbc_ingest_kwargs(stage_address)
+            self._check_adbc_session_schema_sync(conn, stage_address, ingest_kwargs)
             cursor = conn.cursor()
             try:
                 # DROP-IF-EXISTS before CREATE so a retry of the same
@@ -2140,13 +2229,14 @@ class GenericSQLConnector(BaseDestinationHandler):
                 # address-derived kwargs (components pre-normalized, so a
                 # case-folding system's stored name matches the connector's
                 # conventional lowercase one); dialects that don't fall back
-                # to the connection's session defaults, where the stage was
-                # just created.
+                # to the connection's session defaults — verified above to
+                # match the target schema (the ADBC path mandates an explicit
+                # one) — where the stage was just created.
                 cursor.adbc_ingest(
                     stage_address.table,
                     cast_batch,
                     mode="append",
-                    **self.dialect.adbc_ingest_kwargs(stage_address),
+                    **ingest_kwargs,
                 )
                 conn.commit()
                 on_clause = " AND ".join(

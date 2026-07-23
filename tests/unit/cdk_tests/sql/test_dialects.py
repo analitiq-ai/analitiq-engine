@@ -455,3 +455,12 @@ class TestAdbcIngestKwargs:
             "db_schema_name": "ds",
             "catalog_name": "proj",
         }
+
+
+class TestAdbcSessionSchemaSql:
+    """Companion probe to the ingest-targeting opt-out (issue #377): the base
+    speaks the one shipped session-default system's spelling (Snowflake,
+    equally valid on Postgres); a dialect whose system differs overrides."""
+
+    def test_base_probe_is_current_schema(self):
+        assert SqlDialect().adbc_session_schema_sql() == "SELECT CURRENT_SCHEMA()"
