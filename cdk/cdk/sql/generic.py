@@ -2285,12 +2285,17 @@ class GenericSQLConnector(BaseDestinationHandler):
                 finally:
                     _close_cursor_quietly(drop_cursor)
             except Exception:
-                # The next retry's pre-flight DROP-IF-EXISTS will clean
-                # the orphan up; warn so an operator sees the leftover
-                # in the meantime.
+                # Only a failure that is actually retried gets cleaned
+                # up by the next attempt's pre-flight DROP-IF-EXISTS;
+                # after a FATAL reclassification or exhausted retries
+                # nothing re-sends this batch and the orphan needs a
+                # manual drop.
                 logger.warning(
-                    "ADBC stage table %s left behind after MERGE failure; "
-                    "the next retry's pre-flight DROP-IF-EXISTS will clean it up",
+                    "ADBC stage table %s left behind after MERGE failure; a "
+                    "retryable failure with retries remaining is cleaned up "
+                    "by the next attempt's pre-flight DROP-IF-EXISTS, but "
+                    "after a FATAL failure or exhausted retries the table "
+                    "must be dropped manually",
                     stage_qualified,
                     exc_info=True,
                 )
@@ -2298,24 +2303,63 @@ class GenericSQLConnector(BaseDestinationHandler):
             if _is_fatal_adbc_error(exc):
                 raise _reclassify_as_fatal(exc) from exc
             raise
-        # Successful path — DROP the stage so subsequent writes start
-        # clean. If this DROP fails, the next retry of the same batch
-        # cleans it up via the pre-flight DROP-IF-EXISTS at the top of
-        # this method, so even a persistent DROP failure does not break
-        # idempotency.
-        try:
-            drop_cursor = conn.cursor()
+        # Successful path — DROP the stage so it does not outlive the
+        # batch. Once the SUCCESS ack for this batch lands, nothing ever
+        # retries it, and the stage name embeds this batch's
+        # fingerprint, so the pre-flight DROP-IF-EXISTS only serves
+        # retries of FAILED batches and never reaches this table (the
+        # one exception — a SUCCESS ack lost in transit replaying the
+        # batch — makes the replay's own pre-flight DROP clean it up).
+        # Try twice, then poison the connection — a failed DROP implies
+        # a possibly-dead handle (mirroring the failure path), and
+        # without the poison the next batch burns one retryable failure
+        # on the cached handle before healing — and log honestly that
+        # the table is orphaned.
+        dropped = False
+        last_exc: Exception | None = None
+        for attempt in (1, 2):
             try:
-                drop_cursor.execute(f"DROP TABLE IF EXISTS {stage_qualified}")
-                conn.commit()
-            finally:
-                _close_cursor_quietly(drop_cursor)
-        except Exception:
+                drop_cursor = conn.cursor()
+                try:
+                    drop_cursor.execute(f"DROP TABLE IF EXISTS {stage_qualified}")
+                    conn.commit()
+                    dropped = True
+                finally:
+                    _close_cursor_quietly(drop_cursor)
+            except Exception as exc:
+                last_exc = exc
+                logger.debug(
+                    "post-MERGE DROP of ADBC stage table %s failed (attempt %d/2)",
+                    stage_qualified,
+                    attempt,
+                    exc_info=True,
+                )
+            if dropped:
+                break
+        if not dropped:
+            self._poison_adbc_connection()
+            # exc_info carries the last attempt's exception: at the
+            # default log level the per-attempt DEBUG records are never
+            # written, and the cause (permissions vs lock vs dead
+            # connection) decides what the operator's manual drop needs.
             logger.warning(
-                "ADBC stage table %s post-MERGE DROP failed; next retry of "
-                "this batch will clean it up via pre-flight DROP-IF-EXISTS",
+                "ADBC stage table %s could not be dropped after a successful "
+                "MERGE (two attempts). The batch is acked and never retried, "
+                "so no automatic cleanup reaches this table: it is orphaned "
+                "— a full copy of this batch — until dropped manually or "
+                "removed by a table-expiration policy. The connection was "
+                "discarded and reopens on the next operation",
                 stage_qualified,
-                exc_info=True,
+                exc_info=last_exc,
+            )
+        elif last_exc is not None:
+            # Surface the recovery at INFO: a handle failing its first
+            # DROP on every batch would otherwise have no footprint at
+            # the default log level until it escalates to an orphan.
+            logger.info(
+                "post-MERGE DROP of ADBC stage table %s succeeded on the "
+                "second attempt",
+                stage_qualified,
             )
 
     async def health_check(self) -> bool:
