@@ -34,15 +34,18 @@ intent takes a different primitive per transport:
 | `truncate_insert` | delete + insert inside the batch transaction (`generic.py:1689`) | separate truncate, then append (`generic.py:2089`) |
 | Transaction shape | one transaction per batch (`write_batch`, `generic.py:1338-1344`) | three commits per stage cycle (`generic.py:2226,2241,2269`) |
 | Bulk load | none — the sanctioned hook does not exist (#382; mysql#29 parked) | `adbc_ingest`, a private code path |
-| Stage tables | never | upsert only |
+| Stage tables | never | upsert and keyless insert |
 
 Two further gaps compound it:
 
-- **No sanctioned thick-connector surface for writes.** Registry connectors
-  extend the CDK only through `SqlDialect` hooks today, and the one connector
-  that needed more (MySQL `LOAD DATA LOCAL INFILE`, mysql#29) was parked
-  because its only route was overriding private internals — contract-less
-  coupling that breaks silently on any CDK refactor.
+- **No sanctioned thick-connector surface for writes.** The CDK's intended
+  extension surface is `SqlDialect`, and most registry connectors stay on it —
+  but both connectors that needed more prove the gap. MySQL's
+  `LOAD DATA LOCAL INFILE` (mysql#29) was parked because its only route was
+  overriding private internals; the BigQuery connector shipped exactly that
+  way, overriding `_adbc_only_ingest_sync` and `_merge_ingest_locked_sync` to
+  land batches as load jobs. Contract-less coupling that breaks silently on
+  any CDK refactor — parked in one case, live in the other.
 - **No way to reach per-table load-job quotas** (#384). The wire protocol is
   strictly one batch → one ack → cursor persisted, so a destination can never
   hold more than one unacked batch and has nothing to coalesce; one small load
@@ -71,8 +74,10 @@ Per mode, the single statement from stage to target is:
   replacing the per-row execution at `generic.py:1650`. Identity semantics are
   unchanged: the contract primary key, or the synthetic `_record_hash` column
   for a keyless stream (#282). This statement is plain ANSI and runs on both
-  backends, which structurally closes the documented parity gap — ADBC keyed
-  and keyless inserts become exactly-once instead of at-least-once.
+  backends, which structurally closes the parity gap: the ADBC keyed insert —
+  today a plain append, at-least-once (`generic.py:1994-2020`) — becomes
+  exactly-once, and the ADBC keyless stage + `MERGE` special case (#285)
+  becomes the same anti-join every insert uses.
 - **`truncate_insert`** — truncate once on the read's first batch
   (`batch_seq == 1`, #307 semantics unchanged), then a plain
   `INSERT INTO target SELECT … FROM stage` append. No identity dedup: deduping
@@ -142,9 +147,9 @@ class TransportBackend(ABC):
 
     Holds no write-mode logic. SqlAlchemyBackend serves both engine flavors
     (async engine, and sync engine on a worker thread) through one shared
-    sync-Connection body -- the property write_batch has today survives the
-    split. AdbcBackend owns the ADBC connection, its locks, and reopen/poison
-    handling.
+    sync-Connection body -- the property _apply_write_in_txn gives the
+    write path today, and it survives the split. AdbcBackend owns the ADBC
+    connection, its locks, and reopen/poison handling.
     """
 
     async def connect(self, runtime: ConnectionRuntime) -> None: ...
@@ -175,8 +180,10 @@ of scope.
 ## 4. The dialect surface
 
 `SqlDialect` keeps its role: per-system subclasses in connector packages
-override exactly the quirks their system has, and the connector class remains
-`dialect_class = XDialect` and nothing else. The write-path hooks after v2:
+override exactly the quirks their system has, and under v2 the connector class
+is `dialect_class = XDialect` and nothing else — the BigQuery connector's
+private-internal overrides migrate onto the hooks below (§11). The write-path
+hooks after v2:
 
 **New / generalized rendering hooks**
 
@@ -200,7 +207,9 @@ def bulk_land(self, conn: Any, stage: TableAddress,
     """Native bulk load into the stage. Return True if landed; False
     declines and the backend falls back to executemany (logged INFO).
     Called only when the connector declares a bulk mechanism (section 5);
-    conn is the backend's native connection object. Base returns False."""
+    conn is the backend's native connection object. A dialect whose
+    mechanism runs through the system's own client rather than the
+    transport connection (load_job) may ignore conn. Base returns False."""
 ```
 
 The anti-join insert, the truncate, and the append statement are plain ANSI
@@ -241,7 +250,7 @@ A schema-validated block in `connector.json` (contract change tracked in
   "catalog": "none" | "read" | "full",
   "session_targeting": "per_statement" | "session_default",
   "merge_form": "merge" | "insert_on_conflict" | "insert_on_duplicate_key" | "none",
-  "bulk_load": "none" | "copy_from" | "load_data_local_infile" | "adbc_ingest",
+  "bulk_load": "none" | "copy_from" | "load_data_local_infile" | "adbc_ingest" | "load_job",
   "stage": {
     "scope": "temp" | "real",
     "schema": "target" | "dedicated",
@@ -269,6 +278,10 @@ Properties:
 - **One source of truth per fact.** The JSON declares *whether* the system
   has a shape; the dialect class renders *how* to write it. The
   `supports_*` class booleans are deleted, not mirrored.
+- `"load_job"` names the mechanism of systems whose bulk path is a load-job
+  API driven through the system's own client rather than the transport
+  connection (BigQuery). It lands into the per-batch stage table like every
+  other mechanism — which is what makes §8's quota arithmetic hold.
 - Validated offline by the published validator like every other contract
   surface, and visible to any consumer of the connector definition.
 - `write_unit` sits at the connector level because it is not a SQL fact —
@@ -335,9 +348,11 @@ Declared per system as `stage.transactional_ddl`:
   degraded mode — it is how every load-job warehouse pipeline works.
 
 Both SQLAlchemy flavors keep sharing one sync-`Connection` transaction body,
-as `write_batch` does today (`generic.py:1338-1344`); the backend split must
-not fork them. The ADBC backend replaces today's fixed three-commit cycle
-(`generic.py:2226,2241,2269`) with the declared shape.
+as they do today through `_apply_write_in_txn` (`generic.py:1473-1494`,
+entered from the async flavor via `run_sync` and from the sync flavor on a
+worker thread); the backend split must not fork them. The ADBC backend
+replaces today's fixed three-commit cycle (`generic.py:2226,2241,2269`) with
+the declared shape.
 
 Statement-timeout policy is unchanged and stays in the facade: one deadline
 covers the whole batch write (`generic.py:1290`), with the known limitation
@@ -415,7 +430,8 @@ disappear because the backends no longer differ in mechanism. The
 per-handler matrix in
 [grpc-streaming-architecture.md](grpc-streaming-architecture.md) is amended
 accordingly by the implementing PRs, including deleting its "ADBC-only
-transports do not yet do the keyless insert anti-join" caveat.
+transports do not yet do the keyless insert anti-join" caveat — already stale
+for keyless (#285 made it stage + `MERGE`), and moot for keyed under v2.
 
 ## 10. What the conformance kit asserts about the primitive
 
@@ -455,7 +471,11 @@ compatibility layer, per the engine's no-legacy rule:
   path.
 - #389: `AdbcBackend` — aligns insert/truncate_insert on the primitive;
   deletes the plain-append insert path; inherits #377/#379 behavior as
-  specified in §6-§7.
+  specified in §6-§7. Once it lands, the BigQuery connector's registry repo
+  moves its load-job landing from the private `_adbc_only_ingest_sync` /
+  `_merge_ingest_locked_sync` overrides onto `bulk_land` with
+  `bulk_load: "load_job"` — until then that connector fails the §10 override
+  rule by construction.
 - #390: the `sql_capabilities` + `write_unit` contract block; deletes the
   `supports_*` dialect booleans and every guessing default. Connector
   definition updates in the registry repos follow per connector, including
