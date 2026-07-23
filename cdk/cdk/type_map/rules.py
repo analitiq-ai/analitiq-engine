@@ -29,6 +29,7 @@ from typing import Final, Literal, TypeVar
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .exceptions import InvalidTypeMapError
+from .grammar import NULL_TZ_SENTINEL, UNIT_SHORT_TO_LONG, unit_families
 
 _NAMED_GROUP_RE2: Final[Pattern[str]] = re.compile(r"\(\?<([A-Za-z_][A-Za-z0-9_]*)>")
 _SUBSTITUTION_TOKEN: Final[Pattern[str]] = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -50,43 +51,41 @@ _FORBIDDEN_CONSTRUCTS: Final[tuple[tuple[str, str], ...]] = (
 )
 _BACKREFERENCE_DIGIT: Final[Pattern[str]] = re.compile(r"\\[1-9]")
 
-# Short-code → long-form mapping for temporal unit arguments.  parse_arrow_type
-# accepts both spellings; normalize_canonical_type expands short codes in both
-# the stored write-rule key and every lookup input, so either spelling in a
-# write rule's canonical field matches either spelling at lookup time.
-_UNIT_SHORT_TO_LONG: Final[dict[str, str]] = {
-    "s": "SECOND",
-    "ms": "MILLISECOND",
-    "us": "MICROSECOND",
-    "ns": "NANOSECOND",
-}
+# Unit vocabulary and per-family constraints come from the shared grammar
+# table (cdk.type_map.grammar) — the same source parse_arrow_type binds
+# against and the published arrow_type_grammar.json renders from — so this
+# string-only surface can never disagree with the parser.
+# normalize_canonical_type expands short codes in both the stored write-rule
+# key and every lookup input, so either spelling in a write rule's canonical
+# field matches either spelling at lookup time.
+_UNIT_LONG_FORMS: Final[frozenset[str]] = frozenset(UNIT_SHORT_TO_LONG.values())
 
-# Long-form names matched by _TEMPORAL_UNIT_RE that pass through unchanged.
-_UNIT_LONG_FORMS: Final[frozenset[str]] = frozenset(_UNIT_SHORT_TO_LONG.values())
+# Allowed long-form units per temporal family, derived from the grammar. The
+# check runs after unit expansion so the error fires on both short (us) and
+# long (MICROSECOND) inputs.
+_VALID_UNITS_BY_TYPE: Final[dict[str, frozenset[str]]] = unit_families()
 
-# Arrow constrains which units are legal per temporal type:
-# Time32 accepts only SECOND/MILLISECOND; Time64 accepts only MICROSECOND/NANOSECOND.
-# Timestamp and Duration are unconstrained — every unit in _UNIT_SHORT_TO_LONG is legal.
-# This table is checked after unit expansion so the error fires on both short (us)
-# and long (MICROSECOND) inputs.
-_VALID_UNITS_BY_TYPE: Final[dict[str, frozenset[str]]] = {
-    "Time32": frozenset({"SECOND", "MILLISECOND"}),
-    "Time64": frozenset({"MICROSECOND", "NANOSECOND"}),
-}
-
-# Matches the opening of a temporal-type parameter list, capturing the type name
-# and its first argument (the unit).  The trailing \b ensures that short codes
-# (e.g. "s") do not partially match inside long-form names (e.g. "SECOND") —
-# the word-boundary assertion fails when the matched unit is followed by another
-# word character.
+# Matches the opening of a temporal-type parameter list, capturing the type
+# name and its first argument (the unit). Both alternations are built from the
+# grammar vocabulary, longest spelling first, so short codes (e.g. "s") do not
+# partially match inside long-form names (e.g. "SECOND"); the trailing \b
+# rejects a matched unit followed by another word character.
 _TEMPORAL_UNIT_RE: Final[Pattern[str]] = re.compile(
-    r"\b(Timestamp|Time32|Time64|Duration)"
-    r"\((NANOSECOND|MILLISECOND|MICROSECOND|SECOND|ns|us|ms|s)\b"
+    r"\b("
+    + "|".join(sorted(_VALID_UNITS_BY_TYPE, key=len, reverse=True))
+    + r")\(("
+    + "|".join(
+        sorted(_UNIT_LONG_FORMS, key=len, reverse=True)
+        + sorted(UNIT_SHORT_TO_LONG, key=len, reverse=True)
+    )
+    + r")\b"
 )
 
 # Timestamp(unit, null) is semantically identical to Timestamp(unit) — both
 # produce a timezone-naïve type.  Fold the explicit null into the no-tz form.
-_NULL_TZ_RE: Final[Pattern[str]] = re.compile(r"\bTimestamp\(([^,)]+),\s*null\)")
+_NULL_TZ_RE: Final[Pattern[str]] = re.compile(
+    r"\bTimestamp\(([^,)]+),\s*" + NULL_TZ_SENTINEL + r"\)"
+)
 
 
 def _expand_temporal_unit(m: re.Match[str]) -> str:
@@ -104,17 +103,17 @@ def _expand_temporal_unit(m: re.Match[str]) -> str:
     ``Time32(MICROSECOND)`` or ``Time64(SECOND)``).
     """
     type_name, unit = m.group(1), m.group(2)
-    if unit in _UNIT_SHORT_TO_LONG:
-        long_unit = _UNIT_SHORT_TO_LONG[unit]
+    if unit in UNIT_SHORT_TO_LONG:
+        long_unit = UNIT_SHORT_TO_LONG[unit]
     elif unit in _UNIT_LONG_FORMS:
         long_unit = unit
     else:
         raise AssertionError(
             f"temporal-unit regex matched unexpected unit {unit!r}; "
-            f"update _UNIT_SHORT_TO_LONG or _UNIT_LONG_FORMS to include it"
+            f"the regex and the grammar vocabulary have drifted out of sync"
         )
-    allowed = _VALID_UNITS_BY_TYPE.get(type_name)
-    if allowed is not None and long_unit not in allowed:
+    allowed = _VALID_UNITS_BY_TYPE[type_name]
+    if long_unit not in allowed:
         valid_str = "/".join(sorted(allowed))
         raise InvalidTypeMapError(
             f"{type_name} accepts {valid_str} only; got {long_unit}"

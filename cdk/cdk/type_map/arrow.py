@@ -17,21 +17,9 @@ import pyarrow as pa
 
 from .conversions import Conversion, classify_conversion
 from .exceptions import InvalidTypeMapError
+from .grammar import STRUCTURAL_FAMILIES, UNIT_LONG_TO_SHORT, bind_parameters
 
 _PARAM_SPLIT: Final[Pattern[str]] = re.compile(r"\s*,\s*")
-
-
-_UNIT_ALIASES: Final[dict[str, str]] = {
-    "SECOND": "s",
-    "MILLISECOND": "ms",
-    "MICROSECOND": "us",
-    "NANOSECOND": "ns",
-}
-
-
-def _normalize_unit(unit: str) -> str:
-    """Map the schema's long unit names to PyArrow's short codes."""
-    return _UNIT_ALIASES.get(unit, unit)
 
 
 def _parse_head(canonical: str) -> tuple[str, tuple[str, ...]]:
@@ -51,85 +39,73 @@ def _parse_head(canonical: str) -> tuple[str, tuple[str, ...]]:
     return head.strip(), args
 
 
+# Family -> pyarrow factory over the values bind_parameters resolved. Keyed on
+# the same family set as the grammar table; the conformance test pins the two
+# key sets equal so a family cannot be declared without being buildable.
+_FACTORIES: Final[dict[str, Callable[[Mapping[str, Any]], pa.DataType]]] = {
+    "Null": lambda v: pa.null(),
+    "Boolean": lambda v: pa.bool_(),
+    "Int8": lambda v: pa.int8(),
+    "Int16": lambda v: pa.int16(),
+    "Int32": lambda v: pa.int32(),
+    "Int64": lambda v: pa.int64(),
+    "UInt8": lambda v: pa.uint8(),
+    "UInt16": lambda v: pa.uint16(),
+    "UInt32": lambda v: pa.uint32(),
+    "UInt64": lambda v: pa.uint64(),
+    "Float16": lambda v: pa.float16(),
+    "Float32": lambda v: pa.float32(),
+    "Float64": lambda v: pa.float64(),
+    "Utf8": lambda v: pa.string(),
+    "LargeUtf8": lambda v: pa.large_string(),
+    "Binary": lambda v: pa.binary(),
+    "LargeBinary": lambda v: pa.large_binary(),
+    "Date32": lambda v: pa.date32(),
+    "Date64": lambda v: pa.date64(),
+    "Time32": lambda v: pa.time32(UNIT_LONG_TO_SHORT[v["unit"]]),
+    "Time64": lambda v: pa.time64(UNIT_LONG_TO_SHORT[v["unit"]]),
+    "Duration": lambda v: pa.duration(UNIT_LONG_TO_SHORT[v["unit"]]),
+    "Timestamp": lambda v: pa.timestamp(UNIT_LONG_TO_SHORT[v["unit"]], tz=v["tz"]),
+    "Decimal128": lambda v: pa.decimal128(v["precision"], v["scale"]),
+    "Decimal256": lambda v: pa.decimal256(v["precision"], v["scale"]),
+    "FixedSizeBinary": lambda v: pa.binary(v["byte_width"]),
+    # Opaque JSON blob — shape not declared. Carried over the wire as a
+    # JSON-encoded string; destinations json.loads it back to a dict/list at
+    # the write boundary.
+    "Json": lambda v: pa.large_string(),
+}
+
+
 def parse_arrow_type(canonical: str) -> pa.DataType:
     """Parse an Arrow type string into a PyArrow ``DataType``.
 
-    Raises :class:`InvalidTypeMapError` for malformed input or unsupported
-    families. The matcher is deliberately strict — an unknown family
-    indicates an author-time mistake that should surface loudly.
+    The parameter grammar — allowed units, integer ranges, the timezone forms
+    — comes from :data:`cdk.type_map.grammar.ARROW_TYPE_GRAMMAR`, the same
+    table the published ``arrow_type_grammar.json`` renders from. Raises
+    :class:`InvalidTypeMapError` for malformed input, unsupported families, or
+    any parameter the grammar rejects (including an invalid timezone, which
+    fails here at author time rather than at cast time inside a running
+    pipeline). The matcher is deliberately strict — an unknown family or a
+    surplus parameter indicates an author-time mistake that should surface
+    loudly.
 
     Nested-type markers (``Object``, ``List``) are intentionally rejected
     here: they need the property's sub-schema, which only the
     :class:`SchemaContract` walker has access to.
     """
     head, args = _parse_head(canonical)
-    match head:
-        case "Null":
-            return pa.null()
-        case "Boolean":
-            return pa.bool_()
-        case "Int8":
-            return pa.int8()
-        case "Int16":
-            return pa.int16()
-        case "Int32":
-            return pa.int32()
-        case "Int64":
-            return pa.int64()
-        case "UInt8":
-            return pa.uint8()
-        case "UInt16":
-            return pa.uint16()
-        case "UInt32":
-            return pa.uint32()
-        case "UInt64":
-            return pa.uint64()
-        case "Float16":
-            return pa.float16()
-        case "Float32":
-            return pa.float32()
-        case "Float64":
-            return pa.float64()
-        case "Utf8":
-            return pa.string()
-        case "LargeUtf8":
-            return pa.large_string()
-        case "Binary":
-            return pa.binary()
-        case "LargeBinary":
-            return pa.large_binary()
-        case "Date32":
-            return pa.date32()
-        case "Date64":
-            return pa.date64()
-        case "Time32":
-            return pa.time32(_require_unit(args, head, ("s", "ms")))
-        case "Time64":
-            return pa.time64(_require_unit(args, head, ("us", "ns")))
-        case "Duration":
-            return pa.duration(_require_unit(args, head, ("s", "ms", "us", "ns")))
-        case "Timestamp":
-            return _parse_timestamp(args)
-        case "Decimal128":
-            return _parse_decimal(args, pa.decimal128, head)
-        case "Decimal256":
-            return _parse_decimal(args, pa.decimal256, head)
-        case "FixedSizeBinary":
-            return _parse_fixed_binary(args, head)
-        case "Json":
-            # Opaque JSON blob — shape not declared. Carried over the wire as
-            # a JSON-encoded string; destinations json.loads it back to a
-            # dict/list at the write boundary.
-            return pa.large_string()
-        case "Object" | "List":
-            raise InvalidTypeMapError(
-                f"arrow_type {head!r} describes a nested type and cannot be "
-                f"parsed in isolation; SchemaContract reads the property's "
-                f"'properties' (Object) or 'items' (List) sub-schema to build it"
-            )
-    raise InvalidTypeMapError(
-        f"arrow_type family {head!r} (from {canonical!r}) is not supported"
-    )
+    if head in STRUCTURAL_FAMILIES:
+        raise InvalidTypeMapError(
+            f"arrow_type {head!r} describes a nested type and cannot be "
+            f"parsed in isolation; SchemaContract reads the property's "
+            f"'properties' (Object) or 'items' (List) sub-schema to build it"
+        )
+    factory = _FACTORIES.get(head)
+    if factory is None:
+        raise InvalidTypeMapError(
+            f"arrow_type family {head!r} (from {canonical!r}) is not supported"
+        )
+    return factory(bind_parameters(head, args))
 
 
 def resolve_arrow_type(spec: Mapping[str, Any], where: str = "field") -> pa.DataType:
@@ -167,63 +143,6 @@ def resolve_arrow_type(spec: Mapping[str, Any], where: str = "field") -> pa.Data
             )
         return pa.list_(resolve_arrow_type(items, where=f"{where}[]"))
     return parse_arrow_type(arrow_type)
-
-
-def _require_unit(args: tuple[str, ...], head: str, allowed: tuple[str, ...]) -> str:
-    if len(args) != 1:
-        raise InvalidTypeMapError(
-            f"{head}{args} requires exactly one unit from {allowed}"
-        )
-    unit = _normalize_unit(args[0])
-    if unit not in allowed:
-        raise InvalidTypeMapError(
-            f"{head}{args} requires exactly one unit from {allowed}"
-        )
-    return unit
-
-
-def _parse_timestamp(args: tuple[str, ...]) -> pa.DataType:
-    if not args:
-        raise InvalidTypeMapError(
-            "Timestamp requires at least a unit (e.g. Timestamp(MICROSECOND))"
-        )
-    unit = _normalize_unit(args[0])
-    if unit not in ("s", "ms", "us", "ns"):
-        raise InvalidTypeMapError(
-            f"Timestamp unit must be one of "
-            f"SECOND/MILLISECOND/MICROSECOND/NANOSECOND, got {args[0]!r}"
-        )
-    tz = args[1] if len(args) > 1 and args[1] and args[1] != "null" else None
-    return pa.timestamp(unit, tz=tz)
-
-
-def _parse_decimal(
-    args: tuple[str, ...],
-    factory: Callable[[int, int], pa.DataType],
-    head: str,
-) -> pa.DataType:
-    if len(args) != 2:
-        raise InvalidTypeMapError(f"{head} requires (precision, scale); got {args}")
-    try:
-        precision = int(args[0])
-        scale = int(args[1])
-    except ValueError as err:
-        raise InvalidTypeMapError(
-            f"{head}({', '.join(args)}) has non-integer parameters"
-        ) from err
-    return factory(precision, scale)
-
-
-def _parse_fixed_binary(args: tuple[str, ...], head: str) -> pa.DataType:
-    if len(args) != 1:
-        raise InvalidTypeMapError(f"{head} requires (byte_width); got {args}")
-    try:
-        width = int(args[0])
-    except ValueError as err:
-        raise InvalidTypeMapError(
-            f"{head}({args[0]}) byte_width is not an integer"
-        ) from err
-    return pa.binary(width)
 
 
 # Ordered (predicate, family) probes mapping a live DataType back to its
