@@ -68,6 +68,18 @@ and the gate agree. Docstring presence is not mandated (only style, via
 6. Run the PR Review Process.
 7. Wait for feedback from the review executor.
 
+## Consolidation Rule
+
+**Three leaks means one abstraction.** When three or more findings share one
+underlying mechanism, stop filing instances. File a single consolidation issue
+that (1) names the invariant or missing abstraction, (2) enumerates every site
+it covers, and (3) closes the instance issues into it. Fix the class in one PR
+and test the set, not the single case. Precedent: #348.
+
+Corollary for reviewers: a review that produces three or more findings pointing
+at the same mechanism should say so in the review summary instead of emitting
+them as independent items.
+
 ## PR Review Process
 
 1. Use `/pr-review-toolkit` to review the PR after you have implemented all changes.
