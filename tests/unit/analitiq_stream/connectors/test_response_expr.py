@@ -78,9 +78,15 @@ class TestResolveResponseExpr:
         )
 
     def test_unknown_scope_raises(self):
-        """A typo'd scope is an authoring defect, never silently absorbed."""
+        """A typo'd scope is an authoring defect, never silently absorbed.
+
+        The contract's ``ref`` pattern rejects an unknown scope at parse
+        time, so this node cannot come from a validated model; it is passed
+        raw, the shape the module accepts alongside parsed ones. The
+        resolver is the last line of defence for a node reaching it that way.
+        """
         with pytest.raises(KeyError, match="scope"):
-            resolve_response_expr(_expr({"ref": "bogus.path"}), _resolver({}))
+            resolve_response_expr({"ref": "bogus.path"}, _resolver({}))
 
     def test_literal_passes_through(self):
         """A literal expression yields its value."""

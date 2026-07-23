@@ -6,7 +6,8 @@ into :class:`~analitiq.contracts.endpoints.ApiEndpointDoc` once per read
 (issue #349), and every declaration is read as a model attribute:
 
 * ``operations.read.request.{method, path}`` — URL + HTTP verb.
-* ``operations.read.request.body`` — optional JSON body; built per page
+* ``operations.read.request.body`` — optional JSON body, declared only by
+  the contract's POST read request (a GET read has no body); built per page
   request: ``{"from_param": ...}`` nodes bind the page's param values
   (including pagination-controlled ones), then the body is deep-resolved
   through the value-expression grammar. Params declared ``in: body``
@@ -50,6 +51,7 @@ from analitiq.contracts.endpoints import (
     PagePagination,
     PageSize,
     Pagination,
+    PostReadRequest,
     Predicate,
     ReadOperation,
     Replication,
@@ -253,8 +255,9 @@ class APIConnector(BaseConnector):
 
         replication_block = stream_source.get("replication") or {}
         replication_method = replication_block.get("method", "full_refresh")
-        # cursor_field is a contract string|null (validated upstream), so no
-        # list normalization is needed.
+        # cursor_field is a required non-empty string on the contract's
+        # incremental replication variant and absent from the full-refresh
+        # one (validated upstream), so no list normalization is needed.
         cursor_field = replication_block.get("cursor_field")
         safety_window = replication_block.get("safety_window_seconds")
 
@@ -287,8 +290,11 @@ class APIConnector(BaseConnector):
         # nodes against the same table and resolves expressions. Built
         # per page so controlled params (limit, offset, cursor) reach a
         # body-paginated endpoint instead of freezing at their initial
-        # values.
-        raw_body = read.request.body
+        # values. Only the POST branch of the contract's method-discriminated
+        # read request declares a body; a GET read structurally has none.
+        raw_body = (
+            read.request.body if isinstance(read.request, PostReadRequest) else None
+        )
 
         def build_request(
             page_params: dict[str, Any],
@@ -687,6 +693,38 @@ class APIConnector(BaseConnector):
         )
 
     @staticmethod
+    def _page_scope(data: Any, records: list[dict[str, Any]]) -> dict[str, Any]:
+        """Build the ``response`` scope a page's expressions resolve against.
+
+        ``record_count`` is the contract's name for how many records the
+        page carried (RESERVED_RESPONSE_SCOPES); an offset that counts
+        records advances by it. Built here so every strategy's per-page
+        expressions — ``stop_when``, ``next_cursor``, ``next_url``,
+        ``increment_by`` — see the same scope.
+
+        Two of the contract's six reserved response names; ``headers``,
+        ``status``, ``records`` and ``metadata`` are not exposed to page
+        expressions yet, so a ref naming one resolves to nothing.
+        """
+        return {"body": data, "record_count": len(records)}
+
+    def _advance_step(
+        self, increment_by: Any, resolver: Resolver, *, context: str
+    ) -> int:
+        """Resolve a declared per-page advance step to a positive int.
+
+        The contract types the step as either a positive-integer literal or
+        a value expression: ``{ref: response.record_count}`` where the
+        offset counts records returned, ``{ref: runtime.batch_size}`` where
+        it counts the requested window. Literals pass through the grammar
+        untouched, so both forms take one path.
+        """
+        return self._positive_step(
+            self._resolve_response_value(increment_by, resolver, context=context),
+            context=context,
+        )
+
+    @staticmethod
     def _positive_step(value: Any, *, context: str) -> int:
         """Parse an authored pagination value into a positive int.
 
@@ -714,7 +752,7 @@ class APIConnector(BaseConnector):
     def _effective_page_size(
         self, limit: PageSize | None, batch_size: int, resolver: Resolver
     ) -> int:
-        """Resolve the page size a paginated read requests and advances by.
+        """Resolve the page size a paginated read requests.
 
         Per the contract's ``PageSize`` block, an authored ``limit.default``
         value expression declares the page size (``runtime.batch_size`` is
@@ -779,11 +817,12 @@ class APIConnector(BaseConnector):
         The strategy's declared ``limit`` block sets the *effective* page
         size via :meth:`_effective_page_size` (authored ``default``
         expression, clamped by the provider's ``max``); it is what the
-        request carries (when ``limit.param`` is declared), what the
-        offset step defaults to, and what the short-page stops compare
-        against — comparing against a raw ``batch_size`` the provider
-        clamps below would make every page look short and silently
-        truncate the read.
+        request carries (when ``limit.param`` is declared) and what the
+        short-page stops compare against — comparing against a raw
+        ``batch_size`` the provider clamps below would make every page look
+        short and silently truncate the read. All five strategies declare a
+        ``limit``, so all five bind it the same way; link differs only in
+        that its follow-up requests replay a URL and so carry no params.
 
         Every strategy stops when its declared ``stop_when`` predicate holds
         for the page's response. An empty page always stops (there is nothing
@@ -802,15 +841,17 @@ class APIConnector(BaseConnector):
                 yield records
             return
 
+        # Every strategy binds its declared limit identically: resolve the
+        # effective page size and write it into the param the limit block
+        # names. For link this reaches the first request only -- follow-up
+        # pages replay the response's next_url verbatim and carry no params
+        # (see :meth:`_iterate_link_pages`), so a declared limit never
+        # modifies a followed link.
+        page_size = self._effective_page_size(pagination.limit, batch_size, resolver)
+        if pagination.limit is not None and pagination.limit.param:
+            base_params[pagination.limit.param] = page_size
+
         if isinstance(pagination, LinkPagination):
-            # LinkPagination is dispatched before the limit injection below
-            # because the contract gives it NO limit field (its shape is
-            # type/link/stop_when, extra="forbid") — a link endpoint's
-            # first-request page size is authored as an ordinary param
-            # default over runtime.batch_size instead. A drift-guard test
-            # pins this; if the contract ever adds link.limit, that test
-            # fails and this dispatch must start computing and injecting
-            # the effective page size (``_effective_page_size``).
             async for records in self._iterate_link_pages(
                 full_url=full_url,
                 method=method,
@@ -823,24 +864,14 @@ class APIConnector(BaseConnector):
                 yield records
             return
 
-        page_size = self._effective_page_size(pagination.limit, batch_size, resolver)
-        if pagination.limit is not None and pagination.limit.param:
-            base_params[pagination.limit.param] = page_size
-
         if isinstance(pagination, OffsetPagination):
             offset_param = pagination.offset.param
             offset = int(pagination.offset.initial)
-            # An authored ``increment_by`` fixes the step; otherwise the
-            # offset advances by the page size actually requested (the
-            # contract: increment_by defaults to the resolved effective
-            # limit).
-            offset_step = (
-                self._positive_step(
-                    pagination.offset.increment_by, context="offset.increment_by"
-                )
-                if pagination.offset.increment_by is not None
-                else page_size
-            )
+            # The contract requires an authored ``offset.increment_by`` (the
+            # two offset families -- record-counting vs window-counting --
+            # cannot be told apart from the document, so it refuses to
+            # default it) and lets it be a per-page value expression, hence
+            # the step is resolved against each page rather than once.
             while True:
                 params = dict(base_params)
                 params[offset_param] = offset
@@ -850,22 +881,34 @@ class APIConnector(BaseConnector):
                 )
                 if not records:
                     return
-                page_resolver = resolver.with_response({"body": data})
+                page_resolver = resolver.with_response(self._page_scope(data, records))
                 stop = self._stop_requested(pagination.stop_when, page_resolver)
                 short = len(records) < page_size
+                if not (stop or short):
+                    # Advance before the page is yielded: a page the loop
+                    # cannot advance from must fail before the engine can
+                    # commit it. The next request is the only reader of
+                    # ``offset``, so advancing here and stopping below are
+                    # independent.
+                    offset += self._advance_step(
+                        pagination.offset.increment_by,
+                        page_resolver,
+                        context="offset.increment_by",
+                    )
                 yield records
                 if stop or short:
                     return
-                offset += offset_step
 
         elif isinstance(pagination, PagePagination):
             page_param = pagination.page.param
             page = int(pagination.page.initial)
             # An authored ``increment_by`` fixes the step; page numbers
-            # advance by one otherwise.
+            # advance by one otherwise. Resolved once, before any request:
+            # unlike an offset, a page number cannot advance by a per-page
+            # response value, so nothing here depends on a page.
             page_step = (
-                self._positive_step(
-                    pagination.page.increment_by, context="page.increment_by"
+                self._advance_step(
+                    pagination.page.increment_by, resolver, context="page.increment_by"
                 )
                 if pagination.page.increment_by is not None
                 else 1
@@ -879,7 +922,7 @@ class APIConnector(BaseConnector):
                 )
                 if not records:
                     return
-                page_resolver = resolver.with_response({"body": data})
+                page_resolver = resolver.with_response(self._page_scope(data, records))
                 stop = self._stop_requested(pagination.stop_when, page_resolver)
                 short = len(records) < page_size
                 yield records
@@ -904,7 +947,7 @@ class APIConnector(BaseConnector):
                 )
                 if not records:
                     return
-                page_resolver = resolver.with_response({"body": data})
+                page_resolver = resolver.with_response(self._page_scope(data, records))
                 stop = self._stop_requested(pagination.stop_when, page_resolver)
                 cursor_token = None
                 if not stop:
@@ -944,7 +987,7 @@ class APIConnector(BaseConnector):
                 )
                 if not records:
                     return
-                page_resolver = resolver.with_response({"body": data})
+                page_resolver = resolver.with_response(self._page_scope(data, records))
                 stop = self._stop_requested(pagination.stop_when, page_resolver)
                 if not stop:
                     # Validate the continuation before yielding: a page the
@@ -977,11 +1020,14 @@ class APIConnector(BaseConnector):
     ) -> AsyncIterator[list[dict[str, Any]]]:
         """Follow ``link.next_url`` from each response to the next page.
 
-        Per the contract, the resolved URL replaces the entire request:
-        follow-up pages carry no query params and no body (spec: §Pagination
-        Strategies — link, "no params traverse"). A relative next URL joins
-        the connection's base URL; an absolute one must stay on the
-        connection's origin — the shared session sends the connection's
+        The first request is built from ``base_params`` like any other
+        strategy's, so a declared ``limit`` (already bound by the caller)
+        rides on it. Per the contract, the resolved URL then replaces the
+        entire request: follow-up pages carry no query params and no body
+        (spec: §Pagination Strategies — link, "no params traverse"), which
+        is what makes the declared limit first-request-only. A relative
+        next URL joins the connection's base URL; an absolute one must stay
+        on the connection's origin — the shared session sends the connection's
         default headers (auth included) on every request, so following a
         response-supplied URL to another host would hand those credentials
         to it. The next URL is resolved and vetted BEFORE its page is
@@ -1003,7 +1049,7 @@ class APIConnector(BaseConnector):
         while True:
             if not records:
                 return
-            page_resolver = resolver.with_response({"body": data})
+            page_resolver = resolver.with_response(self._page_scope(data, records))
             stop = self._stop_requested(pagination.stop_when, page_resolver)
             next_target: str | None = None
             if not stop:

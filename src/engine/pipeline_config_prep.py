@@ -45,9 +45,10 @@ from pathlib import Path
 from typing import Any
 
 from analitiq.contracts.endpoints import ApiEndpointDoc, DatabaseEndpointDoc
-from analitiq.contracts.pipelines.config import RuntimeConfig as ContractRuntimeConfig
-from analitiq.contracts.stream import ReplicationConfig as ContractReplicationConfig
-from pydantic import BaseModel
+from analitiq.contracts.pipelines.config import Runtime as ContractRuntime
+from analitiq.contracts.stream import IncrementalReplication
+from analitiq.contracts.stream import Replication as ContractReplication
+from pydantic import BaseModel, TypeAdapter
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.secrets import SchemeSecretsResolver, SecretsResolver
@@ -79,6 +80,10 @@ from src.models.stream import EndpointRef
 
 logger = logging.getLogger(__name__)
 
+# The contract's replication entry is a method-discriminated union alias, not a
+# class, so validation goes through an adapter (built once, reused per stream).
+_REPLICATION_ADAPTER: TypeAdapter[Any] = TypeAdapter(ContractReplication)
+
 
 def _author_set(model: BaseModel, keys: tuple[str, ...]) -> dict[str, Any]:
     """Return ``{key: value}`` for keys the author explicitly set to a non-null value.
@@ -106,7 +111,7 @@ def _parse_runtime_config(raw: Mapping[str, Any]) -> RuntimeConfig:
     than the contract's (``dlq``), so it must forward author-set values only, not
     the contract's defaults. Precedence: pipeline config > env var > engine default.
     """
-    contract = ContractRuntimeConfig.model_validate(dict(raw))
+    contract = ContractRuntime.model_validate(dict(raw))
     return RuntimeConfig(
         batching=BatchingConfig(
             **_author_set(contract.batching, ("batch_size", "max_concurrent_batches"))
@@ -126,17 +131,24 @@ def _parse_replication(raw_source: Mapping[str, Any]) -> ReplicationConfig | Non
 
     Returns ``None`` when no replication policy is present (full-refresh sources
     may omit it). Reads the validated contract model: ``method`` is
-    contract-required; the optional cursor/tie-breaker fields carry through as
-    ``None`` when absent (the engine has no settings default for these, so no
-    author-intent filtering is needed).
+    contract-required and selects the variant of the contract's
+    method-discriminated replication union, where ``cursor_field`` exists on the
+    incremental branch only -- the full-refresh branch forbids it, so the engine
+    reads ``None`` for it there. ``tie_breaker_fields`` is shared by both and
+    carries through as ``None`` when absent (the engine has no settings default
+    for these, so no author-intent filtering is needed).
     """
     raw = raw_source.get("replication")
     if not raw:
         return None
-    contract = ContractReplicationConfig.model_validate(dict(raw))
+    contract = _REPLICATION_ADAPTER.validate_python(dict(raw))
     return ReplicationConfig(
         method=contract.method,
-        cursor_field=contract.cursor_field,
+        cursor_field=(
+            contract.cursor_field
+            if isinstance(contract, IncrementalReplication)
+            else None
+        ),
         tie_breaker_fields=contract.tie_breaker_fields,
     )
 
