@@ -374,6 +374,34 @@ def _dialect_is_async(dsn: str) -> bool:
     return bool(getattr(make_url(dsn).get_dialect(), "is_async", False))
 
 
+def _run_closing_on_failure(dbapi_connection: Any, action: Callable[[], None]) -> None:
+    """Run a connection-setup action; close the raw connection if it fails.
+
+    Nobody cleans up a fresh driver connection whose setup action fails
+    unless we do: SQLAlchemy's pool cleans up after a non-DBAPI exception
+    escaping a ``connect`` listener, but a DBAPI error is re-raised with
+    the just-created connection left open — the record is discarded and
+    the socket (and, for async drivers, the driver's worker thread)
+    leaks. An ADBC connection has no pool at all. Every setup action the
+    CDK runs on a new connection (the TLS probe, the session-init
+    statements) executes queries whose failures ARE DBAPI errors, so each
+    routes through here and closes before re-raising. A failing close is
+    logged and suppressed to keep the original error primary.
+    """
+    try:
+        action()
+    except Exception:
+        try:
+            dbapi_connection.close()
+        except Exception:
+            logger.debug(
+                "closing the DBAPI connection after a failed connect-event "
+                "action itself failed",
+                exc_info=True,
+            )
+        raise
+
+
 def _attach_tls_verification(engine: Engine, sql_dialect: Any, mode: str) -> None:
     """Run the dialect's TLS probe on every new DBAPI connection.
 
@@ -403,7 +431,80 @@ def _attach_tls_verification(engine: Engine, sql_dialect: Any, mode: str) -> Non
 
     @event.listens_for(engine, "connect")
     def _verify_tls(dbapi_connection: Any, connection_record: Any) -> None:
-        sql_dialect.verify_tls_state(dbapi_connection, mode)
+        _run_closing_on_failure(
+            dbapi_connection,
+            lambda: sql_dialect.verify_tls_state(dbapi_connection, mode),
+        )
+
+
+def _session_init_statements(sql_dialect: Any) -> list[str]:
+    """Read and validate the dialect's session-init statements (build time).
+
+    ``session_init_sql`` takes no connection, so it is read once per build
+    and the same statements run on every new connection either SQL
+    transport opens. A malformed return is a connector authoring defect
+    and fails the build loudly. The statements are dialect code, not
+    secrets — logging them keeps the pinned session state auditable.
+    """
+    if sql_dialect is None:
+        return []
+    statements = sql_dialect.session_init_sql()
+    if not isinstance(statements, list) or not all(
+        isinstance(s, str) and s for s in statements
+    ):
+        raise TypeError(
+            f"session_init_sql on dialect "
+            f"{getattr(sql_dialect, 'name', type(sql_dialect).__name__)!r} "
+            f"must return a list of non-empty SQL statement strings, got "
+            f"{statements!r}"
+        )
+    if statements:
+        logger.info(
+            "Dialect %r pins session state on every new connection: %s",
+            getattr(sql_dialect, "name", type(sql_dialect).__name__),
+            statements,
+        )
+    return statements
+
+
+def _execute_session_init(dbapi_connection: Any, statements: list[str]) -> None:
+    """Run the dialect's session-init statements on a fresh DBAPI connection.
+
+    One cursor for all statements, then commit: on systems where session
+    variables are transactional (Postgres ``SET``) an uncommitted
+    statement would be silently reverted by the next rollback — the
+    pool's reset-on-return included — dropping the state the dialect
+    declared. Both SQL transports run through here, so the same
+    declaration behaves identically on each.
+    """
+    cursor = dbapi_connection.cursor()
+    try:
+        for statement in statements:
+            cursor.execute(statement)
+    finally:
+        cursor.close()
+    dbapi_connection.commit()
+
+
+def _attach_session_init(engine: Engine, statements: list[str]) -> None:
+    """Run session-init statements on every new pooled DBAPI connection.
+
+    Registered on the pool ``connect`` event after the TLS listener
+    (listeners fire in registration order), so the statements run on a
+    session whose declared TLS mode has already been verified — the
+    build-time probe connection and every connection the pool later
+    opens (reconnects, ``pool_pre_ping`` replacements, overflow) alike.
+    A failing statement closes the connection and fails loud
+    (:func:`_run_closing_on_failure`) — a session missing its declared
+    state is never handed out.
+    """
+
+    @event.listens_for(engine, "connect")
+    def _session_init(dbapi_connection: Any, connection_record: Any) -> None:
+        _run_closing_on_failure(
+            dbapi_connection,
+            lambda: _execute_session_init(dbapi_connection, statements),
+        )
 
 
 def _build_and_probe_sync_engine(
@@ -413,11 +514,14 @@ def _build_and_probe_sync_engine(
     *,
     sql_dialect: Any,
     tls_mode: str | None,
+    session_init: list[str],
 ) -> Engine:
     """Build a sync engine and run the ``SELECT 1`` probe (worker thread)."""
     engine = create_engine(dsn, connect_args=dict(connect_args), **dict(engine_kwargs))
     if tls_mode is not None:
         _attach_tls_verification(engine, sql_dialect, tls_mode)
+    if session_init:
+        _attach_session_init(engine, session_init)
     try:
         with engine.connect() as conn:
             conn.execute(_sa_text("SELECT 1"))
@@ -451,6 +555,11 @@ async def build_sqlalchemy_from_spec(
     against the established session, because connect arguments only
     request TLS and a driver can silently proceed in plaintext (see
     :func:`_attach_tls_verification`).
+
+    A dialect that declares session-init statements
+    (``SqlDialect.session_init_sql``) gets them run on every new pooled
+    DBAPI connection — the probe included — after TLS verification, on
+    both engine flavours (see :func:`_attach_session_init`).
     """
     driver = resolved["driver"]
     connect_args: dict[str, Any] = {}
@@ -467,6 +576,7 @@ async def build_sqlalchemy_from_spec(
             sql_dialect.build_tls_connect_args(tls_mode, tls.get("ca_pem"))
         )
 
+    session_init = _session_init_statements(sql_dialect)
     dsn = resolved["dsn"]
     engine_kwargs = dict(resolved.get("engine_kwargs") or {})
     is_async = _dialect_is_async(dsn)
@@ -477,6 +587,8 @@ async def build_sqlalchemy_from_spec(
         )
         if tls_mode is not None:
             _attach_tls_verification(async_engine.sync_engine, sql_dialect, tls_mode)
+        if session_init:
+            _attach_session_init(async_engine.sync_engine, session_init)
         try:
             async with async_engine.connect() as conn:
                 await conn.execute(_sa_text("SELECT 1"))
@@ -492,6 +604,7 @@ async def build_sqlalchemy_from_spec(
             engine_kwargs,
             sql_dialect=sql_dialect,
             tls_mode=tls_mode,
+            session_init=session_init,
         )
 
     base_dialect = driver.split("+", 1)[0]
@@ -679,10 +792,17 @@ async def build_adbc_from_spec(
     The probe ``SELECT 1`` fires at build time so a bad DSN, missing
     credential, or network reachability problem fails before the engine
     starts a pipeline run, not on the first batch.
+
+    A dialect that declares session-init statements
+    (``SqlDialect.session_init_sql``) gets them run on every connection
+    the transport opens — the probe included — before the connection is
+    handed to its caller, matching the SQLAlchemy pool behaviour (same
+    declaration, same semantics on both SQL transports).
     """
     driver = resolved["driver"]
     uri = resolved.get("uri")
     db_kwargs = dict(resolved.get("db_kwargs") or {})
+    session_init = _session_init_statements(sql_dialect)
 
     driver_module_path = _adbc_dbapi_module_path(driver)
     try:
@@ -700,10 +820,18 @@ async def build_adbc_from_spec(
         # driver. Pass only what was provided so a Snowflake spec (db_kwargs
         # only) doesn't accidentally hand an empty string to ``connect``.
         if uri is not None and db_kwargs:
-            return driver_module.connect(uri, db_kwargs=db_kwargs)
-        if uri is not None:
-            return driver_module.connect(uri)
-        return driver_module.connect(db_kwargs=db_kwargs)
+            conn = driver_module.connect(uri, db_kwargs=db_kwargs)
+        elif uri is not None:
+            conn = driver_module.connect(uri)
+        else:
+            conn = driver_module.connect(db_kwargs=db_kwargs)
+        if session_init:
+            # Never hand out a session missing its declared state — a
+            # failing statement closes the connection and fails loud.
+            _run_closing_on_failure(
+                conn, lambda: _execute_session_init(conn, session_init)
+            )
+        return conn
 
     probe_conn = await asyncio.to_thread(_open_connection)
     try:
