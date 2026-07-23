@@ -4,8 +4,9 @@
 vendor-specific in the SQL path: identifier quoting and normalization, the
 ``catalog.schema.table`` address composer (:class:`TableAddress`), the
 PRIMARY KEY clause form, the ``INFORMATION_SCHEMA`` discovery query shapes,
-the SQLAlchemy upsert statement, the pre-DDL statements, and the ADBC-only
-write machinery (native DDL type names and stage-table syntax).
+the SQLAlchemy upsert statement, the pre-DDL statements, the per-connection
+session-init statements, and the ADBC-only write machinery (native DDL type
+names and stage-table syntax).
 
 Table addressing follows the engine's bind-once/sink-many rule: the intent
 (``catalog``/``schema``/``table``) is resolved exactly once into a
@@ -308,6 +309,27 @@ class SqlDialect:
         when its driver can silently downgrade.
         """
         return None
+
+    def session_init_sql(self) -> list[str]:
+        """Statements the CDK runs on every new database connection.
+
+        Executed before the connection is used — the build-time probe
+        included — on both SQL transports: every new pooled DBAPI
+        connection of a SQLAlchemy engine (async and sync, after
+        :meth:`verify_tls_state`) and every connection an ADBC transport
+        opens. The statements run through one cursor and are committed,
+        so session state survives a later rollback on systems where it
+        is transactional (Postgres ``SET``).
+
+        The base declares no statements, so existing connectors are
+        unaffected. A dialect opts in when its system has session state
+        that must be pinned for type-mapping correctness — e.g. MySQL's
+        ``SET time_zone = '+00:00'``, without which retrieved TIMESTAMP
+        values are converted through whatever ``time_zone`` the server
+        happens to run and the tz-aware canonical types carry the wrong
+        instants.
+        """
+        return []
 
     def sqlalchemy_pre_ddl(self, schema_name: str) -> list[str]:
         """Return statements to run before ``MetaData.create_all``.

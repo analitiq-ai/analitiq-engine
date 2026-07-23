@@ -347,7 +347,9 @@ class ConnectionRuntime:
 
         ``sql_dialect`` is the connector's dialect — required whenever the
         transport declares TLS (the per-driver SSL vocabulary lives in the
-        connector package's dialect).
+        connector package's dialect), and the source of the per-connection
+        session-init statements (``session_init_sql``): without a dialect
+        no session state is pinned.
 
         Connectors without a ``transports`` block (file/s3/stdout) expose
         ``resolved_config`` directly — they have no shared transport.
