@@ -296,7 +296,6 @@ class TestWriteBatchFatalOnTypeMapError:
         # mode's post-connect check (SqlDialect.verify_tls_state) mid-run.
         # Retrying reconnects to the same downgraded endpoint, so the write
         # must classify fatal, not retryable (issue #376).
-        from contextlib import asynccontextmanager
         from unittest.mock import MagicMock
 
         from cdk.sql.exceptions import TlsVerificationError
@@ -318,12 +317,11 @@ class TestWriteBatchFatalOnTypeMapError:
             schema_contract=contract_mock,
         )
 
-        # The listener fires during pool connect inside engine.begin();
-        # raising from the context manager entry models that surface.
-        @asynccontextmanager
-        async def _refusing_begin():
+        # The listener fires during pool connect when engine.begin() opens
+        # a connection; raising from the begin call models that surface
+        # inside the same write_batch try block.
+        def _refusing_begin():
             raise TlsVerificationError("session is not encrypted under mode 'REQUIRED'")
-            yield  # pragma: no cover
 
         handler._engine.begin = _refusing_begin
 
