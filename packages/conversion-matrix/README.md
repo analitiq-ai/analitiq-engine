@@ -82,13 +82,18 @@ only when the grid content itself changes.
 
 CI publishes with short-lived GitHub OIDC credentials (`sync-s3` job in
 `.github/workflows/conversion-matrix.yml`). The role ARN, region, bucket, and
-prefix come from the repository variables `CONVERSION_MATRIX_S3_ROLE_ARN`,
+prefix come from the variables `CONVERSION_MATRIX_S3_ROLE_ARN`,
 `CONVERSION_MATRIX_S3_REGION`, `CONVERSION_MATRIX_S3_BUCKET`, and
-`CONVERSION_MATRIX_S3_PREFIX` (default `conversion-matrix`); the job is
-skipped until they are configured. The sync reconciles against `latest.json`
-(sha256 compare, patch-bump on change, manifest written last as the commit
-point), so re-runs and partial failures converge without cutting spurious
-versions.
+`CONVERSION_MATRIX_S3_PREFIX` (default `conversion-matrix`). All four must be
+**repository-scoped** variables — an environment-scoped variable is invisible
+to the job's gate and would skip the sync silently. The job runs once the
+role ARN is set; the remaining variables are then required and fail loud when
+missing. The assumed role needs `s3:GetObject` and `s3:PutObject` on the
+prefix and `s3:ListBucket` on the bucket (so a missing manifest reads as
+absence rather than Forbidden); it needs no delete permissions. The sync
+reconciles against `latest.json` (sha256 compare, patch-bump on change,
+manifest written last as the commit point), so re-runs and partial failures
+converge without cutting spurious versions.
 
 ## Publishing (maintainers)
 

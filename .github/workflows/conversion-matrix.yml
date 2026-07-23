@@ -10,8 +10,9 @@ name: conversion-matrix
 #      grid without registry credentials. Authentication is GitHub OIDC
 #      (short-lived, no stored keys); the role, region, bucket, and prefix come
 #      exclusively from repository variables, so no cloud identifiers live in
-#      this repo, and the job is skipped entirely until those variables are
-#      configured against the provisioned infrastructure.
+#      this repo. The job is gated on the role-ARN variable and skipped until
+#      it is set; the remaining variables are then required and fail loud when
+#      missing.
 
 on:
   push:
@@ -83,14 +84,21 @@ jobs:
     # Versions on S3 are independent of the npm version: the npm digest covers
     # the shipped TS code too, while S3 carries the grid alone, so the two cut
     # versions at different times by design. The sync script reconciles against
-    # the latest.json manifest on S3, so a re-run after a partial failure (or
-    # the first run after the variables are configured) converges on its own.
+    # the latest.json manifest on S3, so a re-run after a partial failure
+    # converges on its own. (The first-ever run additionally needs the role to
+    # grant s3:ListBucket, so a missing manifest reads as absence, not as
+    # Forbidden.)
+    #
+    # The gate variable (and the other three) must be REPOSITORY-scoped:
+    # a job-level `if` is evaluated before the environment attaches, so an
+    # environment-scoped variable reads as empty here and would skip this job
+    # silently, forever.
     if: github.event_name == 'push' && vars.CONVERSION_MATRIX_S3_ROLE_ARN != ''
     needs: verify
     runs-on: ubuntu-latest
-    # The OIDC trust policy pins this repo + environment in its subject claim,
-    # mirroring the schemas-publisher pattern; protection rules for the
-    # environment are a repo-settings concern, not a workflow one.
+    # The job's OIDC subject claim carries this repo + environment; the role's
+    # trust policy must pin both. Protection rules for the environment are a
+    # repo-settings concern, not a workflow one.
     environment: conversion-matrix
     concurrency:
       group: conversion-matrix-s3-sync

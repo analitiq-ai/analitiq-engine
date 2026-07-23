@@ -12,11 +12,14 @@
 //
 // The manifest is written last: it is the commit point. A run that dies after
 // uploading the versioned object leaves an orphan no consumer can discover;
-// the next run recomputes the same next version and overwrites it.
+// the next run recomputes the same next version and overwrites it — possibly
+// with different bytes, if the grid moved in between. Only a consumer that
+// probed a version no manifest ever referenced could observe that window.
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -30,8 +33,9 @@ const gridPath = join(repoRoot, "cdk", "cdk", "type_map", "conversion_matrix.jso
  *
  * Returns {action: "skip"} when the published grid already matches, or
  * {action: "publish", version} with the version to cut. A manifest that does
- * not parse, or whose version is not plain semver, aborts: guessing a version
- * on top of corrupt state could overwrite a published object.
+ * not parse, or whose version is not plain semver when a new version must be
+ * cut, aborts: guessing a version on top of corrupt state could overwrite a
+ * published object.
  */
 export function planSync(manifestText, currentSha) {
   if (manifestText === null) return { action: "publish", version: "1.0.0" };
@@ -40,6 +44,9 @@ export function planSync(manifestText, currentSha) {
     manifest = JSON.parse(manifestText);
   } catch (err) {
     throw new Error(`latest.json on S3 is not valid JSON: ${err.message}`);
+  }
+  if (manifest === null || typeof manifest !== "object" || Array.isArray(manifest)) {
+    throw new Error("latest.json on S3 is not a JSON object");
   }
   if (manifest.sha256 === currentSha) return { action: "skip" };
   const parts = /^(\d+)\.(\d+)\.(\d+)$/.exec(manifest.version ?? "");
@@ -55,19 +62,38 @@ export function planSync(manifestText, currentSha) {
 const aws = (args, opts = {}) =>
   execFileSync("aws", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts });
 
-// A manifest that has never been written is the only "absent" case (404 /
-// NoSuchKey). Every other failure — credentials, missing bucket, network —
-// must abort the run, not be misread as a first publish (which would reset
-// versioning to 1.0.0 over an existing history).
-function fetchManifestOrAbsent(url) {
+/**
+ * True when the AWS CLI output says the manifest object itself does not exist.
+ *
+ * NoSuchKey is the only absence signal. It covers the never-written manifest
+ * (first publish) — and a mistyped prefix, which S3 cannot tell apart; what
+ * stops a prefix typo from starting a parallel history is the IAM policy
+ * scoping PutObject to the real prefix. Everything else — NoSuchBucket,
+ * AccessDenied, ExpiredToken, network errors — must abort the run, not be
+ * misread as a first publish (which would reset versioning to 1.0.0 over an
+ * existing history).
+ */
+export function manifestAbsent(cliOutput) {
+  return cliOutput.includes("NoSuchKey");
+}
+
+// GetObject via s3api rather than `aws s3 cp`: `s3 cp` probes with HeadObject,
+// whose bodyless 404 cannot say WHAT is missing — a mistyped bucket would read
+// as "first publish". GetObject's error carries the real code, so absence can
+// be matched on NoSuchKey alone. NOTE: this distinction only exists when the
+// role grants s3:ListBucket — without it S3 masks a missing key as
+// AccessDenied and the first publish dead-ends on a Forbidden fetch.
+function fetchManifestOrAbsent(bucket, key) {
+  const dir = mkdtempSync(join(tmpdir(), "conversion-matrix-"));
+  const outfile = join(dir, "latest.json");
   try {
-    return aws(["s3", "cp", url, "-"]);
+    aws(["s3api", "get-object", "--bucket", bucket, "--key", key, outfile]);
+    return readFileSync(outfile, "utf8");
   } catch (err) {
-    const out = `${err.stdout ?? ""}${err.stderr ?? ""}`;
-    if (out.includes("(404)") || out.includes("NoSuchKey") || out.includes("Not Found")) {
-      return null;
-    }
+    if (manifestAbsent(`${err.stdout ?? ""}${err.stderr ?? ""}`)) return null;
     throw err;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 }
 
@@ -90,7 +116,7 @@ function main() {
 
   const grid = readFileSync(gridPath);
   const currentSha = createHash("sha256").update(grid).digest("hex");
-  const plan = planSync(fetchManifestOrAbsent(`${base}/latest.json`), currentSha);
+  const plan = planSync(fetchManifestOrAbsent(bucket, `${prefix}/latest.json`), currentSha);
 
   if (plan.action === "skip") {
     console.log(`grid unchanged on S3 (sha256 ${currentSha.slice(0, 12)}); nothing to sync`);
