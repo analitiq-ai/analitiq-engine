@@ -35,7 +35,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Union
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy import text as _sa_text
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -348,11 +348,37 @@ def _dialect_is_async(dsn: str) -> bool:
     return bool(getattr(make_url(dsn).get_dialect(), "is_async", False))
 
 
+def _attach_tls_verification(engine: Engine, sql_dialect: Any, mode: str) -> None:
+    """Run the dialect's TLS probe on every new DBAPI connection.
+
+    Registered on the pool ``connect`` event so the build-time ``SELECT 1``
+    probe and every connection the pool later opens (reconnects,
+    ``pool_pre_ping`` replacements, overflow) pass the same check. Connect
+    arguments alone cannot guarantee encryption — a driver may silently
+    skip the TLS handshake when the server does not advertise the
+    capability (aiomysql does, for every mode) — so the declared mode is
+    verified against the established session, not the requested
+    configuration. For an async engine the listener is registered on its
+    ``sync_engine`` facade; the event fires inside the greenlet bridge, so
+    the dialect's DBAPI cursor calls work on the adapted connection.
+    """
+
+    @event.listens_for(engine, "connect")
+    def _verify_tls(dbapi_connection: Any, connection_record: Any) -> None:
+        sql_dialect.verify_tls_state(dbapi_connection, mode)
+
+
 def _build_and_probe_sync_engine(
-    dsn: str, connect_args: Mapping[str, Any], engine_kwargs: Mapping[str, Any]
+    dsn: str,
+    connect_args: Mapping[str, Any],
+    engine_kwargs: Mapping[str, Any],
+    sql_dialect: Any = None,
+    tls_mode: str | None = None,
 ) -> Engine:
     """Build a sync engine and run the ``SELECT 1`` probe (worker thread)."""
     engine = create_engine(dsn, connect_args=dict(connect_args), **dict(engine_kwargs))
+    if tls_mode is not None:
+        _attach_tls_verification(engine, sql_dialect, tls_mode)
     try:
         with engine.connect() as conn:
             conn.execute(_sa_text("SELECT 1"))
@@ -379,11 +405,19 @@ async def build_sqlalchemy_from_spec(
     (``redshift_connector``: ``ssl`` + ``sslmode``) return them all. A
     declared TLS mode without a dialect that implements the hook fails
     loudly.
+
+    A declared TLS mode also arms the dialect's ``verify_tls_state`` hook
+    on the pool's connect event before the probe runs — the probe
+    connection and every connection the pool ever opens are checked
+    against the established session, because connect arguments only
+    request TLS and a driver can silently proceed in plaintext (see
+    :func:`_attach_tls_verification`).
     """
     driver = resolved["driver"]
     connect_args: dict[str, Any] = {}
     tls = resolved.get("tls")
-    if tls is not None and tls.get("mode") is not None:
+    tls_mode = tls.get("mode") if tls is not None else None
+    if tls is not None and tls_mode is not None:
         if sql_dialect is None:
             raise ValueError(
                 f"transport for driver {driver!r} declares tls but no "
@@ -391,7 +425,7 @@ async def build_sqlalchemy_from_spec(
                 f"dialect implements build_tls_connect_args"
             )
         connect_args.update(
-            sql_dialect.build_tls_connect_args(tls["mode"], tls.get("ca_pem"))
+            sql_dialect.build_tls_connect_args(tls_mode, tls.get("ca_pem"))
         )
 
     dsn = resolved["dsn"]
@@ -402,6 +436,8 @@ async def build_sqlalchemy_from_spec(
         async_engine = create_async_engine(
             dsn, connect_args=connect_args, **engine_kwargs
         )
+        if tls_mode is not None:
+            _attach_tls_verification(async_engine.sync_engine, sql_dialect, tls_mode)
         try:
             async with async_engine.connect() as conn:
                 await conn.execute(_sa_text("SELECT 1"))
@@ -411,7 +447,12 @@ async def build_sqlalchemy_from_spec(
         engine = async_engine
     else:
         engine = await asyncio.to_thread(
-            _build_and_probe_sync_engine, dsn, connect_args, engine_kwargs
+            _build_and_probe_sync_engine,
+            dsn,
+            connect_args,
+            engine_kwargs,
+            sql_dialect,
+            tls_mode,
         )
 
     base_dialect = driver.split("+", 1)[0]

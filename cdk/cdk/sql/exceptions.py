@@ -55,6 +55,21 @@ class CreateTableError(SqlIntrospectionError):
     """Standalone ``create_table`` failed to build or execute its DDL."""
 
 
+class TlsVerificationError(Exception):
+    """The established session does not satisfy the declared TLS mode.
+
+    Raised from :meth:`cdk.sql.dialects.SqlDialect.verify_tls_state` when
+    a TLS mode that promises encryption (e.g. MySQL ``REQUIRED`` /
+    ``VERIFY_CA`` / ``VERIFY_IDENTITY``) finds the session unencrypted —
+    the driver accepted the connection without a TLS handshake (a non-TLS
+    server, or an active MITM stripping the server's TLS capability).
+    Fails the connection so no pipeline data flows over the downgraded
+    channel. Deterministic for a given endpoint: retrying cannot succeed;
+    the fix is enabling TLS on the server (or declaring a mode that does
+    not promise encryption).
+    """
+
+
 class SchemaConfigurationError(Exception):
     """``configure_schema`` was given input it cannot act on.
 

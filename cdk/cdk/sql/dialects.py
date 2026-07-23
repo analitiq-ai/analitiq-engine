@@ -284,6 +284,31 @@ class SqlDialect:
         value = self.build_tls_connect_arg(mode, ca_pem)
         return {} if value is None else {"ssl": value}
 
+    def verify_tls_state(self, dbapi_connection: Any, mode: str) -> None:
+        """Verify the established session satisfies the declared TLS *mode*.
+
+        Connect arguments only request TLS; they cannot guarantee it. A
+        driver may silently skip the TLS handshake when the server does
+        not advertise the capability (aiomysql does, for every mode), so
+        an active MITM can strip the server's TLS capability and downgrade
+        the strictest mode to plaintext unless the established session is
+        checked. The transport factory calls this hook on every new DBAPI
+        connection the engine's pool creates — the build-time probe
+        included — whenever the transport declares a TLS mode.
+
+        ``dbapi_connection`` is the driver's connection (for async
+        drivers, SQLAlchemy's asyncio adapter, which exposes the same
+        DBAPI cursor surface). The connector package's dialect implements
+        the system-specific probe (MySQL: ``SHOW STATUS LIKE
+        'Ssl_cipher'`` — empty value means unencrypted) and raises
+        :class:`~cdk.sql.exceptions.TlsVerificationError` when a mode
+        that promises encryption finds an unencrypted session; modes that
+        do not promise encryption pass without checking. The base is a
+        no-op so existing connectors are unaffected — a dialect opts in
+        when its driver can silently downgrade.
+        """
+        return None
+
     def sqlalchemy_pre_ddl(self, schema_name: str) -> list[str]:
         """Return statements to run before ``MetaData.create_all``.
 
