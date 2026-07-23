@@ -1244,16 +1244,28 @@ class _StageDropFailConn:
     Records every executed statement. ``merge_error`` makes the MERGE
     statement itself raise (failure-path injection); either way the
     MERGE marks the sequence, and the next ``drop_failures`` DROP
-    statements raise ``OperationalError`` (a retryable name, so the
-    error is not the fatal-reclassification path under test elsewhere).
+    statements raise ``drop_error`` (default ``OperationalError``, a
+    retryable name). ``commit_failures`` instead fails the ``commit``
+    that follows a post-MERGE DROP — a dropped stage means a
+    *committed* DROP, not merely an executed one.
     """
 
-    def __init__(self, *, drop_failures=0, merge_error=None):
+    def __init__(
+        self,
+        *,
+        drop_failures=0,
+        merge_error=None,
+        drop_error=None,
+        commit_failures=0,
+    ):
         self.drop_failures = drop_failures
         self.merge_error = merge_error
+        self.drop_error = drop_error
+        self.commit_failures = commit_failures
         self.statements: list[str] = []
         self.merge_seen = False
         self.closed = False
+        self.last_sql = ""
 
     def cursor(self):
         conn = self
@@ -1261,6 +1273,7 @@ class _StageDropFailConn:
         class _Cursor:
             def execute(self, sql, *args):
                 conn.statements.append(sql)
+                conn.last_sql = sql
                 if sql.startswith("MERGE"):
                     conn.merge_seen = True
                     if conn.merge_error is not None:
@@ -1268,7 +1281,9 @@ class _StageDropFailConn:
                 elif sql.startswith("DROP") and conn.merge_seen:
                     if conn.drop_failures > 0:
                         conn.drop_failures -= 1
-                        raise OperationalError("connection reset during DROP")
+                        raise conn.drop_error or OperationalError(
+                            "connection reset during DROP"
+                        )
 
             def adbc_ingest(self, table, batch, mode, **kwargs):
                 """No-op: the stage fill is not under test."""
@@ -1279,7 +1294,13 @@ class _StageDropFailConn:
         return _Cursor()
 
     def commit(self):
-        """No-op: statements are captured, not transacted."""
+        if (
+            self.merge_seen
+            and self.last_sql.startswith("DROP")
+            and self.commit_failures > 0
+        ):
+            self.commit_failures -= 1
+            raise OperationalError("connection reset during DROP commit")
 
     def close(self):
         self.closed = True
@@ -1288,15 +1309,16 @@ class _StageDropFailConn:
 class TestMergeIngestStageDropFailure:
     """Stage-DROP failure handling on both sides of the MERGE (issue #379).
 
-    Success path: the batch is acked SUCCESS and never retried, and the
-    stage name embeds the batch fingerprint, so a failed post-MERGE DROP
-    orphans the stage permanently. The connector must retry the DROP once,
-    then poison the connection — a failed DROP implies a possibly-dead
-    handle; without the poison the next batch burns one retryable failure
-    on the cached handle before healing — and log honestly that no
-    automatic cleanup reaches the table. Failure path: the cleanup-failure
-    log must not promise retry cleanup unconditionally, because after a
-    FATAL reclassification nothing retries.
+    Success path: once the batch's SUCCESS ack lands nothing retries it,
+    and the stage name embeds the batch fingerprint, so a failed
+    post-MERGE DROP orphans the stage. The connector must retry the DROP
+    once, then poison the connection — a failed DROP implies a
+    possibly-dead handle; without the poison the next batch burns one
+    retryable failure on the cached handle before healing — and log
+    honestly that no automatic cleanup reaches the table. Failure path:
+    the cleanup-failure log must not promise retry cleanup
+    unconditionally, because after a FATAL reclassification or exhausted
+    retries nothing retries.
     """
 
     def _handler(self, conn):
@@ -1343,12 +1365,19 @@ class TestMergeIngestStageDropFailure:
         assert len(self._post_merge_drops(conn)) == 2
         assert not conn.closed
         assert h._adbc_conn is conn
-        # The first failed attempt surfaces at DEBUG only.
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        # The failed attempt surfaces at DEBUG, the recovery at INFO —
+        # a first-attempt failure on every batch must leave a footprint
+        # at the default log level.
         assert any(
             "attempt 1/2" in r.getMessage()
             for r in caplog.records
             if r.levelno == logging.DEBUG
+        )
+        assert any(
+            "second attempt" in r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.INFO
         )
 
     def test_persistent_drop_failure_poisons_and_logs_orphan(self, caplog):
@@ -1369,6 +1398,39 @@ class TestMergeIngestStageDropFailure:
         assert "orphaned" in message
         assert "never retried" in message
         assert "DROP-IF-EXISTS" not in message
+        # The warning carries the DROP failure's traceback: the DEBUG
+        # attempt records never exist at the default log level, and the
+        # cause decides what the operator's manual drop needs.
+        assert warnings[0].exc_info is not None
+        assert isinstance(warnings[0].exc_info[1], OperationalError)
+
+    def test_fatal_named_drop_failure_still_swallowed_and_poisons(self, caplog):
+        # A fatal-classified name (ProgrammingError) on the success-path
+        # DROP must not be reclassified or raised: the MERGE committed,
+        # so the batch acks SUCCESS regardless of the failure's class.
+        conn = _StageDropFailConn(
+            drop_failures=2, drop_error=ProgrammingError("permission denied")
+        )
+        h = self._handler(conn)
+        with caplog.at_level(logging.WARNING, logger=database_module.logger.name):
+            self._merge(h)  # must NOT raise
+        assert conn.closed
+        assert h._adbc_conn is None
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert isinstance(warnings[0].exc_info[1], ProgrammingError)
+
+    def test_drop_commit_failure_counts_as_failed_drop(self, caplog):
+        # A dropped stage means a committed DROP: an executed DROP whose
+        # commit is lost must take the same retry-poison-warn path.
+        conn = _StageDropFailConn(commit_failures=2)
+        h = self._handler(conn)
+        with caplog.at_level(logging.WARNING, logger=database_module.logger.name):
+            self._merge(h)  # must NOT raise
+        assert len(self._post_merge_drops(conn)) == 2
+        assert conn.closed
+        assert h._adbc_conn is None
+        assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
 
     def test_failure_path_cleanup_log_is_honest_about_fatal(self, caplog):
         conn = _StageDropFailConn(
@@ -1386,9 +1448,11 @@ class TestMergeIngestStageDropFailure:
         ]
         assert len(warnings) == 1
         message = warnings[0].getMessage()
-        # Cleanup-by-retry is promised only for retryable failures.
+        # Cleanup-by-retry is promised only while retries remain.
         assert "retryable" in message
+        assert "retries remaining" in message
         assert "FATAL" in message
+        assert "exhausted retries" in message
         assert "dropped manually" in message
 
 
