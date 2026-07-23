@@ -6,12 +6,13 @@ name: conversion-matrix
 #
 #   1. @analitiq-ai/conversion-matrix on GitHub Packages, so the frontend can
 #      pin the typed helpers.
-#   2. Versioned raw JSON on S3 (sync-s3 job), so non-npm consumers can pin the
-#      grid without registry credentials. Authentication is GitHub OIDC
-#      (short-lived, no stored keys); the role, region, and bucket come
-#      exclusively from repository variables, so no cloud identifiers live in
-#      this repo. The job is gated on the role-ARN variable and skipped until
-#      it is set; the remaining variables are then required and fail loud when
+#   2. Versioned raw JSON on S3 (sync-s3 job), one leg per target environment
+#      (dev, prod), so non-npm consumers can pin the grid without registry
+#      credentials. Authentication is GitHub OIDC (short-lived, no stored
+#      keys); the role, region, and bucket come exclusively from GitHub
+#      Environment variables, so no cloud identifiers live in this repo. An
+#      environment with no role ARN configured skips its steps; once the role
+#      ARN is set, the remaining variables are required and fail loud when
 #      missing.
 
 on:
@@ -87,21 +88,31 @@ jobs:
     # the latest.json manifest on S3, so a re-run after a partial failure
     # converges on its own. (The first-ever run additionally needs the role to
     # grant s3:ListBucket, so a missing manifest reads as absence, not as
-    # Forbidden.)
+    # Forbidden.) Each environment's bucket keeps its own independent version
+    # history; content is compared across buckets by the manifest sha256.
     #
-    # The gate variable must be REPOSITORY-scoped: a job-level `if` is
-    # evaluated before the environment attaches, so an environment-scoped
-    # variable reads as empty here and would skip this job silently, forever.
-    # Keep the other two variables with it rather than splitting scopes.
-    if: github.event_name == 'push' && vars.CONVERSION_MATRIX_S3_ROLE_ARN != ''
+    # The role/region/bucket variables are ENVIRONMENT-scoped — each
+    # environment carries its own values under the same names — which is why
+    # the gate sits on the steps, not the job: a job-level `if` is evaluated
+    # before the environment attaches and would read every environment-scoped
+    # variable as empty. An unconfigured environment shows as a green leg with
+    # skipped steps.
+    if: github.event_name == 'push'
     needs: verify
     runs-on: ubuntu-latest
-    # The job's OIDC subject claim carries this repo + environment; the role's
-    # trust policy must pin both. Protection rules for the environment are a
+    strategy:
+      # Legs are independent: a dev hiccup must not hold back prod, or the
+      # other way round.
+      fail-fast: false
+      matrix:
+        env: [dev, prod]
+    # The job's OIDC subject claim carries this repo + environment; each
+    # account's role trust policy pins its own environment (dev role -> dev,
+    # prod role -> prod). Protection rules for an environment are a
     # repo-settings concern, not a workflow one.
-    environment: conversion-matrix
+    environment: ${{ matrix.env }}
     concurrency:
-      group: conversion-matrix-s3-sync
+      group: conversion-matrix-s3-sync-${{ matrix.env }}
       cancel-in-progress: false
     permissions:
       contents: read
@@ -110,16 +121,20 @@ jobs:
       # Tip of main, same rationale as the publish job: always sync the current
       # grid, never a stale triggering commit.
       - uses: actions/checkout@v4
+        if: vars.CONVERSION_MATRIX_S3_ROLE_ARN != ''
         with:
           ref: main
       - uses: actions/setup-node@v4
+        if: vars.CONVERSION_MATRIX_S3_ROLE_ARN != ''
         with:
           node-version: "20"
       - uses: aws-actions/configure-aws-credentials@v4
+        if: vars.CONVERSION_MATRIX_S3_ROLE_ARN != ''
         with:
           role-to-assume: ${{ vars.CONVERSION_MATRIX_S3_ROLE_ARN }}
           aws-region: ${{ vars.CONVERSION_MATRIX_S3_REGION }}
       - name: Sync versioned grid to S3 when the grid content changed
+        if: vars.CONVERSION_MATRIX_S3_ROLE_ARN != ''
         env:
           CONVERSION_MATRIX_S3_BUCKET: ${{ vars.CONVERSION_MATRIX_S3_BUCKET }}
         run: node scripts/sync-matrix-to-s3.mjs
