@@ -5,20 +5,24 @@ strings (``_resolve_tls_mode``) — JSON-safe, bootstrap-ready. The build
 side turns them into the driver's connect argument through the connector
 dialect's ``build_tls_connect_arg`` hook; the per-driver SSL vocabularies
 live in the connector packages and are tested there. Here we cover the
-CDK machinery: resolution, hook wiring, the no-dialect failure, and the
-shared ``ca_ssl_context`` helper.
+CDK machinery: resolution, hook wiring, the no-dialect failure, the
+shared ``ca_ssl_context`` helper, and the post-connect
+``verify_tls_state`` enforcement (armed on the pool's connect event for
+every new DBAPI connection whenever a TLS mode is declared).
 """
 
 from __future__ import annotations
 
+import logging
 import ssl as _ssl
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import text as _sa_text
 
 from cdk.sql.dialects import SqlDialect
-from cdk.sql.exceptions import UnsupportedDialectOperationError
+from cdk.sql.exceptions import TlsVerificationError, UnsupportedDialectOperationError
 from cdk.transport_factory import (
     _resolve_tls_mode,
     build_sqlalchemy_from_spec,
@@ -99,7 +103,7 @@ class TestBuildWiresTlsThroughDialect:
 
         with patch(
             "cdk.transport_factory.create_async_engine", side_effect=fake_create
-        ):
+        ), patch("cdk.transport_factory._attach_tls_verification") as attach:
             with pytest.raises(RuntimeError, match="stop before probe"):
                 await build_sqlalchemy_from_spec(
                     {
@@ -112,6 +116,8 @@ class TestBuildWiresTlsThroughDialect:
                     sql_dialect=_FixtureDialect(),
                 )
         assert captured["connect_args"] == {"ssl": "ssl<require:None>"}
+        # The declared mode also arms post-connect verification.
+        assert attach.call_args[0][2] == "require"
 
     @pytest.mark.asyncio
     async def test_hook_returning_none_omits_ssl_arg(self):
@@ -126,7 +132,7 @@ class TestBuildWiresTlsThroughDialect:
 
         with patch(
             "cdk.transport_factory.create_async_engine", side_effect=fake_create
-        ):
+        ), patch("cdk.transport_factory._attach_tls_verification"):
             with pytest.raises(RuntimeError, match="stop"):
                 await build_sqlalchemy_from_spec(
                     {
@@ -215,7 +221,9 @@ class TestTlsConnectArgsMapping:
             engine.dispose = MagicMock()
             return engine
 
-        with patch("cdk.transport_factory.create_engine", side_effect=fake_create):
+        with patch(
+            "cdk.transport_factory.create_engine", side_effect=fake_create
+        ), patch("cdk.transport_factory._attach_tls_verification"):
             with pytest.raises(RuntimeError, match="stop"):
                 await build_sqlalchemy_from_spec(
                     {
@@ -228,3 +236,182 @@ class TestTlsConnectArgsMapping:
                     sql_dialect=_MultiArgDialect(),
                 )
         assert captured["connect_args"] == {"ssl": True, "sslmode": "verify-ca"}
+
+
+class _VerifyingDialect(SqlDialect):
+    """Dialect recording ``verify_tls_state`` calls (sqlite takes no ssl arg).
+
+    The hook body runs a real cursor query, pinning the load-bearing
+    mechanism a connector probe depends on: DBAPI cursor calls work at the
+    pool connect-event lifecycle point — including through SQLAlchemy's
+    asyncio adapter on the async path.
+    """
+
+    name = "verifying"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, str]] = []
+
+    def build_tls_connect_arg(self, mode, ca_pem):
+        return None
+
+    def verify_tls_state(self, dbapi_connection, mode):
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("SELECT 1")
+            row = cursor.fetchone()
+        finally:
+            cursor.close()
+        self.calls.append((row[0], mode))
+
+
+class _RefusingDialect(_VerifyingDialect):
+    """Dialect whose session probe finds the connection unencrypted."""
+
+    def verify_tls_state(self, dbapi_connection, mode):
+        raise TlsVerificationError(
+            f"session is not encrypted; declared TLS mode {mode!r} promises "
+            f"encryption"
+        )
+
+
+def _sqlite_spec(driver: str, dsn: str, mode: str | None) -> dict:
+    return {
+        "transport_type": "sqlalchemy",
+        "driver": driver,
+        "dsn": dsn,
+        "tls": {"mode": mode, "ca_pem": None} if mode is not None else None,
+        "engine_kwargs": {},
+    }
+
+
+class TestVerifyTlsState:
+    """Post-connect enforcement: the declared mode is checked against the
+    established session on every new DBAPI connection (real engines, no
+    mocks — sqlite for the sync path, aiosqlite for the async path)."""
+
+    def test_base_hook_is_noop(self):
+        assert SqlDialect().verify_tls_state(object(), "require") is None
+
+    @pytest.mark.asyncio
+    async def test_sync_probe_connection_is_verified(self):
+        dialect = _VerifyingDialect()
+        transport = await build_sqlalchemy_from_spec(
+            _sqlite_spec("sqlite+pysqlite", "sqlite://", "require"),
+            sql_dialect=dialect,
+        )
+        try:
+            assert dialect.calls == [(1, "require")]
+        finally:
+            transport.engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_every_new_pool_connection_is_verified(self):
+        dialect = _VerifyingDialect()
+        transport = await build_sqlalchemy_from_spec(
+            _sqlite_spec("sqlite+pysqlite", "sqlite://", "require"),
+            sql_dialect=dialect,
+        )
+        engine = transport.engine
+        try:
+            # Drop the probe connection's pool; the next checkout opens a
+            # fresh DBAPI connection, which must pass the same check.
+            engine.dispose()
+            with engine.connect() as conn:
+                conn.execute(_sa_text("SELECT 1"))
+            assert [mode for _, mode in dialect.calls] == ["require", "require"]
+        finally:
+            engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_sync_failed_verification_fails_the_build(self):
+        with pytest.raises(TlsVerificationError, match="not encrypted"):
+            await build_sqlalchemy_from_spec(
+                _sqlite_spec("sqlite+pysqlite", "sqlite://", "require"),
+                sql_dialect=_RefusingDialect(),
+            )
+
+    @pytest.mark.asyncio
+    async def test_inherited_noop_hook_is_logged(self, caplog):
+        class _ConnectArgsOnlyDialect(SqlDialect):
+            name = "args-only"
+
+            def build_tls_connect_arg(self, mode, ca_pem):
+                return None
+
+        with caplog.at_level(logging.INFO, logger="cdk.transport_factory"):
+            transport = await build_sqlalchemy_from_spec(
+                _sqlite_spec("sqlite+pysqlite", "sqlite://", "require"),
+                sql_dialect=_ConnectArgsOnlyDialect(),
+            )
+        transport.engine.dispose()
+        assert any(
+            "verify_tls_state" in record.getMessage()
+            and "args-only" in record.getMessage()
+            for record in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_overriding_dialect_is_not_logged_as_noop(self, caplog):
+        dialect = _VerifyingDialect()
+        with caplog.at_level(logging.INFO, logger="cdk.transport_factory"):
+            transport = await build_sqlalchemy_from_spec(
+                _sqlite_spec("sqlite+pysqlite", "sqlite://", "require"),
+                sql_dialect=dialect,
+            )
+        transport.engine.dispose()
+        assert not any("no-op" in record.getMessage() for record in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_no_declared_tls_mode_skips_verification(self):
+        dialect = _VerifyingDialect()
+        transport = await build_sqlalchemy_from_spec(
+            _sqlite_spec("sqlite+pysqlite", "sqlite://", None),
+            sql_dialect=dialect,
+        )
+        try:
+            assert dialect.calls == []
+        finally:
+            transport.engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_async_probe_connection_is_verified(self):
+        pytest.importorskip("aiosqlite")
+        dialect = _VerifyingDialect()
+        transport = await build_sqlalchemy_from_spec(
+            _sqlite_spec("sqlite+aiosqlite", "sqlite+aiosqlite://", "verify-ca"),
+            sql_dialect=dialect,
+        )
+        try:
+            assert dialect.calls == [(1, "verify-ca")]
+        finally:
+            await transport.engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_async_failed_verification_fails_the_build(self):
+        pytest.importorskip("aiosqlite")
+        with pytest.raises(TlsVerificationError, match="not encrypted"):
+            await build_sqlalchemy_from_spec(
+                _sqlite_spec("sqlite+aiosqlite", "sqlite+aiosqlite://", "require"),
+                sql_dialect=_RefusingDialect(),
+            )
+
+
+class TestTlsVerificationClassifiesDeterministic:
+    """A mid-run verification failure must fail fast at every boundary the
+    engine classifies errors: connect, worker read, and write-batch (the
+    write path is covered behaviorally in test_database_handler_endpoint_refs).
+    Retrying reconnects to the same downgraded endpoint — and under an
+    active MITM is exactly wrong."""
+
+    def test_connect_classification(self):
+        from cdk.connection_runtime import DETERMINISTIC_CONNECT_ERRORS
+
+        assert TlsVerificationError in DETERMINISTIC_CONNECT_ERRORS
+
+    def test_worker_read_classification(self):
+        # src.worker imports the gRPC generated stack; guard for local envs
+        # whose contract-models version predates it (CI always runs this).
+        source_service = pytest.importorskip("src.worker.source_service")
+
+        assert TlsVerificationError in source_service._DETERMINISTIC_READ_ERRORS

@@ -43,6 +43,7 @@ from cdk.rate_limiter import RateLimiter
 from cdk.resolver import ResolutionContext, Resolver
 from cdk.secrets.exceptions import PlaceholderExpansionError, SecretNotFoundError
 from cdk.secrets.protocol import SecretsResolver
+from cdk.sql.exceptions import TlsVerificationError
 from cdk.transport_factory import (
     AdbcTransport,
     HttpTransport,
@@ -896,6 +897,11 @@ DETERMINISTIC_CONNECT_ERRORS: tuple = (
     UnmappedTypeError,
     PlaceholderExpansionError,
     TransportSpecError,
+    # A session that fails the declared TLS mode's post-connect check
+    # (SqlDialect.verify_tls_state) cannot heal by reconnecting to the
+    # same endpoint; keep the type unwrapped so callers see the security
+    # failure, not a generic connectivity error.
+    TlsVerificationError,
 )
 
 

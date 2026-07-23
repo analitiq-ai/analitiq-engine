@@ -20,7 +20,11 @@ import pyarrow as pa
 import grpc
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.exceptions import TransportSpecError
-from cdk.sql.exceptions import ReadError, UnsupportedDialectOperationError
+from cdk.sql.exceptions import (
+    ReadError,
+    TlsVerificationError,
+    UnsupportedDialectOperationError,
+)
 from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
 from src.grpc.generated.analitiq.v1 import (
     CursorSave,
@@ -51,6 +55,11 @@ _DETERMINISTIC_READ_ERRORS = (
     # contract): an authoring defect in a value expression that escapes a
     # connector unwrapped must not classify as retryable.
     TransportSpecError,
+    # A mid-run pool connection that fails the declared TLS mode's
+    # post-connect check (a non-TLS or downgraded server) cannot heal by
+    # retrying against the same endpoint — and under an active MITM,
+    # retrying is exactly wrong.
+    TlsVerificationError,
     KeyError,
     TypeError,
     ValueError,

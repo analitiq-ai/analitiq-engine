@@ -23,6 +23,7 @@ from cdk.secrets.exceptions import PlaceholderExpansionError
 from cdk.sql.exceptions import (
     CreateTableError,
     SchemaConfigurationError,
+    TlsVerificationError,
     UnsupportedDialectOperationError,
 )
 from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
@@ -423,12 +424,17 @@ class DestinationServicer(DestinationServiceServicer):
             AdbcConfigurationError,
             CreateTableError,
             SchemaConfigurationError,
+            TlsVerificationError,
             UnsupportedDialectOperationError,
             PlaceholderExpansionError,
         ) as e:
             # The handler's configure_schema deliberately propagates these
             # deterministic errors so the SchemaAck carries the precise
             # reason; translate them here instead of crashing the stream.
+            # TlsVerificationError reaches DDL when the pool opens a
+            # replacement connection that fails the declared TLS mode's
+            # post-connect check; deterministic for the endpoint, so it is
+            # a schema/config rejection, not a stream-transport failure.
             # CreateTableError comes only from the DDL builder
             # (build_create_table_sql) on this path: no columns, a primary
             # key missing from the column list, or a type-map error wrapped

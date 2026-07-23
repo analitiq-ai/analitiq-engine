@@ -33,6 +33,7 @@ from .exceptions import (
     ReadError,
     SchemaConfigurationError,
     SqlIntrospectionError,
+    TlsVerificationError,
     UnsupportedDialectOperationError,
 )
 from .execution import execute_ddl, fetch_rows
@@ -84,4 +85,5 @@ __all__ = [
     "CreateTableError",
     "ReadError",
     "SchemaConfigurationError",
+    "TlsVerificationError",
 ]
