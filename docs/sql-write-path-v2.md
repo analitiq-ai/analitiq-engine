@@ -82,10 +82,12 @@ Per mode, the single statement from stage to target is:
 - **`truncate_insert`** — empty the target once on the read's first batch
   (`batch_seq == 1`, #307 semantics unchanged), then a plain
   `INSERT INTO target SELECT … FROM stage` append. The emptying statement is
-  an ANSI `DELETE FROM target`, exactly what runs today
-  (`state.table.delete()`, `generic.py:1707`) — never the `TRUNCATE`
-  statement, which implicitly commits on Redshift and others and would break
-  the §7 single-transaction promise. No identity dedup: deduping a full
+  rendered by the dialect's `empty_table_sql` (§4) — base ANSI
+  `DELETE FROM target`, what runs today (`state.table.delete()`,
+  `generic.py:1707`), overridable for systems whose DELETE grammar deviates
+  (BigQuery requires a `WHERE` clause) — and never the `TRUNCATE` statement,
+  which implicitly commits on Redshift and others and would break the §7
+  single-transaction promise. No identity dedup: deduping a full
   refresh would collapse legitimate duplicate rows (unchanged contract,
   `generic.py:1616-1619`).
 
@@ -99,10 +101,12 @@ applied in Arrow space before landing:
 - **`insert`** — duplicate identities collapse to the **first** occurrence.
   Unchanged contract (`generic.py:1625-1638`, `_attach_record_hash_to_batch`).
 - **`upsert`** — duplicate `conflict_keys` collapse to the row with the
-  **greatest value of the stream's cursor field** (ties break to the last
-  occurrence in batch order). Recency comes from the declared cursor, never
-  from physical position — a batch may be unordered, the same reason the wire
-  cursor is computed as MAX. A stream with no cursor field keeps today's loud
+  **greatest cursor tuple**: the stream's cursor field, then its declared
+  tie-breaker fields, ordered exactly as the engine's committed-cursor
+  computation orders them (`compute_max_cursor`, `src/grpc/cursor.py:150-157`);
+  rows equal on the full tuple collapse to the last occurrence. Recency comes
+  from the declared cursor, never from physical position — a batch may be
+  unordered, the same reason the wire cursor is computed as MAX. A stream with no cursor field keeps today's loud
   failure: with no declared recency signal, duplicate keys inside one batch
   mean the source's `conflict_keys` are not actually unique, and no collapse
   rule can be correct. Today every duplicate fails loudly (`ON CONFLICT`
@@ -110,11 +114,19 @@ applied in Arrow space before landing:
   rows match"), so the cursor-keyed collapse is newly sanctioned behavior,
   not a silent change — and it is required: coalescing (§8) widens the window
   a batch covers, making a key updated twice within one unit a normal event
-  rather than an anomaly. The cursor field and its tie-breakers reach the
-  facade the way `conflict_keys` already do — threaded from the shared
-  pipeline config on the engine side of the worker boundary
-  (`base_handler.py:134-150` is the pattern); the wire `Cursor` stays opaque
-  and `SchemaMessage` stays slim.
+  rather than an anomaly. The cursor and tie-breaker fields reach the facade
+  the way `conflict_keys` already do — resolved by the engine to their
+  post-mapping column names and threaded from the shared pipeline config on
+  the engine side of the worker boundary (`base_handler.py:134-150` is the
+  pattern); the wire `Cursor` stays opaque and `SchemaMessage` stays slim.
+  The comparison runs on the destination batch's own columns, so the
+  collapse is only possible when the mapping carries those columns into the
+  written batch (`build_output_schema` builds it solely from assignment
+  targets, `src/engine/data_transformer.py:57-79`); a stream whose mapping
+  drops them keeps the loud duplicate failure, and declaring `write_unit`
+  turns that combination into a loud config error before any data moves —
+  coalescing makes intra-unit duplicates normal, so a coalesced upsert
+  stream must be collapse-capable up front.
 - **`truncate_insert`** — no collapsing, as above.
 
 ### Landing
@@ -152,7 +164,7 @@ class StageWritePlan:
     transactional: bool            # from the declaration (section 7)
     create_stage_sql: str          # dialect.stage_table_sql(...)
     truncate_sql: str | None       # first truncate_insert batch only:
-                                   # ANSI DELETE FROM target (section 2)
+                                   # dialect.empty_table_sql(target) (section 2)
     mode_sql: str                  # the one mode statement (section 2)
     drop_stage_sql: str
     columns: tuple[str, ...]       # landing column order, identity included
@@ -243,10 +255,13 @@ def bulk_land(self, conn: Any, stage: TableAddress, batch: pa.RecordBatch,
     Base returns False."""
 ```
 
-The anti-join insert, the truncate, and the append statement are plain ANSI
-rendered by the CDK through the dialect's quoting (`quote_table`,
-`quote_ident`) — they are not hooks, because no per-system divergence exists
-to express.
+The anti-join insert and the append statement are plain ANSI rendered by the
+CDK through the dialect's quoting (`quote_table`, `quote_ident`) — not hooks,
+because no per-system divergence exists to express. The target-emptying
+statement has exactly one known divergence (BigQuery's DELETE requires a
+`WHERE` clause), so it follows the `current_timestamp_default` pattern: a
+base-implemented render, `empty_table_sql(target: TableAddress) -> str`,
+returning ANSI `DELETE FROM <target>`, overridable.
 
 **Retained hooks, and the per-connection composition order**
 
@@ -445,11 +460,18 @@ Mechanics:
   coalescer keeps their boundary offsets), each through the normal send path
   with its own `record_ids` and MAX cursor; only the source batches that
   fail again are DLQ'd or skipped — the same rows that would have been lost
-  without coalescing, no more. A `truncate_insert` first unit that fails
-  this way restarts numbering, so its first split goes out as the fresh
-  read's `batch_seq` 1 and the truncate signal survives. Exhausted
-  *retryable* failures keep unit granularity: they are transient, not
-  row-caused, and a wholesale unit replayed from the DLQ loses nothing.
+  without coalescing, no more. Splits always take fresh, monotonically
+  continued `batch_seq` values: batch identity and everything derived from
+  it (stage tokens, deterministic load-job IDs, bigquery#6) is never reused
+  with a different payload — load-job systems dedup job insertion by ID, so
+  a reused identity would silently no-op the split's load. The read's first
+  `truncate_insert` unit is the one exemption: it is not split, because the
+  truncate signal is bound to `batch_seq` 1 and must not ride a fresh
+  identity — a deterministically failed full-refresh first batch means the
+  refresh itself failed, so it keeps today's whole-unit FATAL semantics and
+  re-running the refresh is the recovery. Exhausted *retryable* failures
+  also keep unit granularity: they are transient, not row-caused, and a
+  wholesale unit replayed from the DLQ loses nothing.
 - **Size budget.** The hard bound is the gRPC message cap
   (`GRPC_MAX_MESSAGE_SIZE`, `src/config/settings.py:103`), raised from 16 MiB
   to 64 MiB by default. The unit budget counts the Arrow payload **plus**
