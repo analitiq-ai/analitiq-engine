@@ -188,6 +188,17 @@ def _resolve_tls_mode(
     canonical vocabulary — the driver-specific materializer interprets the
     native string. ``ca_pem`` is ``None`` unless the connection provided
     a CA bundle.
+
+    The CA ref is optional at the connection level: the connector's shared
+    transport recipe declares it for every connection, and one that pins
+    no CA simply does not carry the secret — the resolver's typed
+    missing-data signal (:class:`UnresolvedValueError`), logged at INFO
+    and treated as "no CA", mirroring the optional ``db_kwargs`` policy.
+    Everything else fails loud: an authoring defect (typo'd scope raises
+    plain ``KeyError``) propagates, and a CA that resolves to ``None``,
+    an empty string, or a non-string was provided-but-unusable — silently
+    proceeding without it would hand the dialect whatever weaker trust it
+    falls back to (issue #380).
     """
     if tls_spec is None:
         return None, None
@@ -210,9 +221,23 @@ def _resolve_tls_mode(
     if raw_ca is not None:
         try:
             resolved = resolver.resolve(raw_ca)
-        except KeyError:
-            resolved = None
-        if isinstance(resolved, str) and resolved:
+        except UnresolvedValueError:
+            logger.info(
+                "tls.ca_certificate omitted: optional CA ref references a "
+                "value the connection does not supply; proceeding without "
+                "CA pinning."
+            )
+        else:
+            if not isinstance(resolved, str) or not resolved:
+                # Type name only — the ref may be mis-wired at another
+                # secret, so the resolved value must never reach the error.
+                kind = "an empty string" if resolved == "" else type(resolved).__name__
+                raise TransportSpecError(
+                    f"tls.ca_certificate resolved to {kind}; a provided CA "
+                    f"bundle must resolve to a non-empty PEM string — remove "
+                    f"the value to proceed without CA pinning, or supply the "
+                    f"PEM"
+                )
             ca_value = resolved
 
     return mode, ca_value
