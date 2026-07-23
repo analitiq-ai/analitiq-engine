@@ -100,42 +100,17 @@ applied in Arrow space before landing:
 
 - **`insert`** — duplicate identities collapse to the **first** occurrence.
   Unchanged contract (`generic.py:1625-1638`, `_attach_record_hash_to_batch`).
-- **`upsert`** — duplicate `conflict_keys` collapse to the row with the
-  **greatest cursor tuple**: the stream's cursor field, then its declared
-  tie-breaker fields, ordered exactly as the engine's committed-cursor
-  computation orders them (`compute_max_cursor`, `src/grpc/cursor.py:150-157`);
-  rows equal on the full tuple collapse to the first occurrence — matching
-  both `compute_max_cursor`, which keeps the first row on full equality, and
-  insert's first-wins rule. Recency comes
-  from the declared cursor, never from physical position — a batch may be
-  unordered, the same reason the wire cursor is computed as MAX. A stream with no cursor field keeps today's loud
-  failure: with no declared recency signal, duplicate keys inside one batch
-  mean the source's `conflict_keys` are not actually unique, and no collapse
-  rule can be correct. Today every duplicate fails loudly (`ON CONFLICT`
-  raises "cannot affect row a second time"; `MERGE` raises "multiple source
-  rows match"), so the cursor-keyed collapse is newly sanctioned behavior,
-  not a silent change — and it is required: coalescing (§8) widens the window
-  a batch covers, making a key updated twice within one unit a normal event
-  rather than an anomaly. The cursor and tie-breaker fields reach the facade
-  the way `conflict_keys` already do — resolved by the engine to their
-  post-mapping column names and threaded from the shared pipeline config on
-  the engine side of the worker boundary (`base_handler.py:134-150` is the
-  pattern); the wire `Cursor` stays opaque and `SchemaMessage` stays slim.
-  Resolution is defined only for direct assignments: a cursor or tie-breaker
-  field mapped by a plain `get` to exactly one target column. A field that
-  is wrapped in an expression, split across targets, or absent from the
-  mapping has no well-defined destination column, and the stream is not
-  collapse-capable — mappings are arbitrary expressions, so no general
-  inverse exists to guess with.
-  The comparison runs on the destination batch's own columns, so the
-  collapse is only possible when the mapping carries those columns into the
-  written batch (`build_output_schema` builds it solely from assignment
-  targets, `src/engine/data_transformer.py:57-79`); a stream whose mapping
-  drops them keeps the loud duplicate failure. Collapse-capability also
-  gates coalescing (§8): an upsert stream that cannot collapse — cursor-less,
-  or with the columns lost in its mapping — is simply not coalesced, because
-  coalescing would manufacture intra-unit duplicate keys that each source
-  batch alone never had.
+- **`upsert`** — duplicate `conflict_keys` inside one **source batch** keep
+  today's loud failure (`ON CONFLICT` raises "cannot affect row a second
+  time"; `MERGE` raises "multiple source rows match"): a single source page
+  carrying the same key twice means the source's `conflict_keys` are not
+  actually unique, and no collapse rule can be correct. Coalescing (§8)
+  never manufactures this case: duplicate keys *across* the source batches
+  of one merged unit are collapsed by the engine's coalescer before the
+  unit is built, keeping the later batch's row — byte-for-byte the row that
+  today's sequential per-batch merges would leave in the target. The
+  destination never sees a duplicate it would not see today, so no new
+  contract surface exists for this rule.
 - **`truncate_insert`** — no collapsing, as above.
 
 ### Landing
@@ -453,10 +428,9 @@ that only the async SQLAlchemy flavor can enforce it in-band
 
 ## 8. Batch coalescing (settles #384)
 
-**Decision: the engine coalesces source batches before sending; message
-shapes and ack semantics do not change** (the only proto deltas are
-additive: one new `failure_category` value below, and the §11 field
-reservations). The destination-side alternatives — buffered
+**Decision: the engine coalesces source batches before sending; the wire
+protocol does not change** (the only proto delta is hygienic: the §11
+reservation of the deleted capability fields). The destination-side alternatives — buffered
 batches with deferred or windowed acks, or a flush hook with held cursors —
 are rejected: both require the sandboxed, untrusted connector worker to hold
 data the engine has already had acked or to participate in cursor durability,
@@ -475,11 +449,12 @@ Mechanics:
   the destination connector's definition while assembling the pipeline
   (`pipeline_config_prep.py`) and threads it into the runtime batching
   config the load stage already receives — the same path that delivers
-  `batch_size` today. Not every stream is eligible: an upsert stream that is
-  not collapse-capable (§2) is excluded from coalescing and keeps one
-  source batch per send, logged at INFO — the `bulk_land` rule again: a
-  visible speed downgrade, never a manufactured failure and never a silent
-  one. Because it runs
+  `batch_size` today. For upsert streams the coalescer collapses duplicate
+  `conflict_keys` across the source batches it merges, keeping the later
+  batch's row (§2) — it already holds the post-mapping batches in arrival
+  order and reads `conflict_keys` from stream config, so the collapse needs
+  no new contract surface and reproduces sequential-merge semantics
+  exactly. Because it runs
   *before* `record_ids`, the MAX-cursor computation, `emitted_at` stamping,
   and `batch_seq` assignment (`stream_processor.py:586-633`), everything
   downstream — retry stability, cursor semantics, DLQ correlation — is
@@ -496,37 +471,17 @@ Mechanics:
   coalescer to hold, and the engine's synthetic empty `batch_seq` 1 —
   which is what truncates the target after a clean zero-row read
   (`stream_processor.py:918-968`) — is sent outside the coalescer's path.
-- **Failure isolation survives coalescing.** A bigger unit must not widen
-  the dlq/skip blast radius: on a FATAL ack that declares the *data itself*
-  was rejected, the engine re-sends the unit split back into its original
-  source batches (the coalescer keeps their boundary offsets), each through
-  the normal send path with its own `record_ids` and MAX cursor; only the
-  source batches that fail again are DLQ'd or skipped — the same rows that
-  would have been lost without coalescing, no more. `WRITE_REJECTED` is too
-  broad to key the split on — the #351 vocabulary folds permission and
-  driver failures into it, and splitting those isolates nothing — so the
-  engine-owned vocabulary gains one value, `FAILURE_CATEGORY_DATA_REJECTED`,
-  assigned by the CDK's write-failure ladder to row-shaped rejections
-  (constraint and type violations: `IntegrityError`, `DataError`). Only
-  that category triggers the split pass. Every other fatal —
-  `WRITE_REJECTED`, `CONFIG_DEFECT`, `NOT_READY`, or an undeclared category
-  — stays terminal for the whole unit exactly as today: not row-caused,
-  splitting cannot isolate anything, and under dlq/skip it would convert a
-  configuration or environment defect into dropped data. The added enum
-  value is a vocabulary extension inside the existing `failure_category`
-  field — no message shape or ack semantics change.
-  Splits always take fresh, monotonically
-  continued `batch_seq` values: batch identity and everything derived from
-  it (stage tokens, deterministic load-job IDs, bigquery#6) is never reused
-  with a different payload — load-job systems dedup job insertion by ID, so
-  a reused identity would silently no-op the split's load. The read's first
-  `truncate_insert` unit is the one exemption: it is not split, because the
-  truncate signal is bound to `batch_seq` 1 and must not ride a fresh
-  identity — a deterministically failed full-refresh first batch means the
-  refresh itself failed, so it keeps today's whole-unit FATAL semantics and
-  re-running the refresh is the recovery. Exhausted *retryable* failures
-  also keep unit granularity: they are transient, not row-caused, and a
-  wholesale unit replayed from the DLQ loses nothing.
+- **The dlq/skip unit is the sent batch — as it always was.** Declaring
+  `write_unit` consciously widens that unit: a fatally rejected coalesced
+  unit is DLQ'd or skipped wholesale, good rows included, exactly as a
+  source batch is today. Nothing is lost under `dlq` — the unit replays —
+  and unit size is the operator's control over rejection granularity: a
+  deployment that needs finer DLQ isolation declares a smaller
+  `write_unit`. The engine adds no split-and-retry machinery for this:
+  whole-batch rejection without per-record attribution is this engine's
+  recorded design stance (untrusted connectors cannot be trusted to blame
+  individual rows), and wholesale rejection of a load unit is the norm for
+  load-based warehouse pipelines.
 - **Server-registered idempotency tokens include content.** Stage *names*
   stay batch-derived (`run_id|stream_id|batch_seq`): a stale stage is
   dropped and rebuilt, so the name only has to be deterministic per
@@ -612,9 +567,11 @@ The contract tier (#391, no live database) certifies this ADR's surface:
   bulk-landed and executemany-landed stages produce identical stage
   contents against the suite's fakes.
 - **Duplicate rules hold.** Intra-batch duplicate identities collapse
-  first-wins for insert and greatest-cursor for upsert (loud failure for a
-  cursor-less upsert stream) before the mode statement renders; a replayed
-  batch leaves target state unchanged for the exactly-once modes.
+  first-wins for insert before the mode statement renders; duplicate
+  `conflict_keys` inside one batch fail loudly for upsert; a replayed batch
+  leaves target state unchanged for the exactly-once modes. (The
+  cross-batch collapse inside a coalesced unit is engine code, exercised by
+  engine tests, not by the connector kit.)
 
 The live tier exercises the primitive end-to-end (all modes plus
 restart/replay) on systems that run as Docker service containers; cloud
@@ -642,11 +599,12 @@ compatibility layer, per the engine's no-legacy rule:
   renaming `adbc_stage_table_sql` overrides to `stage_table_sql` and
   removing the dead `MySQLDialect.batch_commits_key_type`.
 - #391: the conformance kit asserting §10.
-- #384: the engine coalescer with the FATAL split pass, the message-cap
-  default raise, and removal of the dead `GetCapabilitiesResponse` sizing
-  fields, their field numbers and names `reserved` in the proto so a future
-  field can never reuse the tags against a mixed-version peer — #384 remains
-  open as the implementation tracker for §8.
+- #384: the engine coalescer (including the cross-batch upsert collapse),
+  the message-cap default raise, and removal of the dead
+  `GetCapabilitiesResponse` sizing fields, their field numbers and names
+  `reserved` in the proto so a future field can never reuse the tags
+  against a mixed-version peer — #384 remains open as the implementation
+  tracker for §8.
 - Docs: the affected sections of
   [grpc-streaming-architecture.md](grpc-streaming-architecture.md) (verdict
   matrix, ADBC parity caveat, batch-size prose) and
@@ -679,10 +637,10 @@ compatibility layer, per the engine's no-legacy rule:
   pipelines). Accepted: the batch sizes where this matters are exactly the
   ones coalescing grows, and temp-scope stages make the overhead one
   in-session table.
-- Cursor-keyed upsert collapsing is newly defined behavior where today fails
-  loud; pipelines relying on the loud failure to detect upstream duplicate
-  keys keep that tripwire only for cursor-less upsert streams and insert
-  mode.
+- Declaring `write_unit` widens the dlq/skip unit to the coalesced batch: a
+  fatally rejected unit is rejected wholesale, good rows included.
+  Replayable under `dlq`; the mitigation is unit size, not engine
+  machinery.
 - The 64 MiB single-message ceiling is a real bound on write-unit size;
   chunked framing is the known, deliberately deferred escape hatch.
 
@@ -720,17 +678,17 @@ compatibility layer, per the engine's no-legacy rule:
    #384; §8). *Rationale:* the flush-gated and windowed-ack alternatives
    hand unacked data or cursor durability to untrusted connector workers;
    engine-side merging solves the quota problem with no new trust and no
-   change to message shapes or ack semantics (the one proto delta is the
-   additive `FAILURE_CATEGORY_DATA_REJECTED` value); the data-rejection
-   split pass keeps the dlq/skip blast radius at the source batch. Chunked
-   framing is deferred until a workload needs it.
-8. **Upsert collapses intra-batch duplicate keys to the greatest cursor
-   value, and stays a loud failure for cursor-less streams; insert stays
-   first-wins** (§2). *Rationale:* coalescing makes intra-batch key updates
-   normal, and the declared cursor is the only honest recency signal — a
-   batch may be unordered, so physical position must not decide which
-   version survives. Insert's first-wins contract predates v2 and is
-   unchanged.
+   wire change. The dlq/skip unit remains the sent batch — `write_unit`
+   consciously widens it, and unit size is the operator's granularity
+   control. Chunked framing is deferred until a workload needs it.
+8. **Duplicate keys inside one source batch stay a loud failure; duplicates
+   across coalesced source batches are collapsed by the engine's coalescer,
+   later batch wins; insert stays first-wins** (§2, §8). *Rationale:*
+   sequential per-batch merges are the semantics being preserved, and the
+   coalescer reproduces them exactly at the one point where batch order
+   still exists — instead of reconstructing recency at the destination
+   through new contract surface. Insert's first-wins contract predates v2
+   and is unchanged.
 9. **The conformance contract tier certifies rendering-matches-declaration,
    refusals, the sanctioned override surface, landing equivalence, and the
    duplicate rules** (§10).
