@@ -394,7 +394,7 @@ async def test_partitioned_write_with_naive_emitted_at_is_fatal():
     """
     handler = _make_handler(serialize_return=b'{"id":1}\n')
     handler._path_template = "year={year}/month={month}"
-    naive = datetime(2026, 7, 21, 9, 0, 0)  # no tzinfo
+    naive = _EMITTED_AT.replace(tzinfo=None)  # strip tz -> naive (local) datetime
 
     result = await handler.write_batch(
         run_id="r",
