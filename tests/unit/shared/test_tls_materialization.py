@@ -13,6 +13,7 @@ every new DBAPI connection whenever a TLS mode is declared).
 
 from __future__ import annotations
 
+import logging
 import ssl as _ssl
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -238,7 +239,13 @@ class TestTlsConnectArgsMapping:
 
 
 class _VerifyingDialect(SqlDialect):
-    """Dialect recording ``verify_tls_state`` calls (sqlite takes no ssl arg)."""
+    """Dialect recording ``verify_tls_state`` calls (sqlite takes no ssl arg).
+
+    The hook body runs a real cursor query, pinning the load-bearing
+    mechanism a connector probe depends on: DBAPI cursor calls work at the
+    pool connect-event lifecycle point — including through SQLAlchemy's
+    asyncio adapter on the async path.
+    """
 
     name = "verifying"
 
@@ -249,7 +256,13 @@ class _VerifyingDialect(SqlDialect):
         return None
 
     def verify_tls_state(self, dbapi_connection, mode):
-        self.calls.append((dbapi_connection, mode))
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("SELECT 1")
+            row = cursor.fetchone()
+        finally:
+            cursor.close()
+        self.calls.append((row[0], mode))
 
 
 class _RefusingDialect(_VerifyingDialect):
@@ -288,8 +301,7 @@ class TestVerifyTlsState:
             sql_dialect=dialect,
         )
         try:
-            assert [mode for _, mode in dialect.calls] == ["require"]
-            assert dialect.calls[0][0] is not None
+            assert dialect.calls == [(1, "require")]
         finally:
             transport.engine.dispose()
 
@@ -320,6 +332,37 @@ class TestVerifyTlsState:
             )
 
     @pytest.mark.asyncio
+    async def test_inherited_noop_hook_is_logged(self, caplog):
+        class _ConnectArgsOnlyDialect(SqlDialect):
+            name = "args-only"
+
+            def build_tls_connect_arg(self, mode, ca_pem):
+                return None
+
+        with caplog.at_level(logging.INFO, logger="cdk.transport_factory"):
+            transport = await build_sqlalchemy_from_spec(
+                _sqlite_spec("sqlite+pysqlite", "sqlite://", "require"),
+                sql_dialect=_ConnectArgsOnlyDialect(),
+            )
+        transport.engine.dispose()
+        assert any(
+            "verify_tls_state" in record.getMessage()
+            and "args-only" in record.getMessage()
+            for record in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_overriding_dialect_is_not_logged_as_noop(self, caplog):
+        dialect = _VerifyingDialect()
+        with caplog.at_level(logging.INFO, logger="cdk.transport_factory"):
+            transport = await build_sqlalchemy_from_spec(
+                _sqlite_spec("sqlite+pysqlite", "sqlite://", "require"),
+                sql_dialect=dialect,
+            )
+        transport.engine.dispose()
+        assert not any("no-op" in record.getMessage() for record in caplog.records)
+
+    @pytest.mark.asyncio
     async def test_no_declared_tls_mode_skips_verification(self):
         dialect = _VerifyingDialect()
         transport = await build_sqlalchemy_from_spec(
@@ -340,7 +383,7 @@ class TestVerifyTlsState:
             sql_dialect=dialect,
         )
         try:
-            assert [mode for _, mode in dialect.calls] == ["verify-ca"]
+            assert dialect.calls == [(1, "verify-ca")]
         finally:
             await transport.engine.dispose()
 

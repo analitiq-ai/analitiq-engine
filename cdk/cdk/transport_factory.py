@@ -48,6 +48,7 @@ from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.exceptions import TransportSpecError, UnresolvedValueError
 from cdk.rate_limiter import RateLimiter
 from cdk.resolver import ResolutionContext, Resolver
+from cdk.sql.dialects import SqlDialect
 
 logger = logging.getLogger(__name__)
 
@@ -362,6 +363,18 @@ def _attach_tls_verification(engine: Engine, sql_dialect: Any, mode: str) -> Non
     ``sync_engine`` facade; the event fires inside the greenlet bridge, so
     the dialect's DBAPI cursor calls work on the adapted connection.
     """
+    if type(sql_dialect).verify_tls_state is SqlDialect.verify_tls_state:
+        # Armed-but-vacuous must be greppable: with the inherited no-op the
+        # declared mode is only as strong as the driver's own connect-arg
+        # enforcement, which some drivers silently skip.
+        logger.info(
+            "TLS mode %r declared but dialect %r inherits the no-op "
+            "verify_tls_state; the established session is not verified "
+            "post-connect — encryption rests on the driver honoring its "
+            "connect args.",
+            mode,
+            getattr(sql_dialect, "name", type(sql_dialect).__name__),
+        )
 
     @event.listens_for(engine, "connect")
     def _verify_tls(dbapi_connection: Any, connection_record: Any) -> None:
@@ -372,8 +385,9 @@ def _build_and_probe_sync_engine(
     dsn: str,
     connect_args: Mapping[str, Any],
     engine_kwargs: Mapping[str, Any],
-    sql_dialect: Any = None,
-    tls_mode: str | None = None,
+    *,
+    sql_dialect: Any,
+    tls_mode: str | None,
 ) -> Engine:
     """Build a sync engine and run the ``SELECT 1`` probe (worker thread)."""
     engine = create_engine(dsn, connect_args=dict(connect_args), **dict(engine_kwargs))
@@ -451,8 +465,8 @@ async def build_sqlalchemy_from_spec(
             dsn,
             connect_args,
             engine_kwargs,
-            sql_dialect,
-            tls_mode,
+            sql_dialect=sql_dialect,
+            tls_mode=tls_mode,
         )
 
     base_dialect = driver.split("+", 1)[0]
