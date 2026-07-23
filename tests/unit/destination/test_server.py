@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pyarrow as pa
@@ -78,7 +79,19 @@ def _arrow_ipc(batch: pa.RecordBatch) -> bytes:
     return sink.getvalue().to_pybytes()
 
 
-def _batch_request(*, stream_id: str = "s1", token: bytes = b"") -> StreamRequest:
+# A fixed emit instant and its wire epoch-ms encoding (issue #353): the engine
+# stamps emitted_at once per batch, and the servicer decodes it back to a
+# tz-aware datetime for the handler.
+_EMITTED_AT = datetime(2026, 7, 21, 9, 30, 0, tzinfo=timezone.utc)
+_EMITTED_AT_MS = int(_EMITTED_AT.timestamp() * 1000)
+
+
+def _batch_request(
+    *,
+    stream_id: str = "s1",
+    token: bytes = b"",
+    emitted_at_unix_ms: int = _EMITTED_AT_MS,
+) -> StreamRequest:
     batch = pa.RecordBatch.from_pydict({"id": [1]})
     return StreamRequest(
         batch=RecordBatch(
@@ -90,6 +103,7 @@ def _batch_request(*, stream_id: str = "s1", token: bytes = b"") -> StreamReques
             record_count=1,
             record_ids=["1"],
             cursor=Cursor(token=token),
+            emitted_at_unix_ms=emitted_at_unix_ms,
         )
     )
 
@@ -634,6 +648,11 @@ class TestWireToCdkTranslation:
         assert isinstance(passed_cursor, CdkCursor)
         assert passed_cursor.token == b"inbound-abc"
 
+        # Inbound: wire emitted_at_unix_ms -> tz-aware UTC datetime (issue #353).
+        passed_emitted_at = handler.write_batch.call_args.kwargs["emitted_at"]
+        assert passed_emitted_at == _EMITTED_AT
+        assert passed_emitted_at.tzinfo is not None
+
         # Outbound: handler's CDK Cursor -> wire Cursor on the ack.
         ack = responses[-1].ack
         assert ack.status == AckStatus.ACK_STATUS_SUCCESS
@@ -723,6 +742,37 @@ class TestWireToCdkTranslation:
         assert ack.failure_category == FailureCategory.FAILURE_CATEGORY_NOT_READY
         handler.write_batch.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_out_of_range_emitted_at_fails_one_batch_not_the_stream(self):
+        # An out-of-range emitted_at_unix_ms (reachable only from a corrupt or
+        # non-conforming sender) must fail THIS batch to the DLQ and never
+        # reach the handler or tear the stream down -- the same per-batch
+        # failure the schema-not-configured guard yields (issue #353).
+        handler = MagicMock()
+        handler.configure_schema = AsyncMock(return_value=True)
+        handler.write_batch = AsyncMock()
+        _stub_retry_semantics(handler)
+        servicer = DestinationServicer(handler, server=MagicMock())
+
+        responses = []
+        async for resp in servicer.StreamRecords(
+            _iter_many(
+                _schema_request("s1"),
+                # 10**18 ms -> ~year 31,690,000: datetime.fromtimestamp raises.
+                _batch_request(stream_id="s1", emitted_at_unix_ms=10**18),
+            ),
+            context=MagicMock(),
+        ):
+            responses.append(resp)
+
+        ack = responses[-1].ack
+        assert ack.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert "emitted_at_unix_ms" in ack.failure_summary
+        # Decode failed before the write, and the stream produced exactly the
+        # schema ack + this one batch ack (no crash).
+        handler.write_batch.assert_not_called()
+        assert len(responses) == 2
+
 
 class TestServerPingProtection:
     """The gRPC server must advertise ping-flood protection options.
@@ -735,7 +785,7 @@ class TestServerPingProtection:
     async def test_server_options_include_ping_protection(self):
         """grpc.http2.min_ping_interval_without_data_ms and
         grpc.http2.max_ping_strikes must be present in the server options."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         from src.destination.server import DestinationGRPCServer
 

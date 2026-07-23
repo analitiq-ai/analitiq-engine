@@ -10,6 +10,7 @@ import io
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 import pyarrow as pa
@@ -492,11 +493,18 @@ class DestinationGRPCClient:
         record_batch: pa.RecordBatch,
         record_ids: list[str],
         cursor: Cursor,
+        emitted_at: datetime,
     ) -> BatchResult:
         """Send a batch and wait for ACK.
 
         Strict in-order: send -> await ACK -> return. The wire format is
         Arrow IPC; the engine ships ``pa.RecordBatch`` straight through.
+
+        ``emitted_at`` is the engine's replay-stable per-batch instant; it
+        rides the wire as epoch milliseconds so a time-partitioned
+        destination resolves the same output path on every retry of this
+        batch (issue #353). The caller stamps it once and passes the same
+        value on each retry.
         """
         if not self._stream_active:
             # A prior batch's transport teardown left the stream inactive but
@@ -533,6 +541,10 @@ class DestinationGRPCClient:
             record_count=record_batch.num_rows,
             record_ids=record_ids,
             cursor=cursor,
+            # Wire convention: emitted_at travels as UTC epoch milliseconds
+            # (int truncates sub-ms). The destination decodes it back to a
+            # tz-aware datetime at the servicer boundary.
+            emitted_at_unix_ms=int(emitted_at.timestamp() * 1000),
         )
 
         # Send batch. An active stream always has its request queue installed

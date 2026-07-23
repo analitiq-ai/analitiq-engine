@@ -32,6 +32,7 @@ import threading
 from collections.abc import AsyncIterator, Mapping
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, nullcontext
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import Any, Literal
 
 import pyarrow as pa
@@ -1249,12 +1250,15 @@ class GenericSQLConnector(BaseDestinationHandler):
         record_batch: pa.RecordBatch,
         record_ids: list[str],
         cursor: Cursor,
+        emitted_at: datetime,
     ) -> BatchWriteResult:
         """Write an Arrow record batch to the database.
 
         The batch is realigned to the destination schema in Arrow space
         (``cast_arrow_batch``) and only materialized to dicts at the very
-        last SQLAlchemy boundary.
+        last SQLAlchemy boundary. ``emitted_at`` is part of the write_batch
+        contract for time-partitioned sinks; a relational target has no
+        output path, so it is unused here.
         """
         rejection = self._reject_if_not_ready(run_id, stream_id, batch_seq)
         if rejection is not None:

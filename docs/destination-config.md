@@ -218,6 +218,12 @@ and an optional `path_template` for partitioning. Format-specific
 options (`compression`, `delimiter`, etc.) are passed through the
 formatter config.
 
+A `path_template` with time placeholders (`{year}/{month}/{day}/{hour}`)
+resolves them from the batch's engine-stamped emit instant, not the
+write-time wall clock, so a replayed batch lands in the same partition
+directory and overwrites in place (issue #353). See the `emitted_at_unix_ms`
+field in [grpc-streaming-architecture.md](grpc-streaming-architecture.md).
+
 ### Stdout destination
 
 `stdout` is intentionally minimal — it serializes batches via the

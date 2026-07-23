@@ -7,6 +7,7 @@ that contract without the full gRPC/materialization stack.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -17,6 +18,11 @@ from cdk.sql.exceptions import SchemaConfigurationError
 from cdk.sql.generic import GenericSQLConnector, _StreamState
 from cdk.type_map import TypeMapper
 from cdk.type_map.rules import parse_rules
+
+# A fixed, timezone-aware emit instant for write_batch/send_batch calls; the
+# engine stamps this per batch (issue #353). Value is arbitrary for sinks
+# that ignore it.
+_EMITTED_AT = datetime(2026, 7, 21, 9, 0, 0, tzinfo=timezone.utc)
 
 
 def _mapper(label: str) -> TypeMapper:
@@ -189,7 +195,7 @@ class TestWriteBatchFatalOnTypeMapError:
     @pytest.mark.asyncio
     async def test_missing_schema_contract_classified_as_fatal(self):
         from contextlib import asynccontextmanager
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import MagicMock
 
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 
@@ -219,6 +225,7 @@ class TestWriteBatchFatalOnTypeMapError:
             record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
             record_ids=["1"],
             cursor=Cursor(token=b""),
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.success is False
@@ -276,6 +283,7 @@ class TestWriteBatchFatalOnTypeMapError:
             record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
             record_ids=["1"],
             cursor=Cursor(token=b""),
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.success is False
@@ -307,6 +315,7 @@ class TestWriteBatchFatalOnTypeMapError:
             record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
             record_ids=["1"],
             cursor=Cursor(token=b""),
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.success is False
@@ -355,6 +364,7 @@ class TestWriteBatchFatalOnTypeMapError:
             record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
             record_ids=["1"],
             cursor=Cursor(token=b""),
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.success is False

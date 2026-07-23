@@ -1,5 +1,6 @@
 """Tests that file and stream handlers do not retain secrets after connect()."""
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -7,6 +8,11 @@ import pytest
 from cdk.connection_runtime import ConnectionRuntime
 from src.destination.connectors.file import FileDestinationHandler
 from src.destination.connectors.stream import StreamDestinationHandler
+
+# A fixed, timezone-aware emit instant for write_batch/send_batch calls; the
+# engine stamps this per batch (issue #353). Value is arbitrary for sinks
+# that ignore it.
+_EMITTED_AT = datetime(2026, 7, 21, 9, 0, 0, tzinfo=timezone.utc)
 
 
 def _make_file_runtime(*, raw_config=None):
@@ -160,6 +166,7 @@ class TestFileHandlerSecretRetention:
                 record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
                 record_ids=["r1"],
                 cursor=Cursor(token=b"cursor-0"),
+                emitted_at=_EMITTED_AT,
             )
 
         assert result.success

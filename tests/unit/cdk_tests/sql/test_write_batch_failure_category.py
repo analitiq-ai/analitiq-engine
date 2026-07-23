@@ -11,6 +11,7 @@ declares WRITE_REJECTED, and the summary text stays what it was.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pyarrow as pa
@@ -49,6 +50,7 @@ async def _write(handler: GenericSQLConnector):
         record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
         record_ids=["1"],
         cursor=Cursor(token=b""),
+        emitted_at=datetime(2026, 7, 21, 9, 0, 0, tzinfo=timezone.utc),
     )
 
 

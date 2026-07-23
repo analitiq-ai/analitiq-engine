@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from .types import BatchWriteResult, CheckpointStore, Cursor, SchemaSpec
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     import pyarrow as pa
 
     from .connection_runtime import ConnectionRuntime
@@ -121,6 +123,7 @@ class Writable(Protocol):
         record_batch: pa.RecordBatch,
         record_ids: list[str],
         cursor: Cursor,
+        emitted_at: datetime,
     ) -> BatchWriteResult:
         ...
 

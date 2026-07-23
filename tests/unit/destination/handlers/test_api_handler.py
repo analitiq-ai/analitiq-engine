@@ -6,6 +6,7 @@ document's ``operations.write.<mode>`` block selects the path / method
 / batching for the stream's write_mode).
 """
 
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -21,6 +22,11 @@ from src.destination.connectors.api import (
     _StreamState,
 )
 from src.grpc.generated.analitiq.v1 import AckStatus, SchemaMessage, WriteMode
+
+# A fixed, timezone-aware emit instant for write_batch/send_batch calls; the
+# engine stamps this per batch (issue #353). Value is arbitrary for sinks
+# that ignore it.
+_EMITTED_AT = datetime(2026, 7, 21, 9, 0, 0, tzinfo=timezone.utc)
 
 
 def _to_record_batch(records: list[dict[str, Any]]) -> pa.RecordBatch:
@@ -173,6 +179,7 @@ class TestApiHandlerWriteBatchFailures:
             record_batch=_to_record_batch(sample_records),
             record_ids=sample_record_ids,
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         # Assert: should return FATAL_FAILURE, not SUCCESS
@@ -213,6 +220,7 @@ class TestApiHandlerWriteBatchFailures:
             record_batch=_to_record_batch(sample_records),
             record_ids=sample_record_ids,
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         # Assert: partial failure should be FATAL_FAILURE
@@ -248,6 +256,7 @@ class TestApiHandlerWriteBatchFailures:
             record_batch=_to_record_batch(sample_records),
             record_ids=sample_record_ids,
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         # Assert: should return SUCCESS
@@ -275,6 +284,7 @@ class TestApiHandlerWriteBatchFailures:
             record_batch=pa.RecordBatch.from_pylist([]),
             record_ids=[],
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         # Assert: empty batch is success
@@ -303,6 +313,7 @@ class TestApiHandlerWriteBatchFailures:
             record_batch=_to_record_batch(sample_records),
             record_ids=sample_record_ids,
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         # Assert: connection issue is retryable
@@ -319,7 +330,6 @@ class TestApiHandlerWriteBatchFailures:
         sample_record_ids: list[str],
     ):
         """Transport-level errors are transient — classify as RETRYABLE."""
-        import aiohttp
 
         api_handler._connected = True
         api_handler._session = MagicMock()
@@ -335,6 +345,7 @@ class TestApiHandlerWriteBatchFailures:
             record_batch=_to_record_batch(sample_records),
             record_ids=sample_record_ids,
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.success is False
@@ -366,6 +377,7 @@ class TestApiHandlerWriteBatchFailures:
             record_batch=_to_record_batch(sample_records),
             record_ids=sample_record_ids,
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.success is False
@@ -385,7 +397,6 @@ class TestApiHandlerWriteSingleMode:
         """RETRYABLE transport errors (connection errors, timeouts) re-raise
         so write_batch can return RETRYABLE for the whole batch. The loop
         does not continue to subsequent records after a transient failure."""
-        import aiohttp
 
         api_handler._connected = True
         api_handler._session = MagicMock()
@@ -513,7 +524,6 @@ class TestApiHandlerWriteSingleMode:
         api_handler: ApiDestinationHandler,
     ):
         """All-FATAL-4xx failures: every record attributed, 0 written."""
-        import aiohttp
 
         api_handler._connected = True
         api_handler._session = MagicMock()
@@ -563,6 +573,7 @@ class TestApiHandlerWriteSingleMode:
             record_batch=_to_record_batch(sample_records),
             record_ids=sample_record_ids,
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.success is False
@@ -595,6 +606,7 @@ class TestApiHandlerWriteSingleMode:
             record_batch=_to_record_batch(sample_records),
             record_ids=sample_record_ids,
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.success is False
@@ -661,7 +673,6 @@ class TestApiHandlerChunkedWrites:
         mock_cursor: MagicMock,
     ):
         """Chunked-mode transport-level failure → RETRYABLE."""
-        import aiohttp
 
         api_handler._connected = True
         api_handler._session = MagicMock()
@@ -681,6 +692,7 @@ class TestApiHandlerChunkedWrites:
             record_batch=_to_record_batch(records),
             record_ids=record_ids,
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.success is False
@@ -714,6 +726,7 @@ class TestApiHandlerChunkedWrites:
             record_batch=_to_record_batch(records),
             record_ids=record_ids,
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         # Assert: partial success is still a failure, and the unsent ids carry
@@ -732,7 +745,6 @@ class TestApiHandlerChunkedWrites:
         every record from the failed chunk onward as failed. This is the
         load-bearing dup-on-retry fix.
         """
-        import aiohttp
 
         state = api_handler._streams["test-stream"]
         state.max_records = 2
@@ -769,7 +781,6 @@ class TestApiHandlerChunkedWrites:
         must be FATAL (not RETRYABLE), carry the true written count and the
         unsent ids, and drop the cursor so the checkpoint cannot advance past
         records that were never written."""
-        import aiohttp
 
         api_handler._connected = True
         api_handler._session = MagicMock()
@@ -793,6 +804,7 @@ class TestApiHandlerChunkedWrites:
             record_batch=_to_record_batch([{"id": i} for i in range(5)]),
             record_ids=[f"r{i}" for i in range(5)],
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
@@ -897,6 +909,7 @@ class TestApiHandlerChunkedWrites:
             record_batch=_to_record_batch([{"id": i} for i in range(6)]),
             record_ids=[f"r{i}" for i in range(6)],
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
@@ -913,7 +926,6 @@ class TestApiHandlerChunkedWrites:
         """A transport failure on the FIRST chunk (nothing landed yet) must
         re-raise so it surfaces as RETRYABLE — there is no landed chunk to
         duplicate, so it must not be fatally DLQ'd."""
-        import aiohttp
 
         state = api_handler._streams["test-stream"]
         state.max_records = 2
@@ -935,7 +947,6 @@ class TestApiHandlerChunkedWrites:
     ):
         """End-to-end: a first-chunk transport failure is RETRYABLE (no dup
         risk) instead of FATAL."""
-        import aiohttp
 
         api_handler._connected = True
         api_handler._session = MagicMock()
@@ -953,6 +964,7 @@ class TestApiHandlerChunkedWrites:
             record_batch=_to_record_batch([{"id": i} for i in range(5)]),
             record_ids=[f"r{i}" for i in range(5)],
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -1190,6 +1202,7 @@ class TestApiHandlerContractBatching:
             record_batch=_to_record_batch(records),
             record_ids=[f"r{i}" for i in range(5)],
             cursor=MagicMock(),
+            emitted_at=_EMITTED_AT,
         )
         assert result.status == AckStatus.ACK_STATUS_SUCCESS
         assert result.records_written == 5
@@ -1392,6 +1405,7 @@ class TestApiHandlerJsonFields:
             record_batch=batch,
             record_ids=["r1"],
             cursor=MagicMock(),
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.status == AckStatus.ACK_STATUS_SUCCESS
@@ -1438,7 +1452,6 @@ class TestApiHandlerJsonFields:
         wire. Asserting on the dict shape locks in that we don't waste
         cycles pre-converting in Arrow space.
         """
-        from datetime import datetime, timezone
         from decimal import Decimal
 
         import orjson
@@ -1489,6 +1502,7 @@ class TestApiHandlerJsonFields:
             record_batch=batch,
             record_ids=["r1"],
             cursor=MagicMock(),
+            emitted_at=_EMITTED_AT,
         )
         assert result.status == AckStatus.ACK_STATUS_SUCCESS
 
@@ -1531,6 +1545,7 @@ class TestApiHandlerJsonFields:
             record_batch=batch,
             record_ids=["r1"],
             cursor=MagicMock(),
+            emitted_at=_EMITTED_AT,
         )
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert "metadata" in (result.failure_summary or "")
@@ -1574,7 +1589,6 @@ class TestOrjsonDefault:
     def test_orjson_uses_default_for_decimal_in_nested_dict(self):
         """The hook fires per-value inside nested structures — proves
         no Arrow-level recursion needed to handle nested Decimals."""
-        from datetime import datetime, timezone
         from decimal import Decimal
 
         import orjson
@@ -1653,8 +1667,6 @@ class TestClassifyHttpError:
         )
 
     def test_connection_error_is_retryable(self):
-        import aiohttp
-
         assert (
             _classify_http_error(aiohttp.ClientConnectionError("refused"))
             == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -1669,8 +1681,6 @@ class TestClassifyHttpError:
         )
 
     def test_payload_error_is_retryable(self):
-        import aiohttp
-
         assert (
             _classify_http_error(aiohttp.ClientPayloadError("truncated"))
             == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -1689,8 +1699,6 @@ class TestClassifyHttpError:
         )
 
     def test_non_response_client_error_is_retryable(self):
-        import aiohttp
-
         assert (
             _classify_http_error(aiohttp.ClientError())
             == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -1721,7 +1729,6 @@ class TestApiHandlerDeterministic4xxClassification:
     ):
         """write_batch's outer exception handler classifies a 4xx
         ClientResponseError as FATAL, not RETRYABLE."""
-        import aiohttp
 
         api_handler._connected = True
         api_handler._session = MagicMock()
@@ -1738,6 +1745,7 @@ class TestApiHandlerDeterministic4xxClassification:
             record_batch=_to_record_batch([{"id": 1}]),
             record_ids=["r1"],
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
@@ -1749,7 +1757,6 @@ class TestApiHandlerDeterministic4xxClassification:
         self, api_handler: ApiDestinationHandler, mock_cursor: MagicMock
     ):
         """write_batch's outer exception handler classifies 429 as RETRYABLE."""
-        import aiohttp
 
         api_handler._connected = True
         api_handler._session = MagicMock()
@@ -1766,6 +1773,7 @@ class TestApiHandlerDeterministic4xxClassification:
             record_batch=_to_record_batch([{"id": 1}]),
             record_ids=["r1"],
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -1775,7 +1783,6 @@ class TestApiHandlerDeterministic4xxClassification:
         self, api_handler: ApiDestinationHandler, mock_cursor: MagicMock
     ):
         """write_batch's outer exception handler classifies 5xx as RETRYABLE."""
-        import aiohttp
 
         api_handler._connected = True
         api_handler._session = MagicMock()
@@ -1792,6 +1799,7 @@ class TestApiHandlerDeterministic4xxClassification:
             record_batch=_to_record_batch([{"id": 1}]),
             record_ids=["r1"],
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -1804,7 +1812,6 @@ class TestApiHandlerDeterministic4xxClassification:
         _write_single_mode (not re-raised). The record goes into failed_ids
         and write_batch returns FATAL via _build_write_result, not via the
         outer exception handler."""
-        import aiohttp
 
         api_handler._connected = True
         api_handler._session = MagicMock()
@@ -1821,6 +1828,7 @@ class TestApiHandlerDeterministic4xxClassification:
             record_batch=_to_record_batch([{"id": 1}]),
             record_ids=["r1"],
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
@@ -1835,7 +1843,6 @@ class TestApiHandlerDeterministic4xxClassification:
         """A 4xx on the first chunk (nothing landed) must NOT re-raise:
         the rejection is deterministic, so re-raising as RETRYABLE would
         burn engine retries on a payload the API will always refuse."""
-        import aiohttp
 
         state = api_handler._streams["test-stream"]
         state.max_records = 2
@@ -1861,7 +1868,6 @@ class TestApiHandlerDeterministic4xxClassification:
     ):
         """End-to-end: a 4xx on the first (and only attempted) chunk must
         yield FATAL with every record id attributed and no cursor advance."""
-        import aiohttp
 
         api_handler._connected = True
         api_handler._session = MagicMock()
@@ -1881,6 +1887,7 @@ class TestApiHandlerDeterministic4xxClassification:
             record_batch=_to_record_batch([{"id": i} for i in range(4)]),
             record_ids=[f"r{i}" for i in range(4)],
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
@@ -1894,7 +1901,6 @@ class TestApiHandlerDeterministic4xxClassification:
     ):
         """429 on the first chunk is RETRYABLE and must still re-raise so
         write_batch can classify it RETRYABLE — nothing landed, safe to retry."""
-        import aiohttp
 
         state = api_handler._streams["test-stream"]
         state.max_records = 2
@@ -1919,7 +1925,6 @@ class TestApiHandlerDeterministic4xxClassification:
         attribute the failed chunk plus unsent tail and return FATAL.
         The 4xx must not re-raise (nothing-landed invariant only applies at
         written == 0; mid-batch duplication risk doesn't change the rule)."""
-        import aiohttp
 
         api_handler._connected = True
         api_handler._session = MagicMock()
@@ -1945,6 +1950,7 @@ class TestApiHandlerDeterministic4xxClassification:
             record_batch=_to_record_batch([{"id": i} for i in range(5)]),
             record_ids=[f"r{i}" for i in range(5)],
             cursor=mock_cursor,
+            emitted_at=_EMITTED_AT,
         )
 
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
@@ -2290,6 +2296,7 @@ class TestApiHandlerBodySpec:
             record_batch=_to_record_batch([{"id": 1}]),
             record_ids=["r1"],
             cursor=MagicMock(),
+            emitted_at=_EMITTED_AT,
         )
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert "1/1 records failed" in result.failure_summary
@@ -2326,6 +2333,7 @@ class TestApiHandlerBodySpec:
             ),
             record_ids=["r1", "r2", "r3"],
             cursor=MagicMock(),
+            emitted_at=_EMITTED_AT,
         )
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert result.records_written == 2
@@ -2619,6 +2627,7 @@ class TestApiHandlerIdempotencyInjection:
             record_batch=_to_record_batch([{"id": 1, "idempotency_key": "mine"}]),
             record_ids=["r1"],
             cursor=MagicMock(),
+            emitted_at=_EMITTED_AT,
         )
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert "1/1 records failed" in result.failure_summary

@@ -13,6 +13,7 @@ engine-side full-refresh checkpoint view that keeps a truncate_insert
 stream from resuming mid-cursor.
 """
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pyarrow as pa
@@ -24,6 +25,11 @@ from cdk.sql.dialects import TableAddress
 from cdk.sql.generic import GenericSQLConnector
 from cdk.sql.generic import _StreamState as SqlStreamState
 from src.engine.stream_processor import StreamProcessor, _FullRefreshCheckpoint
+
+# A fixed, timezone-aware emit instant for write_batch/send_batch calls; the
+# engine stamps this per batch (issue #353). Value is arbitrary for sinks
+# that ignore it.
+_EMITTED_AT = datetime(2026, 7, 21, 9, 0, 0, tzinfo=timezone.utc)
 
 
 def _make_processor(
@@ -120,6 +126,7 @@ async def _write(
         record_batch=_batch(rows),
         record_ids=[f"r{r['id']}" for r in rows],
         cursor=MagicMock(),
+        emitted_at=_EMITTED_AT,
     )
 
 
@@ -765,6 +772,7 @@ class TestZeroBatchTruncate:
             record_batch=pa.record_batch([], schema=pa.schema([])),
             record_ids=[],
             cursor=MagicMock(),
+            emitted_at=_EMITTED_AT,
         )
         assert r.success
         # The stream's own address reaches the truncate — not a rebuilt one.

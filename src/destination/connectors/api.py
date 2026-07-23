@@ -11,6 +11,7 @@ import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -660,11 +661,14 @@ class ApiDestinationHandler(BaseDestinationHandler):
         record_batch: pa.RecordBatch,
         record_ids: list[str],
         cursor: Cursor,
+        emitted_at: datetime,
     ) -> BatchWriteResult:
         """Write an Arrow record batch to the API.
 
         HTTP request bodies are dict-shaped, so the batch is materialized
-        once at this boundary.
+        once at this boundary. ``emitted_at`` is part of the write_batch
+        contract for time-partitioned sinks and has no meaning for an API
+        destination, so it is unused here.
         """
         if not self._session or not self._connected:
             return reject_batch(

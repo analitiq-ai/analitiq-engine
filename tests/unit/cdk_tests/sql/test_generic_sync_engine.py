@@ -11,6 +11,7 @@ database, not mocks of the engine surface.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -85,6 +86,7 @@ async def _write(
         record_batch=_batch(rows if rows is not None else [{"id": 1, "name": "a"}]),
         record_ids=[],
         cursor=Cursor(token=token),
+        emitted_at=datetime(2026, 7, 21, 9, 0, 0, tzinfo=timezone.utc),
     )
 
 

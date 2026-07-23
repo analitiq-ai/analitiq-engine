@@ -11,6 +11,7 @@ content → different path (restart cannot overwrite).
 """
 
 import hashlib
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pyarrow as pa
@@ -26,6 +27,12 @@ from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 # ---------------------------------------------------------------------------
 
 
+# A fixed, timezone-aware emit instant the engine stamps per batch (issue
+# #353). Several tests here assert the partition directory derives from it, so
+# its exact value is load-bearing, not arbitrary.
+_EMITTED_AT = datetime(2026, 7, 21, 9, 0, 0, tzinfo=timezone.utc)
+
+
 class TestBuildPathContentHash:
     """build_path embeds the content hash to avoid same-seq overwrites."""
 
@@ -38,6 +45,7 @@ class TestBuildPathContentHash:
             stream_id="orders",
             batch_seq=3,
             extension=".jsonl",
+            timestamp=_EMITTED_AT,
         )
         assert path == "/out/orders/3.jsonl"
 
@@ -47,21 +55,26 @@ class TestBuildPathContentHash:
             stream_id="orders",
             batch_seq=3,
             extension=".jsonl",
+            timestamp=_EMITTED_AT,
             content_hash="abcd1234ef567890",
         )
         assert path == "/out/orders/3_abcd1234ef567890.jsonl"
 
     def test_different_hashes_produce_different_paths(self):
         s = self._storage()
-        p1 = s.build_path("/out", "s", 0, ".jsonl", content_hash="aaaa0000aaaa0000")
-        p2 = s.build_path("/out", "s", 0, ".jsonl", content_hash="bbbb1111bbbb1111")
+        p1 = s.build_path(
+            "/out", "s", 0, ".jsonl", _EMITTED_AT, content_hash="aaaa0000aaaa0000"
+        )
+        p2 = s.build_path(
+            "/out", "s", 0, ".jsonl", _EMITTED_AT, content_hash="bbbb1111bbbb1111"
+        )
         assert p1 != p2
 
     def test_same_hash_produces_same_path(self):
         s = self._storage()
         h = "deadbeef12345678"
-        p1 = s.build_path("/out", "s", 5, ".jsonl", content_hash=h)
-        p2 = s.build_path("/out", "s", 5, ".jsonl", content_hash=h)
+        p1 = s.build_path("/out", "s", 5, ".jsonl", _EMITTED_AT, content_hash=h)
+        p2 = s.build_path("/out", "s", 5, ".jsonl", _EMITTED_AT, content_hash=h)
         assert p1 == p2
 
     def test_partition_template_includes_hash(self):
@@ -70,12 +83,44 @@ class TestBuildPathContentHash:
             stream_id="orders",
             batch_seq=1,
             extension=".jsonl",
+            timestamp=_EMITTED_AT,
             content_hash="cafe0000cafe0000",
             partition_template="year={year}/month={month}",
         )
         # Path must contain the hash as part of the final filename stem
         assert "orders_1_cafe0000cafe0000.jsonl" in path
         assert path.startswith("/out/year=")
+
+    def test_partition_placeholders_resolve_from_timestamp_not_wall_clock(self):
+        """The #353 guarantee at the storage layer: the partition dir is a
+        pure function of the passed timestamp, with no hidden wall-clock read,
+        so the same batch instant always resolves the same path and a later
+        instant advances to the next partition. (What makes that instant
+        replay-stable across retries is the engine layer -- see the
+        stream_processor / engine-failure tests.)
+        """
+        s = self._storage()
+        tmpl = "year={year}/month={month}/day={day}/hour={hour}"
+        ts = datetime(2026, 7, 21, 9, 30, 0, tzinfo=timezone.utc)
+        common = dict(
+            base_path="/out",
+            stream_id="orders",
+            batch_seq=3,
+            extension=".jsonl",
+            content_hash="ab12cd34ef56ab78",
+            partition_template=tmpl,
+        )
+        # Same batch timestamp -> same partition path, regardless of "now".
+        p1 = s.build_path(timestamp=ts, **common)
+        p2 = s.build_path(timestamp=ts, **common)
+        assert (
+            p1
+            == p2
+            == "/out/year=2026/month=07/day=21/hour=09/orders_3_ab12cd34ef56ab78.jsonl"
+        )
+        # A later batch timestamp (next hour) lands in the next partition.
+        p_next = s.build_path(timestamp=ts.replace(hour=10), **common)
+        assert "/hour=10/" in p_next and p_next != p1
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +163,7 @@ async def test_write_batch_passes_content_hash_to_build_path():
         record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
         record_ids=["r1"],
         cursor=Cursor(token=b"c"),
+        emitted_at=_EMITTED_AT,
     )
 
     call_kwargs = handler._storage.build_path.call_args[1]
@@ -149,6 +195,7 @@ async def test_same_run_id_restart_different_content_gets_different_path():
             record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
             record_ids=["r1"],
             cursor=Cursor(token=b"c"),
+            emitted_at=_EMITTED_AT,
         )
 
     captured_hash_a = handler_a._storage.build_path.call_args[1]["content_hash"]
@@ -177,6 +224,7 @@ async def test_in_run_replay_same_content_overwrites_same_path():
             record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
             record_ids=["r1"],
             cursor=Cursor(token=b"c"),
+            emitted_at=_EMITTED_AT,
         )
         assert result.status == AckStatus.ACK_STATUS_SUCCESS
 
@@ -207,6 +255,7 @@ async def test_restart_batch_at_committed_seq_is_written_not_skipped():
             record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
             record_ids=["r1"],
             cursor=Cursor(token=b"c"),
+            emitted_at=_EMITTED_AT,
         )
         assert result.status == AckStatus.ACK_STATUS_SUCCESS
         assert result.records_written == 1
@@ -225,6 +274,7 @@ async def test_write_batch_result_is_success():
         record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
         record_ids=["r1"],
         cursor=Cursor(token=b"c"),
+        emitted_at=_EMITTED_AT,
     )
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
     assert result.committed_cursor.token == b"c"
@@ -245,6 +295,7 @@ async def test_empty_batch_skips_serialize_and_build_path():
         record_batch=pa.RecordBatch.from_pylist([]),
         record_ids=[],
         cursor=Cursor(token=b"c"),
+        emitted_at=_EMITTED_AT,
     )
     assert result.status == AckStatus.ACK_STATUS_SUCCESS
     assert result.records_written == 0
@@ -272,8 +323,163 @@ async def test_serialize_exception_is_fatal_and_build_path_not_called():
         record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
         record_ids=["r1"],
         cursor=Cursor(token=b"c"),
+        emitted_at=_EMITTED_AT,
     )
 
     assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
     assert "RuntimeError" in result.failure_summary
     handler._storage.build_path.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# write_batch: emitted_at feeds the partition path (issue #353)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_partitioned_write_passes_emitted_at_to_build_path():
+    """With a path_template, write_batch forwards emitted_at as build_path's
+    timestamp, so the partition dir is a function of the replay-stable batch
+    instant rather than the write-time clock (issue #353).
+    """
+    handler = _make_handler(serialize_return=b'{"id":1}\n')
+    handler._path_template = "year={year}/month={month}/day={day}/hour={hour}"
+
+    await handler.write_batch(
+        run_id="r",
+        stream_id="s",
+        batch_seq=0,
+        record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+        record_ids=["r1"],
+        cursor=Cursor(token=b"c"),
+        emitted_at=_EMITTED_AT,
+    )
+
+    call_kwargs = handler._storage.build_path.call_args[1]
+    assert call_kwargs["timestamp"] is _EMITTED_AT
+    assert call_kwargs["partition_template"] == handler._path_template
+
+
+@pytest.mark.asyncio
+async def test_partitioned_write_with_unstamped_emitted_at_is_fatal():
+    """A partitioned file destination must fail loud on an unstamped
+    emitted_at (epoch 0) rather than bucket every replay under year=1970
+    (issue #353). build_path is never reached.
+    """
+    handler = _make_handler(serialize_return=b'{"id":1}\n')
+    handler._path_template = "year={year}/month={month}"
+    unstamped = datetime.fromtimestamp(0, tz=timezone.utc)  # wire default
+
+    result = await handler.write_batch(
+        run_id="r",
+        stream_id="s",
+        batch_seq=0,
+        record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+        record_ids=["r1"],
+        cursor=Cursor(token=b"c"),
+        emitted_at=unstamped,
+    )
+
+    assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+    assert "emitted_at" in result.failure_summary
+    handler._storage.build_path.assert_not_called()
+    handler._storage.write_file.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_partitioned_write_with_naive_emitted_at_is_fatal():
+    """A naive (tz-less) emitted_at is a defect for a time-partitioned sink:
+    the guard rejects it before build_path, so a local-time datetime can never
+    silently bucket into the wrong UTC partition (issue #353).
+    """
+    handler = _make_handler(serialize_return=b'{"id":1}\n')
+    handler._path_template = "year={year}/month={month}"
+    naive = _EMITTED_AT.replace(tzinfo=None)  # strip tz -> naive (local) datetime
+
+    result = await handler.write_batch(
+        run_id="r",
+        stream_id="s",
+        batch_seq=0,
+        record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+        record_ids=["r1"],
+        cursor=Cursor(token=b"c"),
+        emitted_at=naive,
+    )
+
+    assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+    assert "emitted_at" in result.failure_summary
+    handler._storage.build_path.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_format_spec_time_placeholder_still_requires_stamp():
+    """A time field with a format spec ({year:04d}) is substituted by
+    build_path exactly like a bare {year}, so the guard must require a stamp
+    for it too. A substring match on "{year}" would miss it and silently
+    bucket an unstamped batch under 1970 (issue #353).
+    """
+    handler = _make_handler(serialize_return=b'{"id":1}\n')
+    handler._path_template = "y={year:04d}/m={month:02d}"
+    unstamped = datetime.fromtimestamp(0, tz=timezone.utc)
+
+    result = await handler.write_batch(
+        run_id="r",
+        stream_id="s",
+        batch_seq=0,
+        record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+        record_ids=["r1"],
+        cursor=Cursor(token=b"c"),
+        emitted_at=unstamped,
+    )
+
+    assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+    assert "emitted_at" in result.failure_summary
+    handler._storage.build_path.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_static_path_template_tolerates_unstamped_emitted_at():
+    """A path_template with no time placeholders never consumes emitted_at, so
+    the guard must not fire for it even when emitted_at is unstamped -- only a
+    time-based template requires the instant (issue #353).
+    """
+    handler = _make_handler(serialize_return=b'{"id":1}\n')
+    handler._path_template = "archive/fixed"  # no {year}/{month}/{day}/{hour}
+    unstamped = datetime.fromtimestamp(0, tz=timezone.utc)
+
+    result = await handler.write_batch(
+        run_id="r",
+        stream_id="s",
+        batch_seq=0,
+        record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+        record_ids=["r1"],
+        cursor=Cursor(token=b"c"),
+        emitted_at=unstamped,
+    )
+
+    assert result.status == AckStatus.ACK_STATUS_SUCCESS
+    handler._storage.build_path.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_unpartitioned_write_tolerates_unstamped_emitted_at():
+    """Without a path_template there is no partition to render, so an
+    unstamped emitted_at is harmless -- the guard only fires when the layout
+    actually needs the instant.
+    """
+    handler = _make_handler(serialize_return=b'{"id":1}\n')
+    handler._path_template = None
+    unstamped = datetime.fromtimestamp(0, tz=timezone.utc)
+
+    result = await handler.write_batch(
+        run_id="r",
+        stream_id="s",
+        batch_seq=0,
+        record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+        record_ids=["r1"],
+        cursor=Cursor(token=b"c"),
+        emitted_at=unstamped,
+    )
+
+    assert result.status == AckStatus.ACK_STATUS_SUCCESS
+    handler._storage.build_path.assert_called_once()

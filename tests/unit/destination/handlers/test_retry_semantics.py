@@ -7,6 +7,7 @@ stdout has nothing to dedup with. The base default is the only honest
 claim for a handler that declares nothing: at-least-once.
 """
 
+from datetime import datetime
 from typing import Any
 
 import pytest
@@ -40,6 +41,7 @@ class _DeclareNothingHandler(BaseDestinationHandler):
         record_batch: Any,
         record_ids: list[str],
         cursor: Cursor,
+        emitted_at: datetime,
     ) -> BatchWriteResult:  # pragma: no cover
         raise NotImplementedError
 

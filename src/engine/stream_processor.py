@@ -625,11 +625,19 @@ class StreamProcessor:
                         tie_breaker_fields=tie_breaker_fields,
                     )
 
+                # Stamp the batch's emit instant ONCE, before the send/retry
+                # loop, so every retry of this batch carries the same value.
+                # A time-partitioned destination derives its output path from
+                # this instant, so a re-stamp per attempt would drift a
+                # replayed batch across an hour/day boundary (issue #353).
+                emitted_at = datetime.now(timezone.utc)
+
                 outcome = await self._send_batch_acked(
                     batch_seq=batch_seq,
                     record_batch=batch,
                     record_ids=record_ids,
                     cursor=cursor,
+                    emitted_at=emitted_at,
                     label=f"Batch {batch_seq}",
                 )
                 await self._handle_send_outcome(
@@ -684,6 +692,7 @@ class StreamProcessor:
         record_batch: pa.RecordBatch,
         record_ids: list[str],
         cursor: Cursor | None,
+        emitted_at: datetime,
         label: str,
     ) -> _BatchSendOutcome:
         """Send one batch and drive the ack protocol to a terminal answer.
@@ -692,6 +701,11 @@ class StreamProcessor:
         the batch loop and the zero-batch synthetic truncate so the same
         situation always behaves the same way. Policy (error strategy, DLQ,
         classification) stays with the callers.
+
+        ``emitted_at`` is stamped once by the caller and passed unchanged on
+        every retry here, so a replayed batch carries the same instant a
+        time-partitioned destination derives its output path from (issue
+        #353). Re-stamping per attempt would reintroduce the boundary drift.
         """
         client = self.grpc_client
         assert client is not None  # created by run() before any send
@@ -704,6 +718,7 @@ class StreamProcessor:
                 record_batch=record_batch,
                 record_ids=record_ids,
                 cursor=cursor,
+                emitted_at=emitted_at,
             )
             if result.status == AckStatus.ACK_STATUS_SUCCESS:
                 return _BatchSendOutcome(_AckDisposition.COMMITTED, result)
@@ -914,6 +929,7 @@ class StreamProcessor:
             record_batch=empty_batch,
             record_ids=[],
             cursor=Cursor(token=b""),
+            emitted_at=datetime.now(timezone.utc),
             label="synthetic truncate batch",
         )
         if outcome.disposition is _AckDisposition.COMMITTED:
