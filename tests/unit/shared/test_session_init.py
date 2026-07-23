@@ -37,8 +37,9 @@ def _assert_no_lingering_aiosqlite_threads() -> None:
     A DBAPI error escaping a pool ``connect`` listener leaves the raw
     driver connection open unless the listener closes it — for aiosqlite
     that leaks the connection's worker thread and hangs interpreter
-    shutdown. The worker exits shortly after close (its queue poll times
-    out), so poll briefly before declaring a leak.
+    shutdown. The worker exits shortly after close (the close posts a
+    stop sentinel the worker processes asynchronously), so poll briefly
+    before declaring a leak.
     """
 
     def _workers() -> list[threading.Thread]:
@@ -90,8 +91,15 @@ class TestHookContract:
 
     @pytest.mark.parametrize(
         "bad",
-        ["SET x = 1", ("SET x = 1",), ["SET x = 1", ""], [b"SET x = 1"], [None]],
-        ids=["str", "tuple", "empty-item", "bytes-item", "none-item"],
+        [
+            "SET x = 1",
+            ("SET x = 1",),
+            ["SET x = 1", ""],
+            ["SET x = 1", "  \n\t"],
+            [b"SET x = 1"],
+            [None],
+        ],
+        ids=["str", "tuple", "empty-item", "blank-item", "bytes-item", "none-item"],
     )
     def test_malformed_return_fails_loud(self, bad):
         class _BadDialect(SqlDialect):
@@ -205,11 +213,24 @@ class TestSqlAlchemySessionInit:
         transport.engine.dispose()
 
     @pytest.mark.asyncio
-    async def test_statements_run_after_tls_verification(self):
+    @pytest.mark.parametrize(
+        "driver,dsn",
+        [
+            ("sqlite+pysqlite", "sqlite://"),
+            ("sqlite+aiosqlite", "sqlite+aiosqlite://"),
+        ],
+        ids=["sync", "async"],
+    )
+    async def test_statements_run_after_tls_verification(self, driver, dsn):
         # ``PRAGMA user_version`` defaults to 0 per (in-memory) database;
         # session init sets it to 7. The TLS hook fires on the same connect
         # event and must observe the pre-init value: TLS verification runs
-        # against the raw session, before any dialect statements.
+        # against the raw session, before any dialect statements. Both
+        # engine flavours register the two listeners at separate sites, so
+        # the ordering is pinned on each.
+        if "aiosqlite" in driver:
+            pytest.importorskip("aiosqlite")
+
         class _OrderProbeDialect(SqlDialect):
             name = "order-probe"
 
@@ -233,16 +254,26 @@ class TestSqlAlchemySessionInit:
 
         dialect = _OrderProbeDialect()
         transport = await build_sqlalchemy_from_spec(
-            _sqlite_spec("sqlite+pysqlite", "sqlite://", mode="require"),
+            _sqlite_spec(driver, dsn, mode="require"),
             sql_dialect=dialect,
         )
         engine = transport.engine
         try:
             assert dialect.user_version_during_tls == [0]
-            with engine.connect() as conn:
-                assert conn.execute(_sa_text("PRAGMA user_version")).scalar_one() == 7
+            if transport.is_async:
+                async with engine.connect() as conn:
+                    result = await conn.execute(_sa_text("PRAGMA user_version"))
+                    assert result.scalar_one() == 7
+            else:
+                with engine.connect() as conn:
+                    assert (
+                        conn.execute(_sa_text("PRAGMA user_version")).scalar_one() == 7
+                    )
         finally:
-            engine.dispose()
+            if transport.is_async:
+                await engine.dispose()
+            else:
+                engine.dispose()
 
 
 class _FakeAdbcCursor:

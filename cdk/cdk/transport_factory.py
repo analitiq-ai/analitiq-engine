@@ -377,16 +377,21 @@ def _dialect_is_async(dsn: str) -> bool:
 def _run_closing_on_failure(dbapi_connection: Any, action: Callable[[], None]) -> None:
     """Run a connection-setup action; close the raw connection if it fails.
 
-    Nobody cleans up a fresh driver connection whose setup action fails
-    unless we do: SQLAlchemy's pool cleans up after a non-DBAPI exception
-    escaping a ``connect`` listener, but a DBAPI error is re-raised with
-    the just-created connection left open — the record is discarded and
-    the socket (and, for async drivers, the driver's worker thread)
-    leaks. An ADBC connection has no pool at all. Every setup action the
-    CDK runs on a new connection (the TLS probe, the session-init
-    statements) executes queries whose failures ARE DBAPI errors, so each
-    routes through here and closes before re-raising. A failing close is
-    logged and suppressed to keep the original error primary.
+    Nobody else closes a fresh driver connection whose setup action
+    fails. SQLAlchemy never closes a connection whose ``connect``
+    listener raised: a non-DBAPI exception happens to be reclaimed
+    because the discarded pool record leaves the connection garbage (the
+    driver's finalizer runs via refcounting), but a DBAPI error is
+    wrapped and re-raised with the raw connection still reachable — the
+    socket (and, for async drivers, the driver's worker thread) leaks.
+    An ADBC connection has no pool at all. Every setup action the CDK
+    runs on a new connection (the TLS probe, the session-init
+    statements) executes queries whose failures ARE DBAPI errors, so
+    each routes through here and closes before re-raising — on any
+    failure, not just DBAPI errors, since no other cleanup is
+    guaranteed. A failing close is logged and suppressed to keep the
+    original error primary; WARNING because it means the connection this
+    guard exists to reclaim may now genuinely be leaked.
     """
     try:
         action()
@@ -394,9 +399,10 @@ def _run_closing_on_failure(dbapi_connection: Any, action: Callable[[], None]) -
         try:
             dbapi_connection.close()
         except Exception:
-            logger.debug(
-                "closing the DBAPI connection after a failed connect-event "
-                "action itself failed",
+            logger.warning(
+                "closing the DBAPI connection after a failed "
+                "connection-setup action itself failed; the connection "
+                "may be leaked",
                 exc_info=True,
             )
         raise
@@ -450,12 +456,12 @@ def _session_init_statements(sql_dialect: Any) -> list[str]:
         return []
     statements = sql_dialect.session_init_sql()
     if not isinstance(statements, list) or not all(
-        isinstance(s, str) and s for s in statements
+        isinstance(s, str) and s.strip() for s in statements
     ):
         raise TypeError(
             f"session_init_sql on dialect "
             f"{getattr(sql_dialect, 'name', type(sql_dialect).__name__)!r} "
-            f"must return a list of non-empty SQL statement strings, got "
+            f"must return a list of non-blank SQL statement strings, got "
             f"{statements!r}"
         )
     if statements:
