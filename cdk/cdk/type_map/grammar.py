@@ -138,9 +138,12 @@ _FIXED_OFFSET_RE: Final[Pattern[str]] = re.compile(FIXED_OFFSET_PATTERN)
 
 _PLAIN_INT_RE: Final[Pattern[str]] = re.compile(r"-?(?:0|[1-9][0-9]*)")
 
-# In the tz database's key set but not castable by Arrow's tzdb; accepting it
-# would only defer the failure to cast time.
-_NON_CASTABLE_ZONES: Final[frozenset[str]] = frozenset({"Factory"})
+# Keys available_timezones() can report that the contract must not accept:
+# Factory is in the tz database but not castable by Arrow's tzdb, and
+# localtime (present when a host exposes /usr/share/zoneinfo/localtime as a
+# TZif file) resolves through the host's local zone, so the same schema would
+# mean different things on different runtimes.
+_EXCLUDED_ZONE_KEYS: Final[frozenset[str]] = frozenset({"Factory", "localtime"})
 
 
 @lru_cache(maxsize=1)
@@ -153,7 +156,7 @@ def _iana_zones() -> frozenset[str]:
     filesystem (macOS) accepts ``utc`` that the Linux runtime rejects. The key
     set has neither problem and behaves identically on every platform.
     """
-    return frozenset(available_timezones()) - _NON_CASTABLE_ZONES
+    return frozenset(available_timezones()) - _EXCLUDED_ZONE_KEYS
 
 
 def resolve_timezone(raw: str) -> str | None:
@@ -259,7 +262,16 @@ def _resolve(
                 f"{family}({raw}) {spec.name} is not an integer in plain "
                 f"decimal form"
             )
-        value = int(raw)
+        try:
+            value = int(raw)
+        except ValueError as err:
+            # The regex admits arbitrarily long digit strings, but int()
+            # refuses conversions past sys.int_info.default_max_str_digits;
+            # keep that inside the grammar's typed error contract.
+            raise InvalidTypeMapError(
+                f"{family} {spec.name} is out of range "
+                f"(value has {len(raw.lstrip('-'))} digits)"
+            ) from err
         maximum = spec.maximum
         cap_label = str(maximum) if maximum is not None else None
         if spec.bounded_by is not None:

@@ -174,12 +174,14 @@ class TestTimezoneValidation:
         with pytest.raises(InvalidTypeMapError, match="timezone"):
             parse_arrow_type(f"Timestamp(MICROSECOND, {tz})")
 
-    @pytest.mark.parametrize("tz", ["utc", "europe/berlin", "Factory"])
+    @pytest.mark.parametrize("tz", ["utc", "europe/berlin", "Factory", "localtime"])
     def test_platform_independent_rejection(self, tz: str) -> None:
         # A ZoneInfo probe accepts these on a case-insensitive filesystem
-        # (macOS) or via tz-database keys Arrow cannot cast (Factory); the
-        # membership check rejects them identically on every platform, so a
-        # config validated on a dev Mac cannot die later in the Linux runtime.
+        # (macOS), via tz-database keys Arrow cannot cast (Factory), or via a
+        # host-local alias that means a different zone per machine
+        # (localtime); the membership check rejects them identically on every
+        # platform, so a config validated on a dev Mac cannot die later in
+        # the Linux runtime.
         with pytest.raises(InvalidTypeMapError, match="timezone"):
             parse_arrow_type(f"Timestamp(MICROSECOND, {tz})")
 
@@ -227,6 +229,16 @@ class TestIntegerRanges:
         # the exact same-intent divergence this artifact exists to eliminate.
         with pytest.raises(InvalidTypeMapError, match="is not an integer"):
             parse_arrow_type(canonical)
+
+    def test_oversized_digit_string_stays_a_typed_error(self) -> None:
+        # Past sys.int_info.default_max_str_digits (4300), int() itself
+        # raises; the grammar must keep even absurd inputs inside its typed
+        # error contract instead of leaking a bare ValueError.
+        huge = "9" * 5000
+        with pytest.raises(InvalidTypeMapError, match="out of range"):
+            parse_arrow_type(f"Decimal128({huge}, 0)")
+        with pytest.raises(InvalidTypeMapError, match="out of range"):
+            parse_arrow_type(f"FixedSizeBinary({huge})")
 
 
 class TestArity:
