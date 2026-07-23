@@ -233,13 +233,14 @@ def bulk_land(self, conn: Any, stage: TableAddress, batch: pa.RecordBatch,
     conn is the backend's native connection object. runtime is the same
     resolved ConnectionRuntime the backend connected with: a dialect whose
     mechanism runs through the system's own client rather than the
-    transport connection (load_job) ignores conn and builds its client
-    from runtime. A built client is scoped to the backend's
-    connect/disconnect cycle -- the backend drops it on reconnect, so a
-    rotated credential or changed connection never leaves a stale client
-    cached on the dialect. That is the sanctioned replacement for the
-    private client state the BigQuery connector holds today.
-    Base returns False."""
+    transport connection (load_job) ignores conn, builds its client from
+    runtime inside the call, and discards it when the call returns. No
+    client is cached on the dialect or the backend, so there is no
+    stale-client lifecycle to manage: a reconnect or credential rotation
+    has nothing to invalidate, and per-call construction is noise at
+    coalesced-unit granularity (section 8). That is the sanctioned
+    replacement for the private client state the BigQuery connector
+    holds today. Base returns False."""
 ```
 
 The anti-join insert and the append statement are plain ANSI rendered by the
@@ -452,19 +453,28 @@ Mechanics:
   `batch_size` today. For upsert streams the coalescer collapses duplicate
   `conflict_keys` across the source batches it merges, keeping the later
   batch's row (§2) — it already holds the post-mapping batches in arrival
-  order and reads `conflict_keys` from stream config, so the collapse needs
-  no new contract surface and reproduces sequential-merge semantics
-  exactly. One asymmetry is pinned: the unit's MAX cursor is computed over
-  the *pre-collapse* rows — a dropped earlier duplicate may carry the
-  unit's only watermark, and a surviving later row with a null or lower
-  cursor value must not erase progress that sequential per-batch
-  checkpoints would have persisted. Because it runs
-  *before* `record_ids`, the MAX-cursor computation, `emitted_at` stamping,
-  and `batch_seq` assignment (`stream_processor.py:586-633`), everything
-  downstream — retry stability, cursor semantics, DLQ correlation — is
-  unchanged code operating on a bigger batch. A merged batch's `batch_seq`
-  is stable across retries exactly as today, which also preserves
-  deterministic load-job-ID schemes built on it (bigquery#6).
+  order, so the collapse reproduces sequential-merge semantics exactly.
+  The keys it collapses on are already parsed engine-side from the stream
+  definition (`main.py` copies `write.conflict_keys` into the destination
+  worker bootstrap today); #384 threads the same values into the runtime
+  batching config alongside `write_unit` — internal plumbing, no new
+  contract surface, and `_build_destination_config` (`runner.py:131-140`)
+  stays mode-only. One asymmetry is pinned: the unit's MAX cursor is
+  computed over the *pre-collapse* rows — a dropped earlier duplicate may
+  carry the unit's only watermark, and a surviving later row with a null
+  or lower cursor value must not erase progress that sequential per-batch
+  checkpoints would have persisted. The existing cursor code
+  (`compute_max_cursor` over the materialized sent batch,
+  `stream_processor.py:598-626`) sees only surviving rows, so the
+  coalescer computes the unit's MAX cursor itself over every row it
+  merges and carries it on the unit; for collapsed units the load stage
+  checkpoints the carried value instead of recomputing. Everything else
+  the coalescer sits upstream of — `record_ids`, `emitted_at` stamping,
+  `batch_seq` assignment (`stream_processor.py:586-633`), retry
+  stability, DLQ correlation — is unchanged code operating on a bigger
+  batch. A merged batch's `batch_seq` is stable across retries exactly as
+  today, which also preserves deterministic load-job-ID schemes built on
+  it (bigquery#6).
 - No timer: pipeline runs are finite reads, so the tail flushes when the
   read ends. Backpressure is unchanged — the coalescer holds at most one
   unit.
@@ -481,7 +491,15 @@ Mechanics:
   source batch is today. Nothing is lost under `dlq`: every row of the unit
   is persisted to the dead-letter queue the way a source batch's rows are
   today (the per-record JSONL the DLQ already writes), and recovery is the
-  same operator workflow either way — over more rows. Unit size is the
+  same operator workflow either way — over more rows. A row the upsert
+  collapse dropped is represented in that unit by its surviving later
+  version — same `conflict_keys` identity, newer payload — so a
+  dead-lettered unit still carries one row per identity, and replaying it
+  reaches the same final state sequential merges would have. What a
+  failure loses relative to sequential sends is the superseded
+  *intermediate* version an earlier batch would have briefly committed;
+  that is part of the widened-unit cost, controlled the same way — by
+  unit size. Unit size is the
   operator's control over rejection granularity: a deployment that needs
   finer DLQ isolation declares a smaller `write_unit`. The engine adds no split-and-retry machinery for this:
   whole-batch rejection without per-record attribution is this engine's
