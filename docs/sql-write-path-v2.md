@@ -76,8 +76,9 @@ Per mode, the single statement from stage to target is:
   for a keyless stream (#282). This statement is plain ANSI and runs on both
   backends, which structurally closes the parity gap: the ADBC keyed insert —
   today a plain append, at-least-once (`generic.py:1994-2020`) — becomes
-  exactly-once, and the ADBC keyless stage + `MERGE` special case (#285)
-  becomes the same anti-join every insert uses.
+  exactly-once wherever the system enforces the identity constraint (§9),
+  and the ADBC keyless stage + `MERGE` special case (#285) becomes the same
+  anti-join every insert uses.
 - **`truncate_insert`** — truncate once on the read's first batch
   (`batch_seq == 1`, #307 semantics unchanged), then a plain
   `INSERT INTO target SELECT … FROM stage` append. No identity dedup: deduping
@@ -93,14 +94,19 @@ applied in Arrow space before landing:
 
 - **`insert`** — duplicate identities collapse to the **first** occurrence.
   Unchanged contract (`generic.py:1625-1638`, `_attach_record_hash_to_batch`).
-- **`upsert`** — duplicate `conflict_keys` collapse to the **last** occurrence:
-  the batch is in source read order, so the last version of a key is the
-  newest, and upsert's intent is to reconcile to the newest version. Today
-  this case fails loudly (`ON CONFLICT` raises "cannot affect row a second
-  time"; `MERGE` raises "multiple source rows match"), so this is newly
-  sanctioned behavior, not a silent change — and it is required: coalescing
-  (§8) widens the window a batch covers, making a key updated twice within one
-  batch a normal event rather than an anomaly.
+- **`upsert`** — duplicate `conflict_keys` collapse to the row with the
+  **greatest value of the stream's cursor field** (ties break to the last
+  occurrence in batch order). Recency comes from the declared cursor, never
+  from physical position — a batch may be unordered, the same reason the wire
+  cursor is computed as MAX. A stream with no cursor field keeps today's loud
+  failure: with no declared recency signal, duplicate keys inside one batch
+  mean the source's `conflict_keys` are not actually unique, and no collapse
+  rule can be correct. Today every duplicate fails loudly (`ON CONFLICT`
+  raises "cannot affect row a second time"; `MERGE` raises "multiple source
+  rows match"), so the cursor-keyed collapse is newly sanctioned behavior,
+  not a silent change — and it is required: coalescing (§8) widens the window
+  a batch covers, making a key updated twice within one unit a normal event
+  rather than an anomaly.
 - **`truncate_insert`** — no collapsing, as above.
 
 ### Landing
@@ -156,13 +162,18 @@ class TransportBackend(ABC):
     async def disconnect(self) -> None: ...
     async def run_ddl(self, statements: Sequence[str]) -> None: ...
 
-    async def execute_write(self, plan: StageWritePlan, batch: pa.RecordBatch) -> int:
+    async def execute_write(self, plan: StageWritePlan, batch: pa.RecordBatch) -> None:
         """Create the stage, land the batch (declared bulk mechanism first,
         executemany fallback), run plan.mode_sql, drop the stage.
 
         One transaction spanning all four steps when plan.transactional;
         stepwise commits with the section-6 poisoning rules when not.
-        Returns rows affected by the mode statement."""
+        Success is returning without raising. Deliberately returns nothing:
+        database rowcounts lie about the batch (an idempotent replay's
+        anti-join affects 0 rows; MySQL upserts count 2 per updated row),
+        so the facade keeps reporting records_written from the batch's own
+        row count, as today (generic.py:1347-1350) -- a backend rowcount
+        never reaches the ack."""
 ```
 
 The facade prepares the batch once (type casting, `_record_hash` attachment,
@@ -202,14 +213,18 @@ def merge_statement_sql(self, stage: TableAddress, target: TableAddress,
     text at generic.py:2242-2268. Serves upsert only: insert uses the ANSI
     anti-join and needs no dialect hook. Base raises."""
 
-def bulk_land(self, conn: Any, stage: TableAddress,
-              batch: pa.RecordBatch) -> bool:
+def bulk_land(self, conn: Any, stage: TableAddress, batch: pa.RecordBatch,
+              *, runtime: ConnectionRuntime) -> bool:
     """Native bulk load into the stage. Return True if landed; False
     declines and the backend falls back to executemany (logged INFO).
     Called only when the connector declares a bulk mechanism (section 5);
-    conn is the backend's native connection object. A dialect whose
+    conn is the backend's native connection object. runtime is the same
+    resolved ConnectionRuntime the backend connected with: a dialect whose
     mechanism runs through the system's own client rather than the
-    transport connection (load_job) may ignore conn. Base returns False."""
+    transport connection (load_job) ignores conn and builds -- and may
+    cache -- its client from runtime. That is the sanctioned replacement
+    for the private client state the BigQuery connector holds today.
+    Base returns False."""
 ```
 
 The anti-join insert, the truncate, and the append statement are plain ANSI
@@ -291,13 +306,21 @@ Properties:
 
 ## 6. Stage lifecycle
 
-**Naming** keeps the deterministic grammar the ADBC path proved:
-`_analitiq_stage_<target>_b<sha16>` where the token is
-`sha256(run_id|stream_id|batch_seq)[:16]` (`generic.py:2152-2154`). A retry of
-the same batch computes the same name, so the pre-flight
-`DROP TABLE IF EXISTS` (real scope) or `CREATE OR REPLACE`-equivalent finds
-and clears its own leftovers — stage cleanup is self-healing across retries
-by construction, never dependent on a cleanup pass.
+**Naming** keeps the deterministic token the ADBC path proved —
+`sha256(run_id|stream_id|batch_seq)[:16]` (`generic.py:2152-2154`) — and
+reorders the grammar to `_analitiq_stage_b<sha16>_<target>`: the fixed prefix
+and hash come first, and the target-name tail is readability only, truncated
+to the dialect's identifier budget. (The current order,
+`_analitiq_stage_<target>_b<sha16>`, lets Postgres' 63-byte NAMEDATALEN cut
+the hash off any target longer than 29 characters — distinct stages then
+collapse into one name and a pre-flight drop can destroy another batch's
+in-flight stage.) The token alone is unique; the tail may be cut freely. A
+retry of the same batch computes the same name, so the pre-flight
+`DROP TABLE IF EXISTS` — run for any non-transactional stage, temp scope
+included, since a failed batch can leave a session-temp table on the pooled
+connection — finds and clears its own leftovers: stage cleanup is
+self-healing across retries by construction, never dependent on a cleanup
+pass.
 
 **Scope is declared, temp preferred.** `stage.scope` in the capability block:
 
@@ -314,7 +337,12 @@ by construction, never dependent on a cleanup pass.
   expiration mechanism where one exists (BigQuery table expiration), so an
   orphan is time-bounded even after a process crash.
 
-**Cleanup and poisoning — the #379 rules, generalized to both backends:**
+**Cleanup and poisoning — the #379 rules, generalized to both backends.**
+These rules govern the **non-transactional** path (`transactional_ddl:
+false`, §7). On the transactional path they do not apply: every step,
+the drop included, lives inside the batch transaction, so a failed drop
+aborts the transaction and the batch returns a retryable failure — success
+is never acked past a failed step, and nothing can be committed or orphaned.
 
 - The stage is dropped after the mode statement, success or failure, in both
   scopes (a long-lived session accumulates temp stages otherwise).
@@ -335,10 +363,12 @@ Declared per system as `stage.transactional_ddl`:
 
 - **`true`** — the backend runs create-stage, land, mode statement, and drop
   in **one transaction**: an interrupted batch leaves nothing, not even a
-  stage. Postgres and Redshift support this outright; MySQL qualifies with
-  `temp` scope because `CREATE TEMPORARY TABLE` does not implicitly commit
-  while its regular `CREATE TABLE` does — the declaration covers the
-  combination the system actually has.
+  stage. Postgres and Redshift support this outright. MySQL does **not**
+  qualify even with `temp` scope: `CREATE TEMPORARY TABLE` avoids the
+  implicit commit of regular DDL, but temporary-table DDL still cannot be
+  rolled back — a failed batch can leave the temp table sitting on the
+  pooled session — so MySQL declares `false` and relies on the pre-flight
+  drop (§6) like every other non-transactional system.
 - **`false`** — systems whose DDL self-commits or whose loads are their own
   commit unit (Snowflake, BigQuery) run the steps with per-step commits.
   Safety then comes from the primitive itself, not atomicity: deterministic
@@ -388,7 +418,11 @@ Mechanics:
   unit.
 - `truncate_insert` is safe by construction: the merged first unit is sent
   as `batch_seq` 1, so truncate-once gating (#307) fires exactly once,
-  covering every source page inside the unit.
+  covering every source page inside the unit. The zero-batch case is
+  untouched: a read that yields no batches produces nothing for the
+  coalescer to hold, and the engine's synthetic empty `batch_seq` 1 —
+  which is what truncates the target after a clean zero-row read
+  (`stream_processor.py:918-968`) — is sent outside the coalescer's path.
 - **Size budget.** The hard bound is the gRPC message cap
   (`GRPC_MAX_MESSAGE_SIZE`, `src/config/settings.py:103`), raised from 16 MiB
   to 64 MiB by default. The unit budget counts the Arrow payload **plus**
@@ -421,8 +455,16 @@ transport-independent, which is the point of the primitive:
 | Mode | Verdict | Mechanism |
 |------|---------|-----------|
 | `upsert` | exactly-once | merge on `conflict_keys` from stage |
-| `insert` | exactly-once | set-based anti-join on identity (contract PK or `_record_hash`) from stage |
+| `insert` | exactly-once where the system enforces the identity constraint; at-least-once where it does not | set-based anti-join on identity (contract PK or `_record_hash`) from stage |
 | `truncate_insert` | at-least-once | truncate on first read batch, plain append after — by design (#307) |
+
+The insert condition is the honest-verdict rule: the anti-join dedups every
+sequential replay on its own, but the enforced `PRIMARY KEY` is the
+structural backstop against writes that race it
+(`generic.py:1598-1601`). A system that does not enforce uniqueness
+(`pk_not_enforced` — BigQuery, `dialects.py:123-125`) has a filter, not a
+guarantee, so its insert streams report at-least-once rather than promising
+what the system cannot hold.
 
 `retry_semantics` (`generic.py:559-621`) loses its per-transport rows: the
 ADBC keyed-insert at-least-once row and the ADBC keyless special case
@@ -452,9 +494,9 @@ The contract tier (#391, no live database) certifies this ADR's surface:
   bulk-landed and executemany-landed stages produce identical stage
   contents against the suite's fakes.
 - **Duplicate rules hold.** Intra-batch duplicate identities collapse
-  first-wins for insert and last-wins for upsert before the mode statement
-  renders; a replayed batch leaves target state unchanged for the
-  exactly-once modes.
+  first-wins for insert and greatest-cursor for upsert (loud failure for a
+  cursor-less upsert stream) before the mode statement renders; a replayed
+  batch leaves target state unchanged for the exactly-once modes.
 
 The live tier exercises the primitive end-to-end (all modes plus
 restart/replay) on systems that run as Docker service containers; cloud
@@ -517,9 +559,10 @@ compatibility layer, per the engine's no-legacy rule:
   pipelines). Accepted: the batch sizes where this matters are exactly the
   ones coalescing grows, and temp-scope stages make the overhead one
   in-session table.
-- Last-wins upsert collapsing is newly defined behavior where today fails
+- Cursor-keyed upsert collapsing is newly defined behavior where today fails
   loud; pipelines relying on the loud failure to detect upstream duplicate
-  keys lose that tripwire (they retain it for insert mode).
+  keys keep that tripwire only for cursor-less upsert streams and insert
+  mode.
 - The 64 MiB single-message ceiling is a real bound on write-unit size;
   chunked framing is the known, deliberately deferred escape hatch.
 
@@ -558,10 +601,13 @@ compatibility layer, per the engine's no-legacy rule:
    hand unacked data or cursor durability to untrusted connector workers;
    engine-side merging solves the quota problem with no new trust and no
    proto change. Chunked framing is deferred until a workload needs it.
-8. **Upsert collapses intra-batch duplicate keys last-wins; insert stays
+8. **Upsert collapses intra-batch duplicate keys to the greatest cursor
+   value, and stays a loud failure for cursor-less streams; insert stays
    first-wins** (§2). *Rationale:* coalescing makes intra-batch key updates
-   normal; last version wins matches upsert's reconcile-to-newest intent,
-   while insert's first-wins contract predates v2 and is unchanged.
+   normal, and the declared cursor is the only honest recency signal — a
+   batch may be unordered, so physical position must not decide which
+   version survives. Insert's first-wins contract predates v2 and is
+   unchanged.
 9. **The conformance contract tier certifies rendering-matches-declaration,
    refusals, the sanctioned override surface, landing equivalence, and the
    duplicate rules** (§10).
