@@ -323,7 +323,7 @@ class TestParseArrowType:
         assert parse_arrow_type("Decimal256(38, 10)") == pa.decimal256(38, 10)
 
     def test_decimal_rejects_non_integer_params(self):
-        with pytest.raises(InvalidTypeMapError, match="non-integer parameters"):
+        with pytest.raises(InvalidTypeMapError, match="precision is not an integer"):
             parse_arrow_type("Decimal128(a, b)")
 
     def test_timestamp_requires_unit(self):

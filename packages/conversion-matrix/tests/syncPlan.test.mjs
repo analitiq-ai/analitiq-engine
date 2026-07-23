@@ -1,10 +1,10 @@
-// Tests for the pure decision core of scripts/sync-matrix-to-s3.mjs: planSync()
+// Tests for the pure decision core of scripts/sync-contracts-to-s3.mjs: planSync()
 // and the absence classifier manifestAbsent(). The AWS-facing shell around them
 // runs only in CI, and only once the S3 repository variables are configured;
 // the version/skip decisions and the fail-loud paths are pinned here.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { manifestAbsent, planSync } from "../scripts/sync-matrix-to-s3.mjs";
+import { manifestAbsent, planSync } from "../scripts/sync-contracts-to-s3.mjs";
 
 const SHA_A = "a".repeat(64);
 const SHA_B = "b".repeat(64);

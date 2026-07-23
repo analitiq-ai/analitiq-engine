@@ -66,26 +66,39 @@ import matrix from "@analitiq-ai/conversion-matrix/conversion_matrix.json" with 
 
 ## Versioned JSON on S3
 
-For consumers that cannot (or should not) pull a private npm package, the raw
-grid is also published to S3 as versioned JSON, under a bucket configured
-outside this repo:
+For consumers that cannot (or should not) pull a private npm package, the
+engine's contract artifacts are published to S3 as versioned JSON, under a
+bucket configured outside this repo — one prefix per artifact, each with its
+own independent version history:
 
 ```
-conversion-matrix/v{version}/conversion_matrix.json   immutable, one object per grid version
-conversion-matrix/latest.json                         {version, sha256, commit, publishedAt}
+conversion-matrix/v{version}/conversion_matrix.json     immutable, one object per version
+conversion-matrix/latest.json                           {version, sha256, commit, publishedAt}
+arrow-type-grammar/v{version}/arrow_type_grammar.json   immutable, one object per version
+arrow-type-grammar/latest.json                          {version, sha256, commit, publishedAt}
 ```
+
+The grid says which `source -> target` family conversions the engine permits;
+the grammar says what may appear inside a canonical type string's parentheses
+(allowed temporal units and their accepted spellings, decimal
+precision/scale ranges, the timezone forms — including the exact fixed-offset
+pattern the engine enforces — and byte width). Both are generated from
+canonical tables in the CDK and pinned by conformance tests — consumers
+should derive their validation from these artifacts rather than hand-writing
+it. The one part that is not fully machine-derivable is IANA timezone names,
+which additionally need a tz database on the consumer side.
 
 Pin a version by fetching its immutable object; discover the current one via
-`latest.json`. Versions here are **independent of the npm package version**:
-the npm digest covers the shipped TS helpers too, while an S3 version is cut
-only when the grid content itself changes.
+that artifact's `latest.json`. Versions here are **independent of the npm
+package version**: the npm digest covers the shipped TS helpers too, while an
+S3 version is cut only when that artifact's content itself changes.
 
 CI publishes with short-lived GitHub OIDC credentials (`sync-s3` job in
 `.github/workflows/conversion-matrix.yml`), one leg per target environment
 (`dev`, `prod`). Each GitHub Environment carries its own values for the same
 three variables: `CONVERSION_MATRIX_S3_ROLE_ARN`,
 `CONVERSION_MATRIX_S3_REGION`, and `CONVERSION_MATRIX_S3_BUCKET`; the
-`conversion-matrix/` prefix is fixed in the sync script, not configurable.
+artifact prefixes are fixed in the sync script, not configurable.
 The variables are **environment-scoped**, which is why the not-yet-configured
 gate sits on the job's steps rather than the job (a job-level `if` cannot see
 environment variables): an environment with no role ARN set shows as a green

@@ -401,10 +401,11 @@ tests/e2e/reports/
 **/tests/**/fixtures/**/__pycache__/
 **/tests/**/fixtures/**/*.py[cod]
 
-# Published conversion matrix: a generated contract artifact (built from the
-# canonical table in cdk/cdk/type_map/conversions.py), tracked despite the
-# blanket *.json ignore so Infra/the frontend can consume it.
+# Published contract artifacts: generated (from the canonical tables in
+# cdk/cdk/type_map/conversions.py and grammar.py), tracked despite the blanket
+# *.json ignore so Infra/the frontend can consume them.
 !cdk/cdk/type_map/conversion_matrix.json
+!cdk/cdk/type_map/arrow_type_grammar.json
 
 # conversion-matrix npm package: committed past the blanket *.json and scripts/
 # ignores (its build scripts and config are source, not generated artifacts).

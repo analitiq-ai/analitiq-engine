@@ -1,19 +1,20 @@
-// Sync the engine's conversion grid to S3 as versioned JSON.
+// Sync the engine's published contract artifacts to S3 as versioned JSON.
 //
-// Layout under s3://$CONVERSION_MATRIX_S3_BUCKET/conversion-matrix/:
-//   v{version}/conversion_matrix.json   immutable, one object per grid version
-//   latest.json                         mutable manifest {version, sha256, commit, publishedAt}
+// Layout under s3://$CONVERSION_MATRIX_S3_BUCKET/{prefix}/, one prefix per
+// artifact in ARTIFACTS:
+//   v{version}/{artifact}.json   immutable, one object per published version
+//   latest.json                  mutable manifest {version, sha256, commit, publishedAt}
 //
-// S3 is its own source of truth: the grid's sha256 is compared against the
-// manifest and a patch version is cut only when the grid content changed. This
-// is deliberately independent of the npm package version — that digest also
-// covers the shipped TS code, so a helper fix bumps npm without touching the
-// grid consumers pin here.
+// S3 is its own source of truth, independently per artifact: each artifact's
+// sha256 is compared against its own manifest and a patch version is cut only
+// when that artifact's content changed. This is deliberately independent of
+// the npm package version — that digest also covers the shipped TS code, so a
+// helper fix bumps npm without touching what consumers pin here.
 //
 // The manifest is written last: it is the commit point. A run that dies after
 // uploading the versioned object leaves an orphan no consumer can discover;
 // the next run recomputes the same next version and overwrites it — possibly
-// with different bytes, if the grid moved in between. Only a consumer that
+// with different bytes, if the artifact moved in between. Only a consumer that
 // probed a version no manifest ever referenced could observe that window.
 
 import { execFileSync } from "node:child_process";
@@ -25,13 +26,24 @@ import { fileURLToPath } from "node:url";
 
 const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = resolve(pkgRoot, "..", "..");
-const gridPath = join(repoRoot, "cdk", "cdk", "type_map", "conversion_matrix.json");
+const typeMapDir = join(repoRoot, "cdk", "cdk", "type_map");
+
+// Prefixes are fixed, not configurable: on a shared bucket whose publisher
+// role is not prefix-scoped, a typo'd prefix variable would silently start a
+// parallel version history. A constant removes that channel entirely.
+// Exported so the test suite can assert each source file exists and is
+// tracked — a stale entry otherwise surfaces only in the post-merge sync job.
+export const ARTIFACTS = [
+  { prefix: "conversion-matrix", file: "conversion_matrix.json" },
+  { prefix: "arrow-type-grammar", file: "arrow_type_grammar.json" },
+];
 
 /**
- * Decide what this run must do, from the manifest currently on S3 (raw JSON
- * text, or null when none exists yet) and the sha256 of the local grid.
+ * Decide what this run must do for one artifact, from the manifest currently
+ * on S3 (raw JSON text, or null when none exists yet) and the sha256 of the
+ * local artifact.
  *
- * Returns {action: "skip"} when the published grid already matches, or
+ * Returns {action: "skip"} when the published artifact already matches, or
  * {action: "publish", version} with the version to cut. A manifest that does
  * not parse, or whose version is not plain semver when a new version must be
  * cut, aborts: guessing a version on top of corrupt state could overwrite a
@@ -65,11 +77,12 @@ const aws = (args, opts = {}) =>
 /**
  * True when the AWS CLI output says the manifest object itself does not exist.
  *
- * NoSuchKey is the only absence signal: with the prefix a constant, the one
- * thing it can mean is a never-written manifest — the first publish.
- * Everything else — NoSuchBucket, AccessDenied, ExpiredToken, network errors
- * — must abort the run, not be misread as a first publish (which would reset
- * versioning to 1.0.0 over an existing history).
+ * NoSuchKey is the only absence signal: with the prefixes constant, it means
+ * a never-written manifest — the first publish — or an out-of-band deletion
+ * of latest.json, which the publisher role cannot cause (no delete
+ * permission). Everything else — NoSuchBucket, AccessDenied, ExpiredToken,
+ * network errors — must abort the run, not be misread as a first publish
+ * (which would reset versioning to 1.0.0 over an existing history).
  */
 export function manifestAbsent(cliOutput) {
   return cliOutput.includes("NoSuchKey");
@@ -82,7 +95,7 @@ export function manifestAbsent(cliOutput) {
 // role grants s3:ListBucket — without it S3 masks a missing key as
 // AccessDenied and the first publish dead-ends on a Forbidden fetch.
 function fetchManifestOrAbsent(bucket, key) {
-  const dir = mkdtempSync(join(tmpdir(), "conversion-matrix-"));
+  const dir = mkdtempSync(join(tmpdir(), "engine-contracts-"));
   const outfile = join(dir, "latest.json");
   try {
     aws(["s3api", "get-object", "--bucket", bucket, "--key", key, outfile]);
@@ -101,33 +114,22 @@ function requireEnv(name) {
   return value;
 }
 
-function main() {
-  const bucket = requireEnv("CONVERSION_MATRIX_S3_BUCKET");
-  // Fixed, not configurable: on a shared bucket whose publisher role is not
-  // prefix-scoped, a typo'd prefix variable would silently start a parallel
-  // version history. A constant removes that channel entirely.
-  const prefix = "conversion-matrix";
-  // The commit of the checked-out tree the grid was read from — the workflow
-  // checks out main's tip, so GITHUB_SHA (the triggering commit) can be stale.
-  const commit = execFileSync("git", ["rev-parse", "HEAD"], {
-    cwd: repoRoot,
-    encoding: "utf8",
-  }).trim();
+function syncArtifact(bucket, commit, { prefix, file }) {
+  const sourcePath = join(typeMapDir, file);
   const base = `s3://${bucket}/${prefix}`;
-
-  const grid = readFileSync(gridPath);
-  const currentSha = createHash("sha256").update(grid).digest("hex");
+  const content = readFileSync(sourcePath);
+  const currentSha = createHash("sha256").update(content).digest("hex");
   const plan = planSync(fetchManifestOrAbsent(bucket, `${prefix}/latest.json`), currentSha);
 
   if (plan.action === "skip") {
-    console.log(`grid unchanged on S3 (sha256 ${currentSha.slice(0, 12)}); nothing to sync`);
+    console.log(`${prefix} unchanged on S3 (sha256 ${currentSha.slice(0, 12)}); nothing to sync`);
     return;
   }
 
-  console.log(`syncing grid v${plan.version} to ${base} (sha256 ${currentSha.slice(0, 12)})`);
+  console.log(`syncing ${prefix} v${plan.version} to ${base} (sha256 ${currentSha.slice(0, 12)})`);
   aws(
     [
-      "s3", "cp", gridPath, `${base}/v${plan.version}/conversion_matrix.json`,
+      "s3", "cp", sourcePath, `${base}/v${plan.version}/${file}`,
       "--content-type", "application/json",
       "--cache-control", "public, max-age=31536000, immutable",
     ],
@@ -151,6 +153,20 @@ function main() {
     ],
     { input: manifest, stdio: ["pipe", "inherit", "inherit"] }
   );
+}
+
+function main() {
+  const bucket = requireEnv("CONVERSION_MATRIX_S3_BUCKET");
+  // The commit of the checked-out tree the artifacts were read from — the
+  // workflow checks out main's tip, so GITHUB_SHA (the triggering commit) can
+  // be stale.
+  const commit = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  }).trim();
+  for (const artifact of ARTIFACTS) {
+    syncArtifact(bucket, commit, artifact);
+  }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -1,13 +1,15 @@
 name: conversion-matrix
 
-# Publishes the engine's conversion grid to its two distribution channels when
-# it changes. The grid is generated from cdk/cdk/type_map/conversion_matrix.json;
-# both channels regenerate from it on every run and cannot drift.
+# Publishes the engine's contract artifacts to their distribution channels
+# when they change. Both artifacts are generated from canonical tables in the
+# CDK and pinned by conformance tests, so no channel can drift from the code.
 #
 #   1. @analitiq-ai/conversion-matrix on GitHub Packages, so the frontend can
-#      pin the typed helpers.
-#   2. Versioned raw JSON on S3 (sync-s3 job), one leg per target environment
-#      (dev, prod), so non-npm consumers can pin the grid without registry
+#      pin the typed helpers over the grid.
+#   2. Versioned raw JSON on S3 (sync-s3 job) — the conversion grid and the
+#      arrow_type parameter grammar, each under its own prefix with its own
+#      independent version history — one leg per target environment (dev,
+#      prod), so non-npm consumers can pin the contracts without registry
 #      credentials. Authentication is GitHub OIDC (short-lived, no stored
 #      keys); the role, region, and bucket come exclusively from GitHub
 #      Environment variables, so no cloud identifiers live in this repo. An
@@ -20,11 +22,13 @@ on:
     branches: [main]
     paths:
       - cdk/cdk/type_map/conversion_matrix.json
+      - cdk/cdk/type_map/arrow_type_grammar.json
       - packages/conversion-matrix/**
       - .github/workflows/conversion-matrix.yml
   pull_request:
     paths:
       - cdk/cdk/type_map/conversion_matrix.json
+      - cdk/cdk/type_map/arrow_type_grammar.json
       - packages/conversion-matrix/**
       - .github/workflows/conversion-matrix.yml
 
@@ -83,8 +87,8 @@ jobs:
 
   sync-s3:
     # Versions on S3 are independent of the npm version: the npm digest covers
-    # the shipped TS code too, while S3 carries the grid alone, so the two cut
-    # versions at different times by design. The sync script reconciles against
+    # the shipped TS code too, while each S3 artifact (the grid, the grammar)
+    # versions alone on its own content. The sync script reconciles against
     # the latest.json manifest on S3, so a re-run after a partial failure
     # converges on its own. (The first-ever run additionally needs the role to
     # grant s3:ListBucket, so a missing manifest reads as absence, not as
@@ -133,8 +137,8 @@ jobs:
         with:
           role-to-assume: ${{ vars.CONVERSION_MATRIX_S3_ROLE_ARN }}
           aws-region: ${{ vars.CONVERSION_MATRIX_S3_REGION }}
-      - name: Sync versioned grid to S3 when the grid content changed
+      - name: Sync versioned contract artifacts to S3 when their content changed
         if: vars.CONVERSION_MATRIX_S3_ROLE_ARN != ''
         env:
           CONVERSION_MATRIX_S3_BUCKET: ${{ vars.CONVERSION_MATRIX_S3_BUCKET }}
-        run: node scripts/sync-matrix-to-s3.mjs
+        run: node scripts/sync-contracts-to-s3.mjs

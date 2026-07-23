@@ -25,6 +25,11 @@ from .exceptions import (
     TypeMapNotFoundError,
     UnmappedTypeError,
 )
+from .grammar import (
+    build_arrow_type_grammar,
+    load_published_grammar,
+    render_arrow_type_grammar,
+)
 from .loader import (
     TYPE_MAP_FILENAME,
     WRITE_TYPE_MAP_FILENAME,
@@ -87,10 +92,13 @@ __all__ = [
     "UnmappedTypeError",
     "WriteTypeMapRule",
     "arrow_family",
+    "build_arrow_type_grammar",
     "build_conversion_matrix",
     "classify_arrow_conversion",
     "classify_conversion",
+    "load_published_grammar",
     "load_published_matrix",
+    "render_arrow_type_grammar",
     "render_conversion_matrix",
     "parse_arrow_type",
     "resolve_arrow_type",
