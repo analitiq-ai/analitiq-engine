@@ -412,6 +412,32 @@ async def test_partitioned_write_with_naive_emitted_at_is_fatal():
 
 
 @pytest.mark.asyncio
+async def test_format_spec_time_placeholder_still_requires_stamp():
+    """A time field with a format spec ({year:04d}) is substituted by
+    build_path exactly like a bare {year}, so the guard must require a stamp
+    for it too. A substring match on "{year}" would miss it and silently
+    bucket an unstamped batch under 1970 (issue #353).
+    """
+    handler = _make_handler(serialize_return=b'{"id":1}\n')
+    handler._path_template = "y={year:04d}/m={month:02d}"
+    unstamped = datetime.fromtimestamp(0, tz=timezone.utc)
+
+    result = await handler.write_batch(
+        run_id="r",
+        stream_id="s",
+        batch_seq=0,
+        record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+        record_ids=["r1"],
+        cursor=Cursor(token=b"c"),
+        emitted_at=unstamped,
+    )
+
+    assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+    assert "emitted_at" in result.failure_summary
+    handler._storage.build_path.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_static_path_template_tolerates_unstamped_emitted_at():
     """A path_template with no time placeholders never consumes emitted_at, so
     the guard must not fire for it even when emitted_at is unstamped -- only a

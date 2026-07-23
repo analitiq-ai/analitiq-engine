@@ -8,6 +8,7 @@ import errno
 import hashlib
 import logging
 from datetime import datetime
+from string import Formatter
 from typing import Any
 
 import pyarrow as pa
@@ -24,17 +25,32 @@ from ..storage.base import BaseStorageBackend
 logger = logging.getLogger(__name__)
 
 
-# Placeholders build_path fills from the batch instant. A path_template that
-# uses any of these needs a real emitted_at; one without them (a static prefix)
-# renders a deterministic path that never touches the instant.
-_TIME_PARTITION_PLACEHOLDERS = ("{year}", "{month}", "{day}", "{hour}")
+# Fields build_path fills from the batch instant. A path_template that
+# references any of them needs a real emitted_at; one without them (a static
+# prefix) renders a deterministic path that never touches the instant.
+_TIME_PARTITION_FIELDS = frozenset({"year", "month", "day", "hour"})
 
 
 def _template_needs_timestamp(template: str | None) -> bool:
-    """Report whether ``template`` substitutes any time placeholder."""
+    """Report whether ``template`` references any time field build_path fills.
+
+    Resolves field names with the same parser ``str.format`` uses
+    (``string.Formatter``), so a format spec or conversion -- ``{year:04d}``,
+    ``{hour!s}`` -- is recognized exactly as a bare ``{year}`` would be. The
+    guard and ``build_path`` must share one definition of "references the
+    instant"; a substring match on ``{year}`` would miss ``{year:04d}`` yet
+    ``build_path`` would still substitute it, silently bucketing an unstamped
+    batch under 1970. A malformed template raises here just as it would at
+    ``build_path``, failing the batch loud.
+    """
     if not template:
         return False
-    return any(p in template for p in _TIME_PARTITION_PLACEHOLDERS)
+    referenced = {
+        name.split(".")[0].split("[")[0]
+        for _, name, _, _ in Formatter().parse(template)
+        if name
+    }
+    return bool(referenced & _TIME_PARTITION_FIELDS)
 
 
 def _is_stamped_utc(value: object) -> bool:
