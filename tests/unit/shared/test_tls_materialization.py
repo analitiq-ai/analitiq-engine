@@ -57,18 +57,53 @@ class TestResolveTlsMode:
         )
         assert (mode, ca) == ("verify-ca", "PEM-BUNDLE")
 
-    def test_missing_ca_ref_resolves_to_none(self):
-        def raise_keyerror(v):
+    def test_absent_optional_ca_resolves_to_none(self):
+        # The connector recipe declares the CA ref for every connection;
+        # one that pins no CA raises the resolver's typed missing-data
+        # signal and legitimately proceeds without CA pinning.
+        from cdk.exceptions import UnresolvedValueError
+
+        def raise_unresolved(v):
             if v == "PEM-REF":
-                raise KeyError(v)
+                raise UnresolvedValueError(v)
             return v
 
         resolver = MagicMock()
-        resolver.resolve = MagicMock(side_effect=raise_keyerror)
+        resolver.resolve = MagicMock(side_effect=raise_unresolved)
         mode, ca = _resolve_tls_mode(
             {"mode": "require", "ca_certificate": "PEM-REF"}, resolver
         )
         assert (mode, ca) == ("require", None)
+
+    def test_authoring_defect_in_ca_ref_propagates(self):
+        # Plain KeyError is the resolver's authoring-defect signal (typo'd
+        # scope); it must never be absorbed into "no CA" (issue #380).
+        def raise_keyerror(v):
+            if v == "PEM-REF":
+                raise KeyError("Unknown resolution scope 'secrts'")
+            return v
+
+        resolver = MagicMock()
+        resolver.resolve = MagicMock(side_effect=raise_keyerror)
+        with pytest.raises(KeyError, match="secrts"):
+            _resolve_tls_mode(
+                {"mode": "require", "ca_certificate": "PEM-REF"}, resolver
+            )
+
+    @pytest.mark.parametrize("bad_ca", [None, "", 42], ids=["none", "empty", "int"])
+    def test_provided_but_unusable_ca_fails_loud(self, bad_ca):
+        # A CA that resolves to None/empty/non-string was provided but
+        # unusable; silently proceeding without it would downgrade the
+        # connection's trust (issue #380). The value itself must not leak
+        # into the error.
+        from cdk.exceptions import TransportSpecError
+
+        resolver = _resolver({"MODE-REF": "verify-ca", "PEM-REF": bad_ca})
+        with pytest.raises(TransportSpecError, match="ca_certificate") as err:
+            _resolve_tls_mode(
+                {"mode": "MODE-REF", "ca_certificate": "PEM-REF"}, resolver
+            )
+        assert "42" not in str(err.value)
 
     def test_non_mapping_spec_rejected(self):
         from cdk.exceptions import TransportSpecError
