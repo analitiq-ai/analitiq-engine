@@ -22,11 +22,16 @@ from .grammar import STRUCTURAL_FAMILIES, UNIT_LONG_TO_SHORT, bind_parameters
 _PARAM_SPLIT: Final[Pattern[str]] = re.compile(r"\s*,\s*")
 
 
-def _parse_head(canonical: str) -> tuple[str, tuple[str, ...]]:
-    """Split ``Name(arg1, arg2)`` into (``Name``, (``arg1``, ``arg2``))."""
+def _parse_head(canonical: str) -> tuple[str, tuple[str, ...], bool]:
+    """Split ``Name(arg1, arg2)`` into (``Name``, args, had-parentheses).
+
+    The third element distinguishes ``Name()`` from bare ``Name`` — both
+    yield empty args, but the binder rejects empty parentheses on a
+    parameterless family instead of silently equating the two spellings.
+    """
     trimmed = canonical.strip()
     if "(" not in trimmed:
-        return trimmed, ()
+        return trimmed, (), False
     if not trimmed.endswith(")"):
         raise InvalidTypeMapError(
             f"canonical type {canonical!r} has unbalanced parentheses"
@@ -34,9 +39,9 @@ def _parse_head(canonical: str) -> tuple[str, tuple[str, ...]]:
     head, _, rest = trimmed.partition("(")
     body = rest[:-1]
     if not body.strip():
-        return head.strip(), ()
+        return head.strip(), (), True
     args = tuple(part.strip() for part in _PARAM_SPLIT.split(body))
-    return head.strip(), args
+    return head.strip(), args, True
 
 
 # Family -> pyarrow factory over the values bind_parameters resolved. Keyed on
@@ -93,7 +98,7 @@ def parse_arrow_type(canonical: str) -> pa.DataType:
     here: they need the property's sub-schema, which only the
     :class:`SchemaContract` walker has access to.
     """
-    head, args = _parse_head(canonical)
+    head, args, has_parens = _parse_head(canonical)
     if head in STRUCTURAL_FAMILIES:
         raise InvalidTypeMapError(
             f"arrow_type {head!r} describes a nested type and cannot be "
@@ -105,7 +110,7 @@ def parse_arrow_type(canonical: str) -> pa.DataType:
         raise InvalidTypeMapError(
             f"arrow_type family {head!r} (from {canonical!r}) is not supported"
         )
-    return factory(bind_parameters(head, args))
+    return factory(bind_parameters(head, args, has_parens=has_parens))
 
 
 def resolve_arrow_type(spec: Mapping[str, Any], where: str = "field") -> pa.DataType:

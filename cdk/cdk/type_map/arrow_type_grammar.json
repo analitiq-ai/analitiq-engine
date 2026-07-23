@@ -1,0 +1,195 @@
+{
+  "families": {
+    "Binary": {
+      "params": []
+    },
+    "Boolean": {
+      "params": []
+    },
+    "Date32": {
+      "params": []
+    },
+    "Date64": {
+      "params": []
+    },
+    "Decimal128": {
+      "params": [
+        {
+          "kind": "int",
+          "max": 38,
+          "min": 1,
+          "name": "precision"
+        },
+        {
+          "kind": "int",
+          "max": "precision",
+          "min": 0,
+          "name": "scale"
+        }
+      ]
+    },
+    "Decimal256": {
+      "params": [
+        {
+          "kind": "int",
+          "max": 76,
+          "min": 1,
+          "name": "precision"
+        },
+        {
+          "kind": "int",
+          "max": "precision",
+          "min": 0,
+          "name": "scale"
+        }
+      ]
+    },
+    "Duration": {
+      "params": [
+        {
+          "accepted_short_forms": {
+            "ms": "MILLISECOND",
+            "ns": "NANOSECOND",
+            "s": "SECOND",
+            "us": "MICROSECOND"
+          },
+          "allowed": [
+            "SECOND",
+            "MILLISECOND",
+            "MICROSECOND",
+            "NANOSECOND"
+          ],
+          "kind": "unit",
+          "name": "unit"
+        }
+      ]
+    },
+    "FixedSizeBinary": {
+      "params": [
+        {
+          "kind": "int",
+          "max": null,
+          "min": 1,
+          "name": "byte_width"
+        }
+      ]
+    },
+    "Float16": {
+      "params": []
+    },
+    "Float32": {
+      "params": []
+    },
+    "Float64": {
+      "params": []
+    },
+    "Int16": {
+      "params": []
+    },
+    "Int32": {
+      "params": []
+    },
+    "Int64": {
+      "params": []
+    },
+    "Int8": {
+      "params": []
+    },
+    "Json": {
+      "params": []
+    },
+    "LargeBinary": {
+      "params": []
+    },
+    "LargeUtf8": {
+      "params": []
+    },
+    "List": {
+      "structural": "items"
+    },
+    "Null": {
+      "params": []
+    },
+    "Object": {
+      "structural": "properties"
+    },
+    "Time32": {
+      "params": [
+        {
+          "accepted_short_forms": {
+            "ms": "MILLISECOND",
+            "s": "SECOND"
+          },
+          "allowed": [
+            "SECOND",
+            "MILLISECOND"
+          ],
+          "kind": "unit",
+          "name": "unit"
+        }
+      ]
+    },
+    "Time64": {
+      "params": [
+        {
+          "accepted_short_forms": {
+            "ns": "NANOSECOND",
+            "us": "MICROSECOND"
+          },
+          "allowed": [
+            "MICROSECOND",
+            "NANOSECOND"
+          ],
+          "kind": "unit",
+          "name": "unit"
+        }
+      ]
+    },
+    "Timestamp": {
+      "params": [
+        {
+          "accepted_short_forms": {
+            "ms": "MILLISECOND",
+            "ns": "NANOSECOND",
+            "s": "SECOND",
+            "us": "MICROSECOND"
+          },
+          "allowed": [
+            "SECOND",
+            "MILLISECOND",
+            "MICROSECOND",
+            "NANOSECOND"
+          ],
+          "kind": "unit",
+          "name": "unit"
+        },
+        {
+          "accepted_forms": [
+            "IANA zone name",
+            "+HH:MM or -HH:MM fixed offset"
+          ],
+          "fixed_offset_pattern": "[+-](?:[01][0-9]|2[0-3]):[0-5][0-9]",
+          "kind": "timezone",
+          "name": "tz",
+          "null_sentinel": "null",
+          "optional": true
+        }
+      ]
+    },
+    "UInt16": {
+      "params": []
+    },
+    "UInt32": {
+      "params": []
+    },
+    "UInt64": {
+      "params": []
+    },
+    "UInt8": {
+      "params": []
+    },
+    "Utf8": {
+      "params": []
+    }
+  }
+}

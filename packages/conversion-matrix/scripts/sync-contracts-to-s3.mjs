@@ -31,7 +31,9 @@ const typeMapDir = join(repoRoot, "cdk", "cdk", "type_map");
 // Prefixes are fixed, not configurable: on a shared bucket whose publisher
 // role is not prefix-scoped, a typo'd prefix variable would silently start a
 // parallel version history. A constant removes that channel entirely.
-const ARTIFACTS = [
+// Exported so the test suite can assert each source file exists and is
+// tracked — a stale entry otherwise surfaces only in the post-merge sync job.
+export const ARTIFACTS = [
   { prefix: "conversion-matrix", file: "conversion_matrix.json" },
   { prefix: "arrow-type-grammar", file: "arrow_type_grammar.json" },
 ];
@@ -75,11 +77,12 @@ const aws = (args, opts = {}) =>
 /**
  * True when the AWS CLI output says the manifest object itself does not exist.
  *
- * NoSuchKey is the only absence signal: with the prefixes constant, the one
- * thing it can mean is a never-written manifest — the first publish.
- * Everything else — NoSuchBucket, AccessDenied, ExpiredToken, network errors
- * — must abort the run, not be misread as a first publish (which would reset
- * versioning to 1.0.0 over an existing history).
+ * NoSuchKey is the only absence signal: with the prefixes constant, it means
+ * a never-written manifest — the first publish — or an out-of-band deletion
+ * of latest.json, which the publisher role cannot cause (no delete
+ * permission). Everything else — NoSuchBucket, AccessDenied, ExpiredToken,
+ * network errors — must abort the run, not be misread as a first publish
+ * (which would reset versioning to 1.0.0 over an existing history).
  */
 export function manifestAbsent(cliOutput) {
   return cliOutput.includes("NoSuchKey");

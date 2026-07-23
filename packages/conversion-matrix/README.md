@@ -81,10 +81,12 @@ arrow-type-grammar/latest.json                          {version, sha256, commit
 The grid says which `source -> target` family conversions the engine permits;
 the grammar says what may appear inside a canonical type string's parentheses
 (allowed temporal units and their accepted spellings, decimal
-precision/scale ranges, the timezone forms, byte width). Both are generated
-from canonical tables in the CDK and pinned by conformance tests — consumers
-should derive their validation patterns from these artifacts rather than
-hand-writing them.
+precision/scale ranges, the timezone forms — including the exact fixed-offset
+pattern the engine enforces — and byte width). Both are generated from
+canonical tables in the CDK and pinned by conformance tests — consumers
+should derive their validation from these artifacts rather than hand-writing
+it. The one part that is not fully machine-derivable is IANA timezone names,
+which additionally need a tz database on the consumer side.
 
 Pin a version by fetching its immutable object; discover the current one via
 that artifact's `latest.json`. Versions here are **independent of the npm

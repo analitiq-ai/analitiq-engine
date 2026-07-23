@@ -51,13 +51,14 @@ _FORBIDDEN_CONSTRUCTS: Final[tuple[tuple[str, str], ...]] = (
 )
 _BACKREFERENCE_DIGIT: Final[Pattern[str]] = re.compile(r"\\[1-9]")
 
-# Unit vocabulary and per-family constraints come from the shared grammar
-# table (cdk.type_map.grammar) — the same source parse_arrow_type binds
-# against and the published arrow_type_grammar.json renders from — so this
-# string-only surface can never disagree with the parser.
-# normalize_canonical_type expands short codes in both the stored write-rule
-# key and every lookup input, so either spelling in a write rule's canonical
-# field matches either spelling at lookup time.
+# The unit vocabulary comes from the shared grammar table
+# (cdk.type_map.grammar) — the same source parse_arrow_type binds against and
+# the published arrow_type_grammar.json renders from — so the unit checks this
+# surface performs can never contradict the parser's. That is this surface's
+# whole validation scope: integer ranges, timezone, and arity are enforced
+# only by parse_arrow_type. normalize_canonical_type expands short codes in
+# both the stored write-rule key and every lookup input, so either spelling in
+# a write rule's canonical field matches either spelling at lookup time.
 _UNIT_LONG_FORMS: Final[frozenset[str]] = frozenset(UNIT_SHORT_TO_LONG.values())
 
 # Allowed long-form units per temporal family, derived from the grammar. The

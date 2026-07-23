@@ -13,6 +13,10 @@ from. These tests pin the chain so it cannot silently rot:
    engine's typed error (including the ranges pyarrow enforces, so a pyarrow
    upgrade that shifts a bound fails CI instead of silently changing the
    contract).
+
+Positive parses of the remaining unit spellings (Time64 short forms, the
+other Timestamp units) live in ``tests/unit/engine/test_type_map.py``; that
+suite and this one together cover the published surface.
 """
 
 from __future__ import annotations
@@ -58,10 +62,14 @@ class TestFamilySetConformance:
         assert set(_FACTORIES) == set(ARROW_TYPE_GRAMMAR)
 
     def test_rules_unit_vocabulary_derives_from_grammar(self) -> None:
+        from cdk.type_map import rules
+
         derived = unit_families()
         assert set(derived) == {"Time32", "Time64", "Duration", "Timestamp"}
         assert derived["Time32"] == frozenset({"SECOND", "MILLISECOND"})
         assert derived["Time64"] == frozenset({"MICROSECOND", "NANOSECOND"})
+        # The string-only rule surface consumes this exact mapping.
+        assert rules._VALID_UNITS_BY_TYPE == derived
 
 
 # One representative canonical string per scalar family, derived-checked below
@@ -158,6 +166,23 @@ class TestTimezoneValidation:
         with pytest.raises(InvalidTypeMapError, match="timezone"):
             parse_arrow_type(f"Timestamp(MICROSECOND, {tz})")
 
+    @pytest.mark.parametrize("tz", ["America", "Europe", "Asia"])
+    def test_continent_only_typo_raises_typed_error(self, tz: str) -> None:
+        # A ZoneInfo construction probe would raise IsADirectoryError here
+        # (continents are directories in the tz database); the membership
+        # check must keep this the engine's typed error.
+        with pytest.raises(InvalidTypeMapError, match="timezone"):
+            parse_arrow_type(f"Timestamp(MICROSECOND, {tz})")
+
+    @pytest.mark.parametrize("tz", ["utc", "europe/berlin", "Factory"])
+    def test_platform_independent_rejection(self, tz: str) -> None:
+        # A ZoneInfo probe accepts these on a case-insensitive filesystem
+        # (macOS) or via tz-database keys Arrow cannot cast (Factory); the
+        # membership check rejects them identically on every platform, so a
+        # config validated on a dev Mac cannot die later in the Linux runtime.
+        with pytest.raises(InvalidTypeMapError, match="timezone"):
+            parse_arrow_type(f"Timestamp(MICROSECOND, {tz})")
+
 
 class TestIntegerRanges:
     """The published ranges are enforced with the engine's typed error."""
@@ -186,6 +211,23 @@ class TestIntegerRanges:
         with pytest.raises(InvalidTypeMapError, match=match):
             parse_arrow_type(canonical)
 
+    @pytest.mark.parametrize(
+        "canonical",
+        [
+            "Decimal128(+10, 2)",  # sign prefix
+            "Decimal128(1_0, 2)",  # underscore separator
+            "Decimal128(038, 9)",  # leading zero survives into rendered DDL
+            "Decimal128(١٦, 9)",  # unicode digits render corrupt DDL
+            "FixedSizeBinary(１６)",  # fullwidth digits
+        ],
+    )
+    def test_non_plain_integer_spelling_rejected(self, canonical: str) -> None:
+        # Python's int() accepts all of these; the published grammar says
+        # kind "int", and a consumer implementing [0-9]+ would reject them —
+        # the exact same-intent divergence this artifact exists to eliminate.
+        with pytest.raises(InvalidTypeMapError, match="is not an integer"):
+            parse_arrow_type(canonical)
+
 
 class TestArity:
     """Surplus, missing, and empty parameters all fail loud."""
@@ -195,6 +237,22 @@ class TestArity:
         # author-time mistake, not noise.
         with pytest.raises(InvalidTypeMapError, match="takes no parameters"):
             parse_arrow_type("Int64(3)")
+
+    @pytest.mark.parametrize("canonical", ["Int64()", "Boolean( )"])
+    def test_empty_parens_on_parameterless_family_rejected(
+        self, canonical: str
+    ) -> None:
+        # Every other surface treats "Int64()" as a distinct string from
+        # "Int64" (the write-map lookup would miss), so accepting it here
+        # would bless a spelling that fails later with a misleading error.
+        with pytest.raises(InvalidTypeMapError, match="takes no parameters"):
+            parse_arrow_type(canonical)
+
+    def test_empty_parens_on_parameterized_family_keeps_arity_error(self) -> None:
+        with pytest.raises(InvalidTypeMapError, match="at least a unit"):
+            parse_arrow_type("Timestamp()")
+        with pytest.raises(InvalidTypeMapError, match="requires exactly one unit"):
+            parse_arrow_type("Time32()")
 
     def test_surplus_timestamp_argument_rejected(self) -> None:
         with pytest.raises(InvalidTypeMapError, match="requires"):

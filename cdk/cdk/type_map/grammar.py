@@ -19,10 +19,11 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from re import Pattern
 from typing import Any, Final, Literal
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import available_timezones
 
 from .exceptions import InvalidTypeMapError
 
@@ -129,9 +130,30 @@ STRUCTURAL_FAMILIES: Final[dict[str, str]] = {
 # Timestamp(unit, null) is the explicit timezone-naive spelling.
 NULL_TZ_SENTINEL: Final[str] = "null"
 
-_FIXED_OFFSET_RE: Final[Pattern[str]] = re.compile(
-    r"[+-](?:[01][0-9]|2[0-3]):[0-5][0-9]"
-)
+# Published verbatim in the artifact so consumers can enforce the exact same
+# offset bounds instead of hand-writing an approximation.
+FIXED_OFFSET_PATTERN: Final[str] = r"[+-](?:[01][0-9]|2[0-3]):[0-5][0-9]"
+
+_FIXED_OFFSET_RE: Final[Pattern[str]] = re.compile(FIXED_OFFSET_PATTERN)
+
+_PLAIN_INT_RE: Final[Pattern[str]] = re.compile(r"-?(?:0|[1-9][0-9]*)")
+
+# In the tz database's key set but not castable by Arrow's tzdb; accepting it
+# would only defer the failure to cast time.
+_NON_CASTABLE_ZONES: Final[frozenset[str]] = frozenset({"Factory"})
+
+
+@lru_cache(maxsize=1)
+def _iana_zones() -> frozenset[str]:
+    """Case-sensitive IANA key set, computed once.
+
+    A membership check rather than a ``ZoneInfo(raw)`` construction probe: the
+    probe opens ``TZPATH/<key>`` directly, so a continent-only typo
+    (``America``) raises ``IsADirectoryError`` and a case-insensitive
+    filesystem (macOS) accepts ``utc`` that the Linux runtime rejects. The key
+    set has neither problem and behaves identically on every platform.
+    """
+    return frozenset(available_timezones()) - _NON_CASTABLE_ZONES
 
 
 def resolve_timezone(raw: str) -> str | None:
@@ -146,27 +168,32 @@ def resolve_timezone(raw: str) -> str | None:
         return None
     if _FIXED_OFFSET_RE.fullmatch(raw):
         return raw
-    try:
-        ZoneInfo(raw)
-    except (ZoneInfoNotFoundError, ValueError, KeyError) as err:
+    if raw not in _iana_zones():
         raise InvalidTypeMapError(
             f"Timestamp timezone {raw!r} is not a known IANA zone name, a "
             f"+HH:MM/-HH:MM fixed offset, or the null sentinel"
-        ) from err
+        )
     return raw
 
 
-def bind_parameters(family: str, args: tuple[str, ...]) -> dict[str, Any]:
+def bind_parameters(
+    family: str, args: tuple[str, ...], *, has_parens: bool = False
+) -> dict[str, Any]:
     """Validate *args* against *family*'s grammar and resolve each value.
 
     Units resolve to their long canonical spelling, integers to ``int``, and
     an absent or ``null`` timezone to ``None``. Every violation — wrong arity,
     unknown unit, out-of-range integer, invalid timezone — raises
-    :class:`InvalidTypeMapError`. The family must exist in
+    :class:`InvalidTypeMapError`, as does an empty parenthesis pair on a
+    parameterless family when the caller signals ``has_parens`` (``Int64()``
+    is an author-time mistake, and every other surface treats it as a distinct
+    string from ``Int64``). The family must exist in
     :data:`ARROW_TYPE_GRAMMAR`; callers gate unknown families first, where the
     original input string is available for the error message.
     """
     params = ARROW_TYPE_GRAMMAR[family]
+    if has_parens and not args and not params:
+        raise InvalidTypeMapError(f"{family} takes no parameters; got ()")
     required = sum(1 for p in params if not isinstance(p, TimezoneParam))
     if not required <= len(args) <= len(params):
         raise _arity_error(family, params, args)
@@ -222,12 +249,17 @@ def _resolve(
             )
         return long
     if isinstance(spec, IntParam):
-        try:
-            value = int(raw)
-        except ValueError as err:
+        # Strictly plain ASCII decimal, no leading zeros: Python's int() also
+        # accepts "+38", "3_8", unicode digits, and "038" — spellings the
+        # published grammar does not license and other surfaces (write-rule
+        # regexes, non-Python consumers) treat differently. A minus sign is
+        # admitted so a negative value fails as out-of-range, not as a typo.
+        if not _PLAIN_INT_RE.fullmatch(raw):
             raise InvalidTypeMapError(
-                f"{family}({raw}) {spec.name} is not an integer"
-            ) from err
+                f"{family}({raw}) {spec.name} is not an integer in plain "
+                f"decimal form"
+            )
+        value = int(raw)
         maximum = spec.maximum
         cap_label = str(maximum) if maximum is not None else None
         if spec.bounded_by is not None:
@@ -286,6 +318,9 @@ def _param_to_json(spec: GrammarParam) -> dict[str, Any]:
             "IANA zone name",
             "+HH:MM or -HH:MM fixed offset",
         ],
+        # The exact bounds the engine enforces, so a consumer validates
+        # offsets identically instead of hand-approximating the range.
+        "fixed_offset_pattern": FIXED_OFFSET_PATTERN,
     }
 
 
