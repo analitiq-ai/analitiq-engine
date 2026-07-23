@@ -245,6 +245,35 @@ class TestSchemaAckTypeMapError:
         assert "write_mode=99" in ack.message
 
     @pytest.mark.asyncio
+    async def test_tls_verification_error_is_surfaced_in_schema_ack(self):
+        """A pooled connection opened for the schema DDL can fail the
+        declared TLS mode's post-connect check (issue #376). Deterministic
+        for the endpoint, so the servicer must translate it to a rejected
+        SchemaAck instead of tearing down the stream as a transport
+        failure."""
+        from cdk.sql.exceptions import TlsVerificationError
+
+        handler = MagicMock()
+        handler.configure_schema = AsyncMock(
+            side_effect=TlsVerificationError(
+                "session is not encrypted under mode 'REQUIRED'"
+            )
+        )
+
+        servicer = DestinationServicer(handler, server=MagicMock())
+        responses = []
+        async for resp in servicer.StreamRecords(
+            _iter_once(_schema_request("s8")), context=MagicMock()
+        ):
+            responses.append(resp)
+
+        assert len(responses) == 1
+        ack = responses[0].schema_ack
+        assert ack.accepted is False
+        assert ack.message.startswith("TlsVerificationError: ")
+        assert "not encrypted" in ack.message
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("cause", "cause_detail"),
         [
