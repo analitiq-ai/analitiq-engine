@@ -1,9 +1,19 @@
 name: conversion-matrix
 
-# Publishes @analitiq-ai/conversion-matrix to GitHub Packages when the engine's
-# conversion grid changes, so the frontend can pin it. The grid is generated
-# from cdk/cdk/type_map/conversion_matrix.json; the package regenerates from it
-# on every build and cannot drift.
+# Publishes the engine's conversion grid to its two distribution channels when
+# it changes. The grid is generated from cdk/cdk/type_map/conversion_matrix.json;
+# both channels regenerate from it on every run and cannot drift.
+#
+#   1. @analitiq-ai/conversion-matrix on GitHub Packages, so the frontend can
+#      pin the typed helpers.
+#   2. Versioned raw JSON on S3 (sync-s3 job), one leg per target environment
+#      (dev, prod), so non-npm consumers can pin the grid without registry
+#      credentials. Authentication is GitHub OIDC (short-lived, no stored
+#      keys); the role, region, and bucket come exclusively from GitHub
+#      Environment variables, so no cloud identifiers live in this repo. An
+#      environment with no role ARN configured skips its steps; once the role
+#      ARN is set, the remaining variables are required and fail loud when
+#      missing.
 
 on:
   push:
@@ -70,3 +80,61 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/publish-if-changed.mjs
+
+  sync-s3:
+    # Versions on S3 are independent of the npm version: the npm digest covers
+    # the shipped TS code too, while S3 carries the grid alone, so the two cut
+    # versions at different times by design. The sync script reconciles against
+    # the latest.json manifest on S3, so a re-run after a partial failure
+    # converges on its own. (The first-ever run additionally needs the role to
+    # grant s3:ListBucket, so a missing manifest reads as absence, not as
+    # Forbidden.) Each environment's bucket keeps its own independent version
+    # history; content is compared across buckets by the manifest sha256.
+    #
+    # The role/region/bucket variables are ENVIRONMENT-scoped — each
+    # environment carries its own values under the same names — which is why
+    # the gate sits on the steps, not the job: a job-level `if` is evaluated
+    # before the environment attaches and would read every environment-scoped
+    # variable as empty. An unconfigured environment shows as a green leg with
+    # skipped steps.
+    if: github.event_name == 'push'
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      # Legs are independent: a dev hiccup must not hold back prod, or the
+      # other way round.
+      fail-fast: false
+      matrix:
+        env: [dev, prod]
+    # The job's OIDC subject claim carries this repo + environment; each
+    # account's role trust policy pins its own environment (dev role -> dev,
+    # prod role -> prod). Protection rules for an environment are a
+    # repo-settings concern, not a workflow one.
+    environment: ${{ matrix.env }}
+    concurrency:
+      group: conversion-matrix-s3-sync-${{ matrix.env }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # Tip of main, same rationale as the publish job: always sync the current
+      # grid, never a stale triggering commit.
+      - uses: actions/checkout@v4
+        if: vars.CONVERSION_MATRIX_S3_ROLE_ARN != ''
+        with:
+          ref: main
+      - uses: actions/setup-node@v4
+        if: vars.CONVERSION_MATRIX_S3_ROLE_ARN != ''
+        with:
+          node-version: "20"
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: vars.CONVERSION_MATRIX_S3_ROLE_ARN != ''
+        with:
+          role-to-assume: ${{ vars.CONVERSION_MATRIX_S3_ROLE_ARN }}
+          aws-region: ${{ vars.CONVERSION_MATRIX_S3_REGION }}
+      - name: Sync versioned grid to S3 when the grid content changed
+        if: vars.CONVERSION_MATRIX_S3_ROLE_ARN != ''
+        env:
+          CONVERSION_MATRIX_S3_BUCKET: ${{ vars.CONVERSION_MATRIX_S3_BUCKET }}
+        run: node scripts/sync-matrix-to-s3.mjs

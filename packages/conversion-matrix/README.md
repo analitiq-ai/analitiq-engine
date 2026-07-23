@@ -64,6 +64,43 @@ The raw grid is also shipped as JSON:
 import matrix from "@analitiq-ai/conversion-matrix/conversion_matrix.json" with { type: "json" };
 ```
 
+## Versioned JSON on S3
+
+For consumers that cannot (or should not) pull a private npm package, the raw
+grid is also published to S3 as versioned JSON, under a bucket configured
+outside this repo:
+
+```
+conversion-matrix/v{version}/conversion_matrix.json   immutable, one object per grid version
+conversion-matrix/latest.json                         {version, sha256, commit, publishedAt}
+```
+
+Pin a version by fetching its immutable object; discover the current one via
+`latest.json`. Versions here are **independent of the npm package version**:
+the npm digest covers the shipped TS helpers too, while an S3 version is cut
+only when the grid content itself changes.
+
+CI publishes with short-lived GitHub OIDC credentials (`sync-s3` job in
+`.github/workflows/conversion-matrix.yml`), one leg per target environment
+(`dev`, `prod`). Each GitHub Environment carries its own values for the same
+three variables: `CONVERSION_MATRIX_S3_ROLE_ARN`,
+`CONVERSION_MATRIX_S3_REGION`, and `CONVERSION_MATRIX_S3_BUCKET`; the
+`conversion-matrix/` prefix is fixed in the sync script, not configurable.
+The variables are **environment-scoped**, which is why the not-yet-configured
+gate sits on the job's steps rather than the job (a job-level `if` cannot see
+environment variables): an environment with no role ARN set shows as a green
+leg with skipped steps, and once the role ARN is set the remaining variables
+are required and fail loud when missing. The assumed role needs
+`s3:GetObject` and `s3:PutObject` covering the prefix and `s3:ListBucket` on
+the bucket (so a missing manifest reads as absence rather than Forbidden); it
+needs no delete permissions. The sync reconciles against `latest.json`
+(sha256 compare, patch-bump on change, manifest written last as the commit
+point), so re-runs and partial failures converge without cutting spurious
+versions. Each environment's bucket keeps its own independent version
+history — an environment enabled later starts numbering fresh — so pin a
+version within one bucket and compare content across buckets by the manifest
+`sha256`.
+
 ## Publishing (maintainers)
 
 The engine repo owns and publishes this package; consumers only pin it. CI
