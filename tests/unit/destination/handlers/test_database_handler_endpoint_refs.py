@@ -291,6 +291,60 @@ class TestWriteBatchFatalOnTypeMapError:
         assert "type-map" in result.failure_summary
 
     @pytest.mark.asyncio
+    async def test_tls_verification_error_classified_as_fatal(self):
+        # A pool connection opened for the write can fail the declared TLS
+        # mode's post-connect check (SqlDialect.verify_tls_state) mid-run.
+        # Retrying reconnects to the same downgraded endpoint, so the write
+        # must classify fatal, not retryable (issue #376).
+        from contextlib import asynccontextmanager
+        from unittest.mock import MagicMock
+
+        from cdk.sql.exceptions import TlsVerificationError
+
+        # CDK-native enums (int-identical to the wire enums), so this test
+        # runs without the gRPC generated stack.
+        from cdk.types import AckStatus, FailureCategory
+
+        handler = GenericSQLConnector()
+        contract_mock = MagicMock()
+        contract_mock.to_db_records.return_value = [{"id": 1}]
+
+        handler._engine = MagicMock()
+        handler._connected = True
+        handler._streams["s1"] = _StreamState(
+            table=MagicMock(),
+            write_mode="insert",
+            primary_keys=[],
+            schema_contract=contract_mock,
+        )
+
+        # The listener fires during pool connect inside engine.begin();
+        # raising from the context manager entry models that surface.
+        @asynccontextmanager
+        async def _refusing_begin():
+            raise TlsVerificationError("session is not encrypted under mode 'REQUIRED'")
+            yield  # pragma: no cover
+
+        handler._engine.begin = _refusing_begin
+
+        import pyarrow as pa
+
+        result = await handler.write_batch(
+            run_id="run-1",
+            stream_id="s1",
+            batch_seq=1,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["1"],
+            cursor=None,
+            emitted_at=_EMITTED_AT,
+        )
+
+        assert result.success is False
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert "tls" in result.failure_summary
+        assert result.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
+
+    @pytest.mark.asyncio
     async def test_adbc_only_missing_schema_contract_names_table(self):
         # The ADBC-only guard message must carry schema.table context so
         # the failure_summary is actionable in monitoring (issue #149).

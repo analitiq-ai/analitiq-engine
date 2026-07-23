@@ -75,6 +75,7 @@ from .exceptions import (
     CatalogAddressingError,
     ReadError,
     SchemaConfigurationError,
+    TlsVerificationError,
     UnsupportedDialectOperationError,
 )
 
@@ -1387,6 +1388,27 @@ class GenericSQLConnector(BaseDestinationHandler):
                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,
                 failure_summary=f"write-config: {e}",
+                failure_category=FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
+            )
+        except TlsVerificationError as e:
+            # A pool connection opened for this write failed the declared
+            # TLS mode's post-connect check: the endpoint is serving
+            # plaintext (or was downgraded). Retrying reconnects to the
+            # same endpoint — and under an active MITM is exactly wrong —
+            # so fail fatally instead of looping.
+            logger.error(
+                "TLS verification failed writing batch "
+                "(run=%s, stream=%s, seq=%s): %s",
+                run_id,
+                stream_id,
+                batch_seq,
+                e,
+                exc_info=True,
+            )
+            return BatchWriteResult(
+                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                records_written=0,
+                failure_summary=f"tls: {e}",
                 failure_category=FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
             )
         except AdbcConfigurationError as e:

@@ -395,3 +395,23 @@ class TestVerifyTlsState:
                 _sqlite_spec("sqlite+aiosqlite", "sqlite+aiosqlite://", "require"),
                 sql_dialect=_RefusingDialect(),
             )
+
+
+class TestTlsVerificationClassifiesDeterministic:
+    """A mid-run verification failure must fail fast at every boundary the
+    engine classifies errors: connect, worker read, and write-batch (the
+    write path is covered behaviorally in test_database_handler_endpoint_refs).
+    Retrying reconnects to the same downgraded endpoint — and under an
+    active MITM is exactly wrong."""
+
+    def test_connect_classification(self):
+        from cdk.connection_runtime import DETERMINISTIC_CONNECT_ERRORS
+
+        assert TlsVerificationError in DETERMINISTIC_CONNECT_ERRORS
+
+    def test_worker_read_classification(self):
+        # src.worker imports the gRPC generated stack; guard for local envs
+        # whose contract-models version predates it (CI always runs this).
+        source_service = pytest.importorskip("src.worker.source_service")
+
+        assert TlsVerificationError in source_service._DETERMINISTIC_READ_ERRORS

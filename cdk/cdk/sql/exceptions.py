@@ -66,7 +66,10 @@ class TlsVerificationError(Exception):
     Fails the connection so no pipeline data flows over the downgraded
     channel. Deterministic for a given endpoint: retrying cannot succeed;
     the fix is enabling TLS on the server (or declaring a mode that does
-    not promise encryption).
+    not promise encryption). Listed in ``DETERMINISTIC_CONNECT_ERRORS``
+    and the worker read/write classification sets so a failure on a
+    connection the pool opens mid-run fails fast instead of retrying
+    against the downgraded endpoint.
     """
 
 
