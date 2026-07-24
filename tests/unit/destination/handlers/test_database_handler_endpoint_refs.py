@@ -231,8 +231,6 @@ class TestWriteBatchFatalOnTypeMapError:
 
     @pytest.mark.asyncio
     async def test_missing_schema_contract_classified_as_fatal(self):
-        from unittest.mock import MagicMock
-
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 
         handler = _stage_capable(GenericSQLConnector())
@@ -264,8 +262,6 @@ class TestWriteBatchFatalOnTypeMapError:
 
     @pytest.mark.asyncio
     async def test_type_map_error_classified_as_fatal(self):
-        from unittest.mock import MagicMock
-
         from cdk.type_map import UnmappedTypeError
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 
@@ -307,7 +303,6 @@ class TestWriteBatchFatalOnTypeMapError:
         # mode's post-connect check (SqlDialect.verify_tls_state) mid-run.
         # Retrying reconnects to the same downgraded endpoint, so the write
         # must classify fatal, not retryable (issue #376).
-        from unittest.mock import MagicMock
 
         from cdk.sql.exceptions import TlsVerificationError
 
@@ -391,7 +386,6 @@ class TestWriteBatchFatalOnTypeMapError:
         # End-to-end through write_batch: the plan builder's raise must be
         # classified FATAL (deterministic — retrying an unkeyed upsert can
         # never heal), not retried forever or degraded.
-        from unittest.mock import MagicMock
 
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 
@@ -489,7 +483,6 @@ class TestUpsertFailsLoudWithoutConflictKeys:
         # ADBC twin of the SQLAlchemy classification test: the plan
         # builder's raise is the same code on both transports, and it must
         # fire before anything reaches the backend — no partial write.
-        from unittest.mock import AsyncMock, MagicMock
 
         import pyarrow as pa
 
@@ -531,7 +524,6 @@ class TestEnsureTablesEngineNoneRaises:
 
     @pytest.mark.asyncio
     async def test_engine_none_raises_adbc_configuration_error(self):
-        from unittest.mock import MagicMock
         from unittest.mock import patch as mock_patch
 
         from cdk.adbc_registry import AdbcConfigurationError

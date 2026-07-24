@@ -347,8 +347,8 @@ class BaseDestinationHandler(ABC):
 
         Only a destination that can truncate the target before insert
         advertises ``WRITE_MODE_TRUNCATE_INSERT``; the neutral base cannot, so
-        it defaults False. A SQL handler that issues TRUNCATE overrides this to
-        True.
+        it defaults False. A SQL handler that can empty the target before the
+        insert overrides this to True.
         """
         return False
 

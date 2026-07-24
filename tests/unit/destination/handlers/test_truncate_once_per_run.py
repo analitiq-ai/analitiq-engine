@@ -8,7 +8,8 @@ appends (committed batches survive), and a surviving worker re-truncates
 when a restarted engine re-reads from scratch.
 
 These tests drive the real SQLAlchemy write path against an in-memory
-SQLite engine, the ADBC dispatch with mocked sync writers, and the
+SQLite engine, the ADBC dispatch with a mocked transport backend
+(asserting the plans the facade builds), and the
 engine-side full-refresh checkpoint view that keeps a truncate_insert
 stream from resuming mid-cursor.
 """

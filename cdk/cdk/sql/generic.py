@@ -233,10 +233,10 @@ class GenericSQLConnector(BaseDestinationHandler):
     # Engine-managed dedup key for a keyless insert stream (one with no
     # contract primary key). Holds the content-derived record id and is
     # declared as the table's primary key, so the database enforces the
-    # uniqueness that both the insert anti-join (SQLAlchemy) and the
-    # stage-MERGE (ADBC) rely on -- a re-read row is never duplicated
-    # (issue #282, issue #285). Absent on streams that carry a primary key
-    # or use upsert/truncate_insert.
+    # uniqueness the insert anti-join relies on — one mechanism on both
+    # transports; a re-read row is never duplicated (issue #282, issue
+    # #285). Absent on streams that carry a primary key or use
+    # upsert/truncate_insert.
     RECORD_HASH_COLUMN = "_record_hash"
 
     # The dialect strategy carrying every vendor-specific piece of SQL:
@@ -685,8 +685,17 @@ class GenericSQLConnector(BaseDestinationHandler):
             )
             # materialize() already acquired the runtime; the caller does
             # not disconnect a handler whose connect() raised, so release
-            # the ref here to keep the lifecycle balanced.
-            await runtime.close()
+            # the ref here to keep the lifecycle balanced. The close is
+            # guarded so a failing release can never mask the connect
+            # error the operator actually needs.
+            try:
+                await runtime.close()
+            except Exception:
+                logger.warning(
+                    "runtime release after a failed backend connect also "
+                    "failed; the connect error below is the root cause",
+                    exc_info=True,
+                )
             raise ConnectionError(f"{transport_name} connection failed: {e}") from e
         self._backend = backend
         logger.info(
@@ -1100,8 +1109,8 @@ class GenericSQLConnector(BaseDestinationHandler):
     def _needs_record_hash(self, state: _StreamState) -> bool:
         """Whether this stream uses the synthetic ``_record_hash`` dedup key.
 
-        A keyless ``insert`` stream on either transport: SQLAlchemy anti-joins
-        on the hash; ADBC routes through a stage-MERGE keyed on the hash.
+        A keyless ``insert`` stream: the anti-join matches on the hash
+        from the stage, identically on both transports.
         Upsert/truncate_insert dedup on their own keys.
         """
         return state.write_mode == "insert" and not state.primary_keys

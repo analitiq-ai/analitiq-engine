@@ -2,7 +2,8 @@
 
 The dialect owns one ``catalog.schema.table`` composer: intent resolves once
 into a ``TableAddress`` (normalization + capability gate) and every surface —
-destination DDL, ADBC ingest, stage-MERGE, TRUNCATE, the source read, the
+destination DDL, the stage cycle's ingest targeting, its stage DDL, mode
+and emptying statements, the source read, the
 control-plane ``create_table`` and discovery — consumes that address through a
 sink. These tests pin the two behaviors the composer exists to guarantee:
 

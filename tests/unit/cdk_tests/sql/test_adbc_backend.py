@@ -16,6 +16,7 @@ its transport mechanics (issue #389, ADR sql-write-path-v2 §6-§7):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import pyarrow as pa
@@ -116,7 +117,7 @@ class _FakeCursor:
         return self._conn.description
 
     def close(self):
-        pass
+        """No-op: the fake owns no resources."""
 
 
 class _FakeConn:
@@ -310,9 +311,11 @@ class TestStepwiseCycle:
                 raise OperationalError("still down")
 
         conn = _FakeConn(execute_hook=fail_mode_then_drop)
-        with caplog.at_level(logging.WARNING, logger=backend_module.logger.name):
-            with pytest.raises(OperationalError, match="connection reset"):
-                _backend(dialect, conn)._execute_write_sync(plan, _batch())
+        with (
+            caplog.at_level(logging.WARNING, logger=backend_module.logger.name),
+            pytest.raises(OperationalError, match="connection reset"),
+        ):
+            _backend(dialect, conn)._execute_write_sync(plan, _batch())
         warnings = [
             r
             for r in caplog.records
@@ -388,9 +391,11 @@ class TestLandingMechanisms:
         conn = _FakeConn()
         _backend(dialect, conn, bulk_load="none")._execute_write_sync(plan, _batch())
         assert conn.ingests == []
-        insert = next(s for s in conn.statements if s.startswith("INSERT INTO"))
-        assert dialect.quote_table(plan.stage) in insert
-        assert insert.endswith("VALUES (?, ?)")
+        # The landing INSERT is the parameterized one; the mode
+        # statement is the (set-based) INSERT ... SELECT anti-join.
+        inserts = [s for s in conn.statements if s.endswith("VALUES (?, ?)")]
+        assert len(inserts) == 1
+        assert dialect.quote_table(plan.stage) in inserts[0]
         assert conn.executemany_params == [[(1, "a"), (2, "b")]]
 
     def test_declared_dialect_mechanism_calls_bulk_land_and_verifies(self):
@@ -440,7 +445,9 @@ class TestLandingMechanisms:
         caps = _caps(bulk_load="load_job", stage_scope="real")
         dialect.capabilities = caps
         plan = _plan(dialect, caps)
-        conn = _FakeConn()
+        # The fallback's stage is verified too, so the fake reports the
+        # landed count.
+        conn = _FakeConn(fetch_value=2)
         with caplog.at_level(logging.INFO, logger=backend_module.logger.name):
             _backend(
                 dialect, conn, bulk_load="load_job", runtime=_FakeRuntime([])
@@ -449,6 +456,27 @@ class TestLandingMechanisms:
         assert any(
             "declined the declared bulk land" in r.message for r in caplog.records
         )
+
+    def test_partial_landing_before_a_decline_refuses(self):
+        """A decline must mean "landed nothing": a connector that lands
+        part of the batch and then returns False would silently duplicate
+        rows in the stage under the executemany fallback — the post-
+        fallback verification refuses instead."""
+
+        class _PartialThenDeclineDialect(_StageDialect):
+            def bulk_land(self, conn, stage, batch, *, runtime):
+                return False  # after having landed rows (simulated below)
+
+        dialect = _PartialThenDeclineDialect()
+        caps = _caps(bulk_load="load_job", stage_scope="real")
+        dialect.capabilities = caps
+        plan = _plan(dialect, caps)
+        # Stage count after fallback = 3: one leaked row + the 2-row batch.
+        conn = _FakeConn(fetch_value=3)
+        with pytest.raises(AdbcConfigurationError, match="did not land"):
+            _backend(
+                dialect, conn, bulk_load="load_job", runtime=_FakeRuntime([])
+            )._execute_write_sync(plan, _batch())
 
 
 class TestSessionSchemaGuard:
@@ -493,7 +521,7 @@ class TestSessionSchemaGuard:
         assert "'public'" in str(exc.value)
         assert conn.ingests == []
         assert not any("CREATE" in s for s in conn.statements)
-        # Poisoned like today: the next operation reopens.
+        # Poisoned: the next operation reopens.
         assert conn.closed
         assert backend._conn is None
 
@@ -693,7 +721,7 @@ class TestSuccessPathDropRules:
         # DROP must not be reclassified or raised: the mode statement
         # committed, so the batch acks SUCCESS regardless.
         with caplog.at_level(logging.WARNING, logger=backend_module.logger.name):
-            plan, conn, backend = self._run(
+            _, conn, backend = self._run(
                 drop_failures=2, drop_error=ProgrammingError("permission denied")
             )
         assert conn.closed
@@ -831,3 +859,103 @@ class TestDdlAndProbes:
             await backend.health_check()
         assert sick.closed
         assert backend._conn is None
+
+    @pytest.mark.asyncio
+    async def test_target_columns_failure_poisons_and_reclassifies(self):
+        dialect = _StageDialect()
+        conn = _FakeConn(
+            execute_hook=lambda sql: (_ for _ in ()).throw(
+                ProgrammingError("no such table")
+            )
+        )
+        backend = _backend(dialect, conn)
+        with pytest.raises(AdbcConfigurationError, match="ProgrammingError"):
+            await backend.target_columns(
+                dialect.table_address("orders", schema="public")
+            )
+        assert conn.closed
+        assert backend._conn is None
+
+    @pytest.mark.asyncio
+    async def test_target_columns_refuses_a_missing_description(self):
+        # PEP-249 leaves description None only for non-queries; None
+        # after the probe SELECT is a driver defect and must not be
+        # diagnosed as a zero-column (or _record_hash-less) target.
+        dialect = _StageDialect()
+        conn = _FakeConn(description=None)
+        backend = _backend(dialect, conn)
+        with pytest.raises(AdbcConfigurationError, match="no result description"):
+            await backend.target_columns(
+                dialect.table_address("orders", schema="public")
+            )
+        assert conn.closed
+
+
+class TestWholeCycleMutualExclusion:
+    """ADR §6: a retry only ever meets a completed or abandoned stage,
+    never a live one. On this backend the guarantee is the op lock held
+    by the worker thread for the whole cycle — a second cycle must
+    perform no statements until the first finishes, even if the first
+    cycle's awaiting task was cancelled mid-flight."""
+
+    @pytest.mark.asyncio
+    async def test_second_cycle_blocks_until_the_first_finishes(self):
+        import threading as _threading
+
+        dialect = _StageDialect()
+        caps = _caps(stage_scope="real", transactional_ddl=False)
+        dialect.capabilities = caps
+        plan = _plan(dialect, caps)
+
+        release_first = _threading.Event()
+        first_landing = _threading.Event()
+
+        class _GatedCursor(_FakeCursor):
+            def adbc_ingest(self, table, batch, mode, **kwargs):
+                first_landing.set()
+                if not release_first.wait(timeout=5):  # pragma: no cover
+                    raise RuntimeError("test gate never released")
+                super().adbc_ingest(table, batch, mode, **kwargs)
+
+        class _GatedConn(_FakeConn):
+            def __init__(self):
+                super().__init__()
+                self.gate_first = True
+
+            def cursor(self):
+                if self.gate_first:
+                    self.gate_first = False
+                    return _GatedCursor(self)
+                return _FakeCursor(self)
+
+        conn = _GatedConn()
+        backend = _backend(dialect, conn)
+
+        first = asyncio.ensure_future(backend.execute_write(plan, _batch()))
+        await asyncio.to_thread(first_landing.wait, 5)
+        # The first cycle is mid-landing, holding the op lock. Cancel its
+        # awaiting task (the engine's retry path) and start the retry.
+        first.cancel()
+        second = asyncio.ensure_future(backend.execute_write(plan, _batch()))
+        await asyncio.sleep(0.05)
+        statements_before_release = len(conn.statements)
+        release_first.set()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        await second
+
+        # The retry performed nothing while the first cycle was live: its
+        # own pre-flight drop appears only after the first cycle's final
+        # statement.
+        first_cycle_len = statements_before_release
+        assert conn.statements[first_cycle_len - 1] == plan.create_stage_sql
+        # Two complete stepwise cycles ran back to back, never interleaved:
+        # drop, create, (land), mode, drop — twice.
+        expected_cycle = [
+            plan.drop_stage_sql,
+            plan.create_stage_sql,
+            plan.mode_sql,
+            plan.drop_stage_sql,
+        ]
+        assert conn.statements == expected_cycle + expected_cycle
+        assert len(conn.ingests) == 2

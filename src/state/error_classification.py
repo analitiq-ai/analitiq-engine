@@ -42,7 +42,7 @@ The name/phrase heuristics below remain only as:
    ack at all).
 3. A defensive fallback (:func:`classify_exception`) for any exception that
    reaches the runner with no tag at all. It mirrors the existing name-based
-   pattern in ``cdk.sql.generic._is_fatal_adbc_error``.
+   pattern in ``cdk.sql._adbc_utils._is_fatal_adbc_error``.
 
 There is no data-vs-schema mismatch code: the engine performs no schema
 validation (the destination only configures its own table via DDL), so type-map

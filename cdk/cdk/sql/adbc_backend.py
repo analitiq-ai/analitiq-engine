@@ -147,8 +147,35 @@ class AdbcBackend(TransportBackend):
         await asyncio.to_thread(self._health_check_sync)
 
     async def execute_write(self, plan: StageWritePlan, batch: pa.RecordBatch) -> None:
-        """Run one full stage cycle for *batch* on a worker thread."""
-        await asyncio.to_thread(self._execute_write_sync, plan, batch)
+        """Run one full stage cycle for *batch* on a worker thread.
+
+        The thread cannot be cancelled in-band: it finishes or abandons
+        its cycle under the op lock (the ADR §6 mutual-exclusion rule),
+        so a cancelled ``await`` needs no shielding for correctness — but
+        the abandoned attempt's own failure must still reach the log
+        with its stage context instead of vanishing into asyncio's
+        never-retrieved bucket.
+        """
+        future = asyncio.ensure_future(
+            asyncio.to_thread(self._execute_write_sync, plan, batch)
+        )
+        try:
+            await asyncio.shield(future)
+        except asyncio.CancelledError:
+            stage_ref = self._dialect.quote_table(plan.stage)
+
+            def _log_abandoned_failure(done: asyncio.Future[None]) -> None:
+                exc = None if done.cancelled() else done.exception()
+                if exc is not None:
+                    logger.warning(
+                        "ADBC stage cycle for %s failed while its caller "
+                        "was already cancelled",
+                        stage_ref,
+                        exc_info=exc,
+                    )
+
+            future.add_done_callback(_log_abandoned_failure)
+            raise
 
     # ---- sync bodies (worker thread, op lock) --------------------------
 
@@ -279,6 +306,14 @@ class AdbcBackend(TransportBackend):
                 self._dialect.name,
                 self._dialect.quote_table(plan.stage),
             )
+            self._executemany_land(cursor, plan, batch)
+            # A decline must mean "landed nothing": untrusted connector
+            # code touched the stage before declining, so the fallback's
+            # result is verified like a claimed land — a partial landing
+            # under the False return would otherwise silently duplicate
+            # rows in the stage.
+            self._verify_bulk_land(cursor, plan, batch.num_rows)
+            return
         self._executemany_land(cursor, plan, batch)
 
     def _executemany_land(
@@ -298,11 +333,12 @@ class AdbcBackend(TransportBackend):
     def _verify_bulk_land(
         self, cursor: Any, plan: StageWritePlan, expected_rows: int
     ) -> None:
-        """Refuse a bulk land whose stage row count is not the batch's.
+        """Refuse a stage whose row count is not the batch's after bulk_land ran.
 
         ``bulk_land`` is untrusted connector code; one cheap aggregate
-        closes the gap where a claim of "landed" would otherwise go
-        unverified before the mode statement runs.
+        closes the gap where its claim — "landed" on ``True``, "landed
+        nothing" on a decline — would otherwise go unverified before the
+        mode statement runs.
         """
         # Dialect-quoted identifiers only; no user values.
         stage_ref = self._dialect.quote_table(plan.stage)
@@ -311,10 +347,10 @@ class AdbcBackend(TransportBackend):
         count = row[0] if row else None
         if count != expected_rows:
             raise AdbcConfigurationError(
-                f"dialect {self._dialect.name!r} bulk_land reported success "
-                f"for {plan.stage} but the stage holds {count} rows, "
+                f"dialect {self._dialect.name!r} bulk_land ran for "
+                f"{plan.stage} but the stage holds {count} rows, "
                 f"expected {expected_rows}; the declared bulk mechanism did "
-                f"not land this batch — fix the connector."
+                f"not land this batch cleanly — fix the connector."
             )
 
     def _check_session_schema_sync(
@@ -446,7 +482,11 @@ class AdbcBackend(TransportBackend):
         try:
             conn.rollback()
         except Exception:
-            logger.warning("rollback before the stage-drop retry failed", exc_info=True)
+            logger.warning(
+                "rollback before the stage-drop retry for %s failed",
+                self._dialect.quote_table(plan.stage),
+                exc_info=True,
+            )
         second_exc = self._try_drop_sync(conn, plan)
         if second_exc is None:
             logger.info(
@@ -475,7 +515,8 @@ class AdbcBackend(TransportBackend):
         )
         self._poison_sync()
 
-    def _try_drop_sync(self, conn: Any, plan: StageWritePlan) -> Exception | None:
+    @staticmethod
+    def _try_drop_sync(conn: Any, plan: StageWritePlan) -> Exception | None:
         """One drop attempt, returning the failure instead of raising."""
         try:
             cursor = conn.cursor()
@@ -516,7 +557,19 @@ class AdbcBackend(TransportBackend):
                 cursor = conn.cursor()
                 try:
                     cursor.execute(sql)
-                    description = cursor.description or []
+                    description = cursor.description
+                    if description is None:
+                        # PEP-249 leaves description None only for
+                        # non-queries; None after a SELECT is a driver
+                        # defect. Treating it as zero columns would
+                        # misdiagnose the target (a bogus "missing
+                        # _record_hash" refusal, or a vacuous readiness
+                        # pass) — refuse naming the real culprit.
+                        raise AdbcConfigurationError(
+                            f"ADBC driver returned no result description "
+                            f"for the readiness probe of {target}; cannot "
+                            f"report the target's columns"
+                        )
                 finally:
                     _close_cursor_quietly(cursor)
             except Exception as exc:

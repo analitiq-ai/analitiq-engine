@@ -424,6 +424,20 @@ class SqlAlchemyBackend(TransportBackend):
                 self._dialect.name,
                 self._dialect.quote_table(plan.stage),
             )
+            self._executemany_land(conn, plan, batch)
+            # A decline must mean "landed nothing": untrusted connector
+            # code touched the stage before declining, so the fallback's
+            # result is verified like a claimed land — a partial landing
+            # under the False return would otherwise silently duplicate
+            # rows in the stage.
+            self._verify_bulk_land(conn, plan, batch.num_rows)
+            return
+        self._executemany_land(conn, plan, batch)
+
+    def _executemany_land(
+        self, conn: Connection, plan: StageWritePlan, batch: pa.RecordBatch
+    ) -> None:
+        """Land via one executemany ``INSERT`` in plan column order (the default)."""
         stage_table = self._stage_table(conn, plan)
         records: list[dict[str, Any]] = batch.to_pylist()
         conn.execute(stage_table.insert(), records)
@@ -431,14 +445,15 @@ class SqlAlchemyBackend(TransportBackend):
     def _verify_bulk_land(
         self, conn: Connection, plan: StageWritePlan, expected_rows: int
     ) -> None:
-        """Refuse a bulk land whose stage row count is not the batch's.
+        """Refuse a stage whose row count is not the batch's after bulk_land ran.
 
-        ``bulk_land`` is untrusted connector code, and its ``True`` return
-        is the one place a claim of "landed" would otherwise go
-        unverified before the mode statement runs — a mechanism that
-        landed into the wrong place (or nowhere) would let an empty stage
-        ack a full batch. One cheap aggregate closes that: a mismatch is
-        a connector defect, refused loudly before any target mutation.
+        ``bulk_land`` is untrusted connector code, and its claim —
+        "landed" on ``True``, "landed nothing" on a decline — would
+        otherwise go unverified before the mode statement runs: a
+        mechanism that landed into the wrong place (or partially, then
+        declined) would let a wrong stage ack a full batch. One cheap
+        aggregate closes that: a mismatch is a connector defect, refused
+        loudly before any target mutation.
         """
         # Dialect-quoted identifiers only; no user values.
         stage_ref = self._dialect.quote_table(plan.stage)
@@ -447,10 +462,10 @@ class SqlAlchemyBackend(TransportBackend):
         ).scalar_one()
         if count != expected_rows:
             raise AdbcConfigurationError(
-                f"dialect {self._dialect.name!r} bulk_land reported success "
-                f"for {plan.stage} but the stage holds {count} rows, "
+                f"dialect {self._dialect.name!r} bulk_land ran for "
+                f"{plan.stage} but the stage holds {count} rows, "
                 f"expected {expected_rows}; the declared bulk mechanism did "
-                f"not land this batch — fix the connector."
+                f"not land this batch cleanly — fix the connector."
             )
 
     def _stage_table(self, conn: Connection, plan: StageWritePlan) -> Table:
@@ -510,7 +525,11 @@ class SqlAlchemyBackend(TransportBackend):
             # the drop errors so neither masks the other.
             conn.rollback()
         except Exception:
-            logger.warning("rollback before the stage-drop retry failed", exc_info=True)
+            logger.warning(
+                "rollback before the stage-drop retry for %s failed",
+                self._dialect.quote_table(plan.stage),
+                exc_info=True,
+            )
         second_exc = self._try_drop(conn, plan)
         if second_exc is None:
             logger.info(

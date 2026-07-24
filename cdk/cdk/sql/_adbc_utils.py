@@ -2,8 +2,8 @@
 
 Extracted here to avoid duplicating the ``params``-forwarding guard and the
 PEP-249 fatal-error classification across their call sites (``adbc_reader``,
-``execution``, the facade's ack ladder in ``generic``, and the transport
-backends). This module carries no ``pyarrow`` import; that property is
+``execution``, the facade's ack ladder in ``generic``, and the ADBC
+transport backend). This module carries no ``pyarrow`` import; that property is
 incidental but convenient — it lets ``execution.py`` (on the eager
 ``cdk.sql`` import path) pull the helpers without triggering pyarrow's load.
 """

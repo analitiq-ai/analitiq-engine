@@ -381,6 +381,74 @@ class TestConnectBinding:
         assert handler._capabilities.catalog == "full"
         assert handler.dialect.capabilities is handler._capabilities
 
+    @staticmethod
+    def _adbc_runtime(**overrides):
+        runtime = MagicMock()
+        runtime.connector_id = "demo"
+        runtime.declared_sql_capabilities = caps_block(bulk_load="adbc_ingest")
+        runtime.is_adbc = True
+        runtime.driver = "snowflake"
+        runtime.close = AsyncMock()
+        for name, value in overrides.items():
+            setattr(runtime, name, value)
+        return runtime
+
+    @pytest.mark.asyncio
+    async def test_adbc_connect_selects_the_adbc_backend_and_opens_eagerly(self):
+        from unittest.mock import patch
+
+        from cdk.sql.adbc_backend import AdbcBackend
+
+        handler = GenericSQLConnector()
+        adbc_conn = MagicMock()
+        runtime = self._adbc_runtime(
+            open_adbc_connection=MagicMock(return_value=adbc_conn)
+        )
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()):
+            await handler.connect(runtime)
+        assert handler._adbc_only is True
+        assert isinstance(handler._backend, AdbcBackend)
+        # Eager open: a bad credential fails at connect(), not first batch.
+        runtime.open_adbc_connection.assert_called_once()
+        assert handler._backend._conn is adbc_conn
+        # The backend read the declared bulk mechanism off the binding.
+        assert handler._backend._bulk_load == "adbc_ingest"
+
+    @pytest.mark.asyncio
+    async def test_adbc_eager_open_failure_releases_runtime_and_wraps(self):
+        from unittest.mock import patch
+
+        handler = GenericSQLConnector()
+        runtime = self._adbc_runtime(
+            open_adbc_connection=MagicMock(side_effect=RuntimeError("bad key"))
+        )
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            pytest.raises(ConnectionError, match="ADBC connection failed"),
+        ):
+            await handler.connect(runtime)
+        # materialize() acquired the runtime; the failed connect releases
+        # the ref itself (the caller never disconnects a handler whose
+        # connect() raised).
+        runtime.close.assert_awaited_once()
+        assert handler._backend is None
+        assert handler._connected is False
+
+    @pytest.mark.asyncio
+    async def test_runtime_release_failure_never_masks_the_connect_error(self):
+        from unittest.mock import patch
+
+        handler = GenericSQLConnector()
+        runtime = self._adbc_runtime(
+            open_adbc_connection=MagicMock(side_effect=RuntimeError("bad key")),
+            close=AsyncMock(side_effect=RuntimeError("dispose failed")),
+        )
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            pytest.raises(ConnectionError, match="bad key"),
+        ):
+            await handler.connect(runtime)
+
 
 class TestPayloadChannel:
     """The declared block crosses the trusted/worker boundary verbatim."""

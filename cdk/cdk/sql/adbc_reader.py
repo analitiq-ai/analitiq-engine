@@ -49,8 +49,8 @@ def _close_quietly(conn: Any) -> None:
     except Exception:
         # Connection-close failures here are server-side resource
         # leaks (warehouse session, libpq fd, gRPC context) operators
-        # may need to act on. WARNING mirrors the destination
-        # handler's _poison_adbc_connection treatment of the same
+        # may need to act on. WARNING mirrors
+        # AdbcBackend._poison_sync's treatment of the same
         # condition. The caller's original exception (if any) is not
         # masked -- this is a separate log line.
         logger.warning(

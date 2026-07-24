@@ -13,6 +13,7 @@ real SQLite database — actual SQL, not mocks.
 from __future__ import annotations
 
 import sqlite3
+from uuid import uuid4
 
 import pyarrow as pa
 import pytest
@@ -98,11 +99,14 @@ class _SqliteAdbcCursor:
 
 
 class _SqliteAdbcConnection:
-    def __init__(self):
+    def __init__(self, uri: str):
         # Autocommit mode: the AdbcBackend's own commit calls delimit the
-        # steps, exactly as an ADBC driver's connection would.
+        # steps, exactly as an ADBC driver's connection would. The
+        # shared-cache URI makes the database survive a poisoned
+        # connection, so the backend's reopen-and-retry path sees the
+        # same state a real server would show it.
         self._conn = sqlite3.connect(
-            ":memory:", check_same_thread=False, isolation_level=None
+            uri, uri=True, check_same_thread=False, isolation_level=None
         )
 
     def cursor(self):
@@ -161,15 +165,31 @@ class _SaHarness:
         self._engine.dispose()
 
 
+class _AdbcRuntimeStub:
+    """Reopens connections to the harness's shared database on demand."""
+
+    def __init__(self, uri: str):
+        self._uri = uri
+
+    def open_adbc_connection(self) -> _SqliteAdbcConnection:
+        return _SqliteAdbcConnection(self._uri)
+
+
 class _AdbcHarness:
     name = "adbc"
 
     def __init__(self, caps: SqlCapabilities):
         self.dialect = _SqliteParityDialect()
         self.dialect.capabilities = caps
-        self._conn = _SqliteAdbcConnection()
+        self._uri = f"file:parity_{uuid4().hex}?mode=memory&cache=shared"
+        # The anchor keeps the shared in-memory database alive across the
+        # backend's poison/reopen cycles and serves the assertions.
+        self._anchor = sqlite3.connect(
+            self._uri, uri=True, check_same_thread=False, isolation_level=None
+        )
         self.backend = AdbcBackend(self.dialect)
-        self.backend._conn = self._conn
+        self.backend._conn = _SqliteAdbcConnection(self._uri)
+        self.backend._runtime = _AdbcRuntimeStub(self._uri)
         self.backend._bulk_load = caps.bulk_load
 
     async def prepare(self):
@@ -177,14 +197,14 @@ class _AdbcHarness:
         assert await self.backend.target_columns(TARGET) == ("id", "name")
 
     def rows(self) -> list[tuple]:
-        cursor = self._conn._conn.cursor()
+        cursor = self._anchor.cursor()
         try:
             return sorted(cursor.execute("SELECT id, name FROM events").fetchall())
         finally:
             cursor.close()
 
     def table_names(self) -> set[str]:
-        cursor = self._conn._conn.cursor()
+        cursor = self._anchor.cursor()
         try:
             rows = cursor.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' "
@@ -195,7 +215,12 @@ class _AdbcHarness:
         return {r[0] for r in rows}
 
     def dispose(self):
-        self._conn.close()
+        with self.backend._conn_lock:
+            conn = self.backend._conn
+            self.backend._conn = None
+        if conn is not None:
+            conn.close()
+        self._anchor.close()
 
 
 HARNESSES = [_SaHarness, _AdbcHarness]
@@ -383,6 +408,36 @@ class TestCrossBackendEquality:
                 finals.append((cls.name, h.rows()))
             finally:
                 h.dispose()
-        (name_a, rows_a), (name_b, rows_b) = finals
-        assert rows_a == rows_b, f"{name_a} and {name_b} diverged"
-        assert rows_a == [(1, "a"), (2, "b2"), (3, "c"), (4, "d")]
+        rows_by_backend = dict(finals)
+        assert len(rows_by_backend) == len(HARNESSES)
+        assert (
+            len(set(map(tuple, rows_by_backend.values()))) == 1
+        ), f"backends diverged: {rows_by_backend}"
+        assert rows_by_backend["adbc"] == [(1, "a"), (2, "b2"), (3, "c"), (4, "d")]
+
+
+class TestFailedCycleRetryParity:
+    @pytest.mark.asyncio
+    async def test_a_failed_cycle_heals_on_the_same_batch_retry(self, harness):
+        """The self-healing claim against a real database: a cycle that
+        fails at the mode statement leaves (at most) a stage behind, and
+        the same batch's retry — the identical plan, so the identical
+        deterministic stage name — pre-flight-drops the leftover and
+        lands correctly, on both backends and both transaction shapes."""
+        import dataclasses
+
+        good = _plan(harness, write_mode="insert", seq=1)
+        broken = dataclasses.replace(
+            good, mode_sql='INSERT INTO "no_such_table" SELECT * FROM "nowhere"'
+        )
+        with pytest.raises(Exception, match="no_such_table|nowhere"):
+            await harness.backend.execute_write(
+                broken, _batch([{"id": 1, "name": "a"}])
+            )
+        assert harness.rows() == []
+        await harness.backend.execute_write(good, _batch([{"id": 1, "name": "a"}]))
+        assert harness.rows() == [(1, "a")]
+        leftovers = {
+            t for t in harness.table_names() if t.startswith("_analitiq_stage_")
+        }
+        assert leftovers == set()
