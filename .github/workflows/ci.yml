@@ -1,6 +1,6 @@
 name: ci
 
-# Enforces the engine's own standards on every PR and push (issue #265 Part A).
+# Enforces the engine's own standards on every PR and push to main (issue #265 Part A).
 # The lint job runs the pre-commit stack against the files a change touches, so
 # a PR that introduces a bare/broad swallow, a dead symbol, a naive datetime, a
 # new type error, or a style/format regression fails CI -- without retroactively
@@ -8,6 +8,7 @@ name: ci
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 concurrency:
