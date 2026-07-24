@@ -38,9 +38,11 @@ class CatalogAddressingError(SqlIntrospectionError):
 
     Raised when ``database_object.catalog`` (or a discovery ``catalog``
     argument) names a catalog but the connector's declared
-    ``sql_capabilities.catalog`` is ``none`` (or undeclared), when a write
-    or DDL operation targets a catalog under a ``read``-only declaration,
-    or when the address is ill-formed (a catalog with no schema).
+    ``sql_capabilities.catalog`` is ``none`` (or undeclared), when
+    standalone ``create_table`` DDL targets a catalog under a
+    ``read``-only declaration (streaming writes surface the same refusal
+    as :class:`SchemaConfigurationError`), or when the address is
+    ill-formed (a catalog with no schema).
     Deterministic: the request is misconfigured for this system, so
     retrying cannot succeed. The fix is authoring-side — use a connection
     whose default catalog is the requested one, or a connector whose

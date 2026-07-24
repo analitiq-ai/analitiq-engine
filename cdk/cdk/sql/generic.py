@@ -530,7 +530,8 @@ class GenericSQLConnector(BaseDestinationHandler):
         The single binding point for declared capability facts: the facade
         keeps the parsed block for write-path gates, and the dialect gets
         the same object for its address-construction catalog gate. Runs on
-        ``connect()`` and on every control-plane entry that takes a runtime
+        ``connect()``, on ``read_batches`` (the runtime-taking source
+        entry), and on every control-plane entry that takes a runtime
         directly, so a standalone discovery/create_table call enforces the
         same declarations as a pipeline run.
         """
@@ -654,12 +655,6 @@ class GenericSQLConnector(BaseDestinationHandler):
             runtime: ConnectionRuntime with enriched config
         """
         self._runtime = runtime
-        # Parse the declared capability block before any transport work so
-        # a malformed declaration fails at connect() time, not on the
-        # first write. Also attached to the dialect: its catalog gate
-        # (table_address / information_schema_ref) consults the declared
-        # fact at address construction.
-        self._bind_capabilities(runtime)
         try:
             await materialize_runtime(runtime, sql_dialect=self.dialect)
         except DETERMINISTIC_CONNECT_ERRORS:
@@ -667,6 +662,16 @@ class GenericSQLConnector(BaseDestinationHandler):
         except Exception as e:
             logger.error("Database destination connection failed: %s", e)
             raise ConnectionError(f"Database connection failed: {e}") from e
+        # Bind the declared capability block only once the new runtime's
+        # transport is live, alongside the other per-connection state: a
+        # failed reconnect must not leave this runtime's declaration bound
+        # against the previous runtime's still-connected transport. (A
+        # malformed block already failed on the trusted side at config
+        # load; this parse re-validates at the process boundary.) Also
+        # attached to the dialect: its catalog gate (table_address /
+        # information_schema_ref) consults the declared fact at address
+        # construction.
+        self._bind_capabilities(runtime)
         self._driver = runtime.driver or ""
         # Reset prior-connection state so a long-lived handler that
         # reconnects across runtimes (e.g. tests) doesn't carry the
@@ -816,8 +821,10 @@ class GenericSQLConnector(BaseDestinationHandler):
         if address.catalog:
             # table_address passed the address door (declared 'read' or
             # 'full'), but this address is a write/DDL target: 'read'
-            # declares discovery/read addressing only.
-            caps = self._capabilities
+            # declares discovery/read addressing only. Consult the same
+            # declaration object the door consulted (the dialect's), so
+            # the door-passed and gate-checked facts cannot diverge.
+            caps = self.dialect.capabilities
             if caps is not None and caps.catalog != "full":
                 raise SchemaConfigurationError(
                     f"stream {stream_id!r} writes to catalog "

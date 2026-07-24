@@ -98,6 +98,31 @@ class TestParse:
         with pytest.raises(SqlCapabilitiesError, match="stage"):
             SqlCapabilities.from_declaration(block)
 
+    @pytest.mark.parametrize(
+        "field,value,path",
+        [
+            ("scope", "global", "sql_capabilities.stage.scope"),
+            ("schema", "session", "sql_capabilities.stage.schema"),
+        ],
+    )
+    def test_off_vocabulary_stage_value_names_the_full_path(self, field, value, path):
+        block = caps_block()
+        block["stage"][field] = value
+        with pytest.raises(SqlCapabilitiesError, match=path):
+            SqlCapabilities.from_declaration(block)
+
+    def test_unknown_stage_field_fails(self):
+        block = caps_block()
+        block["stage"]["auto_expire"] = True
+        with pytest.raises(SqlCapabilitiesError, match="auto_expire"):
+            SqlCapabilities.from_declaration(block)
+
+    def test_empty_dedicated_schema_fails(self):
+        with pytest.raises(SqlCapabilitiesError, match="dedicated_schema"):
+            SqlCapabilities.from_declaration(
+                caps_block(stage_schema="dedicated", dedicated_schema="")
+            )
+
     def test_dedicated_schema_required_iff_dedicated(self):
         with pytest.raises(SqlCapabilitiesError, match="dedicated_schema"):
             SqlCapabilities.from_declaration(caps_block(stage_schema="dedicated"))
@@ -207,12 +232,17 @@ class TestConfigureSchemaUpsertGate:
 class TestConnectBinding:
     @pytest.mark.asyncio
     async def test_malformed_declaration_fails_at_connect(self):
+        # The trusted side already parses at config load; connect()
+        # re-validates at the process boundary once the transport is live.
         handler = GenericSQLConnector()
         runtime = MagicMock()
         runtime.connector_id = "demo"
         runtime.declared_sql_capabilities = caps_block(catalog="everything")
-        with pytest.raises(SqlCapabilitiesError, match="sql_capabilities.catalog"):
-            await handler.connect(runtime)
+        from unittest.mock import patch
+
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()):
+            with pytest.raises(SqlCapabilitiesError, match="sql_capabilities.catalog"):
+                await handler.connect(runtime)
 
     @pytest.mark.asyncio
     async def test_connect_binds_facade_and_dialect(self):

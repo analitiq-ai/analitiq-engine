@@ -262,7 +262,7 @@ bare-name landing or destructive statement, then the stage cycle of §2.
 identifier hooks are unchanged.
 
 **Removed from the class surface:** the capability booleans
-`supports_upsert_sqlalchemy`, `supports_upsert_adbc` (`dialects.py:129-132`)
+`supports_upsert_sqlalchemy`, `supports_upsert_adbc` (`dialects.py`)
 — capability facts move to declared data (§5); the dialect keeps only
 *rendering*. `supports_catalog_addressing` moves with them.
 `adbc_stage_table_sql` is absorbed by `stage_table_sql`.

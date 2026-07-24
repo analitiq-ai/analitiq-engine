@@ -52,6 +52,7 @@ from pydantic import BaseModel, TypeAdapter
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.secrets import SchemeSecretsResolver, SecretsResolver
+from cdk.sql.capabilities import parse_declared_capabilities
 from cdk.type_map import (
     TypeMapNotFoundError,
     TypeMapper,
@@ -436,6 +437,15 @@ class PipelineConfigPrep:
             )
         document = load_connector_definition(connector_id, self._paths["connectors"])
         validate_artifact("connector", document, source=str(connector_file))
+        # Parse the declared sql_capabilities block (issue #390) on the
+        # trusted side, at config load: a malformed declaration fails here
+        # as a config error, never inside a spawned worker where a dead
+        # pre-serve process would surface as a connect failure instead.
+        # None (no block) is legal; needed-but-undeclared facts refuse at
+        # their consumer sites.
+        parse_declared_capabilities(
+            document.get("sql_capabilities"), source=str(connector_file)
+        )
         self._loaded_connectors[connector_id] = document
 
         # Connector type-map is optional from this layer's perspective:

@@ -63,12 +63,12 @@ def undeclared_capability_error(fact: str, *, need: str) -> SqlCapabilitiesError
 
 
 def _require_enum(
-    block: Mapping[str, Any], field: str, allowed: tuple[str, ...], *, source: str
+    value: Any, path: str, allowed: tuple[str, ...], *, source: str
 ) -> str:
-    value = block.get(field)
+    """Validate one declared fact; *path* is the full field path the error names."""
     if value not in allowed:
         raise SqlCapabilitiesError(
-            f"sql_capabilities.{field} in {source} is {value!r}; expected "
+            f"sql_capabilities.{path} in {source} is {value!r}; expected "
             f"one of {list(allowed)}"
         )
     return str(value)
@@ -132,15 +132,20 @@ class SqlCapabilities:
             )
         stage = cls._parse_stage(stage_block, source=source)
         return cls(
-            catalog=_require_enum(block, "catalog", CATALOG_VALUES, source=source),
+            catalog=_require_enum(
+                block.get("catalog"), "catalog", CATALOG_VALUES, source=source
+            ),
             session_targeting=_require_enum(
-                block, "session_targeting", SESSION_TARGETING_VALUES, source=source
+                block.get("session_targeting"),
+                "session_targeting",
+                SESSION_TARGETING_VALUES,
+                source=source,
             ),
             merge_form=_require_enum(
-                block, "merge_form", MERGE_FORM_VALUES, source=source
+                block.get("merge_form"), "merge_form", MERGE_FORM_VALUES, source=source
             ),
             bulk_load=_require_enum(
-                block, "bulk_load", BULK_LOAD_VALUES, source=source
+                block.get("bulk_load"), "bulk_load", BULK_LOAD_VALUES, source=source
             ),
             stage=stage,
         )
@@ -155,13 +160,10 @@ class SqlCapabilities:
                 f"{sorted(unknown)}; expected a subset of {sorted(known)}"
             )
         scope = _require_enum(
-            {"scope": block.get("scope")}, "scope", STAGE_SCOPE_VALUES, source=source
+            block.get("scope"), "stage.scope", STAGE_SCOPE_VALUES, source=source
         )
         schema = _require_enum(
-            {"schema": block.get("schema")},
-            "schema",
-            STAGE_SCHEMA_VALUES,
-            source=source,
+            block.get("schema"), "stage.schema", STAGE_SCHEMA_VALUES, source=source
         )
         dedicated = block.get("dedicated_schema")
         if schema == "dedicated":
