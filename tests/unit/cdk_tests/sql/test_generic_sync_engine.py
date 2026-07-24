@@ -213,6 +213,8 @@ class _SyncReadRuntime:
         self.is_sync_sqlalchemy = True
         self.sync_engine = engine
         self.driver = driver
+        self.connector_id = driver
+        self.declared_sql_capabilities = None
         self.close = AsyncMock()
 
 
@@ -273,6 +275,8 @@ class _SyncWriteRuntime:
         self.is_sync_sqlalchemy = True
         self.sync_engine = engine
         self.driver = driver
+        self.connector_id = driver
+        self.declared_sql_capabilities = None
         self.close = AsyncMock()
 
     @property

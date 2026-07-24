@@ -15,7 +15,11 @@ Public surface:
 * ``SqlDialect`` / ``TableAddress`` — the ANSI-neutral dialect base and its
   once-normalized ``catalog.schema.table`` address (per-system dialects live
   in connector packages).
-* error types: ``SqlIntrospectionError`` and its subclasses.
+* ``SqlCapabilities`` / ``StageCapabilities`` /
+  ``parse_declared_capabilities`` — the typed view of the connector's
+  declared ``sql_capabilities`` block (issue #390).
+* error types: ``SqlIntrospectionError`` and its subclasses, plus
+  ``SqlCapabilitiesError``.
 """
 
 from __future__ import annotations
@@ -23,6 +27,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .._extras import reraise_for_missing_extra
+from .capabilities import (
+    SqlCapabilities,
+    SqlCapabilitiesError,
+    StageCapabilities,
+    parse_declared_capabilities,
+    undeclared_capability_error,
+)
 from .ddl import build_create_table_sql, create_table
 from .dialects import SqlDialect, TableAddress
 from .discovery import list_columns, list_schemas, list_tables
@@ -73,6 +84,11 @@ __all__ = [
     "build_create_table_sql",
     "SqlDialect",
     "TableAddress",
+    "SqlCapabilities",
+    "StageCapabilities",
+    "SqlCapabilitiesError",
+    "parse_declared_capabilities",
+    "undeclared_capability_error",
     "fetch_rows",
     "execute_ddl",
     "AdbcReader",

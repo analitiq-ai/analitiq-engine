@@ -6,14 +6,14 @@ destination DDL, ADBC ingest, stage-MERGE, TRUNCATE, the source read, the
 control-plane ``create_table`` and discovery — consumes that address through a
 sink. These tests pin the two behaviors the composer exists to guarantee:
 
-* a catalog on a dialect that cannot address one fails loud at the boundary
+* a catalog on a system that cannot address one fails loud at the boundary
   it entered through (``configure_schema`` / ``read_batches`` / discovery /
   ``create_table``) — never a silently-dropped catalog (issue #330) and never
   broken cross-database SQL on an ANSI system (issue #343);
-* on a dialect that declares ``supports_catalog_addressing``, the same address
-  reaches every sink identically — three-part quoted SQL, catalog-scoped
-  metadata paths, and ``catalog_name`` ingest targeting (issues #336/#337/
-  #339/#340).
+* on a connector declaring ``sql_capabilities.catalog: full``, the same
+  address reaches every sink identically — three-part quoted SQL,
+  catalog-scoped metadata paths, and ``catalog_name`` ingest targeting
+  (issues #336/#337/#339/#340).
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pyarrow as pa
 import pytest
 
+from cdk.sql.capabilities import SqlCapabilities
 from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.exceptions import (
     CatalogAddressingError,
@@ -31,6 +32,8 @@ from cdk.sql.exceptions import (
 )
 from cdk.sql.generic import GenericSQLConnector
 from cdk.types import SchemaSpec, WriteMode
+
+from .conftest import caps_block
 
 STREAM = "s1"
 
@@ -49,11 +52,10 @@ ENDPOINT_DOC = {
 
 
 class _CatalogAdbcDialect(SqlDialect):
-    """An ADBC dialect whose system addresses catalogs per statement."""
+    """An ADBC dialect bound to a full-catalog, merge-capable declaration."""
 
     name = "cataloged"
-    supports_catalog_addressing = True
-    supports_upsert_adbc = True
+    capabilities = SqlCapabilities.from_declaration(caps_block(catalog="full"))
 
     def render_column_type(self, canonical, type_mapper, *, params=None):
         return {
@@ -100,12 +102,13 @@ def _handler(cls=GenericSQLConnector, *, adbc_only: bool):
 
 class TestConfigureSchemaGate:
     @pytest.mark.asyncio
-    async def test_catalog_on_unsupporting_dialect_rejects_the_schema(self):
-        # The base (ANSI) dialect cannot address a catalog; the failure is a
-        # deterministic authoring error the gRPC layer turns into a rejected
-        # SchemaAck — not a silently-dropped catalog and not broken SQL.
+    async def test_catalog_with_no_declaration_rejects_the_schema(self):
+        # No declared sql_capabilities means the catalog fact is unknown;
+        # the failure is a deterministic authoring error naming the missing
+        # declaration, which the gRPC layer turns into a rejected SchemaAck
+        # — not a silently-dropped catalog and not broken SQL.
         handler = _handler(adbc_only=True)
-        with pytest.raises(SchemaConfigurationError, match="default catalog"):
+        with pytest.raises(SchemaConfigurationError, match="sql_capabilities.catalog"):
             await handler.configure_schema(_schema_spec())
 
     @pytest.mark.asyncio
@@ -171,21 +174,23 @@ async def _drain(connector, runtime, config, checkpoint):
 
 
 class _FakeRuntime:
-    def __init__(self, *, is_adbc: bool, engine=None):
+    def __init__(self, *, is_adbc: bool, engine=None, declared=None):
         self.is_adbc = is_adbc
         self.is_sync_sqlalchemy = False
         self.driver = "postgresql"
+        self.connector_id = "postgresql"
+        self.declared_sql_capabilities = declared
         self.engine = engine
         self.close = AsyncMock()
 
 
 class TestReadPathGate:
     @pytest.mark.asyncio
-    async def test_catalog_on_unsupporting_dialect_fails_before_extraction(self):
+    async def test_catalog_with_no_declaration_fails_before_extraction(self):
         connector = GenericSQLConnector()
         config = {"endpoint_document": ENDPOINT_DOC, "stream_source": {}}
-        with pytest.raises(ReadError, match="default catalog"):
-            await _drain(connector, MagicMock(), config, _checkpoint())
+        with pytest.raises(ReadError, match="sql_capabilities.catalog"):
+            await _drain(connector, _FakeRuntime(is_adbc=True), config, _checkpoint())
 
 
 class TestReadPathCatalog:
@@ -201,7 +206,9 @@ class TestReadPathCatalog:
 
     @pytest.mark.asyncio
     async def test_sqlalchemy_read_compiles_catalog_qualified_from(self):
-        runtime = _FakeRuntime(is_adbc=False, engine=object())
+        runtime = _FakeRuntime(
+            is_adbc=False, engine=object(), declared=caps_block(catalog="full")
+        )
         executed: list[str] = []
 
         class _RecordingConn:
@@ -232,7 +239,7 @@ class TestReadPathCatalog:
 
     @pytest.mark.asyncio
     async def test_adbc_read_compiles_catalog_qualified_from(self):
-        runtime = _FakeRuntime(is_adbc=True)
+        runtime = _FakeRuntime(is_adbc=True, declared=caps_block(catalog="full"))
         calls: list[str] = []
 
         class _Reader:
@@ -350,11 +357,11 @@ class TestAdbcWriteSinks:
 
 class TestControlPlaneGate:
     @pytest.mark.asyncio
-    async def test_create_table_refuses_catalog_on_unsupporting_dialect(self):
+    async def test_create_table_refuses_catalog_with_no_declaration(self):
         from cdk.contract import ColumnDef
         from cdk.sql.ddl import create_table
 
-        with pytest.raises(CatalogAddressingError, match="default catalog"):
+        with pytest.raises(CatalogAddressingError, match="sql_capabilities.catalog"):
             await create_table(
                 MagicMock(),
                 "ds",
@@ -362,6 +369,27 @@ class TestControlPlaneGate:
                 [ColumnDef("id", "Int64")],
                 [],
                 dialect=SqlDialect(),
+                catalog="proj",
+            )
+
+    @pytest.mark.asyncio
+    async def test_create_table_refuses_catalog_on_read_only_declaration(self):
+        # 'read' declares discovery/read addressing only; DDL across
+        # catalogs needs 'full'.
+        from cdk.contract import ColumnDef
+        from cdk.sql.ddl import create_table
+
+        class _ReadOnlyCatalogDialect(SqlDialect):
+            capabilities = SqlCapabilities.from_declaration(caps_block(catalog="read"))
+
+        with pytest.raises(CatalogAddressingError, match="requires 'full'"):
+            await create_table(
+                MagicMock(),
+                "ds",
+                "t",
+                [ColumnDef("id", "Int64")],
+                [],
+                dialect=_ReadOnlyCatalogDialect(),
                 catalog="proj",
             )
 

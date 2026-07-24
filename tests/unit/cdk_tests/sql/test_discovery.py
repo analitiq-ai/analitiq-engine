@@ -18,12 +18,13 @@ from __future__ import annotations
 import pytest
 
 from cdk.contract import ColumnDef
+from cdk.sql.capabilities import SqlCapabilities
 from cdk.sql.dialects import SqlDialect
 from cdk.sql.discovery import list_columns, list_schemas, list_tables
 from cdk.sql.exceptions import DiscoveryError
 from cdk.type_map.exceptions import UnmappedTypeError
 
-from .conftest import FakeAdbcRuntime
+from .conftest import FakeAdbcRuntime, caps_block
 
 
 def _route(rows_by_view):
@@ -161,7 +162,7 @@ class TestListTables:
         # to the requested catalog (issue #348 item 4).
         class _CatalogDialect(SqlDialect):
             name = "cataloged"
-            supports_catalog_addressing = True
+            capabilities = SqlCapabilities.from_declaration(caps_block(catalog="read"))
 
         runtime = FakeAdbcRuntime(
             "cataloged",

@@ -155,6 +155,19 @@ class ConnectionRuntime:
         self._connector_definition: dict[str, Any] | None = (
             dict(connector_definition) if connector_definition else None
         )
+        # The connector's declared ``sql_capabilities`` block (issue #390),
+        # carried verbatim: the published contract validates it engine-side,
+        # ``cdk.sql`` parses it at consumption. Kept as data here so the
+        # core runtime stays independent of the SQL surface (same reason
+        # ``materialize`` takes ``sql_dialect`` untyped). Worker-side
+        # runtimes get it restored from the resolved payload in
+        # :meth:`from_resolved_payload`.
+        self._declared_sql_capabilities: dict[str, Any] | None = (
+            copy.deepcopy(self._connector_definition.get("sql_capabilities"))
+            if self._connector_definition
+            and self._connector_definition.get("sql_capabilities") is not None
+            else None
+        )
         self._driver_override = driver
         self._resolver = resolver
         self._connector_type_mapper = connector_type_mapper
@@ -238,6 +251,23 @@ class ConnectionRuntime:
         return (
             copy.deepcopy(self._connector_definition)
             if self._connector_definition
+            else None
+        )
+
+    @property
+    def declared_sql_capabilities(self) -> dict[str, Any] | None:
+        """The connector's declared ``sql_capabilities`` block, verbatim.
+
+        ``None`` means the connector declares nothing — consumers must
+        refuse any needed-but-undeclared fact
+        (``cdk.sql.capabilities.undeclared_capability_error``), never fill
+        in a default. Trusted-side runtimes read it from the connector
+        definition; worker-side runtimes get it from the resolved payload
+        (the worker never reads ``connector.json``).
+        """
+        return (
+            copy.deepcopy(self._declared_sql_capabilities)
+            if self._declared_sql_capabilities is not None
             else None
         )
 
@@ -459,6 +489,11 @@ class ConnectionRuntime:
             },
             "transport_spec": None,
             "resolved_config": None,
+            # Declared SQL capabilities travel with the payload so the
+            # worker-side facade consumes the same declaration the engine
+            # validated — never a guessed default because connector.json
+            # was out of reach (issue #390).
+            "sql_capabilities": self.declared_sql_capabilities,
         }
         if has_transports and definition is not None:
             context = self._build_resolution_context(secrets)
@@ -503,6 +538,11 @@ class ConnectionRuntime:
         )
         runtime._pre_resolved_config = (
             dict(payload["resolved_config"]) if payload.get("resolved_config") else None
+        )
+        runtime._declared_sql_capabilities = (
+            dict(payload["sql_capabilities"])
+            if payload.get("sql_capabilities") is not None
+            else None
         )
         return runtime
 

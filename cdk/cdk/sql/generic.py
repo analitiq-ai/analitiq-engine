@@ -65,6 +65,11 @@ from cdk.types import (
 from ..contract import ColumnDef
 from ._adbc_utils import _close_cursor_quietly
 from .adbc_reader import open_adbc_reader
+from .capabilities import (
+    SqlCapabilities,
+    parse_declared_capabilities,
+    undeclared_capability_error,
+)
 from .ddl import build_create_table_sql
 from .ddl import create_table as _sql_create_table
 from .dialects import SqlDialect, TableAddress
@@ -267,6 +272,11 @@ class GenericSQLConnector(BaseDestinationHandler):
     def __init__(self) -> None:
         """Initialize the database handler."""
         self.dialect: SqlDialect = self.dialect_class()
+        # The connector's declared sql_capabilities (issue #390), parsed
+        # from the runtime when one binds. None = undeclared: every
+        # consumer refuses a needed-but-undeclared fact loudly instead of
+        # guessing a default.
+        self._capabilities: SqlCapabilities | None = None
         self._runtime: ConnectionRuntime | None = None
         self._engine: AsyncEngine | None = None
         # Sync SQLAlchemy engine for sync-only drivers (e.g. Redshift's
@@ -514,18 +524,34 @@ class GenericSQLConnector(BaseDestinationHandler):
         """All SQL databases support transactions."""
         return True
 
+    def _bind_capabilities(self, runtime: ConnectionRuntime) -> None:
+        """Parse the runtime's declared ``sql_capabilities`` and attach them.
+
+        The single binding point for declared capability facts: the facade
+        keeps the parsed block for write-path gates, and the dialect gets
+        the same object for its address-construction catalog gate. Runs on
+        ``connect()`` and on every control-plane entry that takes a runtime
+        directly, so a standalone discovery/create_table call enforces the
+        same declarations as a pipeline run.
+        """
+        self._capabilities = parse_declared_capabilities(
+            runtime.declared_sql_capabilities,
+            source=f"connector {runtime.connector_id!r}",
+        )
+        self.dialect.capabilities = self._capabilities
+
     @property
     def supports_upsert(self) -> bool:
-        """True when the active dialect has an upsert path.
+        """True when the declared ``sql_capabilities.merge_form`` has one.
 
-        SA-mode dialects implement ``build_sqlalchemy_upsert``; ADBC-only
-        mode uses stage-table + ``MERGE INTO`` (``adbc_stage_table_sql``).
-        Both are declared by the connector package's dialect — the neutral
-        base supports neither.
+        A fact about the target system, declared in ``connector.json`` —
+        never inferred from the transport or the dialect class. Undeclared
+        advertises ``False``; an upsert stream against an undeclared or
+        ``none`` merge form is refused at ``configure_schema`` time with an
+        error naming the missing declaration.
         """
-        if self._adbc_only:
-            return self.dialect.supports_upsert_adbc
-        return self.dialect.supports_upsert_sqlalchemy
+        caps = self._capabilities
+        return caps is not None and caps.supports_upsert
 
     @property
     def supports_bulk_load(self) -> bool:
@@ -628,6 +654,12 @@ class GenericSQLConnector(BaseDestinationHandler):
             runtime: ConnectionRuntime with enriched config
         """
         self._runtime = runtime
+        # Parse the declared capability block before any transport work so
+        # a malformed declaration fails at connect() time, not on the
+        # first write. Also attached to the dialect: its catalog gate
+        # (table_address / information_schema_ref) consults the declared
+        # fact at address construction.
+        self._bind_capabilities(runtime)
         try:
             await materialize_runtime(runtime, sql_dialect=self.dialect)
         except DETERMINISTIC_CONNECT_ERRORS:
@@ -773,15 +805,27 @@ class GenericSQLConnector(BaseDestinationHandler):
         if address.catalog and not self._adbc_only:
             # The SQLAlchemy write path reflects the target table and builds
             # DML from the reflected object; SQLAlchemy reflection cannot
-            # cross catalogs, and no dialect on this transport declares
-            # catalog addressing today. Refuse loudly rather than write to
-            # whatever the reflected two-part name resolves to.
+            # cross catalogs. Refuse loudly rather than write to whatever
+            # the reflected two-part name resolves to.
             raise SchemaConfigurationError(
                 f"stream {stream_id!r} targets catalog "
                 f"{address.catalog!r}, which the SQLAlchemy write transport "
                 f"cannot address; use a connection whose default catalog is "
                 f"{address.catalog!r}"
             )
+        if address.catalog:
+            # table_address passed the address door (declared 'read' or
+            # 'full'), but this address is a write/DDL target: 'read'
+            # declares discovery/read addressing only.
+            caps = self._capabilities
+            if caps is not None and caps.catalog != "full":
+                raise SchemaConfigurationError(
+                    f"stream {stream_id!r} writes to catalog "
+                    f"{address.catalog!r}, but the connector declares "
+                    f"sql_capabilities.catalog {caps.catalog!r} — writes and "
+                    f"DDL across catalogs require 'full'. Use a connection "
+                    f"whose default catalog is {address.catalog!r}."
+                )
         return address
 
     async def configure_schema(self, schema_spec: SchemaSpec) -> bool:
@@ -841,6 +885,29 @@ class GenericSQLConnector(BaseDestinationHandler):
             primary_keys=primary_keys,
             conflict_keys=conflict_keys,
         )
+
+        if state.write_mode == "upsert":
+            # Refuse at handshake time, naming the declaration, before any
+            # DDL runs: upsert needs the system's declared merge form.
+            caps = self._capabilities
+            if caps is None:
+                raise SchemaConfigurationError(
+                    str(
+                        undeclared_capability_error(
+                            "merge_form",
+                            need=f"stream {stream_id!r} writes in upsert "
+                            f"mode to {address}",
+                        )
+                    )
+                )
+            if not caps.supports_upsert:
+                raise SchemaConfigurationError(
+                    f"stream {stream_id!r} writes in upsert mode to "
+                    f"{address}, but the connector declares "
+                    f"sql_capabilities.merge_form 'none' — this system has "
+                    f"no merge statement. Use insert or truncate_insert, or "
+                    f"fix the connector's declaration."
+                )
 
         # Resolve the type-mapper for this stream's endpoint once —
         # both DDL generation and the schema contract use it.
@@ -1002,25 +1069,33 @@ class GenericSQLConnector(BaseDestinationHandler):
         ADBC cursor. On the SQLAlchemy path the table is then REFLECTED so
         DML binding uses the real column types the database reports.
         """
-        if (
-            self._adbc_only
-            and self._needs_record_hash(state)
-            and not self.dialect.supports_upsert_adbc
-        ):
-            # Keyless insert dedups via stage-MERGE (_record_hash). A dialect
-            # that ingests but cannot MERGE (supports_upsert_adbc=False, the base
-            # default) would otherwise reach _merge_ingest_sync and fatal on the
-            # first write via adbc_stage_table_sql. Fail loud at configure time
-            # instead: a keyless insert cannot be made exactly-once on this
-            # dialect, and a silent plain-append fallback would reintroduce the
-            # lost-ack duplication that issue #285 closes.
-            raise AdbcConfigurationError(
-                f"Keyless insert on {state.address} "
-                f"requires stage-MERGE dedup, but the ADBC dialect "
-                f"{type(self.dialect).__name__} does not support MERGE "
-                f"(supports_upsert_adbc=False). Declare a primary key for this "
-                f"stream or add MERGE support to the connector's dialect."
-            )
+        if self._adbc_only and self._needs_record_hash(state):
+            # Keyless insert dedups via stage-MERGE (_record_hash). A system
+            # that ingests but has no merge form would otherwise reach
+            # _merge_ingest_sync and fatal on the first write via
+            # adbc_stage_table_sql. Fail loud at configure time instead: a
+            # keyless insert cannot be made exactly-once on this system, and
+            # a silent plain-append fallback would reintroduce the lost-ack
+            # duplication that issue #285 closes.
+            caps = self._capabilities
+            if caps is None:
+                raise AdbcConfigurationError(
+                    str(
+                        undeclared_capability_error(
+                            "merge_form",
+                            need=f"keyless insert on {state.address} "
+                            f"requires stage-MERGE dedup",
+                        )
+                    )
+                )
+            if not caps.supports_upsert:
+                raise AdbcConfigurationError(
+                    f"Keyless insert on {state.address} requires stage-MERGE "
+                    f"dedup, but the connector declares "
+                    f"sql_capabilities.merge_form 'none' — this system has no "
+                    f"merge statement. Declare a primary key for this stream "
+                    f"or fix the connector's declaration."
+                )
         if not state.endpoint_document:
             raise SchemaConfigurationError(
                 f"destination stream for {state.address} "
@@ -2027,23 +2102,47 @@ class GenericSQLConnector(BaseDestinationHandler):
     ) -> None:
         """Guard bare-name ingest against a session/target schema mismatch.
 
-        When the dialect opts out of per-statement ingest targeting (no
-        ``db_schema_name`` in *ingest_kwargs*) while the address carries
-        a schema, ``adbc_ingest`` resolves the bare table name against
-        the connection's session schema. The invariant *session schema
-        == target schema* holds by construction today (issue #377); this
-        probe makes a future divergence a hard error instead of a silent
-        append into a same-named table in the wrong schema.
+        The declared ``sql_capabilities.session_targeting`` is the
+        authority for which regime a bare-name operation is in. When the
+        ingest kwargs carry no ``db_schema_name`` while the address has a
+        schema, ``adbc_ingest`` resolves the bare table name against the
+        connection's session schema; the invariant *session schema ==
+        target schema* (issue #377) is then checked for a declared
+        ``session_default`` system, refused as undeclared when no
+        declaration exists, and reported as a connector defect for a
+        declared ``per_statement`` system whose dialect failed to target
+        the statement.
 
-        Probes :meth:`SqlDialect.adbc_session_schema_sql` once per
-        connection (cached; reset whenever ``_adbc_conn`` is dropped)
-        and compares the dialect-normalized result against
-        ``address.schema``. Runs under ``_adbc_op_lock`` inside the
-        caller's poison/reclassify scope, so a failing probe is handled
-        like any other ingest-path driver error.
+        The ``session_default`` probe runs
+        :meth:`SqlDialect.adbc_session_schema_sql` once per connection
+        (cached; reset whenever ``_adbc_conn`` is dropped) and compares
+        the dialect-normalized result against ``address.schema``. Runs
+        under ``_adbc_op_lock`` inside the caller's poison/reclassify
+        scope, so a failing probe is handled like any other ingest-path
+        driver error.
         """
         if "db_schema_name" in ingest_kwargs or not address.schema:
             return
+        caps = self._capabilities
+        if caps is None:
+            raise AdbcConfigurationError(
+                str(
+                    undeclared_capability_error(
+                        "session_targeting",
+                        need=f"a bare-name ADBC operation against {address} "
+                        f"must know whether the session or the statement "
+                        f"selects the schema",
+                    )
+                )
+            )
+        if caps.session_targeting == "per_statement":
+            raise AdbcConfigurationError(
+                f"connector declares sql_capabilities.session_targeting "
+                f"'per_statement', but dialect {self.dialect.name!r} "
+                f"returned no db_schema_name targeting kwarg for {address} "
+                f"— the declaration and the dialect's adbc_ingest_kwargs "
+                f"disagree; fix the connector."
+            )
         if not self._adbc_session_schema_known:
             cursor = conn.cursor()
             try:
@@ -2459,6 +2558,10 @@ class GenericSQLConnector(BaseDestinationHandler):
         table_name = database_object.get("name")
         if not table_name:
             raise ReadError("endpoint document missing database_object.name")
+        # read_batches is a runtime-taking entry point (no connect()), so
+        # the declared capabilities bind here — before the address gate
+        # below consults them.
+        self._bind_capabilities(runtime)
         # No default schema: dialects without a schema concept (sqlite,
         # duckdb) would emit invalid ``public.<table>`` references if we
         # forced one. When the endpoint omits ``schema``, QueryBuilder emits
@@ -2466,7 +2569,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         # current schema/database. The address normalizes every component
         # once (catalog, schema, AND table) so both transports and the
         # destination resolve the same physical objects; a catalog the
-        # dialect cannot address fails loud here, before any extraction.
+        # system cannot address fails loud here, before any extraction.
         try:
             address = self.dialect.table_address(
                 table_name,
@@ -2888,11 +2991,13 @@ class GenericSQLConnector(BaseDestinationHandler):
     async def list_schemas(
         self, runtime: ConnectionRuntime, *, catalog: str = ""
     ) -> list[str]:
+        self._bind_capabilities(runtime)
         return await _sql_list_schemas(runtime, dialect=self.dialect, catalog=catalog)
 
     async def list_tables(
         self, runtime: ConnectionRuntime, schema: str, *, catalog: str = ""
     ) -> list[str]:
+        self._bind_capabilities(runtime)
         return await _sql_list_tables(
             runtime, schema, dialect=self.dialect, catalog=catalog
         )
@@ -2900,6 +3005,7 @@ class GenericSQLConnector(BaseDestinationHandler):
     async def list_columns(
         self, runtime: ConnectionRuntime, schema: str, table: str, *, catalog: str = ""
     ) -> tuple[list[ColumnDef], list[str]]:
+        self._bind_capabilities(runtime)
         return await _sql_list_columns(
             runtime, schema, table, dialect=self.dialect, catalog=catalog
         )
@@ -2914,6 +3020,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         *,
         catalog: str = "",
     ) -> None:
+        self._bind_capabilities(runtime)
         await _sql_create_table(
             runtime,
             schema,
