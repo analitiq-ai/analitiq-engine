@@ -25,7 +25,7 @@ from cdk.adbc_registry import AdbcConfigurationError
 from cdk.sql import adbc_backend as backend_module
 from cdk.sql.adbc_backend import AdbcBackend
 from cdk.sql.capabilities import SqlCapabilities
-from cdk.sql.dialects import SqlDialect, TableAddress
+from cdk.sql.dialects import SqlDialect
 from cdk.sql.write_plan import build_stage_write_plan
 
 from .conftest import caps_block
@@ -54,8 +54,7 @@ class _StageDialect(SqlDialect):
 
     def merge_statement_sql(self, stage, target, conflict_keys, columns):
         on = " AND ".join(
-            f"t.{self.quote_ident(k)} = s.{self.quote_ident(k)}"
-            for k in conflict_keys
+            f"t.{self.quote_ident(k)} = s.{self.quote_ident(k)}" for k in conflict_keys
         )
         return (
             f"MERGE INTO {self.quote_table(target)} t "
@@ -232,9 +231,7 @@ class TestStepwiseCycle:
 
     def _run(self, *, truncate_now=False, bulk_load="adbc_ingest"):
         dialect = _StageDialect()
-        caps = _caps(
-            bulk_load=bulk_load, stage_scope="real", transactional_ddl=False
-        )
+        caps = _caps(bulk_load=bulk_load, stage_scope="real", transactional_ddl=False)
         dialect.capabilities = caps
         plan = _plan(
             dialect,
@@ -243,9 +240,7 @@ class TestStepwiseCycle:
             truncate_now=truncate_now,
         )
         conn = _FakeConn()
-        _backend(dialect, conn, bulk_load=bulk_load)._execute_write_sync(
-            plan, _batch()
-        )
+        _backend(dialect, conn, bulk_load=bulk_load)._execute_write_sync(plan, _batch())
         return plan, conn
 
     def test_step_order_with_preflight_drop(self):
@@ -451,7 +446,9 @@ class TestLandingMechanisms:
                 dialect, conn, bulk_load="load_job", runtime=_FakeRuntime([])
             )._execute_write_sync(plan, _batch())
         assert conn.executemany_params == [[(1, "a"), (2, "b")]]
-        assert any("declined the declared bulk land" in r.message for r in caplog.records)
+        assert any(
+            "declined the declared bulk land" in r.message for r in caplog.records
+        )
 
 
 class TestSessionSchemaGuard:
@@ -463,9 +460,7 @@ class TestSessionSchemaGuard:
 
     def _setup(self, session_schema, *, dialect_cls=_SessionDefaultDialect, **caps_kw):
         dialect = dialect_cls()
-        caps = _caps(
-            session_targeting="session_default", stage_scope="real", **caps_kw
-        )
+        caps = _caps(session_targeting="session_default", stage_scope="real", **caps_kw)
         dialect.capabilities = caps
         plan = _plan(dialect, caps)
         conn = _FakeConn(
@@ -653,11 +648,7 @@ class TestSuccessPathDropRules:
     @staticmethod
     def _post_mode_drops(plan, conn):
         mode_at = conn.statements.index(plan.mode_sql)
-        return [
-            s
-            for s in conn.statements[mode_at + 1 :]
-            if s == plan.drop_stage_sql
-        ]
+        return [s for s in conn.statements[mode_at + 1 :] if s == plan.drop_stage_sql]
 
     def test_single_drop_success_no_retry_no_poison(self, caplog):
         with caplog.at_level(logging.INFO, logger=backend_module.logger.name):
@@ -774,9 +765,7 @@ class TestConnectionLifecycle:
         plan = _plan(dialect, caps)
 
         first = _FakeConn(
-            execute_hook=lambda sql: (_ for _ in ()).throw(
-                OperationalError("down")
-            )
+            execute_hook=lambda sql: (_ for _ in ()).throw(OperationalError("down"))
         )
         second = _FakeConn()
         runtime = _FakeRuntime([second])
@@ -807,9 +796,7 @@ class TestDdlAndProbes:
     @pytest.mark.asyncio
     async def test_run_ddl_reclassifies_fatal_and_poisons(self):
         conn = _FakeConn(
-            execute_hook=lambda sql: (_ for _ in ()).throw(
-                ProgrammingError("bad ddl")
-            )
+            execute_hook=lambda sql: (_ for _ in ()).throw(ProgrammingError("bad ddl"))
         )
         backend = _backend(_StageDialect(), conn)
         with pytest.raises(AdbcConfigurationError, match="ProgrammingError"):
@@ -837,9 +824,7 @@ class TestDdlAndProbes:
         assert conn.statements == ["SELECT 1"]
 
         sick = _FakeConn(
-            execute_hook=lambda sql: (_ for _ in ()).throw(
-                OperationalError("down")
-            )
+            execute_hook=lambda sql: (_ for _ in ()).throw(OperationalError("down"))
         )
         backend._conn = sick
         with pytest.raises(OperationalError):

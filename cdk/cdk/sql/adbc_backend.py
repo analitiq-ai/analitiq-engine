@@ -284,7 +284,7 @@ class AdbcBackend(TransportBackend):
     def _executemany_land(
         self, cursor: Any, plan: StageWritePlan, batch: pa.RecordBatch
     ) -> None:
-        """Default landing: one executemany ``INSERT`` in plan column order."""
+        """Land via one executemany ``INSERT`` in plan column order (the default)."""
         cols = ", ".join(self._dialect.quote_ident(c) for c in plan.columns)
         placeholders = ", ".join("?" for _ in plan.columns)
         # Dialect-quoted identifiers only; values bind via qmark params.
@@ -507,7 +507,9 @@ class AdbcBackend(TransportBackend):
 
     def _target_columns_sync(self, target: TableAddress) -> tuple[str, ...]:
         # Dialect-quoted identifiers only; no user values.
-        sql = f"SELECT * FROM {self._dialect.quote_table(target)} WHERE 1=0"  # nosec B608
+        sql = (
+            f"SELECT * FROM {self._dialect.quote_table(target)} WHERE 1=0"  # nosec B608
+        )
         with self._op_lock:
             conn = self._require_conn_sync()
             try:

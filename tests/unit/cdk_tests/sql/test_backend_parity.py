@@ -81,9 +81,7 @@ class _SqliteAdbcCursor:
         assert mode == "append"
         cols = ", ".join(f'"{c}"' for c in batch.schema.names)
         placeholders = ", ".join("?" for _ in batch.schema.names)
-        rows = [
-            tuple(row[c] for c in batch.schema.names) for row in batch.to_pylist()
-        ]
+        rows = [tuple(row[c] for c in batch.schema.names) for row in batch.to_pylist()]
         self._cursor.executemany(
             f'INSERT INTO "{table}" ({cols}) VALUES ({placeholders})', rows
         )
