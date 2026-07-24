@@ -59,12 +59,19 @@ def _readable():
     )
 
 
+def _runtime():
+    """Runtime double declaring no error taxonomy (issue #401)."""
+    runtime = MagicMock()
+    runtime.connector_id = "demo"
+    runtime.declared_error_map = None
+    runtime.close = AsyncMock()
+    return runtime
+
+
 async def _run(responses, *, checkpoint=None, captured_requests=None):
     """Drive read_batches against a canned worker response stream."""
     checkpoint = checkpoint or _FakeCheckpoint()
-    runtime = MagicMock()
-    runtime.connector_id = "demo"
-    runtime.close = AsyncMock()
+    runtime = _runtime()
     handle = MagicMock()
     handle.target = "unix:/tmp/w/worker.sock"
     handle.close = AsyncMock()
@@ -196,6 +203,46 @@ class TestWorkerReadable:
             assert tag.stage is FailureStage.SOURCE_EXTRACT, error_type
             assert tag.code is ErrorCode.CONFIG_INVALID, error_type
 
+    async def test_declared_category_names_the_code_across_the_boundary(self):
+        # The worker classified at the birth site and sent the declared
+        # category on the wire (issue #401); the engine derives the
+        # published code from it instead of flooring to CONFIG_INVALID.
+        responses = [
+            ReadResponse(
+                error=ReadErrorMsg(
+                    message="status 401",
+                    deterministic=True,
+                    error_type="ReadError",
+                    declared_category="auth",
+                )
+            )
+        ]
+        with pytest.raises(ReadError) as exc_info:
+            await _run(responses)
+        tag = read_failure_tag(exc_info.value)
+        assert tag is not None
+        assert tag.code is ErrorCode.SOURCE_AUTH_FAILED
+
+    async def test_declared_category_tags_a_retryable_error(self):
+        # A declared rate_limited 403 that exhausts retries must report
+        # RATE_LIMITED, not the text split's auth reading of "403". The
+        # tag rides the retryable error; retry machinery ignores tags.
+        responses = [
+            ReadResponse(
+                error=ReadErrorMsg(
+                    message="status 403",
+                    deterministic=False,
+                    error_type="TransientReadError",
+                    declared_category="rate_limited",
+                )
+            )
+        ]
+        with pytest.raises(RuntimeError) as exc_info:
+            await _run(responses)
+        tag = read_failure_tag(exc_info.value)
+        assert tag is not None
+        assert tag.code is ErrorCode.RATE_LIMITED
+
     async def test_retryable_error_raises_runtime_error(self):
         responses = [
             ReadResponse(
@@ -223,9 +270,7 @@ class TestWorkerReadable:
             )
         ]
         checkpoint = _FakeCheckpoint()
-        runtime = MagicMock()
-        runtime.connector_id = "demo"
-        runtime.close = AsyncMock()
+        runtime = _runtime()
         handle = MagicMock()
         handle.target = "unix:/tmp/w/worker.sock"
         handle.close = AsyncMock()

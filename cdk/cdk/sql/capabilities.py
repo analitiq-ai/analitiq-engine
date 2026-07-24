@@ -12,15 +12,17 @@ declared block into the resolved worker payload (the same channel that
 delivers transport specs), and both sides parse it here — fail-loud, at the
 process boundary, so a malformed or partially-declared block never reaches a
 consumer site. ``None`` (no block declared) is legal at parse time; every
-consumer treats a needed-but-undeclared fact as a loud configuration error
-via :func:`undeclared_capability_error` — no base-class default ever fills
-in a guess.
+consumer treats a needed-but-undeclared shape fact as a loud configuration
+error via :func:`undeclared_capability_error` — no base-class default ever
+fills in a guess. The one exception is the ``limits`` member (issue #401),
+whose absence is additive: an undeclared cap means "no declared cap" and
+current behavior applies.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 CATALOG_VALUES = ("none", "read", "full")
@@ -85,6 +87,31 @@ class StageCapabilities:
 
 
 @dataclass(frozen=True)
+class SqlLimits:
+    """Declared system limits (``sql_capabilities.limits``, issue #401).
+
+    Additive semantics, unlike the shape facts: an undeclared limit is
+    ``None`` — no declared cap, current behavior applies. It never blocks a
+    write; a runtime failure caused by an undeclared cap is a connector
+    defect, fixed by declaring the cap.
+
+    - ``max_bind_params``: the statement's bind-parameter ceiling (MSSQL
+      2100, SQLite 999/32766). The executemany stage landing chunks rows so
+      no statement exceeds it.
+    - ``max_identifier_len``: the identifier byte ceiling. Stage-name
+      rendering and DDL validate against it instead of assuming the
+      dialect default.
+    """
+
+    max_bind_params: int | None
+    max_identifier_len: int | None
+
+    @classmethod
+    def undeclared(cls) -> SqlLimits:
+        return cls(max_bind_params=None, max_identifier_len=None)
+
+
+@dataclass(frozen=True)
 class SqlCapabilities:
     """Typed view of a connector's declared ``sql_capabilities`` block."""
 
@@ -93,6 +120,7 @@ class SqlCapabilities:
     merge_form: str
     bulk_load: str
     stage: StageCapabilities
+    limits: SqlLimits = field(default_factory=SqlLimits.undeclared)
 
     @property
     def supports_upsert(self) -> bool:
@@ -107,21 +135,24 @@ class SqlCapabilities:
 
         The published contract validates the same shape engine-side; this
         parse re-validates because the block crosses the process boundary in
-        the resolved worker payload. All five facts are required inside a
-        declared block — a partial declaration is a configuration error, not
-        a set of implicit defaults.
+        the resolved worker payload. All five shape facts are required inside
+        a declared block — a partial declaration is a configuration error,
+        not a set of implicit defaults. ``limits`` (issue #401) is the one
+        additive member: caps are optional facts whose absence means "no
+        declared cap", never a refusal.
         """
         if not isinstance(block, Mapping):
             raise SqlCapabilitiesError(
                 f"sql_capabilities in {source} must be an object, "
                 f"got {type(block).__name__}"
             )
-        known = {"catalog", "session_targeting", "merge_form", "bulk_load", "stage"}
-        unknown = set(block) - known
+        required = {"catalog", "session_targeting", "merge_form", "bulk_load", "stage"}
+        unknown = set(block) - required - {"limits"}
         if unknown:
             raise SqlCapabilitiesError(
                 f"sql_capabilities in {source} carries unknown fields "
-                f"{sorted(unknown)}; expected exactly {sorted(known)}"
+                f"{sorted(unknown)}; expected {sorted(required)} plus "
+                f"optional 'limits'"
             )
         stage_block = block.get("stage")
         if not isinstance(stage_block, Mapping):
@@ -148,6 +179,39 @@ class SqlCapabilities:
                 block.get("bulk_load"), "bulk_load", BULK_LOAD_VALUES, source=source
             ),
             stage=stage,
+            limits=cls._parse_limits(block.get("limits"), source=source),
+        )
+
+    @staticmethod
+    def _parse_limits(block: Any, *, source: str) -> SqlLimits:
+        if block is None:
+            return SqlLimits.undeclared()
+        if not isinstance(block, Mapping):
+            raise SqlCapabilitiesError(
+                f"sql_capabilities.limits in {source} must be an object, "
+                f"got {type(block).__name__}"
+            )
+        known = {"max_bind_params", "max_identifier_len"}
+        unknown = set(block) - known
+        if unknown:
+            raise SqlCapabilitiesError(
+                f"sql_capabilities.limits in {source} carries unknown fields "
+                f"{sorted(unknown)}; expected a subset of {sorted(known)}"
+            )
+        values: dict[str, int | None] = {}
+        for name in known:
+            value = block.get(name)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 1
+            ):
+                raise SqlCapabilitiesError(
+                    f"sql_capabilities.limits.{name} in {source} is "
+                    f"{value!r}; expected a positive integer"
+                )
+            values[name] = value
+        return SqlLimits(
+            max_bind_params=values["max_bind_params"],
+            max_identifier_len=values["max_identifier_len"],
         )
 
     @staticmethod

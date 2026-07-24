@@ -37,6 +37,7 @@ class _FakeRuntime:
         self.driver = driver
         self.connector_id = driver
         self.declared_sql_capabilities = None
+        self.declared_error_map = None
         self.engine = engine
         self.close = AsyncMock()
 

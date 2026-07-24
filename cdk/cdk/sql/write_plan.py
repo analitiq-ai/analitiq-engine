@@ -28,6 +28,59 @@ from .exceptions import SchemaConfigurationError
 
 logger = logging.getLogger(__name__)
 
+
+def identifier_budget(caps: SqlCapabilities | None, dialect: SqlDialect) -> int:
+    """Return the identifier byte budget: declared cap over dialect default.
+
+    The declared ``sql_capabilities.limits.max_identifier_len`` (issue #401)
+    makes the bound a per-system fact; an undeclared cap keeps the dialect's
+    assumed ``max_identifier_length`` — additive absence, current behavior.
+    This budget bounds the stage-name grammar, which always truncates to
+    something; DDL rendering (``cdk.sql.ddl``) separately refuses over-cap
+    identifiers, and only against a *declared* cap — a refusal from an
+    assumed default would be a guess.
+    """
+    if caps is not None and caps.limits.max_identifier_len is not None:
+        return caps.limits.max_identifier_len
+    return dialect.max_identifier_length
+
+
+def rows_per_statement(
+    caps: SqlCapabilities,
+    columns: Sequence[str],
+    *,
+    target: TableAddress,
+    bindless_landing: bool = False,
+) -> int | None:
+    """Rows one landing statement may carry under the declared bind cap.
+
+    ``floor(max_bind_params / column_count)`` when the connector declares
+    ``sql_capabilities.limits.max_bind_params``; ``None`` when undeclared
+    (no chunking, current behavior). A cap too small to hold even one row
+    is refused loudly — no statement shape can honor it. The refusal and
+    the chunk math apply only where binds can actually flow:
+    ``bindless_landing`` marks the one landing that can never reach the
+    executemany path (ADBC transport with declared ``adbc_ingest`` — Arrow
+    goes straight to the driver, no bind parameters, no decline fallback),
+    so a declared cap must not block a wide-table write there. A declared
+    ``bulk_land`` mechanism is NOT bindless: a decline falls back to
+    executemany, where the cap holds.
+    """
+    if bindless_landing:
+        return None
+    cap = caps.limits.max_bind_params
+    if cap is None:
+        return None
+    per_statement = cap // len(columns)
+    if per_statement < 1:
+        raise SchemaConfigurationError(
+            f"declared sql_capabilities.limits.max_bind_params {cap} cannot "
+            f"hold one row of {len(columns)} columns for {target}; a single "
+            f"row exceeds the system's bind-parameter ceiling"
+        )
+    return per_statement
+
+
 _STAGE_PREFIX = "_analitiq_stage_"
 
 WriteModeName = str  # "insert" | "upsert" | "truncate_insert" (facade-owned)
@@ -69,9 +122,10 @@ def stage_table_name(
         # exists to prevent. A budget this tight is a dialect authoring
         # error; refuse it loudly.
         raise SchemaConfigurationError(
-            f"dialect identifier budget {max_identifier_length} cannot hold "
+            f"identifier budget {max_identifier_length} cannot hold "
             f"the {len(head)}-byte stage-name prefix and uniqueness token; "
-            f"fix the dialect's max_identifier_length"
+            f"fix the declared sql_capabilities.limits.max_identifier_len "
+            f"or the dialect's max_identifier_length"
         )
     tail_budget = max_identifier_length - len(head) - 1
     if tail_budget <= 0 or not target_table:
@@ -185,6 +239,7 @@ def build_stage_write_plan(
     run_id: str,
     stream_id: str,
     batch_seq: int,
+    bindless_landing: bool = False,
 ) -> StageWritePlan:
     """Assemble the complete plan for one batch write.
 
@@ -198,7 +253,7 @@ def build_stage_write_plan(
         run_id=run_id,
         stream_id=stream_id,
         batch_seq=batch_seq,
-        max_identifier_length=dialect.max_identifier_length,
+        max_identifier_length=identifier_budget(caps, dialect),
     )
     stage = _stage_address(dialect, caps, target, stage_name)
     temp = caps.stage.scope == "temp"
@@ -238,4 +293,7 @@ def build_stage_write_plan(
         mode_sql=mode_sql,
         drop_stage_sql=f"DROP TABLE IF EXISTS {dialect.quote_table(stage)}",
         columns=tuple(columns),
+        rows_per_statement=rows_per_statement(
+            caps, columns, target=target, bindless_landing=bindless_landing
+        ),
     )

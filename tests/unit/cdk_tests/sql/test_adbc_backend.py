@@ -180,6 +180,8 @@ class _FakeRuntime:
     def __init__(self, conns):
         self._conns = list(conns)
         self.opened = 0
+        self.connector_id = "demo"
+        self.declared_error_map = None
 
     def open_adbc_connection(self):
         self.opened += 1

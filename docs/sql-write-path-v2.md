@@ -277,7 +277,8 @@ conformance, unlike the operation capabilities the connector-module ADR
 rightly refuses to declare — so they must be declared as data.
 
 A schema-validated block in `connector.json` (contract change tracked in
-#390; published-schema version bump coordinated there):
+#390; the v2 revision below in #401; published-schema version bump
+coordinated as one bump):
 
 ```json
 "sql_capabilities": {
@@ -290,14 +291,25 @@ A schema-validated block in `connector.json` (contract change tracked in
     "schema": "target" | "dedicated",
     "dedicated_schema": "<name, required iff schema is dedicated>",
     "transactional_ddl": true | false
+  },
+  "limits": {
+    "max_bind_params": 2100,
+    "max_identifier_len": 63
   }
 }
 ```
 
-and one connector-level (not SQL-specific) declaration for §8:
+and the connector-level (not SQL-specific) declarations:
 
 ```json
-"write_unit": { "rows": 200000, "bytes": 33554432 }
+"write_unit": { "rows": 200000, "bytes": 33554432 },
+"concurrency": { "max_connections": 8 },
+"error_map": {
+  "sqlstate":    { "08": "unreachable", "28000": "auth", "23": "write_rejected" },
+  "exception":   { "OperationalError": "transient" },
+  "vendor_code": { "1045": "auth" },
+  "http":        { "429": "rate_limited", "401": "auth" }
+}
 ```
 
 Properties:
@@ -330,6 +342,42 @@ Properties:
   any destination whose write cost is per-write-operation (file/S3 sinks
   included) may declare it, and the engine consumes it transport-agnostically
   (§8). Absent means "no preference": the engine does not coalesce.
+- **The #401 additions are additive, not refuse-don't-guess.** A missing
+  `merge_form` blocks an upsert; a missing limit or error mapping cannot
+  block anything — absence means "no declared cap / no declared mapping" and
+  current behavior applies. A runtime failure caused by an undeclared cap or
+  mapping is a connector defect, fixed by declaring it — never worked around
+  in the engine. Declared content is still validated fail-loud
+  (`cdk.sql.capabilities` for `limits`, `cdk.declarations` for `error_map`
+  and `concurrency`) at config load on the trusted side; `error_map` and
+  `limits` re-validate where the resolved payload is parsed (`concurrency`
+  has no worker-side consumer — the engine's fan-out is its only reader).
+- **`error_map` declares facts, never verdicts.** The value vocabulary is
+  engine-owned — `transient | config | auth | unreachable | rate_limited |
+  write_rejected` — and the engine alone derives `AckStatus`,
+  `FailureCategory`, and `ErrorCode` from it (the per-context verdict
+  tables in `cdk.declarations`, the same trust rule as retry semantics,
+  §9). Matching happens at the failure's birth site against the immediate
+  exception (plus at most its single explicit driver link — SQLAlchemy's
+  `orig` or `raise ... from`); the verdict then crosses process
+  boundaries as structured signals (the worker's deterministic flag and
+  `declared_category` wire field, the ack's failure category) — never
+  re-derived downstream from chains or text. The heuristics are demoted
+  to last resort, per context: the read path resolves declared verdicts
+  (the birth-site category on the typed error, then the map) → sanctioned
+  typed errors; the write ack ladder resolves its typed engine errors
+  (type-map, dialect, TLS — engine contracts a driver map must not
+  re-route) → declared map → class-name heuristic; the ADBC boundary and
+  both HTTP sites resolve declared map → built-in heuristic. The
+  engine-side classifiers log when a text heuristic decided.
+- **`limits` consumption.** The executemany stage landing chunks rows by
+  `floor(max_bind_params / column_count)` (`StageWritePlan.rows_per_statement`,
+  applied identically by both transport backends); stage-name rendering and
+  `CREATE TABLE` DDL validate identifiers against `max_identifier_len`
+  instead of assuming the dialect default.
+- **`concurrency` consumption.** The engine's stream fan-out paces streams
+  sharing a source connection to at most `max_connections` concurrent —
+  connector-level because API systems have connection ceilings too.
 
 ## 6. Stage lifecycle
 

@@ -51,6 +51,7 @@ from analitiq.contracts.stream import Replication as ContractReplication
 from pydantic import BaseModel, TypeAdapter
 
 from cdk.connection_runtime import ConnectionRuntime
+from cdk.declarations import parse_declared_concurrency, parse_declared_error_map
 from cdk.secrets import SchemeSecretsResolver, SecretsResolver
 from cdk.sql.capabilities import parse_declared_capabilities
 from cdk.type_map import (
@@ -445,6 +446,13 @@ class PipelineConfigPrep:
         # their consumer sites.
         parse_declared_capabilities(
             document.get("sql_capabilities"), source=str(connector_file)
+        )
+        # Same early, trusted-side parse for the connector-level declared
+        # facts (issue #401). Absence is additive; declared content is
+        # validated fail-loud here.
+        parse_declared_error_map(document.get("error_map"), source=str(connector_file))
+        parse_declared_concurrency(
+            document.get("concurrency"), source=str(connector_file)
         )
         self._loaded_connectors[connector_id] = document
 

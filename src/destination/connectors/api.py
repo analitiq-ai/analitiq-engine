@@ -29,6 +29,7 @@ from pydantic import ValidationError
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult, reject_batch
 from cdk.connection_runtime import ConnectionRuntime
+from cdk.declarations import DECLARED_WRITE_VERDICTS, ErrorMap, error_map_for
 from cdk.json_utils import decode_json_fields
 from cdk.rate_limiter import RateLimiter
 from cdk.request_binding import (
@@ -37,7 +38,14 @@ from cdk.request_binding import (
     resolve_param_defaults,
 )
 from cdk.resolver import Resolver
-from cdk.types import AckStatus, Cursor, RetrySemantics, RetryVerdict, SchemaSpec
+from cdk.types import (
+    AckStatus,
+    Cursor,
+    FailureCategory,
+    RetrySemantics,
+    RetryVerdict,
+    SchemaSpec,
+)
 
 from ...shared.http_utils import join_url
 
@@ -274,6 +282,55 @@ def _classify_http_error(
     return AckStatus.ACK_STATUS_RETRYABLE_FAILURE
 
 
+def _http_verdict(
+    exc: aiohttp.ClientError | asyncio.TimeoutError,
+    error_map: "ErrorMap | None",
+) -> tuple["AckStatus", "FailureCategory"]:
+    """Ack verdict for a transport error: declared map first (issue #401).
+
+    The connector's declared ``http`` family classifies a response status,
+    and its ``exception`` family classifies the non-response transport
+    errors that carry no status (TLS/certificate failures, payload errors,
+    timeouts); the engine-owned write verdict table derives both the ack
+    status and the declared failure category — which rides the ack to the
+    engine, where ``classify_destination_failure`` reads it structurally
+    instead of falling back to text. An unclaimed error keeps the built-in
+    4xx heuristic with an UNSPECIFIED category, exactly as before. The
+    families are disjoint by error shape: a response error resolves by its
+    status only (the concrete HTTP fact), a non-response transport error
+    by the exception family only.
+    """
+    if error_map is not None:
+        if isinstance(exc, aiohttp.ClientResponseError):
+            # The status IS the concrete fact for a response error: an
+            # unmapped status falls to the built-in 4xx heuristic, never
+            # to a broad declared exception class — otherwise
+            # exception.ClientError (meant for status-less transport
+            # blips) would claim deterministic 4xx rejections.
+            match = error_map.match_http(exc.status)
+            if match is not None:
+                logger.info(
+                    "declared error_map classified HTTP %d -> %s",
+                    exc.status,
+                    match.category,
+                )
+                return DECLARED_WRITE_VERDICTS[match.category]
+        else:
+            match = error_map.match_exception(exc)
+            if match is not None:
+                logger.info(
+                    "declared error_map classified the transport error: " "%s %s -> %s",
+                    match.family,
+                    match.identifier,
+                    match.category,
+                )
+                return DECLARED_WRITE_VERDICTS[match.category]
+    return (
+        _classify_http_error(exc),
+        FailureCategory.FAILURE_CATEGORY_UNSPECIFIED,
+    )
+
+
 def _content_idempotency_key(record: Mapping[str, Any]) -> str:
     """Full-content hash used as the idempotency key in upsert mode.
 
@@ -387,6 +444,12 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
         # Rate limiter
         self._rate_limiter: RateLimiter | None = None
+
+        # The connector's declared error taxonomy (issue #401), parsed at
+        # connect(). Its http family classifies a transport error before
+        # the built-in 4xx heuristic; None keeps current behavior
+        # (additive absence).
+        self._error_map: ErrorMap | None = None
 
         # Per-request value-expression resolver, built from the connection
         # runtime at connect() time. Used only when a stream declares a
@@ -511,6 +574,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
         """
         self._runtime = runtime
         runtime.acquire()
+        self._error_map = error_map_for(runtime)
         await runtime.materialize()
         self._base_url = runtime.base_url
         self._rate_limiter = runtime.rate_limiter
@@ -707,13 +771,19 @@ class ApiDestinationHandler(BaseDestinationHandler):
         try:
             decode_json_fields(records, state.json_fields)
             if state.max_records is None:
-                written, failed_ids, failure_detail = await self._write_single_mode(
-                    state, records, record_ids
-                )
+                (
+                    written,
+                    failed_ids,
+                    failure_detail,
+                    failure_category,
+                ) = await self._write_single_mode(state, records, record_ids)
             else:
-                written, failed_ids, failure_detail = await self._write_chunked_mode(
-                    state, records, record_ids
-                )
+                (
+                    written,
+                    failed_ids,
+                    failure_detail,
+                    failure_category,
+                ) = await self._write_chunked_mode(state, records, record_ids)
 
             logger.info(
                 f"API wrote batch {batch_seq}: {written}/{len(records)} records"
@@ -724,15 +794,17 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 total=len(records),
                 cursor=cursor,
                 failure_detail=failure_detail,
+                failure_category=failure_category,
             )
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            status = _classify_http_error(e)
+            status, failure_category = _http_verdict(e, self._error_map)
             logger.error("Transport error writing to API: %s", e, exc_info=True)
             return BatchWriteResult(
                 status=status,
                 records_written=0,
                 failure_summary=f"{type(e).__name__}: {e}",
+                failure_category=failure_category,
             )
         except Exception as e:
             logger.error("Fatal error writing to API: %s", e, exc_info=True)
@@ -795,6 +867,9 @@ class ApiDestinationHandler(BaseDestinationHandler):
         total: int,
         cursor: Cursor | None,
         failure_detail: str = "",
+        failure_category: FailureCategory = (
+            FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+        ),
     ) -> BatchWriteResult:
         """One partial-failure verdict shared by every write mode.
 
@@ -806,6 +881,9 @@ class ApiDestinationHandler(BaseDestinationHandler):
         carries the first per-record failure reason into the summary — the
         bare count crosses the wire but the reason otherwise stays in this
         container's logs, leaving the engine-side operator nothing to act on.
+        ``failure_category`` carries the first failure's declared category
+        (issue #401) so a declared verdict is not lost to the engine's text
+        fallback on the per-record and chunked paths.
         """
         if written == total and not failed_record_ids:
             return BatchWriteResult(
@@ -822,6 +900,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
             records_written=written,
             failed_record_ids=tuple(failed_record_ids),
             failure_summary=summary,
+            failure_category=failure_category,
         )
 
     async def _write_single_mode(
@@ -829,7 +908,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
         state: _StreamState,
         records: list[dict[str, Any]],
         record_ids: list[str],
-    ) -> tuple[int, list[str], str]:
+    ) -> tuple[int, list[str], str, "FailureCategory"]:
         """Write records one at a time.
 
         Returns ``(written, failed_record_ids, first_failure)`` — the first
@@ -855,6 +934,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
         written = 0
         failed_ids: list[str] = []
         first_failure = ""
+        first_category = FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
 
         for i, record in enumerate(records):
             # Insert keys on the identity-derived record_id (first
@@ -894,7 +974,8 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 await self._send_request(state, body, extra_headers=idempotency_header)
                 written += 1
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                if _classify_http_error(e) == AckStatus.ACK_STATUS_RETRYABLE_FAILURE:
+                status, category = _http_verdict(e, self._error_map)
+                if status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE:
                     logger.warning(
                         "RETRYABLE error on record %s (index %d, %d already written)"
                         " — aborting batch: %s: %s",
@@ -912,6 +993,10 @@ class ApiDestinationHandler(BaseDestinationHandler):
                     e,
                 )
                 failed_ids.append(record_ids[i])
+                if not first_failure:
+                    # The first failure names the batch verdict — its
+                    # declared category rides the ack alongside its reason.
+                    first_category = category
                 first_failure = first_failure or f"{type(e).__name__}: {e}"
 
         if failed_ids:
@@ -919,14 +1004,14 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 f"Failed to write {len(failed_ids)} records: {failed_ids[:5]}..."
             )
 
-        return written, failed_ids, first_failure
+        return written, failed_ids, first_failure, first_category
 
     async def _write_chunked_mode(
         self,
         state: _StreamState,
         records: list[dict[str, Any]],
         record_ids: list[str],
-    ) -> tuple[int, list[str], str]:
+    ) -> tuple[int, list[str], str, "FailureCategory"]:
         """Write records in chunks of at most ``max_records``.
 
         Returns ``(written, failed_record_ids, first_failure)``, matching
@@ -981,15 +1066,17 @@ class ApiDestinationHandler(BaseDestinationHandler):
                     type(e).__name__,
                     e,
                 )
-                return written, list(record_ids[i:]), f"{type(e).__name__}: {e}"
+                return (
+                    written,
+                    list(record_ids[i:]),
+                    f"{type(e).__name__}: {e}",
+                    FailureCategory.FAILURE_CATEGORY_UNSPECIFIED,
+                )
             try:
                 await self._send_request(state, body)
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                if (
-                    written == 0
-                    and _classify_http_error(e)
-                    == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
-                ):
+                status, category = _http_verdict(e, self._error_map)
+                if written == 0 and status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE:
                     # No chunk landed and the error is transient — safe to
                     # retry the whole batch.
                     raise
@@ -1001,10 +1088,15 @@ class ApiDestinationHandler(BaseDestinationHandler):
                     e,
                     exc_info=True,
                 )
-                return written, list(record_ids[i:]), f"{type(e).__name__}: {e}"
+                return (
+                    written,
+                    list(record_ids[i:]),
+                    f"{type(e).__name__}: {e}",
+                    category,
+                )
             written += len(batch)
 
-        return written, [], ""
+        return written, [], "", FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
 
     async def _send_request(
         self,

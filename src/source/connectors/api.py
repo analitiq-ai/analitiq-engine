@@ -61,6 +61,7 @@ from analitiq.contracts.endpoints import (
 from pydantic import ValidationError
 
 from cdk.connection_runtime import ConnectionRuntime
+from cdk.declarations import DECLARED_READ_DETERMINISTIC, ErrorMap, error_map_for
 from cdk.exceptions import TransportSpecError
 from cdk.rate_limiter import RateLimiter
 from cdk.request_binding import bind_param_refs, resolve_param_defaults
@@ -78,8 +79,38 @@ from .response_expr import evaluate_predicate, resolve_response_expr
 logger = logging.getLogger(__name__)
 
 # HTTP statuses retrying can heal: request timeout, rate limit, upstream
-# outages. Everything else non-200 is a deterministic contract/config error.
+# outages. Absent a declared error_map mapping for the status, everything
+# else non-200 is a deterministic contract/config error.
 _TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+
+
+def _read_error_for_status(
+    status: int, detail: str, error_map: ErrorMap | None
+) -> Exception:
+    """Build the read error a non-200 status raises: declared map first (#401).
+
+    The connector's declared ``http`` family classifies the status and the
+    engine-owned read verdict decides retryability (``TransientReadError``
+    retries, ``ReadError`` is deterministic). Only an undeclared status
+    falls to the built-in heuristic: rate limits and upstream outages heal
+    on retry; other statuses (bad request, auth, missing endpoint) do not.
+    """
+    match = error_map.match_http(status) if error_map is not None else None
+    if match is not None:
+        logger.info(
+            "declared error_map classified HTTP %d -> %s", status, match.category
+        )
+        # The declared category rides the typed error so the worker
+        # forwards it across the process boundary (issue #401) — the
+        # engine then reports the declared code instead of re-deriving
+        # from text.
+        if DECLARED_READ_DETERMINISTIC[match.category]:
+            return ReadError(detail, declared_category=match.category)
+        return TransientReadError(detail, declared_category=match.category)
+    if status in _TRANSIENT_HTTP_STATUSES:
+        return TransientReadError(detail)
+    return ReadError(detail)
+
 
 # Lookback subtracted from the stored cursor on an incremental read when the
 # stream has a prior cursor but declares no safety window of its own. It is an
@@ -112,11 +143,17 @@ class APIConnector(BaseConnector):
         self.session: aiohttp.ClientSession | None = None
         self.base_url: str | None = None
         self.rate_limiter: RateLimiter | None = None
+        # The connector's declared error taxonomy (issue #401), parsed at
+        # connect(). Its http family classifies a non-200 status before
+        # the built-in transient-status heuristic; None keeps current
+        # behavior (additive absence).
+        self._error_map: ErrorMap | None = None
 
     async def connect(self, runtime: ConnectionRuntime) -> None:
         try:
             self._runtime = runtime
             runtime.acquire()
+            self._error_map = error_map_for(runtime)
             await runtime.materialize()
             self.session = runtime.session
             self.base_url = runtime.base_url
@@ -1145,11 +1182,7 @@ class APIConnector(BaseConnector):
                     f"API request failed: {method} {url} -> status {response.status}; "
                     f"params={params}; body[:500]={body_snippet!r}"
                 )
-                # Rate limits and upstream outages heal on retry; other
-                # statuses (bad request, auth, missing endpoint) do not.
-                if response.status in _TRANSIENT_HTTP_STATUSES:
-                    raise TransientReadError(detail)
-                raise ReadError(detail)
+                raise _read_error_for_status(response.status, detail, self._error_map)
             data = await response.json(loads=_loads_preserving_decimals)
         self.metrics["records_read"] += 0  # incremented below per page
         records = _extract_records(data, records_ref)

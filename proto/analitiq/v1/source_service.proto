@@ -56,6 +56,14 @@ message ReadError {
   // the engine fails the stream fatally instead of retrying.
   bool deterministic = 2;
   string error_type = 3;
+  // The connector-declared error_map category the worker matched at the
+  // failure's birth site (issue #401): one of the engine-owned vocabulary
+  // values (transient | config | auth | unreachable | rate_limited |
+  // write_rejected), empty when no declared fact claimed the failure.
+  // Carries the declared classification across the process boundary so
+  // the engine reports the declared code instead of re-deriving from
+  // text; the engine alone maps it to a verdict.
+  string declared_category = 4;
 }
 
 message ReadComplete {
