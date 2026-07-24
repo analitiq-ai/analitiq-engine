@@ -220,18 +220,36 @@ def _resolve_connector_class(
     """Resolve the class the way the engine registry would.
 
     Explicit ``class_path`` wins (for running the suite before the
-    package is installed); then the installed entry points (destination
-    first — the unified SQL class serves both roles); then the CDK's
-    generic database fallback. Non-database kinds without an entry point
-    resolve to ``None``: their generic classes live in the engine, and
-    the class-level checks skip.
+    package is installed); then the installed entry points; then the
+    CDK's generic database fallback. Non-database kinds without an
+    entry point resolve to ``None``: their generic classes live in the
+    engine, and the class-level checks skip.
+
+    Both entry-point groups are always loaded: the engine keeps
+    separate source and destination registries, and a
+    registered-but-broken source entry point would otherwise fall back
+    silently to the generic class in production while the suite went
+    green against the destination class. A package registering both
+    groups under different classes is refused — the unified SQL class
+    serves both roles, and a split would let the two roles drift.
     """
     if class_path:
         return _load_class(class_path)
+    loaded: dict[str, type] = {}
     for group in (DESTINATION_GROUP, SOURCE_GROUP):
         cls = _entry_point_class(group, connector_id)
         if cls is not None:
-            return cls
+            loaded[group] = cls
+    if loaded:
+        classes = set(loaded.values())
+        if len(classes) > 1:
+            names = {group: cls.__name__ for group, cls in loaded.items()}
+            raise ConformanceSetupError(
+                f"connector {connector_id!r} registers different classes per "
+                f"entry-point group ({names}); one unified class serves both "
+                f"roles"
+            )
+        return next(iter(classes))
     if kind == "database":
         return GenericSQLConnector
     return None

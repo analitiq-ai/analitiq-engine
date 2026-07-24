@@ -65,16 +65,35 @@ def _declared_driver(target: ConformanceTarget) -> str:
     return driver
 
 
-def _declared_sql_transports(target: ConformanceTarget) -> list[str]:
-    """The SQL transport types the connector declares, fail-loud when none."""
+def _declared_sql_transports(target: ConformanceTarget) -> list[tuple[str, str]]:
+    """Collect ``(transport_type, dialect string)`` per declared SQL transport.
+
+    Each transport is probed with its own block's driver — the engine
+    derives the read dialect from the transport actually materialized,
+    so probing a non-default ADBC transport with the default SQLAlchemy
+    transport's driver would certify SQL the ADBC read never compiles.
+    The dialect string is the driver up to any ``+`` flavour suffix
+    (``postgresql+asyncpg`` reads as ``postgresql``; ADBC driver names
+    carry none). Fail-loud when nothing SQL-shaped is declared or a
+    block declares no driver.
+    """
     transports = target.definition.get("transports") or {}
-    declared: list[str] = []
-    for block in transports.values():
+    declared: list[tuple[str, str]] = []
+    for ref, block in transports.items():
         transport_type = (
             block.get("transport_type") if isinstance(block, dict) else None
         )
-        if transport_type in _SQL_TRANSPORT_TYPES and transport_type not in declared:
-            declared.append(transport_type)
+        if transport_type not in _SQL_TRANSPORT_TYPES:
+            continue
+        raw_driver = block.get("driver")
+        if not isinstance(raw_driver, str) or not raw_driver:
+            pytest.fail(
+                f"transport {ref!r} ({transport_type}) declares no driver; "
+                f"the engine cannot materialize it"
+            )
+        shape = (transport_type, raw_driver.split("+", 1)[0])
+        if shape not in declared:
+            declared.append(shape)
     if not declared:
         pytest.fail(
             f"connector.json declares no SQL transport (sqlalchemy/adbc) in "
@@ -85,7 +104,7 @@ def _declared_sql_transports(target: ConformanceTarget) -> list[str]:
 
 
 def _query_builder(
-    target: ConformanceTarget, dialect: SqlDialect, transport_type: str
+    dialect: SqlDialect, transport_type: str, driver: str
 ) -> QueryBuilder:
     """Build the read-path query builder exactly as the engine does.
 
@@ -95,7 +114,6 @@ def _query_builder(
     paging). Probing any other shape would certify SQL the engine never
     executes.
     """
-    driver = _declared_driver(target)
     try:
         if transport_type == "adbc":
             return QueryBuilder(
@@ -121,14 +139,22 @@ def _query_builder(
         )
 
 
+def test_definition_derives_a_driver(
+    conformance_target: ConformanceTarget,
+) -> None:
+    """The default transport yields a driver the engine can materialize."""
+    require_database(conformance_target)
+    assert _declared_driver(conformance_target)
+
+
 def test_read_query_compiles_on_every_declared_transport(
     conformance_target: ConformanceTarget,
 ) -> None:
     """A plain projection renders in each declared transport's shape."""
     require_database(conformance_target)
     dialect = require_dialect(conformance_target)
-    for transport_type in _declared_sql_transports(conformance_target):
-        builder = _query_builder(conformance_target, dialect, transport_type)
+    for transport_type, driver in _declared_sql_transports(conformance_target):
+        builder = _query_builder(dialect, transport_type, driver)
         sql, _params = builder.build_select_query(
             QueryConfig(
                 schema_name="conformance",
@@ -150,8 +176,8 @@ def test_cursor_read_orders_by_the_cursor_field(
     """
     require_database(conformance_target)
     dialect = require_dialect(conformance_target)
-    for transport_type in _declared_sql_transports(conformance_target):
-        builder = _query_builder(conformance_target, dialect, transport_type)
+    for transport_type, driver in _declared_sql_transports(conformance_target):
+        builder = _query_builder(dialect, transport_type, driver)
         sql, _params = builder.build_select_query(
             QueryConfig(
                 schema_name="conformance",
