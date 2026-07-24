@@ -186,7 +186,7 @@ def test_declared_bulk_and_executemany_land_identically(
         )
     if caps.bulk_load == "adbc_ingest":
         transports = harness.target.declared_transports()
-        default_ref = harness.target.definition.get("default_transport")
+        default_ref = str(harness.target.definition.get("default_transport") or "")
         default_type = (transports.get(default_ref) or {}).get("transport_type")
         if default_type != "adbc":
             pytest.skip(
