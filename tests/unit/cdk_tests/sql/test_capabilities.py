@@ -174,6 +174,23 @@ class _RenderingConnector(GenericSQLConnector):
     dialect_class = _RenderingDialect
 
 
+class _StageRenderingDialect(SqlDialect):
+    """Dialect implementing the ADBC stage DDL hook, as a declaring ADBC
+    connector's package dialect must until #389 replaces the machinery."""
+
+    name = "stage_rendering"
+
+    def adbc_stage_table_sql(self, stage_qualified, target_qualified):
+        return (
+            f"CREATE TABLE {stage_qualified} AS SELECT * FROM "
+            f"{target_qualified} WHERE FALSE"
+        )
+
+
+class _StageRenderingConnector(GenericSQLConnector):
+    dialect_class = _StageRenderingDialect
+
+
 def _upsert_handler(cls=GenericSQLConnector):
     handler = cls()
     handler._connected = True
@@ -283,8 +300,23 @@ class TestConfigureSchemaUpsertGate:
             await handler.configure_schema(_upsert_spec())
 
     @pytest.mark.asyncio
-    async def test_adbc_upsert_with_current_machinery_shape_configures(self):
+    async def test_adbc_upsert_without_stage_renderer_refuses(self):
+        # Declaration/dialect disagreement, ADBC flavor: the stage-MERGE
+        # path renders its stage through adbc_stage_table_sql; a declaring
+        # connector without the override fails at handshake, not on the
+        # first batch.
         handler = _upsert_handler()
+        handler._engine = None
+        handler._adbc_only = True
+        handler._capabilities = SqlCapabilities.from_declaration(
+            caps_block(merge_form="merge", stage_scope="real")
+        )
+        with pytest.raises(AdbcConfigurationError, match="adbc_stage_table_sql"):
+            await handler.configure_schema(_upsert_spec())
+
+    @pytest.mark.asyncio
+    async def test_adbc_upsert_with_current_machinery_shape_configures(self):
+        handler = _upsert_handler(cls=_StageRenderingConnector)
         handler._engine = None
         handler._adbc_only = True
         handler._capabilities = SqlCapabilities.from_declaration(

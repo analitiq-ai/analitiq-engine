@@ -552,6 +552,20 @@ class GenericSQLConnector(BaseDestinationHandler):
             is not SqlDialect.build_sqlalchemy_upsert
         )
 
+    def _dialect_renders_adbc_stage(self) -> bool:
+        """Whether the active dialect implements the stage-table DDL hook.
+
+        The ADBC analog of :meth:`_dialect_renders_sqlalchemy_upsert`: the
+        stage-MERGE path renders its stage through
+        ``adbc_stage_table_sql``, which the neutral base does not
+        implement — a declaring connector without the override would pass
+        the handshake and fatal on the first batch instead.
+        """
+        return (
+            type(self.dialect).adbc_stage_table_sql
+            is not SqlDialect.adbc_stage_table_sql
+        )
+
     @staticmethod
     def _adbc_stage_machinery_honors(caps: SqlCapabilities) -> bool:
         """Whether the current ADBC stage machinery can honor *caps*.
@@ -595,6 +609,13 @@ class GenericSQLConnector(BaseDestinationHandler):
                 f"target schema (declared stage shapes land in #389); "
                 f"refusing rather than staging in an undeclared namespace."
             )
+        if not self._dialect_renders_adbc_stage():
+            raise AdbcConfigurationError(
+                f"{need} needs the stage-MERGE path, but dialect "
+                f"{self.dialect.name!r} does not implement "
+                f"adbc_stage_table_sql — the declaration and the dialect "
+                f"disagree; fix the connector."
+            )
 
     @property
     def supports_upsert(self) -> bool:
@@ -613,7 +634,10 @@ class GenericSQLConnector(BaseDestinationHandler):
         if caps is None or not caps.supports_upsert:
             return False
         if self._adbc_only:
-            return self._adbc_stage_machinery_honors(caps)
+            return (
+                self._adbc_stage_machinery_honors(caps)
+                and self._dialect_renders_adbc_stage()
+            )
         return self._dialect_renders_sqlalchemy_upsert()
 
     @property

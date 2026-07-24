@@ -788,6 +788,14 @@ class TestSupportsUpsert:
         h._capabilities = _caps(merge_form="insert_on_conflict")
         assert h.supports_upsert is False
 
+    def test_adbc_declaration_without_stage_renderer_does_not_advertise(self):
+        # The base dialect has no adbc_stage_table_sql; a declaring
+        # connector without the override cannot run the stage-MERGE path.
+        h = GenericSQLConnector()
+        h._adbc_only = True
+        h._capabilities = _caps(merge_form="merge")
+        assert h.supports_upsert is False
+
     def test_sa_declaration_without_renderer_does_not_advertise(self):
         h = _FixtureConnector()
         h._adbc_only = False
