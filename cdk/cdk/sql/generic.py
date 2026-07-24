@@ -1720,28 +1720,33 @@ class GenericSQLConnector(BaseDestinationHandler):
                 e,
                 exc_info=True,
             )
-            if not self._adbc_only and _is_fatal_adbc_error(e):
-                # Same intent, same verdict on both transports: the ADBC
-                # helpers reclassify the deterministic PEP-249 classes
-                # (ProgrammingError, IntegrityError, DataError,
-                # NotSupportedError) as fatal before they reach this
-                # ladder, and SQLAlchemy's wrapper exceptions carry the
-                # same class names — broken rendered SQL, a duplicate
-                # conflict key inside one source batch, or a constraint
-                # violation cannot heal between retries against an
-                # identical request.
-                return BatchWriteResult(
-                    status=AckStatus.ACK_STATUS_FATAL_FAILURE,
-                    records_written=0,
-                    failure_summary=f"sqlalchemy: {type(e).__name__}: {e}",
-                    failure_category=FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
-                )
+            return self._classify_unexpected_write_error(e)
+
+    def _classify_unexpected_write_error(self, e: Exception) -> BatchWriteResult:
+        """Ack an exception the typed ladder did not claim.
+
+        Same intent, same verdict on both transports: the ADBC helpers
+        reclassify the deterministic PEP-249 classes (ProgrammingError,
+        IntegrityError, DataError, NotSupportedError) as fatal before they
+        reach the ladder, and SQLAlchemy's wrapper exceptions carry the
+        same class names — broken rendered SQL, a duplicate conflict key
+        inside one source batch, or a constraint violation cannot heal
+        between retries against an identical request. Everything else
+        stays retryable.
+        """
+        if not self._adbc_only and _is_fatal_adbc_error(e):
             return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,
-                failure_summary=str(e),
-                failure_category=FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED,
+                failure_summary=f"sqlalchemy: {type(e).__name__}: {e}",
+                failure_category=FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
             )
+        return BatchWriteResult(
+            status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+            records_written=0,
+            failure_summary=str(e),
+            failure_category=FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED,
+        )
 
     async def _truncate_only(self, state: _StreamState) -> None:
         """Empty the target table with no insert (any transport).

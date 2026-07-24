@@ -747,7 +747,7 @@ class TestPrepareSqlAlchemyBatch:
         # byte-stable across engine versions — a canonicalization change
         # here silently breaks dedup continuity against every existing
         # keyless target (historical rows re-insert once, no error).
-        from datetime import date, datetime
+        from datetime import date
         from decimal import Decimal
 
         import pyarrow as pa

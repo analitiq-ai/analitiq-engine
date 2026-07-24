@@ -263,7 +263,8 @@ class SqlAlchemyBackend(TransportBackend):
             raise
         self._drop_stage_after_success(conn, plan)
 
-    def _stage_leftover_note(self, plan: StageWritePlan) -> str:
+    @staticmethod
+    def _stage_leftover_note(plan: StageWritePlan) -> str:
         """Word the honest, scope-accurate consequence of an undropped stage."""
         if plan.scope == "temp":
             return (

@@ -73,7 +73,6 @@ def stage_table_name(
 
 
 def _stage_address(
-    dialect: SqlDialect,
     caps: SqlCapabilities,
     target: TableAddress,
     stage_name: str,
@@ -183,7 +182,7 @@ def build_stage_write_plan(
         batch_seq=batch_seq,
         max_identifier_length=dialect.max_identifier_length,
     )
-    stage = _stage_address(dialect, caps, target, stage_name)
+    stage = _stage_address(caps, target, stage_name)
     temp = caps.stage.scope == "temp"
 
     if write_mode == "upsert":

@@ -319,7 +319,7 @@ class SqlDialect:
         # Composed of dialect-quoted identifiers; no user values.
         return f"DELETE FROM {self.quote_table(target)}"  # nosec B608
 
-    def bulk_land(
+    def bulk_land(  # skipcq: PYL-R0201
         self,
         conn: Any,
         stage: TableAddress,

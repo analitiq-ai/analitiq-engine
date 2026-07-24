@@ -25,7 +25,7 @@ import pytest
 from sqlalchemy import MetaData, Table, create_engine
 from sqlalchemy.pool import StaticPool
 
-from cdk.sql.backend import SqlAlchemyBackend
+from cdk.sql.backend import SqlAlchemyBackend, StageWritePlan
 from cdk.sql.capabilities import SqlCapabilities
 from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.generic import GenericSQLConnector, _StreamState
@@ -431,9 +431,6 @@ class TestNonTransactionalFailureRules:
     def test_drop_failure_after_failed_batch_warns_and_swallows(self, caplog):
         import logging
 
-        from cdk.sql.backend import SqlAlchemyBackend, StageWritePlan
-        from cdk.sql.dialects import TableAddress
-
         backend = SqlAlchemyBackend(_SqliteStageDialect())
         plan = StageWritePlan(
             stage=TableAddress(table="stg"),
@@ -457,9 +454,6 @@ class TestNonTransactionalFailureRules:
 
     def test_rollback_failure_says_the_drop_was_never_attempted(self, caplog):
         import logging
-
-        from cdk.sql.backend import SqlAlchemyBackend, StageWritePlan
-        from cdk.sql.dialects import TableAddress
 
         backend = SqlAlchemyBackend(_SqliteStageDialect())
         plan = StageWritePlan(
@@ -489,9 +483,6 @@ class TestSuccessDropRules:
     statement stays SUCCESS whatever happens to the drop."""
 
     def _plan(self, scope: str = "real"):
-        from cdk.sql.backend import StageWritePlan
-        from cdk.sql.dialects import TableAddress
-
         return StageWritePlan(
             stage=TableAddress(table="stg"),
             target=TableAddress(table="events"),
@@ -507,8 +498,6 @@ class TestSuccessDropRules:
     def test_second_attempt_recovery_logs_the_first_cause(self, caplog):
         import logging
 
-        from cdk.sql.backend import SqlAlchemyBackend
-
         backend = SqlAlchemyBackend(_SqliteStageDialect())
         conn = MagicMock()
         conn.exec_driver_sql.side_effect = [RuntimeError("lock timeout"), None]
@@ -522,38 +511,36 @@ class TestSuccessDropRules:
     def test_double_failure_warns_orphan_then_invalidates(self, caplog):
         import logging
 
-        from cdk.sql.backend import SqlAlchemyBackend
-
         backend = SqlAlchemyBackend(_SqliteStageDialect())
         conn = MagicMock()
         conn.exec_driver_sql.side_effect = RuntimeError("still locked")
         with caplog.at_level(logging.WARNING, logger="cdk.sql.backend"):
             backend._drop_stage_after_success(conn, self._plan("real"))
-        warning = next(
+        warnings = [
             r.getMessage()
             for r in caplog.records
             if "could not be dropped after a successful" in r.getMessage()
-        )
-        assert "orphaned" in warning
+        ]
+        assert len(warnings) == 1
+        assert "orphaned" in warnings[0]
         conn.invalidate.assert_called_once()
 
     def test_temp_scope_double_failure_notes_session_death(self, caplog):
         import logging
-
-        from cdk.sql.backend import SqlAlchemyBackend
 
         backend = SqlAlchemyBackend(_SqliteStageDialect())
         conn = MagicMock()
         conn.exec_driver_sql.side_effect = RuntimeError("still locked")
         with caplog.at_level(logging.WARNING, logger="cdk.sql.backend"):
             backend._drop_stage_after_success(conn, self._plan("temp"))
-        warning = next(
+        warnings = [
             r.getMessage()
             for r in caplog.records
             if "could not be dropped after a successful" in r.getMessage()
-        )
-        assert "dies with the discarded connection" in warning
-        assert "orphaned" not in warning
+        ]
+        assert len(warnings) == 1
+        assert "dies with the discarded connection" in warnings[0]
+        assert "orphaned" not in warnings[0]
 
     @pytest.mark.asyncio
     async def test_committed_batch_acks_success_despite_double_drop_failure(
@@ -754,9 +741,7 @@ class TestStageTableGuards:
             engine.dispose()
 
     def test_plan_landing_unknown_columns_fails_loud(self):
-        from sqlalchemy import Column, Integer, MetaData, Table
-
-        from cdk.sql.backend import SqlAlchemyBackend, StageWritePlan
+        from sqlalchemy import Column, Integer
 
         backend = SqlAlchemyBackend(_SqliteStageDialect())
         target_address = TableAddress(table="events")
