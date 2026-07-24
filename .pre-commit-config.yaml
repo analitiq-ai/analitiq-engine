@@ -79,6 +79,10 @@ repos:
           - python-dateutil
           - protobuf
           - grpcio
+          # The CDK's conformance suite (cdk/cdk/conformance) is pytest-based
+          # shipped code, not a tests/ tree, so the hook env needs pytest's
+          # types (skip/fail are NoReturn, which mypy's narrowing relies on).
+          - pytest
           # Published contract packages: the [tool.mypy] override follows
           # their untyped imports (no py.typed yet), so the isolated hook
           # env must be able to resolve them. Pinned to the pyproject pin.

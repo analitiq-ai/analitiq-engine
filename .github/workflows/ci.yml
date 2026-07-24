@@ -38,6 +38,51 @@ jobs:
       - name: Run tests
         run: poetry run pytest
 
+  conformance-live:
+    name: conformance kit (live tier vs postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: conformance
+          POSTGRES_PASSWORD: conformance
+          POSTGRES_DB: conformance
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U conformance"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Install dependencies
+        run: poetry install --no-interaction
+
+      - name: Install the reference connector's driver
+        # The engine pins no database drivers (drivers belong to connector
+        # packages); this job installs asyncpg exactly as a connector repo's
+        # CI installs its own requirements before running the live tier.
+        run: poetry run pip install asyncpg
+
+      - name: Run the live tier against the service container
+        env:
+          CONFORMANCE_PG_HOST: 127.0.0.1
+          CONFORMANCE_PG_PORT: "5432"
+          CONFORMANCE_PG_DATABASE: conformance
+          CONFORMANCE_PG_USER: conformance
+          CONFORMANCE_PG_PASSWORD: conformance
+        run: poetry run pytest tests/conformance_kit/test_kit_live_reference.py
+
   lint:
     name: pre-commit (all files)
     runs-on: ubuntu-latest

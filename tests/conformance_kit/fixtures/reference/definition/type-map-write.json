@@ -1,0 +1,13 @@
+[
+  { "match": "exact", "canonical": "Boolean", "native": "BOOLEAN" },
+  { "match": "exact", "canonical": "Int16", "native": "SMALLINT" },
+  { "match": "exact", "canonical": "Int32", "native": "INTEGER" },
+  { "match": "exact", "canonical": "Int64", "native": "BIGINT" },
+  { "match": "exact", "canonical": "Float64", "native": "DOUBLE PRECISION" },
+  { "match": "exact", "canonical": "Utf8", "native": "TEXT" },
+  { "match": "regex", "canonical": "^Decimal128\\((?<p>\\d+), (?<s>\\d+)\\)$", "native": "NUMERIC(${p}, ${s})" },
+  { "match": "exact", "canonical": "Date32", "native": "DATE" },
+  { "match": "exact", "canonical": "Timestamp(MICROSECOND, UTC)", "native": "TIMESTAMPTZ" },
+  { "match": "exact", "canonical": "Timestamp(MICROSECOND)", "native": "TIMESTAMP" },
+  { "match": "exact", "canonical": "Json", "native": "JSONB" }
+]
