@@ -988,42 +988,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         )
 
         if state.write_mode == "upsert":
-            # Refuse at handshake time, naming the declaration, before any
-            # DDL runs: upsert needs the system's declared merge form.
-            caps = self._capabilities
-            if caps is None:
-                raise SchemaConfigurationError(
-                    str(
-                        undeclared_capability_error(
-                            "merge_form",
-                            need=f"stream {stream_id!r} writes in upsert "
-                            f"mode to {address}",
-                        )
-                    )
-                )
-            if not caps.supports_upsert:
-                raise SchemaConfigurationError(
-                    f"stream {stream_id!r} writes in upsert mode to "
-                    f"{address}, but the connector declares "
-                    f"sql_capabilities.merge_form 'none' — this system has "
-                    f"no merge statement. Use insert or truncate_insert, or "
-                    f"fix the connector's declaration."
-                )
-            if self._adbc_only:
-                self._check_adbc_stage_machinery(caps, f"stream {stream_id!r}")
-            elif not self._dialect_renders_sqlalchemy_upsert():
-                # Declaration/dialect disagreement, caught at handshake
-                # instead of on the first batch: the SQLAlchemy upsert
-                # machinery renders through the dialect's statement hook
-                # until #388 replaces it with the shared stage primitive.
-                raise SchemaConfigurationError(
-                    f"stream {stream_id!r} writes in upsert mode to "
-                    f"{address}: the connector declares "
-                    f"sql_capabilities.merge_form {caps.merge_form!r}, but "
-                    f"its dialect {self.dialect.name!r} does not implement "
-                    f"build_sqlalchemy_upsert — the declaration and the "
-                    f"dialect disagree; fix the connector."
-                )
+            self._check_upsert_capabilities(stream_id, address)
 
         # Resolve the type-mapper for this stream's endpoint once —
         # both DDL generation and the schema contract use it.
@@ -1065,6 +1030,50 @@ class GenericSQLConnector(BaseDestinationHandler):
             state.primary_keys,
         )
         return True
+
+    def _check_upsert_capabilities(self, stream_id: str, address: TableAddress) -> None:
+        """Refuse an upsert stream at handshake time, before any DDL runs.
+
+        The whole upsert gate in one place: upsert needs the system's
+        declared merge form, and the active transport must be able to run
+        it now — the interim ADBC stage-machinery shape, or the SA
+        dialect's statement hook. Every refusal names the missing
+        declaration or the declaration/dialect disagreement.
+        """
+        caps = self._capabilities
+        if caps is None:
+            raise SchemaConfigurationError(
+                str(
+                    undeclared_capability_error(
+                        "merge_form",
+                        need=f"stream {stream_id!r} writes in upsert "
+                        f"mode to {address}",
+                    )
+                )
+            )
+        if not caps.supports_upsert:
+            raise SchemaConfigurationError(
+                f"stream {stream_id!r} writes in upsert mode to "
+                f"{address}, but the connector declares "
+                f"sql_capabilities.merge_form 'none' — this system has "
+                f"no merge statement. Use insert or truncate_insert, or "
+                f"fix the connector's declaration."
+            )
+        if self._adbc_only:
+            self._check_adbc_stage_machinery(caps, f"stream {stream_id!r}")
+        elif not self._dialect_renders_sqlalchemy_upsert():
+            # Declaration/dialect disagreement, caught at handshake
+            # instead of on the first batch: the SQLAlchemy upsert
+            # machinery renders through the dialect's statement hook
+            # until #388 replaces it with the shared stage primitive.
+            raise SchemaConfigurationError(
+                f"stream {stream_id!r} writes in upsert mode to "
+                f"{address}: the connector declares "
+                f"sql_capabilities.merge_form {caps.merge_form!r}, but "
+                f"its dialect {self.dialect.name!r} does not implement "
+                f"build_sqlalchemy_upsert — the declaration and the "
+                f"dialect disagree; fix the connector."
+            )
 
     def _get_write_mode(self, proto_write_mode: int) -> WriteMode:
         mode_map: dict[int, WriteMode] = {

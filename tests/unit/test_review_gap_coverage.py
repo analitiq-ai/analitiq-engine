@@ -31,8 +31,6 @@ def _merge_capable_caps():
 def _rendering_connector_cls():
     """A GenericSQLConnector whose dialect implements the SA upsert hook —
     the upsert configure gate checks declaration/dialect agreement (#390)."""
-    from unittest.mock import MagicMock as _MagicMock
-
     from cdk.sql.dialects import SqlDialect
     from cdk.sql.generic import GenericSQLConnector
 
@@ -40,7 +38,7 @@ def _rendering_connector_cls():
         name = "rendering"
 
         def build_sqlalchemy_upsert(self, table, records, conflict_keys):
-            return _MagicMock()
+            return MagicMock()
 
     class _RenderingConnector(GenericSQLConnector):
         dialect_class = _RenderingDialect

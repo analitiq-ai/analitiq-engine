@@ -539,8 +539,11 @@ class ConnectionRuntime:
         runtime._pre_resolved_config = (
             dict(payload["resolved_config"]) if payload.get("resolved_config") else None
         )
+        # deepcopy, not dict(): the block nests the stage object, and the
+        # rebuilt runtime must not share mutable state with the caller's
+        # payload (same isolation rule the constructor applies).
         runtime._declared_sql_capabilities = (
-            dict(payload["sql_capabilities"])
+            copy.deepcopy(payload["sql_capabilities"])
             if payload.get("sql_capabilities") is not None
             else None
         )

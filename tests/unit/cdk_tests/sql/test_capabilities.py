@@ -342,9 +342,11 @@ class TestConnectBinding:
         runtime.close = AsyncMock()
         from unittest.mock import patch
 
-        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()):
-            with pytest.raises(SqlCapabilitiesError, match="sql_capabilities.catalog"):
-                await handler.connect(runtime)
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            pytest.raises(SqlCapabilitiesError, match="sql_capabilities.catalog"),
+        ):
+            await handler.connect(runtime)
         runtime.close.assert_awaited_once()
 
     @pytest.mark.asyncio

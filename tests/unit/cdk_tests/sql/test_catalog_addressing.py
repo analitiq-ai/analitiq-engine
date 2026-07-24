@@ -134,11 +134,13 @@ class TestConfigureSchemaGate:
         handler._capabilities = read_caps
         handler.dialect.capabilities = read_caps
         executed: list[str] = []
-        with patch.object(
-            handler, "_execute_adbc_ddl_sync", side_effect=executed.extend
+        with (
+            patch.object(
+                handler, "_execute_adbc_ddl_sync", side_effect=executed.extend
+            ),
+            pytest.raises(SchemaConfigurationError, match="require 'full'"),
         ):
-            with pytest.raises(SchemaConfigurationError, match="require 'full'"):
-                await handler.configure_schema(_schema_spec())
+            await handler.configure_schema(_schema_spec())
         assert executed == []
 
     @pytest.mark.asyncio
