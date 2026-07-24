@@ -378,7 +378,7 @@ class TestNonTransactionalCycle:
             from cdk.sql.write_plan import stage_table_name
 
             leftover = stage_table_name(
-                "events",
+                TableAddress(table="events"),
                 run_id="r1",
                 stream_id="s1",
                 batch_seq=1,

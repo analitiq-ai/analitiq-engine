@@ -1416,8 +1416,11 @@ class GenericSQLConnector(BaseDestinationHandler):
             and caps.stage.scope == "real"
             and caps.stage.schema == "dedicated"
         ):
+            # Normalized like every other schema component, so the
+            # namespace prepared here is the one the write plan targets.
+            dedicated = self.dialect.normalize_ident(str(caps.stage.dedicated_schema))
             statements = [
-                *self.dialect.sqlalchemy_pre_ddl(str(caps.stage.dedicated_schema)),
+                *self.dialect.sqlalchemy_pre_ddl(dedicated),
                 *statements,
             ]
         async with self._statement_deadline():

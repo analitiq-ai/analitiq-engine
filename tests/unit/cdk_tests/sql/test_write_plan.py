@@ -60,14 +60,15 @@ def _plan(**overrides):
 
 class TestStageName:
     def test_deterministic_per_batch_identity(self):
+        t = TableAddress(table="t")
         a = stage_table_name(
-            "t", run_id="r", stream_id="s", batch_seq=1, max_identifier_length=63
+            t, run_id="r", stream_id="s", batch_seq=1, max_identifier_length=63
         )
         b = stage_table_name(
-            "t", run_id="r", stream_id="s", batch_seq=1, max_identifier_length=63
+            t, run_id="r", stream_id="s", batch_seq=1, max_identifier_length=63
         )
         c = stage_table_name(
-            "t", run_id="r", stream_id="s", batch_seq=2, max_identifier_length=63
+            t, run_id="r", stream_id="s", batch_seq=2, max_identifier_length=63
         )
         assert a == b
         assert a != c
@@ -78,13 +79,17 @@ class TestStageName:
         # cut the tail — two long-named targets can never collapse into
         # one stage name.
         name = stage_table_name(
-            "orders", run_id="r", stream_id="s", batch_seq=1, max_identifier_length=63
+            TableAddress(table="orders"),
+            run_id="r",
+            stream_id="s",
+            batch_seq=1,
+            max_identifier_length=63,
         )
         assert name.startswith("_analitiq_stage_b")
         assert name.endswith("_orders")
 
     def test_tail_truncates_to_the_identifier_budget(self):
-        long_target = "a" * 100
+        long_target = TableAddress(table="a" * 100)
         name = stage_table_name(
             long_target,
             run_id="r",
@@ -100,11 +105,10 @@ class TestStageName:
             batch_seq=1,
             max_identifier_length=34,
         )
-        # No room for any tail: the token alone is the name.
-        assert short == stage_table_name(
-            "", run_id="r", stream_id="s", batch_seq=1, max_identifier_length=34
-        )
-        assert len(short) <= 34
+        # No room for any tail: the token alone is the name (33 bytes of
+        # fixed prefix + token, within the 34-byte budget).
+        assert short.startswith("_analitiq_stage_b")
+        assert len(short) == 33
 
     def test_multibyte_tail_truncates_by_bytes(self):
         # NAMEDATALEN counts bytes: a multibyte target name must never
@@ -112,7 +116,7 @@ class TestStageName:
         # codepoint is left broken at the cut.
         target = "заказы_клиентов_и_платежи_очень_длинное_имя"
         name = stage_table_name(
-            target,
+            TableAddress(table=target),
             run_id="r",
             stream_id="s",
             batch_seq=1,
@@ -131,15 +135,42 @@ class TestStageName:
         # stages into one name. An absurd dialect budget refuses loudly.
         with pytest.raises(SchemaConfigurationError, match="identifier budget"):
             stage_table_name(
-                "t", run_id="r", stream_id="s", batch_seq=1, max_identifier_length=20
+                TableAddress(table="t"),
+                run_id="r",
+                stream_id="s",
+                batch_seq=1,
+                max_identifier_length=20,
             )
 
     def test_different_streams_never_collide(self):
         a = stage_table_name(
-            "t", run_id="r", stream_id="s1", batch_seq=1, max_identifier_length=63
+            TableAddress(table="t"),
+            run_id="r",
+            stream_id="s1",
+            batch_seq=1,
+            max_identifier_length=63,
         )
         b = stage_table_name(
-            "t", run_id="r", stream_id="s2", batch_seq=1, max_identifier_length=63
+            TableAddress(table="t"),
+            run_id="r",
+            stream_id="s2",
+            batch_seq=1,
+            max_identifier_length=63,
+        )
+        assert a != b
+
+    def test_different_targets_never_collide_even_with_truncated_tails(self):
+        # Two destinations of one stream can share a staging namespace;
+        # the target is part of the hashed identity, so same-numbered
+        # batches against different targets never collide even when the
+        # readability tails truncate identically.
+        long_a = TableAddress(table="a" * 40 + "_one", schema="staging")
+        long_b = TableAddress(table="a" * 40 + "_two", schema="staging")
+        a = stage_table_name(
+            long_a, run_id="r", stream_id="s", batch_seq=1, max_identifier_length=63
+        )
+        b = stage_table_name(
+            long_b, run_id="r", stream_id="s", batch_seq=1, max_identifier_length=63
         )
         assert a != b
 
@@ -167,6 +198,35 @@ class TestStagePlacement:
             )
         )
         assert plan.stage.schema == "_analitiq"
+
+    def test_dedicated_schema_is_dialect_normalized(self):
+        # A case-folding system must resolve the declaration to the same
+        # physical namespace the rest of the SQL path targets — the
+        # dedicated schema goes through normalize_ident like every other
+        # schema component.
+        class _FoldingDialect(_StagingDialect):
+            def normalize_ident(self, name):
+                return name.upper()
+
+        caps = _caps(
+            stage_scope="real",
+            stage_schema="dedicated",
+            dedicated_schema="_analitiq",
+        )
+        plan = build_stage_write_plan(
+            _FoldingDialect(),
+            caps,
+            target=TableAddress(table="EVENTS", schema="PUBLIC"),
+            columns=("id",),
+            write_mode="insert",
+            conflict_keys=[],
+            identity=["id"],
+            truncate_now=False,
+            run_id="r1",
+            stream_id="s1",
+            batch_seq=1,
+        )
+        assert plan.stage.schema == "_ANALITIQ"
 
     def test_transaction_shape_comes_from_the_declaration(self):
         assert _plan(caps=_caps(transactional_ddl=True)).transactional is True

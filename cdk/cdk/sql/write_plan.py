@@ -34,7 +34,7 @@ WriteModeName = str  # "insert" | "upsert" | "truncate_insert" (facade-owned)
 
 
 def stage_table_name(
-    target_table: str,
+    target: TableAddress,
     *,
     run_id: str,
     stream_id: str,
@@ -43,17 +43,24 @@ def stage_table_name(
 ) -> str:
     """Compose the deterministic per-batch stage name.
 
-    ``sha256(run_id|stream_id|batch_seq)[:16]`` is the uniqueness token —
-    fixed-width and collision-resistant, so a retry of the same batch
-    computes the same name and the pre-flight drop finds exactly its own
-    leftovers. The token comes *before* the target tail: the tail is
-    readability only and is truncated to the dialect's identifier budget,
-    so no target name can ever push the token past the budget and collapse
+    ``sha256(run_id|stream_id|batch_seq|target)[:16]`` is the uniqueness
+    token — fixed-width and collision-resistant, so a retry of the same
+    batch computes the same name and the pre-flight drop finds exactly
+    its own leftovers. The fully-qualified target is part of the hashed
+    identity, not just the readability tail: two destinations of the same
+    stream can share one staging namespace, and their same-numbered
+    batches must never collide on a stage name once the tail is
+    truncated. The token comes *before* the tail: the tail is readability
+    only and is truncated to the dialect's identifier budget, so no
+    target name can ever push the token past the budget and collapse
     distinct stages into one name.
     """
+    target_table = target.table
     token = (
         "b"
-        + hashlib.sha256(f"{run_id}|{stream_id}|{batch_seq}".encode()).hexdigest()[:16]
+        + hashlib.sha256(
+            f"{run_id}|{stream_id}|{batch_seq}|{target}".encode()
+        ).hexdigest()[:16]
     )
     head = f"{_STAGE_PREFIX}{token}"
     if max_identifier_length < len(head):
@@ -80,6 +87,7 @@ def stage_table_name(
 
 
 def _stage_address(
+    dialect: SqlDialect,
     caps: SqlCapabilities,
     target: TableAddress,
     stage_name: str,
@@ -89,9 +97,12 @@ def _stage_address(
     A temp-scope stage carries no schema or catalog: it lives in the
     session's namespace, which is also what lets the mode statement see it
     on the same connection. A real-scope stage lands in the target's
-    schema, or in the declared dedicated schema. The engine-generated name
-    is used verbatim (no re-normalization), so the quoted DDL and the
-    landing statements stay the same string.
+    schema, or in the declared dedicated schema — normalized through the
+    dialect exactly like every other schema component, so a case-folding
+    system resolves the declaration to the same physical namespace the
+    rest of the SQL path targets. The engine-generated stage name is used
+    verbatim (no re-normalization), so the quoted DDL and the landing
+    statements stay the same string.
     """
     if caps.stage.scope == "temp":
         return TableAddress(table=stage_name)
@@ -99,7 +110,7 @@ def _stage_address(
         # dedicated_schema is validated non-empty for this placement.
         return TableAddress(
             table=stage_name,
-            schema=str(caps.stage.dedicated_schema),
+            schema=dialect.normalize_ident(str(caps.stage.dedicated_schema)),
             catalog=target.catalog,
         )
     return replace(target, table=stage_name)
@@ -183,13 +194,13 @@ def build_stage_write_plan(
     batch's schema names, identity included.
     """
     stage_name = stage_table_name(
-        target.table,
+        target,
         run_id=run_id,
         stream_id=stream_id,
         batch_seq=batch_seq,
         max_identifier_length=dialect.max_identifier_length,
     )
-    stage = _stage_address(caps, target, stage_name)
+    stage = _stage_address(dialect, caps, target, stage_name)
     temp = caps.stage.scope == "temp"
 
     if write_mode == "upsert":

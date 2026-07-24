@@ -393,6 +393,16 @@ class WorkerProxyHandler(BaseDestinationHandler):
         return bool(self._capabilities and self._capabilities.supports_auto_create)
 
     @property
+    def supports_insert(self) -> bool:
+        # Mirrored from the worker's write-mode list exactly like truncate
+        # (issue #388): inheriting the base's unconditional True would
+        # re-advertise a mode the worker's schema handshake will refuse
+        # (e.g. a SQLAlchemy connector without declared stage capabilities).
+        if not self._capabilities:
+            return False
+        return WriteMode.WRITE_MODE_INSERT in self._capabilities.supported_write_modes
+
+    @property
     def supports_truncate(self) -> bool:
         # The wire response advertises truncate through the write-mode list,
         # not a dedicated bool; mirror exactly what the worker advertised so
