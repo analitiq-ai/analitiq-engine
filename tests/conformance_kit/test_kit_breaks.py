@@ -400,6 +400,7 @@ class TestTargetLoadingBreaks:
 
 class _LifecycleDunderConnector(ReferenceConnector):
     def __init__(self) -> None:
+        super().__init__()
         self.eager_state: dict[str, str] = {}
 
 
