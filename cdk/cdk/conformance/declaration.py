@@ -9,7 +9,7 @@ dialect class renders *how*. The two must agree, both ways:
   ``bulk_land``) would refuse or silently downgrade on the first
   customer batch; the suite fails it in CI instead.
 * **used-but-undeclared** — a hook override no declaration ever routes
-  a call to (``bulk_land`` under ``bulk_load: "none"``, a merge
+  a call to (``bulk_land`` with no declared bulk mechanism, a merge
   rendering under ``merge_form: "none"``) is dead code that reads as
   capability; the suite fails it so the declaration and the code cannot
   drift apart.
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cdk.sql.capabilities import SqlCapabilities
+from cdk.sql.capabilities import DIALECT_IMPLEMENTED_BULK_MECHANISMS, SqlCapabilities
 from cdk.sql.dialects import SqlDialect
 
 from .violations import Violation
@@ -28,16 +28,6 @@ if TYPE_CHECKING:
     from .target import ConformanceTarget
 
 CHECK = "declaration-consistency"
-
-#: Bulk mechanisms whose landing runs through the dialect's ``bulk_land``
-#: hook. ``adbc_ingest`` is the ADBC backend's own native landing — no
-#: dialect code involved — so it neither requires nor forbids the hook
-#: (a connector may still implement ``bulk_land`` for its SQLAlchemy
-#: transport alongside a declared ``adbc_ingest``); what it does require
-#: is an ADBC transport to run on, checked below.
-DIALECT_IMPLEMENTED_BULK_MECHANISMS = frozenset(
-    {"copy_from", "load_data_local_infile", "load_job"}
-)
 
 
 def declared_transport_types(target: ConformanceTarget) -> set[str]:
@@ -79,8 +69,10 @@ def _write_signals(target: ConformanceTarget) -> list[str]:
     if caps is not None:
         if caps.merge_form != "none":
             signals.append(f"connector.json declares merge_form {caps.merge_form!r}")
-        if caps.bulk_load != "none":
-            signals.append(f"connector.json declares bulk_load {caps.bulk_load!r}")
+        if caps.bulk_load:
+            signals.append(
+                f"connector.json declares bulk_load {dict(caps.bulk_load)!r}"
+            )
     return signals
 
 
@@ -148,20 +140,19 @@ def check_declaration_consistency(target: ConformanceTarget) -> list[Violation]:
 
     if caps is not None:
         violations.extend(_hook_declaration_violations(caps, dialect_cls))
-        if caps.bulk_load == "adbc_ingest" and "adbc" not in declared_transport_types(
-            target
-        ):
-            violations.append(
-                Violation(
-                    CHECK,
-                    "connector.json declares bulk_load 'adbc_ingest' but no "
-                    "adbc transport; the mechanism is the ADBC backend's own "
-                    "landing and can never run on a SQLAlchemy-only "
-                    "connector — every batch would silently fall back to "
-                    "executemany. Declare an adbc transport or a mechanism "
-                    "the declared transport can run.",
+        shipped = declared_transport_types(target)
+        for transport_type, mechanism in caps.bulk_load.items():
+            if transport_type not in shipped:
+                violations.append(
+                    Violation(
+                        CHECK,
+                        f"connector.json declares bulk_load "
+                        f"{{{transport_type!r}: {mechanism!r}}} but ships no "
+                        f"{transport_type} transport; the declared mechanism "
+                        f"can never run. Declare the transport or drop the "
+                        f"entry.",
+                    )
                 )
-            )
     return violations
 
 
@@ -194,25 +185,31 @@ def _hook_declaration_violations(
         )
 
     implements_bulk = dialect_overrides(dialect_cls, "bulk_land")
-    if caps.bulk_load in DIALECT_IMPLEMENTED_BULK_MECHANISMS and not implements_bulk:
+    hook_mechanisms = {
+        transport_type: mechanism
+        for transport_type, mechanism in caps.bulk_load.items()
+        if mechanism in DIALECT_IMPLEMENTED_BULK_MECHANISMS
+    }
+    if hook_mechanisms and not implements_bulk:
         violations.append(
             Violation(
                 CHECK,
-                f"connector.json declares bulk_load {caps.bulk_load!r} but "
+                f"connector.json declares bulk_load {hook_mechanisms!r} but "
                 f"{dialect_cls.__name__} does not implement bulk_land; every "
-                f"batch would fall back to executemany, silently negating "
-                f"the declared mechanism. Implement the hook or declare "
-                f"bulk_load 'none'.",
+                f"batch on those transports would fall back to executemany, "
+                f"silently negating the declared mechanism. Implement the "
+                f"hook or drop the entries.",
             )
         )
-    if caps.bulk_load == "none" and implements_bulk:
+    if implements_bulk and not hook_mechanisms:
         violations.append(
             Violation(
                 CHECK,
                 f"{dialect_cls.__name__} implements bulk_land but "
-                f"connector.json declares bulk_load 'none'; an undeclared "
-                f"mechanism is never called (ADR sql-write-path-v2 section "
-                f"5). Declare the mechanism or delete the override.",
+                f"connector.json declares no bulk_load mechanism that routes "
+                f"through it (adbc_ingest is the ADBC backend's own "
+                f"landing); the hook is never called (ADR sql-write-path-v2 "
+                f"section 5). Declare the mechanism or delete the override.",
             )
         )
     return violations

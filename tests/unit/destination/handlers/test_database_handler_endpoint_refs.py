@@ -73,7 +73,7 @@ _DECLARED_CAPS = SqlCapabilities.from_declaration(
         "catalog": "none",
         "session_targeting": "per_statement",
         "merge_form": "insert_on_conflict",
-        "bulk_load": "none",
+        "bulk_load": {},
         "stage": {"scope": "temp", "schema": "target", "transactional_ddl": True},
     },
     source="<test>",

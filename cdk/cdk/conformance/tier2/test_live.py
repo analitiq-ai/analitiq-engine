@@ -170,30 +170,29 @@ def test_declared_bulk_and_executemany_land_identically(
     """Landing is a pure speed slot: bulk and executemany agree (ADR s.2).
 
     The batch is written twice — once through the declared bulk
-    mechanism, once through a probe whose declaration is doctored to
-    bulk_load "none" so every backend (adbc_ingest included) lands via
-    executemany — into two tables, and the resulting contents must be
-    identical. This is the live form of the
+    mechanism, once through a probe whose declaration is doctored to an
+    empty bulk_load mapping so every backend (adbc_ingest included)
+    lands via executemany — into two tables, and the resulting contents
+    must be identical. This is the live form of the
     ADR's landing-equivalence assertion; native bulk protocols cannot
     execute against generic fakes, so the contract tier certifies the
     declaration/hook pairing and this scenario certifies the semantics.
     """
     caps = harness.target.declared_capabilities
-    if caps is None or caps.bulk_load == "none":
+    if caps is None or not caps.bulk_load:
         pytest.skip(
             "connector declares no bulk mechanism; landing is executemany "
             "by definition"
         )
-    if caps.bulk_load == "adbc_ingest":
-        transports = harness.target.declared_transports()
-        default_ref = str(harness.target.definition.get("default_transport") or "")
-        default_type = (transports.get(default_ref) or {}).get("transport_type")
-        if default_type != "adbc":
-            pytest.skip(
-                f"the live connection materializes the default transport "
-                f"({default_type}); the declared adbc_ingest mechanism does "
-                f"not run on it, so this comparison would certify nothing"
-            )
+    transports = harness.target.declared_transports()
+    default_ref = str(harness.target.definition.get("default_transport") or "")
+    default_type = str((transports.get(default_ref) or {}).get("transport_type") or "")
+    if caps.bulk_mechanism(default_type) is None:
+        pytest.skip(
+            f"no bulk mechanism declared for the transport the live "
+            f"connection materializes ({default_type or 'unknown'}); "
+            f"nothing to compare on this connection"
+        )
 
     async def scenario() -> None:
         batch = rows_batch([(i, f"v{i}", i) for i in range(1, 6)])

@@ -233,7 +233,11 @@ class TestStepwiseCycle:
 
     def _run(self, *, truncate_now=False, bulk_load="adbc_ingest"):
         dialect = _StageDialect()
-        caps = _caps(bulk_load=bulk_load, stage_scope="real", transactional_ddl=False)
+        caps = _caps(
+            bulk_load={"adbc": bulk_load} if bulk_load != "none" else {},
+            stage_scope="real",
+            transactional_ddl=False,
+        )
         dialect.capabilities = caps
         plan = _plan(
             dialect,
@@ -370,7 +374,7 @@ class TestTransactionalCycle:
 class TestLandingMechanisms:
     def test_declared_adbc_ingest_lands_arrow_with_targeting_kwargs(self):
         dialect = _StageDialect()
-        caps = _caps(bulk_load="adbc_ingest", stage_scope="real")
+        caps = _caps(bulk_load={"adbc": "adbc_ingest"}, stage_scope="real")
         dialect.capabilities = caps
         plan = _plan(dialect, caps)
         conn = _FakeConn()
@@ -386,7 +390,7 @@ class TestLandingMechanisms:
 
     def test_undeclared_mechanism_lands_via_executemany(self):
         dialect = _StageDialect()
-        caps = _caps(bulk_load="none", stage_scope="real")
+        caps = _caps(bulk_load={}, stage_scope="real")
         dialect.capabilities = caps
         plan = _plan(dialect, caps)
         conn = _FakeConn()
@@ -408,7 +412,7 @@ class TestLandingMechanisms:
                 return True
 
         dialect = _BulkDialect()
-        caps = _caps(bulk_load="load_job", stage_scope="real")
+        caps = _caps(bulk_load={"adbc": "load_job"}, stage_scope="real")
         dialect.capabilities = caps
         plan = _plan(dialect, caps)
         conn = _FakeConn(fetch_value=2)  # COUNT(*) matches the batch
@@ -428,7 +432,7 @@ class TestLandingMechanisms:
                 return True  # claims landed; the stage stays empty
 
         dialect = _LyingBulkDialect()
-        caps = _caps(bulk_load="load_job", stage_scope="real")
+        caps = _caps(bulk_load={"adbc": "load_job"}, stage_scope="real")
         dialect.capabilities = caps
         plan = _plan(dialect, caps)
         conn = _FakeConn(fetch_value=0)
@@ -443,7 +447,7 @@ class TestLandingMechanisms:
                 return False
 
         dialect = _DecliningBulkDialect()
-        caps = _caps(bulk_load="load_job", stage_scope="real")
+        caps = _caps(bulk_load={"adbc": "load_job"}, stage_scope="real")
         dialect.capabilities = caps
         plan = _plan(dialect, caps)
         # The fallback's stage is verified too, so the fake reports the
@@ -469,7 +473,7 @@ class TestLandingMechanisms:
                 return False  # after having landed rows (simulated below)
 
         dialect = _PartialThenDeclineDialect()
-        caps = _caps(bulk_load="load_job", stage_scope="real")
+        caps = _caps(bulk_load={"adbc": "load_job"}, stage_scope="real")
         dialect.capabilities = caps
         plan = _plan(dialect, caps)
         # Stage count after fallback = 3: one leaked row + the 2-row batch.
@@ -766,7 +770,7 @@ class TestConnectionLifecycle:
     @pytest.mark.asyncio
     async def test_connect_opens_eagerly_and_reads_the_bulk_declaration(self):
         dialect = _StageDialect()
-        dialect.capabilities = _caps(bulk_load="adbc_ingest")
+        dialect.capabilities = _caps(bulk_load={"adbc": "adbc_ingest"})
         conn = _FakeConn()
         runtime = _FakeRuntime([conn])
         backend = AdbcBackend(dialect)

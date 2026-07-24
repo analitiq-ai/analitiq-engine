@@ -307,7 +307,7 @@ class TestDeclarationBreaks:
     ) -> None:
         doctored = dataclasses.replace(
             _with_connector(reference_target, _UndeclaredBulkConnector),
-            declared_capabilities=_caps_with(reference_target, bulk_load="none"),
+            declared_capabilities=_caps_with(reference_target, bulk_load={}),
         )
         violations = check_declaration_consistency(doctored)
         report = _messages(violations)
@@ -364,12 +364,14 @@ class TestDeclarationBreaks:
         """adbc_ingest on a SQLAlchemy-only connector can never run."""
         doctored = dataclasses.replace(
             reference_target,
-            declared_capabilities=_caps_with(reference_target, bulk_load="adbc_ingest"),
+            declared_capabilities=_caps_with(
+                reference_target, bulk_load={"adbc": "adbc_ingest"}
+            ),
         )
         violations = check_declaration_consistency(doctored)
         report = _messages(violations)
         assert "adbc_ingest" in report
-        assert "transport" in report
+        assert "ships no adbc transport" in report
 
     def test_merge_rendering_without_declaration_fails(
         self, reference_target: ConformanceTarget
@@ -607,7 +609,7 @@ class TestRenderingBreaks:
             kit_rendering.test_merge_statement_matches_declared_form(doctored)
 
 
-def _caps_with(target: ConformanceTarget, **facts: str) -> SqlCapabilities:
+def _caps_with(target: ConformanceTarget, **facts: Any) -> SqlCapabilities:
     """The reference declaration with named facts replaced."""
     caps = target.declared_capabilities
     assert caps is not None

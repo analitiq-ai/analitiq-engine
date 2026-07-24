@@ -156,12 +156,12 @@ class LiveHarness:
     def executemany_forced(self) -> LiveHarness:
         """Build a sibling harness (own table) that lands via executemany.
 
-        The probe target's declaration is doctored to ``bulk_load:
-        "none"`` — in the parsed capabilities and in the definition the
-        runtime is built from — so no backend consults any bulk
-        mechanism: the ADBC backend's own ``adbc_ingest`` landing and
-        the ``bulk_land`` hook are both off, and every batch takes the
-        executemany path the comparison certifies. The connector under
+        The probe target's declaration is doctored to an empty
+        ``bulk_load`` mapping — in the parsed capabilities and in the
+        definition the runtime is built from — so no backend consults
+        any bulk mechanism: the ADBC backend's own ``adbc_ingest``
+        landing and the ``bulk_land`` hook are both off, and every batch
+        takes the executemany path the comparison certifies. The connector under
         test is never modified; the doctoring is suite-side data.
         """
         caps = self.target.declared_capabilities
@@ -170,12 +170,12 @@ class LiveHarness:
                 "executemany_forced needs declared sql_capabilities"
             )
         definition = json.loads(json.dumps(self.target.definition))
-        definition["sql_capabilities"]["bulk_load"] = "none"
+        definition["sql_capabilities"]["bulk_load"] = {}
         return LiveHarness(
             target=dataclasses.replace(
                 self.target,
                 definition=definition,
-                declared_capabilities=dataclasses.replace(caps, bulk_load="none"),
+                declared_capabilities=dataclasses.replace(caps, bulk_load={}),
             ),
             document_path=self.document_path,
             schema=self.schema,
