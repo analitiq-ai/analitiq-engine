@@ -29,7 +29,7 @@ class TestDeclaredFirst:
         error_map = _map({"exception": {"ValueError": "transient"}})
         deterministic, declared = classify_read_error(ValueError("blip"), error_map)
         assert deterministic is False
-        assert declared == "exception:ValueError -> transient"
+        assert declared == "transient"
 
     def test_declared_config_makes_an_unknown_type_deterministic(self):
         error_map = _map({"exception": {"AutoReconnect": "config"}})
@@ -59,6 +59,28 @@ class TestDeclaredFirst:
         outer.__cause__ = inner
         deterministic, _ = classify_read_error(outer, error_map)
         assert deterministic is True
+
+
+class TestBirthSiteCategory:
+    def test_typed_error_carries_its_birth_site_category(self):
+        # A connector's HTTP site stamps the declared category on the
+        # typed error; the worker forwards it without re-matching (the
+        # error_map here would say nothing about ReadError).
+        from src.source.connectors.base import TransientReadError
+
+        exc = TransientReadError("status 403", declared_category="rate_limited")
+        deterministic, declared = classify_read_error(exc, None)
+        assert deterministic is False
+        assert declared == "rate_limited"
+
+    def test_birth_site_category_outranks_the_map(self):
+        from src.source.connectors.base import ReadError
+
+        error_map = _map({"exception": {"ReadError": "transient"}})
+        exc = ReadError("status 503", declared_category="auth")
+        deterministic, declared = classify_read_error(exc, error_map)
+        assert deterministic is True
+        assert declared == "auth"
 
 
 class TestLadderFallback:

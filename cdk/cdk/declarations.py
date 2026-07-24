@@ -129,9 +129,6 @@ _EXCEPTION_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _VENDOR_CODE_KEY = re.compile(r"^-?[0-9]+$")
 _HTTP_KEY = re.compile(r"^[1-5][0-9]{2}$")
 
-# Cap the chain walk so a self-referential cause chain can never spin.
-_MAX_CHAIN_DEPTH = 50
-
 
 class ConnectorDeclarationError(ValueError):
     """A connector-level declared block (``error_map`` / ``concurrency``) is malformed.
@@ -207,14 +204,14 @@ def _parse_family(
 class ErrorMap:
     """Typed view of a connector's declared ``error_map`` block.
 
-    Lookup precedence is most-specific-first, chain-wide: every chained
-    member's structured driver facts (full SQLSTATE, then SQLSTATE class,
-    then vendor code) are consulted before any member's exception class
-    name (MRO order, subclass before base) — a declared generic wrapper
-    class never shadows the fact on the driver exception it links. Within
-    each specificity tier the outermost member wins. HTTP statuses are not
-    read off exceptions — HTTP call sites pass the status explicitly to
-    :meth:`match_http`.
+    Lookup precedence is most-specific-first across the birth-site pair
+    (the caught exception and its single explicit driver link): both
+    members' structured driver facts (full SQLSTATE, then SQLSTATE class,
+    then vendor code) are consulted before any exception class name (MRO
+    order, subclass before base) — a declared generic wrapper class never
+    shadows the fact on the driver exception it links. HTTP statuses are
+    not read off exceptions — HTTP call sites pass the status explicitly
+    to :meth:`match_http`.
     """
 
     sqlstate: Mapping[str, str]
@@ -298,19 +295,27 @@ class ErrorMap:
     def match_exception(self, exc: BaseException) -> DeclaredMatch | None:
         """Return the declared classification for a live exception, if any.
 
-        Fact specificity is chain-wide, not per-member: the whole chain is
-        scanned for structured driver facts (full SQLSTATE, SQLSTATE class,
-        vendor code) before any exception class name is considered — a
-        generic declared wrapper class (SQLAlchemy's OperationalError) must
+        Birth-site matching, deliberately narrow: the caller is the
+        boundary that just caught the driver's failure, so the input is
+        *exc* itself plus at most its single explicit driver link —
+        SQLAlchemy's ``orig`` (the raw DBAPI exception its wrapper carries)
+        or ``raise ... from`` (``__cause__``), one hop, no recursion. There
+        is no chain walking: classification happens where the error is
+        born and crosses process boundaries as structured verdicts, never
+        by re-deriving from whatever exotic chain a wrapper accumulated.
+
+        Structured driver facts (full SQLSTATE, then SQLSTATE class, then
+        vendor code) are consulted on both members before any exception
+        class name (MRO order) — a generic declared wrapper class must
         never shadow the more specific fact on the driver exception it
-        links. Within each pass the walk is outermost-first. Never raises:
-        the members are untrusted connector/driver objects whose attributes
-        may be misbehaving properties, and a classifier crash here would
-        displace the original failure at the exact moment it is being
-        reported — an unreadable member logs a WARNING and matches nothing.
+        links. Never raises: the members are untrusted connector/driver
+        objects whose attributes may be misbehaving properties, and a
+        classifier crash here would displace the original failure at the
+        exact moment it is being reported — an unreadable member logs a
+        WARNING and matches nothing.
         """
-        chain = _walk_chain(exc)
-        for member in chain:
+        members = _birth_site_members(exc)
+        for member in members:
             try:
                 match = self._match_member_facts(member)
             except Exception:
@@ -323,7 +328,7 @@ class ErrorMap:
                 continue
             if match is not None:
                 return match
-        for member in chain:
+        for member in members:
             match = self.match_names(cls.__name__ for cls in type(member).__mro__)
             if match is not None:
                 return match
@@ -391,46 +396,28 @@ def _read_vendor_code(member: BaseException) -> str | None:
     return None
 
 
-def _walk_chain(exc: BaseException) -> list[BaseException]:
-    """Flatten an exception, its group members, and its explicit-link chain.
+def _birth_site_members(exc: BaseException) -> list[BaseException]:
+    """Collect the exception and its single explicit driver link, one hop only.
 
-    Outermost-first, depth-capped, identity-deduplicated. Follows only
-    explicit links — ``ExceptionGroup`` members, ``raise ... from``
-    (``__cause__``), SQLAlchemy's ``orig`` (the raw DBAPI exception its
-    wrapper carries, the one holding sqlstate/vendor facts), and the
-    engine's own ``original_error`` wrapper attribute — never the implicit
-    ``__context__``: a declared fact riding an exception that merely
-    happened to be in flight (a driver's internal retry, a cleanup
-    failure) must not claim the verdict for the failure that was actually
-    raised. The engine's text heuristics walk wider on purpose; declared
-    claims trade recall for precision.
+    ``orig`` is SQLAlchemy's raw-DBAPI-exception slot (the member carrying
+    sqlstate/vendor facts); ``__cause__`` covers ``raise ... from`` at a
+    driver boundary. No recursion and no ``__context__``: the caller is
+    the birth site of the failure, so anything deeper is not the failure
+    being classified. The reads are guarded — the members are untrusted
+    objects, and a misbehaving link property must not crash the caller in
+    the middle of reporting the original failure.
     """
-    seen: set[int] = set()
-    out: list[BaseException] = []
-    stack: list[tuple[BaseException, int]] = [(exc, 0)]
-    while stack:
-        current, depth = stack.pop()
-        if current is None or id(current) in seen or depth > _MAX_CHAIN_DEPTH:
-            continue
-        seen.add(id(current))
-        out.append(current)
-        nested: list[BaseException] = []
-        if isinstance(current, BaseExceptionGroup):
-            nested.extend(current.exceptions)
-        for attr in ("original_error", "orig", "__cause__"):
-            # The members are untrusted objects; a misbehaving property on
-            # a link attribute must not crash the walk (the caller is in
-            # the middle of reporting the original failure), so a raising
-            # read degrades to "no link".
-            try:
-                linked = getattr(current, attr, None)
-            except Exception:
-                linked = None
-            if isinstance(linked, BaseException):
-                nested.append(linked)
-        for child in nested:
-            stack.append((child, depth + 1))
-    return out
+    members = [exc]
+    for attr in ("orig", "__cause__"):
+        try:
+            linked = getattr(exc, attr, None)
+        except Exception:
+            linked = None
+        if isinstance(linked, BaseException) and not any(
+            linked is member for member in members
+        ):
+            members.append(linked)
+    return members
 
 
 def parse_declared_error_map(

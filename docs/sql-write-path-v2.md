@@ -357,13 +357,19 @@ Properties:
   write_rejected` — and the engine alone derives `AckStatus`,
   `FailureCategory`, and `ErrorCode` from it (the per-context verdict
   tables in `cdk.declarations`, the same trust rule as retry semantics,
-  §9). The heuristics are demoted to last resort, per context: the read
-  path resolves declared map → sanctioned typed errors; the write ack
-  ladder resolves its typed engine errors (type-map, dialect, TLS —
-  engine contracts a driver map must not re-route) → declared map →
-  class-name heuristic; the ADBC boundary and both HTTP sites resolve
-  declared map → built-in heuristic. The engine-side classifiers log
-  when a text heuristic decided.
+  §9). Matching happens at the failure's birth site against the immediate
+  exception (plus at most its single explicit driver link — SQLAlchemy's
+  `orig` or `raise ... from`); the verdict then crosses process
+  boundaries as structured signals (the worker's deterministic flag and
+  `declared_category` wire field, the ack's failure category) — never
+  re-derived downstream from chains or text. The heuristics are demoted
+  to last resort, per context: the read path resolves declared verdicts
+  (the birth-site category on the typed error, then the map) → sanctioned
+  typed errors; the write ack ladder resolves its typed engine errors
+  (type-map, dialect, TLS — engine contracts a driver map must not
+  re-route) → declared map → class-name heuristic; the ADBC boundary and
+  both HTTP sites resolve declared map → built-in heuristic. The
+  engine-side classifiers log when a text heuristic decided.
 - **`limits` consumption.** The executemany stage landing chunks rows by
   `floor(max_bind_params / column_count)` (`StageWritePlan.rows_per_statement`,
   applied identically by both transport backends); stage-name rendering and

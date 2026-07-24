@@ -100,9 +100,13 @@ def _read_error_for_status(
         logger.info(
             "declared error_map classified HTTP %d -> %s", status, match.category
         )
+        # The declared category rides the typed error so the worker
+        # forwards it across the process boundary (issue #401) — the
+        # engine then reports the declared code instead of re-deriving
+        # from text.
         if DECLARED_READ_DETERMINISTIC[match.category]:
-            return ReadError(detail)
-        return TransientReadError(detail)
+            return ReadError(detail, declared_category=match.category)
+        return TransientReadError(detail, declared_category=match.category)
     if status in _TRANSIENT_HTTP_STATUSES:
         return TransientReadError(detail)
     return ReadError(detail)

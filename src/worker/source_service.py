@@ -70,22 +70,25 @@ _DETERMINISTIC_READ_ERRORS = (
 def classify_read_error(
     exc: BaseException, error_map: ErrorMap | None
 ) -> tuple[bool, str | None]:
-    """Classify a read failure: declared map first, isinstance ladder after.
+    """Classify a read failure: declared verdicts first, isinstance ladder after.
 
-    Returns ``(deterministic, declared_note)`` where ``declared_note``
-    names the matched declaration (family, identifier, category) when the
-    connector's ``error_map`` claimed the failure, and ``None`` when the
-    verdict came from the type ladder — so the log always shows which path
-    decided. Resolution order per issue #401: declared map, then the
-    connector's sanctioned typed errors (``_DETERMINISTIC_READ_ERRORS`` —
-    the hook), never text.
+    Returns ``(deterministic, declared_category)`` where
+    ``declared_category`` is the engine-vocabulary value the connector's
+    declarations claimed for this failure — carried on the typed error by
+    its birth site (a connector's HTTP status match) or matched here
+    against the raw driver exception — and ``None`` when the verdict came
+    from the type ladder. The category crosses the process boundary on the
+    ``ReadError`` wire message so the engine reports the declared code
+    instead of re-deriving from text. Resolution order per issue #401:
+    declared verdicts, then the connector's sanctioned typed errors
+    (``_DETERMINISTIC_READ_ERRORS`` — the hook), never text.
     """
+    birth_site = getattr(exc, "declared_category", None)
+    if isinstance(birth_site, str) and birth_site in DECLARED_READ_DETERMINISTIC:
+        return DECLARED_READ_DETERMINISTIC[birth_site], birth_site
     match = error_map.match_exception(exc) if error_map is not None else None
     if match is not None:
-        return (
-            DECLARED_READ_DETERMINISTIC[match.category],
-            f"{match.family}:{match.identifier} -> {match.category}",
-        )
+        return DECLARED_READ_DETERMINISTIC[match.category], match.category
     return isinstance(exc, _DETERMINISTIC_READ_ERRORS), None
 
 
@@ -204,7 +207,7 @@ class SourceWorkerServicer(SourceServiceServicer):
                 "classified by %s): %s",
                 type(exc).__name__,
                 deterministic,
-                f"declared error_map {declared}" if declared else "type ladder",
+                f"declared category {declared}" if declared else "type ladder",
                 exc,
                 exc_info=True,
             )
@@ -213,6 +216,7 @@ class SourceWorkerServicer(SourceServiceServicer):
                     message=str(exc),
                     deterministic=deterministic,
                     error_type=type(exc).__name__,
+                    declared_category=declared or "",
                 )
             )
             return

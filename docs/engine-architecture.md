@@ -260,12 +260,19 @@ aggregated `ExceptionGroup` (every stream failed) the highest-priority tag acros
 the leaves wins, and `error_detail` keeps every per-stream leaf rather than
 collapsing to `All streams failed (N sub-exceptions)`.
 
-Three structured signals cross process boundaries so the tag survives isolation:
+Four structured signals cross process boundaries so the tag survives isolation:
 
 - The source worker's `deterministic` flag (a config/contract error retrying
   cannot heal) is preserved across the gRPC worker boundary as a `CONFIG_INVALID`
   tag, so a deterministic source-config error classifies as `CONFIG_INVALID`
   regardless of the `ReadError`/`RuntimeError` wrapper its type collapses into.
+- The source worker's `declared_category` (`ReadError` wire message, issue
+  #401): the worker classifies a read failure at its birth site against the
+  connector's declared `error_map` and sends the matched engine-vocabulary
+  category; the engine maps it to the published code
+  (`source_code_for_declared_category`) and tags both deterministic and
+  retryable errors with it — a declared `rate_limited` 403 that exhausts
+  retries reports `RATE_LIMITED`, never the text split's reading of "403".
 - The destination-handshake reason (engine/proxy-generated, including the inner
   reason forwarded across the worker proxy) is split transport-vs-config at the
   raise site by `classify_handshake_failure`, so a proxied destination outage
@@ -283,12 +290,16 @@ states, exception class names, vendor codes, HTTP statuses, each mapped to
 an engine-owned category (`transient | config | auth | unreachable |
 rate_limited | write_rejected`). The engine alone derives the verdicts
 (`AckStatus`, `FailureCategory`, `ErrorCode`) from a declared category;
-connectors never self-declare verdicts. The connector-facing boundaries
-(the CDK write ladder, the ADBC boundary, the source worker, both API
-connectors) consult the declared map before their heuristics, and its
-verdict reaches the engine's classifiers as structured signals — the
-worker's deterministic flag, the ack's failure category, the extract tag —
-so a declaring connector gets deterministic classification for declared
+connectors never self-declare verdicts. Classification happens at the
+failure's birth site: the boundary that just caught the driver's error (the
+CDK write ladder, the ADBC boundary, the source worker, both API
+connectors) matches the immediate exception — plus at most its single
+explicit driver link, SQLAlchemy's `orig` or `raise ... from` — against
+the declared map, and the verdict crosses process boundaries as the
+structured signals above (the deterministic flag, the wire
+`declared_category`, the ack's failure category). Nothing downstream
+re-derives a declared classification from exception chains or text, so a
+declaring connector gets deterministic classification for declared
 identifiers with zero connector Python.
 
 The name/phrase heuristics remain in three narrow roles only, each running

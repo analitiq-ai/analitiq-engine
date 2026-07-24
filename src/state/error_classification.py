@@ -63,7 +63,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 
-from cdk.declarations import ERROR_CATEGORY_VALUES, ErrorMap
+from cdk.declarations import ERROR_CATEGORY_VALUES
 from cdk.types import FailureCategory
 
 logger = logging.getLogger(__name__)
@@ -560,18 +560,37 @@ if _undeclared_source:
     )
 
 
-def classify_source_extract(
-    exc: BaseException, *, error_map: ErrorMap | None = None
-) -> ErrorCode:
+def source_code_for_declared_category(category: str) -> ErrorCode | None:
+    """Return the source :class:`ErrorCode` a declared category names, if any.
+
+    Consumes the ``declared_category`` the source worker carried across the
+    wire (issue #401): the worker classified the failure at its birth site
+    against the connector's declarations, and the engine derives the
+    published code here — connectors declare facts, the engine owns codes.
+    ``None`` for ``transient``/``write_rejected`` (they claim no source
+    code) and for an off-vocabulary value (wire skew is logged, never
+    trusted into a code).
+    """
+    if category not in _DECLARED_SOURCE_CODES:
+        logger.warning(
+            "declared_category %r off the wire is not in the engine "
+            "vocabulary; ignoring it",
+            category,
+        )
+        return None
+    return _DECLARED_SOURCE_CODES[category]
+
+
+def classify_source_extract(exc: BaseException) -> ErrorCode:
     """Classify a source-extract failure into its concrete source code.
 
-    Declared map before the text split (issue #401; the local-filesystem
-    guard still runs first — an engine-infra fault is never the source's to
-    classify): the source connector's ``error_map`` claims the failure
-    structurally — off the live exception chain (SQLSTATE, vendor code,
-    class MRO) or, across the worker boundary where only class names
-    survive, off the collapsed name set. Only an unclaimed failure falls to
-    the text split, and that fallback is logged.
+    Declared classification does not happen here: connector failures are
+    classified at their birth site (the worker, against the declared
+    ``error_map``) and cross the boundary as structured verdicts — the
+    deterministic flag and the declared category on the ``ReadError`` wire
+    message, which the extract path turns into a tag before this runs
+    (issue #401). An exception reaching this function unclaimed is
+    classified by the text split, and that fallback is logged.
 
     The extract stage knows the failure is source-side, but auth-vs-unreachable-
     vs-rate for an opaque driver/HTTP error is only legible from the error
@@ -590,39 +609,11 @@ def classify_source_extract(
         # bare OSError from a full/read-only volume) from the engine's own
         # checkpoint/state I/O is infra, not source auth.
         return ErrorCode.INTERNAL
-    match = None
-    if error_map is not None:
-        # sorted(): across a process boundary the chain collapses to a name
-        # set with no MRO order left; a map declaring several matching names
-        # should agree with itself, and the lexicographic pick keeps a
-        # disagreeing one deterministic.
-        match = error_map.match_exception(exc) or error_map.match_names(sorted(names))
-        if match is not None:
-            declared_code = _DECLARED_SOURCE_CODES[match.category]
-            if declared_code is not None:
-                logger.info(
-                    "declared error_map classified the source failure: " "%s %s -> %s",
-                    match.family,
-                    match.identifier,
-                    match.category,
-                )
-                return declared_code
     code = _classify_source_extract_by_text(names, text)
-    if match is not None:
-        logger.info(
-            "declared error_map matched %s %s -> %s, which claims no source "
-            "code; text heuristic classified it %s",
-            match.family,
-            match.identifier,
-            match.category,
-            code.value,
-        )
-    else:
-        logger.info(
-            "no declaration claimed the source failure; text heuristic "
-            "classified it %s",
-            code.value,
-        )
+    logger.info(
+        "no declaration claimed the source failure; text heuristic " "classified it %s",
+        code.value,
+    )
     return code
 
 

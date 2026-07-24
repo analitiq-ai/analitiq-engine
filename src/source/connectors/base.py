@@ -203,9 +203,15 @@ class ReadError(ConnectorError):
     Reserved for failures retrying cannot heal: contract/configuration
     problems and non-transient HTTP statuses. The worker classifies it
     deterministic (the stream fails fatally instead of retrying).
+    ``declared_category`` carries the connector-declared error_map category
+    when the birth site matched one (issue #401) — a structured field on
+    the typed error, so the declared verdict survives to the worker
+    boundary instead of being re-derived from text.
     """
 
-    pass
+    def __init__(self, message: str, *, declared_category: str | None = None):
+        super().__init__(message)
+        self.declared_category = declared_category
 
 
 class TransientReadError(ConnectorError):
@@ -213,9 +219,12 @@ class TransientReadError(ConnectorError):
 
     Deliberately NOT a ``ReadError`` subclass: the worker classifies
     ``ReadError`` as deterministic/fatal, and this must classify retryable.
+    ``declared_category`` mirrors :class:`ReadError`'s field (issue #401).
     """
 
-    pass
+    def __init__(self, message: str, *, declared_category: str | None = None):
+        super().__init__(message)
+        self.declared_category = declared_category
 
 
 class WriteError(ConnectorError):
