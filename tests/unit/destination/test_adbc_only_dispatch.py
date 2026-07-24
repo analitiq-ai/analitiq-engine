@@ -27,6 +27,7 @@ import pyarrow as pa
 import pytest
 
 from cdk.sql import generic as database_module
+from cdk.sql.capabilities import SqlCapabilities
 from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.generic import (
     _FATAL_ADBC_ERROR_NAMES,
@@ -38,6 +39,28 @@ from cdk.sql.generic import (
     _StreamState,
 )
 
+
+def _caps(**overrides) -> SqlCapabilities:
+    """A declared sql_capabilities object, defaults merge-capable/per-statement.
+
+    Stands in for the block a connector.json declares; tests assign it to
+    ``handler._capabilities`` the way ``_bind_capabilities`` would at
+    connect() time, overriding exactly the fact under test.
+    """
+    # Stage defaults to the one shape the current ADBC machinery honors
+    # (real table, target schema); the interim guard refuses anything else
+    # until #389 lands declared stage shapes.
+    block = {
+        "catalog": "none",
+        "session_targeting": "per_statement",
+        "merge_form": "merge",
+        "bulk_load": "none",
+        "stage": {"scope": "real", "schema": "target", "transactional_ddl": True},
+    }
+    block.update(overrides)
+    return SqlCapabilities.from_declaration(block)
+
+
 # --- fixture dialects + connector (stand in for a connector package) --------
 
 
@@ -46,14 +69,15 @@ class _FixtureAdbcDialect(SqlDialect):
 
     Stands in for a connector package's dialect: renders canonical Arrow types
     to canned native DDL strings (overriding ``render_column_type`` — the single
-    write surface — rather than the old per-purpose ADBC hooks), supports ADBC
-    upsert, and folds identifiers upper-case (the way a case-folding system's
-    package dialect would) so the normalize-reaches-the-ingest-site coverage
-    has something to assert.
+    write surface — rather than the old per-purpose ADBC hooks) and folds
+    identifiers upper-case (the way a case-folding system's package dialect
+    would) so the normalize-reaches-the-ingest-site coverage has something to
+    assert. Whether the system can MERGE is declared data
+    (``sql_capabilities.merge_form``), not a dialect fact — tests set it on
+    the handler via ``_caps``.
     """
 
     name = "fixture"
-    supports_upsert_adbc = True
 
     #: canonical Arrow string -> canned native DDL type the dialect renders.
     _CANONICAL_TO_DDL = {
@@ -453,6 +477,7 @@ class TestAdbcSessionSchemaGuard:
     def _handler(self, session_schema):
         h = _FixtureSessionDefaultConnector()
         h._adbc_only = True
+        h._capabilities = _caps(session_targeting="session_default")
         conn = _SessionFakeConn(session_schema, h.dialect.adbc_session_schema_sql())
         h._adbc_conn = conn
         return h, conn
@@ -612,6 +637,7 @@ class TestAdbcSessionSchemaGuard:
         # collapse to the loud "no schema selected" refusal.
         h = _FixtureSessionDefaultConnector()
         h._adbc_only = True
+        h._capabilities = _caps(session_targeting="session_default")
         conn = _SessionFakeConn(None, h.dialect.adbc_session_schema_sql(), no_row=True)
         h._adbc_conn = conn
         with pytest.raises(AdbcConfigurationError, match="no schema selected"):
@@ -628,6 +654,36 @@ class TestAdbcSessionSchemaGuard:
         h._adbc_only_ingest_sync(self._batch(), h.dialect.table_address("orders"))
         assert conn.probe_count == 0
         assert len(conn.ingests) == 1
+
+    def test_undeclared_session_targeting_refuses_bare_name(self):
+        # A bare-name ingest must know which regime it is in; with no
+        # declared sql_capabilities the refusal names the missing
+        # declaration instead of probing (refuse, don't guess — #390).
+        h, conn = self._handler("PUBLIC")
+        h._capabilities = None
+        with pytest.raises(
+            AdbcConfigurationError, match="sql_capabilities.session_targeting"
+        ):
+            h._adbc_only_ingest_sync(
+                self._batch(),
+                h.dialect.table_address("orders", schema="public"),
+            )
+        assert conn.probe_count == 0
+        assert conn.ingests == []
+
+    def test_per_statement_declaration_with_bare_name_is_a_connector_defect(self):
+        # Declared per_statement + a dialect returning no targeting kwarg
+        # is a declaration/dialect disagreement, reported as such rather
+        # than silently probing the session.
+        h, conn = self._handler("PUBLIC")
+        h._capabilities = _caps(session_targeting="per_statement")
+        with pytest.raises(AdbcConfigurationError, match="disagree"):
+            h._adbc_only_ingest_sync(
+                self._batch(),
+                h.dialect.table_address("orders", schema="public"),
+            )
+        assert conn.probe_count == 0
+        assert conn.ingests == []
 
     async def test_disconnect_resets_the_probe_cache(self):
         h, conn = self._handler("PUBLIC")
@@ -701,31 +757,63 @@ class TestStageTableSql:
 
 
 class TestSupportsUpsert:
-    """``supports_upsert`` reads the dialect's capability flags, gated by the
-    active transport mode. The ANSI base supports neither; a connector
-    package's dialect opts in (the fixture does, for ADBC)."""
+    """``supports_upsert`` advertises upsert only when it is declared
+    (``sql_capabilities.merge_form``) AND the active transport can run it
+    now — the interim ADBC stage-machinery shape, or the SA dialect's
+    statement hook — so ``GetCapabilities`` never advertises a mode
+    ``configure_schema`` would refuse for every stream."""
 
-    def test_base_sa_mode_does_not_support(self):
+    def test_undeclared_does_not_support(self):
         h = GenericSQLConnector()
-        h._adbc_only = False
         assert h.supports_upsert is False
 
-    def test_base_adbc_mode_does_not_support(self):
-        h = GenericSQLConnector()
-        h._adbc_only = True
-        assert h.supports_upsert is False
-
-    def test_fixture_adbc_mode_supports(self):
+    def test_declared_merge_form_supports_on_adbc(self):
         h = _FixtureConnector()
         h._adbc_only = True
+        h._capabilities = _caps(merge_form="merge")
         assert h.supports_upsert is True
 
-    def test_fixture_sa_mode_does_not_support(self):
-        # The fixture dialect declares supports_upsert_adbc but not the SA
-        # flag, so the SA transport path reports no upsert.
+    def test_declared_none_does_not_support(self):
+        h = _FixtureConnector()
+        h._adbc_only = True
+        h._capabilities = _caps(merge_form="none")
+        assert h.supports_upsert is False
+
+    def test_adbc_declaration_the_machinery_cannot_honor_does_not_advertise(self):
+        # Same gates as configure_schema: a non-merge form (or a non-
+        # real/target stage shape) refuses every upsert stream, so it must
+        # not be advertised either.
+        h = _FixtureConnector()
+        h._adbc_only = True
+        h._capabilities = _caps(merge_form="insert_on_conflict")
+        assert h.supports_upsert is False
+
+    def test_adbc_declaration_without_stage_renderer_does_not_advertise(self):
+        # The base dialect has no adbc_stage_table_sql; a declaring
+        # connector without the override cannot run the stage-MERGE path.
+        h = GenericSQLConnector()
+        h._adbc_only = True
+        h._capabilities = _caps(merge_form="merge")
+        assert h.supports_upsert is False
+
+    def test_sa_declaration_without_renderer_does_not_advertise(self):
         h = _FixtureConnector()
         h._adbc_only = False
+        h._capabilities = _caps(merge_form="merge")
         assert h.supports_upsert is False
+
+    def test_sa_declaration_with_renderer_supports(self):
+        class _SaRenderingDialect(_FixtureAdbcDialect):
+            def build_sqlalchemy_upsert(self, table, records, conflict_keys):
+                return MagicMock()
+
+        class _SaRenderingConnector(GenericSQLConnector):
+            dialect_class = _SaRenderingDialect
+
+        h = _SaRenderingConnector()
+        h._adbc_only = False
+        h._capabilities = _caps(merge_form="merge")
+        assert h.supports_upsert is True
 
 
 class TestAdbcDdlBuilders:
@@ -1630,19 +1718,10 @@ class TestRecordHashDecimalPrecision:
         assert self._hash(arr) == expected
 
 
-class _NoMergeAdbcDialect(_FixtureAdbcDialect):
-    """ADBC dialect that ingests but cannot MERGE (base default)."""
-
-    supports_upsert_adbc = False
-
-
-class _NoMergeConnector(GenericSQLConnector):
-    dialect_class = _NoMergeAdbcDialect
-
-
 class TestKeylessInsertRequiresMergeSupport:
-    """Keyless ADBC insert dedups via stage-MERGE; a dialect that cannot MERGE
-    must fail loud at configure, not fatal on the first write (issue #285 P2)."""
+    """Keyless ADBC insert dedups via stage-MERGE; a system with no declared
+    merge form must fail loud at configure, not fatal on the first write
+    (issue #285 P2). The fact comes from ``sql_capabilities.merge_form``."""
 
     def _state(self, primary_keys=None):
         return _StreamState(
@@ -1652,26 +1731,59 @@ class TestKeylessInsertRequiresMergeSupport:
         )
 
     @pytest.mark.asyncio
-    async def test_keyless_insert_without_merge_support_fails_configure(self):
-        h = _NoMergeConnector()
+    async def test_keyless_insert_with_declared_none_fails_configure(self):
+        h = _FixtureConnector()
         h._adbc_only = True
-        with pytest.raises(AdbcConfigurationError, match="MERGE"):
+        h._capabilities = _caps(merge_form="none")
+        with pytest.raises(AdbcConfigurationError, match="merge_form 'none'"):
             await h._ensure_tables_exist(self._state(), MagicMock())
 
     @pytest.mark.asyncio
-    async def test_merge_capable_dialect_is_not_gated(self):
-        # Same keyless insert on a MERGE-capable dialect clears the guard and
-        # fails later on the (deliberately absent) endpoint document instead.
+    async def test_keyless_insert_with_no_declaration_fails_configure(self):
         h = _FixtureConnector()
         h._adbc_only = True
+        with pytest.raises(AdbcConfigurationError, match="sql_capabilities.merge_form"):
+            await h._ensure_tables_exist(self._state(), MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_merge_capable_declaration_is_not_gated(self):
+        # Same keyless insert under a declared merge form clears the guard
+        # and fails later on the (deliberately absent) endpoint document.
+        h = _FixtureConnector()
+        h._adbc_only = True
+        h._capabilities = _caps(merge_form="merge")
         with pytest.raises(SchemaConfigurationError):
             await h._ensure_tables_exist(self._state(), MagicMock())
 
     @pytest.mark.asyncio
     async def test_keyed_insert_is_not_gated(self):
         # Keyed insert needs no _record_hash dedup, so the guard is bypassed
-        # even on a non-MERGE dialect.
-        h = _NoMergeConnector()
+        # even with no declaration at all.
+        h = _FixtureConnector()
         h._adbc_only = True
         with pytest.raises(SchemaConfigurationError):
             await h._ensure_tables_exist(self._state(primary_keys=["id"]), MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_keyless_insert_with_non_merge_form_fails_configure(self):
+        # The current ADBC stage machinery renders MERGE only; a declared
+        # ON CONFLICT form cannot be honored until #389 and must refuse at
+        # configure, not emit MERGE SQL the declaration disavows.
+        h = _FixtureConnector()
+        h._adbc_only = True
+        h._capabilities = _caps(merge_form="insert_on_conflict")
+        with pytest.raises(AdbcConfigurationError, match="MERGE only"):
+            await h._ensure_tables_exist(self._state(), MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_keyless_insert_with_undeclarable_stage_shape_fails_configure(self):
+        # Declared temp-scope staging is #389 machinery; until then the
+        # stage would silently land as a real table in the target schema —
+        # refuse instead of misrouting.
+        h = _FixtureConnector()
+        h._adbc_only = True
+        h._capabilities = _caps(
+            stage={"scope": "temp", "schema": "target", "transactional_ddl": True}
+        )
+        with pytest.raises(AdbcConfigurationError, match="stage"):
+            await h._ensure_tables_exist(self._state(), MagicMock())

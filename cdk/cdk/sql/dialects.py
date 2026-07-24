@@ -49,6 +49,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from .capabilities import SqlCapabilities, undeclared_capability_error
 from .exceptions import CatalogAddressingError, UnsupportedDialectOperationError
 
 if TYPE_CHECKING:
@@ -64,7 +65,7 @@ class TableAddress:
 
     Built via :meth:`SqlDialect.table_address`, which applies
     :meth:`SqlDialect.normalize_ident` to every component and enforces the
-    dialect's catalog capability — so DDL, DML, ingest kwargs, query
+    declared catalog capability — so DDL, DML, ingest kwargs, query
     building, and logs all work from the same components and none can
     diverge. Empty string means "absent" (no catalog / no schema).
     Construct directly only with already-normalized components (tests on
@@ -125,21 +126,14 @@ class SqlDialect:
     pk_not_enforced: bool = False
     #: Schemas hidden from ``list_schemas`` (catalog/internal schemas).
     system_schemas: tuple[str, ...] = ()
-    #: Whether the dialect implements ``build_sqlalchemy_upsert``.
-    supports_upsert_sqlalchemy: bool = False
-    #: Whether the dialect supports the ADBC stage-table + MERGE upsert path
-    #: (requires ``adbc_stage_table_sql`` and the ADBC DDL type hooks).
-    supports_upsert_adbc: bool = False
-    #: Whether the system can address a catalog other than the connection's
-    #: current one per statement (three-part names, catalog-qualified
-    #: ``INFORMATION_SCHEMA``, ``adbc.ingest.target_catalog``). ANSI SQL has
-    #: no portable form — PostgreSQL/MySQL cannot cross databases, and
-    #: systems that scope the catalog at session level (Snowflake) cannot
-    #: target one per statement either — so the base declares False and a
-    #: requested catalog fails loud with "use a connection whose default
-    #: catalog is X". Connector packages whose system supports it
-    #: (BigQuery, DuckDB) declare True.
-    supports_catalog_addressing: bool = False
+    #: The connector's declared ``sql_capabilities`` (issue #390), attached
+    #: by the facade when a runtime binds (``GenericSQLConnector``). The
+    #: dialect class renders SQL; whether the system HAS a shape — catalog
+    #: addressability, merge form, session-targeting regime, bulk mechanism,
+    #: stage shape — is declared data in ``connector.json``, never a class
+    #: boolean. ``None`` means undeclared: any gate that needs a fact
+    #: refuses loudly instead of guessing.
+    capabilities: SqlCapabilities | None = None
 
     # ---- identifiers -------------------------------------------------------
     def quote_ident(self, name: str) -> str:
@@ -165,19 +159,34 @@ class SqlDialect:
         return name
 
     def _check_catalog(self, catalog: str) -> None:
-        """Reject a catalog this dialect cannot address (single choke point).
+        """Reject a catalog the system cannot address (single choke point).
 
         Shared by :meth:`table_address` (read / write / DDL) and
         :meth:`information_schema_ref` (discovery) — the only two doors a
-        catalog enters SQL composition through.
+        catalog enters SQL composition through. The authority is the
+        connector's declared ``sql_capabilities.catalog``: ``read`` or
+        ``full`` passes this door (write/DDL sites additionally require
+        ``full`` where the address is a write target); ``none`` refuses;
+        undeclared refuses naming the missing declaration — never a guess.
         """
-        if catalog and not self.supports_catalog_addressing:
+        if not catalog:
+            return
+        caps = self.capabilities
+        if caps is None:
             raise CatalogAddressingError(
-                f"dialect {self.name!r} does not support per-statement "
-                f"catalog addressing; cannot target catalog {catalog!r}. "
-                f"Use a connection whose default catalog is {catalog!r}, or "
-                f"a connector whose dialect declares "
-                f"supports_catalog_addressing."
+                str(
+                    undeclared_capability_error(
+                        "catalog",
+                        need=f"this operation targets catalog {catalog!r}",
+                    )
+                )
+            )
+        if caps.catalog == "none":
+            raise CatalogAddressingError(
+                f"connector declares sql_capabilities.catalog 'none': "
+                f"{self.name!r} cannot address a catalog per statement; "
+                f"cannot target catalog {catalog!r}. Use a connection whose "
+                f"default catalog is {catalog!r}."
             )
 
     def table_address(
@@ -397,9 +406,10 @@ class SqlDialect:
         kwarg) and ``adbc.ingest.target_catalog`` (``catalog_name``).
         Components come off the already-normalized *address*, so ingest
         resolves the same physical objects the DDL created. The catalog
-        kwarg is only reachable on dialects that declare
-        ``supports_catalog_addressing`` — :meth:`table_address` rejects a
-        catalog on any other dialect before an address exists.
+        kwarg is only reachable on connectors whose declared
+        ``sql_capabilities.catalog`` is ``full`` — :meth:`table_address`
+        rejects a catalog on an undeclared or ``none`` declaration before
+        an address exists, and the write path requires ``full``.
 
         Drivers that do not implement per-statement ingest targeting
         override this to return no kwargs; ingest then follows the

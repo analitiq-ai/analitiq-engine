@@ -23,8 +23,9 @@ from typing import Any
 from ..contract import ColumnDef
 from ..type_map.exceptions import InvalidTypeMapError, UnmappedTypeError
 from ..types import EndpointScope
+from .capabilities import bind_dialect_capabilities
 from .dialects import SqlDialect, TableAddress
-from .exceptions import CreateTableError
+from .exceptions import CatalogAddressingError, CreateTableError
 from .execution import execute_ddl
 
 
@@ -108,19 +109,37 @@ async def create_table(
     (``runtime.type_mapper_for(scope=CONNECTION)`` — connection write rules
     over the connector's) unless an explicit *type_mapper* is supplied. The
     ``catalog``/``schema``/``table`` intent resolves through
-    ``dialect.table_address`` — a catalog the dialect cannot address fails
+    ``dialect.table_address`` — a catalog the system cannot address fails
     loud there (:class:`~cdk.sql.exceptions.CatalogAddressingError`) before
-    any DDL is composed.
+    any DDL is composed, and DDL against a catalog additionally requires
+    the declared ``sql_capabilities.catalog`` to be ``full`` (``read``
+    covers discovery and reads only).
     """
+    # Standalone entry point: bind the runtime's declared capabilities to
+    # the dialect (the same rule the facade applies), so a declaring
+    # connector's catalog gate behaves identically however the CDK is
+    # driven.
+    bind_dialect_capabilities(dialect, runtime)
     mapper = (
         type_mapper
         if type_mapper is not None
         else runtime.type_mapper_for(scope=EndpointScope.CONNECTION)
     )
+    address = dialect.table_address(table, schema=schema, catalog=catalog)
+    if address.catalog:
+        caps = dialect.capabilities
+        if caps is not None and caps.catalog != "full":
+            raise CatalogAddressingError(
+                f"CREATE TABLE targets catalog {address.catalog!r}, but the "
+                f"connector declares sql_capabilities.catalog "
+                f"{caps.catalog!r} — DDL across catalogs requires 'full'. "
+                f"Use a connection whose default catalog is "
+                f"{address.catalog!r}."
+            )
     ddl = build_create_table_sql(
         dialect,
         mapper,
-        dialect.table_address(table, schema=schema, catalog=catalog),
+        address,
         columns,
         primary_keys,
         if_not_exists=if_not_exists,

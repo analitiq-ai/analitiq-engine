@@ -552,6 +552,16 @@ def test_source_unreachable_by_builtin_type():
         ("TransformationError", "cannot convert value to Int64"),
         ("SchemaError", "source schema could not be read"),
         ("SchemaConfigurationError", "unsupported proto write mode"),
+        # Declared-capability refusals (issue #390): authoring defects in or
+        # against the connector's sql_capabilities block.
+        (
+            "SqlCapabilitiesError",
+            "connector declares no sql_capabilities.merge_form",
+        ),
+        (
+            "CatalogAddressingError",
+            "connector declares sql_capabilities.catalog 'none'",
+        ),
     ],
 )
 def test_type_and_mapping_defects_are_config_invalid(name, message):

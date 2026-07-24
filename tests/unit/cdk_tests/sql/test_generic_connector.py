@@ -35,6 +35,8 @@ class _FakeRuntime:
         self.is_adbc = is_adbc
         self.is_sync_sqlalchemy = False
         self.driver = driver
+        self.connector_id = driver
+        self.declared_sql_capabilities = None
         self.engine = engine
         self.close = AsyncMock()
 
@@ -680,7 +682,7 @@ class TestControlPlaneDelegators:
     @pytest.mark.asyncio
     async def test_discovery_and_create_table_delegate(self):
         connector = GenericSQLConnector()
-        runtime = object()
+        runtime = _FakeRuntime(is_adbc=True)
         with patch(
             "cdk.sql.generic._sql_list_schemas", new=AsyncMock(return_value=["s"])
         ) as ls, patch(

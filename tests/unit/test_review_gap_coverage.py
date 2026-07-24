@@ -11,6 +11,41 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+
+def _merge_capable_caps():
+    """A declared merge-capable sql_capabilities object (issue #390): the
+    upsert configure gate needs a declared merge_form before any DDL runs."""
+    from cdk.sql.capabilities import SqlCapabilities
+
+    return SqlCapabilities.from_declaration(
+        {
+            "catalog": "none",
+            "session_targeting": "per_statement",
+            "merge_form": "merge",
+            "bulk_load": "none",
+            "stage": {"scope": "real", "schema": "target", "transactional_ddl": True},
+        }
+    )
+
+
+def _rendering_connector_cls():
+    """A GenericSQLConnector whose dialect implements the SA upsert hook —
+    the upsert configure gate checks declaration/dialect agreement (#390)."""
+    from cdk.sql.dialects import SqlDialect
+    from cdk.sql.generic import GenericSQLConnector
+
+    class _RenderingDialect(SqlDialect):
+        name = "rendering"
+
+        def build_sqlalchemy_upsert(self, table, records, conflict_keys):
+            return MagicMock()
+
+    class _RenderingConnector(GenericSQLConnector):
+        dialect_class = _RenderingDialect
+
+    return _RenderingConnector
+
+
 # --------------------------------------------------------------------------- #
 # Gap #12: stream conflict keys thread end-to-end through configure_schema    #
 # --------------------------------------------------------------------------- #
@@ -25,11 +60,11 @@ class TestWriteConflictKeysWiring:
     @pytest.mark.asyncio
     async def test_conflict_keys_consumed_verbatim(self):
         """Registered conflict keys land verbatim in the stream state."""
-        from cdk.sql.generic import GenericSQLConnector
         from cdk.type_map import TypeMapper
         from cdk.type_map.rules import parse_rules
 
-        handler = GenericSQLConnector()
+        handler = _rendering_connector_cls()()
+        handler._capabilities = _merge_capable_caps()
         handler._connected = True
         handler._engine = MagicMock()
         handler._runtime = MagicMock()
@@ -86,11 +121,11 @@ class TestWriteConflictKeysWiring:
         self,
     ):
         """No registered entry means an empty conflict target, no PK fallback."""
-        from cdk.sql.generic import GenericSQLConnector
         from cdk.type_map import TypeMapper
         from cdk.type_map.rules import parse_rules
 
-        handler = GenericSQLConnector()
+        handler = _rendering_connector_cls()()
+        handler._capabilities = _merge_capable_caps()
         handler._connected = True
         handler._engine = MagicMock()
         handler._runtime = MagicMock()

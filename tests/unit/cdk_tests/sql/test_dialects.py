@@ -16,8 +16,16 @@ from __future__ import annotations
 
 import pytest
 
+from cdk.sql.capabilities import SqlCapabilities
 from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.exceptions import CatalogAddressingError, UnsupportedDialectOperationError
+
+from .conftest import caps_block
+
+# Declared capability objects the fixture dialects carry, standing in for the
+# engine attaching a connector's validated declaration at runtime binding.
+_FULL_CATALOG_CAPS = SqlCapabilities.from_declaration(caps_block(catalog="full"))
+_NO_CATALOG_CAPS = SqlCapabilities.from_declaration(caps_block(catalog="none"))
 
 # --- fixture dialects (stand in for connector-package dialects) -------------
 
@@ -54,11 +62,11 @@ class _SystemSchemaDialect(SqlDialect):
 
 
 class _CatalogDialect(SqlDialect):
-    """A dialect whose system addresses catalogs per statement (as DuckDB or
-    BigQuery would)."""
+    """A dialect bound to a connector declaring full catalog addressing (as
+    DuckDB or BigQuery would in their ``sql_capabilities``)."""
 
     name = "cataloged"
-    supports_catalog_addressing = True
+    capabilities = _FULL_CATALOG_CAPS
 
 
 # --- identifier quoting ------------------------------------------------------
@@ -124,7 +132,7 @@ class TestTableAddress:
         # One rule, applied once, to catalog AND schema AND table — no
         # consumer can diverge afterwards (issue #348 item 3).
         class _UpperCatalogDialect(_UpperNormalizingDialect):
-            supports_catalog_addressing = True
+            capabilities = _FULL_CATALOG_CAPS
 
         address = _UpperCatalogDialect().table_address(
             "orders", schema="public", catalog="analytics_db"
@@ -138,12 +146,21 @@ class TestTableAddress:
         assert str(TableAddress(table="t", schema="s")) == "s.t"
         assert str(TableAddress(table="t")) == "t"
 
-    def test_catalog_on_unsupporting_dialect_fails_loud(self):
-        # ANSI SQL has no portable cross-catalog form; the base refuses a
-        # catalog before any SQL is composed instead of compiling a
-        # statement the system would misread (issues #343 / #338).
-        with pytest.raises(CatalogAddressingError, match="default catalog"):
+    def test_catalog_with_no_declaration_fails_loud(self):
+        # An undeclared capability is never guessed: the refusal names the
+        # missing sql_capabilities declaration (issue #390).
+        with pytest.raises(CatalogAddressingError, match="sql_capabilities.catalog"):
             SqlDialect().table_address("t", schema="s", catalog="other_db")
+
+    def test_catalog_on_declared_none_fails_loud(self):
+        # ANSI SQL has no portable cross-catalog form; a declared 'none'
+        # refuses a catalog before any SQL is composed instead of compiling
+        # a statement the system would misread (issues #343 / #338).
+        class _NoCatalogDialect(SqlDialect):
+            capabilities = _NO_CATALOG_CAPS
+
+        with pytest.raises(CatalogAddressingError, match="default catalog"):
+            _NoCatalogDialect().table_address("t", schema="s", catalog="other_db")
 
     def test_catalog_without_schema_fails_loud(self):
         with pytest.raises(CatalogAddressingError, match="requires an explicit schema"):
@@ -261,7 +278,7 @@ class TestCatalogScopedDiscoveryQueries:
 
     def test_catalog_params_are_normalized(self):
         class _UpperCatalogDialect(_UpperNormalizingDialect):
-            supports_catalog_addressing = True
+            capabilities = _FULL_CATALOG_CAPS
 
         sql, params = _UpperCatalogDialect().tables_query("ds", "proj")
         assert '"PROJ".information_schema.tables' in sql
@@ -421,10 +438,12 @@ class TestUnsupportedHooks:
         # ... and points the operator at the connector package.
         assert "connector package" in message
 
-    def test_base_does_not_support_upsert_flags(self):
-        d = SqlDialect()
-        assert d.supports_upsert_sqlalchemy is False
-        assert d.supports_upsert_adbc is False
+    def test_base_declares_no_capabilities(self):
+        # Capability facts are declared data (sql_capabilities in
+        # connector.json), never class defaults: the base carries no
+        # declaration, so every needed fact refuses until a connector's
+        # declaration is bound (issue #390).
+        assert SqlDialect().capabilities is None
 
 
 class TestAdbcIngestKwargs:

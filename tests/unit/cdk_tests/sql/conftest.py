@@ -26,6 +26,39 @@ from cdk.types import EndpointScope
 # A responder maps an executed (sql, params) to the rows the cursor returns.
 Responder = Callable[[str, Sequence[Any]], list[dict[str, Any]]]
 
+
+def caps_block(
+    *,
+    catalog: str = "none",
+    session_targeting: str = "per_statement",
+    merge_form: str = "merge",
+    bulk_load: str = "none",
+    stage_scope: str = "temp",
+    stage_schema: str = "target",
+    dedicated_schema: str | None = None,
+    transactional_ddl: bool = True,
+) -> dict[str, Any]:
+    """A declared ``sql_capabilities`` block as connector.json would carry it.
+
+    Defaults describe a plain per-statement, merge-capable system; tests
+    override exactly the fact they exercise.
+    """
+    stage: dict[str, Any] = {
+        "scope": stage_scope,
+        "schema": stage_schema,
+        "transactional_ddl": transactional_ddl,
+    }
+    if dedicated_schema is not None:
+        stage["dedicated_schema"] = dedicated_schema
+    return {
+        "catalog": catalog,
+        "session_targeting": session_targeting,
+        "merge_form": merge_form,
+        "bulk_load": bulk_load,
+        "stage": stage,
+    }
+
+
 # Postgres-shaped rules covering the native/canonical types the DDL and
 # discovery tests drive through the mapper. Deliberately no rule for
 # ``geometry`` (read) or ``LargeList`` (write): the unmapped-type error paths
@@ -181,10 +214,13 @@ class FakeAdbcRuntime:
         responder: Responder | None = None,
         fail_execute: Exception | None = None,
         fail_close: Exception | None = None,
+        declared_sql_capabilities: dict[str, Any] | None = None,
     ) -> None:
         self.driver = driver
+        self.connector_id = driver
         self.is_adbc = True
         self.is_sync_sqlalchemy = False
+        self.declared_sql_capabilities = declared_sql_capabilities
         self._mapper = mapper
         self._connection_mapper = connection_mapper
         self._responder = responder
@@ -286,10 +322,13 @@ class FakeSaRuntime:
         connection_mapper: Any = None,
         rows: list[dict[str, Any]] | None = None,
         fail: Exception | None = None,
+        declared_sql_capabilities: dict[str, Any] | None = None,
     ) -> None:
         self.driver = driver
+        self.connector_id = driver
         self.is_adbc = False
         self.is_sync_sqlalchemy = False
+        self.declared_sql_capabilities = declared_sql_capabilities
         self._mapper = mapper
         self._connection_mapper = connection_mapper
         self.engine = FakeAsyncEngine(rows=rows, fail=fail)
