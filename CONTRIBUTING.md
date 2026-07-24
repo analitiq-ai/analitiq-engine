@@ -32,7 +32,7 @@ poetry run pre-commit run --all-files   # run on the whole tree on demand
 
 ## Continuous Integration
 
-The `ci` workflow runs on every push and pull request:
+The `ci` workflow runs on every pull request and on pushes to `main`:
 
 - **pytest** over the whole suite.
 - **pre-commit** (black, isort, flake8 with bugbear + datetimez, mypy,
