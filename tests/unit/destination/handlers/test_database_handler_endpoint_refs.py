@@ -700,6 +700,81 @@ class TestPrepareSqlAlchemyBatch:
         prepared = handler._prepare_sqlalchemy_batch(state, batch)
         assert prepared.to_pylist() == [{"id": "k", "v": "first"}]
 
+    @pytest.mark.parametrize("mode", ["upsert", "truncate_insert"])
+    def test_upsert_and_full_refresh_never_collapse(self, mode):
+        # ADR §2: duplicate conflict_keys inside one source batch keep the
+        # system's own loud failure for upsert (no collapse rule can be
+        # correct), and deduping a full refresh would drop legitimate
+        # duplicate rows. Only insert collapses.
+        import pyarrow as pa
+
+        from cdk.schema_contract import SchemaContract
+
+        handler = GenericSQLConnector()
+        contract = SchemaContract(
+            {
+                "columns": [
+                    {
+                        "name": "id",
+                        "arrow_type": "Utf8",
+                        "native_type": "TEXT",
+                        "nullable": False,
+                    },
+                    {
+                        "name": "v",
+                        "arrow_type": "Utf8",
+                        "native_type": "TEXT",
+                        "nullable": True,
+                    },
+                ]
+            }
+        )
+        state = _StreamState(
+            write_mode=mode,  # type: ignore[arg-type]
+            primary_keys=["id"],
+            conflict_keys=["id"],
+            schema_contract=contract,
+        )
+        batch = pa.RecordBatch.from_pylist(
+            [{"id": "k", "v": "first"}, {"id": "k", "v": "second"}],
+            schema=contract.arrow_schema,
+        )
+        prepared = handler._prepare_sqlalchemy_batch(state, batch)
+        assert prepared.num_rows == 2
+
+    def test_record_hash_digest_is_pinned(self):
+        # Golden digest: the content-hash identity (issue #282) must stay
+        # byte-stable across engine versions — a canonicalization change
+        # here silently breaks dedup continuity against every existing
+        # keyless target (historical rows re-insert once, no error).
+        from datetime import date, datetime
+        from decimal import Decimal
+
+        import pyarrow as pa
+
+        handler = GenericSQLConnector()
+        state = _StreamState(write_mode="insert", primary_keys=[])
+        batch = pa.RecordBatch.from_arrays(
+            [
+                pa.array([None], type=pa.large_string()),
+                pa.array([Decimal("12.34")], type=pa.decimal128(10, 2)),
+                pa.array(
+                    # Zoneless on purpose: a naive wire timestamp must
+                    # keep hashing identically forever.
+                    [datetime(2026, 1, 2, 3, 4, 5, 123456)],  # noqa: DTZ001
+                    type=pa.timestamp("us"),
+                ),
+                pa.array([date(2026, 1, 2)], type=pa.date32()),
+                pa.array(['{"k": 1}'], type=pa.large_string()),
+            ],
+            names=["id", "amount", "created", "day", "meta"],
+        )
+        hashed = handler._attach_record_hash_to_batch(batch, state)
+        digest = hashed.column("_record_hash")[0].as_py()
+        assert digest == (
+            "fd19ff71ae81aa690cd02028f9aee4c21654e009b4c6c1d7ddad614d6fc2ec76"
+        )
+
     def test_raises_when_schema_contract_is_none(self):
         import pyarrow as pa
 

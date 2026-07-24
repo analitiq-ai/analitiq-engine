@@ -56,6 +56,16 @@ def stage_table_name(
         + hashlib.sha256(f"{run_id}|{stream_id}|{batch_seq}".encode()).hexdigest()[:16]
     )
     head = f"{_STAGE_PREFIX}{token}"
+    if max_identifier_length < len(head):
+        # The token is never truncated — a cut token collapses distinct
+        # stages into one name, exactly the defect the hash-first grammar
+        # exists to prevent. A budget this tight is a dialect authoring
+        # error; refuse it loudly.
+        raise SchemaConfigurationError(
+            f"dialect identifier budget {max_identifier_length} cannot hold "
+            f"the {len(head)}-byte stage-name prefix and uniqueness token; "
+            f"fix the dialect's max_identifier_length"
+        )
     tail_budget = max_identifier_length - len(head) - 1
     if tail_budget <= 0 or not target_table:
         return head

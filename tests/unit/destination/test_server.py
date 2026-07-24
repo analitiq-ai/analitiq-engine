@@ -356,7 +356,7 @@ class TestSchemaAckTypeMapError:
         handler = MagicMock()
         handler.configure_schema = AsyncMock(
             side_effect=UnsupportedDialectOperationError(
-                "build_sqlalchemy_upsert", dialect="ansi"
+                "merge_statement_sql", dialect="ansi"
             )
         )
 

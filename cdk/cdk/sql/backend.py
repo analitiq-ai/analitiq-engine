@@ -27,6 +27,8 @@ from sqlalchemy import Column, MetaData, Table
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from cdk.adbc_registry import AdbcConfigurationError
+
 from .dialects import SqlDialect, TableAddress
 
 if TYPE_CHECKING:
@@ -241,24 +243,69 @@ class SqlAlchemyBackend(TransportBackend):
         self._exec_commit(conn, plan.drop_stage_sql)
         try:
             self._run_cycle_steps(conn, plan, batch, preflight_drop=True)
-        except BaseException:
+        except Exception:
             # Failure path: best-effort drop, then the batch fails with
-            # its own error. A failed drop here is expected on a dead
-            # connection; the next attempt's pre-flight drop heals it.
-            try:
-                conn.rollback()
-                self._exec_commit(conn, plan.drop_stage_sql)
-            except Exception:
-                logger.warning(
-                    "stage table %s left behind after a failed batch; a "
-                    "retried batch clears it via the pre-flight drop, but "
-                    "after a fatal failure or exhausted retries it needs a "
-                    "manual drop",
-                    self._dialect.quote_table(plan.stage),
-                    exc_info=True,
-                )
+            # its own error.
+            self._drop_stage_after_failure(conn, plan)
+            raise
+        except BaseException:
+            # Cancellation or interpreter shutdown: no further database
+            # I/O on a deadline that already expired — a cleanup DROP
+            # would block on exactly the condition that caused the
+            # cancellation, past the ack budget, while holding the write
+            # lock. Log honestly and let a retry's pre-flight drop (or
+            # the session's end, for temp scope) clear the stage.
+            logger.warning(
+                "stage cycle for %s interrupted before cleanup; %s",
+                self._dialect.quote_table(plan.stage),
+                self._stage_leftover_note(plan),
+            )
             raise
         self._drop_stage_after_success(conn, plan)
+
+    def _stage_leftover_note(self, plan: StageWritePlan) -> str:
+        """Word the honest, scope-accurate consequence of an undropped stage."""
+        if plan.scope == "temp":
+            return (
+                "the session-temp stage is invisible to other sessions, is "
+                "cleared by a retry's pre-flight drop on this session, and "
+                "dies with the connection"
+            )
+        return (
+            "a retried batch clears it via the pre-flight drop, but after a "
+            "fatal failure or exhausted retries it needs a manual drop or a "
+            "table-expiration policy"
+        )
+
+    def _drop_stage_after_failure(self, conn: Connection, plan: StageWritePlan) -> None:
+        """Best-effort stage drop after a failed cycle step (non-transactional).
+
+        Never raises: the batch must fail with the step's own error, not
+        with whatever the cleanup ran into — the retry verdict belongs to
+        the write failure. Each log tells only what actually happened:
+        a failed rollback means the drop was never attempted (and the
+        stage may not even exist if the create step was what failed).
+        """
+        try:
+            conn.rollback()
+        except Exception:
+            logger.warning(
+                "rollback after a failed batch also failed; the stage drop "
+                "for %s was not attempted — %s",
+                self._dialect.quote_table(plan.stage),
+                self._stage_leftover_note(plan),
+                exc_info=True,
+            )
+            return
+        try:
+            self._exec_commit(conn, plan.drop_stage_sql)
+        except Exception:
+            logger.warning(
+                "stage table %s could not be dropped after a failed batch; " "%s",
+                self._dialect.quote_table(plan.stage),
+                self._stage_leftover_note(plan),
+                exc_info=True,
+            )
 
     def _run_cycle_steps(
         self,
@@ -308,6 +355,7 @@ class SqlAlchemyBackend(TransportBackend):
                     "SqlAlchemyBackend.execute_write() called before connect()"
                 )
             if self._dialect.bulk_land(conn, plan.stage, batch, runtime=self._runtime):
+                self._verify_bulk_land(conn, plan, batch.num_rows)
                 return
             logger.info(
                 "dialect %s declined the declared bulk land for %s; landing "
@@ -315,24 +363,51 @@ class SqlAlchemyBackend(TransportBackend):
                 self._dialect.name,
                 self._dialect.quote_table(plan.stage),
             )
-        stage_table = self._stage_table(plan)
+        stage_table = self._stage_table(conn, plan)
         records: list[dict[str, Any]] = batch.to_pylist()
         conn.execute(stage_table.insert(), records)
 
-    def _stage_table(self, plan: StageWritePlan) -> Table:
+    def _verify_bulk_land(
+        self, conn: Connection, plan: StageWritePlan, expected_rows: int
+    ) -> None:
+        """Refuse a bulk land whose stage row count is not the batch's.
+
+        ``bulk_land`` is untrusted connector code, and its ``True`` return
+        is the one place a claim of "landed" would otherwise go
+        unverified before the mode statement runs — a mechanism that
+        landed into the wrong place (or nowhere) would let an empty stage
+        ack a full batch. One cheap aggregate closes that: a mismatch is
+        a connector defect, refused loudly before any target mutation.
+        """
+        # Dialect-quoted identifiers only; no user values.
+        stage_ref = self._dialect.quote_table(plan.stage)
+        count = conn.exec_driver_sql(
+            f"SELECT COUNT(*) FROM {stage_ref}"  # nosec B608
+        ).scalar_one()
+        if count != expected_rows:
+            raise AdbcConfigurationError(
+                f"dialect {self._dialect.name!r} bulk_land reported success "
+                f"for {plan.stage} but the stage holds {count} rows, "
+                f"expected {expected_rows}; the declared bulk mechanism did "
+                f"not land this batch — fix the connector."
+            )
+
+    def _stage_table(self, conn: Connection, plan: StageWritePlan) -> Table:
         """Build a lightweight stage ``Table`` with the target's column types.
 
         Built per batch from the reflected target so executemany binds each
         landed column exactly as a direct target insert would have — the
         stage table itself is never reflected (it was created moments ago
-        in this same cycle).
+        in this same cycle). The target reflection is normally cached at
+        configure time (``target_columns``); after a reconnect that
+        rebuilt the backend it is re-reflected here on the live cycle
+        connection, so a still-configured stream never wedges on a stale
+        cache.
         """
         target = self._targets.get(plan.target)
         if target is None:
-            raise RuntimeError(
-                f"no reflected table for write target {plan.target}; "
-                f"target_columns() must run at configure time before writes"
-            )
+            target = self._reflect(conn, plan.target)
+            self._targets[plan.target] = target
         missing = [name for name in plan.columns if name not in target.c]
         if missing:
             raise RuntimeError(
@@ -355,35 +430,33 @@ class SqlAlchemyBackend(TransportBackend):
         stage table is orphaned until dropped manually or expired; a
         temp-scope stage dies with the discarded session.
         """
-        last_exc: Exception | None = None
-        for attempt in (1, 2):
-            try:
-                if last_exc is not None:
-                    # A failed first attempt can leave the connection in
-                    # an aborted transaction; clear it or the retry fails
-                    # on the transaction state instead of the drop.
-                    conn.rollback()
-                self._exec_commit(conn, plan.drop_stage_sql)
-            except Exception as exc:
-                last_exc = exc
-                logger.debug(
-                    "post-merge drop of stage %s failed (attempt %d/2)",
-                    self._dialect.quote_table(plan.stage),
-                    attempt,
-                    exc_info=True,
-                )
-                continue
-            if last_exc is not None:
-                # Surface the recovery at INFO: a connection failing its
-                # first DROP on every batch would otherwise have no
-                # footprint at the default log level until it escalates
-                # to an orphan.
-                logger.info(
-                    "post-merge drop of stage %s succeeded on the second " "attempt",
-                    self._dialect.quote_table(plan.stage),
-                )
+        first_exc = self._try_drop(conn, plan)
+        if first_exc is None:
             return
-        conn.invalidate()
+        # INFO, not DEBUG, with the cause: a connection failing its first
+        # DROP on every batch needs a footprint at the default log level
+        # before it escalates to an orphan, and the cause (lock vs network
+        # vs permissions) is the actionable part.
+        logger.info(
+            "post-merge drop of stage %s failed (attempt 1/2); retrying",
+            self._dialect.quote_table(plan.stage),
+            exc_info=first_exc,
+        )
+        try:
+            # A failed first attempt can leave the connection in an
+            # aborted transaction; clear it or the retry fails on the
+            # transaction state instead of the drop. Logged apart from
+            # the drop errors so neither masks the other.
+            conn.rollback()
+        except Exception:
+            logger.warning("rollback before the stage-drop retry failed", exc_info=True)
+        second_exc = self._try_drop(conn, plan)
+        if second_exc is None:
+            logger.info(
+                "post-merge drop of stage %s succeeded on the second attempt",
+                self._dialect.quote_table(plan.stage),
+            )
+            return
         if plan.scope == "real":
             orphan_note = (
                 "it is orphaned — a full copy of this batch — until dropped "
@@ -391,15 +464,35 @@ class SqlAlchemyBackend(TransportBackend):
             )
         else:
             orphan_note = "the session-temp stage dies with the discarded connection"
+        # The honest orphan record comes before the invalidation: a
+        # failing invalidate() must never erase the only log naming the
+        # leftover table. The batch stays acked either way — the mode
+        # statement committed.
         logger.warning(
             "stage table %s could not be dropped after a successful mode "
             "statement (two attempts). The batch is acked and never "
             "retried, so no automatic cleanup reaches this table: %s. The "
-            "connection was invalidated and the pool opens a fresh one",
+            "connection is discarded so the next batch does not inherit it",
             self._dialect.quote_table(plan.stage),
             orphan_note,
-            exc_info=last_exc,
+            exc_info=second_exc,
         )
+        try:
+            conn.invalidate()
+        except Exception:
+            logger.warning(
+                "could not invalidate the connection after the failed stage "
+                "drops; the pool may hand it out again",
+                exc_info=True,
+            )
+
+    def _try_drop(self, conn: Connection, plan: StageWritePlan) -> Exception | None:
+        """One drop attempt, returning the failure instead of raising."""
+        try:
+            self._exec_commit(conn, plan.drop_stage_sql)
+        except Exception as exc:
+            return exc
+        return None
 
     # ---- small execution helpers ---------------------------------------
 

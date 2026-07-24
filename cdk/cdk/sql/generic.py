@@ -136,7 +136,12 @@ _FATAL_ADBC_ERROR_NAMES = frozenset(
 
 
 def _is_fatal_adbc_error(exc: BaseException) -> bool:
-    """Return ``True`` when *exc* is a failure class retries cannot heal."""
+    """Return ``True`` when *exc* is a failure class retries cannot heal.
+
+    Name-based, so it serves both transports: ADBC drivers re-export the
+    PEP-249 names per the spec, and SQLAlchemy's wrapper exceptions
+    (``sqlalchemy.exc.IntegrityError`` etc.) carry the same class names.
+    """
     return any(cls.__name__ in _FATAL_ADBC_ERROR_NAMES for cls in type(exc).__mro__)
 
 
@@ -770,8 +775,17 @@ class GenericSQLConnector(BaseDestinationHandler):
             # materialize() already acquired the runtime; the caller does
             # not disconnect a handler whose connect() raised, so release
             # the ref here to keep the lifecycle balanced (same rule as
-            # the ADBC eager-open failure below).
-            await runtime.close()
+            # the ADBC eager-open failure below). The close is guarded so
+            # a failing release can never mask the binding error the
+            # operator actually needs.
+            try:
+                await runtime.close()
+            except Exception:
+                logger.warning(
+                    "runtime release after a failed capability bind also "
+                    "failed; the binding error below is the root cause",
+                    exc_info=True,
+                )
             raise
         self._driver = runtime.driver or ""
         # Reset prior-connection state so a long-lived handler that
@@ -1706,6 +1720,22 @@ class GenericSQLConnector(BaseDestinationHandler):
                 e,
                 exc_info=True,
             )
+            if not self._adbc_only and _is_fatal_adbc_error(e):
+                # Same intent, same verdict on both transports: the ADBC
+                # helpers reclassify the deterministic PEP-249 classes
+                # (ProgrammingError, IntegrityError, DataError,
+                # NotSupportedError) as fatal before they reach this
+                # ladder, and SQLAlchemy's wrapper exceptions carry the
+                # same class names — broken rendered SQL, a duplicate
+                # conflict key inside one source batch, or a constraint
+                # violation cannot heal between retries against an
+                # identical request.
+                return BatchWriteResult(
+                    status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                    records_written=0,
+                    failure_summary=f"sqlalchemy: {type(e).__name__}: {e}",
+                    failure_category=FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
+                )
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
                 records_written=0,

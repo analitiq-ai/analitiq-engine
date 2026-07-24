@@ -106,6 +106,14 @@ class TestStageName:
         )
         assert len(short) <= 34
 
+    def test_budget_too_small_for_the_token_refuses(self):
+        # The token is never truncated — a cut token collapses distinct
+        # stages into one name. An absurd dialect budget refuses loudly.
+        with pytest.raises(SchemaConfigurationError, match="identifier budget"):
+            stage_table_name(
+                "t", run_id="r", stream_id="s", batch_seq=1, max_identifier_length=20
+            )
+
     def test_different_streams_never_collide(self):
         a = stage_table_name(
             "t", run_id="r", stream_id="s1", batch_seq=1, max_identifier_length=63
