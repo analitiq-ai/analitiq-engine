@@ -66,13 +66,35 @@ class TestDestinationHttpVerdict:
         assert status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
         assert category == FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
 
-    def test_non_response_errors_never_consult_the_map(self):
+    def test_undeclared_non_response_errors_keep_the_heuristic(self):
         error_map = _map({"http": {"401": "auth"}})
         status, category = _http_verdict(
             aiohttp.ClientConnectionError("refused"), error_map
         )
         assert status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
         assert category == FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+
+    def test_declared_exception_family_claims_non_response_errors(self):
+        # A TLS/certificate failure carries no HTTP status; the exception
+        # family claims it (retried forever under the heuristic, fatal
+        # config under the declaration).
+        error_map = _map({"exception": {"ClientConnectionError": "config"}})
+        status, category = _http_verdict(
+            aiohttp.ClientConnectionError("certificate verify failed"), error_map
+        )
+        assert status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
+
+    def test_declared_status_wins_over_the_exception_family(self):
+        error_map = _map(
+            {
+                "http": {"402": "rate_limited"},
+                "exception": {"ClientResponseError": "config"},
+            }
+        )
+        status, category = _http_verdict(_response_error(402), error_map)
+        assert status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        assert category == FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED
 
 
 class TestDestinationConnectWiring:

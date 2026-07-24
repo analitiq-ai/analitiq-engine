@@ -385,12 +385,14 @@ def _walk_chain(exc: BaseException) -> list[BaseException]:
 
     Outermost-first, depth-capped, identity-deduplicated. Follows only
     explicit links — ``ExceptionGroup`` members, ``raise ... from``
-    (``__cause__``), and the engine's own ``original_error`` wrapper
-    attribute — never the implicit ``__context__``: a declared fact riding
-    an exception that merely happened to be in flight (a driver's internal
-    retry, a cleanup failure) must not claim the verdict for the failure
-    that was actually raised. The engine's text heuristics walk wider on
-    purpose; declared claims trade recall for precision.
+    (``__cause__``), SQLAlchemy's ``orig`` (the raw DBAPI exception its
+    wrapper carries, the one holding sqlstate/vendor facts), and the
+    engine's own ``original_error`` wrapper attribute — never the implicit
+    ``__context__``: a declared fact riding an exception that merely
+    happened to be in flight (a driver's internal retry, a cleanup
+    failure) must not claim the verdict for the failure that was actually
+    raised. The engine's text heuristics walk wider on purpose; declared
+    claims trade recall for precision.
     """
     seen: set[int] = set()
     out: list[BaseException] = []
@@ -404,7 +406,7 @@ def _walk_chain(exc: BaseException) -> list[BaseException]:
         nested: list[BaseException] = []
         if isinstance(current, BaseExceptionGroup):
             nested.extend(current.exceptions)
-        for attr in ("original_error", "__cause__"):
+        for attr in ("original_error", "orig", "__cause__"):
             # The members are untrusted objects; a misbehaving property on
             # a link attribute must not crash the walk (the caller is in
             # the middle of reporting the original failure), so a raising

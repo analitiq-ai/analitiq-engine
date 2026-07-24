@@ -168,6 +168,17 @@ class TestErrorMapLookup:
         assert match is not None
         assert match.category == "auth"
 
+    def test_sqlalchemy_orig_link_is_walked(self, error_map):
+        # SQLAlchemy's DBAPIError exposes the raw driver exception as
+        # .orig — the member carrying sqlstate/vendor facts.
+        driver_exc = Exception("auth denied")
+        driver_exc.sqlstate = "28000"
+        wrapper = RuntimeError("(psycopg2.OperationalError) wrapped")
+        wrapper.orig = driver_exc
+        match = error_map.match_exception(wrapper)
+        assert match is not None
+        assert match.category == "auth"
+
     def test_http_lookup(self, error_map):
         match = error_map.match_http(429)
         assert match is not None

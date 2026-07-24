@@ -288,19 +288,33 @@ def _http_verdict(
 ) -> tuple["AckStatus", "FailureCategory"]:
     """Ack verdict for a transport error: declared map first (issue #401).
 
-    The connector's declared ``http`` family classifies the status and the
-    engine-owned write verdict table derives both the ack status and the
-    declared failure category — which rides the ack to the engine, where
-    ``classify_destination_failure`` reads it structurally instead of
-    falling back to text. An undeclared status keeps the built-in 4xx
-    heuristic with an UNSPECIFIED category, exactly as before.
+    The connector's declared ``http`` family classifies a response status,
+    and its ``exception`` family classifies the non-response transport
+    errors that carry no status (TLS/certificate failures, payload errors,
+    timeouts); the engine-owned write verdict table derives both the ack
+    status and the declared failure category — which rides the ack to the
+    engine, where ``classify_destination_failure`` reads it structurally
+    instead of falling back to text. An unclaimed error keeps the built-in
+    4xx heuristic with an UNSPECIFIED category, exactly as before. The
+    status family wins over the exception family for a response error —
+    the status is the more specific declared fact.
     """
-    if error_map is not None and isinstance(exc, aiohttp.ClientResponseError):
-        match = error_map.match_http(exc.status)
+    if error_map is not None:
+        if isinstance(exc, aiohttp.ClientResponseError):
+            match = error_map.match_http(exc.status)
+            if match is not None:
+                logger.info(
+                    "declared error_map classified HTTP %d -> %s",
+                    exc.status,
+                    match.category,
+                )
+                return DECLARED_WRITE_VERDICTS[match.category]
+        match = error_map.match_exception(exc)
         if match is not None:
             logger.info(
-                "declared error_map classified HTTP %d -> %s",
-                exc.status,
+                "declared error_map classified the transport error: %s %s -> %s",
+                match.family,
+                match.identifier,
                 match.category,
             )
             return DECLARED_WRITE_VERDICTS[match.category]
