@@ -336,10 +336,18 @@ class TestTruncateOnFirstBatchSqlAlchemy:
 
 @pytest.mark.unit
 class TestTruncateOnFirstBatchAdbc:
+    """Truncate-once gating is decided by the facade and carried on the
+    plan (``truncate_sql`` set on the read's first batch only, issue
+    #307) — identical for the ADBC transport, whose backend just
+    executes what the plan says."""
+
     def _adbc_handler(self) -> GenericSQLConnector:
         handler = GenericSQLConnector()
         handler._connected = True
         handler._adbc_only = True
+        handler.dialect = _SqliteStageDialect()
+        handler.dialect.capabilities = _SQLITE_CAPS
+        handler._capabilities = _SQLITE_CAPS
         contract = MagicMock()
         contract.cast_arrow_batch = lambda b: b
         handler._streams["s1"] = SqlStreamState(
@@ -347,10 +355,15 @@ class TestTruncateOnFirstBatchAdbc:
             write_mode="truncate_insert",
             schema_contract=contract,
         )
-        handler._truncate_then_ingest_sync = MagicMock()  # type: ignore[method-assign]
-        handler._adbc_only_ingest_sync = MagicMock()  # type: ignore[method-assign]
-        handler._adbc_truncate_sync = MagicMock()  # type: ignore[method-assign]
+        backend = MagicMock()
+        backend.execute_write = AsyncMock()
+        backend.run_ddl = AsyncMock()
+        handler._backend = backend
         return handler
+
+    @staticmethod
+    def _plans(handler) -> list:
+        return [c.args[0] for c in handler._backend.execute_write.call_args_list]
 
     @pytest.mark.asyncio
     async def test_only_the_first_batch_truncates(self):
@@ -359,8 +372,9 @@ class TestTruncateOnFirstBatchAdbc:
         await _write(handler, 1, [{"id": 1, "name": "a"}])
         await _write(handler, 2, [{"id": 2, "name": "b"}])
 
-        assert handler._truncate_then_ingest_sync.call_count == 1
-        assert handler._adbc_only_ingest_sync.call_count == 1
+        first, second = self._plans(handler)
+        assert first.truncate_sql is not None
+        assert second.truncate_sql is None
 
     @pytest.mark.asyncio
     async def test_a_new_read_truncates_again(self):
@@ -369,32 +383,31 @@ class TestTruncateOnFirstBatchAdbc:
         await _write(handler, 1, [{"id": 1, "name": "a"}])
         await _write(handler, 1, [{"id": 1, "name": "a"}], run_id="run-2")
 
-        assert handler._truncate_then_ingest_sync.call_count == 2
-        assert handler._adbc_only_ingest_sync.call_count == 0
+        assert all(plan.truncate_sql is not None for plan in self._plans(handler))
 
     @pytest.mark.asyncio
     async def test_mid_refresh_batch_never_truncates_on_a_fresh_worker(self):
         """A restarted worker has no memory — and needs none: batch_seq > 1
-        routes to the plain append regardless of process history."""
+        plans a plain append regardless of process history."""
         handler = self._adbc_handler()
 
         await _write(handler, 3, [{"id": 3, "name": "c"}])
 
-        assert handler._truncate_then_ingest_sync.call_count == 0
-        assert handler._adbc_only_ingest_sync.call_count == 1
+        (plan,) = self._plans(handler)
+        assert plan.truncate_sql is None
 
     @pytest.mark.asyncio
     async def test_failed_first_batch_truncates_again_on_retry(self):
         handler = self._adbc_handler()
-        handler._truncate_then_ingest_sync.side_effect = RuntimeError("down")
+        handler._backend.execute_write.side_effect = RuntimeError("down")
 
         result = await _write(handler, 1, [{"id": 1, "name": "a"}])
         assert result.success is False
 
-        handler._truncate_then_ingest_sync.side_effect = None
+        handler._backend.execute_write.side_effect = None
         retried = await _write(handler, 1, [{"id": 1, "name": "a"}])
         assert retried.success
-        assert handler._truncate_then_ingest_sync.call_count == 2
+        assert all(plan.truncate_sql is not None for plan in self._plans(handler))
 
     @pytest.mark.asyncio
     async def test_empty_first_batch_truncates_without_ingest(self):
@@ -402,9 +415,10 @@ class TestTruncateOnFirstBatchAdbc:
 
         r = await _write(handler, 1, [])
         assert r.success
-        assert handler._adbc_truncate_sync.call_count == 1
-        assert handler._truncate_then_ingest_sync.call_count == 0
-        assert handler._adbc_only_ingest_sync.call_count == 0
+        # No stage cycle for an empty batch: the emptying statement runs
+        # on its own through run_ddl, and nothing is landed.
+        handler._backend.run_ddl.assert_awaited_once_with(['DELETE FROM "t"'])
+        handler._backend.execute_write.assert_not_called()
 
 
 @pytest.mark.unit
@@ -809,8 +823,9 @@ class TestZeroBatchTruncate:
 
     @pytest.mark.asyncio
     async def test_zero_batch_truncate_insert_clears_table_adbc(self):
-        """End-to-end: an empty source with truncate_insert triggers the
-        ADBC truncate path when the engine sends the synthetic batch."""
+        """End-to-end: an empty source with truncate_insert runs the
+        emptying statement through the transport backend when the engine
+        sends the synthetic batch — no stage cycle, nothing landed."""
         handler = GenericSQLConnector()
         handler._connected = True
         handler._adbc_only = True
@@ -821,9 +836,10 @@ class TestZeroBatchTruncate:
             write_mode="truncate_insert",
             schema_contract=contract,
         )
-        handler._adbc_truncate_sync = MagicMock()
-        handler._truncate_then_ingest_sync = MagicMock()
-        handler._adbc_only_ingest_sync = MagicMock()
+        backend = MagicMock()
+        backend.run_ddl = AsyncMock()
+        backend.execute_write = AsyncMock()
+        handler._backend = backend
 
         r = await handler.write_batch(
             run_id="run-1",
@@ -835,9 +851,7 @@ class TestZeroBatchTruncate:
             emitted_at=_EMITTED_AT,
         )
         assert r.success
-        # The stream's own address reaches the truncate — not a rebuilt one.
-        handler._adbc_truncate_sync.assert_called_once_with(
-            handler._streams["s1"].address
-        )
-        handler._truncate_then_ingest_sync.assert_not_called()
-        handler._adbc_only_ingest_sync.assert_not_called()
+        # The stream's own address reaches the emptying statement — the
+        # dialect's empty_table_sql render, never TRUNCATE.
+        backend.run_ddl.assert_awaited_once_with(['DELETE FROM "t"'])
+        backend.execute_write.assert_not_called()

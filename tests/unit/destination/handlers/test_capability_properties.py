@@ -31,15 +31,20 @@ class TestCapabilityProperties:
         handler = GenericSQLConnector()
         assert handler.supports_auto_create is True
 
-    def test_sql_handler_gates_insert_and_truncate_on_the_stage_predicate(self):
+    @pytest.mark.parametrize("adbc_only", [False, True], ids=["sqlalchemy", "adbc"])
+    def test_sql_handler_gates_insert_and_truncate_on_the_stage_predicate(
+        self, adbc_only
+    ):
         # Advertised modes must match what the schema handshake accepts:
-        # every SQLAlchemy-path write runs the stage cycle, so a connector
-        # without declared capabilities and a stage-rendering dialect
-        # advertises neither INSERT nor TRUNCATE_INSERT (issue #388).
+        # every write on every transport runs the stage cycle (issues
+        # #388/#389), so a connector without declared capabilities and a
+        # stage-rendering dialect advertises neither INSERT nor
+        # TRUNCATE_INSERT — identically on both transports.
         from cdk.sql.capabilities import SqlCapabilities
         from cdk.sql.dialects import SqlDialect
 
         handler = GenericSQLConnector()
+        handler._adbc_only = adbc_only
         assert handler.supports_insert is False
         assert handler.supports_truncate is False
 
@@ -61,12 +66,5 @@ class TestCapabilityProperties:
                 },
             }
         )
-        assert handler.supports_insert is True
-        assert handler.supports_truncate is True
-
-    def test_adbc_path_keeps_unconditional_insert_and_truncate(self):
-        # The ADBC machinery is untouched until #389.
-        handler = GenericSQLConnector()
-        handler._adbc_only = True
         assert handler.supports_insert is True
         assert handler.supports_truncate is True

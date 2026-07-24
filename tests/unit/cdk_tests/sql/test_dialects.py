@@ -428,10 +428,6 @@ class TestUnsupportedHooks:
                 "build_tls_connect_arg",
                 lambda d: d.build_tls_connect_arg("verify-ca", None),
             ),
-            (
-                "adbc_stage_table_sql",
-                lambda d: d.adbc_stage_table_sql("stage", "target"),
-            ),
         ],
     )
     def test_hook_raises_unsupported(self, operation, call):

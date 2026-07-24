@@ -132,6 +132,9 @@ def _unconfigured_sql() -> GenericSQLConnector:
     handler = GenericSQLConnector()
     handler._connected = True
     handler._adbc_only = True
+    # A backend exists (connect() completed); only the schema handshake is
+    # missing, so the schema-not-configured arm is the one that fires.
+    handler._backend = MagicMock()
     handler._streams = {}
     return handler
 

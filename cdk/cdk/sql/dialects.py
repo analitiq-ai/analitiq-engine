@@ -4,11 +4,11 @@
 vendor-specific in the SQL path: identifier quoting and normalization, the
 ``catalog.schema.table`` address composer (:class:`TableAddress`), the
 PRIMARY KEY clause form, the ``INFORMATION_SCHEMA`` discovery query shapes,
-the stage-then-merge write hooks (stage DDL, the merge-form upsert
-statement, the target-emptying statement, the optional native bulk land),
-the pre-DDL statements, the per-connection session-init statements, and the
-ADBC-only write machinery (native DDL type names and stage-table syntax,
-until #389 aligns that transport on the same hooks).
+the stage-then-merge write hooks shared by both transports (stage DDL, the
+merge-form upsert statement, the target-emptying statement, the optional
+native bulk land), the pre-DDL statements, the per-connection session-init
+statements, and the ADBC ingest-targeting hooks (``adbc_ingest_kwargs``
+and the session-schema probe backing the issue-#377 guard).
 
 Table addressing follows the engine's bind-once/sink-many rule: the intent
 (``catalog``/``schema``/``table``) is resolved exactly once into a
@@ -33,8 +33,8 @@ Base behavior is deliberately conservative:
 * ANSI machinery (quoting, PK clause, INFORMATION_SCHEMA queries) works
   out of the box, so a thin connector with no package class still reads
   and plain-INSERTs through SQLAlchemy.
-* Operations that have no portable form — upsert SQL, ADBC DDL type
-  names, stage-table creation — raise
+* Operations that have no portable form — the merge-form upsert
+  statement, stage-table creation — raise
   :class:`~cdk.sql.exceptions.UnsupportedDialectOperationError` so the
   failure is loud, deterministic, and names the missing connector package
   instead of silently degrading.
@@ -467,16 +467,6 @@ class SqlDialect:
         form with error 1067.
         """
         return "CURRENT_TIMESTAMP"
-
-    def adbc_stage_table_sql(self, stage_qualified: str, target_qualified: str) -> str:
-        """Return SQL creating an empty staging table shaped like the target.
-
-        Used for the ADBC upsert's ingest-to-stage + MERGE. Column-copy syntax
-        is vendor-specific; the connector package's dialect implements it.
-        """
-        raise UnsupportedDialectOperationError(
-            "adbc_stage_table_sql", dialect=self.name
-        )
 
     def adbc_ingest_kwargs(self, address: TableAddress) -> dict[str, Any]:
         """Targeting kwargs for ``cursor.adbc_ingest``.

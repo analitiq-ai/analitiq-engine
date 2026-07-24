@@ -16,7 +16,7 @@ class UnsupportedDialectOperationError(SqlIntrospectionError):
     """The active dialect has no implementation for a requested operation.
 
     The CDK ships only the vendor-neutral ANSI ``SqlDialect`` base; every
-    per-system dialect (quoting rules, upsert SQL, ADBC DDL type names,
+    per-system dialect (quoting rules, the merge-form upsert statement,
     stage-table syntax) lives in that system's connector package. Hitting
     this error means the operation needs the connector's own dialect — the
     connector package is either not installed or does not implement the

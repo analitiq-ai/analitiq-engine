@@ -12,13 +12,14 @@ declares WRITE_REJECTED, and the summary text stays what it was.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pyarrow as pa
 import pytest
 
 from cdk.adbc_registry import AdbcConfigurationError
-from cdk.sql.dialects import TableAddress
+from cdk.sql.capabilities import SqlCapabilities
+from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.exceptions import (
     SchemaConfigurationError,
     UnsupportedDialectOperationError,
@@ -32,13 +33,48 @@ pytestmark = pytest.mark.unit
 STREAM_ID = "stream-cat"
 
 
+class _StageDialect(SqlDialect):
+    """Just enough rendering for the plan build to reach the backend."""
+
+    name = "stagefix"
+
+    def stage_table_sql(self, stage, target, *, temp):
+        return f"CREATE TABLE {self.quote_table(stage)} LIKE {self.quote_table(target)}"
+
+
 def _ready_handler(write_error: Exception) -> GenericSQLConnector:
-    """A connected ADBC-only handler whose write attempt raises ``write_error``."""
+    """A connected ADBC-only handler whose write attempt raises ``write_error``.
+
+    The plan build succeeds (stage-capable dialect, declared block, identity
+    contract), so the error surfaces from the transport backend's
+    ``execute_write`` — the site the ack ladder classifies.
+    """
     handler = GenericSQLConnector()
     handler._connected = True
     handler._adbc_only = True
-    handler._streams = {STREAM_ID: _StreamState(address=TableAddress(table="t"))}
-    handler._write_batch_adbc_only = AsyncMock(side_effect=write_error)
+    handler.dialect = _StageDialect()
+    handler._capabilities = SqlCapabilities.from_declaration(
+        {
+            "catalog": "none",
+            "session_targeting": "per_statement",
+            "merge_form": "none",
+            "bulk_load": "adbc_ingest",
+            "stage": {"scope": "real", "schema": "target", "transactional_ddl": False},
+        },
+        source="<test>",
+    )
+    contract = MagicMock()
+    contract.cast_arrow_batch.side_effect = lambda rb: rb
+    handler._streams = {
+        STREAM_ID: _StreamState(
+            address=TableAddress(table="t"),
+            write_mode="insert",
+            primary_keys=["id"],
+            schema_contract=contract,
+        )
+    }
+    handler._backend = MagicMock()
+    handler._backend.execute_write = AsyncMock(side_effect=write_error)
     return handler
 
 
