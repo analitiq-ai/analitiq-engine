@@ -117,7 +117,7 @@ class _FakeCursor:
         return self._conn.description
 
     def close(self):
-        """No-op: the fake owns no resources."""
+        self._conn.cursor_close_count += 1
 
 
 class _FakeConn:
@@ -152,6 +152,7 @@ class _FakeConn:
         self.statements: list[str] = []
         self.ingests: list[dict] = []
         self.executemany_params: list[list] = []
+        self.cursor_close_count = 0
         self.probe_count = 0
         self.commits = 0
         self.rollbacks = 0
