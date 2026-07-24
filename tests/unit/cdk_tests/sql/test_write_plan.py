@@ -106,6 +106,20 @@ class TestStageName:
         )
         assert len(short) <= 34
 
+    def test_multibyte_tail_truncates_by_bytes(self):
+        # NAMEDATALEN counts bytes: a multibyte target name must never
+        # push the generated identifier past the byte budget, and no
+        # codepoint is left broken at the cut.
+        name = stage_table_name(
+            "заказы_клиентов_и_платежи_очень_длинное_имя",
+            run_id="r",
+            stream_id="s",
+            batch_seq=1,
+            max_identifier_length=63,
+        )
+        assert len(name.encode()) <= 63
+        name.encode()  # round-trips: no broken codepoint survived
+
     def test_budget_too_small_for_the_token_refuses(self):
         # The token is never truncated — a cut token collapses distinct
         # stages into one name. An absurd dialect budget refuses loudly.

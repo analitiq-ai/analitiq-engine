@@ -308,6 +308,18 @@ class BaseDestinationHandler(ABC):
         return True
 
     @property
+    def supports_insert(self) -> bool:
+        """Whether this destination can run plain-insert writes right now.
+
+        True for every handler that can write at all; a handler whose
+        insert path has runtime preconditions (the SQL stage-then-merge
+        cycle needs declared capabilities and a stage-rendering dialect)
+        overrides this so GetCapabilities never advertises a mode every
+        stream of which would be refused at the schema handshake.
+        """
+        return True
+
+    @property
     def supports_upsert(self) -> bool:
         """Whether this destination supports upsert operations."""
         return True

@@ -561,6 +561,17 @@ class GenericSQLConnector(BaseDestinationHandler):
         """
         return type(self.dialect).stage_table_sql is not SqlDialect.stage_table_sql
 
+    def _sqlalchemy_stage_ready(self) -> bool:
+        """Whether the SQLAlchemy stage cycle can run for this connector.
+
+        The same predicate the ``configure_schema`` stage gate enforces —
+        declared ``sql_capabilities`` and a stage-rendering dialect — so
+        the advertised write modes and the handshake can never disagree:
+        GetCapabilities must not offer a mode every stream of which would
+        be refused before DDL.
+        """
+        return self._capabilities is not None and self._dialect_renders_stage_table()
+
     def _dialect_renders_adbc_stage(self) -> bool:
         """Whether the active dialect implements the stage-table DDL hook.
 
@@ -648,9 +659,20 @@ class GenericSQLConnector(BaseDestinationHandler):
                 and self._dialect_renders_adbc_stage()
             )
         return (
-            self._dialect_renders_merge_statement()
-            and self._dialect_renders_stage_table()
+            self._dialect_renders_merge_statement() and self._sqlalchemy_stage_ready()
         )
+
+    @property
+    def supports_insert(self) -> bool:
+        """True when this connector can run the insert stage cycle now.
+
+        The ADBC path inserts through its own machinery until #389; the
+        SQLAlchemy path needs the stage predicate — advertised modes must
+        match what the schema handshake will accept.
+        """
+        if self._adbc_only:
+            return True
+        return self._sqlalchemy_stage_ready()
 
     @property
     def supports_bulk_load(self) -> bool:
@@ -675,11 +697,15 @@ class GenericSQLConnector(BaseDestinationHandler):
 
     @property
     def supports_truncate(self) -> bool:
-        """Report that the full-refresh write mode is supported.
+        """True when the full-refresh write mode can run on this connector.
 
-        SQL destinations implement truncate-insert (TRUNCATE then ingest).
+        The ADBC path truncates through its own machinery until #389; the
+        SQLAlchemy path appends from a stage, so the same stage predicate
+        gates the advertisement that gates the handshake.
         """
-        return True
+        if self._adbc_only:
+            return True
+        return self._sqlalchemy_stage_ready()
 
     def retry_semantics(self, stream_id: str) -> RetryVerdict:
         """Retry-safety verdict per write mode, keys, and transport (#286).
@@ -1373,13 +1399,27 @@ class GenericSQLConnector(BaseDestinationHandler):
         # keeps the whole handshake under the ack budget (issue #231).
         # Dialect-declared preparation (e.g. postgres' CREATE SCHEMA
         # IF NOT EXISTS for a non-default schema) shares the DDL
-        # transaction, exactly as before the backend split. The target is
+        # transaction, exactly as before the backend split. A declared
+        # dedicated stage schema is prepared here too: the write plan
+        # places every real-scope stage there, and a handshake that
+        # reported the target ready while the staging namespace does not
+        # exist would fail on the first batch instead. The target is
         # then reflected by the backend so stage landing binds with the
         # column types the database actually created.
         statements = [
             *self.dialect.sqlalchemy_pre_ddl(state.address.schema),
             target_ddl,
         ]
+        caps = self._capabilities
+        if (
+            caps is not None
+            and caps.stage.scope == "real"
+            and caps.stage.schema == "dedicated"
+        ):
+            statements = [
+                *self.dialect.sqlalchemy_pre_ddl(str(caps.stage.dedicated_schema)),
+                *statements,
+            ]
         async with self._statement_deadline():
             async with self._ddl_lock:
                 backend = self._require_backend()

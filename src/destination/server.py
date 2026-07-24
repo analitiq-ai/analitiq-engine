@@ -521,7 +521,9 @@ class DestinationServicer(DestinationServiceServicer):
     ) -> GetCapabilitiesResponse:
         """Return destination capabilities."""
         try:
-            supported_modes = [WriteMode.WRITE_MODE_INSERT]
+            supported_modes = []
+            if self.handler.supports_insert:
+                supported_modes.append(WriteMode.WRITE_MODE_INSERT)
             if self.handler.supports_upsert:
                 supported_modes.append(WriteMode.WRITE_MODE_UPSERT)
             if self.handler.supports_truncate:

@@ -724,6 +724,120 @@ class TestBulkLandFallback:
             engine.dispose()
 
 
+class TestWriteLockUnderCancellation:
+    @pytest.mark.asyncio
+    async def test_lock_held_until_the_sync_worker_finishes(self):
+        # A worker thread cannot be cancelled in-band. Cancelling the
+        # awaiting task must NOT release the write lock while the thread
+        # is still running a cycle — a retry's pre-flight drop would meet
+        # a live stage (the section-6 mutual-exclusion rule).
+        import asyncio
+        import threading
+
+        engine = _sqlite_sync_engine()
+        try:
+            handler = _connected_handler(engine)
+            backend = handler._backend
+
+            started = threading.Event()
+            release = threading.Event()
+            finished = threading.Event()
+
+            def _slow_cycle(plan, batch):
+                started.set()
+                release.wait(timeout=5)
+                finished.set()
+
+            with patch.object(backend, "_execute_write_sync", _slow_cycle):
+                from cdk.sql.write_plan import build_stage_write_plan
+
+                plan = build_stage_write_plan(
+                    handler.dialect,
+                    handler._capabilities,
+                    target=TableAddress(table="events"),
+                    columns=("id", "name"),
+                    write_mode="insert",
+                    conflict_keys=[],
+                    identity=["id"],
+                    truncate_now=False,
+                    run_id="r1",
+                    stream_id="s1",
+                    batch_seq=1,
+                )
+                task = asyncio.create_task(
+                    backend.execute_write(plan, _batch([{"id": 1, "name": "a"}]))
+                )
+                await asyncio.to_thread(started.wait, 5)
+                task.cancel()
+                # The cancellation cannot complete while the thread runs:
+                # the lock stays held.
+                await asyncio.sleep(0.05)
+                assert not task.done()
+                assert backend._write_lock.locked()
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                assert finished.is_set()
+                assert not backend._write_lock.locked()
+        finally:
+            engine.dispose()
+
+
+class TestDedicatedStageSchemaPreDdl:
+    @pytest.mark.asyncio
+    async def test_configure_prepares_the_dedicated_stage_schema(self):
+        # A declared dedicated staging schema must exist before the first
+        # batch creates a stage there; configure runs the dialect pre-DDL
+        # for it alongside the target schema's.
+        class _PreDdlDialect(_SqliteStageDialect):
+            def sqlalchemy_pre_ddl(self, schema_name):
+                if not schema_name:
+                    return []
+                return [f"CREATE SCHEMA IF NOT EXISTS {self.quote_ident(schema_name)}"]
+
+        handler = GenericSQLConnector()
+        handler.dialect = _PreDdlDialect()
+        caps = SqlCapabilities.from_declaration(
+            {
+                "catalog": "none",
+                "session_targeting": "per_statement",
+                "merge_form": "insert_on_conflict",
+                "bulk_load": "none",
+                "stage": {
+                    "scope": "real",
+                    "schema": "dedicated",
+                    "dedicated_schema": "_analitiq_staging",
+                    "transactional_ddl": True,
+                },
+            },
+            source="<test>",
+        )
+        handler.dialect.capabilities = caps
+        handler._capabilities = caps
+
+        ran: list[str] = []
+
+        class _RecordingBackend:
+            async def run_ddl(self, statements):
+                ran.extend(statements)
+
+            async def target_columns(self, target):
+                return ("id",)
+
+        handler._backend = _RecordingBackend()
+        state = _StreamState(
+            address=TableAddress(table="events", schema="public"),
+            primary_keys=["id"],
+            write_mode="insert",
+            endpoint_document={
+                "columns": [{"name": "id", "arrow_type": "Int64", "nullable": False}],
+            },
+        )
+        await handler._ensure_tables_exist(state, _StubTypeMapper())
+        assert 'CREATE SCHEMA IF NOT EXISTS "_analitiq_staging"' in ran
+        assert 'CREATE SCHEMA IF NOT EXISTS "public"' in ran
+
+
 class TestStageTableGuards:
     @pytest.mark.asyncio
     async def test_missing_reflection_self_heals_on_the_cycle_connection(self):

@@ -187,8 +187,36 @@ class SqlAlchemyBackend(TransportBackend):
         """Run one full stage cycle for *batch* under the write lock."""
         async with self._write_lock:
             if self._sync_engine is not None:
-                await asyncio.to_thread(self._execute_write_sync, plan, batch)
+                # The worker thread cannot be cancelled in-band, so a
+                # cancellation of this await must not release the write
+                # lock while the thread is still landing or merging — a
+                # retry's pre-flight drop would then meet a live stage.
+                # Shield the thread future and, on cancellation, hold the
+                # lock until the thread finishes or abandons its cycle
+                # (the section-6 mutual-exclusion rule), then re-raise.
+                future = asyncio.ensure_future(
+                    asyncio.to_thread(self._execute_write_sync, plan, batch)
+                )
+                try:
+                    await asyncio.shield(future)
+                except asyncio.CancelledError:
+                    try:
+                        await future
+                    except Exception:
+                        # The thread's own failure; the cancellation is
+                        # what the caller sees.
+                        logger.warning(
+                            "sync stage cycle for %s failed while its "
+                            "caller was already cancelled",
+                            self._dialect.quote_table(plan.stage),
+                            exc_info=True,
+                        )
+                    raise
                 return
+            # The async flavor cancels in-band: SQLAlchemy's greenlet
+            # bridge delivers the cancellation at the next await point
+            # and the connection context rolls back, so the cycle is
+            # genuinely over when the lock releases.
             async with self._require_engine().connect() as conn:
                 await conn.run_sync(self._run_stage_cycle, plan, batch)
 

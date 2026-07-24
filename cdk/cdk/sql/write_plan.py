@@ -69,7 +69,14 @@ def stage_table_name(
     tail_budget = max_identifier_length - len(head) - 1
     if tail_budget <= 0 or not target_table:
         return head
-    return f"{head}_{target_table[:tail_budget]}"
+    # The budget is bytes (Postgres/Redshift NAMEDATALEN counts bytes, not
+    # characters), so a multibyte target name is truncated on its UTF-8
+    # encoding; a codepoint split at the boundary is dropped, never kept
+    # broken. The tail is readability only — losing a character is free.
+    tail = target_table.encode()[:tail_budget].decode("utf-8", "ignore")
+    if not tail:
+        return head
+    return f"{head}_{tail}"
 
 
 def _stage_address(

@@ -448,10 +448,12 @@ class TestGetCapabilities:
         self,
         *,
         supports_upsert: bool,
+        supports_insert: bool = True,
         supports_truncate: bool = True,
         supports_auto_create: bool = True,
     ) -> MagicMock:
         handler = MagicMock()
+        handler.supports_insert = supports_insert
         handler.supports_upsert = supports_upsert
         handler.supports_truncate = supports_truncate
         handler.supports_auto_create = supports_auto_create
@@ -469,6 +471,18 @@ class TestGetCapabilities:
         )
         resp = await servicer.GetCapabilities(GetCapabilitiesRequest(), MagicMock())
         assert WriteMode.WRITE_MODE_INSERT in resp.supported_write_modes
+
+    @pytest.mark.asyncio
+    async def test_insert_absent_when_handler_lacks_it(self):
+        """INSERT follows the handler property too (issue #388): a SQL
+        handler whose stage cycle cannot run must not advertise a mode
+        the schema handshake would refuse."""
+        servicer = DestinationServicer(
+            self._make_handler(supports_upsert=False, supports_insert=False),
+            server=MagicMock(),
+        )
+        resp = await servicer.GetCapabilities(GetCapabilitiesRequest(), MagicMock())
+        assert WriteMode.WRITE_MODE_INSERT not in resp.supported_write_modes
 
     @pytest.mark.asyncio
     async def test_upsert_absent_when_not_supported(self):
@@ -548,7 +562,8 @@ class TestGetCapabilities:
         code, detail = context.abort.await_args.args
         assert code == grpc.StatusCode.INTERNAL
         assert "MagicMock" in detail
-        assert "supports_upsert" in detail
+        # The first capability the servicer consults is named in the detail.
+        assert "supports_insert" in detail
 
 
 class TestGetCapabilitiesApiHandlerIntegration:
