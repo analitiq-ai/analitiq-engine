@@ -4,6 +4,8 @@ import asyncio
 import logging
 from typing import Any
 
+from cdk.declarations import parse_declared_concurrency
+
 from ..models.metrics import PipelineMetrics
 from ..models.resolved import RuntimeConfig
 from ..state.error_classification import ErrorCode, dominant_error_code
@@ -100,6 +102,7 @@ class StreamingEngine:
         logger.info("Started state run: %s", run_id)
 
         stream_tasks: list[tuple[str, str, asyncio.Task[None]]] = []
+        pacing_gates = self._source_pacing_gates(streams)
 
         try:
             # Create a task for each stream with names for better debugging
@@ -107,11 +110,17 @@ class StreamingEngine:
                 stream_name = stream_config.get("name", stream_id)
                 logger.info("Starting stream: %s", stream_name)
 
+                runtime = self._source_runtime(stream_config)
                 task = asyncio.create_task(
                     self._process_stream(
                         stream_id=stream_id,
                         stream_config=stream_config,
                         pipeline_config=pipeline_config,
+                        pacing_gate=(
+                            pacing_gates.get(runtime.connection_id)
+                            if runtime is not None
+                            else None
+                        ),
                     ),
                     name=f"stream-{stream_name}",
                 )
@@ -205,18 +214,79 @@ class StreamingEngine:
             if not task.done():
                 task.cancel()
 
+    @staticmethod
+    def _source_runtime(stream_config: dict[str, Any]) -> Any | None:
+        """Return the stream's shared source ``ConnectionRuntime``, when carried.
+
+        Read off the resolved source the runner attaches
+        (``source._resolved_source.runtime``); absent in hand-built test
+        configs, where pacing simply does not apply.
+        """
+        resolved = (stream_config.get("source") or {}).get("_resolved_source")
+        return getattr(resolved, "runtime", None)
+
+    @staticmethod
+    def _source_pacing_gates(
+        streams: dict[str, dict[str, Any]]
+    ) -> dict[str, asyncio.Semaphore]:
+        """One gate per source connection declaring a connection ceiling.
+
+        A connector's declared ``concurrency.max_connections`` (issue #401)
+        bounds how many streams may run concurrently against that shared
+        connection — each stream's source worker holds its own driver
+        connection, so unpaced fan-out multiplies connections past small
+        systems' ceilings. Undeclared means no gate: current behavior,
+        additive absence.
+        """
+        gates: dict[str, asyncio.Semaphore] = {}
+        for stream_config in streams.values():
+            runtime = StreamingEngine._source_runtime(stream_config)
+            if runtime is None or runtime.connection_id in gates:
+                continue
+            cap = parse_declared_concurrency(
+                runtime.declared_concurrency,
+                source=f"connector {runtime.connector_id!r}",
+            )
+            if cap is None:
+                continue
+            gates[runtime.connection_id] = asyncio.Semaphore(cap)
+            logger.info(
+                "Pacing streams on connection %s to %d concurrent "
+                "(declared concurrency.max_connections)",
+                runtime.connection_id,
+                cap,
+            )
+        return gates
+
     async def _process_stream(
         self,
         stream_id: str,
         stream_config: dict[str, Any],
         pipeline_config: dict[str, Any],
+        pacing_gate: asyncio.Semaphore | None = None,
     ) -> None:
         """Run one stream through its own StreamProcessor.
 
         The processor owns everything stream-scoped; this wrapper hands it
         the pipeline-wide pieces and surfaces the partial-completion cause
-        run() returns at pipeline level.
+        run() returns at pipeline level. ``pacing_gate`` (issue #401) holds
+        the stream until a slot under the source connection's declared
+        ceiling frees up.
         """
+        if pacing_gate is not None:
+            async with pacing_gate:
+                await self._run_stream_processor(
+                    stream_id, stream_config, pipeline_config
+                )
+            return
+        await self._run_stream_processor(stream_id, stream_config, pipeline_config)
+
+    async def _run_stream_processor(
+        self,
+        stream_id: str,
+        stream_config: dict[str, Any],
+        pipeline_config: dict[str, Any],
+    ) -> None:
         processor = StreamProcessor(
             stream_id=stream_id,
             stream_config=stream_config,

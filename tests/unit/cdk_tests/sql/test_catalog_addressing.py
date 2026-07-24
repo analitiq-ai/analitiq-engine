@@ -238,6 +238,7 @@ class _FakeRuntime:
         self.driver = "postgresql"
         self.connector_id = "postgresql"
         self.declared_sql_capabilities = declared
+        self.declared_error_map = None
         self.engine = engine
         self.type_mapper_for = MagicMock()
         self.close = AsyncMock()

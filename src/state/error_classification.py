@@ -57,12 +57,16 @@ engine-side in the logs (``logger.exception``), not in the metrics record.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 
+from cdk.declarations import ERROR_CATEGORY_VALUES, ErrorMap
 from cdk.types import FailureCategory
+
+logger = logging.getLogger(__name__)
 
 
 class ErrorCode(str, Enum):
@@ -340,6 +344,7 @@ _CONFIG_NAMES = frozenset(
         "AdbcConfigurationError",
         "CatalogAddressingError",
         "SqlCapabilitiesError",
+        "ConnectorDeclarationError",
         "ConnectorNotRegisteredError",
         "UnresolvedValueError",
         "SchemaError",
@@ -373,6 +378,7 @@ _CONFIG_PHRASES = (
     "adbcconfigurationerror",
     "catalogaddressingerror",
     "sqlcapabilitieserror",
+    "connectordeclarationerror",
     "unsupporteddialectoperationerror",
     "schemaconfigurationerror",
     "transformationerror",
@@ -530,8 +536,40 @@ def _matches(
     return any(phrase in text for phrase in phrases)
 
 
-def classify_source_extract(exc: BaseException) -> ErrorCode:
+# Extract context (issue #401): declared error category -> the concrete
+# source ErrorCode. ``transient`` and ``write_rejected`` claim no source
+# code — they speak to retryability, not to which published code names the
+# terminal cause — so they fall through to the text heuristics below.
+_DECLARED_SOURCE_CODES: dict[str, ErrorCode | None] = {
+    "auth": ErrorCode.SOURCE_AUTH_FAILED,
+    "unreachable": ErrorCode.SOURCE_UNREACHABLE,
+    "rate_limited": ErrorCode.RATE_LIMITED,
+    "config": ErrorCode.CONFIG_INVALID,
+    "transient": None,
+    "write_rejected": None,
+}
+
+# Totality, enforced at import (same instinct as _CODE_PRIORITY): a future
+# vocabulary member must take an explicit position here, never silently
+# fall through to text matching.
+_undeclared_source = set(ERROR_CATEGORY_VALUES) - set(_DECLARED_SOURCE_CODES)
+if _undeclared_source:
+    raise RuntimeError(
+        f"_DECLARED_SOURCE_CODES must position every declared error "
+        f"category; missing: {sorted(_undeclared_source)}"
+    )
+
+
+def classify_source_extract(
+    exc: BaseException, *, error_map: ErrorMap | None = None
+) -> ErrorCode:
     """Classify a source-extract failure into its concrete source code.
+
+    Declared map first (issue #401): the source connector's ``error_map``
+    claims the failure structurally — off the live exception chain
+    (SQLSTATE, vendor code, class MRO) or, across the worker boundary where
+    only class names survive, off the collapsed name set. Only an unclaimed
+    failure falls to the text split, and that fallback is logged.
 
     The extract stage knows the failure is source-side, but auth-vs-unreachable-
     vs-rate for an opaque driver/HTTP error is only legible from the error
@@ -550,6 +588,44 @@ def classify_source_extract(exc: BaseException) -> ErrorCode:
         # bare OSError from a full/read-only volume) from the engine's own
         # checkpoint/state I/O is infra, not source auth.
         return ErrorCode.INTERNAL
+    match = None
+    if error_map is not None:
+        # sorted(): across a process boundary the chain collapses to a name
+        # set with no MRO order left; a map declaring several matching names
+        # should agree with itself, and the lexicographic pick keeps a
+        # disagreeing one deterministic.
+        match = error_map.match_exception(exc) or error_map.match_names(sorted(names))
+        if match is not None:
+            declared_code = _DECLARED_SOURCE_CODES[match.category]
+            if declared_code is not None:
+                logger.info(
+                    "declared error_map classified the source failure: " "%s %s -> %s",
+                    match.family,
+                    match.identifier,
+                    match.category,
+                )
+                return declared_code
+    code = _classify_source_extract_by_text(names, text)
+    if match is not None:
+        logger.info(
+            "declared error_map matched %s %s -> %s, which claims no source "
+            "code; text heuristic classified it %s",
+            match.family,
+            match.identifier,
+            match.category,
+            code.value,
+        )
+    else:
+        logger.info(
+            "no declaration or tag claimed the source failure; text "
+            "heuristic classified it %s",
+            code.value,
+        )
+    return code
+
+
+def _classify_source_extract_by_text(names: set[str], text: str) -> ErrorCode:
+    """Run the demoted last-resort text split (issue #401 resolution order)."""
     if _matches(names, text, _CONFIG_NAMES, _CONFIG_PHRASES):
         return ErrorCode.CONFIG_INVALID
     if _matches(names, text, _AUTH_NAMES, _AUTH_PHRASES) or _HTTP_AUTH_STATUS.search(
@@ -692,9 +768,17 @@ def classify_destination_failure(exc: BaseException) -> ErrorCode:
         # matters most here -- _is_local_filesystem_error catches it while still
         # letting a network OSError fall through to DESTINATION_WRITE_FAILED.
         return ErrorCode.INTERNAL
-    if _matches(names, text, _CONFIG_NAMES, _CONFIG_PHRASES):
-        return ErrorCode.CONFIG_INVALID
-    return ErrorCode.DESTINATION_WRITE_FAILED
+    code = (
+        ErrorCode.CONFIG_INVALID
+        if _matches(names, text, _CONFIG_NAMES, _CONFIG_PHRASES)
+        else ErrorCode.DESTINATION_WRITE_FAILED
+    )
+    logger.info(
+        "no declared failure category on the destination failure; text "
+        "heuristic classified it %s",
+        code.value,
+    )
+    return code
 
 
 def classify_exception(exc: BaseException) -> ErrorCode:
@@ -709,6 +793,15 @@ def classify_exception(exc: BaseException) -> ErrorCode:
     if tag is not None:
         return tag.code
 
+    # Untagged: the name/phrase heuristics are the last resort (issue #401
+    # resolution order — declared map, then stage tags, then text), and
+    # their use is logged so a silent heuristic verdict never masquerades
+    # as a structured one.
+    logger.info(
+        "no stage tag on the terminating exception (%s); falling back to "
+        "the name/phrase heuristics",
+        type(exc).__name__,
+    )
     names, text = _signature(exc)
 
     if _is_local_filesystem_error(names):

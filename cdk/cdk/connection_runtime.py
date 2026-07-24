@@ -168,6 +168,23 @@ class ConnectionRuntime:
             and self._connector_definition.get("sql_capabilities") is not None
             else None
         )
+        # Connector-level declared facts (issue #401), carried verbatim like
+        # the sql_capabilities block: ``error_map`` (the driver's failure
+        # taxonomy) and ``concurrency`` (the system's connection ceiling).
+        # ``cdk.declarations`` parses them at consumption; absence is
+        # additive — no declared mapping / no declared ceiling.
+        self._declared_error_map: dict[str, Any] | None = (
+            copy.deepcopy(self._connector_definition.get("error_map"))
+            if self._connector_definition
+            and self._connector_definition.get("error_map") is not None
+            else None
+        )
+        self._declared_concurrency: dict[str, Any] | None = (
+            copy.deepcopy(self._connector_definition.get("concurrency"))
+            if self._connector_definition
+            and self._connector_definition.get("concurrency") is not None
+            else None
+        )
         self._driver_override = driver
         self._resolver = resolver
         self._connector_type_mapper = connector_type_mapper
@@ -268,6 +285,35 @@ class ConnectionRuntime:
         return (
             copy.deepcopy(self._declared_sql_capabilities)
             if self._declared_sql_capabilities is not None
+            else None
+        )
+
+    @property
+    def declared_error_map(self) -> dict[str, Any] | None:
+        """The connector's declared ``error_map`` block, verbatim (issue #401).
+
+        ``None`` means the connector declares no driver-error taxonomy —
+        consumers keep their current heuristics (additive absence, unlike
+        the sql_capabilities shape facts). Parsed at consumption via
+        ``cdk.declarations.parse_declared_error_map``.
+        """
+        return (
+            copy.deepcopy(self._declared_error_map)
+            if self._declared_error_map is not None
+            else None
+        )
+
+    @property
+    def declared_concurrency(self) -> dict[str, Any] | None:
+        """The connector's declared ``concurrency`` block, verbatim (issue #401).
+
+        ``None`` means no declared connection ceiling — fan-out pacing and
+        pool sizing keep their current behavior. Parsed at consumption via
+        ``cdk.declarations.parse_declared_concurrency``.
+        """
+        return (
+            copy.deepcopy(self._declared_concurrency)
+            if self._declared_concurrency is not None
             else None
         )
 
@@ -492,8 +538,11 @@ class ConnectionRuntime:
             # Declared SQL capabilities travel with the payload so the
             # worker-side facade consumes the same declaration the engine
             # validated — never a guessed default because connector.json
-            # was out of reach (issue #390).
+            # was out of reach (issue #390). The connector-level declared
+            # facts (issue #401) ride the same channel.
             "sql_capabilities": self.declared_sql_capabilities,
+            "error_map": self.declared_error_map,
+            "concurrency": self.declared_concurrency,
         }
         if has_transports and definition is not None:
             context = self._build_resolution_context(secrets)
@@ -539,12 +588,22 @@ class ConnectionRuntime:
         runtime._pre_resolved_config = (
             dict(payload["resolved_config"]) if payload.get("resolved_config") else None
         )
-        # deepcopy, not dict(): the block nests the stage object, and the
-        # rebuilt runtime must not share mutable state with the caller's
-        # payload (same isolation rule the constructor applies).
+        # deepcopy, not dict(): the blocks nest objects, and the rebuilt
+        # runtime must not share mutable state with the caller's payload
+        # (same isolation rule the constructor applies).
         runtime._declared_sql_capabilities = (
             copy.deepcopy(payload["sql_capabilities"])
             if payload.get("sql_capabilities") is not None
+            else None
+        )
+        runtime._declared_error_map = (
+            copy.deepcopy(payload["error_map"])
+            if payload.get("error_map") is not None
+            else None
+        )
+        runtime._declared_concurrency = (
+            copy.deepcopy(payload["concurrency"])
+            if payload.get("concurrency") is not None
             else None
         )
         return runtime

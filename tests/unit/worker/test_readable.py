@@ -59,12 +59,19 @@ def _readable():
     )
 
 
+def _runtime():
+    """Runtime double declaring no error taxonomy (issue #401)."""
+    runtime = MagicMock()
+    runtime.connector_id = "demo"
+    runtime.declared_error_map = None
+    runtime.close = AsyncMock()
+    return runtime
+
+
 async def _run(responses, *, checkpoint=None, captured_requests=None):
     """Drive read_batches against a canned worker response stream."""
     checkpoint = checkpoint or _FakeCheckpoint()
-    runtime = MagicMock()
-    runtime.connector_id = "demo"
-    runtime.close = AsyncMock()
+    runtime = _runtime()
     handle = MagicMock()
     handle.target = "unix:/tmp/w/worker.sock"
     handle.close = AsyncMock()
@@ -223,9 +230,7 @@ class TestWorkerReadable:
             )
         ]
         checkpoint = _FakeCheckpoint()
-        runtime = MagicMock()
-        runtime.connector_id = "demo"
-        runtime.close = AsyncMock()
+        runtime = _runtime()
         handle = MagicMock()
         handle.target = "unix:/tmp/w/worker.sock"
         handle.close = AsyncMock()

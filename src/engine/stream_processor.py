@@ -19,6 +19,7 @@ from typing import Any
 import pyarrow as pa
 
 from cdk.contract import Readable
+from cdk.declarations import parse_declared_error_map
 from cdk.types import CheckpointStore, FailureCategory
 
 from ..grpc.client import (
@@ -155,6 +156,23 @@ class StreamProcessor:
         self.error_strategy = error_strategy
 
         self.metrics = StreamMetrics()
+        # The source connector's declared error taxonomy (issue #401),
+        # read off the resolved source the runner attaches. The extract
+        # boundary consults it before the text split; absent in hand-built
+        # test configs, where classification keeps its current behavior.
+        source_runtime = getattr(
+            (stream_config.get("source") or {}).get("_resolved_source"),
+            "runtime",
+            None,
+        )
+        self._source_error_map = (
+            parse_declared_error_map(
+                source_runtime.declared_error_map,
+                source=f"connector {source_runtime.connector_id!r}",
+            )
+            if source_runtime is not None
+            else None
+        )
         # stream_data starts the state run before any processor is built, so
         # the run id is known at construction time.
         self.run_id = state_manager.current_run_id or get_or_generate_run_id()
@@ -465,7 +483,7 @@ class StreamProcessor:
             # from readable.py -- still wins over this coarser default.
             tag_failure(
                 e,
-                code=classify_source_extract(e),
+                code=classify_source_extract(e, error_map=self._source_error_map),
                 stage=FailureStage.SOURCE_EXTRACT,
             )
             raise

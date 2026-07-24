@@ -19,6 +19,11 @@ import pyarrow as pa
 
 import grpc
 from cdk.connection_runtime import ConnectionRuntime
+from cdk.declarations import (
+    DECLARED_READ_DETERMINISTIC,
+    ErrorMap,
+    parse_declared_error_map,
+)
 from cdk.exceptions import TransportSpecError
 from cdk.sql.exceptions import (
     ReadError,
@@ -64,6 +69,28 @@ _DETERMINISTIC_READ_ERRORS = (
     TypeError,
     ValueError,
 )
+
+
+def classify_read_error(
+    exc: BaseException, error_map: ErrorMap | None
+) -> tuple[bool, str | None]:
+    """Classify a read failure: declared map first, isinstance ladder after.
+
+    Returns ``(deterministic, declared_note)`` where ``declared_note``
+    names the matched declaration (family, identifier, category) when the
+    connector's ``error_map`` claimed the failure, and ``None`` when the
+    verdict came from the type ladder — so the log always shows which path
+    decided. Resolution order per issue #401: declared map, then the
+    connector's sanctioned typed errors (``_DETERMINISTIC_READ_ERRORS`` —
+    the hook), never text.
+    """
+    match = error_map.match_exception(exc) if error_map is not None else None
+    if match is not None:
+        return (
+            DECLARED_READ_DETERMINISTIC[match.category],
+            f"{match.family}:{match.identifier} -> {match.category}",
+        )
+    return isinstance(exc, _DETERMINISTIC_READ_ERRORS), None
 
 
 class _RelayCheckpoint:
@@ -123,6 +150,14 @@ class SourceWorkerServicer(SourceServiceServicer):
         self._readable = readable
         self._runtime = runtime
         self._source_config = source_config
+        # The connector's declared error taxonomy (issue #401), restored
+        # from the resolved payload the bootstrap carried. A declared fact
+        # classifies a driver failure with zero connector Python; None
+        # keeps the typed-error ladder (additive absence).
+        self._error_map = parse_declared_error_map(
+            runtime.declared_error_map,
+            source=f"connector {runtime.connector_id!r}",
+        )
 
     async def ReadStream(
         self,
@@ -170,11 +205,13 @@ class SourceWorkerServicer(SourceServiceServicer):
         except (
             Exception
         ) as exc:  # noqa: BLE001 — every failure crosses as a typed event
-            deterministic = isinstance(exc, _DETERMINISTIC_READ_ERRORS)
+            deterministic, declared = classify_read_error(exc, self._error_map)
             logger.error(
-                "source worker read failed (%s, deterministic=%s): %s",
+                "source worker read failed (%s, deterministic=%s, "
+                "classified by %s): %s",
                 type(exc).__name__,
                 deterministic,
+                f"declared error_map {declared}" if declared else "type ladder",
                 exc,
                 exc_info=True,
             )

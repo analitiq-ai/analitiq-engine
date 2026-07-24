@@ -23,6 +23,7 @@ import pyarrow as pa
 
 import grpc
 from cdk.connection_runtime import ConnectionRuntime
+from cdk.declarations import parse_declared_error_map
 from cdk.sql.exceptions import ReadError
 from cdk.types import CheckpointStore
 from src.grpc import DEFAULT_MAX_MESSAGE_SIZE
@@ -71,6 +72,13 @@ class WorkerReadable:
         # separately to build_bootstrap and never embedded in source_config.
         source_config = config
         label = f"src-worker:{runtime.connector_id}:{stream_name}"
+        # The connector's declared error taxonomy (issue #401): the fine
+        # source split consults it on a worker failure, where only the
+        # error_type class name survives the boundary.
+        error_map = parse_declared_error_map(
+            runtime.declared_error_map,
+            source=f"connector {runtime.connector_id!r}",
+        )
 
         initial_cursor = await checkpoint.get_cursor(stream_name, partition)
 
@@ -137,7 +145,7 @@ class WorkerReadable:
                             # connector class survives in the error_type prefix, so
                             # the source classifier reads it; an opaque one floors to
                             # CONFIG_INVALID (deterministic == a setup defect).
-                            code = classify_source_extract(exc)
+                            code = classify_source_extract(exc, error_map=error_map)
                             if code is ErrorCode.INTERNAL:
                                 code = ErrorCode.CONFIG_INVALID
                             raise tag_failure(

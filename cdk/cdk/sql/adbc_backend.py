@@ -31,16 +31,22 @@ import asyncio
 import logging
 import threading
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from cdk.adbc_registry import AdbcConfigurationError
+from cdk.declarations import ErrorMap, parse_declared_error_map
 
 from ._adbc_utils import (
     _close_cursor_quietly,
     _is_fatal_adbc_error,
     _reclassify_as_fatal,
 )
-from .backend import StageWritePlan, TransportBackend, stage_leftover_note
+from .backend import (
+    StageWritePlan,
+    TransportBackend,
+    iter_landing_chunks,
+    stage_leftover_note,
+)
 from .capabilities import undeclared_capability_error
 from .dialects import SqlDialect, TableAddress
 
@@ -96,17 +102,43 @@ class AdbcBackend(TransportBackend):
         # at connect(). Only a declared mechanism is ever used; "none"
         # lands via executemany.
         self._bulk_load: str = "none"
+        # The connector's declared error taxonomy (issue #401), parsed at
+        # connect(). A declared fact claims a driver failure before the
+        # PEP-249 class-name heuristic runs — the raw exception then
+        # propagates to the facade's ack ladder, where the declared
+        # category derives the verdict.
+        self._error_map: ErrorMap | None = None
 
     async def connect(self, runtime: ConnectionRuntime) -> None:
         """Open the ADBC connection eagerly through *runtime*."""
         self._runtime = runtime
         caps = getattr(self._dialect, "capabilities", None)
         self._bulk_load = caps.bulk_load if caps is not None else "none"
+        self._error_map = parse_declared_error_map(
+            runtime.declared_error_map,
+            source=f"connector {runtime.connector_id!r}",
+        )
         conn = await asyncio.to_thread(runtime.open_adbc_connection)
         with self._conn_lock:
             self._conn = conn
             self._session_schema = None
             self._session_schema_known = False
+
+    def _reraise_driver_error(self, exc: Exception) -> NoReturn:
+        """Reraise a driver failure, promoting to fatal only when undeclared.
+
+        Resolution order per issue #401: a declared ``error_map`` fact
+        claims the failure first — the raw exception then propagates so the
+        facade's ack ladder derives the verdict from the declared category.
+        Only an unclaimed exception is subject to the PEP-249 class-name
+        heuristic that reclassifies deterministic classes as
+        :class:`AdbcConfigurationError` (fatal).
+        """
+        if self._error_map is not None and self._error_map.match_exception(exc):
+            raise exc
+        if _is_fatal_adbc_error(exc):
+            raise _reclassify_as_fatal(exc) from exc
+        raise exc
 
     async def disconnect(self) -> None:
         """Close the cached connection; the facade releases the runtime."""
@@ -194,9 +226,7 @@ class AdbcBackend(TransportBackend):
                     )
                 except Exception as exc:
                     self._poison_sync()
-                    if _is_fatal_adbc_error(exc):
-                        raise _reclassify_as_fatal(exc) from exc
-                    raise
+                    self._reraise_driver_error(exc)
             if plan.transactional:
                 self._run_transactional_cycle(conn, plan, batch)
             else:
@@ -226,9 +256,7 @@ class AdbcBackend(TransportBackend):
                 _close_cursor_quietly(cursor)
         except Exception as exc:
             self._poison_sync()
-            if _is_fatal_adbc_error(exc):
-                raise _reclassify_as_fatal(exc) from exc
-            raise
+            self._reraise_driver_error(exc)
 
     def _run_stepwise_cycle(
         self, conn: Any, plan: StageWritePlan, batch: pa.RecordBatch
@@ -267,9 +295,7 @@ class AdbcBackend(TransportBackend):
             # batch must not inherit.
             self._drop_stage_after_failure(conn, plan)
             self._poison_sync()
-            if _is_fatal_adbc_error(exc):
-                raise _reclassify_as_fatal(exc) from exc
-            raise
+            self._reraise_driver_error(exc)
         self._drop_stage_after_success(conn, plan)
 
     def _land(
@@ -319,7 +345,12 @@ class AdbcBackend(TransportBackend):
     def _executemany_land(
         self, cursor: Any, plan: StageWritePlan, batch: pa.RecordBatch
     ) -> None:
-        """Land via one executemany ``INSERT`` in plan column order (the default)."""
+        """Land via executemany ``INSERT`` in plan column order (the default).
+
+        Chunked by the plan's ``rows_per_statement`` so no statement exceeds
+        the connector's declared bind-parameter cap (issue #401); an
+        undeclared cap lands the whole batch in one statement.
+        """
         cols = ", ".join(self._dialect.quote_ident(c) for c in plan.columns)
         placeholders = ", ".join("?" for _ in plan.columns)
         # Dialect-quoted identifiers only; values bind via qmark params.
@@ -327,8 +358,9 @@ class AdbcBackend(TransportBackend):
             f"INSERT INTO {self._dialect.quote_table(plan.stage)} "  # nosec B608
             f"({cols}) VALUES ({placeholders})"
         )
-        rows = batch.to_pylist()
-        cursor.executemany(sql, [tuple(row[c] for c in plan.columns) for row in rows])
+        rows = [tuple(row[c] for c in plan.columns) for row in batch.to_pylist()]
+        for chunk in iter_landing_chunks(rows, plan.rows_per_statement):
+            cursor.executemany(sql, list(chunk))
 
     def _verify_bulk_land(
         self, cursor: Any, plan: StageWritePlan, expected_rows: int
@@ -542,9 +574,7 @@ class AdbcBackend(TransportBackend):
                     _close_cursor_quietly(cursor)
             except Exception as exc:
                 self._poison_sync()
-                if _is_fatal_adbc_error(exc):
-                    raise _reclassify_as_fatal(exc) from exc
-                raise
+                self._reraise_driver_error(exc)
 
     def _target_columns_sync(self, target: TableAddress) -> tuple[str, ...]:
         # Dialect-quoted identifiers only; no user values.
@@ -574,9 +604,7 @@ class AdbcBackend(TransportBackend):
                     _close_cursor_quietly(cursor)
             except Exception as exc:
                 self._poison_sync()
-                if _is_fatal_adbc_error(exc):
-                    raise _reclassify_as_fatal(exc) from exc
-                raise
+                self._reraise_driver_error(exc)
         return tuple(col[0] for col in description)
 
     def _health_check_sync(self) -> None:

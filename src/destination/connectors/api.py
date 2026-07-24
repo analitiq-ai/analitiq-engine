@@ -29,6 +29,7 @@ from pydantic import ValidationError
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult, reject_batch
 from cdk.connection_runtime import ConnectionRuntime
+from cdk.declarations import DECLARED_WRITE_VERDICTS, ErrorMap, parse_declared_error_map
 from cdk.json_utils import decode_json_fields
 from cdk.rate_limiter import RateLimiter
 from cdk.request_binding import (
@@ -37,7 +38,14 @@ from cdk.request_binding import (
     resolve_param_defaults,
 )
 from cdk.resolver import Resolver
-from cdk.types import AckStatus, Cursor, RetrySemantics, RetryVerdict, SchemaSpec
+from cdk.types import (
+    AckStatus,
+    Cursor,
+    FailureCategory,
+    RetrySemantics,
+    RetryVerdict,
+    SchemaSpec,
+)
 
 from ...shared.http_utils import join_url
 
@@ -274,6 +282,34 @@ def _classify_http_error(
     return AckStatus.ACK_STATUS_RETRYABLE_FAILURE
 
 
+def _http_verdict(
+    exc: aiohttp.ClientError | asyncio.TimeoutError,
+    error_map: "ErrorMap | None",
+) -> tuple["AckStatus", "FailureCategory"]:
+    """Ack verdict for a transport error: declared map first (issue #401).
+
+    The connector's declared ``http`` family classifies the status and the
+    engine-owned write verdict table derives both the ack status and the
+    declared failure category — which rides the ack to the engine, where
+    ``classify_destination_failure`` reads it structurally instead of
+    falling back to text. An undeclared status keeps the built-in 4xx
+    heuristic with an UNSPECIFIED category, exactly as before.
+    """
+    if error_map is not None and isinstance(exc, aiohttp.ClientResponseError):
+        match = error_map.match_http(exc.status)
+        if match is not None:
+            logger.info(
+                "declared error_map classified HTTP %d -> %s",
+                exc.status,
+                match.category,
+            )
+            return DECLARED_WRITE_VERDICTS[match.category]
+    return (
+        _classify_http_error(exc),
+        FailureCategory.FAILURE_CATEGORY_UNSPECIFIED,
+    )
+
+
 def _content_idempotency_key(record: Mapping[str, Any]) -> str:
     """Full-content hash used as the idempotency key in upsert mode.
 
@@ -387,6 +423,12 @@ class ApiDestinationHandler(BaseDestinationHandler):
 
         # Rate limiter
         self._rate_limiter: RateLimiter | None = None
+
+        # The connector's declared error taxonomy (issue #401), parsed at
+        # connect(). Its http family classifies a transport error before
+        # the built-in 4xx heuristic; None keeps current behavior
+        # (additive absence).
+        self._error_map: ErrorMap | None = None
 
         # Per-request value-expression resolver, built from the connection
         # runtime at connect() time. Used only when a stream declares a
@@ -511,6 +553,10 @@ class ApiDestinationHandler(BaseDestinationHandler):
         """
         self._runtime = runtime
         runtime.acquire()
+        self._error_map = parse_declared_error_map(
+            runtime.declared_error_map,
+            source=f"connector {runtime.connector_id!r}",
+        )
         await runtime.materialize()
         self._base_url = runtime.base_url
         self._rate_limiter = runtime.rate_limiter
@@ -727,12 +773,13 @@ class ApiDestinationHandler(BaseDestinationHandler):
             )
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            status = _classify_http_error(e)
+            status, failure_category = _http_verdict(e, self._error_map)
             logger.error("Transport error writing to API: %s", e, exc_info=True)
             return BatchWriteResult(
                 status=status,
                 records_written=0,
                 failure_summary=f"{type(e).__name__}: {e}",
+                failure_category=failure_category,
             )
         except Exception as e:
             logger.error("Fatal error writing to API: %s", e, exc_info=True)
@@ -894,7 +941,8 @@ class ApiDestinationHandler(BaseDestinationHandler):
                 await self._send_request(state, body, extra_headers=idempotency_header)
                 written += 1
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                if _classify_http_error(e) == AckStatus.ACK_STATUS_RETRYABLE_FAILURE:
+                status, _category = _http_verdict(e, self._error_map)
+                if status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE:
                     logger.warning(
                         "RETRYABLE error on record %s (index %d, %d already written)"
                         " — aborting batch: %s: %s",
@@ -987,7 +1035,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 if (
                     written == 0
-                    and _classify_http_error(e)
+                    and _http_verdict(e, self._error_map)[0]
                     == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
                 ):
                     # No chunk landed and the error is transient — safe to

@@ -21,9 +21,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from sqlalchemy import Column, MetaData, Table
 from sqlalchemy.engine import Connection, Engine
@@ -41,6 +41,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 StageScope = Literal["temp", "real"]
+
+_Row = TypeVar("_Row")
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,28 @@ class StageWritePlan:
     drop_stage_sql: str
     #: Landing column order, identity columns included.
     columns: tuple[str, ...]
+    #: Rows one landing statement may carry under the connector's declared
+    #: ``sql_capabilities.limits.max_bind_params``
+    #: (``floor(cap / column_count)``, issue #401); ``None`` when no cap is
+    #: declared — the executemany landing then sends the whole batch in one
+    #: statement, as before.
+    rows_per_statement: int | None = None
+
+
+def iter_landing_chunks(
+    rows: Sequence[_Row], per_statement: int | None
+) -> Iterator[Sequence[_Row]]:
+    """Split landed rows so no statement exceeds the declared bind cap.
+
+    The one chunking rule both transport backends apply in their
+    executemany landing (``StageWritePlan.rows_per_statement``, issue
+    #401); ``None`` (no declared cap) yields the whole batch unchanged.
+    """
+    if per_statement is None:
+        yield rows
+        return
+    for start in range(0, len(rows), per_statement):
+        yield rows[start : start + per_statement]
 
 
 def stage_leftover_note(plan: StageWritePlan) -> str:
@@ -437,10 +461,16 @@ class SqlAlchemyBackend(TransportBackend):
     def _executemany_land(
         self, conn: Connection, plan: StageWritePlan, batch: pa.RecordBatch
     ) -> None:
-        """Land via one executemany ``INSERT`` in plan column order (the default)."""
+        """Land via executemany ``INSERT`` in plan column order (the default).
+
+        Chunked by the plan's ``rows_per_statement`` so no statement exceeds
+        the connector's declared bind-parameter cap (issue #401); an
+        undeclared cap lands the whole batch in one statement.
+        """
         stage_table = self._stage_table(conn, plan)
         records: list[dict[str, Any]] = batch.to_pylist()
-        conn.execute(stage_table.insert(), records)
+        for chunk in iter_landing_chunks(records, plan.rows_per_statement):
+            conn.execute(stage_table.insert(), list(chunk))
 
     def _verify_bulk_land(
         self, conn: Connection, plan: StageWritePlan, expected_rows: int

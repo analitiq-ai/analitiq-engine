@@ -353,6 +353,7 @@ class TestConnectBinding:
         runtime = MagicMock()
         runtime.connector_id = "demo"
         runtime.declared_sql_capabilities = caps_block(catalog="everything")
+        runtime.declared_error_map = None
         runtime.close = AsyncMock()
         from unittest.mock import patch
 
@@ -369,6 +370,7 @@ class TestConnectBinding:
         runtime = MagicMock()
         runtime.connector_id = "demo"
         runtime.declared_sql_capabilities = caps_block(catalog="full")
+        runtime.declared_error_map = None
         runtime.is_adbc = False
         runtime.is_sync_sqlalchemy = False
         runtime.driver = "postgresql"
@@ -386,6 +388,7 @@ class TestConnectBinding:
         runtime = MagicMock()
         runtime.connector_id = "demo"
         runtime.declared_sql_capabilities = caps_block(bulk_load="adbc_ingest")
+        runtime.declared_error_map = None
         runtime.is_adbc = True
         runtime.driver = "snowflake"
         runtime.close = AsyncMock()

@@ -69,6 +69,14 @@ def _batch(rows):
     return pa.RecordBatch.from_pylist(rows)
 
 
+def _runtime():
+    """Runtime double declaring no error taxonomy (issue #401)."""
+    runtime = MagicMock()
+    runtime.connector_id = "demo"
+    runtime.declared_error_map = None
+    return runtime
+
+
 async def _collect(servicer, request=None):
     request = request or ReadRequest(stream_name="s1", batch_size=10)
     return [r async for r in servicer.ReadStream(request, MagicMock())]
@@ -107,7 +115,7 @@ class TestReadStream:
             [_batch([{"id": 1}]), _batch([{"id": 2}, {"id": 3}])],
             cursor_values=["c1", "c2"],
         )
-        servicer = SourceWorkerServicer(readable, MagicMock(), {})
+        servicer = SourceWorkerServicer(readable, _runtime(), {})
         responses = await _collect(servicer)
 
         kinds = [r.WhichOneof("message") for r in responses]
@@ -142,7 +150,7 @@ class TestReadStream:
                 return
                 yield  # pragma: no cover — makes this an async generator
 
-        servicer = SourceWorkerServicer(_CursorProbe([]), MagicMock(), {})
+        servicer = SourceWorkerServicer(_CursorProbe([]), _runtime(), {})
         request = ReadRequest(
             stream_name="s1",
             initial_cursor_json=json.dumps({"cursor": "2024-06-01"}),
@@ -169,7 +177,7 @@ class TestReadStream:
     )
     async def test_deterministic_errors_marked_fatal(self, exc):
         readable = _FakeReadable([_batch([{"id": 1}])], error=exc)
-        servicer = SourceWorkerServicer(readable, MagicMock(), {})
+        servicer = SourceWorkerServicer(readable, _runtime(), {})
         responses = await _collect(servicer)
         terminal = responses[-1]
         assert terminal.WhichOneof("message") == "error"
@@ -187,7 +195,7 @@ class TestReadStream:
     )
     async def test_runtime_errors_marked_retryable(self, exc):
         readable = _FakeReadable([], error=exc)
-        servicer = SourceWorkerServicer(readable, MagicMock(), {})
+        servicer = SourceWorkerServicer(readable, _runtime(), {})
         responses = await _collect(servicer)
         terminal = responses[-1]
         assert terminal.WhichOneof("message") == "error"
@@ -196,7 +204,7 @@ class TestReadStream:
 
     async def test_error_ends_stream_without_complete(self):
         readable = _FakeReadable([_batch([{"id": 1}])], error=ValueError("x"))
-        servicer = SourceWorkerServicer(readable, MagicMock(), {})
+        servicer = SourceWorkerServicer(readable, _runtime(), {})
         responses = await _collect(servicer)
         kinds = [r.WhichOneof("message") for r in responses]
         assert kinds[-1] == "error"
@@ -204,7 +212,7 @@ class TestReadStream:
 
     async def test_trailing_cursor_save_after_generator_end(self):
         readable = _FakeReadable([_batch([{"id": 1}])], trailing_cursor="final")
-        servicer = SourceWorkerServicer(readable, MagicMock(), {})
+        servicer = SourceWorkerServicer(readable, _runtime(), {})
         responses = await _collect(servicer)
         kinds = [r.WhichOneof("message") for r in responses]
         assert kinds == ["batch", "cursor_save", "complete"]
@@ -216,7 +224,7 @@ class TestReadStream:
         # tuple, fail the stream fatally). The relay must tag them instead.
         ts = datetime(2024, 6, 1, 12, 30, 0, tzinfo=timezone.utc)
         readable = _FakeReadable([_batch([{"id": 1}])], cursor_values=[ts])
-        servicer = SourceWorkerServicer(readable, MagicMock(), {})
+        servicer = SourceWorkerServicer(readable, _runtime(), {})
         responses = await _collect(servicer)
 
         kinds = [r.WhichOneof("message") for r in responses]
@@ -244,7 +252,7 @@ class TestReadStream:
                 return
                 yield  # pragma: no cover — makes this an async generator
 
-        servicer = SourceWorkerServicer(_CursorProbe([]), MagicMock(), {})
+        servicer = SourceWorkerServicer(_CursorProbe([]), _runtime(), {})
         request = ReadRequest(
             stream_name="s1",
             initial_cursor_json=json.dumps(
