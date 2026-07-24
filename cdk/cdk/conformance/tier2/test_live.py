@@ -276,4 +276,21 @@ class TestIncrementalRead:
                 f"re-read the stream; got ids {sorted(resumed_ids)}"
             )
 
+            # A row past the checkpoint must arrive on the next resume —
+            # an off-by-one that permanently loses the tail would
+            # otherwise be indistinguishable from a clean exclusive
+            # cursor (an empty resumed read is legal above).
+            tail = rows_batch([(8, "v8", 8)])
+            expect_success(
+                await harness.write_phase("insert", [(2, tail)]),
+                "seeding the post-checkpoint row",
+            )
+            after_tail = await harness.read_phase(
+                cursor_field="seq", checkpoint=checkpoint, batch_size=3
+            )
+            assert 8 in {int(row["id"]) for row in after_tail}, (
+                "a row written past the saved cursor never arrived on "
+                "resume; the cursor filter is losing the tail"
+            )
+
         asyncio.run(scenario())

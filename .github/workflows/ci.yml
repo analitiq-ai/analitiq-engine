@@ -81,6 +81,9 @@ jobs:
           CONFORMANCE_PG_DATABASE: conformance
           CONFORMANCE_PG_USER: conformance
           CONFORMANCE_PG_PASSWORD: conformance
+          # Strict mode: this job provisions the container, so a missing
+          # or renamed variable must fail the job, never skip to green.
+          ANALITIQ_CONFORMANCE_REQUIRE_LIVE: "1"
         run: poetry run pytest tests/conformance_kit/test_kit_live_reference.py
 
   lint:

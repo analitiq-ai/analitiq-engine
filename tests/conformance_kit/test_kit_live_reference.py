@@ -14,15 +14,11 @@ import importlib.util
 import json
 import os
 import re
-import subprocess  # nosec B404 - runs the suite the way a connector repo does
-import sys
 from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-REFERENCE_DIR = Path(__file__).parent / "fixtures" / "reference"
-REFERENCE_CLASS = "tests.conformance_kit.reference_connector:ReferenceConnector"
+from .kit_runner import REFERENCE_CLASS, REFERENCE_DIR, run_kit_suite
 
 _ENV_VARS = (
     "CONFORMANCE_PG_HOST",
@@ -36,10 +32,16 @@ _ENV_VARS = (
 def _live_settings() -> dict[str, str]:
     missing = [name for name in _ENV_VARS if not os.environ.get(name)]
     if missing:
-        pytest.skip(
+        reason = (
             f"live reference tier needs {', '.join(missing)} (a postgres "
             f"service container); the CI conformance job provides them"
         )
+        if os.environ.get("ANALITIQ_CONFORMANCE_REQUIRE_LIVE"):
+            # The CI job that provisions the container sets the strict
+            # flag, so a renamed or typo'd variable fails the job
+            # instead of retiring the live tier while it stays green.
+            pytest.fail(f"ANALITIQ_CONFORMANCE_REQUIRE_LIVE is set but {reason}")
+        pytest.skip(reason)
     if importlib.util.find_spec("asyncpg") is None:
         pytest.skip(
             "live reference tier needs the asyncpg driver installed, as a "
@@ -67,23 +69,9 @@ def test_tier2_suite_passes_against_postgres(tmp_path: Path) -> None:
     document_path = tmp_path / "live-connection.json"
     document_path.write_text(json.dumps(document, indent=2))
 
-    env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(
-        [str(REPO_ROOT / "cdk"), str(REPO_ROOT), env.get("PYTHONPATH", "")]
-    ).rstrip(os.pathsep)
-    completed = subprocess.run(  # nosec B603 - fixed argv, no shell
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "--pyargs",
-            "cdk.conformance.tier2",
-            "-q",
-            "--no-header",
-            "-p",
-            "no:cacheprovider",
-            "-p",
-            "cdk.conformance.plugin",
+    completed = run_kit_suite(
+        "cdk.conformance.tier2",
+        options=[
             "--connector-dir",
             str(REFERENCE_DIR),
             "--connector-class",
@@ -91,12 +79,6 @@ def test_tier2_suite_passes_against_postgres(tmp_path: Path) -> None:
             "--live-connection",
             str(document_path),
         ],
-        cwd=REPO_ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=600,
-        check=False,
     )
     output = completed.stdout + completed.stderr
     assert completed.returncode == 0, f"tier 2 failed against postgres:\n{output}"
@@ -104,3 +86,7 @@ def test_tier2_suite_passes_against_postgres(tmp_path: Path) -> None:
     assert (
         passed and int(passed.group(1)) >= 7
     ), f"expected the live tier to actually run its scenarios, got:\n{output}"
+    assert not re.search(r"\d+ skipped", output), (
+        f"every live scenario applies to the reference connector; a skip is "
+        f"a gating regression:\n{output}"
+    )

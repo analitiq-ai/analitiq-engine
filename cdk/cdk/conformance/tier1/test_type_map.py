@@ -14,10 +14,15 @@ from cdk.conformance.violations import violation_report
 def test_type_maps_round_trip_stably(
     conformance_target: ConformanceTarget,
 ) -> None:
-    """Rendered natives read back, and one round reaches a fixed point."""
+    """Rendered natives read back, and one round reaches a fixed point.
+
+    Probes render through the connector's own dialect when one resolved
+    (its ``render_column_type`` override participates), exactly as
+    first-run DDL renders.
+    """
     mapper = conformance_target.type_mapper
     if mapper is None or not mapper.has_write_map:
         pytest.skip("connector ships no type-map-write.json; nothing to check")
-    violations = check_type_map_round_trip(mapper)
+    violations = check_type_map_round_trip(mapper, conformance_target.dialect)
     if violations:
         pytest.fail(violation_report(violations))

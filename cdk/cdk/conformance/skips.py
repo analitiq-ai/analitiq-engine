@@ -43,8 +43,9 @@ def require_dialect(target: ConformanceTarget) -> SqlDialect:
     dialect = target.dialect
     if dialect is None:
         pytest.skip(
-            "no connector class or dialect resolved; reported by the "
-            "declaration-consistency check"
+            "no connector class or dialect resolved; a database connector's "
+            "class carries a dialect_class (for write-capable connectors the "
+            "declaration-consistency check reports this as a failure)"
         )
     return dialect
 

@@ -191,6 +191,10 @@ class LiveHarness:
             connector.set_stream_endpoints({STREAM_ID: self.endpoint_document()})
             if conflict_keys is not None:
                 connector.set_stream_conflict_keys({STREAM_ID: conflict_keys})
+            # Marked before the handshake: configure_schema may create the
+            # table and then fail, and the teardown drop (IF EXISTS,
+            # idempotent) must still run for that partial state.
+            self._created = True
             configured = await connector.configure_schema(
                 SchemaSpec(
                     stream_id=STREAM_ID,
@@ -204,7 +208,6 @@ class LiveHarness:
                     f"configure_schema rejected the {mode} stream for "
                     f"{self.schema}.{self.table}"
                 )
-            self._created = True
             results: list[BatchWriteResult] = []
             for batch_seq, batch in batches:
                 results.append(

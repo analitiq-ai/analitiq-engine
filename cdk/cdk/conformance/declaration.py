@@ -48,15 +48,56 @@ def dialect_overrides(dialect_cls: type, hook: str) -> bool:
     return getattr(dialect_cls, hook) is not getattr(SqlDialect, hook)
 
 
+def _write_signals(target: ConformanceTarget) -> list[str]:
+    """Name every write-capability signal the connector carries.
+
+    Used to catch the inverse inconsistency of the write-role checks: a
+    connector that declares or implements writing but ships no
+    ``type-map-write.json``. The read-only capability facts (catalog,
+    session targeting — and the stage sub-block the parser forces along
+    with them) are deliberately not signals: a source-only connector may
+    declare them for its read gates.
+    """
+    signals: list[str] = []
+    dialect = target.dialect
+    if dialect is not None:
+        for hook in ("stage_table_sql", "merge_statement_sql", "bulk_land"):
+            if dialect_overrides(type(dialect), hook):
+                signals.append(f"the dialect implements {hook}")
+    caps = target.declared_capabilities
+    if caps is not None:
+        if caps.merge_form != "none":
+            signals.append(f"connector.json declares merge_form {caps.merge_form!r}")
+        if caps.bulk_load != "none":
+            signals.append(f"connector.json declares bulk_load {caps.bulk_load!r}")
+    return signals
+
+
 def check_declaration_consistency(target: ConformanceTarget) -> list[Violation]:
     """Certify that ``sql_capabilities`` and the dialect agree.
 
-    Applies to write-capable database connectors (the ones shipping
-    ``type-map-write.json``); source-only and non-database connectors
-    have no write declaration to hold consistent.
+    The write-path checks apply to write-capable database connectors
+    (the ones shipping ``type-map-write.json``). A connector *without* a
+    write map is checked for the inverse inconsistency: declaring or
+    implementing write capability it cannot use — otherwise a forgotten
+    or misnamed write map would silently switch every write check off
+    (the gate's input must not be supplied by the defect it gates).
     """
-    if not target.write_role:
+    if not target.is_database:
         return []
+    if not target.write_role:
+        signals = _write_signals(target)
+        if not signals:
+            return []
+        return [
+            Violation(
+                CHECK,
+                f"the connector ships no type-map-write.json (which makes it "
+                f"source-only) but carries write capability: "
+                f"{'; '.join(signals)}. Ship the write map, or remove the "
+                f"write declarations and hooks.",
+            )
+        ]
     violations: list[Violation] = []
     caps = target.declared_capabilities
     if caps is None:

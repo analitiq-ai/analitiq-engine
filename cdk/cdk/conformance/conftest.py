@@ -43,16 +43,26 @@ def conformance_target(request: pytest.FixtureRequest) -> ConformanceTarget:
 
 @pytest.fixture(scope="session")
 def live_connection_path(request: pytest.FixtureRequest) -> Path:
-    """Return the live connection document's path, or skip the live tier."""
+    """Return the live connection document's path, or skip the live tier.
+
+    ``ANALITIQ_CONFORMANCE_REQUIRE_LIVE`` hardens the gate for CI jobs
+    that provision a service container: with it set, a missing live
+    connection is a failure, not a skip — so a typo'd env var or a
+    renamed option can never silently retire the live tier while the
+    job stays green.
+    """
     raw = _option_or_env(
         request.config, "--live-connection", "ANALITIQ_LIVE_CONNECTION"
     )
     if not raw:
-        pytest.skip(
+        reason = (
             "no live connection configured (--live-connection / "
             "ANALITIQ_LIVE_CONNECTION); the live tier runs only where the "
             "connector repo provides a database service container"
         )
+        if os.environ.get("ANALITIQ_CONFORMANCE_REQUIRE_LIVE"):
+            pytest.fail(f"ANALITIQ_CONFORMANCE_REQUIRE_LIVE is set but {reason}")
+        pytest.skip(reason)
     path = Path(raw)
     if not path.is_file():
         pytest.fail(f"live connection document {path} does not exist")

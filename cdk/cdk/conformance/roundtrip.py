@@ -17,6 +17,14 @@ What must hold is:
   (e.g. a write rule rendering ``INTERVAL`` whose read-back is ``Utf8``
   re-renders as ``TEXT``), and schema comparisons drift forever.
 
+Uncovered probes are skipped — a connector is not required to render
+the whole canonical vocabulary — but the skipping is guarded two ways,
+so it can never absorb a defect: a write map that covers *zero* probes
+is a violation (the check must not go inert), and every write rule must
+be reachable from the probe universe (a regex written against an
+unnormalized spelling would otherwise drop its whole family out of the
+probe set and read as "chose not to cover it").
+
 Exemplars are generated from the published canonical grammar
 (:data:`~cdk.type_map.grammar.ARROW_TYPE_GRAMMAR`) plus the concrete
 canonicals named by the connector's own rules, so the probe set covers
@@ -27,6 +35,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from cdk.sql.dialects import SqlDialect
 from cdk.type_map.exceptions import InvalidTypeMapError, UnmappedTypeError
 from cdk.type_map.grammar import ARROW_TYPE_GRAMMAR, IntParam, TimezoneParam, UnitParam
 from cdk.type_map.rules import normalize_canonical_type, normalize_native_type
@@ -38,27 +47,32 @@ if TYPE_CHECKING:
 
 CHECK_CLOSURE = "type-map-read-closure"
 CHECK_CONVERGENCE = "type-map-convergence"
-
-#: Render hints supplied to every write-map probe, standing in for the
-#: per-column metadata the engine passes at DDL time. A template token
-#: neither these nor a capture group provides is an authoring defect the
-#: probe reports.
-RENDER_HINTS: dict[str, object] = {
-    "length": 255,
-    "precision": 38,
-    "scale": 9,
-    "byte_width": 16,
-}
+CHECK_COVERAGE = "type-map-coverage"
 
 #: Representative (precision, scale)-style argument tuples per
 #: integer-parameterized family: one mid-range shape and the family's
 #: widest shape, so both a regex rule's typical match and its boundary
-#: are probed.
+#: are probed. Every ``IntParam`` family in the grammar must have an
+#: entry — :func:`_grammar_exemplars` refuses to run otherwise, so a new
+#: family can never silently drop out of the probe set.
 _INT_PARAM_EXEMPLARS: dict[str, tuple[tuple[int, ...], ...]] = {
     "Decimal128": ((10, 2), (38, 9)),
     "Decimal256": ((40, 2), (76, 10)),
     "FixedSizeBinary": ((16,),),
 }
+
+#: Structural canonical spellings (nested types) used ONLY for the
+#: write-rule reachability check, never as round-trip probes: nested
+#: types legitimately store as a document column (``List<...> -> JSONB``)
+#: whose read-back is ``Json``, so probing them through the convergence
+#: rule would flag correct authoring.
+_STRUCTURAL_MATCH_EXEMPLARS: tuple[str, ...] = (
+    "List<Int64>",
+    "LargeList<Utf8>",
+    "Struct<x: Int64>",
+    "Map<Utf8, Int64>",
+    "Object<x: Int64>",
+)
 
 
 def _grammar_exemplars() -> list[str]:
@@ -80,7 +94,13 @@ def _grammar_exemplars() -> list[str]:
                     exemplars.append(f"{family}({unit}, UTC)")
             continue
         if isinstance(params[0], IntParam):
-            for values in _INT_PARAM_EXEMPLARS.get(family, ()):
+            if family not in _INT_PARAM_EXEMPLARS:
+                raise RuntimeError(
+                    f"conformance kit defect: grammar family {family!r} has "
+                    f"no probe exemplars; add it to _INT_PARAM_EXEMPLARS so "
+                    f"the family cannot silently drop out of the probe set"
+                )
+            for values in _INT_PARAM_EXEMPLARS[family]:
                 rendered = ", ".join(str(v) for v in values)
                 exemplars.append(f"{family}({rendered})")
     return exemplars
@@ -116,19 +136,73 @@ def probe_canonicals(mapper: TypeMapper) -> list[str]:
     return probes
 
 
-def check_type_map_round_trip(mapper: TypeMapper) -> list[Violation]:
-    """Certify read closure and convergence for every covered probe.
+def _unreachable_write_rules(mapper: TypeMapper, probes: list[str]) -> list[Violation]:
+    """Flag write rules no probe can ever exercise (dead rules).
 
-    A probe the write map does not cover is skipped — a connector is not
-    required to render the whole canonical vocabulary, only to keep the
-    part it does render stable.
+    A rule the probe universe cannot reach is indistinguishable from an
+    uncovered family in the main loop — but the author shipped it, so a
+    non-matching pattern is a defect (typically wrong anchoring or a
+    spelling the normalizer never produces), not a choice. Structural
+    spellings join the match universe here because nested-type rules are
+    legitimate write rules the scalar probes cannot reach.
     """
+    universe = [
+        normalize_canonical_type(c) for c in probes + list(_STRUCTURAL_MATCH_EXEMPLARS)
+    ]
+    violations: list[Violation] = []
+    for rule in mapper.write_rules:
+        if rule.match == "exact":
+            normalized = normalize_canonical_type(rule.canonical)
+            if any(candidate == normalized for candidate in universe):
+                continue
+        else:
+            pattern = rule.compile_pattern()
+            if any(pattern.fullmatch(candidate) for candidate in universe):
+                continue
+        violations.append(
+            Violation(
+                CHECK_COVERAGE,
+                f"write rule for canonical {rule.canonical!r} matches nothing "
+                f"the published grammar can produce; the rule is dead "
+                f"(wrong anchoring, or a spelling normalization never "
+                f"emits) and its family is silently unrenderable.",
+            )
+        )
+    return violations
+
+
+def render_probe(
+    mapper: TypeMapper, canonical: str, dialect: SqlDialect | None = None
+) -> str:
+    """Render one canonical exactly as first-run DDL renders it.
+
+    The engine's only production render path is
+    ``dialect.render_column_type(canonical, type_mapper)`` with no
+    per-column hints (``cdk.sql.ddl.build_create_table_sql``), so the
+    probe renders the same way — through the connector's own dialect
+    when one is available (its ``render_column_type`` override
+    participates), and hint-free either way. A rule whose template needs
+    a hint no capture provides therefore fails here exactly as it fails
+    on the first customer table, instead of passing under fabricated
+    hints the engine never supplies.
+    """
+    if dialect is not None:
+        return dialect.render_column_type(canonical, mapper)
+    return mapper.to_native_type(canonical)
+
+
+def check_type_map_round_trip(
+    mapper: TypeMapper, dialect: SqlDialect | None = None
+) -> list[Violation]:
+    """Certify read closure and convergence for every covered probe."""
     if not mapper.has_write_map:
         return []
-    violations: list[Violation] = []
-    for canonical in probe_canonicals(mapper):
+    probes = probe_canonicals(mapper)
+    violations: list[Violation] = _unreachable_write_rules(mapper, probes)
+    rendered = 0
+    for canonical in probes:
         try:
-            native = mapper.to_native_type(canonical, params=RENDER_HINTS)
+            native = render_probe(mapper, canonical, dialect)
         except UnmappedTypeError:
             continue
         except InvalidTypeMapError as err:
@@ -139,6 +213,7 @@ def check_type_map_round_trip(mapper: TypeMapper) -> list[Violation]:
                 )
             )
             continue
+        rendered += 1
         try:
             recovered = mapper.to_arrow_type(native)
         except UnmappedTypeError:
@@ -154,7 +229,7 @@ def check_type_map_round_trip(mapper: TypeMapper) -> list[Violation]:
             )
             continue
         try:
-            second = mapper.to_native_type(recovered, params=RENDER_HINTS)
+            second = render_probe(mapper, recovered, dialect)
         except (UnmappedTypeError, InvalidTypeMapError) as err:
             violations.append(
                 Violation(
@@ -178,4 +253,14 @@ def check_type_map_round_trip(mapper: TypeMapper) -> list[Violation]:
                     f"type.",
                 )
             )
+    if rendered == 0:
+        violations.append(
+            Violation(
+                CHECK_COVERAGE,
+                "the write map rendered none of the canonical probes; the "
+                "round-trip check certified nothing. The map cannot render "
+                "even the basic scalar vocabulary (Int64, Utf8, ...) the "
+                "engine's DDL needs.",
+            )
+        )
     return violations

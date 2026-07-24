@@ -102,31 +102,32 @@ def _base_call_shape(base_fn: Any) -> tuple[list[Any], dict[str, Any]]:
     return args, kwargs
 
 
-def _signature_mismatch(base_fn: Any, override_fn: Any) -> str | None:
+def _signature_mismatch(
+    base_fn: Any, override_fn: Any, *, takes_self: bool
+) -> str | None:
     """Explain why *override_fn* cannot take the base hook's call, if it cannot.
 
     Checked by simulating the exact call shape the CDK uses on the base
     signature and binding it against the override's signature — so an
     override may add defaulted parameters of its own, but a dropped,
     renamed, or de-keyworded parameter fails with the binder's own
-    explanation.
+    explanation. ``takes_self`` is False only for static/class-method
+    overrides (whose resolved signature carries no instance parameter);
+    a plain method that *forgot* ``self`` must not slip through the
+    self-less bind, so the choice comes from the descriptor type, never
+    from which bind happens to succeed.
     """
     args, kwargs = _base_call_shape(base_fn)
     try:
         override_sig = inspect.signature(override_fn)
     except (TypeError, ValueError):
         return "its signature cannot be introspected"
+    self_placeholder = (None,) if takes_self else ()
     try:
-        override_sig.bind(None, *args, **kwargs)
+        override_sig.bind(*self_placeholder, *args, **kwargs)
         return None
     except TypeError as err:
         problem = str(err)
-    try:
-        # A staticmethod (or an already-bound descriptor) takes no self.
-        override_sig.bind(*args, **kwargs)
-        return None
-    except TypeError:
-        pass
     base_shape = str(inspect.signature(base_fn))
     return f"it cannot accept the CDK's call shape {base_shape}: {problem}"
 
@@ -191,7 +192,11 @@ def _hook_shape_problem(klass: type, name: str) -> str | None:
         )
     base_fn = inspect.unwrap(getattr(SqlDialect, name))
     override_fn = getattr(klass, name)
-    mismatch = _signature_mismatch(base_fn, override_fn)
+    mismatch = _signature_mismatch(
+        base_fn,
+        override_fn,
+        takes_self=not isinstance(override_attr, (staticmethod, classmethod)),
+    )
     if mismatch is None:
         return None
     return (

@@ -114,13 +114,18 @@ jobs:
       - name: Tier 2 (live)
         env:
           CONFORMANCE_DB_PASSWORD: conformance
+          ANALITIQ_CONFORMANCE_REQUIRE_LIVE: "1"
         run: >-
           pytest --pyargs cdk.conformance.tier2 --connector-dir .
           --live-connection ci/live-connection.json
 ```
 
 Systems without a service container drop the tier-2 step; the tier-1
-step is mandatory in every connector repo.
+step is mandatory in every connector repo. A job that *does* provision
+a container should also set `ANALITIQ_CONFORMANCE_REQUIRE_LIVE=1`
+(as the snippet's engine-side counterpart does): with it, a missing
+live connection fails the job instead of skipping, so a typo'd
+variable can never silently retire the live tier while CI stays green.
 
 The checks are also plain importable functions
 (`cdk.conformance.check_override_surface`,

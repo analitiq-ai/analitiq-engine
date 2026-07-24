@@ -9,7 +9,7 @@ asserts the kit fails with a message naming the offending member.
 from __future__ import annotations
 
 import dataclasses
-from pathlib import Path
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
@@ -17,18 +17,19 @@ import pytest
 from cdk.conformance import (
     check_declaration_consistency,
     check_override_surface,
+    check_type_map_round_trip,
     load_target,
 )
-from cdk.conformance.target import ConformanceTarget
+from cdk.conformance import target as target_module
+from cdk.conformance.target import ConformanceSetupError, ConformanceTarget
 from cdk.conformance.tier1 import test_rendering as kit_rendering
 from cdk.sql.capabilities import SqlCapabilities
 from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.generic import GenericSQLConnector
+from cdk.type_map.loader import build_type_mapper
 
+from .kit_runner import REFERENCE_CLASS, REFERENCE_DIR
 from .reference_connector import ReferenceConnector, ReferencePostgresDialect
-
-REFERENCE_DIR = Path(__file__).parent / "fixtures" / "reference"
-REFERENCE_CLASS = "tests.conformance_kit.reference_connector:ReferenceConnector"
 
 
 @pytest.fixture()
@@ -115,6 +116,104 @@ class _WrongFormConnector(GenericSQLConnector):
     dialect_class = _WrongFormDialect
 
 
+class _RenamedKeywordDialect(ReferencePostgresDialect):
+    """Renames bulk_land's keyword-only parameter (a bent call shape)."""
+
+    def bulk_land(  # type: ignore[override]
+        self,
+        conn: Any,
+        stage: TableAddress,
+        batch: Any,
+        *,
+        rt: Any,
+    ) -> bool:
+        return False
+
+
+class _RenamedKeywordConnector(GenericSQLConnector):
+    dialect_class = _RenamedKeywordDialect
+
+
+class _TableAddressOverrideDialect(ReferencePostgresDialect):
+    """Overrides the framework-owned bind-once address factory."""
+
+    def table_address(
+        self, table: str, *, schema: str = "", catalog: str = ""
+    ) -> TableAddress:
+        return super().table_address(table, schema=schema, catalog=catalog)
+
+
+class _TableAddressOverrideConnector(GenericSQLConnector):
+    dialect_class = _TableAddressOverrideDialect
+
+
+class _ExtraDefaultParamDialect(ReferencePostgresDialect):
+    """Adds a defaulted parameter of its own — the documented allowance."""
+
+    def merge_statement_sql(
+        self,
+        stage: TableAddress,
+        target: TableAddress,
+        conflict_keys: Sequence[str],
+        columns: Sequence[str],
+        annotate: bool = False,
+    ) -> str:
+        del annotate
+        return super().merge_statement_sql(stage, target, conflict_keys, columns)
+
+
+class _ExtraDefaultParamConnector(GenericSQLConnector):
+    dialect_class = _ExtraDefaultParamDialect
+
+
+class _StaticHookDialect(ReferencePostgresDialect):
+    """Implements a sanctioned hook as a staticmethod (allowed shape)."""
+
+    @staticmethod
+    def current_timestamp_default() -> str:
+        return "CURRENT_TIMESTAMP"
+
+
+class _StaticHookConnector(GenericSQLConnector):
+    dialect_class = _StaticHookDialect
+
+
+class _MergeFormDialect(ReferencePostgresDialect):
+    """Renders the MERGE form, for the merge_form: 'merge' rendering arm."""
+
+    def merge_statement_sql(
+        self,
+        stage: TableAddress,
+        target: TableAddress,
+        conflict_keys: Sequence[str],
+        columns: Sequence[str],
+    ) -> str:
+        column_list = ", ".join(self.quote_ident(c) for c in columns)
+        match = " AND ".join(
+            f"t.{self.quote_ident(c)} = s.{self.quote_ident(c)}" for c in conflict_keys
+        )
+        update_columns = [c for c in columns if c not in set(conflict_keys)]
+        statement = (
+            f"MERGE INTO {self.quote_table(target)} t "
+            f"USING {self.quote_table(stage)} s ON ({match})"
+        )
+        if update_columns:
+            assignments = ", ".join(
+                f"t.{self.quote_ident(c)} = s.{self.quote_ident(c)}"
+                for c in update_columns
+            )
+            statement += f" WHEN MATCHED THEN UPDATE SET {assignments}"
+        values = ", ".join(f"s.{self.quote_ident(c)}" for c in columns)
+        return (
+            statement
+            + f" WHEN NOT MATCHED THEN INSERT ({column_list}) VALUES ({values})"
+        )
+
+
+class _MergeFormConnector(GenericSQLConnector):
+    dialect_class = _MergeFormDialect
+
+
 class TestOverrideSurfaceBreaks:
     def test_broken_hook_signature_fails_naming_the_hook(
         self, reference_target: ConformanceTarget
@@ -156,6 +255,52 @@ class TestOverrideSurfaceBreaks:
         assert violations
         assert "load_helper" in _messages(violations)
 
+    def test_renamed_keyword_only_parameter_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """The keyword-only call shape (bulk_land's runtime) is enforced."""
+        violations = check_override_surface(
+            _with_connector(reference_target, _RenamedKeywordConnector)
+        )
+        report = _messages(violations)
+        assert "bulk_land" in report
+        assert (
+            "runtime" in report
+        ), f"the failure must name the renamed keyword parameter: {report}"
+
+    def test_framework_owned_attribute_override_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """Overriding table_address bypasses the catalog gate; refused."""
+        violations = check_override_surface(
+            _with_connector(reference_target, _TableAddressOverrideConnector)
+        )
+        report = _messages(violations)
+        assert "table_address" in report
+        assert "framework-owned" in report
+
+    def test_extra_defaulted_parameter_is_allowed(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """The documented allowance: an override may add defaulted params."""
+        assert (
+            check_override_surface(
+                _with_connector(reference_target, _ExtraDefaultParamConnector)
+            )
+            == []
+        )
+
+    def test_staticmethod_hook_is_allowed(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A self-less staticmethod override of a sanctioned hook passes."""
+        assert (
+            check_override_surface(
+                _with_connector(reference_target, _StaticHookConnector)
+            )
+            == []
+        )
+
 
 class TestDeclarationBreaks:
     def test_undeclared_bulk_override_fails(
@@ -187,6 +332,205 @@ class TestDeclarationBreaks:
         report = _messages(violations)
         assert "copy_from" in report
         assert "bulk_land" in report
+
+    def test_missing_stage_rendering_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A write-capable connector without stage DDL cannot write at all.
+
+        The thin generic class carries the base dialect, which renders no
+        stage table; the skip gates in the rendering tests rely on this
+        branch reporting the defect.
+        """
+        violations = check_declaration_consistency(
+            _with_connector(reference_target, GenericSQLConnector)
+        )
+        assert "stage_table_sql" in _messages(violations)
+
+    def test_undeclared_capabilities_fail_for_a_write_connector(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """No sql_capabilities on a write-capable connector is a defect.
+
+        The rendering and live tiers skip on this prerequisite, so this
+        branch is what keeps the skip from reading as a pass.
+        """
+        doctored = dataclasses.replace(reference_target, declared_capabilities=None)
+        violations = check_declaration_consistency(doctored)
+        assert "sql_capabilities" in _messages(violations)
+
+    def test_merge_rendering_without_declaration_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """The used-but-undeclared twin of the bulk case."""
+        doctored = dataclasses.replace(
+            reference_target,
+            declared_capabilities=_caps_with(reference_target, merge_form="none"),
+        )
+        violations = check_declaration_consistency(doctored)
+        report = _messages(violations)
+        assert "merge_statement_sql" in report
+        assert "'none'" in report
+
+
+class TestTargetLoadingBreaks:
+    def test_failing_entry_point_is_a_hard_error(
+        self, reference_target: ConformanceTarget, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unlike the engine's best-effort discovery, the suite must not
+        fall back to the generic class when the connector's own entry
+        point fails to load — that would pass every class check
+        vacuously for exactly the defect the suite exists to surface."""
+
+        class _FailingEntryPoint:
+            name = reference_target.connector_id
+            dist = None
+
+            @staticmethod
+            def load() -> type:
+                raise ImportError("connector module is broken")
+
+        monkeypatch.setattr(
+            target_module.metadata,
+            "entry_points",
+            lambda group: [_FailingEntryPoint()],
+        )
+        with pytest.raises(ConformanceSetupError, match="failed to load"):
+            load_target(reference_target.root)
+
+
+class TestGateInversionBreaks:
+    """A defect must never disable the gate that would have caught it."""
+
+    def test_missing_write_map_with_write_hooks_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A forgotten type-map-write.json must not switch write checks off.
+
+        Without this branch, the missing file makes the target
+        source-only, every write check skips, and the connector goes
+        green while every customer write is refused at handshake.
+        """
+        read_only_mapper = build_type_mapper(
+            "no-write-map",
+            [{"match": "exact", "native": "TEXT", "canonical": "Utf8"}],
+        )
+        doctored = dataclasses.replace(reference_target, type_mapper=read_only_mapper)
+        violations = check_declaration_consistency(doctored)
+        report = _messages(violations)
+        assert "type-map-write.json" in report
+        assert "stage_table_sql" in report
+
+
+class TestTypeMapBreaks:
+    def test_zero_probe_coverage_fails(self) -> None:
+        """A write map rendering no probe must not read as fully certified."""
+        mapper = build_type_mapper(
+            "zero-coverage",
+            [{"match": "exact", "native": "JSONB", "canonical": "Json"}],
+            [
+                {
+                    "match": "regex",
+                    "canonical": "^(List|LargeList)<.+>$",
+                    "native": "JSONB",
+                }
+            ],
+        )
+        violations = check_type_map_round_trip(mapper)
+        report = _messages(violations)
+        assert "type-map-coverage" in report
+        assert "rendered none" in report
+
+    def test_dead_write_rule_fails(self) -> None:
+        """A regex no normalized canonical can match is a dead rule."""
+        mapper = build_type_mapper(
+            "dead-rule",
+            [{"match": "exact", "native": "TEXT", "canonical": "Utf8"}],
+            [
+                {"match": "exact", "canonical": "Utf8", "native": "TEXT"},
+                # No space after the comma: the normalizer always emits
+                # ", ", so this pattern can never match a probe.
+                {
+                    "match": "regex",
+                    "canonical": "^Decimal128\\((?<p>\\d+),(?<s>\\d+)\\)$",
+                    "native": "NUMERIC(${p}, ${s})",
+                },
+            ],
+        )
+        violations = check_type_map_round_trip(mapper)
+        report = _messages(violations)
+        assert "type-map-coverage" in report
+        assert "Decimal128" in report
+
+    def test_hint_requiring_rule_fails_like_production_ddl(self) -> None:
+        """A template needing a hint no capture provides must fail.
+
+        The engine's DDL path renders with no per-column hints; a rule
+        like ``Utf8 -> VARCHAR(${length})`` fails on the first customer
+        table, so the kit must render the same way and refuse it —
+        never paper over it with fabricated hints.
+        """
+        mapper = build_type_mapper(
+            "hint-break",
+            [{"match": "exact", "native": "TEXT", "canonical": "Utf8"}],
+            [{"match": "exact", "canonical": "Utf8", "native": "VARCHAR(${length})"}],
+        )
+        violations = check_type_map_round_trip(mapper)
+        report = _messages(violations)
+        assert (
+            "length" in report
+        ), f"the hint-requiring template must be reported: {report}"
+
+    def test_unreadable_rendered_native_fails_read_closure(self) -> None:
+        """A write rule rendering a native the read map cannot map back."""
+        mapper = build_type_mapper(
+            "closure-break",
+            [{"match": "exact", "native": "TEXT", "canonical": "Utf8"}],
+            [{"match": "exact", "canonical": "Utf8", "native": "INTERVAL"}],
+        )
+        violations = check_type_map_round_trip(mapper)
+        assert violations, "an unreadable rendered native must fail"
+        report = _messages(violations)
+        assert "type-map-read-closure" in report
+        assert "INTERVAL" in report
+
+    def test_non_convergent_pair_fails(self) -> None:
+        """One write/read round that never reaches a fixed point."""
+        mapper = build_type_mapper(
+            "convergence-break",
+            [
+                {"match": "exact", "native": "TEXT", "canonical": "LargeUtf8"},
+                {"match": "exact", "native": "CLOB", "canonical": "LargeUtf8"},
+            ],
+            [
+                {"match": "exact", "canonical": "Utf8", "native": "TEXT"},
+                {"match": "exact", "canonical": "LargeUtf8", "native": "CLOB"},
+            ],
+        )
+        violations = check_type_map_round_trip(mapper)
+        report = _messages(violations)
+        assert (
+            "type-map-convergence" in report
+        ), f"Utf8 -> TEXT -> LargeUtf8 -> CLOB must be reported: {report}"
+
+
+class TestConformantVariantsPass:
+    """The rendering arms beyond the reference's own declaration."""
+
+    def test_merge_form_dialect_passes_the_rendering_checks(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A MERGE-form connector passes the same tests the reference does."""
+        doctored = dataclasses.replace(
+            _with_connector(reference_target, _MergeFormConnector),
+            declared_capabilities=_caps_with(reference_target, merge_form="merge"),
+        )
+        checks = kit_rendering.TestModeStatements()
+        checks.test_merge_statement_matches_declared_form(doctored)
+        checks.test_merge_statement_references_stage_target_and_keys(doctored)
+        checks.test_merge_with_only_key_columns_degrades_to_insert_only(doctored)
+        assert check_override_surface(doctored) == []
+        assert check_declaration_consistency(doctored) == []
 
 
 class TestRenderingBreaks:
