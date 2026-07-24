@@ -200,7 +200,7 @@ class SqlCapabilities:
                     f"{list(SQL_TRANSPORT_TYPES)}"
                 )
             allowed = BULK_MECHANISMS_BY_TRANSPORT[transport_type]
-            if mechanism not in allowed:
+            if not isinstance(mechanism, str) or mechanism not in allowed:
                 detail = ""
                 if mechanism == "adbc_ingest":
                     detail = (
