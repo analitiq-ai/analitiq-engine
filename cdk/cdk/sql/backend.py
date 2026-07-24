@@ -218,7 +218,7 @@ class SqlAlchemyBackend(TransportBackend):
     def _run_stage_cycle(
         self, conn: Connection, plan: StageWritePlan, batch: pa.RecordBatch
     ) -> None:
-        """The one cycle body both engine flavors execute.
+        """Run the one cycle body both engine flavors execute.
 
         Transactional: every step — stage DDL, landing, the optional
         target-emptying DELETE, the mode statement, the drop — shares the
@@ -292,7 +292,9 @@ class SqlAlchemyBackend(TransportBackend):
             # Transactional path: the drop joins the transaction.
             self._exec(conn, plan.drop_stage_sql, commit=False)
 
-    def _land(self, conn: Connection, plan: StageWritePlan, batch: pa.RecordBatch) -> None:
+    def _land(
+        self, conn: Connection, plan: StageWritePlan, batch: pa.RecordBatch
+    ) -> None:
         """Land the batch into the stage: declared bulk mechanism first.
 
         The bulk hook is a pure speed slot — stage contents are identical
@@ -318,7 +320,7 @@ class SqlAlchemyBackend(TransportBackend):
         conn.execute(stage_table.insert(), records)
 
     def _stage_table(self, plan: StageWritePlan) -> Table:
-        """A lightweight stage ``Table`` carrying the target's column types.
+        """Build a lightweight stage ``Table`` with the target's column types.
 
         Built per batch from the reflected target so executemany binds each
         landed column exactly as a direct target insert would have — the
@@ -377,8 +379,7 @@ class SqlAlchemyBackend(TransportBackend):
                 # footprint at the default log level until it escalates
                 # to an orphan.
                 logger.info(
-                    "post-merge drop of stage %s succeeded on the second "
-                    "attempt",
+                    "post-merge drop of stage %s succeeded on the second " "attempt",
                     self._dialect.quote_table(plan.stage),
                 )
             return
@@ -389,9 +390,7 @@ class SqlAlchemyBackend(TransportBackend):
                 "manually or removed by a table-expiration policy"
             )
         else:
-            orphan_note = (
-                "the session-temp stage dies with the discarded connection"
-            )
+            orphan_note = "the session-temp stage dies with the discarded connection"
         logger.warning(
             "stage table %s could not be dropped after a successful mode "
             "statement (two attempts). The batch is acked and never "

@@ -41,7 +41,7 @@ def stage_table_name(
     batch_seq: int,
     max_identifier_length: int,
 ) -> str:
-    """The deterministic per-batch stage name.
+    """Compose the deterministic per-batch stage name.
 
     ``sha256(run_id|stream_id|batch_seq)[:16]`` is the uniqueness token —
     fixed-width and collision-resistant, so a retry of the same batch
@@ -117,8 +117,8 @@ def render_anti_join_insert_sql(
     )
     # Composed exclusively of dialect-quoted identifiers; values never
     # enter this text (they were landed via bound parameters).
-    return (  # nosec B608
-        f"INSERT INTO {dialect.quote_table(target)} ({col_list}) "
+    return (
+        f"INSERT INTO {dialect.quote_table(target)} ({col_list}) "  # nosec B608
         f"SELECT {select_list} FROM {dialect.quote_table(stage)} s "
         f"WHERE NOT EXISTS (SELECT 1 FROM {dialect.quote_table(target)} t "
         f"WHERE {match})"
@@ -139,8 +139,8 @@ def render_append_sql(
     quoted_cols = [dialect.quote_ident(c) for c in columns]
     col_list = ", ".join(quoted_cols)
     # Dialect-quoted identifiers only; see render_anti_join_insert_sql.
-    return (  # nosec B608
-        f"INSERT INTO {dialect.quote_table(target)} ({col_list}) "
+    return (
+        f"INSERT INTO {dialect.quote_table(target)} ({col_list}) "  # nosec B608
         f"SELECT {col_list} FROM {dialect.quote_table(stage)}"
     )
 

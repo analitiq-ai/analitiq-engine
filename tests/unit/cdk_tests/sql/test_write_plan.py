@@ -165,9 +165,7 @@ class TestModeStatements:
     def test_upsert_with_only_key_columns_warns(self, caplog):
         with caplog.at_level(logging.WARNING, logger="cdk.sql.write_plan"):
             _plan(write_mode="upsert", conflict_keys=["id", "v"])
-        assert any(
-            "no non-key columns" in r.getMessage() for r in caplog.records
-        )
+        assert any("no non-key columns" in r.getMessage() for r in caplog.records)
 
     def test_truncate_insert_renders_a_plain_append(self):
         plan = _plan(write_mode="truncate_insert", truncate_now=True)
