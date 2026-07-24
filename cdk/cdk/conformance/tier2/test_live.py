@@ -58,239 +58,226 @@ def _requires_merge(target: ConformanceTarget) -> None:
         pytest.skip("connector declares merge_form 'none'; no upsert to run")
 
 
-class TestInsert:
-    """Anti-join insert: identity-deduplicated, replay-stable."""
+def test_insert_writes_read_back_and_replay_is_stable(
+    harness: LiveHarness,
+) -> None:
+    """Two batches land; a replayed batch leaves the target unchanged."""
 
-    def test_insert_writes_read_back_and_replay_is_stable(
-        self, harness: LiveHarness
-    ) -> None:
-        """Two batches land; a replayed batch leaves the target unchanged."""
+    async def scenario() -> None:
+        first = rows_batch([(1, "a", 1), (2, "b", 2), (3, "c", 3)])
+        second = rows_batch([(3, "c2", 4), (4, "d", 5)])
+        expect_success(
+            await harness.write_phase("insert", [(1, first)]),
+            "insert first batch",
+        )
+        expect_success(
+            await harness.write_phase("insert", [(2, second)]),
+            "insert second batch (fresh connection: restart)",
+        )
+        rows = by_id(await harness.read_phase())
+        assert set(rows) == {1, 2, 3, 4}
+        # id 3 appeared in both batches; the anti-join keeps the
+        # committed row, so the first version survives.
+        assert rows[3]["val"] == "c"
 
-        async def scenario() -> None:
-            first = rows_batch([(1, "a", 1), (2, "b", 2), (3, "c", 3)])
-            second = rows_batch([(3, "c2", 4), (4, "d", 5)])
-            expect_success(
-                await harness.write_phase("insert", [(1, first)]),
-                "insert first batch",
-            )
-            expect_success(
-                await harness.write_phase("insert", [(2, second)]),
-                "insert second batch (fresh connection: restart)",
-            )
-            rows = by_id(await harness.read_phase())
-            assert set(rows) == {1, 2, 3, 4}
-            # id 3 appeared in both batches; the anti-join keeps the
-            # committed row, so the first version survives.
-            assert rows[3]["val"] == "c"
+        replay = await harness.write_phase("insert", [(2, second)])
+        expect_success(replay, "insert replayed batch")
+        rows_after = by_id(await harness.read_phase())
+        assert rows_after == rows, (
+            "a replayed insert batch changed the target; the declared "
+            "verdict promises identity-deduplicated replays"
+        )
 
-            replay = await harness.write_phase("insert", [(2, second)])
-            expect_success(replay, "insert replayed batch")
-            rows_after = by_id(await harness.read_phase())
-            assert rows_after == rows, (
-                "a replayed insert batch changed the target; the declared "
-                "verdict promises identity-deduplicated replays"
-            )
-
-        asyncio.run(scenario())
-
-    def test_insert_collapses_intra_batch_duplicates_first_wins(
-        self, harness: LiveHarness
-    ) -> None:
-        """One batch carrying an identity twice lands its first occurrence."""
-
-        async def scenario() -> None:
-            batch = rows_batch([(1, "first", 1), (1, "second", 2), (2, "b", 3)])
-            expect_success(
-                await harness.write_phase("insert", [(1, batch)]),
-                "insert with intra-batch duplicate identity",
-            )
-            rows = by_id(await harness.read_phase())
-            assert set(rows) == {1, 2}
-            assert rows[1]["val"] == "first"
-
-        asyncio.run(scenario())
+    asyncio.run(scenario())
 
 
-class TestUpsert:
-    """Merge-form upsert on conflict keys: update in place, replay-stable."""
+def test_insert_collapses_intra_batch_duplicates_first_wins(
+    harness: LiveHarness,
+) -> None:
+    """One batch carrying an identity twice lands its first occurrence."""
 
-    def test_upsert_updates_matches_and_replay_is_stable(
-        self, harness: LiveHarness
-    ) -> None:
-        """The declared merge form lands updates; a replay changes nothing."""
-        _requires_merge(harness.target)
+    async def scenario() -> None:
+        batch = rows_batch([(1, "first", 1), (1, "second", 2), (2, "b", 3)])
+        expect_success(
+            await harness.write_phase("insert", [(1, batch)]),
+            "insert with intra-batch duplicate identity",
+        )
+        rows = by_id(await harness.read_phase())
+        assert set(rows) == {1, 2}
+        assert rows[1]["val"] == "first"
 
-        async def scenario() -> None:
-            first = rows_batch([(1, "a", 1), (2, "b", 2), (3, "c", 3)])
-            second = rows_batch([(2, "b2", 4), (3, "c2", 5), (4, "d", 6)])
-            expect_success(
-                await harness.write_phase("upsert", [(1, first)], conflict_keys=["id"]),
-                "upsert first batch",
-            )
-            expect_success(
-                await harness.write_phase(
-                    "upsert", [(2, second)], conflict_keys=["id"]
-                ),
-                "upsert second batch (fresh connection: restart)",
-            )
-            rows = by_id(await harness.read_phase())
-            assert set(rows) == {1, 2, 3, 4}
-            assert rows[2]["val"] == "b2"
-            assert rows[3]["val"] == "c2"
-
-            replay = await harness.write_phase(
-                "upsert", [(2, second)], conflict_keys=["id"]
-            )
-            expect_success(replay, "upsert replayed batch")
-            rows_after = by_id(await harness.read_phase())
-            assert rows_after == rows, (
-                "a replayed upsert batch changed the target; upsert's "
-                "declared verdict is exactly-once on the conflict keys"
-            )
-
-        asyncio.run(scenario())
-
-    def test_upsert_without_conflict_keys_is_rejected_fatally(
-        self, harness: LiveHarness
-    ) -> None:
-        """The keyless-upsert refusal reaches the ack as a fatal failure."""
-        _requires_merge(harness.target)
-
-        async def scenario() -> None:
-            batch = rows_batch([(1, "a", 1)])
-            results = await harness.write_phase(
-                "upsert", [(1, batch)], conflict_keys=[]
-            )
-            assert len(results) == 1
-            assert not results[0].success, (
-                "an upsert stream with no conflict_keys must refuse, never "
-                "silently degrade to INSERT"
-            )
-
-        asyncio.run(scenario())
+    asyncio.run(scenario())
 
 
-class TestTruncateInsert:
-    """Full refresh: truncate on the first batch, plain append after."""
+def test_upsert_updates_matches_and_replay_is_stable(
+    harness: LiveHarness,
+) -> None:
+    """The declared merge form lands updates; a replay changes nothing."""
+    _requires_merge(harness.target)
 
-    def test_first_batch_truncates_then_appends(self, harness: LiveHarness) -> None:
-        """Pre-existing rows vanish on batch 1; batch 2 appends."""
+    async def scenario() -> None:
+        first = rows_batch([(1, "a", 1), (2, "b", 2), (3, "c", 3)])
+        second = rows_batch([(2, "b2", 4), (3, "c2", 5), (4, "d", 6)])
+        expect_success(
+            await harness.write_phase("upsert", [(1, first)], conflict_keys=["id"]),
+            "upsert first batch",
+        )
+        expect_success(
+            await harness.write_phase("upsert", [(2, second)], conflict_keys=["id"]),
+            "upsert second batch (fresh connection: restart)",
+        )
+        rows = by_id(await harness.read_phase())
+        assert set(rows) == {1, 2, 3, 4}
+        assert rows[2]["val"] == "b2"
+        assert rows[3]["val"] == "c2"
 
-        async def scenario() -> None:
-            stale = rows_batch([(90, "stale", 1), (91, "stale", 2)])
-            expect_success(
-                await harness.write_phase("insert", [(1, stale)]),
-                "seeding stale rows",
-            )
-            refresh_first = rows_batch([(1, "a", 3), (2, "b", 4)])
-            refresh_second = rows_batch([(3, "c", 5)])
-            expect_success(
-                await harness.write_phase(
-                    "truncate_insert", [(1, refresh_first), (2, refresh_second)]
-                ),
-                "full refresh",
-            )
-            rows = by_id(await harness.read_phase())
-            assert set(rows) == {1, 2, 3}, (
-                "the refresh's first batch must empty the target and later "
-                "batches must append"
-            )
+        replay = await harness.write_phase(
+            "upsert", [(2, second)], conflict_keys=["id"]
+        )
+        expect_success(replay, "upsert replayed batch")
+        rows_after = by_id(await harness.read_phase())
+        assert rows_after == rows, (
+            "a replayed upsert batch changed the target; upsert's "
+            "declared verdict is exactly-once on the conflict keys"
+        )
 
-        asyncio.run(scenario())
+    asyncio.run(scenario())
 
-    def test_declared_retry_verdict_is_at_least_once(
-        self, harness: LiveHarness
-    ) -> None:
-        """The mode promises no exactly-once; the verdict must say so.
 
-        What a replayed append does is system-dependent — it duplicates
-        rows where nothing blocks it, or is rejected by the enforced
-        primary key — and both outcomes are inside the at-least-once
-        contract (#307). What is certified here is the declaration: a
-        connector must never advertise exactly-once for this mode.
-        """
+def test_upsert_without_conflict_keys_is_rejected_fatally(
+    harness: LiveHarness,
+) -> None:
+    """The keyless-upsert refusal reaches the ack as a fatal failure."""
+    _requires_merge(harness.target)
 
-        async def scenario() -> None:
-            batch = rows_batch([(1, "a", 1)])
-            expect_success(
-                await harness.write_phase("truncate_insert", [(1, batch)]),
-                "full refresh",
-            )
-            connector = harness.connector()
-            await connector.connect(harness.runtime())
-            try:
-                connector.set_endpoint_refs(
-                    {
-                        STREAM_ID: {
-                            "scope": "connector",
-                            "connection_id": "conformance-live",
-                            "endpoint_id": harness.table,
-                        }
+    async def scenario() -> None:
+        batch = rows_batch([(1, "a", 1)])
+        results = await harness.write_phase("upsert", [(1, batch)], conflict_keys=[])
+        assert len(results) == 1
+        assert not results[0].success, (
+            "an upsert stream with no conflict_keys must refuse, never "
+            "silently degrade to INSERT"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_first_batch_truncates_then_appends(harness: LiveHarness) -> None:
+    """Pre-existing rows vanish on batch 1; batch 2 appends."""
+
+    async def scenario() -> None:
+        stale = rows_batch([(90, "stale", 1), (91, "stale", 2)])
+        expect_success(
+            await harness.write_phase("insert", [(1, stale)]),
+            "seeding stale rows",
+        )
+        refresh_first = rows_batch([(1, "a", 3), (2, "b", 4)])
+        refresh_second = rows_batch([(3, "c", 5)])
+        expect_success(
+            await harness.write_phase(
+                "truncate_insert", [(1, refresh_first), (2, refresh_second)]
+            ),
+            "full refresh",
+        )
+        rows = by_id(await harness.read_phase())
+        assert set(rows) == {1, 2, 3}, (
+            "the refresh's first batch must empty the target and later "
+            "batches must append"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_declared_retry_verdict_is_at_least_once(
+    harness: LiveHarness,
+) -> None:
+    """The mode promises no exactly-once; the verdict must say so.
+
+    What a replayed append does is system-dependent — it duplicates
+    rows where nothing blocks it, or is rejected by the enforced
+    primary key — and both outcomes are inside the at-least-once
+    contract (#307). What is certified here is the declaration: a
+    connector must never advertise exactly-once for this mode.
+    """
+
+    async def scenario() -> None:
+        batch = rows_batch([(1, "a", 1)])
+        expect_success(
+            await harness.write_phase("truncate_insert", [(1, batch)]),
+            "full refresh",
+        )
+        connector = harness.connector()
+        await connector.connect(harness.runtime())
+        try:
+            connector.set_endpoint_refs(
+                {
+                    STREAM_ID: {
+                        "scope": "connector",
+                        "connection_id": "conformance-live",
+                        "endpoint_id": harness.table,
                     }
-                )
-                connector.set_stream_endpoints({STREAM_ID: harness.endpoint_document()})
-                configured = await connector.configure_schema(_truncate_spec())
-                assert configured
-                verdict = connector.retry_semantics(STREAM_ID)
-            finally:
-                await connector.disconnect()
-            assert verdict.semantics is RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE, (
-                "truncate_insert replays observably duplicate rows, so the "
-                "declared verdict must be at-least-once"
+                }
             )
+            connector.set_stream_endpoints({STREAM_ID: harness.endpoint_document()})
+            configured = await connector.configure_schema(_truncate_spec())
+            assert configured
+            verdict = connector.retry_semantics(STREAM_ID)
+        finally:
+            await connector.disconnect()
+        assert verdict.semantics is RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE, (
+            "truncate_insert replays observably duplicate rows, so the "
+            "declared verdict must be at-least-once"
+        )
 
-        asyncio.run(scenario())
+    asyncio.run(scenario())
 
 
-class TestIncrementalRead:
-    """The read path: cursor-ordered pages, resume from a checkpoint."""
+def test_cursor_read_is_monotonic_and_resumes(harness: LiveHarness) -> None:
+    """Paged incremental reads advance the cursor and honor a resume."""
 
-    def test_cursor_read_is_monotonic_and_resumes(self, harness: LiveHarness) -> None:
-        """Paged incremental reads advance the cursor and honor a resume."""
+    async def scenario() -> None:
+        batch = rows_batch([(i, f"v{i}", i) for i in range(1, 8)])
+        expect_success(
+            await harness.write_phase("insert", [(1, batch)]),
+            "seeding read rows",
+        )
+        checkpoint = MemoryCheckpointStore()
+        rows = await harness.read_phase(
+            cursor_field="seq", checkpoint=checkpoint, batch_size=3
+        )
+        sequence = [int(row["seq"]) for row in rows]
+        assert sequence == sorted(sequence), (
+            f"incremental read pages are not ordered by the cursor "
+            f"field: {sequence}"
+        )
+        assert {int(row["id"]) for row in rows} == set(range(1, 8))
+        saved = await checkpoint.get_cursor("conformance-stream")
+        assert saved, "the read persisted no cursor checkpoint"
 
-        async def scenario() -> None:
-            batch = rows_batch([(i, f"v{i}", i) for i in range(1, 8)])
-            expect_success(
-                await harness.write_phase("insert", [(1, batch)]),
-                "seeding read rows",
-            )
-            checkpoint = MemoryCheckpointStore()
-            rows = await harness.read_phase(
-                cursor_field="seq", checkpoint=checkpoint, batch_size=3
-            )
-            sequence = [int(row["seq"]) for row in rows]
-            assert sequence == sorted(sequence), (
-                f"incremental read pages are not ordered by the cursor "
-                f"field: {sequence}"
-            )
-            assert {int(row["id"]) for row in rows} == set(range(1, 8))
-            saved = await checkpoint.get_cursor("conformance-stream")
-            assert saved, "the read persisted no cursor checkpoint"
+        resumed = await harness.read_phase(
+            cursor_field="seq", checkpoint=checkpoint, batch_size=3
+        )
+        resumed_ids = {int(row["id"]) for row in resumed}
+        assert resumed_ids.issubset({7}), (
+            f"a resumed read must continue from the saved cursor, not "
+            f"re-read the stream; got ids {sorted(resumed_ids)}"
+        )
 
-            resumed = await harness.read_phase(
-                cursor_field="seq", checkpoint=checkpoint, batch_size=3
-            )
-            resumed_ids = {int(row["id"]) for row in resumed}
-            assert resumed_ids.issubset({7}), (
-                f"a resumed read must continue from the saved cursor, not "
-                f"re-read the stream; got ids {sorted(resumed_ids)}"
-            )
+        # A row past the checkpoint must arrive on the next resume —
+        # an off-by-one that permanently loses the tail would
+        # otherwise be indistinguishable from a clean exclusive
+        # cursor (an empty resumed read is legal above).
+        tail = rows_batch([(8, "v8", 8)])
+        expect_success(
+            await harness.write_phase("insert", [(2, tail)]),
+            "seeding the post-checkpoint row",
+        )
+        after_tail = await harness.read_phase(
+            cursor_field="seq", checkpoint=checkpoint, batch_size=3
+        )
+        assert 8 in {int(row["id"]) for row in after_tail}, (
+            "a row written past the saved cursor never arrived on "
+            "resume; the cursor filter is losing the tail"
+        )
 
-            # A row past the checkpoint must arrive on the next resume —
-            # an off-by-one that permanently loses the tail would
-            # otherwise be indistinguishable from a clean exclusive
-            # cursor (an empty resumed read is legal above).
-            tail = rows_batch([(8, "v8", 8)])
-            expect_success(
-                await harness.write_phase("insert", [(2, tail)]),
-                "seeding the post-checkpoint row",
-            )
-            after_tail = await harness.read_phase(
-                cursor_field="seq", checkpoint=checkpoint, batch_size=3
-            )
-            assert 8 in {int(row["id"]) for row in after_tail}, (
-                "a row written past the saved cursor never arrived on "
-                "resume; the cursor filter is losing the tail"
-            )
-
-        asyncio.run(scenario())
+    asyncio.run(scenario())

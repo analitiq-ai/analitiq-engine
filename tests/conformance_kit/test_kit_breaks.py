@@ -156,9 +156,8 @@ class _ExtraDefaultParamDialect(ReferencePostgresDialect):
         target: TableAddress,
         conflict_keys: Sequence[str],
         columns: Sequence[str],
-        annotate: bool = False,
+        _annotate: bool = False,
     ) -> str:
-        del annotate
         return super().merge_statement_sql(stage, target, conflict_keys, columns)
 
 
@@ -525,10 +524,9 @@ class TestConformantVariantsPass:
             _with_connector(reference_target, _MergeFormConnector),
             declared_capabilities=_caps_with(reference_target, merge_form="merge"),
         )
-        checks = kit_rendering.TestModeStatements()
-        checks.test_merge_statement_matches_declared_form(doctored)
-        checks.test_merge_statement_references_stage_target_and_keys(doctored)
-        checks.test_merge_with_only_key_columns_degrades_to_insert_only(doctored)
+        kit_rendering.test_merge_statement_matches_declared_form(doctored)
+        kit_rendering.test_merge_statement_references_stage_target_and_keys(doctored)
+        kit_rendering.test_merge_with_only_key_columns_degrades_to_insert_only(doctored)
         assert check_override_surface(doctored) == []
         assert check_declaration_consistency(doctored) == []
 
@@ -542,9 +540,8 @@ class TestRenderingBreaks:
             _with_connector(reference_target, _WrongFormConnector),
             declared_capabilities=_caps_with(reference_target, merge_form="merge"),
         )
-        check = kit_rendering.TestModeStatements()
         with pytest.raises(AssertionError, match="merge_form"):
-            check.test_merge_statement_matches_declared_form(doctored)
+            kit_rendering.test_merge_statement_matches_declared_form(doctored)
 
 
 def _caps_with(target: ConformanceTarget, **facts: str) -> SqlCapabilities:

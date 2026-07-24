@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from cdk.sql.capabilities import SqlCapabilities
 from cdk.sql.dialects import SqlDialect
 
 from .violations import Violation
@@ -135,9 +136,16 @@ def check_declaration_consistency(target: ConformanceTarget) -> list[Violation]:
             )
         )
 
-    if caps is None:
-        return violations
+    if caps is not None:
+        violations.extend(_hook_declaration_violations(caps, dialect_cls))
+    return violations
 
+
+def _hook_declaration_violations(
+    caps: SqlCapabilities, dialect_cls: type
+) -> list[Violation]:
+    """Both directions of the merge and bulk hook/declaration pairing."""
+    violations: list[Violation] = []
     renders_merge = dialect_overrides(dialect_cls, "merge_statement_sql")
     if caps.merge_form != "none" and not renders_merge:
         violations.append(
