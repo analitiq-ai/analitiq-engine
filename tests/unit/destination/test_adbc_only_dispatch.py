@@ -47,12 +47,15 @@ def _caps(**overrides) -> SqlCapabilities:
     ``handler._capabilities`` the way ``_bind_capabilities`` would at
     connect() time, overriding exactly the fact under test.
     """
+    # Stage defaults to the one shape the current ADBC machinery honors
+    # (real table, target schema); the interim guard refuses anything else
+    # until #389 lands declared stage shapes.
     block = {
         "catalog": "none",
         "session_targeting": "per_statement",
         "merge_form": "merge",
         "bulk_load": "none",
-        "stage": {"scope": "temp", "schema": "target", "transactional_ddl": True},
+        "stage": {"scope": "real", "schema": "target", "transactional_ddl": True},
     }
     block.update(overrides)
     return SqlCapabilities.from_declaration(block)
@@ -1724,3 +1727,27 @@ class TestKeylessInsertRequiresMergeSupport:
         h._adbc_only = True
         with pytest.raises(SchemaConfigurationError):
             await h._ensure_tables_exist(self._state(primary_keys=["id"]), MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_keyless_insert_with_non_merge_form_fails_configure(self):
+        # The current ADBC stage machinery renders MERGE only; a declared
+        # ON CONFLICT form cannot be honored until #389 and must refuse at
+        # configure, not emit MERGE SQL the declaration disavows.
+        h = _FixtureConnector()
+        h._adbc_only = True
+        h._capabilities = _caps(merge_form="insert_on_conflict")
+        with pytest.raises(AdbcConfigurationError, match="MERGE only"):
+            await h._ensure_tables_exist(self._state(), MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_keyless_insert_with_undeclarable_stage_shape_fails_configure(self):
+        # Declared temp-scope staging is #389 machinery; until then the
+        # stage would silently land as a real table in the target schema —
+        # refuse instead of misrouting.
+        h = _FixtureConnector()
+        h._adbc_only = True
+        h._capabilities = _caps(
+            stage={"scope": "temp", "schema": "target", "transactional_ddl": True}
+        )
+        with pytest.raises(AdbcConfigurationError, match="stage"):
+            await h._ensure_tables_exist(self._state(), MagicMock())

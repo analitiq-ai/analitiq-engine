@@ -26,8 +26,9 @@ from cdk.sql.capabilities import (
     parse_declared_capabilities,
     undeclared_capability_error,
 )
+from cdk.sql.dialects import SqlDialect
 from cdk.sql.exceptions import SchemaConfigurationError
-from cdk.sql.generic import GenericSQLConnector
+from cdk.sql.generic import AdbcConfigurationError, GenericSQLConnector
 from cdk.types import SchemaSpec, WriteMode
 
 from .conftest import caps_block
@@ -159,8 +160,22 @@ class TestRefusalShape:
         assert "never guesses" in message
 
 
-def _upsert_handler():
-    handler = GenericSQLConnector()
+class _RenderingDialect(SqlDialect):
+    """Dialect implementing the SA upsert statement hook, as a declaring
+    connector's package dialect must until #388 replaces the machinery."""
+
+    name = "rendering"
+
+    def build_sqlalchemy_upsert(self, table, records, conflict_keys):
+        return MagicMock()
+
+
+class _RenderingConnector(GenericSQLConnector):
+    dialect_class = _RenderingDialect
+
+
+def _upsert_handler(cls=GenericSQLConnector):
+    handler = cls()
     handler._connected = True
     handler._engine = MagicMock()
     handler._runtime = MagicMock()
@@ -221,28 +236,84 @@ class TestConfigureSchemaUpsertGate:
         handler._ensure_tables_exist.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_declared_merge_form_configures(self):
+    async def test_declared_merge_form_with_renderer_configures(self):
+        handler = _upsert_handler(cls=_RenderingConnector)
+        handler._capabilities = SqlCapabilities.from_declaration(
+            caps_block(merge_form="insert_on_conflict")
+        )
+        assert await handler.configure_schema(_upsert_spec()) is True
+
+    @pytest.mark.asyncio
+    async def test_declared_merge_form_without_sa_renderer_refuses(self):
+        # Declaration/dialect disagreement caught at handshake: the SA
+        # upsert machinery renders through build_sqlalchemy_upsert until
+        # #388; a declaring connector whose dialect lacks it must fail
+        # before DDL, not on the first batch.
         handler = _upsert_handler()
         handler._capabilities = SqlCapabilities.from_declaration(
             caps_block(merge_form="insert_on_conflict")
+        )
+        with pytest.raises(SchemaConfigurationError, match="build_sqlalchemy_upsert"):
+            await handler.configure_schema(_upsert_spec())
+
+    @pytest.mark.asyncio
+    async def test_adbc_upsert_with_non_merge_form_refuses(self):
+        # The current ADBC stage machinery renders MERGE only (#389 lands
+        # declared forms); an ON CONFLICT declaration refuses at handshake.
+        handler = _upsert_handler()
+        handler._engine = None
+        handler._adbc_only = True
+        handler._capabilities = SqlCapabilities.from_declaration(
+            caps_block(merge_form="insert_on_conflict", stage_scope="real")
+        )
+        with pytest.raises(AdbcConfigurationError, match="MERGE only"):
+            await handler.configure_schema(_upsert_spec())
+
+    @pytest.mark.asyncio
+    async def test_adbc_upsert_with_undeclarable_stage_shape_refuses(self):
+        # Temp-scope staging is #389 machinery; refusing beats silently
+        # landing a real stage table in the target schema.
+        handler = _upsert_handler()
+        handler._engine = None
+        handler._adbc_only = True
+        handler._capabilities = SqlCapabilities.from_declaration(
+            caps_block(merge_form="merge", stage_scope="temp")
+        )
+        with pytest.raises(AdbcConfigurationError, match="stage"):
+            await handler.configure_schema(_upsert_spec())
+
+    @pytest.mark.asyncio
+    async def test_adbc_upsert_with_current_machinery_shape_configures(self):
+        handler = _upsert_handler()
+        handler._engine = None
+        handler._adbc_only = True
+        handler._capabilities = SqlCapabilities.from_declaration(
+            caps_block(merge_form="merge", stage_scope="real")
         )
         assert await handler.configure_schema(_upsert_spec()) is True
 
 
 class TestConnectBinding:
     @pytest.mark.asyncio
-    async def test_malformed_declaration_fails_at_connect(self):
+    async def test_malformed_declaration_fails_at_connect_and_releases_runtime(
+        self,
+    ):
         # The trusted side already parses at config load; connect()
         # re-validates at the process boundary once the transport is live.
+        # materialize() acquired the runtime and the caller never
+        # disconnects a handler whose connect() raised, so the failed bind
+        # must release the ref itself.
         handler = GenericSQLConnector()
         runtime = MagicMock()
         runtime.connector_id = "demo"
         runtime.declared_sql_capabilities = caps_block(catalog="everything")
+        runtime.close = AsyncMock()
         from unittest.mock import patch
 
         with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()):
             with pytest.raises(SqlCapabilitiesError, match="sql_capabilities.catalog"):
                 await handler.connect(runtime)
+        runtime.close.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_connect_binds_facade_and_dialect(self):

@@ -23,9 +23,29 @@ def _merge_capable_caps():
             "session_targeting": "per_statement",
             "merge_form": "merge",
             "bulk_load": "none",
-            "stage": {"scope": "temp", "schema": "target", "transactional_ddl": True},
+            "stage": {"scope": "real", "schema": "target", "transactional_ddl": True},
         }
     )
+
+
+def _rendering_connector_cls():
+    """A GenericSQLConnector whose dialect implements the SA upsert hook —
+    the upsert configure gate checks declaration/dialect agreement (#390)."""
+    from unittest.mock import MagicMock as _MagicMock
+
+    from cdk.sql.dialects import SqlDialect
+    from cdk.sql.generic import GenericSQLConnector
+
+    class _RenderingDialect(SqlDialect):
+        name = "rendering"
+
+        def build_sqlalchemy_upsert(self, table, records, conflict_keys):
+            return _MagicMock()
+
+    class _RenderingConnector(GenericSQLConnector):
+        dialect_class = _RenderingDialect
+
+    return _RenderingConnector
 
 
 # --------------------------------------------------------------------------- #
@@ -42,11 +62,10 @@ class TestWriteConflictKeysWiring:
     @pytest.mark.asyncio
     async def test_conflict_keys_consumed_verbatim(self):
         """Registered conflict keys land verbatim in the stream state."""
-        from cdk.sql.generic import GenericSQLConnector
         from cdk.type_map import TypeMapper
         from cdk.type_map.rules import parse_rules
 
-        handler = GenericSQLConnector()
+        handler = _rendering_connector_cls()()
         handler._capabilities = _merge_capable_caps()
         handler._connected = True
         handler._engine = MagicMock()
@@ -104,11 +123,10 @@ class TestWriteConflictKeysWiring:
         self,
     ):
         """No registered entry means an empty conflict target, no PK fallback."""
-        from cdk.sql.generic import GenericSQLConnector
         from cdk.type_map import TypeMapper
         from cdk.type_map.rules import parse_rules
 
-        handler = GenericSQLConnector()
+        handler = _rendering_connector_cls()()
         handler._capabilities = _merge_capable_caps()
         handler._connected = True
         handler._engine = MagicMock()

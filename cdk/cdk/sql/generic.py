@@ -541,6 +541,49 @@ class GenericSQLConnector(BaseDestinationHandler):
         )
         self.dialect.capabilities = self._capabilities
 
+    def _dialect_renders_sqlalchemy_upsert(self) -> bool:
+        """Whether the active dialect implements the SA upsert statement hook.
+
+        A declared-vs-implemented consistency check, not a capability
+        guess: the fact that the system CAN upsert is the declaration's;
+        whether this connector's dialect renders it on the SQLAlchemy
+        transport is an implementation fact checked at handshake so the
+        disagreement fails before DDL, not on the first batch.
+        """
+        return (
+            type(self.dialect).build_sqlalchemy_upsert
+            is not SqlDialect.build_sqlalchemy_upsert
+        )
+
+    def _check_adbc_stage_machinery(self, caps: SqlCapabilities, need: str) -> None:
+        """Refuse declarations the current ADBC stage machinery cannot honor.
+
+        Until #389 lands the declared-shape stage cycle, the ADBC path
+        renders exactly one shape: a real stage table in the target
+        schema, applied with ``MERGE INTO``. A declaration outside that
+        shape would be silently misrouted (stage DDL in the wrong
+        namespace) or mis-rendered (a merge form the machinery does not
+        emit) — refuse it loudly instead. #389 deletes this guard along
+        with the machinery it describes.
+        """
+        if caps.merge_form != "merge":
+            raise AdbcConfigurationError(
+                f"{need} needs the stage-MERGE path, but the connector "
+                f"declares sql_capabilities.merge_form {caps.merge_form!r} "
+                f"and the current ADBC machinery renders MERGE only "
+                f"(declared merge forms land in #389); this declaration "
+                f"cannot be honored yet."
+            )
+        if caps.stage.scope != "real" or caps.stage.schema != "target":
+            raise AdbcConfigurationError(
+                f"{need} needs a stage table, but the connector declares "
+                f"sql_capabilities.stage scope={caps.stage.scope!r} "
+                f"schema={caps.stage.schema!r} and the current ADBC "
+                f"machinery lands stages only as real tables in the "
+                f"target schema (declared stage shapes land in #389); "
+                f"refusing rather than staging in an undeclared namespace."
+            )
+
     @property
     def supports_upsert(self) -> bool:
         """True when the declared ``sql_capabilities.merge_form`` has one.
@@ -671,7 +714,15 @@ class GenericSQLConnector(BaseDestinationHandler):
         # attached to the dialect: its catalog gate (table_address /
         # information_schema_ref) consults the declared fact at address
         # construction.
-        self._bind_capabilities(runtime)
+        try:
+            self._bind_capabilities(runtime)
+        except Exception:
+            # materialize() already acquired the runtime; the caller does
+            # not disconnect a handler whose connect() raised, so release
+            # the ref here to keep the lifecycle balanced (same rule as
+            # the ADBC eager-open failure below).
+            await runtime.close()
+            raise
         self._driver = runtime.driver or ""
         # Reset prior-connection state so a long-lived handler that
         # reconnects across runtimes (e.g. tests) doesn't carry the
@@ -915,6 +966,21 @@ class GenericSQLConnector(BaseDestinationHandler):
                     f"no merge statement. Use insert or truncate_insert, or "
                     f"fix the connector's declaration."
                 )
+            if self._adbc_only:
+                self._check_adbc_stage_machinery(caps, f"stream {stream_id!r}")
+            elif not self._dialect_renders_sqlalchemy_upsert():
+                # Declaration/dialect disagreement, caught at handshake
+                # instead of on the first batch: the SQLAlchemy upsert
+                # machinery renders through the dialect's statement hook
+                # until #388 replaces it with the shared stage primitive.
+                raise SchemaConfigurationError(
+                    f"stream {stream_id!r} writes in upsert mode to "
+                    f"{address}: the connector declares "
+                    f"sql_capabilities.merge_form {caps.merge_form!r}, but "
+                    f"its dialect {self.dialect.name!r} does not implement "
+                    f"build_sqlalchemy_upsert — the declaration and the "
+                    f"dialect disagree; fix the connector."
+                )
 
         # Resolve the type-mapper for this stream's endpoint once —
         # both DDL generation and the schema contract use it.
@@ -1103,6 +1169,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                     f"merge statement. Declare a primary key for this stream "
                     f"or fix the connector's declaration."
                 )
+            self._check_adbc_stage_machinery(caps, f"keyless insert on {state.address}")
         if not state.endpoint_document:
             raise SchemaConfigurationError(
                 f"destination stream for {state.address} "
