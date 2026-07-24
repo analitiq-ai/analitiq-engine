@@ -29,16 +29,23 @@ def _merge_capable_caps():
 
 
 def _rendering_connector_cls():
-    """A GenericSQLConnector whose dialect implements the SA upsert hook —
-    the upsert configure gate checks declaration/dialect agreement (#390)."""
+    """A GenericSQLConnector whose dialect implements the stage-then-merge
+    rendering hooks — the configure gates check declaration/dialect
+    agreement (#390/#388)."""
     from cdk.sql.dialects import SqlDialect
     from cdk.sql.generic import GenericSQLConnector
 
     class _RenderingDialect(SqlDialect):
         name = "rendering"
 
-        def build_sqlalchemy_upsert(self, table, records, conflict_keys):
-            return MagicMock()
+        def stage_table_sql(self, stage, target, *, temp):
+            return (
+                f"CREATE TABLE {self.quote_table(stage)} AS SELECT * FROM "
+                f"{self.quote_table(target)} WHERE FALSE"
+            )
+
+        def merge_statement_sql(self, stage, target, conflict_keys, columns):
+            return "MERGE ..."
 
     class _RenderingConnector(GenericSQLConnector):
         dialect_class = _RenderingDialect

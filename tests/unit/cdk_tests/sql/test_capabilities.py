@@ -161,13 +161,16 @@ class TestRefusalShape:
 
 
 class _RenderingDialect(SqlDialect):
-    """Dialect implementing the SA upsert statement hook, as a declaring
-    connector's package dialect must until #388 replaces the machinery."""
+    """Dialect implementing the stage-then-merge rendering hooks, as a
+    declaring connector's package dialect must (issue #388)."""
 
     name = "rendering"
 
-    def build_sqlalchemy_upsert(self, table, records, conflict_keys):
-        return MagicMock()
+    def stage_table_sql(self, stage, target, *, temp):
+        return f"CREATE TABLE {self.quote_table(stage)} LIKE {self.quote_table(target)}"
+
+    def merge_statement_sql(self, stage, target, conflict_keys, columns):
+        return "INSERT ... ON CONFLICT DO UPDATE"
 
 
 class _RenderingConnector(GenericSQLConnector):
@@ -262,16 +265,49 @@ class TestConfigureSchemaUpsertGate:
 
     @pytest.mark.asyncio
     async def test_declared_merge_form_without_sa_renderer_refuses(self):
-        # Declaration/dialect disagreement caught at handshake: the SA
-        # upsert machinery renders through build_sqlalchemy_upsert until
-        # #388; a declaring connector whose dialect lacks it must fail
-        # before DDL, not on the first batch.
+        # Declaration/dialect disagreement caught at handshake: the
+        # upsert's stage-to-target statement renders through the dialect's
+        # merge_statement_sql; a declaring connector whose dialect lacks
+        # it must fail before DDL, not on the first batch.
         handler = _upsert_handler()
         handler._capabilities = SqlCapabilities.from_declaration(
             caps_block(merge_form="insert_on_conflict")
         )
-        with pytest.raises(SchemaConfigurationError, match="build_sqlalchemy_upsert"):
+        with pytest.raises(SchemaConfigurationError, match="merge_statement_sql"):
             await handler.configure_schema(_upsert_spec())
+
+    @pytest.mark.asyncio
+    async def test_declared_stage_without_stage_renderer_refuses(self):
+        # The stage gate covers every SQLAlchemy-path write mode: a
+        # declared stage shape whose dialect cannot render the stage DDL
+        # is a disagreement, refused at handshake.
+        handler = _upsert_handler()
+        handler._capabilities = SqlCapabilities.from_declaration(caps_block())
+        handler._streams.clear()
+        spec = SchemaSpec(
+            stream_id="s1",
+            version=1,
+            write_mode=WriteMode.WRITE_MODE_INSERT,
+            ack_timeout_seconds=30,
+        )
+        with pytest.raises(SchemaConfigurationError, match="stage_table_sql"):
+            await handler.configure_schema(spec)
+
+    @pytest.mark.asyncio
+    async def test_undeclared_block_refuses_any_sqlalchemy_write(self):
+        # Not just upsert: every SQLAlchemy-path write lands in a stage,
+        # so an undeclared block refuses insert streams too — at
+        # handshake, naming the missing declaration.
+        handler = _upsert_handler()
+        spec = SchemaSpec(
+            stream_id="s1",
+            version=1,
+            write_mode=WriteMode.WRITE_MODE_INSERT,
+            ack_timeout_seconds=30,
+        )
+        with pytest.raises(SchemaConfigurationError, match="sql_capabilities.stage"):
+            await handler.configure_schema(spec)
+        handler._ensure_tables_exist.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_adbc_upsert_with_non_merge_form_refuses(self):

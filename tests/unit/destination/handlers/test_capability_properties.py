@@ -27,10 +27,46 @@ class TestCapabilityProperties:
         assert handler.supports_auto_create is False
         assert handler.supports_truncate is False
 
-    def test_sql_handler_supports_auto_create_and_truncate(self):
-        # The properties are unconditional capability literals (no instance
-        # state), so a bare instance is enough to assert them without a live
-        # database runtime.
-        handler = GenericSQLConnector.__new__(GenericSQLConnector)
+    def test_sql_handler_supports_auto_create(self):
+        handler = GenericSQLConnector()
         assert handler.supports_auto_create is True
+
+    def test_sql_handler_gates_insert_and_truncate_on_the_stage_predicate(self):
+        # Advertised modes must match what the schema handshake accepts:
+        # every SQLAlchemy-path write runs the stage cycle, so a connector
+        # without declared capabilities and a stage-rendering dialect
+        # advertises neither INSERT nor TRUNCATE_INSERT (issue #388).
+        from cdk.sql.capabilities import SqlCapabilities
+        from cdk.sql.dialects import SqlDialect
+
+        handler = GenericSQLConnector()
+        assert handler.supports_insert is False
+        assert handler.supports_truncate is False
+
+        class _StagingDialect(SqlDialect):
+            def stage_table_sql(self, stage, target, *, temp):
+                return "CREATE TABLE ..."
+
+        handler.dialect = _StagingDialect()
+        handler._capabilities = SqlCapabilities.from_declaration(
+            {
+                "catalog": "none",
+                "session_targeting": "per_statement",
+                "merge_form": "none",
+                "bulk_load": "none",
+                "stage": {
+                    "scope": "temp",
+                    "schema": "target",
+                    "transactional_ddl": True,
+                },
+            }
+        )
+        assert handler.supports_insert is True
+        assert handler.supports_truncate is True
+
+    def test_adbc_path_keeps_unconditional_insert_and_truncate(self):
+        # The ADBC machinery is untouched until #389.
+        handler = GenericSQLConnector()
+        handler._adbc_only = True
+        assert handler.supports_insert is True
         assert handler.supports_truncate is True

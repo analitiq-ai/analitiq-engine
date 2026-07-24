@@ -36,7 +36,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 import pyarrow as pa
-from sqlalchemy import MetaData, Table, and_, bindparam, literal, select, text
+from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -65,6 +65,7 @@ from cdk.types import (
 from ..contract import ColumnDef
 from ._adbc_utils import _close_cursor_quietly
 from .adbc_reader import open_adbc_reader
+from .backend import SqlAlchemyBackend
 from .capabilities import (
     SqlCapabilities,
     bind_dialect_capabilities,
@@ -83,6 +84,7 @@ from .exceptions import (
     TlsVerificationError,
     UnsupportedDialectOperationError,
 )
+from .write_plan import build_stage_write_plan
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +136,12 @@ _FATAL_ADBC_ERROR_NAMES = frozenset(
 
 
 def _is_fatal_adbc_error(exc: BaseException) -> bool:
-    """Return ``True`` when *exc* is a failure class retries cannot heal."""
+    """Return ``True`` when *exc* is a failure class retries cannot heal.
+
+    Name-based, so it serves both transports: ADBC drivers re-export the
+    PEP-249 names per the spec, and SQLAlchemy's wrapper exceptions
+    (``sqlalchemy.exc.IntegrityError`` etc.) carry the same class names.
+    """
     return any(cls.__name__ in _FATAL_ADBC_ERROR_NAMES for cls in type(exc).__mro__)
 
 
@@ -193,7 +200,6 @@ class _StreamState:
     """
 
     address: TableAddress = field(default_factory=lambda: TableAddress(table=""))
-    table: Table | None = None
     primary_keys: list[str] = field(default_factory=list)
     # Columns used as the ON CONFLICT / MERGE target for upsert. Set at
     # configure_schema time from the ``set_stream_conflict_keys`` map,
@@ -223,23 +229,28 @@ class GenericSQLConnector(BaseDestinationHandler):
       (Postgres asyncpg, MySQL aiomysql) run on an ``AsyncEngine``;
       sync-only drivers (Redshift ``redshift_connector``) run on a plain
       sync ``Engine`` whose operations are dispatched via
-      ``asyncio.to_thread``. Both flavours share one set of
-      sync-``Connection`` transaction bodies (the async path enters them
-      through ``AsyncConnection.run_sync``), so DML/DDL semantics are
-      identical. DDL via rendered ``CREATE TABLE`` + reflection, DML via
-      the dialect's INSERT/INSERT-ON-CONFLICT/MERGE compilers.
+      ``asyncio.to_thread``. Writes are stage-then-merge, executed by
+      ``SqlAlchemyBackend`` from a ``StageWritePlan`` this facade builds:
+      the batch lands in a per-batch stage table, then exactly one mode
+      statement applies it (set-based anti-join for insert, the dialect's
+      declared merge form for upsert, plain append for truncate_insert).
+      Both flavours run one shared sync-``Connection`` cycle body (the
+      async path enters it through ``AsyncConnection.run_sync``), so
+      DML/DDL semantics are identical. DDL via rendered ``CREATE TABLE``
+      + backend reflection for landing bind types.
     * ``transport_type: "adbc"`` — direct ADBC DBAPI 2.0 connection
       (Snowflake, BigQuery). DDL via ``cursor.execute`` of per-driver
       native SQL, ingest via ``cursor.adbc_ingest``, upsert via
-      stage-table + ``MERGE INTO``.
+      stage-table + ``MERGE INTO`` (aligned onto the shared backend
+      interface by #389).
 
-    Both modes are idempotent on the write mode's own keys (a MERGE on
-    ``conflict_keys`` for upsert, the synthetic ``_record_hash`` key for a
-    keyless insert), not a side ledger; they share the schema-contract
-    Arrow cast and the per-stream state machine. Configuration is
-    resolved through ``ConnectionRuntime`` rather than read off the
-    raw connection JSON — the handler never inspects host/port/secret
-    fields directly.
+    Both modes are idempotent on the write mode's own keys (a merge on
+    ``conflict_keys`` for upsert, the identity anti-join — contract
+    primary key or the synthetic ``_record_hash`` — for insert), not a
+    side ledger; they share the schema-contract Arrow cast and the
+    per-stream state machine. Configuration is resolved through
+    ``ConnectionRuntime`` rather than read off the raw connection JSON —
+    the handler never inspects host/port/secret fields directly.
 
     Per-stream destination settings (schema, table, primary keys,
     columns) are read from the preloaded contract endpoint document at
@@ -284,6 +295,11 @@ class GenericSQLConnector(BaseDestinationHandler):
         # and ADBC-only mode; its operations run via asyncio.to_thread,
         # mirroring the ADBC sync-in-thread pattern.
         self._sync_engine: Engine | None = None
+        # The transport backend executing StageWritePlans on the SQLAlchemy
+        # path (both engine flavors). None until connect(); the ADBC path
+        # keeps its own machinery until #389 puts it behind the same
+        # interface.
+        self._backend: SqlAlchemyBackend | None = None
         self._config: dict[str, Any] = {}
         self._connected: bool = False
         self._driver: str = ""
@@ -309,9 +325,8 @@ class GenericSQLConnector(BaseDestinationHandler):
         # on shared mutable fields.
         self._streams: dict[str, _StreamState] = {}
 
-        # Serializes CREATE TABLE statements across streams. Even when each
-        # stream owns its own SQLAlchemy ``MetaData``, two concurrent
-        # ``create_all`` calls can still race the database's catalog
+        # Serializes CREATE TABLE statements across streams: two
+        # concurrent DDL transactions can race the database's catalog
         # writes (e.g. PostgreSQL's ``pg_type_typname_nsp_index``).
         self._ddl_lock: asyncio.Lock = asyncio.Lock()
 
@@ -459,26 +474,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         instances) the SQLAlchemy deadline is ``asyncio.timeout(None)``,
         which never fires.
 
-        Callers guard ``self._engine is not None`` before entering the
-        transaction inside the deadline.
+        Callers guard the backend's presence before entering the stage
+        cycle inside the deadline.
         """
         if self._adbc_only or self._sync_engine is not None:
             return nullcontext()
         return asyncio.timeout(self._statement_timeout_seconds)
-
-    def _require_async_engine(self) -> AsyncEngine:
-        """Return the async SQLAlchemy engine, or fail loud if path is unset.
-
-        ``connect()`` wires exactly one transport per role; the async
-        engine is reached only on the async-SQLAlchemy path. A ``None``
-        here means a method ran on the wrong transport path.
-        """
-        if self._engine is None:
-            raise RuntimeError(
-                "async SQLAlchemy engine not available; this handler is not "
-                "on the async-SQLAlchemy transport path"
-            )
-        return self._engine
 
     def _require_sync_engine(self) -> Engine:
         """Return the sync SQLAlchemy engine, or fail loud if path is unset."""
@@ -538,24 +539,43 @@ class GenericSQLConnector(BaseDestinationHandler):
         """
         self._capabilities = bind_dialect_capabilities(self.dialect, runtime)
 
-    def _dialect_renders_sqlalchemy_upsert(self) -> bool:
-        """Whether the active dialect implements the SA upsert statement hook.
+    def _dialect_renders_merge_statement(self) -> bool:
+        """Whether the active dialect implements the merge-form statement hook.
 
         A declared-vs-implemented consistency check, not a capability
-        guess: the fact that the system CAN upsert is the declaration's;
-        whether this connector's dialect renders it on the SQLAlchemy
-        transport is an implementation fact checked at handshake so the
-        disagreement fails before DDL, not on the first batch.
+        guess: the fact that the system CAN upsert is the declaration's
+        (``sql_capabilities.merge_form``); whether this connector's dialect
+        renders that form is an implementation fact checked at handshake so
+        the disagreement fails before DDL, not on the first batch.
         """
         return (
-            type(self.dialect).build_sqlalchemy_upsert
-            is not SqlDialect.build_sqlalchemy_upsert
+            type(self.dialect).merge_statement_sql is not SqlDialect.merge_statement_sql
         )
+
+    def _dialect_renders_stage_table(self) -> bool:
+        """Whether the active dialect implements the stage DDL hook.
+
+        Every SQLAlchemy-path write lands in a stage table, so a
+        write-role connector without ``stage_table_sql`` cannot write at
+        all — checked at handshake, alongside the declared stage shape.
+        """
+        return type(self.dialect).stage_table_sql is not SqlDialect.stage_table_sql
+
+    def _sqlalchemy_stage_ready(self) -> bool:
+        """Whether the SQLAlchemy stage cycle can run for this connector.
+
+        The same predicate the ``configure_schema`` stage gate enforces —
+        declared ``sql_capabilities`` and a stage-rendering dialect — so
+        the advertised write modes and the handshake can never disagree:
+        GetCapabilities must not offer a mode every stream of which would
+        be refused before DDL.
+        """
+        return self._capabilities is not None and self._dialect_renders_stage_table()
 
     def _dialect_renders_adbc_stage(self) -> bool:
         """Whether the active dialect implements the stage-table DDL hook.
 
-        The ADBC analog of :meth:`_dialect_renders_sqlalchemy_upsert`: the
+        The ADBC analog of :meth:`_dialect_renders_merge_statement`: the
         stage-MERGE path renders its stage through
         ``adbc_stage_table_sql``, which the neutral base does not
         implement — a declaring connector without the override would pass
@@ -638,7 +658,21 @@ class GenericSQLConnector(BaseDestinationHandler):
                 self._adbc_stage_machinery_honors(caps)
                 and self._dialect_renders_adbc_stage()
             )
-        return self._dialect_renders_sqlalchemy_upsert()
+        return (
+            self._dialect_renders_merge_statement() and self._sqlalchemy_stage_ready()
+        )
+
+    @property
+    def supports_insert(self) -> bool:
+        """True when this connector can run the insert stage cycle now.
+
+        The ADBC path inserts through its own machinery until #389; the
+        SQLAlchemy path needs the stage predicate — advertised modes must
+        match what the schema handshake will accept.
+        """
+        if self._adbc_only:
+            return True
+        return self._sqlalchemy_stage_ready()
 
     @property
     def supports_bulk_load(self) -> bool:
@@ -663,11 +697,15 @@ class GenericSQLConnector(BaseDestinationHandler):
 
     @property
     def supports_truncate(self) -> bool:
-        """Report that the full-refresh write mode is supported.
+        """True when the full-refresh write mode can run on this connector.
 
-        SQL destinations implement truncate-insert (TRUNCATE then ingest).
+        The ADBC path truncates through its own machinery until #389; the
+        SQLAlchemy path appends from a stage, so the same stage predicate
+        gates the advertisement that gates the handshake.
         """
-        return True
+        if self._adbc_only:
+            return True
+        return self._sqlalchemy_stage_ready()
 
     def retry_semantics(self, stream_id: str) -> RetryVerdict:
         """Retry-safety verdict per write mode, keys, and transport (#286).
@@ -763,8 +801,17 @@ class GenericSQLConnector(BaseDestinationHandler):
             # materialize() already acquired the runtime; the caller does
             # not disconnect a handler whose connect() raised, so release
             # the ref here to keep the lifecycle balanced (same rule as
-            # the ADBC eager-open failure below).
-            await runtime.close()
+            # the ADBC eager-open failure below). The close is guarded so
+            # a failing release can never mask the binding error the
+            # operator actually needs.
+            try:
+                await runtime.close()
+            except Exception:
+                logger.warning(
+                    "runtime release after a failed capability bind also "
+                    "failed; the binding error below is the root cause",
+                    exc_info=True,
+                )
             raise
         self._driver = runtime.driver or ""
         # Reset prior-connection state so a long-lived handler that
@@ -773,6 +820,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         self._adbc_only = False
         self._engine = None
         self._sync_engine = None
+        self._backend = None
         self._adbc_session_schema = None
         self._adbc_session_schema_known = False
         if runtime.is_adbc:
@@ -808,6 +856,13 @@ class GenericSQLConnector(BaseDestinationHandler):
                 "GenericSQLConnector connected via SQLAlchemy to %s",
                 self._driver,
             )
+        if not self._adbc_only:
+            # The write backend executes StageWritePlans over the runtime's
+            # engine (either flavor). Created after the capability binding
+            # so it reads the declared bulk-load fact off the dialect.
+            backend = SqlAlchemyBackend(self.dialect)
+            await backend.connect(runtime)
+            self._backend = backend
         self._connected = True
 
     async def disconnect(self) -> None:
@@ -846,6 +901,9 @@ class GenericSQLConnector(BaseDestinationHandler):
                     "server-side resources may remain allocated",
                     exc_info=True,
                 )
+        if self._backend is not None:
+            await self._backend.disconnect()
+            self._backend = None
         if self._runtime:
             try:
                 await self._runtime.close()
@@ -988,7 +1046,14 @@ class GenericSQLConnector(BaseDestinationHandler):
         )
 
         if state.write_mode == "upsert":
+            # Mode-specific gate first: its refusal names the upsert fact
+            # (merge_form), the more actionable message for the stream.
             self._check_upsert_capabilities(stream_id, address)
+        if not self._adbc_only:
+            # Every SQLAlchemy-path write lands in a stage table first, so
+            # the declared stage shape and the dialect's stage DDL hook are
+            # handshake requirements for every write mode, not just upsert.
+            self._check_sqlalchemy_stage_capabilities(stream_id, address)
 
         # Resolve the type-mapper for this stream's endpoint once —
         # both DDL generation and the schema contract use it.
@@ -1061,19 +1126,78 @@ class GenericSQLConnector(BaseDestinationHandler):
             )
         if self._adbc_only:
             self._check_adbc_stage_machinery(caps, f"stream {stream_id!r}")
-        elif not self._dialect_renders_sqlalchemy_upsert():
+        elif not self._dialect_renders_merge_statement():
             # Declaration/dialect disagreement, caught at handshake
-            # instead of on the first batch: the SQLAlchemy upsert
-            # machinery renders through the dialect's statement hook
-            # until #388 replaces it with the shared stage primitive.
+            # instead of on the first batch: the upsert's stage-to-target
+            # statement renders through the dialect's merge hook.
             raise SchemaConfigurationError(
                 f"stream {stream_id!r} writes in upsert mode to "
                 f"{address}: the connector declares "
                 f"sql_capabilities.merge_form {caps.merge_form!r}, but "
                 f"its dialect {self.dialect.name!r} does not implement "
-                f"build_sqlalchemy_upsert — the declaration and the "
+                f"merge_statement_sql — the declaration and the "
                 f"dialect disagree; fix the connector."
             )
+
+    def _check_sqlalchemy_stage_capabilities(
+        self, stream_id: str, address: TableAddress
+    ) -> None:
+        """Refuse a SQLAlchemy-path write stream the stage cycle cannot run.
+
+        Stage-then-merge is the only write shape: the batch lands in a
+        stage whose scope and transaction shape come from the declared
+        ``sql_capabilities.stage`` block and whose DDL renders through the
+        dialect's ``stage_table_sql``. Undeclared refuses naming the
+        missing declaration; a declaration the dialect cannot render
+        refuses naming the disagreement — at handshake, never on the
+        first batch.
+        """
+        if self._capabilities is None:
+            raise SchemaConfigurationError(
+                str(
+                    undeclared_capability_error(
+                        "stage",
+                        need=f"stream {stream_id!r} writes to {address} "
+                        f"through the stage-then-merge primitive",
+                    )
+                )
+            )
+        if not self._dialect_renders_stage_table():
+            raise SchemaConfigurationError(
+                f"stream {stream_id!r} writes to {address}: the connector "
+                f"declares sql_capabilities.stage, but its dialect "
+                f"{self.dialect.name!r} does not implement stage_table_sql "
+                f"— the declaration and the dialect disagree; fix the "
+                f"connector."
+            )
+
+    def _require_backend(self) -> SqlAlchemyBackend:
+        """Return the SQLAlchemy write backend, or fail loud off-path."""
+        if self._backend is None:
+            raise RuntimeError(
+                "SQLAlchemy write backend not available; this handler is "
+                "not connected on the SQLAlchemy transport path"
+            )
+        return self._backend
+
+    def _require_declared_capabilities(self, state: _StreamState) -> SqlCapabilities:
+        """Return the declared block, re-checked at write time (defense in depth).
+
+        ``configure_schema`` already refused undeclared streams; a write
+        reaching this with ``None`` means the handshake was bypassed —
+        refuse with the same loud configuration error, never a guess.
+        """
+        if self._capabilities is None:
+            raise SchemaConfigurationError(
+                str(
+                    undeclared_capability_error(
+                        "stage",
+                        need=f"a write to {state.address} must know the "
+                        f"declared stage shape",
+                    )
+                )
+            )
+        return self._capabilities
 
     def _get_write_mode(self, proto_write_mode: int) -> WriteMode:
         mode_map: dict[int, WriteMode] = {
@@ -1254,11 +1378,12 @@ class GenericSQLConnector(BaseDestinationHandler):
                 )
             return
 
-        if self._engine is None and self._sync_engine is None:
-            # Silently skipping DDL here would leave state.table None and the
-            # write_batch readiness guard returning RETRYABLE_FAILURE forever.
+        if self._backend is None:
+            # Silently skipping DDL here would leave the stream unprepared
+            # and the write_batch readiness guard returning
+            # RETRYABLE_FAILURE forever.
             raise AdbcConfigurationError(
-                f"SQLAlchemy engine is None during DDL for "
+                f"SQLAlchemy write backend is None during DDL for "
                 f"{state.address}; "
                 "connect() must be called before configure_schema()"
             )
@@ -1272,24 +1397,40 @@ class GenericSQLConnector(BaseDestinationHandler):
         # CREATE TABLE with a fresh timer, by which point the engine's ack for
         # this stream has long expired. Bounding the wait + statement together
         # keeps the whole handshake under the ack budget (issue #231).
+        # Dialect-declared preparation (e.g. postgres' CREATE SCHEMA
+        # IF NOT EXISTS for a non-default schema) shares the DDL
+        # transaction, exactly as before the backend split. A declared
+        # dedicated stage schema is prepared here too: the write plan
+        # places every real-scope stage there, and a handshake that
+        # reported the target ready while the staging namespace does not
+        # exist would fail on the first batch instead. The target is
+        # then reflected by the backend so stage landing binds with the
+        # column types the database actually created.
+        statements = [
+            *self.dialect.sqlalchemy_pre_ddl(state.address.schema),
+            target_ddl,
+        ]
+        caps = self._capabilities
+        if (
+            caps is not None
+            and caps.stage.scope == "real"
+            and caps.stage.schema == "dedicated"
+        ):
+            # Normalized like every other schema component, so the
+            # namespace prepared here is the one the write plan targets.
+            dedicated = self.dialect.normalize_ident(str(caps.stage.dedicated_schema))
+            statements = [
+                *self.dialect.sqlalchemy_pre_ddl(dedicated),
+                *statements,
+            ]
         async with self._statement_deadline():
             async with self._ddl_lock:
-                if self._sync_engine is not None:
-                    state.table = await asyncio.to_thread(
-                        self._ddl_and_reflect_on_sync_engine,
-                        state,
-                        target_ddl,
-                    )
-                else:
-                    async with self._require_async_engine().begin() as conn:
-                        state.table = await conn.run_sync(
-                            self._run_ddl_and_reflect,
-                            state,
-                            target_ddl,
-                        )
+                backend = self._require_backend()
+                await backend.run_ddl(statements)
+                target_columns = await backend.target_columns(state.address)
 
         if self._needs_record_hash(state) and (
-            state.table is None or self.RECORD_HASH_COLUMN not in state.table.c
+            self.RECORD_HASH_COLUMN not in target_columns
         ):
             # A keyless insert table created before issue #282 has no
             # _record_hash column; CREATE TABLE IF NOT EXISTS is a no-op and
@@ -1309,48 +1450,6 @@ class GenericSQLConnector(BaseDestinationHandler):
             state.address,
         )
 
-    def _run_ddl_and_reflect(
-        self,
-        conn: Connection,
-        state: _StreamState,
-        target_ddl: str,
-    ) -> Table:
-        """Run the DDL + reflection transaction body on a sync connection.
-
-        Written once against the sync ``Connection`` API. The async engine
-        enters via ``AsyncConnection.run_sync``; the sync engine runs it
-        directly on a worker thread — both transports execute the identical
-        statements.
-        Reflection matters for DML binding: SQLAlchemy derives the column
-        types from what the database actually created, so inserts/upserts
-        bind correctly without a second hand-kept type surface.
-        """
-        # Dialect-declared preparation (e.g. postgres' CREATE SCHEMA
-        # IF NOT EXISTS for a non-default schema). The neutral base
-        # declares none.
-        for stmt in self.dialect.sqlalchemy_pre_ddl(state.address.schema):
-            conn.execute(text(stmt))
-        conn.execute(text(target_ddl))
-
-        meta = MetaData()
-        return Table(
-            state.address.table,
-            meta,
-            autoload_with=conn,
-            schema=state.address.schema or None,
-        )
-
-    def _ddl_and_reflect_on_sync_engine(
-        self, state: _StreamState, target_ddl: str
-    ) -> Table:
-        """Run the shared DDL + reflection body on the sync engine.
-
-        Runs on a worker thread.
-        """
-        engine = self._require_sync_engine()
-        with engine.begin() as conn:
-            return self._run_ddl_and_reflect(conn, state, target_ddl)
-
     def _reject_if_not_ready(
         self, run_id: str, stream_id: str, batch_seq: int
     ) -> BatchWriteResult | None:
@@ -1367,10 +1466,10 @@ class GenericSQLConnector(BaseDestinationHandler):
                 stream_id=stream_id,
                 batch_seq=batch_seq,
             )
-        if not self._adbc_only and self._engine is None and self._sync_engine is None:
+        if not self._adbc_only and self._backend is None:
             return reject_batch(
                 logger,
-                "Handler not connected: no SQLAlchemy engine",
+                "Handler not connected: no SQLAlchemy write backend",
                 run_id=run_id,
                 stream_id=stream_id,
                 batch_seq=batch_seq,
@@ -1378,19 +1477,12 @@ class GenericSQLConnector(BaseDestinationHandler):
 
         state = self._streams.get(stream_id)
         if state is None:
+            # Stream presence implies configure_schema completed: the
+            # state is only registered after DDL and (on the SQLAlchemy
+            # path) target reflection succeeded.
             return reject_batch(
                 logger,
                 "Schema not configured",
-                run_id=run_id,
-                stream_id=stream_id,
-                batch_seq=batch_seq,
-            )
-        # ADBC writes never build SQLAlchemy table objects; readiness there
-        # is the configured state + schema contract.
-        if not self._adbc_only and state.table is None:
-            return reject_batch(
-                logger,
-                "Schema not configured: no table object for the stream",
                 run_id=run_id,
                 stream_id=stream_id,
                 batch_seq=batch_seq,
@@ -1470,11 +1562,12 @@ class GenericSQLConnector(BaseDestinationHandler):
     ) -> BatchWriteResult:
         """Write an Arrow record batch to the database.
 
-        The batch is realigned to the destination schema in Arrow space
-        (``cast_arrow_batch``) and only materialized to dicts at the very
-        last SQLAlchemy boundary. ``emitted_at`` is part of the write_batch
-        contract for time-partitioned sinks; a relational target has no
-        output path, so it is unused here.
+        The facade prepares the batch once in Arrow space — schema cast,
+        record-hash attachment, intra-batch duplicate collapse — and hands
+        the backend Arrow; the backend converts to its own parameter shape
+        internally. ``emitted_at`` is part of the write_batch contract for
+        time-partitioned sinks; a relational target has no output path, so
+        it is unused here.
         """
         rejection = self._reject_if_not_ready(run_id, stream_id, batch_seq)
         if rejection is not None:
@@ -1527,22 +1620,28 @@ class GenericSQLConnector(BaseDestinationHandler):
                         record_batch,
                         truncate_now=truncate_now,
                     )
-                elif self._sync_engine is not None:
-                    prepared = self._prepare_for_sqlalchemy(state, record_batch)
-                    self._attach_record_hash(state, prepared)
-                    await asyncio.to_thread(
-                        self._write_batch_on_sync_engine,
-                        state,
-                        prepared,
-                        truncate_now,
-                    )
                 else:
-                    prepared = self._prepare_for_sqlalchemy(state, record_batch)
-                    self._attach_record_hash(state, prepared)
-                    async with self._require_async_engine().begin() as conn:
-                        await conn.run_sync(
-                            self._apply_write_in_txn, state, prepared, truncate_now
-                        )
+                    # Stage-then-merge on the SQLAlchemy transport: the
+                    # facade prepares the batch once in Arrow space (cast,
+                    # record-hash attachment, intra-batch duplicate
+                    # collapse — all semantics), renders the plan, and the
+                    # backend executes it. Both engine flavors run one
+                    # shared cycle body inside the backend.
+                    prepared = self._prepare_sqlalchemy_batch(state, record_batch)
+                    plan = build_stage_write_plan(
+                        self.dialect,
+                        self._require_declared_capabilities(state),
+                        target=state.address,
+                        columns=tuple(prepared.schema.names),
+                        write_mode=state.write_mode,
+                        conflict_keys=state.conflict_keys,
+                        identity=self._identity_columns(state),
+                        truncate_now=truncate_now,
+                        run_id=run_id,
+                        stream_id=stream_id,
+                        batch_seq=batch_seq,
+                    )
+                    await self._require_backend().execute_write(plan, prepared)
 
                 logger.info(f"Wrote batch {batch_seq}: {record_count} records")
                 return BatchWriteResult(
@@ -1664,88 +1763,105 @@ class GenericSQLConnector(BaseDestinationHandler):
                 e,
                 exc_info=True,
             )
+            return self._classify_unexpected_write_error(e)
+
+    def _classify_unexpected_write_error(self, e: Exception) -> BatchWriteResult:
+        """Ack an exception the typed ladder did not claim.
+
+        Same intent, same verdict on both transports: the ADBC helpers
+        reclassify the deterministic PEP-249 classes (ProgrammingError,
+        IntegrityError, DataError, NotSupportedError) as fatal before they
+        reach the ladder, and SQLAlchemy's wrapper exceptions carry the
+        same class names — broken rendered SQL, a duplicate conflict key
+        inside one source batch, or a constraint violation cannot heal
+        between retries against an identical request. Everything else
+        stays retryable.
+        """
+        if not self._adbc_only and _is_fatal_adbc_error(e):
             return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,
-                failure_summary=str(e),
-                failure_category=FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED,
+                failure_summary=f"sqlalchemy: {type(e).__name__}: {e}",
+                failure_category=FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
             )
-
-    def _apply_write_in_txn(
-        self,
-        conn: Connection,
-        state: _StreamState,
-        records: list[dict[str, Any]],
-        truncate_now: bool,
-    ) -> None:
-        """Dispatch one batch's DML on an open transaction.
-
-        Written once against the sync ``Connection`` API so both
-        SQLAlchemy engine flavours execute identical statements: the
-        async engine enters via ``AsyncConnection.run_sync``, the sync
-        engine directly from its worker thread. ``truncate_now`` is the
-        first-batch truncate decision made in ``write_batch`` (issue
-        #307); only truncate_insert reads it.
-        """
-        if state.write_mode == "truncate_insert":
-            self._truncate_and_insert(conn, state, records, truncate_now)
-        elif state.write_mode == "upsert":
-            self._upsert_records(conn, state, records)
-        else:
-            self._insert_records(conn, state, records)
-
-    def _write_batch_on_sync_engine(
-        self,
-        state: _StreamState,
-        records: list[dict[str, Any]],
-        truncate_now: bool,
-    ) -> None:
-        """Run one write attempt on the sync engine (worker thread).
-
-        Mirrors the async path: the DML runs in a single transaction.
-        """
-        with self._require_sync_engine().begin() as conn:
-            self._apply_write_in_txn(conn, state, records, truncate_now)
+        return BatchWriteResult(
+            status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+            records_written=0,
+            failure_summary=str(e),
+            failure_category=FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED,
+        )
 
     async def _truncate_only(self, state: _StreamState) -> None:
         """Empty the target table with no insert (any transport).
 
         Runs when a refresh's first batch is delivered with zero rows,
         including the synthetic empty batch the engine sends when the
-        source yields no batches at all (issue #312).
+        source yields no batches at all (issue #312). No stage cycle: there
+        is nothing to land, so the emptying statement runs on its own.
         """
         if self._adbc_only:
             await asyncio.to_thread(self._adbc_truncate_sync, state.address)
-        elif self._sync_engine is not None:
-            await asyncio.to_thread(self._write_batch_on_sync_engine, state, [], True)
-        else:
-            async with self._require_async_engine().begin() as conn:
-                await conn.run_sync(self._apply_write_in_txn, state, [], True)
-
-    def _attach_record_hash(
-        self,
-        state: _StreamState,
-        records: list[dict[str, Any]],
-    ) -> None:
-        """Populate the synthetic ``_record_hash`` for a keyless insert stream.
-
-        A keyless stream has no key identity, so the hash is the row's *content*,
-        computed here at the sink from the cast record -- deliberately not the
-        engine's wire ``record_id``, which derives from the source's declared
-        primary key when it has one. Deriving from content means two
-        byte-identical rows share a hash and collapse to one, while a row whose
-        content differs -- even if it repeats the source primary key -- gets a
-        distinct hash and is kept (issue #282). The record carries only contract
-        columns at this point (no ``_record_hash``/``_synced_at``), so the digest
-        is a stable function of the data and matches across attempts. No-op for
-        any stream that dedups on a real key.
-        """
-        if not self._needs_record_hash(state):
             return
-        for record in records:
-            canonical = json.dumps(record, sort_keys=True, default=str)
-            digest = hashlib.sha256(canonical.encode()).hexdigest()
-            record[self.RECORD_HASH_COLUMN] = digest
+        await self._require_backend().run_ddl(
+            [self.dialect.empty_table_sql(state.address)]
+        )
+
+    def _prepare_sqlalchemy_batch(
+        self, state: _StreamState, record_batch: pa.RecordBatch
+    ) -> pa.RecordBatch:
+        """Prepare one batch for the stage cycle, entirely in Arrow space.
+
+        Casts to the destination schema, then applies the mode's identity
+        semantics before anything lands — the stage feeds set-based
+        statements, so intra-batch duplicates must be resolved here:
+
+        * keyless ``insert`` — attach the content-derived ``_record_hash``
+          and collapse duplicate hashes, first occurrence wins (#282);
+        * keyed ``insert`` — collapse duplicate primary keys, first
+          occurrence wins (two rows sharing an identity would both pass
+          the anti-join and then collide on the primary key);
+        * ``upsert`` — no collapse: duplicate ``conflict_keys`` inside one
+          source batch keep the system's own loud failure — a single page
+          carrying the same key twice means the declared keys are not
+          actually unique, and no collapse rule can be correct;
+        * ``truncate_insert`` — no collapse: deduping a full refresh would
+          drop legitimate duplicate rows.
+        """
+        if state.schema_contract is None:
+            raise AdbcConfigurationError(
+                f"SQLAlchemy write for {state.address} "
+                "requires a configured SchemaContract; schema alignment was skipped"
+            )
+        cast_batch = state.schema_contract.cast_arrow_batch(record_batch)
+        if state.write_mode != "insert":
+            return cast_batch
+        if self._needs_record_hash(state):
+            return self._attach_record_hash_to_batch(cast_batch, state)
+        return self._collapse_first_wins(cast_batch, state.primary_keys)
+
+    @staticmethod
+    def _collapse_first_wins(
+        batch: pa.RecordBatch, key_columns: list[str]
+    ) -> pa.RecordBatch:
+        """Drop rows whose *key_columns* tuple already appeared in *batch*.
+
+        The insert contract's intra-batch rule: first occurrence wins.
+        The key columns are the table's PRIMARY KEY (NOT NULL), so the
+        Python ``None == None`` collapse a nullable key could cause here
+        is unreachable in practice.
+        """
+        if not key_columns:
+            return batch
+        columns = [batch.column(name) for name in key_columns]
+        seen: set[tuple[Any, ...]] = set()
+        keep: list[int] = []
+        for i in range(batch.num_rows):
+            key = tuple(col[i].as_py() for col in columns)
+            if key in seen:
+                continue
+            seen.add(key)
+            keep.append(i)
+        return batch.take(keep) if len(keep) < batch.num_rows else batch
 
     def _attach_record_hash_to_batch(
         self,
@@ -1754,13 +1870,15 @@ class GenericSQLConnector(BaseDestinationHandler):
     ) -> pa.RecordBatch:
         """Append a ``_record_hash`` column and deduplicate an Arrow batch.
 
-        Computes a per-row SHA-256 digest from the JSON-serialized row content
-        (same formula as ``_attach_record_hash`` for cross-retry stability),
-        appends it as a new column, and removes intra-batch duplicate rows
-        (first occurrence wins). Intra-batch dedup is necessary because the
-        stage-MERGE keys on ``_record_hash``; if the stage contains two rows
-        sharing the same key the MERGE raises a "multiple source rows match"
-        error on most databases.
+        Computes a per-row SHA-256 digest from the JSON-serialized row
+        content — the content-hash identity contract (issue #282): the
+        digest is a stable function of the cast row's data, so it matches
+        across attempts, runs, and transports — appends it as a new
+        column, and removes intra-batch duplicate rows (first occurrence
+        wins). Intra-batch dedup is necessary because the stage feeds
+        set-based statements keyed on ``_record_hash``: two rows sharing
+        the key would both pass the anti-join (or raise "multiple source
+        rows match" from a MERGE).
 
         No-op for streams that don't need the synthetic key.
         """
@@ -1783,147 +1901,6 @@ class GenericSQLConnector(BaseDestinationHandler):
             list(deduped.columns) + [hash_col],
             names=list(deduped.schema.names) + [self.RECORD_HASH_COLUMN],
         )
-
-    def _insert_records(
-        self,
-        conn: Connection,
-        state: _StreamState,
-        records: list[dict[str, Any]],
-    ) -> None:
-        """Insert pre-cast records, skipping rows whose identity already exists.
-
-        Insert mode is at-least-once at the wire: a same-run retry re-reads the
-        inclusive cursor boundary, so a row can arrive twice. Instead of a
-        positional ledger (issue #282), each row lands only when its identity is
-        absent -- the contract primary key, or the synthetic ``_record_hash``
-        for a keyless stream. The check is one ``INSERT ... SELECT ... WHERE NOT
-        EXISTS`` per row built with SQLAlchemy core, so the engine emits no
-        dialect-specific SQL; the identity column's PRIMARY KEY is the
-        structural backstop. With no identity column (not expected for insert
-        mode) it degrades to a plain INSERT.
-
-        Coalescing is identity-only: a row whose identity already exists is
-        skipped without comparing its other columns. For a keyed insert that
-        means a same-key row with *different* content is dropped (first
-        occurrence wins) -- the same tradeoff as two byte-identical keyless
-        rows. Insert mode cannot tell a retry's re-read from a genuinely
-        conflicting key without a per-row read-back, which would defeat the
-        single-statement anti-join; a stream that must reconcile changed rows
-        should use upsert.
-        """
-        if state.table is None or not records:
-            return
-        table = state.table
-        # The anti-join is an insert-mode concern. truncate_insert reaches this
-        # helper too (after the run's first batch emptied the table); deduping
-        # there would silently drop a same-key row in a full-refresh batch
-        # instead of surfacing the PK violation, so it gets a plain INSERT.
-        identity = self._identity_columns(state) if state.write_mode == "insert" else []
-        if not identity:
-            conn.execute(table.insert(), records)
-            return
-
-        # Drop intra-batch duplicates first: two rows sharing an identity both
-        # pass NOT EXISTS (neither is in the table yet) and would then collide
-        # on the primary key. First occurrence wins -- the Fivetran _record_hash
-        # tradeoff for byte-identical keyless rows. The identity columns are the
-        # table's PRIMARY KEY (NOT NULL), so the Python ``None == None`` collapse
-        # that a nullable key could cause here is unreachable in practice.
-        seen: set[tuple[Any, ...]] = set()
-        deduped: list[dict[str, Any]] = []
-        for record in records:
-            key = tuple(record.get(col) for col in identity)
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append(record)
-
-        columns = list(deduped[0].keys())
-        binds = {col: bindparam(col, type_=table.c[col].type) for col in columns}
-        already_present = (
-            select(literal(1))
-            .where(and_(*(table.c[col] == binds[col] for col in identity)))
-            .exists()
-        )
-        source = select(*(binds[col].label(col) for col in columns)).where(
-            ~already_present
-        )
-        conn.execute(table.insert().from_select(columns, source), deduped)
-
-    def _upsert_records(
-        self,
-        conn: Connection,
-        state: _StreamState,
-        records: list[dict[str, Any]],
-    ) -> None:
-        """Upsert pre-cast records via the dialect's INSERT-or-UPDATE form.
-
-        The statement shape is vendor-specific (postgres ``ON CONFLICT``,
-        MySQL ``ON DUPLICATE KEY UPDATE``) and comes from the connector
-        package's dialect. A dialect without one raises
-        ``UnsupportedDialectOperationError`` — loud and fatal, never a
-        silent downgrade to INSERT. The engine should not have routed an
-        upsert here in the first place: ``supports_upsert`` gates the
-        advertised write modes.
-
-        ``conflict_keys`` is the stream's Infra-validated upsert target;
-        the contract guarantees it is non-empty for an upsert. If it is
-        empty here the stream is misconfigured — fail loud rather than
-        silently fall back to INSERT, which would duplicate rows.
-        """
-        if state.table is None:
-            return
-        if not state.conflict_keys:
-            raise SchemaConfigurationError(
-                f"upsert requested for {state.address} "
-                f"but the stream carries no conflict_keys; refusing to fall back "
-                f"to plain INSERT (would silently duplicate rows)"
-            )
-        if not records:
-            return
-
-        stmt = self.dialect.build_sqlalchemy_upsert(
-            state.table, records, state.conflict_keys
-        )
-        conn.execute(stmt)
-
-    def _truncate_and_insert(
-        self,
-        conn: Connection,
-        state: _StreamState,
-        records: list[dict[str, Any]],
-        truncate_now: bool,
-    ) -> None:
-        """Insert pre-cast records, emptying the table first when told to.
-
-        The truncate runs only on the read's first batch (``truncate_now``,
-        decided in ``write_batch``): truncating per batch would keep only
-        the final batch of a multi-batch refresh (issue #307). The delete
-        shares the batch's transaction, so a failed first batch rolls the
-        truncate back with it.
-        """
-        if state.table is None:
-            return
-        if truncate_now:
-            conn.execute(state.table.delete())
-        self._insert_records(conn, state, records)
-
-    def _prepare_for_sqlalchemy(
-        self, state: _StreamState, record_batch: pa.RecordBatch
-    ) -> list[dict[str, Any]]:
-        """Materialise a batch for SQLAlchemy via the schema contract.
-
-        ``to_db_records`` aligns the batch to the destination schema
-        and materialises once. JSON columns stay as wire-format
-        strings, so they bind directly to TEXT or JSONB columns
-        without per-row coercion.
-        """
-        if state.schema_contract is None:
-            raise AdbcConfigurationError(
-                f"SQLAlchemy write for {state.address} "
-                "requires a configured SchemaContract; schema alignment was skipped"
-            )
-        return state.schema_contract.to_db_records(record_batch)
 
     # ------------------------------------------------------------------
     # ADBC-only mode (DDL + idempotency + writes via ADBC cursor)

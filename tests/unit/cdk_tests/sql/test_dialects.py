@@ -413,8 +413,16 @@ class TestUnsupportedHooks:
         "operation,call",
         [
             (
-                "build_sqlalchemy_upsert",
-                lambda d: d.build_sqlalchemy_upsert(object(), [], ["id"]),
+                "stage_table_sql",
+                lambda d: d.stage_table_sql(
+                    TableAddress(table="s"), TableAddress(table="t"), temp=True
+                ),
+            ),
+            (
+                "merge_statement_sql",
+                lambda d: d.merge_statement_sql(
+                    TableAddress(table="s"), TableAddress(table="t"), ["id"], ["id"]
+                ),
             ),
             (
                 "build_tls_connect_arg",

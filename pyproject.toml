@@ -65,8 +65,8 @@ pydantic = "^2.0.0"
 #   - validator: cross-document referential integrity of an assembled run
 #     bundle (validate_pipeline_bundle, used in src/engine/pipeline_config_prep).
 # Pinned exactly (release candidates); bump deliberately to adopt a new contract.
-analitiq-contract-models = {version = "1.0.0rc13", allow-prereleases = true}
-analitiq-validator = {version = "1.0.0rc13", allow-prereleases = true}
+analitiq-contract-models = {version = "1.0.0rc16", allow-prereleases = true}
+analitiq-validator = {version = "1.0.0rc16", allow-prereleases = true}
 
 # Retry and fault tolerance
 backoff = "^2.0.0"

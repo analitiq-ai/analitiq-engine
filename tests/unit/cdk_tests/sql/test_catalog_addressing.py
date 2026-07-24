@@ -168,13 +168,30 @@ class TestConfigureSchemaGate:
         assert '"proj"."ds"."events"' in create_table[0]
 
 
+class _StagingSaDialect(SqlDialect):
+    """A SQLAlchemy-path dialect that can run the stage cycle."""
+
+    name = "staging-sa"
+    capabilities = SqlCapabilities.from_declaration(caps_block())
+
+    def stage_table_sql(self, stage, target, *, temp):
+        return (
+            f"CREATE TABLE {self.quote_table(stage)} AS SELECT * FROM "
+            f"{self.quote_table(target)} WHERE FALSE"
+        )
+
+
+class _StagingSaConnector(GenericSQLConnector):
+    dialect_class = _StagingSaDialect
+
+
 class TestConfigureSchemaAddress:
     @pytest.mark.asyncio
     async def test_sqlalchemy_schema_fallback_lands_in_the_address(self):
         # A catalog-free SA stream with no declared schema resolves the
         # explicit "public" fallback into the stored address — not an
         # unqualified name the connection's search path would resolve.
-        handler = _handler(adbc_only=False)
+        handler = _handler(_StagingSaConnector, adbc_only=False)
         doc = dict(ENDPOINT_DOC)
         doc["database_object"] = {"name": "events"}
         handler.set_stream_endpoints({STREAM: doc})

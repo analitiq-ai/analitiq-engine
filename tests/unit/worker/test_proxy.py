@@ -469,3 +469,19 @@ class TestProxyCapabilities:
         proxy._capabilities = caps
         assert proxy.supports_auto_create is False
         assert proxy.supports_truncate is False
+
+    def test_insert_mirrored_from_the_worker_write_mode_list(self):
+        # Inheriting the base's unconditional True would re-advertise a
+        # mode the worker's schema handshake refuses (issue #388): an
+        # unmigrated SQLAlchemy worker omits INSERT when its stage
+        # capabilities are missing, and the proxy must not add it back.
+        proxy = _proxy()
+        assert proxy.supports_insert is False  # before connect
+        proxy._capabilities = MagicMock(
+            supported_write_modes=[WriteMode.WRITE_MODE_UPSERT],
+        )
+        assert proxy.supports_insert is False
+        proxy._capabilities = MagicMock(
+            supported_write_modes=[WriteMode.WRITE_MODE_INSERT],
+        )
+        assert proxy.supports_insert is True
