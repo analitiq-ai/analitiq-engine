@@ -110,15 +110,21 @@ class TestStageName:
         # NAMEDATALEN counts bytes: a multibyte target name must never
         # push the generated identifier past the byte budget, and no
         # codepoint is left broken at the cut.
+        target = "заказы_клиентов_и_платежи_очень_длинное_имя"
         name = stage_table_name(
-            "заказы_клиентов_и_платежи_очень_длинное_имя",
+            target,
             run_id="r",
             stream_id="s",
             batch_seq=1,
             max_identifier_length=63,
         )
         assert len(name.encode()) <= 63
-        name.encode()  # round-trips: no broken codepoint survived
+        # The kept tail is a clean prefix of the target name: the byte cut
+        # dropped a codepoint rather than keeping it broken.
+        prefix_len = len("_analitiq_stage_") + 17 + 1
+        tail = name[prefix_len:]
+        assert tail
+        assert target.startswith(tail)
 
     def test_budget_too_small_for_the_token_refuses(self):
         # The token is never truncated — a cut token collapses distinct
