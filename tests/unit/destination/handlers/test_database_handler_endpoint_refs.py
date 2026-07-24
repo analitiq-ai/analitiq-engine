@@ -13,7 +13,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.sql.dialects import TableAddress
+from cdk.sql.capabilities import SqlCapabilities
+from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.exceptions import SchemaConfigurationError
 from cdk.sql.generic import GenericSQLConnector, _StreamState
 from cdk.type_map import TypeMapper
@@ -50,6 +51,42 @@ def _runtime(
         connector_type_mapper=connector_mapper,
         connection_type_mapper=connection_mapper,
     )
+
+
+class _StageRenderingDialect(SqlDialect):
+    """The two stage-then-merge rendering hooks a write-role connector ships."""
+
+    name = "staging"
+
+    def stage_table_sql(self, stage, target, *, temp):
+        return (
+            f"CREATE TABLE {self.quote_table(stage)} AS SELECT * FROM "
+            f"{self.quote_table(target)} WHERE FALSE"
+        )
+
+    def merge_statement_sql(self, stage, target, conflict_keys, columns):
+        return "INSERT ... ON CONFLICT DO UPDATE"
+
+
+_DECLARED_CAPS = SqlCapabilities.from_declaration(
+    {
+        "catalog": "none",
+        "session_targeting": "per_statement",
+        "merge_form": "insert_on_conflict",
+        "bulk_load": "none",
+        "stage": {"scope": "temp", "schema": "target", "transactional_ddl": True},
+    },
+    source="<test>",
+)
+
+
+def _stage_capable(handler: GenericSQLConnector) -> GenericSQLConnector:
+    """Give *handler* the declared capabilities + rendering dialect a
+    migrated write-role connector carries after connect()."""
+    handler.dialect = _StageRenderingDialect()
+    handler.dialect.capabilities = _DECLARED_CAPS
+    handler._capabilities = _DECLARED_CAPS
+    return handler
 
 
 class TestEndpointRefDispatch:
@@ -194,27 +231,19 @@ class TestWriteBatchFatalOnTypeMapError:
 
     @pytest.mark.asyncio
     async def test_missing_schema_contract_classified_as_fatal(self):
-        from contextlib import asynccontextmanager
         from unittest.mock import MagicMock
 
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 
-        handler = GenericSQLConnector()
-        handler._engine = MagicMock()
+        handler = _stage_capable(GenericSQLConnector())
+        handler._backend = MagicMock()
         handler._connected = True
         handler._streams["s1"] = _StreamState(
-            table=MagicMock(),
             address=TableAddress(table="events", schema="myschema"),
             write_mode="insert",
             primary_keys=[],
             schema_contract=None,
         )
-
-        @asynccontextmanager
-        async def _fake_begin():
-            yield AsyncMock()
-
-        handler._engine.begin = _fake_begin
 
         import pyarrow as pa
 
@@ -235,44 +264,26 @@ class TestWriteBatchFatalOnTypeMapError:
 
     @pytest.mark.asyncio
     async def test_type_map_error_classified_as_fatal(self):
-        from contextlib import asynccontextmanager
         from unittest.mock import MagicMock
 
         from cdk.type_map import UnmappedTypeError
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 
-        handler = GenericSQLConnector()
+        handler = _stage_capable(GenericSQLConnector())
         # Preconditions: connected, schema configured. We don't actually hit
-        # the DB because the insert raises before any SQL runs.
+        # the DB because the Arrow-space cast raises before any SQL runs.
         contract_mock = MagicMock()
-        contract_mock.to_db_records.return_value = [{"id": 1}]
+        contract_mock.cast_arrow_batch.side_effect = UnmappedTypeError(
+            "pg", "forward", "MONEY"
+        )
 
-        handler._engine = MagicMock()
+        handler._backend = MagicMock()
         handler._connected = True
         handler._streams["s1"] = _StreamState(
-            table=MagicMock(),
             write_mode="insert",
             primary_keys=[],
             schema_contract=contract_mock,
         )
-
-        class _FakeTxnConn:
-            async def run_sync(self, fn, *args):
-                # AsyncConnection.run_sync hands the sync Connection to fn.
-                return fn(MagicMock(), *args)
-
-        @asynccontextmanager
-        async def _fake_begin():
-            yield _FakeTxnConn()
-
-        handler._engine.begin = _fake_begin
-
-        # The schema contract's prepare_records is called inside _insert_records;
-        # route the UnmappedTypeError through that entry.
-        def _raising_insert(_conn, _state, _records):
-            raise UnmappedTypeError("pg", "forward", "MONEY")
-
-        handler._insert_records = _raising_insert  # type: ignore[method-assign]
 
         import pyarrow as pa
 
@@ -304,26 +315,26 @@ class TestWriteBatchFatalOnTypeMapError:
         # runs without the gRPC generated stack.
         from cdk.types import AckStatus, FailureCategory
 
-        handler = GenericSQLConnector()
+        handler = _stage_capable(GenericSQLConnector())
         contract_mock = MagicMock()
-        contract_mock.to_db_records.return_value = [{"id": 1}]
+        contract_mock.cast_arrow_batch.side_effect = lambda rb: rb
 
-        handler._engine = MagicMock()
         handler._connected = True
         handler._streams["s1"] = _StreamState(
-            table=MagicMock(),
             write_mode="insert",
-            primary_keys=[],
+            primary_keys=["id"],
             schema_contract=contract_mock,
         )
 
-        # The listener fires during pool connect when engine.begin() opens
-        # a connection; raising from the begin call models that surface
-        # inside the same write_batch try block.
-        def _refusing_begin():
-            raise TlsVerificationError("session is not encrypted under mode 'REQUIRED'")
-
-        handler._engine.begin = _refusing_begin
+        # The listener fires during pool connect when the backend's cycle
+        # opens a connection; raising from execute_write models that
+        # surface inside the same write_batch try block.
+        handler._backend = MagicMock()
+        handler._backend.execute_write = AsyncMock(
+            side_effect=TlsVerificationError(
+                "session is not encrypted under mode 'REQUIRED'"
+            )
+        )
 
         import pyarrow as pa
 
@@ -376,36 +387,24 @@ class TestWriteBatchFatalOnTypeMapError:
 
     @pytest.mark.asyncio
     async def test_upsert_without_conflict_keys_classified_as_fatal(self):
-        # End-to-end through write_batch: the _upsert_records raise must be
+        # End-to-end through write_batch: the plan builder's raise must be
         # classified FATAL (deterministic — retrying an unkeyed upsert can
         # never heal), not retried forever or degraded.
-        from contextlib import asynccontextmanager
         from unittest.mock import MagicMock
 
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 
-        handler = GenericSQLConnector()
+        handler = _stage_capable(GenericSQLConnector())
         contract_mock = MagicMock()
-        contract_mock.to_db_records.return_value = [{"id": 1}]
+        contract_mock.cast_arrow_batch.side_effect = lambda rb: rb
 
-        handler._engine = MagicMock()
+        handler._backend = MagicMock()
         handler._connected = True
         handler._streams["s1"] = _StreamState(
-            table=MagicMock(),
             write_mode="upsert",
             conflict_keys=[],
             schema_contract=contract_mock,
         )
-
-        class _FakeTxnConn:
-            async def run_sync(self, fn, *args):
-                return fn(MagicMock(), *args)
-
-        @asynccontextmanager
-        async def _fake_begin():
-            yield _FakeTxnConn()
-
-        handler._engine.begin = _fake_begin
 
         import pyarrow as pa
 
@@ -429,49 +428,60 @@ class TestUpsertFailsLoudWithoutConflictKeys:
     degrades to INSERT (which would duplicate rows) and never derives a
     target from ``primary_keys`` (issue #254)."""
 
-    @pytest.mark.asyncio
-    async def test_upsert_without_conflict_keys_raises(self):
-        from unittest.mock import MagicMock
+    def test_upsert_without_conflict_keys_raises(self):
+        from cdk.sql.write_plan import build_stage_write_plan
 
-        handler = GenericSQLConnector()
-        handler._insert_records = MagicMock()  # type: ignore[method-assign]
-        conn = MagicMock()
-        state = _StreamState(
-            table=MagicMock(),
-            address=TableAddress(table="events", schema="public"),
-            write_mode="upsert",
-            primary_keys=["id"],  # present, but must NOT be used as a fallback
-            conflict_keys=[],
-        )
+        class _RecordingDialect(_StageRenderingDialect):
+            merge_calls: list = []
 
+            def merge_statement_sql(self, stage, target, conflict_keys, columns):
+                self.merge_calls.append((conflict_keys, columns))
+                return "MERGE ..."
+
+        dialect = _RecordingDialect()
         with pytest.raises(SchemaConfigurationError, match="no conflict_keys"):
-            handler._upsert_records(conn, state, [{"id": 1}])
+            build_stage_write_plan(
+                dialect,
+                _DECLARED_CAPS,
+                target=TableAddress(table="events", schema="public"),
+                columns=("id", "name"),
+                write_mode="upsert",
+                conflict_keys=[],
+                # primary keys present, but must NOT be used as a fallback
+                identity=["id"],
+                truncate_now=False,
+                run_id="r1",
+                stream_id="s1",
+                batch_seq=1,
+            )
+        assert dialect.merge_calls == []
 
-        handler._insert_records.assert_not_called()
-        conn.execute.assert_not_called()
+    def test_upsert_with_conflict_keys_renders_the_merge(self):
+        from cdk.sql.write_plan import build_stage_write_plan
 
-    @pytest.mark.asyncio
-    async def test_upsert_with_conflict_keys_executes(self):
-        from unittest.mock import MagicMock
+        calls: list = []
 
-        handler = GenericSQLConnector()
-        handler.dialect = MagicMock()
-        handler.dialect.build_sqlalchemy_upsert.return_value = MagicMock()
-        state = _StreamState(
-            table=MagicMock(),
-            address=TableAddress(table="events", schema="public"),
+        class _RecordingDialect(_StageRenderingDialect):
+            def merge_statement_sql(self, stage, target, conflict_keys, columns):
+                calls.append((list(conflict_keys), list(columns)))
+                return "MERGE ..."
+
+        plan = build_stage_write_plan(
+            _RecordingDialect(),
+            _DECLARED_CAPS,
+            target=TableAddress(table="events", schema="public"),
+            columns=("id", "name"),
             write_mode="upsert",
             conflict_keys=["id"],
+            identity=[],
+            truncate_now=False,
+            run_id="r1",
+            stream_id="s1",
+            batch_seq=1,
         )
-
-        conn = MagicMock()
-        handler._upsert_records(conn, state, [{"id": 1}])
-
-        handler.dialect.build_sqlalchemy_upsert.assert_called_once()
-        # The verbatim conflict target must reach the SQL builder unchanged.
-        args, _ = handler.dialect.build_sqlalchemy_upsert.call_args
-        assert args[2] == ["id"]
-        conn.execute.assert_called_once()
+        # The verbatim conflict target must reach the SQL renderer unchanged.
+        assert calls == [(["id"], ["id", "name"])]
+        assert plan.mode_sql == "MERGE ..."
 
     @pytest.mark.asyncio
     async def test_adbc_upsert_without_conflict_keys_raises(self):
@@ -557,11 +567,11 @@ class TestWriteModeDispatch:
             handler._get_write_mode(99)
 
 
-class TestPrepareForSqlAlchemy:
-    """``_prepare_for_sqlalchemy`` aligns the batch to the destination
-    schema and materialises once. Json columns stay as their
-    wire-format string so they bind directly into TEXT / JSONB columns
-    without per-row coercion."""
+class TestPrepareSqlAlchemyBatch:
+    """``_prepare_sqlalchemy_batch`` aligns the batch to the destination
+    schema in Arrow space; the backend materialises it at landing time.
+    Json columns stay as their wire-format string so they bind directly
+    into TEXT / JSONB columns without per-row coercion."""
 
     def test_json_column_kept_as_wire_string(self):
         import pyarrow as pa
@@ -593,11 +603,11 @@ class TestPrepareForSqlAlchemy:
             [{"id": "r1", "metadata": '{"k": "v", "n": 1}'}],
             schema=contract.arrow_schema,
         )
-        records = handler._prepare_for_sqlalchemy(state, batch)
+        prepared = handler._prepare_sqlalchemy_batch(state, batch)
         # The Json column bind value is the raw wire string -- PG
         # accepts it as JSONB text input; other dialects treat it as
         # TEXT. No per-row dict/list parsing happens here.
-        assert records == [{"id": "r1", "metadata": '{"k": "v", "n": 1}'}]
+        assert prepared.to_pylist() == [{"id": "r1", "metadata": '{"k": "v", "n": 1}'}]
 
     def test_null_json_column_passes_through(self):
         import pyarrow as pa
@@ -622,8 +632,73 @@ class TestPrepareForSqlAlchemy:
             [{"metadata": None}],
             schema=contract.arrow_schema,
         )
-        records = handler._prepare_for_sqlalchemy(state, batch)
-        assert records == [{"metadata": None}]
+        prepared = handler._prepare_sqlalchemy_batch(state, batch)
+        assert prepared.to_pylist() == [{"metadata": None}]
+
+    def test_keyless_insert_attaches_and_dedups_record_hash(self):
+        import pyarrow as pa
+
+        from cdk.schema_contract import SchemaContract
+
+        handler = GenericSQLConnector()
+        contract = SchemaContract(
+            {
+                "columns": [
+                    {
+                        "name": "id",
+                        "arrow_type": "Utf8",
+                        "native_type": "TEXT",
+                        "nullable": False,
+                    }
+                ]
+            }
+        )
+        state = _StreamState(
+            write_mode="insert", primary_keys=[], schema_contract=contract
+        )
+        batch = pa.RecordBatch.from_pylist(
+            [{"id": "a"}, {"id": "a"}, {"id": "b"}],
+            schema=contract.arrow_schema,
+        )
+        prepared = handler._prepare_sqlalchemy_batch(state, batch)
+        # Byte-identical rows collapse to the first occurrence and every
+        # surviving row carries the content-derived hash (issue #282).
+        assert prepared.num_rows == 2
+        assert "_record_hash" in prepared.schema.names
+
+    def test_keyed_insert_collapses_duplicate_keys_first_wins(self):
+        import pyarrow as pa
+
+        from cdk.schema_contract import SchemaContract
+
+        handler = GenericSQLConnector()
+        contract = SchemaContract(
+            {
+                "columns": [
+                    {
+                        "name": "id",
+                        "arrow_type": "Utf8",
+                        "native_type": "TEXT",
+                        "nullable": False,
+                    },
+                    {
+                        "name": "v",
+                        "arrow_type": "Utf8",
+                        "native_type": "TEXT",
+                        "nullable": True,
+                    },
+                ]
+            }
+        )
+        state = _StreamState(
+            write_mode="insert", primary_keys=["id"], schema_contract=contract
+        )
+        batch = pa.RecordBatch.from_pylist(
+            [{"id": "k", "v": "first"}, {"id": "k", "v": "second"}],
+            schema=contract.arrow_schema,
+        )
+        prepared = handler._prepare_sqlalchemy_batch(state, batch)
+        assert prepared.to_pylist() == [{"id": "k", "v": "first"}]
 
     def test_raises_when_schema_contract_is_none(self):
         import pyarrow as pa
@@ -639,7 +714,7 @@ class TestPrepareForSqlAlchemy:
         with pytest.raises(
             AdbcConfigurationError, match=r"public\.events.*SchemaContract"
         ):
-            handler._prepare_for_sqlalchemy(state, batch)
+            handler._prepare_sqlalchemy_batch(state, batch)
 
 
 class TestDDLLockSerialization:
@@ -655,9 +730,6 @@ class TestDDLLockSerialization:
         from cdk.sql import generic as generic_module
 
         handler = GenericSQLConnector()
-        # Pretend the engine is connected; we intercept the DDL build + the
-        # reflection (run_sync) before any real SQL is dispatched.
-        handler._engine = AsyncMock()
 
         # DDL rendering is irrelevant to the lock; stub it out so the
         # read-only test mapper (no write rules) doesn't raise before the
@@ -672,29 +744,22 @@ class TestDDLLockSerialization:
         max_concurrent = 0
         order: list[str] = []
 
-        async def _fake_run_sync(_callable, *_args, **_kwargs):
-            nonlocal in_flight, max_concurrent
-            in_flight += 1
-            max_concurrent = max(max_concurrent, in_flight)
-            # Yield control to give a parallel coroutine a chance to enter
-            # this critical section if the lock isn't holding.
-            await asyncio.sleep(0.01)
-            in_flight -= 1
-            # Reflection returns the single bound target table.
-            return object()
+        class _SlowBackend:
+            """Backend stand-in: records DDL concurrency under the lock."""
 
-        # The handler's _ensure_tables_exist uses engine.begin() as an async
-        # context manager; bypass with a coroutine returning a prepared ctx.
-        from contextlib import asynccontextmanager
+            async def run_ddl(self, statements):
+                nonlocal in_flight, max_concurrent
+                in_flight += 1
+                max_concurrent = max(max_concurrent, in_flight)
+                # Yield control to give a parallel coroutine a chance to
+                # enter this critical section if the lock isn't holding.
+                await asyncio.sleep(0.01)
+                in_flight -= 1
 
-        @asynccontextmanager
-        async def _begin_ctx():
-            conn = AsyncMock()
-            conn.execute = AsyncMock()
-            conn.run_sync = _fake_run_sync
-            yield conn
+            async def target_columns(self, target):
+                return ("id",)
 
-        handler._engine.begin = _begin_ctx
+        handler._backend = _SlowBackend()
 
         type_mapper = _mapper("pg")
 
@@ -722,10 +787,10 @@ class TestDDLLockSerialization:
 
         await asyncio.gather(_drive("a"), _drive("b"), _drive("c"))
 
-        # If the lock works, run_sync is never executed concurrently —
+        # If the lock works, run_ddl is never executed concurrently —
         # max_concurrent across all three coroutines must be 1.
         assert max_concurrent == 1, (
-            f"DDL lock did not serialize create_all calls "
+            f"DDL lock did not serialize concurrent DDL "
             f"(max_concurrent={max_concurrent}, order={order})"
         )
 
@@ -738,7 +803,7 @@ class TestConfigureSchemaErrorPropagation:
     (issues #153 and #140)."""
 
     def _configured_handler(self) -> GenericSQLConnector:
-        handler = GenericSQLConnector()
+        handler = _stage_capable(GenericSQLConnector())
         handler._connected = True
         handler._runtime = _runtime(connector_mapper=_mapper("pg"))
         handler.set_endpoint_refs(

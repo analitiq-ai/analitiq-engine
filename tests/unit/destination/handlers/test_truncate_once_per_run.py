@@ -21,7 +21,9 @@ import pytest
 from sqlalchemy import Column, Integer, MetaData, String, Table, create_engine, select
 from sqlalchemy.pool import StaticPool
 
-from cdk.sql.dialects import TableAddress
+from cdk.sql.backend import SqlAlchemyBackend
+from cdk.sql.capabilities import SqlCapabilities
+from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.generic import GenericSQLConnector
 from cdk.sql.generic import _StreamState as SqlStreamState
 from src.engine.stream_processor import StreamProcessor, _FullRefreshCheckpoint
@@ -67,13 +69,25 @@ def _sqlite_engine():
     """One in-memory SQLite database visible across threads.
 
     ``StaticPool`` + ``check_same_thread=False`` keep the single database
-    shared — the sync write path runs via ``asyncio.to_thread``.
+    shared — the sync write path runs via ``asyncio.to_thread``. The
+    isolation-level/BEGIN recipe makes pysqlite genuinely transactional
+    for DDL too (by default it silently commits before DDL), so the
+    declared ``transactional_ddl: true`` shape behaves here exactly as it
+    does on Postgres: a rolled-back batch takes its stage table with it.
     """
-    return create_engine(
+    from sqlalchemy import event
+
+    engine = create_engine(
         "sqlite://",
         poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
+        connect_args={"check_same_thread": False, "isolation_level": None},
     )
+
+    @event.listens_for(engine, "begin")
+    def _do_begin(conn):
+        conn.exec_driver_sql("BEGIN")
+
+    return engine
 
 
 def _table(engine, name: str = "t") -> Table:
@@ -88,20 +102,55 @@ def _table(engine, name: str = "t") -> Table:
     return table
 
 
+class _SqliteStageDialect(SqlDialect):
+    """Stage DDL for the SQLite stand-in (truncate_insert needs no merge)."""
+
+    name = "sqlite"
+
+    def stage_table_sql(self, stage, target, *, temp):
+        keyword = "CREATE TEMPORARY TABLE" if temp else "CREATE TABLE"
+        return (
+            f"{keyword} {self.quote_table(stage)} AS "
+            f"SELECT * FROM {self.quote_table(target)} WHERE 0"
+        )
+
+
+_SQLITE_CAPS = SqlCapabilities.from_declaration(
+    {
+        "catalog": "none",
+        "session_targeting": "per_statement",
+        "merge_form": "none",
+        "bulk_load": "none",
+        "stage": {"scope": "temp", "schema": "target", "transactional_ddl": True},
+    },
+    source="<test>",
+)
+
+
+def _identity_contract() -> MagicMock:
+    # The schema-contract realignment is exercised elsewhere; here the
+    # batch is already destination-shaped.
+    contract = MagicMock()
+    contract.cast_arrow_batch.side_effect = lambda rb: rb
+    return contract
+
+
 def _sqlite_handler(engine, table: Table) -> GenericSQLConnector:
     """Handler wired to the given SQLite sync engine and target table."""
     handler = GenericSQLConnector()
     handler._connected = True
     handler._sync_engine = engine
+    handler.dialect = _SqliteStageDialect()
+    handler.dialect.capabilities = _SQLITE_CAPS
+    handler._capabilities = _SQLITE_CAPS
+    backend = SqlAlchemyBackend(handler.dialect)
+    backend._sync_engine = engine
+    backend._targets[TableAddress(table=table.name)] = table
+    handler._backend = backend
     handler._streams["s1"] = SqlStreamState(
         address=TableAddress(table=table.name),
-        table=table,
         write_mode="truncate_insert",
-    )
-    # The schema-contract realignment is exercised elsewhere; here the
-    # batch is already destination-shaped.
-    handler._prepare_for_sqlalchemy = (  # type: ignore[method-assign]
-        lambda state, record_batch: record_batch.to_pylist()
+        schema_contract=_identity_contract(),
     )
     return handler
 
@@ -215,24 +264,34 @@ class TestTruncateOnFirstBatchSqlAlchemy:
         handler = _sqlite_handler(engine, table)
         await _write(handler, 1, [{"id": 7, "name": "old"}], run_id="run-0")
 
-        original = handler._insert_records
+        # Break the first attempt INSIDE the stage cycle — after the
+        # emptying DELETE ran — by corrupting the plan's mode statement;
+        # the shared transaction must roll the DELETE back with it.
+        import dataclasses
+        from unittest.mock import patch
+
+        from cdk.sql import generic as generic_module
+
+        original_build = generic_module.build_stage_write_plan
         calls = {"n": 0}
 
-        def _flaky_insert(conn, state, records):
+        def _flaky_build(*args, **kwargs):
+            plan = original_build(*args, **kwargs)
             calls["n"] += 1
             if calls["n"] == 1:  # run-1's first attempt fails mid-transaction
-                raise RuntimeError("insert blew up")
-            original(conn, state, records)
+                return dataclasses.replace(
+                    plan, mode_sql="INSERT INTO no_such_table_xyz SELECT 1"
+                )
+            return plan
 
-        handler._insert_records = _flaky_insert  # type: ignore[method-assign]
+        with patch.object(generic_module, "build_stage_write_plan", _flaky_build):
+            failed = await _write(handler, 1, [{"id": 1, "name": "a"}])
+            assert failed.success is False
+            assert _rows(engine, table) == [(7, "old")]
 
-        failed = await _write(handler, 1, [{"id": 1, "name": "a"}])
-        assert failed.success is False
-        assert _rows(engine, table) == [(7, "old")]
-
-        retried = await _write(handler, 1, [{"id": 1, "name": "a"}])
-        assert retried.success
-        assert _rows(engine, table) == [(1, "a")]
+            retried = await _write(handler, 1, [{"id": 1, "name": "a"}])
+            assert retried.success
+            assert _rows(engine, table) == [(1, "a")]
 
     @pytest.mark.asyncio
     async def test_empty_first_batch_still_truncates(self):
@@ -260,10 +319,11 @@ class TestTruncateOnFirstBatchSqlAlchemy:
         table = _table(engine)
         table2 = _table(engine, "t2")
         handler = _sqlite_handler(engine, table)
+        handler._backend._targets[TableAddress(table="t2")] = table2
         handler._streams["s2"] = SqlStreamState(
             address=TableAddress(table="t2"),
-            table=table2,
             write_mode="truncate_insert",
+            schema_contract=_identity_contract(),
         )
 
         await _write(handler, 1, [{"id": 1, "name": "a"}])

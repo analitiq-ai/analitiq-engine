@@ -21,8 +21,7 @@ from unittest.mock import MagicMock
 import pyarrow as pa
 import pytest
 
-from cdk.sql.dialects import TableAddress
-from cdk.sql.generic import GenericSQLConnector, _StreamState
+from cdk.sql.generic import GenericSQLConnector
 from cdk.types import AckStatus, Cursor, FailureCategory
 from src.destination.connectors.api import ApiDestinationHandler
 from src.destination.connectors.file import FileDestinationHandler
@@ -121,12 +120,11 @@ def _disconnected_sql() -> GenericSQLConnector:
 
 
 def _engineless_sql() -> GenericSQLConnector:
-    """Connected on the SQLAlchemy path, but no engine was ever built."""
+    """Connected on the SQLAlchemy path, but no write backend was built."""
     handler = GenericSQLConnector()
     handler._connected = True
     handler._adbc_only = False
-    handler._engine = None
-    handler._sync_engine = None
+    handler._backend = None
     return handler
 
 
@@ -135,22 +133,6 @@ def _unconfigured_sql() -> GenericSQLConnector:
     handler._connected = True
     handler._adbc_only = True
     handler._streams = {}
-    return handler
-
-
-def _tableless_sql() -> GenericSQLConnector:
-    """Stream configured, but the SQLAlchemy path never reflected a table.
-
-    The other arm of the same guard as ``_unconfigured_sql``; only the
-    SQLAlchemy path needs a table object, so ADBC cannot reach it.
-    """
-    handler = GenericSQLConnector()
-    handler._connected = True
-    handler._adbc_only = False
-    handler._engine = MagicMock()
-    handler._streams = {
-        STREAM_ID: _StreamState(address=TableAddress(table="t"), table=None)
-    }
     return handler
 
 
@@ -173,7 +155,6 @@ ALL_GUARDS = [
     pytest.param(_disconnected_sql, id="sql-disconnected"),
     pytest.param(_engineless_sql, id="sql-engineless"),
     pytest.param(_unconfigured_sql, id="sql-unconfigured"),
-    pytest.param(_tableless_sql, id="sql-tableless"),
     pytest.param(_unconfigured_proxy, id="proxy-unconfigured"),
 ]
 
@@ -225,9 +206,11 @@ async def test_file_uninitialized_guard_names_the_missing_components(
             _formatterless_stream, "formatter", "not connected", id="stream-formatter"
         ),
         pytest.param(
-            _unconfigured_sql, "Schema not configured", "table", id="sql-none"
+            _unconfigured_sql, "Schema not configured", "backend", id="sql-none"
         ),
-        pytest.param(_tableless_sql, "table", None, id="sql-table"),
+        pytest.param(
+            _engineless_sql, "backend", "Schema not configured", id="sql-backendless"
+        ),
     ],
 )
 async def test_two_condition_guards_distinguish_their_arms(

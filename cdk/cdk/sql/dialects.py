@@ -4,9 +4,11 @@
 vendor-specific in the SQL path: identifier quoting and normalization, the
 ``catalog.schema.table`` address composer (:class:`TableAddress`), the
 PRIMARY KEY clause form, the ``INFORMATION_SCHEMA`` discovery query shapes,
-the SQLAlchemy upsert statement, the pre-DDL statements, the per-connection
-session-init statements, and the ADBC-only write machinery (native DDL type
-names and stage-table syntax).
+the stage-then-merge write hooks (stage DDL, the merge-form upsert
+statement, the target-emptying statement, the optional native bulk land),
+the pre-DDL statements, the per-connection session-init statements, and the
+ADBC-only write machinery (native DDL type names and stage-table syntax,
+until #389 aligns that transport on the same hooks).
 
 Table addressing follows the engine's bind-once/sink-many rule: the intent
 (``catalog``/``schema``/``table``) is resolved exactly once into a
@@ -45,7 +47,7 @@ named binds on the SQLAlchemy path.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -126,6 +128,12 @@ class SqlDialect:
     pk_not_enforced: bool = False
     #: Schemas hidden from ``list_schemas`` (catalog/internal schemas).
     system_schemas: tuple[str, ...] = ()
+    #: Identifier byte budget the engine composes generated names within
+    #: (stage tables). 63 is the tightest budget among supported systems
+    #: (Postgres/Redshift NAMEDATALEN - 1); a dialect whose system allows
+    #: less overrides, one that allows more may raise it to keep longer
+    #: readable name tails.
+    max_identifier_length: int = 63
     #: The connector's declared ``sql_capabilities`` (issue #390), attached
     #: by the facade when a runtime binds (``GenericSQLConnector``). The
     #: dialect class renders SQL; whether the system HAS a shape — catalog
@@ -248,23 +256,95 @@ class SqlDialect:
         """
         return None
 
-    # ---- SQLAlchemy write path ---------------------------------------------
-    def build_sqlalchemy_upsert(
-        self,
-        table: Any,
-        records: list[dict[str, Any]],
-        conflict_keys: list[str],
-    ) -> Any:
-        """Build the dialect's INSERT-or-UPDATE statement for *records*.
+    # ---- stage-then-merge write path (ADR sql-write-path-v2) ---------------
+    def stage_table_sql(
+        self, stage: TableAddress, target: TableAddress, *, temp: bool
+    ) -> str:
+        """``CREATE [TEMPORARY] TABLE`` *stage* shaped like *target*.
 
-        No portable ANSI form exists (postgres ``ON CONFLICT``, MySQL
-        ``ON DUPLICATE KEY UPDATE``); the connector package's dialect
-        implements it. The base raises so an upsert against a dialect
-        without one fails loudly instead of silently degrading to INSERT.
+        Every SQL write lands in a stage table first; this renders the
+        stage's DDL. ``temp`` comes from the connector's declared
+        ``sql_capabilities.stage.scope`` — ``True`` means a session-scoped
+        temporary table (a temp-scope *stage* carries no schema: it lives
+        in the session's namespace), ``False`` an ordinary table placed by
+        the declared schema rule. Column-copy syntax is vendor-specific
+        (postgres ``(LIKE target INCLUDING DEFAULTS)``, MySQL
+        ``LIKE target``); the connector package's dialect implements it.
+        The base raises so a declared stage shape a dialect cannot render
+        fails loudly instead of guessing DDL the system may misread.
         """
-        raise UnsupportedDialectOperationError(
-            "build_sqlalchemy_upsert", dialect=self.name
-        )
+        raise UnsupportedDialectOperationError("stage_table_sql", dialect=self.name)
+
+    def merge_statement_sql(
+        self,
+        stage: TableAddress,
+        target: TableAddress,
+        conflict_keys: Sequence[str],
+        columns: Sequence[str],
+    ) -> str:
+        """Render the upsert statement from *stage* to *target*.
+
+        Rendered in the system's declared merge form (``MERGE INTO``,
+        ``INSERT … ON CONFLICT DO UPDATE``, ``INSERT … ON DUPLICATE KEY
+        UPDATE``); no portable ANSI form exists, so the connector
+        package's dialect implements it. Serves upsert only — insert uses
+        the ANSI anti-join the CDK renders itself.
+
+        The statement's semantics are part of the write contract:
+
+        * ``columns`` are the landed columns, in stage order; the update
+          set is ``columns`` minus ``conflict_keys``. Columns the target
+          has but the batch did not land (the engine-managed
+          ``_synced_at``, physical columns added out-of-band) keep their
+          stored value on matched rows and their DEFAULT on inserted ones.
+        * When every landed column is a conflict key there is nothing to
+          update: render the dialect's insert-only degradation (postgres
+          ``ON CONFLICT DO NOTHING``, a MERGE without ``WHEN MATCHED``) —
+          matched rows stay untouched, never an error.
+
+        The base raises so an upsert against a dialect without a merge
+        rendering fails loudly instead of silently degrading to INSERT.
+        """
+        raise UnsupportedDialectOperationError("merge_statement_sql", dialect=self.name)
+
+    def empty_table_sql(self, target: TableAddress) -> str:
+        """Render the statement that empties *target* for a full refresh.
+
+        ANSI ``DELETE FROM`` — deliberately never ``TRUNCATE``, which
+        implicitly commits on several systems and would break the
+        stage cycle's single-transaction shape where one is declared.
+        Overridable for systems whose DELETE grammar deviates (BigQuery
+        requires a ``WHERE`` clause).
+        """
+        # Composed of dialect-quoted identifiers; no user values.
+        return f"DELETE FROM {self.quote_table(target)}"  # nosec B608
+
+    def bulk_land(
+        self,
+        conn: Any,
+        stage: TableAddress,
+        batch: Any,
+        *,
+        runtime: Any,
+    ) -> bool:
+        """Land *batch* (a ``pyarrow.RecordBatch``) into *stage* natively.
+
+        A pure speed slot: stage contents must be byte-identical to the
+        executemany default, and the downstream mode statement is the same
+        statement either way. Return ``True`` when landed; ``False``
+        declines and the backend falls back to executemany (logged INFO —
+        a speed downgrade is visible, never silent). Called only when the
+        connector declares a bulk mechanism (``sql_capabilities.bulk_load``).
+
+        ``conn`` is the backend's native connection object (the sync
+        SQLAlchemy ``Connection`` on the SQLAlchemy transport). ``runtime``
+        is the resolved ``ConnectionRuntime`` the backend connected with:
+        a dialect whose mechanism runs through the system's own client
+        rather than the transport connection builds that client from
+        *runtime* inside the call and discards it on return — no client is
+        cached on the dialect or the backend.
+        """
+        return False
 
     def build_tls_connect_arg(self, mode: str, ca_pem: str | None) -> Any:
         """Turn the stored TLS mode and CA bundle into the connect argument.

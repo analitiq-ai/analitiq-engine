@@ -2,11 +2,16 @@
 
 A sync-only driver (the production case is Redshift's vendor-supported
 ``redshift_connector``) materializes a plain sync ``Engine``; the handler
-runs the same sync-``Connection`` transaction bodies the async path uses,
+runs the same sync-``Connection`` stage-cycle body the async path uses,
 dispatched via ``asyncio.to_thread``. SQLite's stdlib driver is the
 in-process stand-in for a sync-only dialect, so these tests exercise the
-real write/read/DDL machinery end to end — actual SQL against an actual
+real stage-then-merge machinery end to end — actual SQL against an actual
 database, not mocks of the engine surface.
+
+The write path is stage-then-merge (issue #388): every batch lands in a
+per-batch stage table and exactly one mode statement applies it. The test
+dialect declares its capabilities the way a connector package does and
+implements the two rendering hooks the primitive needs.
 """
 
 from __future__ import annotations
@@ -20,7 +25,9 @@ import pytest
 from sqlalchemy import MetaData, Table, create_engine
 from sqlalchemy.pool import StaticPool
 
-from cdk.sql.dialects import TableAddress
+from cdk.sql.backend import SqlAlchemyBackend
+from cdk.sql.capabilities import SqlCapabilities
+from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.generic import GenericSQLConnector, _StreamState
 from cdk.types import AckStatus, Cursor
 
@@ -31,43 +38,140 @@ def _sqlite_sync_engine():
     The handler dispatches sync-engine work via ``asyncio.to_thread``, so
     the default per-thread SQLite memory connection would see an empty
     database; StaticPool + check_same_thread=False shares one connection.
+    The isolation-level/BEGIN recipe makes pysqlite genuinely
+    transactional for DDL too (by default it silently commits before
+    DDL), so the declared ``transactional_ddl: true`` stage shape behaves
+    here the way it does on Postgres.
     """
-    return create_engine(
+    from sqlalchemy import event
+
+    engine = create_engine(
         "sqlite://",
-        connect_args={"check_same_thread": False},
+        connect_args={"check_same_thread": False, "isolation_level": None},
         poolclass=StaticPool,
     )
+
+    @event.listens_for(engine, "begin")
+    def _do_begin(conn):
+        conn.exec_driver_sql("BEGIN")
+
+    return engine
 
 
 TARGET_DDL = "CREATE TABLE events (id INTEGER PRIMARY KEY, name TEXT)"
 
 
-def _connected_handler(engine, write_mode: str = "insert") -> GenericSQLConnector:
+class _SqliteStageDialect(SqlDialect):
+    """Stage-then-merge rendering for the SQLite stand-in.
+
+    Implements exactly the two hooks a write-role connector package must
+    ship: the stage DDL and the declared merge form (SQLite speaks
+    ``INSERT … ON CONFLICT DO UPDATE``).
+    """
+
+    name = "sqlite"
+
+    def stage_table_sql(
+        self, stage: TableAddress, target: TableAddress, *, temp: bool
+    ) -> str:
+        keyword = "CREATE TEMPORARY TABLE" if temp else "CREATE TABLE"
+        return (
+            f"{keyword} {self.quote_table(stage)} AS "
+            f"SELECT * FROM {self.quote_table(target)} WHERE 0"
+        )
+
+    def merge_statement_sql(self, stage, target, conflict_keys, columns):
+        col_list = ", ".join(self.quote_ident(c) for c in columns)
+        keys = ", ".join(self.quote_ident(c) for c in conflict_keys)
+        update_cols = [c for c in columns if c not in set(conflict_keys)]
+        sql = (
+            f"INSERT INTO {self.quote_table(target)} ({col_list}) "
+            f"SELECT {col_list} FROM {self.quote_table(stage)} WHERE true "
+            f"ON CONFLICT ({keys}) "
+        )
+        if not update_cols:
+            return sql + "DO NOTHING"
+        sets = ", ".join(
+            f"{self.quote_ident(c)} = excluded.{self.quote_ident(c)}"
+            for c in update_cols
+        )
+        return sql + f"DO UPDATE SET {sets}"
+
+
+def _declared_caps(**stage_overrides: Any) -> SqlCapabilities:
+    stage = {
+        "scope": "temp",
+        "schema": "target",
+        "transactional_ddl": True,
+        **stage_overrides,
+    }
+    return SqlCapabilities.from_declaration(
+        {
+            "catalog": "none",
+            "session_targeting": "per_statement",
+            "merge_form": "insert_on_conflict",
+            "bulk_load": "none",
+            "stage": stage,
+        },
+        source="<test>",
+    )
+
+
+def _arrow_contract() -> MagicMock:
+    """SchemaContract stand-in: the cast is identity (rows are pre-shaped)."""
+    contract = MagicMock()
+    contract.cast_arrow_batch.side_effect = lambda rb: rb
+    return contract
+
+
+def _wire_backend(
+    handler: GenericSQLConnector,
+    engine: Any,
+    address: TableAddress,
+    caps: SqlCapabilities,
+) -> None:
+    """Wire dialect, declared capabilities, and a backend with the
+    reflected target — what connect() + configure_schema() produce."""
+    handler.dialect = _SqliteStageDialect()
+    handler.dialect.capabilities = caps
+    handler._capabilities = caps
+    backend = SqlAlchemyBackend(handler.dialect)
+    backend._sync_engine = engine
+    backend._bulk_declared = caps.bulk_load != "none"
+    backend._targets[address] = Table(address.table, MetaData(), autoload_with=engine)
+    handler._backend = backend
+
+
+def _connected_handler(
+    engine,
+    write_mode: str = "insert",
+    *,
+    conflict_keys: list[str] | None = None,
+    transactional: bool = True,
+) -> GenericSQLConnector:
     """Handler wired to *engine* with the reflected target table for ``s1``.
 
     Content-derived idempotency (issue #282) means the destination creates
-    only the target table -- there is no positional ``_batch_commits`` ledger.
-    The stream's ``id`` primary key is the identity the insert anti-join skips
-    a re-read row on.
+    only the target table -- there is no positional ``_batch_commits``
+    ledger. The stream's ``id`` primary key is the identity the insert
+    anti-join skips a re-read row on.
     """
     with engine.begin() as conn:
         conn.exec_driver_sql(TARGET_DDL)
-    meta = MetaData()
-    table = Table("events", meta, autoload_with=engine)
 
-    contract = MagicMock()
-    contract.to_db_records.side_effect = lambda rb: rb.to_pylist()
-
+    address = TableAddress(table="events")
     handler = GenericSQLConnector()
     handler._connected = True
     handler._sync_engine = engine
+    _wire_backend(
+        handler, engine, address, _declared_caps(transactional_ddl=transactional)
+    )
     handler._streams["s1"] = _StreamState(
-        address=TableAddress(table="events"),
-        table=table,
+        address=address,
         write_mode=write_mode,
         primary_keys=["id"],
-        conflict_keys=[],
-        schema_contract=contract,
+        conflict_keys=conflict_keys or [],
+        schema_contract=_arrow_contract(),
     )
     return handler
 
@@ -95,6 +199,15 @@ def _count(engine, table: str) -> int:
         return conn.exec_driver_sql(f"SELECT count(*) FROM {table}").scalar_one()
 
 
+def _table_names(engine) -> set[str]:
+    with engine.connect() as conn:
+        rows = conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "UNION ALL SELECT name FROM sqlite_temp_master WHERE type='table'"
+        ).all()
+    return {r[0] for r in rows}
+
+
 class TestSyncEngineWritePath:
     @pytest.mark.asyncio
     async def test_insert_writes_rows(self):
@@ -114,9 +227,9 @@ class TestSyncEngineWritePath:
     async def test_reinsert_same_key_is_deduped(self):
         # A same-run retry re-reads the inclusive cursor boundary, so the same
         # keyed row can arrive twice. There is no positional ledger (issue
-        # #282); the insert anti-join skips the row whose ``id`` already exists,
-        # so the re-insert is a no-op that still acks SUCCESS -- never the
-        # removed ALREADY_COMMITTED status.
+        # #282); the set-based anti-join from the stage skips the row whose
+        # ``id`` already exists, so the re-insert is a no-op that still acks
+        # SUCCESS -- never the removed ALREADY_COMMITTED status.
         engine = _sqlite_sync_engine()
         try:
             handler = _connected_handler(engine)
@@ -127,6 +240,43 @@ class TestSyncEngineWritePath:
             assert replay.committed_cursor.token == b"cur-1"
             # The re-insert was deduped on the primary key -- no double row.
             assert _count(engine, "events") == 1
+        finally:
+            engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_intra_batch_duplicate_key_first_occurrence_wins(self):
+        # The stage feeds one set-based statement, so duplicate identities
+        # inside a batch are collapsed in Arrow space before landing —
+        # first occurrence wins, same contract as before the stage split.
+        engine = _sqlite_sync_engine()
+        try:
+            handler = _connected_handler(engine)
+            result = await _write(
+                handler,
+                rows=[{"id": 1, "name": "first"}, {"id": 1, "name": "second"}],
+            )
+            assert result.status == AckStatus.ACK_STATUS_SUCCESS
+            with engine.connect() as conn:
+                rows = conn.exec_driver_sql("SELECT id, name FROM events").all()
+            assert rows == [(1, "first")]
+        finally:
+            engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_upsert_updates_in_place(self):
+        # The upsert lands in the stage and applies via the dialect's
+        # declared merge form; a re-sent key updates instead of duplicating.
+        engine = _sqlite_sync_engine()
+        try:
+            handler = _connected_handler(
+                engine, write_mode="upsert", conflict_keys=["id"]
+            )
+            await _write(handler, rows=[{"id": 1, "name": "old"}])
+            result = await _write(handler, rows=[{"id": 1, "name": "new"}])
+            assert result.status == AckStatus.ACK_STATUS_SUCCESS
+            with engine.connect() as conn:
+                rows = conn.exec_driver_sql("SELECT id, name FROM events").all()
+            assert rows == [(1, "new")]
         finally:
             engine.dispose()
 
@@ -174,6 +324,18 @@ class TestSyncEngineWritePath:
             engine.dispose()
 
     @pytest.mark.asyncio
+    async def test_stage_is_dropped_after_the_batch(self):
+        # The per-batch stage must not outlive its cycle, success included.
+        engine = _sqlite_sync_engine()
+        try:
+            handler = _connected_handler(engine)
+            await _write(handler)
+            leftovers = {n for n in _table_names(engine) if "stage" in n}
+            assert leftovers == set()
+        finally:
+            engine.dispose()
+
+    @pytest.mark.asyncio
     async def test_health_check_runs_on_sync_engine(self):
         engine = _sqlite_sync_engine()
         try:
@@ -185,22 +347,89 @@ class TestSyncEngineWritePath:
             engine.dispose()
 
 
-class TestSyncEngineDdl:
+class TestNonTransactionalCycle:
+    """``stage.transactional_ddl: false`` runs per-step commits with the
+    pre-flight drop; the primitive's self-healing rules replace atomicity."""
+
     @pytest.mark.asyncio
-    async def test_ddl_and_reflect_returns_bound_table(self):
+    async def test_write_lands_and_drops_stage(self):
         engine = _sqlite_sync_engine()
         try:
-            handler = GenericSQLConnector()
-            handler._sync_engine = engine
-            state = _StreamState(address=TableAddress(table="events"))
-            import asyncio
-
-            table = await asyncio.to_thread(
-                handler._ddl_and_reflect_on_sync_engine,
-                state,
-                TARGET_DDL,
+            handler = _connected_handler(engine, transactional=False)
+            result = await _write(
+                handler, rows=[{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]
             )
-            assert {c.name for c in table.columns} == {"id", "name"}
+            assert result.status == AckStatus.ACK_STATUS_SUCCESS
+            assert _count(engine, "events") == 2
+            assert {n for n in _table_names(engine) if "stage" in n} == set()
+        finally:
+            engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_retry_after_leftover_stage_self_heals(self):
+        # A crashed attempt can leave the deterministic-named stage behind
+        # on the session; the retry's pre-flight DROP IF EXISTS clears
+        # exactly its own leftover and the batch lands.
+        engine = _sqlite_sync_engine()
+        try:
+            handler = _connected_handler(engine, transactional=False)
+            # Simulate the prior attempt's leftover under the same
+            # deterministic name the retry will compute.
+            from cdk.sql.write_plan import stage_table_name
+
+            leftover = stage_table_name(
+                "events",
+                run_id="r1",
+                stream_id="s1",
+                batch_seq=1,
+                max_identifier_length=handler.dialect.max_identifier_length,
+            )
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    f'CREATE TEMPORARY TABLE "{leftover}" AS '
+                    f"SELECT * FROM events WHERE 0"
+                )
+            result = await _write(handler, seq=1, run_id="r1")
+            assert result.status == AckStatus.ACK_STATUS_SUCCESS
+            assert _count(engine, "events") == 1
+        finally:
+            engine.dispose()
+
+
+class TestBulkLandFallback:
+    @pytest.mark.asyncio
+    async def test_declined_bulk_land_falls_back_to_executemany(self, caplog):
+        import logging
+
+        engine = _sqlite_sync_engine()
+        try:
+            handler = _connected_handler(engine)
+            # Declare a bulk mechanism; the base dialect's bulk_land
+            # declines, so landing falls back to executemany with an
+            # INFO log — a visible speed downgrade, never a silent one.
+            handler._backend._bulk_declared = True
+            with caplog.at_level(logging.INFO, logger="cdk.sql.backend"):
+                # bulk_land needs the runtime it connected with.
+                handler._backend._runtime = MagicMock()
+                result = await _write(handler)
+            assert result.status == AckStatus.ACK_STATUS_SUCCESS
+            assert _count(engine, "events") == 1
+            assert any("declined" in r.getMessage() for r in caplog.records)
+        finally:
+            engine.dispose()
+
+
+class TestSyncEngineDdl:
+    @pytest.mark.asyncio
+    async def test_run_ddl_and_reflect_target_columns(self):
+        engine = _sqlite_sync_engine()
+        try:
+            dialect = _SqliteStageDialect()
+            backend = SqlAlchemyBackend(dialect)
+            backend._sync_engine = engine
+            await backend.run_ddl([TARGET_DDL])
+            columns = await backend.target_columns(TableAddress(table="events"))
+            assert set(columns) == {"id", "name"}
         finally:
             engine.dispose()
 
@@ -276,7 +505,17 @@ class _SyncWriteRuntime:
         self.sync_engine = engine
         self.driver = driver
         self.connector_id = driver
-        self.declared_sql_capabilities = None
+        self.declared_sql_capabilities = {
+            "catalog": "none",
+            "session_targeting": "per_statement",
+            "merge_form": "insert_on_conflict",
+            "bulk_load": "none",
+            "stage": {
+                "scope": "temp",
+                "schema": "target",
+                "transactional_ddl": True,
+            },
+        }
         self.close = AsyncMock()
 
     @property
@@ -304,6 +543,10 @@ class _StubTypeMapper:
         return self._to_native[canonical]
 
 
+class _SqliteConnector(GenericSQLConnector):
+    dialect_class = _SqliteStageDialect
+
+
 class TestSyncRuntimeWiring:
     """The dispatch between the three modes, driven through the real
     entry points (connect -> DDL -> write) instead of injected fields."""
@@ -313,12 +556,13 @@ class TestSyncRuntimeWiring:
         """connect -> DDL -> write flows through the sync-engine runtime."""
         engine = _sqlite_sync_engine()
         try:
-            handler = GenericSQLConnector()
+            handler = _SqliteConnector()
             with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()):
                 await handler.connect(_SyncWriteRuntime(engine))
             assert handler._sync_engine is engine
             assert handler._engine is None
             assert handler._adbc_only is False
+            assert handler._backend is not None
 
             state = _StreamState(
                 address=TableAddress(table="events"),
@@ -337,11 +581,8 @@ class TestSyncRuntimeWiring:
                 },
             )
             await handler._ensure_tables_exist(state, _StubTypeMapper())
-            assert state.table is not None
 
-            contract = MagicMock()
-            contract.to_db_records.side_effect = lambda rb: rb.to_pylist()
-            state.schema_contract = contract
+            state.schema_contract = _arrow_contract()
             handler._streams["s1"] = state
 
             result = await _write(handler, rows=[{"id": 1, "name": "a"}])
@@ -376,9 +617,9 @@ class TestSyncEngineStatementTimeout:
             handler = _connected_handler(engine)
             handler.set_statement_timeout(5.0)
             with patch.object(
-                handler,
-                "_write_batch_on_sync_engine",
-                side_effect=TimeoutError(),
+                handler._backend,
+                "execute_write",
+                new=AsyncMock(side_effect=TimeoutError()),
             ):
                 result = await _write(handler)
             assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -402,8 +643,8 @@ class TestSyncEngineStatementTimeout:
 
 
 class TestAsyncEngineParity:
-    """The async flavour enters the same shared sync-Connection bodies via
-    run_sync; prove it against a real async driver, not a fake."""
+    """The async flavour enters the same shared sync-Connection cycle body
+    via run_sync; prove it against a real async driver, not a fake."""
 
     async def _async_handler(self):
         pytest.importorskip("aiosqlite")
@@ -414,24 +655,26 @@ class TestAsyncEngineParity:
             connect_args={"check_same_thread": False},
             poolclass=StaticPool,
         )
-        meta = MetaData()
         async with engine.begin() as conn:
             await conn.exec_driver_sql(TARGET_DDL)
-            table = await conn.run_sync(
-                lambda c: Table("events", meta, autoload_with=c)
-            )
-        contract = MagicMock()
-        contract.to_db_records.side_effect = lambda rb: rb.to_pylist()
+        address = TableAddress(table="events")
+        caps = _declared_caps()
         handler = GenericSQLConnector()
         handler._connected = True
         handler._engine = engine
+        handler.dialect = _SqliteStageDialect()
+        handler.dialect.capabilities = caps
+        handler._capabilities = caps
+        backend = SqlAlchemyBackend(handler.dialect)
+        backend._engine = engine
+        await backend.target_columns(address)
+        handler._backend = backend
         handler._streams["s1"] = _StreamState(
-            address=TableAddress(table="events"),
-            table=table,
+            address=address,
             write_mode="insert",
             primary_keys=["id"],
             conflict_keys=[],
-            schema_contract=contract,
+            schema_contract=_arrow_contract(),
         )
         return handler, engine
 

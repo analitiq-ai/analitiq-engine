@@ -804,8 +804,11 @@ class TestSupportsUpsert:
 
     def test_sa_declaration_with_renderer_supports(self):
         class _SaRenderingDialect(_FixtureAdbcDialect):
-            def build_sqlalchemy_upsert(self, table, records, conflict_keys):
-                return MagicMock()
+            def stage_table_sql(self, stage, target, *, temp):
+                return "CREATE TABLE ..."
+
+            def merge_statement_sql(self, stage, target, conflict_keys, columns):
+                return "MERGE ..."
 
         class _SaRenderingConnector(GenericSQLConnector):
             dialect_class = _SaRenderingDialect
