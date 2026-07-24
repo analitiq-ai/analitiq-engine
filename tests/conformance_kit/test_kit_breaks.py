@@ -358,6 +358,19 @@ class TestDeclarationBreaks:
         violations = check_declaration_consistency(doctored)
         assert "sql_capabilities" in _messages(violations)
 
+    def test_adbc_ingest_without_adbc_transport_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """adbc_ingest on a SQLAlchemy-only connector can never run."""
+        doctored = dataclasses.replace(
+            reference_target,
+            declared_capabilities=_caps_with(reference_target, bulk_load="adbc_ingest"),
+        )
+        violations = check_declaration_consistency(doctored)
+        report = _messages(violations)
+        assert "adbc_ingest" in report
+        assert "transport" in report
+
     def test_merge_rendering_without_declaration_fails(
         self, reference_target: ConformanceTarget
     ) -> None:

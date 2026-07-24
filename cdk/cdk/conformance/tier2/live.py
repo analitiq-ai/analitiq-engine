@@ -154,31 +154,29 @@ class LiveHarness:
         return connector
 
     def executemany_forced(self) -> LiveHarness:
-        """Build a sibling harness (own table) whose bulk mechanism declines.
+        """Build a sibling harness (own table) that lands via executemany.
 
-        The dialect subclass returns ``False`` from ``bulk_land``, so the
-        CDK backend takes its documented fallback and lands via
-        executemany — the reference state the declared mechanism's
-        landing is compared against. Suite-side subclassing only; the
-        connector under test is never modified.
+        The probe target's declaration is doctored to ``bulk_load:
+        "none"`` — in the parsed capabilities and in the definition the
+        runtime is built from — so no backend consults any bulk
+        mechanism: the ADBC backend's own ``adbc_ingest`` landing and
+        the ``bulk_land`` hook are both off, and every batch takes the
+        executemany path the comparison certifies. The connector under
+        test is never modified; the doctoring is suite-side data.
         """
-        base = self.target.connector_class
-        if base is None or not issubclass(base, GenericSQLConnector):
+        caps = self.target.declared_capabilities
+        if caps is None:
             raise ConformanceSetupError(
-                "no GenericSQLConnector subclass resolved for the live tier"
+                "executemany_forced needs declared sql_capabilities"
             )
-        declined_dialect = type(
-            f"{base.dialect_class.__name__}ExecutemanyProbe",
-            (base.dialect_class,),
-            {"bulk_land": _decline_bulk_land},
-        )
-        forced_connector = type(
-            f"{base.__name__}ExecutemanyProbe",
-            (base,),
-            {"dialect_class": declined_dialect},
-        )
+        definition = json.loads(json.dumps(self.target.definition))
+        definition["sql_capabilities"]["bulk_load"] = "none"
         return LiveHarness(
-            target=dataclasses.replace(self.target, connector_class=forced_connector),
+            target=dataclasses.replace(
+                self.target,
+                definition=definition,
+                declared_capabilities=dataclasses.replace(caps, bulk_load="none"),
+            ),
             document_path=self.document_path,
             schema=self.schema,
             table=f"conformance_{uuid.uuid4().hex[:12]}",
@@ -307,18 +305,6 @@ class LiveHarness:
             await _run_statement(runtime, statement)
         finally:
             await runtime.close()
-
-
-def _decline_bulk_land(
-    self: SqlDialect,
-    conn: Any,
-    stage: Any,
-    batch: Any,
-    *,
-    runtime: Any,
-) -> bool:
-    """Decline the bulk mechanism so the CDK lands via executemany."""
-    return False
 
 
 async def _run_statement(runtime: ConnectionRuntime, statement: str) -> None:

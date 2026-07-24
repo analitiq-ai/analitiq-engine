@@ -29,22 +29,45 @@ Every check is also importable directly (:func:`check_override_surface`,
 :func:`check_declaration_consistency`, :func:`check_type_map_round_trip`)
 so a repo can wire them into its own harness; the pytest modules are thin
 wrappers over these functions.
+
+Exports resolve lazily (PEP 562): the ``pytest11`` entry point makes
+pytest import :mod:`cdk.conformance.plugin` — and therefore this
+package — at startup in every environment with the core CDK installed,
+including ones without the ``conformance``/``arrow`` extras. The check
+modules reach the Arrow-dependent SQL surface, so importing them here
+eagerly would break pytest startup for a core-only consumer; they load
+on first attribute access instead.
 """
 
-from .declaration import check_declaration_consistency
-from .roundtrip import check_type_map_round_trip
-from .surface import check_override_surface, sanctioned_dialect_surface
-from .target import ConformanceSetupError, ConformanceTarget, load_target
-from .violations import Violation, violation_report
+from importlib import import_module
+from typing import TYPE_CHECKING, Any
 
-__all__ = [
-    "ConformanceSetupError",
-    "ConformanceTarget",
-    "Violation",
-    "check_declaration_consistency",
-    "check_override_surface",
-    "check_type_map_round_trip",
-    "load_target",
-    "sanctioned_dialect_surface",
-    "violation_report",
-]
+if TYPE_CHECKING:
+    from .declaration import check_declaration_consistency
+    from .roundtrip import check_type_map_round_trip
+    from .surface import check_override_surface, sanctioned_dialect_surface
+    from .target import ConformanceSetupError, ConformanceTarget, load_target
+    from .violations import Violation, violation_report
+
+#: Export name -> defining submodule, resolved on first access.
+_EXPORTS = {
+    "ConformanceSetupError": "target",
+    "ConformanceTarget": "target",
+    "load_target": "target",
+    "Violation": "violations",
+    "violation_report": "violations",
+    "check_declaration_consistency": "declaration",
+    "check_override_surface": "surface",
+    "sanctioned_dialect_surface": "surface",
+    "check_type_map_round_trip": "roundtrip",
+}
+
+__all__ = sorted(_EXPORTS)
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve a public export from its submodule on first access."""
+    submodule = _EXPORTS.get(name)
+    if submodule is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return getattr(import_module(f".{submodule}", __name__), name)

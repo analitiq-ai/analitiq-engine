@@ -168,9 +168,10 @@ def test_declared_bulk_and_executemany_land_identically(
     """Landing is a pure speed slot: bulk and executemany agree (ADR s.2).
 
     The batch is written twice — once through the declared bulk
-    mechanism, once through a suite-side dialect that declines so the
-    CDK takes its executemany fallback — into two tables, and the
-    resulting contents must be identical. This is the live form of the
+    mechanism, once through a probe whose declaration is doctored to
+    bulk_load "none" so every backend (adbc_ingest included) lands via
+    executemany — into two tables, and the resulting contents must be
+    identical. This is the live form of the
     ADR's landing-equivalence assertion; native bulk protocols cannot
     execute against generic fakes, so the contract tier certifies the
     declaration/hook pairing and this scenario certifies the semantics.

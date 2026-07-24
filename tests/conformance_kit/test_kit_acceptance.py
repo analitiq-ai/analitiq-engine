@@ -121,6 +121,41 @@ class TestThinConnectorPassesVacuously:
         assert check_declaration_consistency(target) == []
 
 
+class TestPluginImportStaysLight:
+    """The pytest11 entry point must not require the optional extras."""
+
+    def test_plugin_import_pulls_no_heavy_dependencies(self) -> None:
+        """Pytest imports the plugin at startup in every env with the core
+        CDK installed; the import must not reach pyarrow or the SQL
+        surface, or a core-only consumer's pytest runs crash before
+        collection."""
+        import subprocess
+        import sys
+
+        from .kit_runner import REPO_ROOT
+
+        probe = (
+            "import sys\n"
+            "import cdk.conformance.plugin\n"
+            "heavy = [m for m in ('pyarrow', 'cdk.sql.generic', "
+            "'cdk.sql.dialects') if m in sys.modules]\n"
+            "assert not heavy, f'plugin import loaded {heavy}'\n"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", probe],
+            cwd=REPO_ROOT,
+            env={"PYTHONPATH": str(REPO_ROOT / "cdk")},
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        assert completed.returncode == 0, (
+            f"importing the pytest plugin dragged in optional dependencies:"
+            f"\n{completed.stdout}{completed.stderr}"
+        )
+
+
 class TestSuiteInvocation:
     """The shipped pytest wiring, both consumer configuration paths."""
 

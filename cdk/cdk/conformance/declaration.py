@@ -33,10 +33,21 @@ CHECK = "declaration-consistency"
 #: hook. ``adbc_ingest`` is the ADBC backend's own native landing — no
 #: dialect code involved — so it neither requires nor forbids the hook
 #: (a connector may still implement ``bulk_land`` for its SQLAlchemy
-#: transport alongside a declared ``adbc_ingest``).
+#: transport alongside a declared ``adbc_ingest``); what it does require
+#: is an ADBC transport to run on, checked below.
 DIALECT_IMPLEMENTED_BULK_MECHANISMS = frozenset(
     {"copy_from", "load_data_local_infile", "load_job"}
 )
+
+
+def declared_transport_types(target: ConformanceTarget) -> set[str]:
+    """Collect the ``transport_type`` values the definition declares."""
+    transports = target.definition.get("transports") or {}
+    return {
+        str(block["transport_type"])
+        for block in transports.values()
+        if isinstance(block, dict) and block.get("transport_type")
+    }
 
 
 def dialect_overrides(dialect_cls: type, hook: str) -> bool:
@@ -138,6 +149,20 @@ def check_declaration_consistency(target: ConformanceTarget) -> list[Violation]:
 
     if caps is not None:
         violations.extend(_hook_declaration_violations(caps, dialect_cls))
+        if caps.bulk_load == "adbc_ingest" and "adbc" not in declared_transport_types(
+            target
+        ):
+            violations.append(
+                Violation(
+                    CHECK,
+                    "connector.json declares bulk_load 'adbc_ingest' but no "
+                    "adbc transport; the mechanism is the ADBC backend's own "
+                    "landing and can never run on a SQLAlchemy-only "
+                    "connector — every batch would silently fall back to "
+                    "executemany. Declare an adbc transport or a mechanism "
+                    "the declared transport can run.",
+                )
+            )
     return violations
 
 
