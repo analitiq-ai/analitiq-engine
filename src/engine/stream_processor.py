@@ -422,10 +422,9 @@ class StreamProcessor:
         writing must not block other streams from starting their reads.
         """
         if self.pacing_gate is None:
-            await stage
-            return
+            return await stage
         async with self.pacing_gate:
-            await stage
+            return await stage
 
     async def _extract_stage(
         self, source_readable: Readable, queue: asyncio.Queue[Any]

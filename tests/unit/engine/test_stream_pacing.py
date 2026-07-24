@@ -84,8 +84,6 @@ class TestProcessStreamForwardsTheGate:
     while unleashing full fan-out."""
 
     async def test_gate_reaches_the_stream_processor(self, monkeypatch):
-        import src.engine.engine as engine_module
-
         engine = object.__new__(StreamingEngine)
         engine.pipeline_id = "p1"
         engine.state_manager = MagicMock()
@@ -108,7 +106,7 @@ class TestProcessStreamForwardsTheGate:
             async def run(self):
                 return None
 
-        monkeypatch.setattr(engine_module, "StreamProcessor", _Processor)
+        monkeypatch.setattr("src.engine.engine.StreamProcessor", _Processor)
         gate = asyncio.Semaphore(2)
         await engine._process_stream("s1", {}, {}, pacing_gate=gate)
         assert captured["pacing_gate"] is gate
