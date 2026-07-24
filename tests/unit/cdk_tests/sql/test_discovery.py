@@ -18,7 +18,6 @@ from __future__ import annotations
 import pytest
 
 from cdk.contract import ColumnDef
-from cdk.sql.capabilities import SqlCapabilities
 from cdk.sql.dialects import SqlDialect
 from cdk.sql.discovery import list_columns, list_schemas, list_tables
 from cdk.sql.exceptions import DiscoveryError
@@ -158,15 +157,17 @@ class TestListTables:
 
     @pytest.mark.asyncio
     async def test_catalog_scope_reaches_the_query(self):
-        # A catalog-addressing dialect scopes the FROM path and the binds
-        # to the requested catalog (issue #348 item 4).
+        # A connector declaring catalog addressing ('read' suffices for
+        # discovery) scopes the FROM path and the binds to the requested
+        # catalog (issue #348 item 4). The declaration rides the runtime;
+        # list_tables binds it to the dialect itself.
         class _CatalogDialect(SqlDialect):
             name = "cataloged"
-            capabilities = SqlCapabilities.from_declaration(caps_block(catalog="read"))
 
         runtime = FakeAdbcRuntime(
             "cataloged",
             responder=_route({"tables": [{"table_name": "orders"}]}),
+            declared_sql_capabilities=caps_block(catalog="read"),
         )
         assert await list_tables(
             runtime, "ds", dialect=_CatalogDialect(), catalog="proj"

@@ -23,6 +23,7 @@ from typing import Any
 from ..contract import ColumnDef
 from ..type_map.exceptions import InvalidTypeMapError, UnmappedTypeError
 from ..types import EndpointScope
+from .capabilities import bind_dialect_capabilities
 from .dialects import SqlDialect, TableAddress
 from .exceptions import CatalogAddressingError, CreateTableError
 from .execution import execute_ddl
@@ -114,6 +115,11 @@ async def create_table(
     the declared ``sql_capabilities.catalog`` to be ``full`` (``read``
     covers discovery and reads only).
     """
+    # Standalone entry point: bind the runtime's declared capabilities to
+    # the dialect (the same rule the facade applies), so a declaring
+    # connector's catalog gate behaves identically however the CDK is
+    # driven.
+    bind_dialect_capabilities(dialect, runtime)
     mapper = (
         type_mapper
         if type_mapper is not None

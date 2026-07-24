@@ -207,6 +207,7 @@ class _FakeRuntime:
         self.connector_id = "postgresql"
         self.declared_sql_capabilities = declared
         self.engine = engine
+        self.type_mapper_for = MagicMock()
         self.close = AsyncMock()
 
 
@@ -412,6 +413,10 @@ class TestAdbcWriteSinks:
 
 
 class TestControlPlaneGate:
+    """The standalone helpers bind the runtime's declaration themselves
+    (the same rule the facade applies), so control-plane calls enforce
+    the declared catalog fact without any manual pre-binding."""
+
     @pytest.mark.asyncio
     async def test_create_table_refuses_catalog_with_no_declaration(self):
         from cdk.contract import ColumnDef
@@ -419,7 +424,7 @@ class TestControlPlaneGate:
 
         with pytest.raises(CatalogAddressingError, match="sql_capabilities.catalog"):
             await create_table(
-                MagicMock(),
+                _FakeRuntime(is_adbc=True),
                 "ds",
                 "t",
                 [ColumnDef("id", "Int64")],
@@ -431,29 +436,27 @@ class TestControlPlaneGate:
     @pytest.mark.asyncio
     async def test_create_table_refuses_catalog_on_read_only_declaration(self):
         # 'read' declares discovery/read addressing only; DDL across
-        # catalogs needs 'full'.
+        # catalogs needs 'full'. The declaration comes from the runtime —
+        # the helper binds it, the caller never pre-binds the dialect.
         from cdk.contract import ColumnDef
         from cdk.sql.ddl import create_table
 
-        class _ReadOnlyCatalogDialect(SqlDialect):
-            capabilities = SqlCapabilities.from_declaration(caps_block(catalog="read"))
-
         with pytest.raises(CatalogAddressingError, match="requires 'full'"):
             await create_table(
-                MagicMock(),
+                _FakeRuntime(is_adbc=True, declared=caps_block(catalog="read")),
                 "ds",
                 "t",
                 [ColumnDef("id", "Int64")],
                 [],
-                dialect=_ReadOnlyCatalogDialect(),
+                dialect=SqlDialect(),
                 catalog="proj",
             )
 
     @pytest.mark.asyncio
-    async def test_discovery_refuses_catalog_on_unsupporting_dialect(self):
+    async def test_discovery_refuses_catalog_with_no_declaration(self):
         from cdk.sql.discovery import list_columns, list_schemas, list_tables
 
-        runtime = MagicMock()
+        runtime = _FakeRuntime(is_adbc=True)
         for call in (
             lambda: list_schemas(runtime, dialect=SqlDialect(), catalog="proj"),
             lambda: list_tables(runtime, "ds", dialect=SqlDialect(), catalog="proj"),

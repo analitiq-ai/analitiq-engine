@@ -23,6 +23,7 @@ from typing import Any
 from ..contract import ColumnDef
 from ..type_map.exceptions import UnmappedTypeError
 from ..types import EndpointScope
+from .capabilities import bind_dialect_capabilities
 from .dialects import SqlDialect
 from .exceptions import DiscoveryError
 from .execution import Row, fetch_rows
@@ -59,7 +60,11 @@ async def list_schemas(
     per-system dialects live in the connector packages. A *catalog* scopes
     the listing to that catalog; a dialect that cannot address one raises
     :class:`~cdk.sql.exceptions.CatalogAddressingError` before any SQL runs.
+    Binds the runtime's declared capabilities to the dialect first (the
+    same rule the facade applies), so standalone discovery enforces the
+    declared catalog fact identically.
     """
+    bind_dialect_capabilities(dialect, runtime)
     sql, params = dialect.schemas_query(catalog)
     rows = await fetch_rows(runtime, sql, params)
     return [_col(row, "schema_name") for row in rows]
@@ -69,6 +74,7 @@ async def list_tables(
     runtime: Any, schema: str, *, dialect: SqlDialect, catalog: str = ""
 ) -> list[str]:
     """List the tables (and views) in *schema* (catalog-scoped when given)."""
+    bind_dialect_capabilities(dialect, runtime)
     sql, params = dialect.tables_query(schema, catalog)
     rows = await fetch_rows(runtime, sql, params)
     return [_col(row, "table_name") for row in rows]
@@ -89,6 +95,7 @@ async def list_columns(
     ``UnmappedTypeError`` is chained). A *catalog* scopes both queries to that
     catalog.
     """
+    bind_dialect_capabilities(dialect, runtime)
     type_mapper = runtime.type_mapper_for(scope=EndpointScope.CONNECTION)
 
     pk_sql, pk_params = dialect.primary_keys_query(schema, table, catalog)

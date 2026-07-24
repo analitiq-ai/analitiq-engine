@@ -757,27 +757,55 @@ class TestStageTableSql:
 
 
 class TestSupportsUpsert:
-    """``supports_upsert`` reads the declared ``sql_capabilities.merge_form``
-    — a fact about the target system, identical on every transport. No
-    declaration advertises ``False``; the loud declaration-naming refusal
-    happens at ``configure_schema`` for streams that need upsert."""
+    """``supports_upsert`` advertises upsert only when it is declared
+    (``sql_capabilities.merge_form``) AND the active transport can run it
+    now — the interim ADBC stage-machinery shape, or the SA dialect's
+    statement hook — so ``GetCapabilities`` never advertises a mode
+    ``configure_schema`` would refuse for every stream."""
 
     def test_undeclared_does_not_support(self):
         h = GenericSQLConnector()
         assert h.supports_upsert is False
 
-    def test_declared_merge_form_supports_on_both_transports(self):
-        for adbc_only in (True, False):
-            h = _FixtureConnector()
-            h._adbc_only = adbc_only
-            h._capabilities = _caps(merge_form="merge")
-            assert h.supports_upsert is True
+    def test_declared_merge_form_supports_on_adbc(self):
+        h = _FixtureConnector()
+        h._adbc_only = True
+        h._capabilities = _caps(merge_form="merge")
+        assert h.supports_upsert is True
 
     def test_declared_none_does_not_support(self):
         h = _FixtureConnector()
         h._adbc_only = True
         h._capabilities = _caps(merge_form="none")
         assert h.supports_upsert is False
+
+    def test_adbc_declaration_the_machinery_cannot_honor_does_not_advertise(self):
+        # Same gates as configure_schema: a non-merge form (or a non-
+        # real/target stage shape) refuses every upsert stream, so it must
+        # not be advertised either.
+        h = _FixtureConnector()
+        h._adbc_only = True
+        h._capabilities = _caps(merge_form="insert_on_conflict")
+        assert h.supports_upsert is False
+
+    def test_sa_declaration_without_renderer_does_not_advertise(self):
+        h = _FixtureConnector()
+        h._adbc_only = False
+        h._capabilities = _caps(merge_form="merge")
+        assert h.supports_upsert is False
+
+    def test_sa_declaration_with_renderer_supports(self):
+        class _SaRenderingDialect(_FixtureAdbcDialect):
+            def build_sqlalchemy_upsert(self, table, records, conflict_keys):
+                return MagicMock()
+
+        class _SaRenderingConnector(GenericSQLConnector):
+            dialect_class = _SaRenderingDialect
+
+        h = _SaRenderingConnector()
+        h._adbc_only = False
+        h._capabilities = _caps(merge_form="merge")
+        assert h.supports_upsert is True
 
 
 class TestAdbcDdlBuilders:

@@ -67,7 +67,7 @@ from ._adbc_utils import _close_cursor_quietly
 from .adbc_reader import open_adbc_reader
 from .capabilities import (
     SqlCapabilities,
-    parse_declared_capabilities,
+    bind_dialect_capabilities,
     undeclared_capability_error,
 )
 from .ddl import build_create_table_sql
@@ -527,19 +527,16 @@ class GenericSQLConnector(BaseDestinationHandler):
     def _bind_capabilities(self, runtime: ConnectionRuntime) -> None:
         """Parse the runtime's declared ``sql_capabilities`` and attach them.
 
-        The single binding point for declared capability facts: the facade
-        keeps the parsed block for write-path gates, and the dialect gets
-        the same object for its address-construction catalog gate. Runs on
-        ``connect()``, on ``read_batches`` (the runtime-taking source
-        entry), and on every control-plane entry that takes a runtime
-        directly, so a standalone discovery/create_table call enforces the
-        same declarations as a pipeline run.
+        The facade side of the one binding rule
+        (:func:`~cdk.sql.capabilities.bind_dialect_capabilities`): the
+        facade keeps the parsed block for write-path gates, and the
+        dialect gets the same object for its address-construction catalog
+        gate. Runs on ``connect()``, on ``read_batches`` (the
+        runtime-taking source entry), and on every control-plane entry
+        that takes a runtime directly; the standalone helpers bind
+        themselves through the same function.
         """
-        self._capabilities = parse_declared_capabilities(
-            runtime.declared_sql_capabilities,
-            source=f"connector {runtime.connector_id!r}",
-        )
-        self.dialect.capabilities = self._capabilities
+        self._capabilities = bind_dialect_capabilities(self.dialect, runtime)
 
     def _dialect_renders_sqlalchemy_upsert(self) -> bool:
         """Whether the active dialect implements the SA upsert statement hook.
@@ -553,6 +550,21 @@ class GenericSQLConnector(BaseDestinationHandler):
         return (
             type(self.dialect).build_sqlalchemy_upsert
             is not SqlDialect.build_sqlalchemy_upsert
+        )
+
+    @staticmethod
+    def _adbc_stage_machinery_honors(caps: SqlCapabilities) -> bool:
+        """Whether the current ADBC stage machinery can honor *caps*.
+
+        One shape until #389: a real stage table in the target schema,
+        applied with ``MERGE INTO``. Shared by the advertisement
+        (``supports_upsert``) and the refusing gate
+        (:meth:`_check_adbc_stage_machinery`) so the two cannot disagree.
+        """
+        return (
+            caps.merge_form == "merge"
+            and caps.stage.scope == "real"
+            and caps.stage.schema == "target"
         )
 
     def _check_adbc_stage_machinery(self, caps: SqlCapabilities, need: str) -> None:
@@ -586,16 +598,23 @@ class GenericSQLConnector(BaseDestinationHandler):
 
     @property
     def supports_upsert(self) -> bool:
-        """True when the declared ``sql_capabilities.merge_form`` has one.
+        """True when upsert is declared AND this connector can run it now.
 
-        A fact about the target system, declared in ``connector.json`` —
-        never inferred from the transport or the dialect class. Undeclared
-        advertises ``False``; an upsert stream against an undeclared or
-        ``none`` merge form is refused at ``configure_schema`` time with an
-        error naming the missing declaration.
+        The declaration (``sql_capabilities.merge_form``) says whether the
+        system has a merge statement; the advertisement additionally
+        applies the same implementability gates ``configure_schema``
+        enforces — the interim ADBC stage-machinery shape and the SA
+        dialect's statement hook — so ``GetCapabilities`` never advertises
+        a mode every stream of which would be refused at handshake.
+        Undeclared advertises ``False``; refusals at ``configure_schema``
+        carry the error naming the missing declaration or disagreement.
         """
         caps = self._capabilities
-        return caps is not None and caps.supports_upsert
+        if caps is None or not caps.supports_upsert:
+            return False
+        if self._adbc_only:
+            return self._adbc_stage_machinery_honors(caps)
+        return self._dialect_renders_sqlalchemy_upsert()
 
     @property
     def supports_bulk_load(self) -> bool:

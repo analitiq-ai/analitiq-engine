@@ -205,3 +205,22 @@ def parse_declared_capabilities(
     if block is None:
         return None
     return SqlCapabilities.from_declaration(block, source=source)
+
+
+def bind_dialect_capabilities(dialect: Any, runtime: Any) -> SqlCapabilities | None:
+    """Parse the runtime's declared block and attach it to *dialect*.
+
+    The one binding rule for every entry point that receives a runtime —
+    the ``GenericSQLConnector`` facade and the standalone control-plane
+    helpers (``create_table``, ``list_schemas`` / ``list_tables`` /
+    ``list_columns``) — so a declaring connector's catalog gate behaves
+    identically however the CDK is driven. Reads the runtime's
+    ``declared_sql_capabilities`` strictly: a runtime object without the
+    attribute is a wiring defect, not an undeclared connector.
+    """
+    caps = parse_declared_capabilities(
+        runtime.declared_sql_capabilities,
+        source=f"connector {runtime.connector_id!r}",
+    )
+    dialect.capabilities = caps
+    return caps
