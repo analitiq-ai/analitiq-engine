@@ -77,18 +77,9 @@ def _declared_sql_transports(target: ConformanceTarget) -> list[tuple[str, str]]
     carry none). Fail-loud when nothing SQL-shaped is declared or a
     block declares no driver.
     """
-    transports = target.definition.get("transports") or {}
-    defaults = target.definition.get("transport_defaults") or {}
     declared: list[tuple[str, str]] = []
-    for ref, block in transports.items():
-        if isinstance(block, dict) and isinstance(defaults, dict):
-            # The engine merges transport_defaults before resolving a
-            # transport; reading the raw block would false-fail a
-            # connector supplying transport_type/driver through defaults.
-            block = {**defaults, **block}
-        transport_type = (
-            block.get("transport_type") if isinstance(block, dict) else None
-        )
+    for ref, block in target.declared_transports().items():
+        transport_type = block.get("transport_type")
         if transport_type not in _SQL_TRANSPORT_TYPES:
             continue
         raw_driver = block.get("driver")
@@ -103,8 +94,8 @@ def _declared_sql_transports(target: ConformanceTarget) -> list[tuple[str, str]]
     if not declared:
         pytest.fail(
             f"connector.json declares no SQL transport (sqlalchemy/adbc) in "
-            f"transports {sorted(transports)}; a database connector needs "
-            f"one for the engine's read path"
+            f"transports {sorted(target.declared_transports())}; a database "
+            f"connector needs one for the engine's read path"
         )
     return declared
 

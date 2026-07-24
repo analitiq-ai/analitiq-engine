@@ -60,6 +60,27 @@ class ConformanceTarget:
     type_mapper: TypeMapper | None
     connector_class: type | None
 
+    def declared_transports(self) -> dict[str, dict[str, Any]]:
+        """Return transport blocks with ``transport_defaults`` merged.
+
+        The engine merges defaults before resolving a transport, so every
+        kit site reading ``transport_type``/``driver`` consumes this view;
+        reading raw blocks would false-fail a connector supplying those
+        fields through defaults. Shallow merge: the fields the kit reads
+        are top-level scalars.
+        """
+        transports = self.definition.get("transports") or {}
+        defaults = self.definition.get("transport_defaults") or {}
+        merged: dict[str, dict[str, Any]] = {}
+        for ref, block in transports.items():
+            if not isinstance(block, dict):
+                continue
+            if isinstance(defaults, dict) and defaults:
+                merged[ref] = {**defaults, **block}
+            else:
+                merged[ref] = dict(block)
+        return merged
+
     @property
     def has_write_map(self) -> bool:
         """Whether the connector ships ``type-map-write.json``."""
@@ -229,9 +250,11 @@ def _resolve_connector_class(
     separate source and destination registries, and a
     registered-but-broken source entry point would otherwise fall back
     silently to the generic class in production while the suite went
-    green against the destination class. A package registering both
-    groups under different classes is refused — the unified SQL class
-    serves both roles, and a split would let the two roles drift.
+    green against the destination class. For ``kind: database`` the two
+    groups must agree — one unified SQL class serves both roles, and a
+    split would let them drift. Other kinds may legitimately register
+    different classes per role (the engine's api family does); the
+    destination class is used there, matching the write-focused checks.
     """
     if class_path:
         return _load_class(class_path)
@@ -242,14 +265,14 @@ def _resolve_connector_class(
             loaded[group] = cls
     if loaded:
         classes = set(loaded.values())
-        if len(classes) > 1:
+        if len(classes) > 1 and kind == "database":
             names = {group: cls.__name__ for group, cls in loaded.items()}
             raise ConformanceSetupError(
-                f"connector {connector_id!r} registers different classes per "
-                f"entry-point group ({names}); one unified class serves both "
-                f"roles"
+                f"database connector {connector_id!r} registers different "
+                f"classes per entry-point group ({names}); one unified SQL "
+                f"class serves both roles"
             )
-        return next(iter(classes))
+        return loaded.get(DESTINATION_GROUP) or next(iter(loaded.values()))
     if kind == "database":
         return GenericSQLConnector
     return None

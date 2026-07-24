@@ -42,11 +42,10 @@ DIALECT_IMPLEMENTED_BULK_MECHANISMS = frozenset(
 
 def declared_transport_types(target: ConformanceTarget) -> set[str]:
     """Collect the ``transport_type`` values the definition declares."""
-    transports = target.definition.get("transports") or {}
     return {
         str(block["transport_type"])
-        for block in transports.values()
-        if isinstance(block, dict) and block.get("transport_type")
+        for block in target.declared_transports().values()
+        if block.get("transport_type")
     }
 
 

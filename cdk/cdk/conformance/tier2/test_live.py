@@ -185,14 +185,9 @@ def test_declared_bulk_and_executemany_land_identically(
             "by definition"
         )
     if caps.bulk_load == "adbc_ingest":
-        transports = harness.target.definition.get("transports") or {}
+        transports = harness.target.declared_transports()
         default_ref = harness.target.definition.get("default_transport")
-        default_block = transports.get(default_ref) or {}
-        default_type = (
-            default_block.get("transport_type")
-            if isinstance(default_block, dict)
-            else None
-        )
+        default_type = (transports.get(default_ref) or {}).get("transport_type")
         if default_type != "adbc":
             pytest.skip(
                 f"the live connection materializes the default transport "
