@@ -43,11 +43,15 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .declaration import check_declaration_consistency
-    from .roundtrip import check_type_map_round_trip
-    from .surface import check_override_surface, sanctioned_dialect_surface
-    from .target import ConformanceSetupError, ConformanceTarget, load_target
-    from .violations import Violation, violation_report
+    # Static-analysis view of the lazy exports below (noqa: names are
+    # re-exported through __getattr__, which flake8 cannot see).
+    from .declaration import check_declaration_consistency  # noqa: F401
+    from .roundtrip import check_type_map_round_trip  # noqa: F401
+    from .surface import check_override_surface  # noqa: F401
+    from .surface import sanctioned_dialect_surface  # noqa: F401
+    from .target import ConformanceSetupError  # noqa: F401
+    from .target import ConformanceTarget, load_target  # noqa: F401
+    from .violations import Violation, violation_report  # noqa: F401
 
 #: Export name -> defining submodule, resolved on first access.
 _EXPORTS = {
