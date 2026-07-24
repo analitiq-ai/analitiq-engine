@@ -43,11 +43,17 @@ def _live_settings() -> dict[str, str]:
             pytest.fail(f"ANALITIQ_CONFORMANCE_REQUIRE_LIVE is set but {reason}")
         pytest.skip(reason)
     if importlib.util.find_spec("asyncpg") is None:
-        pytest.skip(
+        reason = (
             "live reference tier needs the asyncpg driver installed, as a "
             "connector repo installs its own driver; the CI conformance job "
             "installs it"
         )
+        if os.environ.get("ANALITIQ_CONFORMANCE_REQUIRE_LIVE"):
+            # Same strict-mode rule as the env vars above: the job that
+            # provisions the container must fail, not skip, when its
+            # driver install step regresses.
+            pytest.fail(f"ANALITIQ_CONFORMANCE_REQUIRE_LIVE is set but {reason}")
+        pytest.skip(reason)
     return {name: os.environ[name] for name in _ENV_VARS}
 
 

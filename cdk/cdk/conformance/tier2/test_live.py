@@ -21,7 +21,7 @@ import pytest
 from cdk.conformance.fakes import MemoryCheckpointStore
 from cdk.conformance.skips import require_write_role
 from cdk.conformance.target import ConformanceTarget
-from cdk.types import RetrySemantics, SchemaSpec, WriteMode
+from cdk.types import AckStatus, RetrySemantics, SchemaSpec, WriteMode
 
 from .live import STREAM_ID, LiveHarness, by_id, expect_success, rows_batch
 
@@ -154,9 +154,11 @@ def test_upsert_without_conflict_keys_is_rejected_fatally(
         batch = rows_batch([(1, "a", 1)])
         results = await harness.write_phase("upsert", [(1, batch)], conflict_keys=[])
         assert len(results) == 1
-        assert not results[0].success, (
-            "an upsert stream with no conflict_keys must refuse, never "
-            "silently degrade to INSERT"
+        assert results[0].status is AckStatus.ACK_STATUS_FATAL_FAILURE, (
+            f"an upsert stream with no conflict_keys must refuse fatally "
+            f"(a retryable status would make the engine replay an "
+            f"unhealable stream forever); got {results[0].status!r}: "
+            f"{results[0].failure_summary}"
         )
 
     asyncio.run(scenario())
@@ -182,6 +184,21 @@ def test_declared_bulk_and_executemany_land_identically(
             "connector declares no bulk mechanism; landing is executemany "
             "by definition"
         )
+    if caps.bulk_load == "adbc_ingest":
+        transports = harness.target.definition.get("transports") or {}
+        default_ref = harness.target.definition.get("default_transport")
+        default_block = transports.get(default_ref) or {}
+        default_type = (
+            default_block.get("transport_type")
+            if isinstance(default_block, dict)
+            else None
+        )
+        if default_type != "adbc":
+            pytest.skip(
+                f"the live connection materializes the default transport "
+                f"({default_type}); the declared adbc_ingest mechanism does "
+                f"not run on it, so this comparison would certify nothing"
+            )
 
     async def scenario() -> None:
         batch = rows_batch([(i, f"v{i}", i) for i in range(1, 6)])
@@ -222,10 +239,15 @@ def test_first_batch_truncates_then_appends(harness: LiveHarness) -> None:
         refresh_first = rows_batch([(1, "a", 3), (2, "b", 4)])
         refresh_second = rows_batch([(3, "c", 5)])
         expect_success(
-            await harness.write_phase(
-                "truncate_insert", [(1, refresh_first), (2, refresh_second)]
-            ),
-            "full refresh",
+            await harness.write_phase("truncate_insert", [(1, refresh_first)]),
+            "full refresh first batch",
+        )
+        # The second batch runs on a fresh connector and connection: the
+        # truncate-once gate must key on batch_seq == 1, never on
+        # in-memory state a worker restart would reset.
+        expect_success(
+            await harness.write_phase("truncate_insert", [(2, refresh_second)]),
+            "full refresh second batch (fresh connection: restart)",
         )
         rows = by_id(await harness.read_phase())
         assert set(rows) == {1, 2, 3}, (

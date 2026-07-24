@@ -116,6 +116,12 @@ def test_stage_ddl_names_the_stage(conformance_target: ConformanceTarget) -> Non
         f"stage DDL does not reference the quoted stage address "
         f"{dialect.quote_table(plan.stage)}: {plan.create_stage_sql!r}"
     )
+    assert dialect.quote_table(plan.target) in plan.create_stage_sql, (
+        f"stage DDL does not reference the quoted target "
+        f"{dialect.quote_table(plan.target)}; the hook receives only the "
+        f"two addresses, so a stage not shaped from the target cannot "
+        f"match customer streams: {plan.create_stage_sql!r}"
+    )
 
 
 def test_stage_name_fits_the_identifier_budget(
@@ -171,11 +177,14 @@ def test_merge_statement_references_stage_target_and_keys(
 ) -> None:
     """The statement moves the stage into the target on the stream keys."""
     dialect, caps = _require_merge_rendering(conformance_target)
-    plan = _plan(dialect, caps, mode="upsert", conflict_keys=("id",))
+    # A non-leading, non-id key: a renderer that ignores conflict_keys
+    # and hard-codes the id column would still contain a quoted "id"
+    # through the column list, but never a quoted "seq".
+    plan = _plan(dialect, caps, mode="upsert", conflict_keys=("seq",))
     for label, reference in (
         ("stage", dialect.quote_table(plan.stage)),
         ("target", dialect.quote_table(plan.target)),
-        ("conflict key", dialect.quote_ident("id")),
+        ("conflict key", dialect.quote_ident("seq")),
     ):
         assert reference in plan.mode_sql, (
             f"the rendered upsert statement does not reference the "
@@ -205,6 +214,12 @@ def test_merge_with_only_key_columns_degrades_to_insert_only(
         assert not _WHEN_MATCHED_TOKEN.search(rendered), (
             f"all landed columns are conflict keys; the MERGE form must "
             f"render no WHEN MATCHED clause: {plan.mode_sql!r}"
+        )
+    if caps.merge_form == "insert_on_duplicate_key":
+        assert not rendered.rstrip().endswith("ON DUPLICATE KEY UPDATE"), (
+            f"all landed columns are conflict keys; an empty ON DUPLICATE "
+            f"KEY UPDATE clause is invalid SQL — render a no-op update "
+            f"instead: {plan.mode_sql!r}"
         )
 
 
@@ -248,6 +263,11 @@ def test_empty_table_statement_is_delete_shaped(
     assert not _TRUNCATE_TOKEN.search(statement.upper()), (
         f"empty_table_sql renders TRUNCATE, which implicitly commits on "
         f"several systems: {statement!r}"
+    )
+    assert "DELETE" in statement.upper(), (
+        f"empty_table_sql must be DELETE-shaped (ADR sql-write-path-v2 "
+        f"section 4); any other emptying statement (a DROP) breaks the "
+        f"append phase: {statement!r}"
     )
     assert dialect.quote_table(_target_address(dialect)) in statement
 
