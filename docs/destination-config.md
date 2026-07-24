@@ -294,17 +294,21 @@ ordering sequence on the wire; it is never the dedup key. How identity is
 enforced depends on the write mode:
 
 - **`upsert`** — MERGE / INSERT-or-UPDATE on the stream's `conflict_keys`.
-- **`truncate_insert`** — full refresh: TRUNCATE on the read's first
-  batch (`batch_seq` 1, issue #307), plain append after that with no
+- **`truncate_insert`** — full refresh: the target is emptied on the
+  read's first batch (`batch_seq` 1, issue #307) via the dialect's
+  target-emptying statement (ANSI `DELETE FROM`, never `TRUNCATE`),
+  plain append from the stage after that with no
   row-identity dedup (deduping a full refresh would collapse legitimate
   duplicate rows). `batch_seq` restarts at 1 only when the engine
   (re)starts the read, so the decision survives engine and destination
   restarting independently. The engine never resumes a truncate_insert
   stream from a cursor — a restart re-reads the source from scratch and
   re-truncates.
-- **`insert`** — each row is inserted only if its identity is not already
-  present: one `INSERT ... SELECT ... WHERE NOT EXISTS (...)` per row,
-  built with SQLAlchemy core (no dialect-specific SQL). The identity is
+- **`insert`** — a row is inserted only if its identity is not already
+  present: the batch lands in a per-batch stage table and one set-based
+  `INSERT ... SELECT ... FROM stage WHERE NOT EXISTS (...)` applies it,
+  identically on both transports (plain ANSI over the dialect's quoting,
+  no dialect-specific SQL). The identity is
   the contract primary key, or — for a keyless insert stream — a synthetic
   engine-managed `_record_hash` column (full SHA-256 of the row content)
   declared as the table's `PRIMARY KEY`, the structural uniqueness
@@ -316,11 +320,9 @@ enforced depends on the write mode:
   reconcile changed rows should use `upsert`. A keyless insert target created
   before `_record_hash` existed is rejected loudly on the next run (the column
   is the primary key and cannot be back-filled on existing rows); recreate the
-  table so the engine can manage it.
-
-ADBC-only transports (Snowflake/BigQuery) do not yet do the keyless
-`insert` anti-join — plain `insert` there is at-least-once (a noted
-follow-up); `upsert` remains idempotent.
+  table so the engine can manage it. On a system that does not enforce
+  uniqueness (BigQuery's `NOT ENFORCED` keys) the anti-join is a filter,
+  not a guarantee, and insert streams report at-least-once.
 
 ### File / S3 (content-addressed filenames)
 

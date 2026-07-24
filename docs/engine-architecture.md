@@ -285,7 +285,7 @@ tag genuinely cannot make without inspecting the error; the
 failure whose ack declares no category — a thick connector's own ack, or a
 failure with no ack at all; and a defensive
 **fallback** (`classify_exception` over class names + message text, mirroring
-`cdk.sql.generic._is_fatal_adbc_error`) for any exception that reaches the runner
+`cdk.sql._adbc_utils._is_fatal_adbc_error`) for any exception that reaches the runner
 with no tag. Because the source split runs *only* at the source boundary, a
 destination port (`host:401`) or path can never be misread as source auth.
 

@@ -28,7 +28,7 @@ from cdk.sql.capabilities import (
 )
 from cdk.sql.dialects import SqlDialect
 from cdk.sql.exceptions import SchemaConfigurationError
-from cdk.sql.generic import AdbcConfigurationError, GenericSQLConnector
+from cdk.sql.generic import GenericSQLConnector
 from cdk.types import SchemaSpec, WriteMode
 
 from .conftest import caps_block
@@ -177,23 +177,6 @@ class _RenderingConnector(GenericSQLConnector):
     dialect_class = _RenderingDialect
 
 
-class _StageRenderingDialect(SqlDialect):
-    """Dialect implementing the ADBC stage DDL hook, as a declaring ADBC
-    connector's package dialect must until #389 replaces the machinery."""
-
-    name = "stage_rendering"
-
-    def adbc_stage_table_sql(self, stage_qualified, target_qualified):
-        return (
-            f"CREATE TABLE {stage_qualified} AS SELECT * FROM "
-            f"{target_qualified} WHERE FALSE"
-        )
-
-
-class _StageRenderingConnector(GenericSQLConnector):
-    dialect_class = _StageRenderingDialect
-
-
 def _upsert_handler(cls=GenericSQLConnector):
     handler = cls()
     handler._connected = True
@@ -310,55 +293,50 @@ class TestConfigureSchemaUpsertGate:
         handler._ensure_tables_exist.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_adbc_upsert_with_non_merge_form_refuses(self):
-        # The current ADBC stage machinery renders MERGE only (#389 lands
-        # declared forms); an ON CONFLICT declaration refuses at handshake.
-        handler = _upsert_handler()
+    async def test_adbc_upsert_gate_is_transport_uniform(self):
+        # The gate is the same on the ADBC transport (issue #389): any
+        # declared merge form with a rendering dialect configures — the
+        # interim MERGE-only / real-stage-only machinery shape is gone.
+        handler = _upsert_handler(cls=_RenderingConnector)
         handler._engine = None
         handler._adbc_only = True
         handler._capabilities = SqlCapabilities.from_declaration(
-            caps_block(merge_form="insert_on_conflict", stage_scope="real")
-        )
-        with pytest.raises(AdbcConfigurationError, match="MERGE only"):
-            await handler.configure_schema(_upsert_spec())
-
-    @pytest.mark.asyncio
-    async def test_adbc_upsert_with_undeclarable_stage_shape_refuses(self):
-        # Temp-scope staging is #389 machinery; refusing beats silently
-        # landing a real stage table in the target schema.
-        handler = _upsert_handler()
-        handler._engine = None
-        handler._adbc_only = True
-        handler._capabilities = SqlCapabilities.from_declaration(
-            caps_block(merge_form="merge", stage_scope="temp")
-        )
-        with pytest.raises(AdbcConfigurationError, match="stage"):
-            await handler.configure_schema(_upsert_spec())
-
-    @pytest.mark.asyncio
-    async def test_adbc_upsert_without_stage_renderer_refuses(self):
-        # Declaration/dialect disagreement, ADBC flavor: the stage-MERGE
-        # path renders its stage through adbc_stage_table_sql; a declaring
-        # connector without the override fails at handshake, not on the
-        # first batch.
-        handler = _upsert_handler()
-        handler._engine = None
-        handler._adbc_only = True
-        handler._capabilities = SqlCapabilities.from_declaration(
-            caps_block(merge_form="merge", stage_scope="real")
-        )
-        with pytest.raises(AdbcConfigurationError, match="adbc_stage_table_sql"):
-            await handler.configure_schema(_upsert_spec())
-
-    @pytest.mark.asyncio
-    async def test_adbc_upsert_with_current_machinery_shape_configures(self):
-        handler = _upsert_handler(cls=_StageRenderingConnector)
-        handler._engine = None
-        handler._adbc_only = True
-        handler._capabilities = SqlCapabilities.from_declaration(
-            caps_block(merge_form="merge", stage_scope="real")
+            caps_block(merge_form="insert_on_conflict", stage_scope="temp")
         )
         assert await handler.configure_schema(_upsert_spec()) is True
+
+    @pytest.mark.asyncio
+    async def test_adbc_upsert_without_merge_renderer_refuses(self):
+        # Declaration/dialect disagreement on the ADBC transport: the
+        # upsert statement renders through the same merge_statement_sql
+        # hook as the SQLAlchemy path; a declaring connector without the
+        # override fails at handshake, not on the first batch.
+        handler = _upsert_handler()
+        handler._engine = None
+        handler._adbc_only = True
+        handler._capabilities = SqlCapabilities.from_declaration(
+            caps_block(merge_form="merge", stage_scope="real")
+        )
+        with pytest.raises(SchemaConfigurationError, match="merge_statement_sql"):
+            await handler.configure_schema(_upsert_spec())
+
+    @pytest.mark.asyncio
+    async def test_adbc_stage_gate_applies_to_every_write_mode(self):
+        # The stage gate covers the ADBC transport identically: a
+        # declared stage shape whose dialect cannot render the stage DDL
+        # refuses an insert stream at handshake.
+        handler = _upsert_handler()
+        handler._engine = None
+        handler._adbc_only = True
+        handler._capabilities = SqlCapabilities.from_declaration(caps_block())
+        spec = SchemaSpec(
+            stream_id="s1",
+            version=1,
+            write_mode=WriteMode.WRITE_MODE_INSERT,
+            ack_timeout_seconds=30,
+        )
+        with pytest.raises(SchemaConfigurationError, match="stage_table_sql"):
+            await handler.configure_schema(spec)
 
 
 class TestConnectBinding:
@@ -402,6 +380,74 @@ class TestConnectBinding:
         assert handler._capabilities is not None
         assert handler._capabilities.catalog == "full"
         assert handler.dialect.capabilities is handler._capabilities
+
+    @staticmethod
+    def _adbc_runtime(**overrides):
+        runtime = MagicMock()
+        runtime.connector_id = "demo"
+        runtime.declared_sql_capabilities = caps_block(bulk_load="adbc_ingest")
+        runtime.is_adbc = True
+        runtime.driver = "snowflake"
+        runtime.close = AsyncMock()
+        for name, value in overrides.items():
+            setattr(runtime, name, value)
+        return runtime
+
+    @pytest.mark.asyncio
+    async def test_adbc_connect_selects_the_adbc_backend_and_opens_eagerly(self):
+        from unittest.mock import patch
+
+        from cdk.sql.adbc_backend import AdbcBackend
+
+        handler = GenericSQLConnector()
+        adbc_conn = MagicMock()
+        runtime = self._adbc_runtime(
+            open_adbc_connection=MagicMock(return_value=adbc_conn)
+        )
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()):
+            await handler.connect(runtime)
+        assert handler._adbc_only is True
+        assert isinstance(handler._backend, AdbcBackend)
+        # Eager open: a bad credential fails at connect(), not first batch.
+        runtime.open_adbc_connection.assert_called_once()
+        assert handler._backend._conn is adbc_conn
+        # The backend read the declared bulk mechanism off the binding.
+        assert handler._backend._bulk_load == "adbc_ingest"
+
+    @pytest.mark.asyncio
+    async def test_adbc_eager_open_failure_releases_runtime_and_wraps(self):
+        from unittest.mock import patch
+
+        handler = GenericSQLConnector()
+        runtime = self._adbc_runtime(
+            open_adbc_connection=MagicMock(side_effect=RuntimeError("bad key"))
+        )
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            pytest.raises(ConnectionError, match="ADBC connection failed"),
+        ):
+            await handler.connect(runtime)
+        # materialize() acquired the runtime; the failed connect releases
+        # the ref itself (the caller never disconnects a handler whose
+        # connect() raised).
+        runtime.close.assert_awaited_once()
+        assert handler._backend is None
+        assert handler._connected is False
+
+    @pytest.mark.asyncio
+    async def test_runtime_release_failure_never_masks_the_connect_error(self):
+        from unittest.mock import patch
+
+        handler = GenericSQLConnector()
+        runtime = self._adbc_runtime(
+            open_adbc_connection=MagicMock(side_effect=RuntimeError("bad key")),
+            close=AsyncMock(side_effect=RuntimeError("dispose failed")),
+        )
+        with (
+            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            pytest.raises(ConnectionError, match="bad key"),
+        ):
+            await handler.connect(runtime)
 
 
 class TestPayloadChannel:

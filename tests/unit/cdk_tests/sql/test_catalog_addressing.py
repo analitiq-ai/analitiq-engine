@@ -2,7 +2,8 @@
 
 The dialect owns one ``catalog.schema.table`` composer: intent resolves once
 into a ``TableAddress`` (normalization + capability gate) and every surface —
-destination DDL, ADBC ingest, stage-MERGE, TRUNCATE, the source read, the
+destination DDL, the stage cycle's ingest targeting, its stage DDL, mode
+and emptying statements, the source read, the
 control-plane ``create_table`` and discovery — consumes that address through a
 sink. These tests pin the two behaviors the composer exists to guarantee:
 
@@ -64,10 +65,19 @@ class _CatalogAdbcDialect(SqlDialect):
             "Timestamp(MICROSECOND, UTC)": "TIMESTAMPTZ",
         }[canonical]
 
-    def adbc_stage_table_sql(self, stage_qualified, target_qualified):
+    def stage_table_sql(self, stage, target, *, temp):
         return (
-            f"CREATE TABLE {stage_qualified} AS SELECT * FROM "
-            f"{target_qualified} WHERE FALSE"
+            f"CREATE TABLE {self.quote_table(stage)} AS SELECT * FROM "
+            f"{self.quote_table(target)} WHERE FALSE"
+        )
+
+    def merge_statement_sql(self, stage, target, conflict_keys, columns):
+        on = " AND ".join(
+            f"t.{self.quote_ident(k)} = s.{self.quote_ident(k)}" for k in conflict_keys
+        )
+        return (
+            f"MERGE INTO {self.quote_table(target)} t "
+            f"USING {self.quote_table(stage)} s ON {on}"
         )
 
 
@@ -94,6 +104,12 @@ def _handler(cls=GenericSQLConnector, *, adbc_only: bool):
     handler._capabilities = handler.dialect.capabilities
     if not adbc_only:
         handler._engine = MagicMock()
+    # A recording transport backend: run_ddl captures the statement lists,
+    # target_columns satisfies the post-DDL readiness probe.
+    backend = MagicMock()
+    backend.run_ddl = AsyncMock()
+    backend.target_columns = AsyncMock(return_value=("id",))
+    handler._backend = backend
     handler.set_stream_endpoints({STREAM: ENDPOINT_DOC})
     handler.set_endpoint_refs(
         {STREAM: {"scope": "connector", "connection_id": "c", "endpoint_id": "e"}}
@@ -133,15 +149,9 @@ class TestConfigureSchemaGate:
         read_caps = SqlCapabilities.from_declaration(caps_block(catalog="read"))
         handler._capabilities = read_caps
         handler.dialect.capabilities = read_caps
-        executed: list[str] = []
-        with (
-            patch.object(
-                handler, "_execute_adbc_ddl_sync", side_effect=executed.extend
-            ),
-            pytest.raises(SchemaConfigurationError, match="require 'full'"),
-        ):
+        with pytest.raises(SchemaConfigurationError, match="require 'full'"):
             await handler.configure_schema(_schema_spec())
-        assert executed == []
+        handler._backend.run_ddl.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_catalog_reaches_every_ddl_statement_on_adbc(self):
@@ -151,21 +161,24 @@ class TestConfigureSchemaGate:
         # requirement, not a skipped gate.
         assert handler._capabilities is not None
         assert handler._capabilities.catalog == "full"
-        executed: list[str] = []
-        with patch.object(
-            handler, "_execute_adbc_ddl_sync", side_effect=executed.extend
-        ):
-            assert await handler.configure_schema(_schema_spec()) is True
+        assert await handler.configure_schema(_schema_spec()) is True
 
         state = handler._streams[STREAM]
         assert state.address == TableAddress(
             table="events", schema="ds", catalog="proj"
         )
+        executed = [
+            stmt
+            for call in handler._backend.run_ddl.await_args_list
+            for stmt in call.args[0]
+        ]
         create_schema = [s for s in executed if s.startswith("CREATE SCHEMA")]
         assert create_schema == ['CREATE SCHEMA IF NOT EXISTS "proj"."ds"']
         create_table = [s for s in executed if s.startswith("CREATE TABLE")]
         assert len(create_table) == 1
         assert '"proj"."ds"."events"' in create_table[0]
+        # The post-DDL readiness probe consumes the same address.
+        handler._backend.target_columns.assert_awaited_once_with(state.address)
 
 
 class _StagingSaDialect(SqlDialect):
@@ -370,65 +383,72 @@ class _CapturingConn:
 
 
 class TestAdbcWriteSinks:
-    """One address, every sink: ingest kwargs, TRUNCATE, stage + MERGE."""
+    """One address, every sink of the ADBC stage cycle: the ingest kwargs,
+    the stage DDL, the mode statement, the emptying statement, the drop —
+    all consuming the same plan the facade built."""
 
-    def _connected(self):
-        handler = _CatalogConnector()
-        handler._adbc_only = True
-        conn = _CapturingConn()
-        handler._adbc_conn = conn
-        return handler, conn
+    def _cycle(self, *, write_mode: str, conflict_keys=(), truncate_now=False):
+        from cdk.sql.adbc_backend import AdbcBackend
+        from cdk.sql.write_plan import build_stage_write_plan
 
-    def _address(self, handler):
-        return handler.dialect.table_address("orders", schema="ds", catalog="proj")
-
-    def test_plain_ingest_targets_catalog_and_schema(self):
-        handler, conn = self._connected()
-        handler._adbc_only_ingest_sync(
-            pa.record_batch([pa.array([1])], names=["id"]),
-            self._address(handler),
+        dialect = _CatalogAdbcDialect()
+        caps = SqlCapabilities.from_declaration(
+            caps_block(catalog="full", bulk_load="adbc_ingest", stage_scope="real")
         )
+        dialect.capabilities = caps
+        plan = build_stage_write_plan(
+            dialect,
+            caps,
+            target=dialect.table_address("orders", schema="ds", catalog="proj"),
+            columns=("id", "v"),
+            write_mode=write_mode,
+            conflict_keys=list(conflict_keys),
+            identity=["id"],
+            truncate_now=truncate_now,
+            run_id="r1",
+            stream_id="s1",
+            batch_seq=1,
+        )
+        backend = AdbcBackend(dialect)
+        conn = _CapturingConn()
+        backend._conn = conn
+        backend._bulk_load = caps.bulk_load
+        backend._execute_write_sync(
+            plan, pa.record_batch([pa.array([1]), pa.array(["a"])], names=["id", "v"])
+        )
+        return plan, conn
+
+    def test_ingest_targets_catalog_and_schema_of_the_stage(self):
+        plan, conn = self._cycle(write_mode="insert")
         assert conn.ingests == [
             {
-                "table": "orders",
+                "table": plan.stage.table,
                 "mode": "append",
                 "db_schema_name": "ds",
                 "catalog_name": "proj",
             }
         ]
 
-    def test_truncate_renders_three_part_name(self):
-        handler, conn = self._connected()
-        handler._adbc_truncate_sync(self._address(handler))
-        assert conn.executed == ['TRUNCATE TABLE "proj"."ds"."orders"']
+    def test_emptying_statement_renders_three_part_name(self):
+        plan, conn = self._cycle(write_mode="truncate_insert", truncate_now=True)
+        assert plan.truncate_sql == 'DELETE FROM "proj"."ds"."orders"'
+        assert plan.truncate_sql in conn.executed
 
-    def test_merge_ingest_uses_the_same_address_everywhere(self):
-        handler, conn = self._connected()
-        handler._merge_ingest_sync(
-            pa.record_batch([pa.array([1]), pa.array(["a"])], names=["id", "v"]),
-            self._address(handler),
-            ["id", "v"],
-            ["id"],
-            "btok",
-        )
-        stage = '"proj"."ds"."_analitiq_stage_orders_btok"'
+    def test_upsert_cycle_uses_the_same_address_everywhere(self):
+        plan, conn = self._cycle(write_mode="upsert", conflict_keys=["id"])
+        stage = f'"proj"."ds"."{plan.stage.table}"'
         target = '"proj"."ds"."orders"'
         merges = [s for s in conn.executed if s.startswith("MERGE INTO")]
-        assert len(merges) == 1
-        assert f"MERGE INTO {target} t USING {stage} s" in merges[0]
-        assert f"DROP TABLE IF EXISTS {stage}" in conn.executed[0]
+        assert merges == [f'MERGE INTO {target} t USING {stage} s ON t."id" = s."id"']
         creates = [s for s in conn.executed if s.startswith("CREATE TABLE")]
         assert len(creates) == 1
         assert stage in creates[0] and target in creates[0]
+        drops = [s for s in conn.executed if s.startswith("DROP TABLE")]
+        assert drops == [f"DROP TABLE IF EXISTS {stage}"]
         # The stage ingest targets the stage through the same address sink.
-        assert conn.ingests == [
-            {
-                "table": "_analitiq_stage_orders_btok",
-                "mode": "append",
-                "db_schema_name": "ds",
-                "catalog_name": "proj",
-            }
-        ]
+        assert conn.ingests[0]["table"] == plan.stage.table
+        assert conn.ingests[0]["db_schema_name"] == "ds"
+        assert conn.ingests[0]["catalog_name"] == "proj"
 
 
 class TestControlPlaneGate:

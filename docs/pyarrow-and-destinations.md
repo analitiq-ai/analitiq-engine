@@ -121,25 +121,27 @@ transport_type: "sqlalchemy"  → SqlAlchemyBackend (stage-then-merge:
                                   redshift_connector), run via
                                   asyncio.to_thread.
 
-transport_type: "adbc"        → ADBC machinery (DDL via
-                                  cursor.execute, ingest via
-                                  cursor.adbc_ingest, upsert via
-                                  staged table + MERGE). Depth layer
-                                  for dialects with no async SA
-                                  driver (Snowflake today). Moves
-                                  behind the same TransportBackend
-                                  interface in #389.
+transport_type: "adbc"        → AdbcBackend (the same stage-then-merge
+                                  plans over a direct ADBC DBAPI
+                                  connection: DDL via cursor.execute,
+                                  stage landing via the declared bulk
+                                  mechanism — cursor.adbc_ingest, a
+                                  dialect bulk_land hook, or
+                                  executemany — then the plan's mode
+                                  statement). Depth layer for dialects
+                                  with no async SA driver
+                                  (Snowflake, BigQuery).
 ```
 
 `GenericSQLConnector` is the facade and single semantic owner (write
 modes, truncate gating, identity and duplicate rules, refusals, retry
-verdicts, timeouts). On the SQLAlchemy transport it builds a
-`StageWritePlan` per batch and delegates execution to
-`SqlAlchemyBackend` (`cdk/cdk/sql/backend.py`) — the two SQLAlchemy
-flavours run one shared sync-`Connection` cycle body (the async engine
-enters it via `run_sync`), so their semantics cannot fork. The ADBC
-path keeps its own machinery until #389 puts it behind the same
-interface; both share the cast/schema-contract logic.
+verdicts, timeouts). It builds a `StageWritePlan` per batch and
+delegates execution to the runtime-selected `TransportBackend`
+(`cdk/cdk/sql/backend.py`, `cdk/cdk/sql/adbc_backend.py`) — the two
+SQLAlchemy flavours run one shared sync-`Connection` cycle body (the
+async engine enters it via `run_sync`), and the ADBC backend executes
+the identical plans, so write semantics cannot fork between
+transports; all paths share the cast/schema-contract logic.
 
 ### ADBC coverage (production-ready, 2026)
 
@@ -157,14 +159,12 @@ interface; both share the cast/schema-contract logic.
 
 ### The UPSERT wrinkle
 
-`adbc_ingest` is INSERT/APPEND only. The ADBC path implements upsert
-by ingesting into a stage table and emitting `MERGE INTO target USING
-stage ON ... WHEN MATCHED UPDATE WHEN NOT MATCHED INSERT` against the
-conflict keys. The SQLAlchemy backend runs the same stage shape: the
-batch lands in the stage and the dialect's `merge_statement_sql`
-renders the declared merge form from stage to target (`INSERT ... ON
-CONFLICT DO UPDATE` on Postgres, `INSERT ... ON DUPLICATE KEY UPDATE`
-on MySQL).
+`adbc_ingest` is INSERT/APPEND only — which is exactly what the write
+primitive needs: it lands the batch into the stage, and the dialect's
+`merge_statement_sql` renders the declared merge form from stage to
+target (`MERGE INTO` on the warehouses, `INSERT ... ON CONFLICT DO
+UPDATE` on Postgres, `INSERT ... ON DUPLICATE KEY UPDATE` on MySQL).
+Both backends run the same stage shape from the same plan.
 
 ## What Not to Do
 

@@ -342,6 +342,9 @@ class TestSyncEngineWritePath:
             handler = GenericSQLConnector()
             handler._connected = True
             handler._sync_engine = engine
+            backend = SqlAlchemyBackend(handler.dialect)
+            backend._sync_engine = engine
+            handler._backend = backend
             assert await handler.health_check() is True
         finally:
             engine.dispose()
@@ -718,7 +721,7 @@ class TestBulkLandFallback:
             backend._runtime = MagicMock()
             result = await _write(handler)
             assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
-            assert "bulk_land reported success" in result.failure_summary
+            assert "bulk_land ran for" in result.failure_summary
             assert _count(engine, "events") == 0
         finally:
             engine.dispose()

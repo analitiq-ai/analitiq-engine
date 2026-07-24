@@ -11,7 +11,9 @@ commit calls, and holds no write-mode logic.
 ``SqlAlchemyBackend`` is the SQLAlchemy transport (issue #388). It serves
 both engine flavors — async engine, and sync engine on a worker thread —
 through one shared sync-``Connection`` cycle body, so DML semantics cannot
-fork between them. The ADBC transport joins this interface in #389.
+fork between them. The ADBC transport is
+:class:`~cdk.sql.adbc_backend.AdbcBackend` (issue #389), executing the
+same plans over a direct ADBC DBAPI connection.
 """
 
 from __future__ import annotations
@@ -68,6 +70,25 @@ class StageWritePlan:
     columns: tuple[str, ...]
 
 
+def stage_leftover_note(plan: StageWritePlan) -> str:
+    """Word the honest, scope-accurate consequence of an undropped stage.
+
+    Shared by both backends' failure-path logs so the same leftover has
+    the same documented consequence whichever transport left it.
+    """
+    if plan.scope == "temp":
+        return (
+            "the session-temp stage is invisible to other sessions, is "
+            "cleared by a retry's pre-flight drop on this session, and "
+            "dies with the connection"
+        )
+    return (
+        "a retried batch clears it via the pre-flight drop, but after a "
+        "fatal failure or exhausted retries it needs a manual drop or a "
+        "table-expiration policy"
+    )
+
+
 class TransportBackend(ABC):
     """Executes :class:`StageWritePlan`s; owns connections and commits.
 
@@ -94,6 +115,20 @@ class TransportBackend(ABC):
     @abstractmethod
     async def run_ddl(self, statements: Sequence[str]) -> None:
         """Run *statements* committed together (one transaction)."""
+
+    @abstractmethod
+    async def target_columns(self, target: TableAddress) -> tuple[str, ...]:
+        """Return *target*'s column names as the database reports them.
+
+        Called by the facade after DDL: the names serve its readiness
+        checks (the engine-managed ``_record_hash`` column, one rule for
+        every transport). A backend may also cache what it learns here
+        for the landing step's own use.
+        """
+
+    @abstractmethod
+    async def health_check(self) -> None:
+        """Probe transport liveness; success is returning without raising."""
 
     @abstractmethod
     async def execute_write(self, plan: StageWritePlan, batch: pa.RecordBatch) -> None:
@@ -167,6 +202,18 @@ class SqlAlchemyBackend(TransportBackend):
         async with self._require_engine().begin() as conn:
             for stmt in stmts:
                 await conn.exec_driver_sql(stmt)
+
+    async def health_check(self) -> None:
+        """Probe liveness with ``SELECT 1`` on the active engine flavor."""
+        if self._sync_engine is not None:
+            await asyncio.to_thread(self._health_check_sync)
+            return
+        async with self._require_engine().connect() as conn:
+            await conn.exec_driver_sql("SELECT 1")
+
+    def _health_check_sync(self) -> None:
+        with self._require_sync_engine().connect() as conn:
+            conn.exec_driver_sql("SELECT 1")
 
     async def target_columns(self, target: TableAddress) -> tuple[str, ...]:
         """Reflect *target* (cached) and return its column names.
@@ -286,25 +333,10 @@ class SqlAlchemyBackend(TransportBackend):
             logger.warning(
                 "stage cycle for %s interrupted before cleanup; %s",
                 self._dialect.quote_table(plan.stage),
-                self._stage_leftover_note(plan),
+                stage_leftover_note(plan),
             )
             raise
         self._drop_stage_after_success(conn, plan)
-
-    @staticmethod
-    def _stage_leftover_note(plan: StageWritePlan) -> str:
-        """Word the honest, scope-accurate consequence of an undropped stage."""
-        if plan.scope == "temp":
-            return (
-                "the session-temp stage is invisible to other sessions, is "
-                "cleared by a retry's pre-flight drop on this session, and "
-                "dies with the connection"
-            )
-        return (
-            "a retried batch clears it via the pre-flight drop, but after a "
-            "fatal failure or exhausted retries it needs a manual drop or a "
-            "table-expiration policy"
-        )
 
     def _drop_stage_after_failure(self, conn: Connection, plan: StageWritePlan) -> None:
         """Best-effort stage drop after a failed cycle step (non-transactional).
@@ -322,7 +354,7 @@ class SqlAlchemyBackend(TransportBackend):
                 "rollback after a failed batch also failed; the stage drop "
                 "for %s was not attempted — %s",
                 self._dialect.quote_table(plan.stage),
-                self._stage_leftover_note(plan),
+                stage_leftover_note(plan),
                 exc_info=True,
             )
             return
@@ -332,7 +364,7 @@ class SqlAlchemyBackend(TransportBackend):
             logger.warning(
                 "stage table %s could not be dropped after a failed batch; " "%s",
                 self._dialect.quote_table(plan.stage),
-                self._stage_leftover_note(plan),
+                stage_leftover_note(plan),
                 exc_info=True,
             )
 
@@ -392,6 +424,20 @@ class SqlAlchemyBackend(TransportBackend):
                 self._dialect.name,
                 self._dialect.quote_table(plan.stage),
             )
+            self._executemany_land(conn, plan, batch)
+            # A decline must mean "landed nothing": untrusted connector
+            # code touched the stage before declining, so the fallback's
+            # result is verified like a claimed land — a partial landing
+            # under the False return would otherwise silently duplicate
+            # rows in the stage.
+            self._verify_bulk_land(conn, plan, batch.num_rows)
+            return
+        self._executemany_land(conn, plan, batch)
+
+    def _executemany_land(
+        self, conn: Connection, plan: StageWritePlan, batch: pa.RecordBatch
+    ) -> None:
+        """Land via one executemany ``INSERT`` in plan column order (the default)."""
         stage_table = self._stage_table(conn, plan)
         records: list[dict[str, Any]] = batch.to_pylist()
         conn.execute(stage_table.insert(), records)
@@ -399,14 +445,15 @@ class SqlAlchemyBackend(TransportBackend):
     def _verify_bulk_land(
         self, conn: Connection, plan: StageWritePlan, expected_rows: int
     ) -> None:
-        """Refuse a bulk land whose stage row count is not the batch's.
+        """Refuse a stage whose row count is not the batch's after bulk_land ran.
 
-        ``bulk_land`` is untrusted connector code, and its ``True`` return
-        is the one place a claim of "landed" would otherwise go
-        unverified before the mode statement runs — a mechanism that
-        landed into the wrong place (or nowhere) would let an empty stage
-        ack a full batch. One cheap aggregate closes that: a mismatch is
-        a connector defect, refused loudly before any target mutation.
+        ``bulk_land`` is untrusted connector code, and its claim —
+        "landed" on ``True``, "landed nothing" on a decline — would
+        otherwise go unverified before the mode statement runs: a
+        mechanism that landed into the wrong place (or partially, then
+        declined) would let a wrong stage ack a full batch. One cheap
+        aggregate closes that: a mismatch is a connector defect, refused
+        loudly before any target mutation.
         """
         # Dialect-quoted identifiers only; no user values.
         stage_ref = self._dialect.quote_table(plan.stage)
@@ -415,10 +462,10 @@ class SqlAlchemyBackend(TransportBackend):
         ).scalar_one()
         if count != expected_rows:
             raise AdbcConfigurationError(
-                f"dialect {self._dialect.name!r} bulk_land reported success "
-                f"for {plan.stage} but the stage holds {count} rows, "
+                f"dialect {self._dialect.name!r} bulk_land ran for "
+                f"{plan.stage} but the stage holds {count} rows, "
                 f"expected {expected_rows}; the declared bulk mechanism did "
-                f"not land this batch — fix the connector."
+                f"not land this batch cleanly — fix the connector."
             )
 
     def _stage_table(self, conn: Connection, plan: StageWritePlan) -> Table:
@@ -478,7 +525,11 @@ class SqlAlchemyBackend(TransportBackend):
             # the drop errors so neither masks the other.
             conn.rollback()
         except Exception:
-            logger.warning("rollback before the stage-drop retry failed", exc_info=True)
+            logger.warning(
+                "rollback before the stage-drop retry for %s failed",
+                self._dialect.quote_table(plan.stage),
+                exc_info=True,
+            )
         second_exc = self._try_drop(conn, plan)
         if second_exc is None:
             logger.info(

@@ -2,9 +2,10 @@
 
 Every destination handler reports, per configured stream, whether a
 same-``RUN_ID`` restart can duplicate writes. The SQL verdict is write
-mode x key x transport aware; file writes content-addressed files;
-stdout has nothing to dedup with. The base default is the only honest
-claim for a handler that declares nothing: at-least-once.
+mode x key aware and transport-independent (stage-then-merge, ADR
+sql-write-path-v2 §9); file writes content-addressed files; stdout has
+nothing to dedup with. The base default is the only honest claim for a
+handler that declares nothing: at-least-once.
 """
 
 from datetime import datetime
@@ -80,11 +81,12 @@ class TestFileAndStdoutVerdicts:
 
 @pytest.mark.unit
 class TestSqlVerdicts:
-    """The SQL verdict must match the write path that actually runs:
-    upsert dedups on its conflict keys everywhere; insert anti-joins on
-    row identity only on the SQLAlchemy transport; truncate-insert
-    truncates on the run's first batch (issue #307) but appends with no
-    row-identity dedup, so it cannot claim replay safety."""
+    """The SQL verdict is transport-independent under stage-then-merge
+    (ADR sql-write-path-v2 §9): upsert dedups on its conflict keys;
+    insert anti-joins on row identity from the stage on both transports;
+    truncate-insert truncates on the run's first batch (issue #307) but
+    appends with no row-identity dedup, so it cannot claim replay
+    safety. Every mode verdict is asserted for both transports."""
 
     def _handler(self, *, adbc_only: bool, **state_kwargs) -> GenericSQLConnector:
         handler = GenericSQLConnector()
@@ -96,55 +98,59 @@ class TestSqlVerdicts:
         )
         return handler
 
-    def test_upsert_exactly_once_names_conflict_keys(self):
+    @pytest.mark.parametrize("adbc_only", [False, True], ids=["sqlalchemy", "adbc"])
+    def test_upsert_exactly_once_names_conflict_keys(self, adbc_only):
         handler = self._handler(
-            adbc_only=False, write_mode="upsert", conflict_keys=["id"]
+            adbc_only=adbc_only, write_mode="upsert", conflict_keys=["id"]
         )
         verdict = handler.retry_semantics("s1")
         assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE
         assert "id" in verdict.reason
 
-    def test_truncate_insert_reports_not_replay_safe(self):
+    @pytest.mark.parametrize("adbc_only", [False, True], ids=["sqlalchemy", "adbc"])
+    def test_truncate_insert_reports_not_replay_safe(self, adbc_only):
         """Truncate-insert truncates on the run's first batch (issue
         #307), but its append phase has no row-identity dedup, so a
         replayed already-committed later batch re-inserts its rows."""
-        handler = self._handler(adbc_only=True, write_mode="truncate_insert")
+        handler = self._handler(adbc_only=adbc_only, write_mode="truncate_insert")
         verdict = handler.retry_semantics("s1")
         assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE
         assert "first batch" in verdict.reason
 
-    def test_keyed_insert_on_sqlalchemy_exactly_once(self):
+    @pytest.mark.parametrize("adbc_only", [False, True], ids=["sqlalchemy", "adbc"])
+    def test_keyed_insert_exactly_once(self, adbc_only):
         handler = self._handler(
-            adbc_only=False, write_mode="insert", primary_keys=["id"]
+            adbc_only=adbc_only, write_mode="insert", primary_keys=["id"]
         )
         verdict = handler.retry_semantics("s1")
         assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE
         assert "['id']" in verdict.reason
 
-    def test_keyless_insert_on_sqlalchemy_exactly_once_via_record_hash(self):
-        handler = self._handler(adbc_only=False, write_mode="insert")
+    @pytest.mark.parametrize("adbc_only", [False, True], ids=["sqlalchemy", "adbc"])
+    def test_keyless_insert_exactly_once_via_record_hash(self, adbc_only):
+        handler = self._handler(adbc_only=adbc_only, write_mode="insert")
         verdict = handler.retry_semantics("s1")
         assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE
         assert GenericSQLConnector.RECORD_HASH_COLUMN in verdict.reason
 
-    def test_keyed_insert_on_adbc_at_least_once(self):
-        """Keyed ADBC insert uses plain append; the PK prevents silent dups
-        but a retry re-reading the inclusive boundary may surface a constraint
-        violation — the verdict must not claim exactly-once."""
+    def test_insert_on_unenforced_pk_system_at_least_once(self):
+        """The honest-verdict rule (ADR §9): the anti-join dedups every
+        sequential replay, but a system that does not enforce the
+        identity constraint (``pk_not_enforced`` — BigQuery) has a
+        filter, not a guarantee, so its insert streams must not promise
+        exactly-once."""
+        from cdk.sql.dialects import SqlDialect
+
+        class _UnenforcedPkDialect(SqlDialect):
+            pk_not_enforced = True
+
         handler = self._handler(
             adbc_only=True, write_mode="insert", primary_keys=["id"]
         )
+        handler.dialect = _UnenforcedPkDialect()
         verdict = handler.retry_semantics("s1")
         assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE
-        assert "ADBC" in verdict.reason or "keyed" in verdict.reason
-
-    def test_keyless_insert_on_adbc_exactly_once_via_record_hash(self):
-        """Keyless ADBC insert routes through stage-MERGE on _record_hash
-        (issue #285) — the verdict must reflect the new exactly-once guarantee."""
-        handler = self._handler(adbc_only=True, write_mode="insert")  # no primary_keys
-        verdict = handler.retry_semantics("s1")
-        assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE
-        assert GenericSQLConnector.RECORD_HASH_COLUMN in verdict.reason
+        assert "does not enforce" in verdict.reason
 
     def test_unconfigured_stream_falls_back_to_base_default(self):
         handler = GenericSQLConnector()

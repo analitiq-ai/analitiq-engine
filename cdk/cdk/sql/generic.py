@@ -15,20 +15,26 @@ The active transport is selected by the connector definition and set on the
 engine) or ``transport_type: "adbc"`` (direct ADBC DBAPI). Type casting is
 handled by the Arrow-based ``SchemaContract``.
 
-This base is vendor-neutral: every per-system quirk (quoting, upsert SQL,
-pre-DDL, ADBC DDL type names, stage-table syntax, discovery queries) is
-delegated to the :class:`~cdk.sql.dialects.SqlDialect` carried by
-``dialect_class`` — which each connector package overrides with its own
-dialect next to its connector class. The base never branches on a driver
-or connector_id; operations with no portable form raise
-``UnsupportedDialectOperationError`` naming the missing connector package.
+Writes are stage-then-merge on both transports (ADR sql-write-path-v2):
+this facade owns the semantics — write modes, identity and duplicate
+rules, refusals, retry verdicts, timeouts — and hands each batch to the
+runtime-selected :class:`~cdk.sql.backend.TransportBackend`
+(``SqlAlchemyBackend`` or ``AdbcBackend``) as a ``StageWritePlan``.
+
+This base is vendor-neutral: every per-system quirk (quoting, the
+merge-form upsert statement, pre-DDL, stage-table syntax, discovery
+queries) is delegated to the :class:`~cdk.sql.dialects.SqlDialect`
+carried by ``dialect_class`` — which each connector package overrides
+with its own dialect next to its connector class. The base never
+branches on a driver or connector_id; operations with no portable form
+raise ``UnsupportedDialectOperationError`` naming the missing connector
+package.
 """
 
 import asyncio
 import hashlib
 import json
 import logging
-import threading
 from collections.abc import AsyncIterator, Mapping
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, nullcontext
 from dataclasses import dataclass, field, replace
@@ -36,7 +42,6 @@ from datetime import datetime
 from typing import Any, Literal
 
 import pyarrow as pa
-from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -63,9 +68,10 @@ from cdk.types import (
 )
 
 from ..contract import ColumnDef
-from ._adbc_utils import _close_cursor_quietly
+from ._adbc_utils import _is_fatal_adbc_error
+from .adbc_backend import AdbcBackend
 from .adbc_reader import open_adbc_reader
-from .backend import SqlAlchemyBackend
+from .backend import SqlAlchemyBackend, TransportBackend
 from .capabilities import (
     SqlCapabilities,
     bind_dialect_capabilities,
@@ -118,46 +124,6 @@ def _note_order_by_fallback(table_name: str, column_name: str) -> None:
         table_name,
         column_name,
     )
-
-
-# PEP-249 exception class names that indicate the failure cannot heal
-# between retries against an identical request: bad SQL, missing
-# objects, permission denials, type mismatches, unsupported operations.
-# Driver modules re-export these names per PEP-249; we match on the
-# class name so the check works without importing the optional driver.
-_FATAL_ADBC_ERROR_NAMES = frozenset(
-    {
-        "ProgrammingError",
-        "NotSupportedError",
-        "IntegrityError",
-        "DataError",
-    }
-)
-
-
-def _is_fatal_adbc_error(exc: BaseException) -> bool:
-    """Return ``True`` when *exc* is a failure class retries cannot heal.
-
-    Name-based, so it serves both transports: ADBC drivers re-export the
-    PEP-249 names per the spec, and SQLAlchemy's wrapper exceptions
-    (``sqlalchemy.exc.IntegrityError`` etc.) carry the same class names.
-    """
-    return any(cls.__name__ in _FATAL_ADBC_ERROR_NAMES for cls in type(exc).__mro__)
-
-
-def _reclassify_as_fatal(exc: BaseException) -> AdbcConfigurationError:
-    """Wrap a fatal PEP-249 exception in ``AdbcConfigurationError``.
-
-    The wrapped message preserves the original class name so operators
-    triaging an opaque ``str(exception)`` in the engine's failure
-    summary can still distinguish ProgrammingError (syntax / missing
-    object / permission denial) from IntegrityError (PK collision)
-    from DataError (type / value mismatch).
-    """
-    inner_name = type(exc).__name__
-    wrapped = AdbcConfigurationError(f"{inner_name}: {exc}")
-    wrapped.__cause__ = exc
-    return wrapped
 
 
 WriteMode = Literal["insert", "upsert", "truncate_insert"]
@@ -239,13 +205,14 @@ class GenericSQLConnector(BaseDestinationHandler):
       DML/DDL semantics are identical. DDL via rendered ``CREATE TABLE``
       + backend reflection for landing bind types.
     * ``transport_type: "adbc"`` — direct ADBC DBAPI 2.0 connection
-      (Snowflake, BigQuery). DDL via ``cursor.execute`` of per-driver
-      native SQL, ingest via ``cursor.adbc_ingest``, upsert via
-      stage-table + ``MERGE INTO`` (aligned onto the shared backend
-      interface by #389).
+      (Snowflake, BigQuery). The same ``StageWritePlan``s execute over
+      ``AdbcBackend``: DDL via ``cursor.execute`` of the rendered
+      statements, stage landing via the declared bulk mechanism
+      (``cursor.adbc_ingest``, a dialect ``bulk_land`` hook, or
+      executemany), the mode statement from the same plan.
 
-    Both modes are idempotent on the write mode's own keys (a merge on
-    ``conflict_keys`` for upsert, the identity anti-join — contract
+    Both transports are idempotent on the write mode's own keys (a merge
+    on ``conflict_keys`` for upsert, the identity anti-join — contract
     primary key or the synthetic ``_record_hash`` — for insert), not a
     side ledger; they share the schema-contract Arrow cast and the
     per-stream state machine. Configuration is resolved through
@@ -266,14 +233,14 @@ class GenericSQLConnector(BaseDestinationHandler):
     # Engine-managed dedup key for a keyless insert stream (one with no
     # contract primary key). Holds the content-derived record id and is
     # declared as the table's primary key, so the database enforces the
-    # uniqueness that both the insert anti-join (SQLAlchemy) and the
-    # stage-MERGE (ADBC) rely on -- a re-read row is never duplicated
-    # (issue #282, issue #285). Absent on streams that carry a primary key
-    # or use upsert/truncate_insert.
+    # uniqueness the insert anti-join relies on — one mechanism on both
+    # transports; a re-read row is never duplicated (issue #282, issue
+    # #285). Absent on streams that carry a primary key or use
+    # upsert/truncate_insert.
     RECORD_HASH_COLUMN = "_record_hash"
 
     # The dialect strategy carrying every vendor-specific piece of SQL:
-    # quoting, upsert statements, pre-DDL, ADBC DDL type names, stage-table
+    # quoting, the merge-form upsert statement, pre-DDL, stage-table
     # syntax, discovery queries. The CDK base is ANSI-neutral; a connector
     # package's class overrides ``dialect_class`` with its own SqlDialect
     # subclass. This is the ONLY per-system extension point — the generic
@@ -295,11 +262,10 @@ class GenericSQLConnector(BaseDestinationHandler):
         # and ADBC-only mode; its operations run via asyncio.to_thread,
         # mirroring the ADBC sync-in-thread pattern.
         self._sync_engine: Engine | None = None
-        # The transport backend executing StageWritePlans on the SQLAlchemy
-        # path (both engine flavors). None until connect(); the ADBC path
-        # keeps its own machinery until #389 puts it behind the same
-        # interface.
-        self._backend: SqlAlchemyBackend | None = None
+        # The transport backend executing StageWritePlans —
+        # SqlAlchemyBackend (both engine flavors) or AdbcBackend, selected
+        # by the runtime's transport in connect(). None until connect().
+        self._backend: TransportBackend | None = None
         self._config: dict[str, Any] = {}
         self._connected: bool = False
         self._driver: str = ""
@@ -309,12 +275,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         # instances, or unset) means unbounded - asyncio.timeout(None) never
         # fires. See _statement_deadline.
         self._statement_timeout_seconds: float | None = None
-        # ADBC-only mode: the runtime exposes no SQLAlchemy engine and
-        # every write/DDL/idempotency operation runs through the cached
-        # ADBC DBAPI connection. Set in ``connect()`` from
-        # ``runtime.is_adbc``. The SQLAlchemy transport (``self._engine``)
-        # is the alternative; the two are selected by ``transport_type``
-        # on the connector, never mixed.
+        # ADBC-only mode: the runtime exposes no SQLAlchemy engine and the
+        # backend is AdbcBackend. Set in ``connect()`` from
+        # ``runtime.is_adbc``. The facade keeps the flag for the
+        # transport-fact rules that stay semantic (statement-deadline
+        # enforceability, the explicit-schema addressing requirement) —
+        # all DML and cursor mechanics live in the backend.
         self._adbc_only: bool = False
 
         # Per-stream state derived from the contract endpoint document at
@@ -344,46 +310,6 @@ class GenericSQLConnector(BaseDestinationHandler):
         # ``write.conflict_keys``). Populated by set_stream_conflict_keys()
         # at startup; absent/empty means INSERT mode.
         self._stream_conflict_keys: dict[str, list[str]] = {}
-
-        # Cached ADBC DBAPI connection for ADBC-only mode (Snowflake /
-        # BigQuery / Postgres), opened eagerly in connect() via
-        # runtime.open_adbc_connection(). Nulled on any failure under
-        # _adbc_conn_lock so the next operation reopens instead of
-        # reusing a poisoned handle.
-        self._adbc_conn: Any = None
-        # Session schema reported by the live ADBC connection, probed
-        # lazily the first time a dialect that opted out of
-        # per-statement ingest targeting needs the session == target
-        # invariant checked (issue #377). Valid only for the current
-        # ``_adbc_conn``: every site that drops or replaces the
-        # connection resets both fields so a fresh connection is
-        # re-probed. ``_known`` distinguishes "not probed yet" from a
-        # session that legitimately has no schema selected (None).
-        self._adbc_session_schema: str | None = None
-        self._adbc_session_schema_known: bool = False
-        # Guards mutations of ``self._adbc_conn`` from worker threads.
-        # ``asyncio.to_thread`` dispatches each ADBC call to the default
-        # thread pool; without this lock two concurrent failures could
-        # double-close the same DBAPI handle (libpq segfault risk) and
-        # two concurrent reopens could open and leak a second connection.
-        # Sync (``threading.Lock``) because the protected sections run
-        # off the event loop.
-        self._adbc_conn_lock: threading.Lock = threading.Lock()
-        # PEP-249 reports ``threadsafety = 1`` for every ADBC driver
-        # we ship — "threads may share the module, but not connections".
-        # ``asyncio.to_thread`` gives no guarantee that subsequent
-        # awaited calls land on the same worker thread, so concurrent
-        # batches against one cached connection can corrupt cursor /
-        # transaction state. This lock serializes ALL cursor operations
-        # on the cached connection. Concurrent batches against the same
-        # destination handler queue here — acceptable given the
-        # PEP-249 constraint; the alternative is opening a fresh
-        # connection per batch, which is far more expensive.
-        # ``RLock`` (reentrant) because some sync helpers compose
-        # internally (e.g. ``_truncate_then_ingest_sync`` calls
-        # ``_adbc_only_ingest_sync`` after the truncate); both run on
-        # the same worker thread within one ``asyncio.to_thread`` call.
-        self._adbc_op_lock: threading.RLock = threading.RLock()
 
         # Read-path (Readable role) counters. Not consumed by the engine's
         # pipeline metrics — kept for parity with the source connector's
@@ -481,15 +407,6 @@ class GenericSQLConnector(BaseDestinationHandler):
             return nullcontext()
         return asyncio.timeout(self._statement_timeout_seconds)
 
-    def _require_sync_engine(self) -> Engine:
-        """Return the sync SQLAlchemy engine, or fail loud if path is unset."""
-        if self._sync_engine is None:
-            raise RuntimeError(
-                "sync SQLAlchemy engine not available; this handler is not "
-                "on the sync-SQLAlchemy transport path"
-            )
-        return self._sync_engine
-
     def _type_mapper_for_stream(self, stream_id: str) -> TypeMapper:
         """Resolve the type-mapper appropriate for ``stream_id``'s endpoint."""
         if self._runtime is None:
@@ -561,8 +478,8 @@ class GenericSQLConnector(BaseDestinationHandler):
         """
         return type(self.dialect).stage_table_sql is not SqlDialect.stage_table_sql
 
-    def _sqlalchemy_stage_ready(self) -> bool:
-        """Whether the SQLAlchemy stage cycle can run for this connector.
+    def _stage_ready(self) -> bool:
+        """Whether the stage cycle can run for this connector (any transport).
 
         The same predicate the ``configure_schema`` stage gate enforces —
         declared ``sql_capabilities`` and a stage-rendering dialect — so
@@ -572,71 +489,6 @@ class GenericSQLConnector(BaseDestinationHandler):
         """
         return self._capabilities is not None and self._dialect_renders_stage_table()
 
-    def _dialect_renders_adbc_stage(self) -> bool:
-        """Whether the active dialect implements the stage-table DDL hook.
-
-        The ADBC analog of :meth:`_dialect_renders_merge_statement`: the
-        stage-MERGE path renders its stage through
-        ``adbc_stage_table_sql``, which the neutral base does not
-        implement — a declaring connector without the override would pass
-        the handshake and fatal on the first batch instead.
-        """
-        return (
-            type(self.dialect).adbc_stage_table_sql
-            is not SqlDialect.adbc_stage_table_sql
-        )
-
-    @staticmethod
-    def _adbc_stage_machinery_honors(caps: SqlCapabilities) -> bool:
-        """Whether the current ADBC stage machinery can honor *caps*.
-
-        One shape until #389: a real stage table in the target schema,
-        applied with ``MERGE INTO``. Shared by the advertisement
-        (``supports_upsert``) and the refusing gate
-        (:meth:`_check_adbc_stage_machinery`) so the two cannot disagree.
-        """
-        return (
-            caps.merge_form == "merge"
-            and caps.stage.scope == "real"
-            and caps.stage.schema == "target"
-        )
-
-    def _check_adbc_stage_machinery(self, caps: SqlCapabilities, need: str) -> None:
-        """Refuse declarations the current ADBC stage machinery cannot honor.
-
-        Until #389 lands the declared-shape stage cycle, the ADBC path
-        renders exactly one shape: a real stage table in the target
-        schema, applied with ``MERGE INTO``. A declaration outside that
-        shape would be silently misrouted (stage DDL in the wrong
-        namespace) or mis-rendered (a merge form the machinery does not
-        emit) — refuse it loudly instead. #389 deletes this guard along
-        with the machinery it describes.
-        """
-        if caps.merge_form != "merge":
-            raise AdbcConfigurationError(
-                f"{need} needs the stage-MERGE path, but the connector "
-                f"declares sql_capabilities.merge_form {caps.merge_form!r} "
-                f"and the current ADBC machinery renders MERGE only "
-                f"(declared merge forms land in #389); this declaration "
-                f"cannot be honored yet."
-            )
-        if caps.stage.scope != "real" or caps.stage.schema != "target":
-            raise AdbcConfigurationError(
-                f"{need} needs a stage table, but the connector declares "
-                f"sql_capabilities.stage scope={caps.stage.scope!r} "
-                f"schema={caps.stage.schema!r} and the current ADBC "
-                f"machinery lands stages only as real tables in the "
-                f"target schema (declared stage shapes land in #389); "
-                f"refusing rather than staging in an undeclared namespace."
-            )
-        if not self._dialect_renders_adbc_stage():
-            raise AdbcConfigurationError(
-                f"{need} needs the stage-MERGE path, but dialect "
-                f"{self.dialect.name!r} does not implement "
-                f"adbc_stage_table_sql — the declaration and the dialect "
-                f"disagree; fix the connector."
-            )
-
     @property
     def supports_upsert(self) -> bool:
         """True when upsert is declared AND this connector can run it now.
@@ -644,45 +496,36 @@ class GenericSQLConnector(BaseDestinationHandler):
         The declaration (``sql_capabilities.merge_form``) says whether the
         system has a merge statement; the advertisement additionally
         applies the same implementability gates ``configure_schema``
-        enforces — the interim ADBC stage-machinery shape and the SA
-        dialect's statement hook — so ``GetCapabilities`` never advertises
-        a mode every stream of which would be refused at handshake.
-        Undeclared advertises ``False``; refusals at ``configure_schema``
-        carry the error naming the missing declaration or disagreement.
+        enforces — the stage predicate and the dialect's merge-statement
+        hook, identical on both transports — so ``GetCapabilities`` never
+        advertises a mode every stream of which would be refused at
+        handshake. Undeclared advertises ``False``; refusals at
+        ``configure_schema`` carry the error naming the missing
+        declaration or disagreement.
         """
         caps = self._capabilities
         if caps is None or not caps.supports_upsert:
             return False
-        if self._adbc_only:
-            return (
-                self._adbc_stage_machinery_honors(caps)
-                and self._dialect_renders_adbc_stage()
-            )
-        return (
-            self._dialect_renders_merge_statement() and self._sqlalchemy_stage_ready()
-        )
+        return self._dialect_renders_merge_statement() and self._stage_ready()
 
     @property
     def supports_insert(self) -> bool:
         """True when this connector can run the insert stage cycle now.
 
-        The ADBC path inserts through its own machinery until #389; the
-        SQLAlchemy path needs the stage predicate — advertised modes must
-        match what the schema handshake will accept.
+        Every write on every transport is a stage cycle, so the stage
+        predicate gates the advertisement that gates the handshake.
         """
-        if self._adbc_only:
-            return True
-        return self._sqlalchemy_stage_ready()
+        return self._stage_ready()
 
     @property
     def supports_bulk_load(self) -> bool:
         """Bulk-load capability is not advertised here.
 
-        ADBC dialects use Arrow-native ingest (``adbc_ingest``) for every
-        write regardless of this flag; SA dialects use parameterized
-        INSERT batches. Returning False keeps the destination protocol
-        unaware of the distinction — the engine always batches the same
-        way.
+        How a batch lands in the stage is the connector's declared
+        ``sql_capabilities.bulk_load`` mechanism, consumed by the
+        transport backend. Returning False keeps the destination
+        protocol unaware of the distinction — the engine always batches
+        the same way.
         """
         return False
 
@@ -699,27 +542,27 @@ class GenericSQLConnector(BaseDestinationHandler):
     def supports_truncate(self) -> bool:
         """True when the full-refresh write mode can run on this connector.
 
-        The ADBC path truncates through its own machinery until #389; the
-        SQLAlchemy path appends from a stage, so the same stage predicate
-        gates the advertisement that gates the handshake.
+        The append phase reads from a stage on both transports, so the
+        same stage predicate gates the advertisement that gates the
+        handshake.
         """
-        if self._adbc_only:
-            return True
-        return self._sqlalchemy_stage_ready()
+        return self._stage_ready()
 
     def retry_semantics(self, stream_id: str) -> RetryVerdict:
-        """Retry-safety verdict per write mode, keys, and transport (#286).
+        """Retry-safety verdict per write mode and keys (#286).
 
-        Upsert is idempotent on its conflict keys on every transport.
-        Keyless insert dedups by content hash on both transports: the
-        SQLAlchemy path uses an anti-join; the ADBC path uses a stage-MERGE
-        keyed on ``_record_hash`` (issue #285). Keyed insert is exactly-once
-        on SQLAlchemy (anti-join on the primary key) but at-least-once on
-        ADBC (plain append; the PK prevents duplicates structurally but a
-        retry that re-reads the inclusive boundary may surface a constraint
-        violation rather than a silent skip). Truncate-insert truncates on
-        the read's first batch only (issue #307) and its append phase is a
-        plain insert with no row-identity dedup — so a replayed
+        Transport-independent under stage-then-merge (ADR
+        sql-write-path-v2 §9): upsert merges on its conflict keys; insert
+        anti-joins on row identity (contract primary key, or the
+        synthetic ``_record_hash`` for a keyless stream) from the stage
+        on every transport. The honest-verdict rule for insert: the
+        anti-join dedups every sequential replay on its own, but the
+        enforced PRIMARY KEY is the structural backstop against writes
+        that race it — a system that does not enforce uniqueness
+        (``pk_not_enforced``) has a filter, not a guarantee, so its
+        insert streams report at-least-once. Truncate-insert truncates on
+        the read's first batch only (issue #307) and its append phase is
+        a plain insert with no row-identity dedup — so a replayed
         already-committed later batch re-inserts its rows.
         """
         state = self._streams.get(stream_id)
@@ -743,23 +586,16 @@ class GenericSQLConnector(BaseDestinationHandler):
                     "rows"
                 ),
             )
-        if self._adbc_only and self._needs_record_hash(state):
-            return RetryVerdict(
-                semantics=RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE,
-                reason=(
-                    f"keyless insert on the ADBC transport deduplicates via "
-                    f"stage-MERGE on {self.RECORD_HASH_COLUMN} (issue #285); "
-                    f"a re-read row is never duplicated"
-                ),
-            )
-        if self._adbc_only:
+        if self.dialect.pk_not_enforced:
             return RetryVerdict(
                 semantics=RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE,
                 reason=(
-                    "keyed insert on the ADBC transport is plain append; "
-                    "the database PK prevents duplicate rows but a retry "
-                    "re-reading the inclusive boundary may raise a "
-                    "constraint violation"
+                    f"insert anti-joins on row identity "
+                    f"{self._identity_columns(state)}, which dedups every "
+                    f"sequential replay, but this system does not enforce "
+                    f"the identity constraint — a write racing the "
+                    f"anti-join can land a duplicate the system will not "
+                    f"reject"
                 ),
             )
         return RetryVerdict(
@@ -821,88 +657,79 @@ class GenericSQLConnector(BaseDestinationHandler):
         self._engine = None
         self._sync_engine = None
         self._backend = None
-        self._adbc_session_schema = None
-        self._adbc_session_schema_known = False
+        # The write backend executes StageWritePlans over the runtime's
+        # transport. Created after the capability binding so it reads the
+        # declared bulk-load fact off the dialect.
+        backend: TransportBackend
         if runtime.is_adbc:
             self._adbc_only = True
-            # Open the ADBC connection eagerly so a bad credential
-            # fails at connect() time, not on the first batch. Wrap
-            # the driver-specific exception in ConnectionError to
-            # match the materialize() failure shape.
-            try:
-                self._adbc_conn = await asyncio.to_thread(runtime.open_adbc_connection)
-            except Exception as e:
-                logger.error(
-                    "ADBC eager-open failed during connect: %s", e, exc_info=True
-                )
-                # materialize() already acquired the runtime; the caller does
-                # not disconnect a handler whose connect() raised, so release
-                # the ref here to keep the lifecycle balanced.
-                await runtime.close()
-                raise ConnectionError(f"ADBC connection failed: {e}") from e
-            logger.info(
-                "GenericSQLConnector connected via ADBC to %s",
-                self._driver,
-            )
+            transport_name = "ADBC"
+            backend = AdbcBackend(self.dialect)
         elif runtime.is_sync_sqlalchemy:
             self._sync_engine = runtime.sync_engine
-            logger.info(
-                "GenericSQLConnector connected via sync SQLAlchemy to %s",
-                self._driver,
-            )
+            transport_name = "sync SQLAlchemy"
+            backend = SqlAlchemyBackend(self.dialect)
         else:
             self._engine = runtime.engine
-            logger.info(
-                "GenericSQLConnector connected via SQLAlchemy to %s",
-                self._driver,
-            )
-        if not self._adbc_only:
-            # The write backend executes StageWritePlans over the runtime's
-            # engine (either flavor). Created after the capability binding
-            # so it reads the declared bulk-load fact off the dialect.
+            transport_name = "SQLAlchemy"
             backend = SqlAlchemyBackend(self.dialect)
+        try:
+            # The ADBC backend opens its connection eagerly so a bad
+            # credential fails at connect() time, not on the first batch;
+            # the driver-specific exception is wrapped in ConnectionError
+            # to match the materialize() failure shape.
             await backend.connect(runtime)
-            self._backend = backend
+        except Exception as e:
+            logger.error(
+                "%s backend connect failed: %s", transport_name, e, exc_info=True
+            )
+            # materialize() already acquired the runtime; the caller does
+            # not disconnect a handler whose connect() raised, so release
+            # the ref here to keep the lifecycle balanced. The close is
+            # guarded so a failing release can never mask the connect
+            # error the operator actually needs.
+            try:
+                await runtime.close()
+            except Exception:
+                logger.warning(
+                    "runtime release after a failed backend connect also "
+                    "failed; the connect error below is the root cause",
+                    exc_info=True,
+                )
+            raise ConnectionError(f"{transport_name} connection failed: {e}") from e
+        self._backend = backend
+        logger.info(
+            "GenericSQLConnector connected via %s to %s",
+            transport_name,
+            self._driver,
+        )
         self._connected = True
 
     async def disconnect(self) -> None:
         """Close database connection.
 
-        Both the ADBC connection and the SQLAlchemy runtime are
-        released even if the other side fails or the coroutine is
-        cancelled mid-close. The ADBC release uses ``BaseException``
-        so ``asyncio.CancelledError`` during shutdown still gives the
-        SQLAlchemy runtime a chance to dispose its engine pool.
+        Both the transport backend (which closes an ADBC connection
+        where one exists) and the runtime are released even if the other
+        side fails or the coroutine is cancelled mid-close.
         ``CancelledError`` is re-raised after both releases so the
         caller's cancellation is honored.
-
-        The ``_adbc_conn`` mutation goes through ``_adbc_conn_lock``
-        so a worker thread mid-poison cannot race with disconnect on
-        the same handle (libpq double-close risk).
         """
         cancelled: BaseException | None = None
-        with self._adbc_conn_lock:
-            adbc_conn = self._adbc_conn
-            self._adbc_conn = None
-            self._adbc_session_schema = None
-            self._adbc_session_schema_known = False
-        if adbc_conn is not None:
+        if self._backend is not None:
             try:
-                await asyncio.to_thread(adbc_conn.close)
+                await self._backend.disconnect()
             except asyncio.CancelledError as exc:
                 logger.error(
-                    "ADBC close cancelled during disconnect; "
+                    "transport backend close cancelled during disconnect; "
                     "server-side resources may remain allocated"
                 )
                 cancelled = exc
             except Exception:
                 logger.error(
-                    "Failed to close ADBC connection during disconnect; "
+                    "Failed to close transport backend during disconnect; "
                     "server-side resources may remain allocated",
                     exc_info=True,
                 )
-        if self._backend is not None:
-            await self._backend.disconnect()
             self._backend = None
         if self._runtime:
             try:
@@ -1049,11 +876,10 @@ class GenericSQLConnector(BaseDestinationHandler):
             # Mode-specific gate first: its refusal names the upsert fact
             # (merge_form), the more actionable message for the stream.
             self._check_upsert_capabilities(stream_id, address)
-        if not self._adbc_only:
-            # Every SQLAlchemy-path write lands in a stage table first, so
-            # the declared stage shape and the dialect's stage DDL hook are
-            # handshake requirements for every write mode, not just upsert.
-            self._check_sqlalchemy_stage_capabilities(stream_id, address)
+        # Every write on every transport lands in a stage table first, so
+        # the declared stage shape and the dialect's stage DDL hook are
+        # handshake requirements for every write mode, not just upsert.
+        self._check_stage_capabilities(stream_id, address)
 
         # Resolve the type-mapper for this stream's endpoint once —
         # both DDL generation and the schema contract use it.
@@ -1100,10 +926,9 @@ class GenericSQLConnector(BaseDestinationHandler):
         """Refuse an upsert stream at handshake time, before any DDL runs.
 
         The whole upsert gate in one place: upsert needs the system's
-        declared merge form, and the active transport must be able to run
-        it now — the interim ADBC stage-machinery shape, or the SA
-        dialect's statement hook. Every refusal names the missing
-        declaration or the declaration/dialect disagreement.
+        declared merge form and a dialect that renders it — the same
+        statement hook on both transports. Every refusal names the
+        missing declaration or the declaration/dialect disagreement.
         """
         caps = self._capabilities
         if caps is None:
@@ -1124,9 +949,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 f"no merge statement. Use insert or truncate_insert, or "
                 f"fix the connector's declaration."
             )
-        if self._adbc_only:
-            self._check_adbc_stage_machinery(caps, f"stream {stream_id!r}")
-        elif not self._dialect_renders_merge_statement():
+        if not self._dialect_renders_merge_statement():
             # Declaration/dialect disagreement, caught at handshake
             # instead of on the first batch: the upsert's stage-to-target
             # statement renders through the dialect's merge hook.
@@ -1139,10 +962,8 @@ class GenericSQLConnector(BaseDestinationHandler):
                 f"dialect disagree; fix the connector."
             )
 
-    def _check_sqlalchemy_stage_capabilities(
-        self, stream_id: str, address: TableAddress
-    ) -> None:
-        """Refuse a SQLAlchemy-path write stream the stage cycle cannot run.
+    def _check_stage_capabilities(self, stream_id: str, address: TableAddress) -> None:
+        """Refuse a write stream the stage cycle cannot run (any transport).
 
         Stage-then-merge is the only write shape: the batch lands in a
         stage whose scope and transaction shape come from the declared
@@ -1171,12 +992,12 @@ class GenericSQLConnector(BaseDestinationHandler):
                 f"connector."
             )
 
-    def _require_backend(self) -> SqlAlchemyBackend:
-        """Return the SQLAlchemy write backend, or fail loud off-path."""
+    def _require_backend(self) -> TransportBackend:
+        """Return the transport write backend, or fail loud pre-connect."""
         if self._backend is None:
             raise RuntimeError(
-                "SQLAlchemy write backend not available; this handler is "
-                "not connected on the SQLAlchemy transport path"
+                "transport write backend not available; connect() has not "
+                "completed on this handler"
             )
         return self._backend
 
@@ -1288,8 +1109,8 @@ class GenericSQLConnector(BaseDestinationHandler):
     def _needs_record_hash(self, state: _StreamState) -> bool:
         """Whether this stream uses the synthetic ``_record_hash`` dedup key.
 
-        A keyless ``insert`` stream on either transport: SQLAlchemy anti-joins
-        on the hash; ADBC routes through a stage-MERGE keyed on the hash.
+        A keyless ``insert`` stream: the anti-join matches on the hash
+        from the stage, identically on both transports.
         Upsert/truncate_insert dedup on their own keys.
         """
         return state.write_mode == "insert" and not state.primary_keys
@@ -1314,38 +1135,13 @@ class GenericSQLConnector(BaseDestinationHandler):
 
         ONE DDL builder serves every transport: column types come from the
         connector's read+write maps via the dialect, quoting/PK from the
-        dialect, and the rendered statement executes over SQLAlchemy or the
-        ADBC cursor. On the SQLAlchemy path the table is then REFLECTED so
-        DML binding uses the real column types the database reports.
+        dialect, and the rendered statements execute through the transport
+        backend. The backend then reports the target's columns — the
+        SQLAlchemy backend by reflecting (its landing binds with the
+        reflected types), the ADBC backend by a zero-row probe — so the
+        engine-managed ``_record_hash`` readiness rule below is one rule
+        for every transport.
         """
-        if self._adbc_only and self._needs_record_hash(state):
-            # Keyless insert dedups via stage-MERGE (_record_hash). A system
-            # that ingests but has no merge form would otherwise reach
-            # _merge_ingest_sync and fatal on the first write via
-            # adbc_stage_table_sql. Fail loud at configure time instead: a
-            # keyless insert cannot be made exactly-once on this system, and
-            # a silent plain-append fallback would reintroduce the lost-ack
-            # duplication that issue #285 closes.
-            caps = self._capabilities
-            if caps is None:
-                raise AdbcConfigurationError(
-                    str(
-                        undeclared_capability_error(
-                            "merge_form",
-                            need=f"keyless insert on {state.address} "
-                            f"requires stage-MERGE dedup",
-                        )
-                    )
-                )
-            if not caps.supports_upsert:
-                raise AdbcConfigurationError(
-                    f"Keyless insert on {state.address} requires stage-MERGE "
-                    f"dedup, but the connector declares "
-                    f"sql_capabilities.merge_form 'none' — this system has no "
-                    f"merge statement. Declare a primary key for this stream "
-                    f"or fix the connector's declaration."
-                )
-            self._check_adbc_stage_machinery(caps, f"keyless insert on {state.address}")
         if not state.endpoint_document:
             raise SchemaConfigurationError(
                 f"destination stream for {state.address} "
@@ -1370,20 +1166,12 @@ class GenericSQLConnector(BaseDestinationHandler):
             state.address,
         )
 
-        if self._adbc_only:
-            await self._ensure_tables_via_adbc(state, [target_ddl])
-            if self._needs_record_hash(state):
-                await asyncio.to_thread(
-                    self._verify_record_hash_column_adbc_sync, state
-                )
-            return
-
         if self._backend is None:
             # Silently skipping DDL here would leave the stream unprepared
             # and the write_batch readiness guard returning
             # RETRYABLE_FAILURE forever.
             raise AdbcConfigurationError(
-                f"SQLAlchemy write backend is None during DDL for "
+                f"transport write backend is None during DDL for "
                 f"{state.address}; "
                 "connect() must be called before configure_schema()"
             )
@@ -1397,32 +1185,10 @@ class GenericSQLConnector(BaseDestinationHandler):
         # CREATE TABLE with a fresh timer, by which point the engine's ack for
         # this stream has long expired. Bounding the wait + statement together
         # keeps the whole handshake under the ack budget (issue #231).
-        # Dialect-declared preparation (e.g. postgres' CREATE SCHEMA
-        # IF NOT EXISTS for a non-default schema) shares the DDL
-        # transaction, exactly as before the backend split. A declared
-        # dedicated stage schema is prepared here too: the write plan
-        # places every real-scope stage there, and a handshake that
-        # reported the target ready while the staging namespace does not
-        # exist would fail on the first batch instead. The target is
-        # then reflected by the backend so stage landing binds with the
-        # column types the database actually created.
         statements = [
-            *self.dialect.sqlalchemy_pre_ddl(state.address.schema),
+            *self._schema_preparation_statements(state.address),
             target_ddl,
         ]
-        caps = self._capabilities
-        if (
-            caps is not None
-            and caps.stage.scope == "real"
-            and caps.stage.schema == "dedicated"
-        ):
-            # Normalized like every other schema component, so the
-            # namespace prepared here is the one the write plan targets.
-            dedicated = self.dialect.normalize_ident(str(caps.stage.dedicated_schema))
-            statements = [
-                *self.dialect.sqlalchemy_pre_ddl(dedicated),
-                *statements,
-            ]
         async with self._statement_deadline():
             async with self._ddl_lock:
                 backend = self._require_backend()
@@ -1434,8 +1200,8 @@ class GenericSQLConnector(BaseDestinationHandler):
         ):
             # A keyless insert table created before issue #282 has no
             # _record_hash column; CREATE TABLE IF NOT EXISTS is a no-op and
-            # reflection returns it without the column, so every write would
-            # then fail indexing table.c[_record_hash]. Fail loud with a clear
+            # the backend reports it without the column, so every write would
+            # then fail on the missing identity column. Fail loud with a clear
             # message instead -- the engine adds no migration (the column is the
             # primary key, so it cannot be back-filled on existing rows).
             raise SchemaConfigurationError(
@@ -1449,6 +1215,53 @@ class GenericSQLConnector(BaseDestinationHandler):
             "Destination table ready for %s",
             state.address,
         )
+
+    def _schema_preparation_statements(self, address: TableAddress) -> list[str]:
+        """Namespace preparation that precedes the target DDL.
+
+        The target's schema first (per-transport rendering: the dialect's
+        ``sqlalchemy_pre_ddl`` hook, or the generic ``CREATE SCHEMA IF NOT
+        EXISTS`` the ADBC path composes for a non-implicit schema), and
+        before it the declared dedicated stage schema when one exists: the
+        write plan places every real-scope stage there, and a handshake
+        that reported the target ready while the staging namespace does
+        not exist would fail on the first batch instead.
+        """
+        if self._adbc_only:
+            statements = []
+            if not self.dialect.schema_is_implicit_default(address.schema):
+                # The address components are already normalized, so a
+                # case-folding system's conventional lowercase name matches
+                # the stored one instead of creating a quoted-lowercase
+                # sibling; the schema path is catalog-qualified when the
+                # address carries one.
+                quoted_schema = self.dialect.quote_schema(address)
+                statements = [f"CREATE SCHEMA IF NOT EXISTS {quoted_schema}"]
+        else:
+            statements = list(self.dialect.sqlalchemy_pre_ddl(address.schema))
+        caps = self._capabilities
+        if (
+            caps is not None
+            and caps.stage.scope == "real"
+            and caps.stage.schema == "dedicated"
+        ):
+            # Normalized like every other schema component, so the
+            # namespace prepared here is the one the write plan targets.
+            dedicated = self.dialect.normalize_ident(str(caps.stage.dedicated_schema))
+            if self._adbc_only:
+                dedicated_ref = self.dialect.quote_schema(
+                    replace(address, schema=dedicated)
+                )
+                statements = [
+                    f"CREATE SCHEMA IF NOT EXISTS {dedicated_ref}",
+                    *statements,
+                ]
+            else:
+                statements = [
+                    *self.dialect.sqlalchemy_pre_ddl(dedicated),
+                    *statements,
+                ]
+        return statements
 
     def _reject_if_not_ready(
         self, run_id: str, stream_id: str, batch_seq: int
@@ -1466,10 +1279,10 @@ class GenericSQLConnector(BaseDestinationHandler):
                 stream_id=stream_id,
                 batch_seq=batch_seq,
             )
-        if not self._adbc_only and self._backend is None:
+        if self._backend is None:
             return reject_batch(
                 logger,
-                "Handler not connected: no SQLAlchemy write backend",
+                "Handler not connected: no transport write backend",
                 run_id=run_id,
                 stream_id=stream_id,
                 batch_seq=batch_seq,
@@ -1611,37 +1424,26 @@ class GenericSQLConnector(BaseDestinationHandler):
                         committed_cursor=cursor,
                     )
 
-                if self._adbc_only:
-                    await self._write_batch_adbc_only(
-                        state,
-                        run_id,
-                        stream_id,
-                        batch_seq,
-                        record_batch,
-                        truncate_now=truncate_now,
-                    )
-                else:
-                    # Stage-then-merge on the SQLAlchemy transport: the
-                    # facade prepares the batch once in Arrow space (cast,
-                    # record-hash attachment, intra-batch duplicate
-                    # collapse — all semantics), renders the plan, and the
-                    # backend executes it. Both engine flavors run one
-                    # shared cycle body inside the backend.
-                    prepared = self._prepare_sqlalchemy_batch(state, record_batch)
-                    plan = build_stage_write_plan(
-                        self.dialect,
-                        self._require_declared_capabilities(state),
-                        target=state.address,
-                        columns=tuple(prepared.schema.names),
-                        write_mode=state.write_mode,
-                        conflict_keys=state.conflict_keys,
-                        identity=self._identity_columns(state),
-                        truncate_now=truncate_now,
-                        run_id=run_id,
-                        stream_id=stream_id,
-                        batch_seq=batch_seq,
-                    )
-                    await self._require_backend().execute_write(plan, prepared)
+                # Stage-then-merge on every transport: the facade
+                # prepares the batch once in Arrow space (cast,
+                # record-hash attachment, intra-batch duplicate
+                # collapse — all semantics), renders the plan, and the
+                # backend executes it.
+                prepared = self._prepare_write_batch(state, record_batch)
+                plan = build_stage_write_plan(
+                    self.dialect,
+                    self._require_declared_capabilities(state),
+                    target=state.address,
+                    columns=tuple(prepared.schema.names),
+                    write_mode=state.write_mode,
+                    conflict_keys=state.conflict_keys,
+                    identity=self._identity_columns(state),
+                    truncate_now=truncate_now,
+                    run_id=run_id,
+                    stream_id=stream_id,
+                    batch_seq=batch_seq,
+                )
+                await self._require_backend().execute_write(plan, prepared)
 
                 logger.info(f"Wrote batch {batch_seq}: {record_count} records")
                 return BatchWriteResult(
@@ -1768,20 +1570,24 @@ class GenericSQLConnector(BaseDestinationHandler):
     def _classify_unexpected_write_error(self, e: Exception) -> BatchWriteResult:
         """Ack an exception the typed ladder did not claim.
 
-        Same intent, same verdict on both transports: the ADBC helpers
-        reclassify the deterministic PEP-249 classes (ProgrammingError,
-        IntegrityError, DataError, NotSupportedError) as fatal before they
-        reach the ladder, and SQLAlchemy's wrapper exceptions carry the
-        same class names — broken rendered SQL, a duplicate conflict key
-        inside one source batch, or a constraint violation cannot heal
-        between retries against an identical request. Everything else
-        stays retryable.
+        Same intent, same verdict on both transports: the deterministic
+        PEP-249 classes (ProgrammingError, IntegrityError, DataError,
+        NotSupportedError) are fatal — broken rendered SQL, a duplicate
+        conflict key inside one source batch, or a constraint violation
+        cannot heal between retries against an identical request. The
+        ADBC backend already reclassifies them as
+        ``AdbcConfigurationError`` at its boundary (caught earlier in the
+        ladder); SQLAlchemy's wrapper exceptions carry the same class
+        names and are claimed here. Everything else stays retryable.
         """
-        if not self._adbc_only and _is_fatal_adbc_error(e):
+        if _is_fatal_adbc_error(e):
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,
-                failure_summary=f"sqlalchemy: {type(e).__name__}: {e}",
+                failure_summary=(
+                    f"{'adbc' if self._adbc_only else 'sqlalchemy'}: "
+                    f"{type(e).__name__}: {e}"
+                ),
                 failure_category=FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
             )
         return BatchWriteResult(
@@ -1797,16 +1603,14 @@ class GenericSQLConnector(BaseDestinationHandler):
         Runs when a refresh's first batch is delivered with zero rows,
         including the synthetic empty batch the engine sends when the
         source yields no batches at all (issue #312). No stage cycle: there
-        is nothing to land, so the emptying statement runs on its own.
+        is nothing to land, so the emptying statement — the dialect's
+        ``empty_table_sql``, never ``TRUNCATE`` — runs on its own.
         """
-        if self._adbc_only:
-            await asyncio.to_thread(self._adbc_truncate_sync, state.address)
-            return
         await self._require_backend().run_ddl(
             [self.dialect.empty_table_sql(state.address)]
         )
 
-    def _prepare_sqlalchemy_batch(
+    def _prepare_write_batch(
         self, state: _StreamState, record_batch: pa.RecordBatch
     ) -> pa.RecordBatch:
         """Prepare one batch for the stage cycle, entirely in Arrow space.
@@ -1829,7 +1633,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         """
         if state.schema_contract is None:
             raise AdbcConfigurationError(
-                f"SQLAlchemy write for {state.address} "
+                f"write for {state.address} "
                 "requires a configured SchemaContract; schema alignment was skipped"
             )
         cast_batch = state.schema_contract.cast_arrow_batch(record_batch)
@@ -1902,728 +1706,16 @@ class GenericSQLConnector(BaseDestinationHandler):
             names=list(deduped.schema.names) + [self.RECORD_HASH_COLUMN],
         )
 
-    # ------------------------------------------------------------------
-    # ADBC-only mode (DDL + idempotency + writes via ADBC cursor)
-    # ------------------------------------------------------------------
-    #
-    # When the runtime exposes an ADBC transport instead of a SQLAlchemy
-    # engine, every DDL/idempotency/write call goes through the cached
-    # ADBC DBAPI connection. Snowflake and BigQuery are the dialects
-    # that require this path today (no async SA driver). Postgres can
-    # also opt in (e.g. for Redshift via the libpq-compatible driver),
-    # but its SA path remains the primary route.
-
-    async def _ensure_tables_via_adbc(
-        self, state: _StreamState, rendered_ddl: list[str]
-    ) -> None:
-        statements: list[str] = []
-        if not self.dialect.schema_is_implicit_default(state.address.schema):
-            # BigQuery uses ``CREATE SCHEMA`` for datasets (Standard
-            # SQL). Snowflake and Postgres both accept the same DDL. The
-            # address components are already normalized, so a case-folding
-            # system's conventional lowercase name matches the stored one
-            # instead of creating a quoted-lowercase sibling; the schema
-            # path is catalog-qualified when the address carries one.
-            quoted_schema = self.dialect.quote_schema(state.address)
-            statements.append(f"CREATE SCHEMA IF NOT EXISTS {quoted_schema}")
-        statements.extend(rendered_ddl)
-        async with self._ddl_lock:
-            await asyncio.to_thread(self._execute_adbc_ddl_sync, statements)
-        logger.info(
-            "Destination tables ready for %s",
-            state.address,
-        )
-
-    def _execute_adbc_ddl_sync(self, statements: list[str]) -> None:
-        """Run a list of DDL statements on the ADBC connection.
-
-        ``_adbc_op_lock`` held for the duration so concurrent batches
-        can't interleave cursor use against PEP-249 threadsafety=1.
-        """
-        with self._adbc_op_lock:
-            conn = self._reopen_adbc_if_needed_sync()
-            try:
-                cursor = conn.cursor()
-                try:
-                    for stmt in statements:
-                        cursor.execute(stmt)
-                    conn.commit()
-                finally:
-                    _close_cursor_quietly(cursor)
-            except Exception as exc:
-                self._poison_adbc_connection()
-                if _is_fatal_adbc_error(exc):
-                    raise _reclassify_as_fatal(exc) from exc
-                raise
-
-    def _verify_record_hash_column_adbc_sync(self, state: _StreamState) -> None:
-        """Assert the ADBC target table has a ``_record_hash`` column.
-
-        ``CREATE TABLE IF NOT EXISTS`` is a no-op for pre-existing tables,
-        which may have been created before issue #285 and therefore lack the
-        column. A cheap ``SELECT ... WHERE 1=0`` probes the catalog at
-        configure_schema time so the operator gets a clear error message
-        instead of a cryptic column-not-found DB error at first write.
-        """
-        target_qualified = self.dialect.quote_table(state.address)
-        hash_col = self.dialect.quote_ident(self.RECORD_HASH_COLUMN)
-        with self._adbc_op_lock:
-            conn = self._reopen_adbc_if_needed_sync()
-            try:
-                cursor = conn.cursor()
-                try:
-                    cursor.execute(
-                        f"SELECT {hash_col} "  # nosec B608
-                        f"FROM {target_qualified} WHERE 1=0"
-                    )
-                finally:
-                    _close_cursor_quietly(cursor)
-            except Exception as exc:
-                self._poison_adbc_connection()
-                if _is_fatal_adbc_error(exc):
-                    raise SchemaConfigurationError(
-                        f"keyless insert target {state.address} "
-                        f"has no {self.RECORD_HASH_COLUMN!r} column; it predates "
-                        f"the content-hash dedup key (issue #285). Recreate the "
-                        f"target so the engine manages {self.RECORD_HASH_COLUMN} "
-                        f"as its primary key."
-                    ) from exc
-                raise
-
-    def _poison_adbc_connection(self) -> None:
-        """Drop and close the cached ADBC connection after a failure.
-
-        The next operation re-opens via ``runtime.open_adbc_connection``.
-        Close runs outside the lock so a slow libpq close path doesn't
-        block other threads waiting to reopen; ``_adbc_conn_lock``
-        ensures only one thread runs the close, preventing double-free
-        on libpq handles.
-        """
-        with self._adbc_conn_lock:
-            conn = self._adbc_conn
-            self._adbc_conn = None
-            self._adbc_session_schema = None
-            self._adbc_session_schema_known = False
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:
-                # Promoted from DEBUG: a failing close on a Snowflake /
-                # BigQuery / Postgres ADBC handle is a server-side
-                # resource leak (warehouse session, libpq fd, gRPC
-                # context) operators may need to act on.
-                logger.warning(
-                    "Discarded poisoned ADBC connection; close failed — "
-                    "potential server-side resource leak",
-                    exc_info=True,
-                )
-
-    def _reopen_adbc_if_needed_sync(self) -> Any:
-        """Return the cached ADBC connection, opening on demand.
-
-        In ADBC-only mode the connection is opened in ``connect()`` but
-        may be poisoned by an earlier failure. This helper transparently
-        re-opens via the runtime so each write is self-healing.
-        The lock guards a check-then-act race: two threads could both
-        observe ``_adbc_conn is None`` and each open a new connection,
-        leaking one.
-        """
-        with self._adbc_conn_lock:
-            if self._adbc_conn is not None:
-                return self._adbc_conn
-            if self._runtime is None:
-                raise AdbcConfigurationError("Runtime not available for ADBC reconnect")
-            # open_adbc_connection is sync; safe to call inside the lock
-            # because the lock is fast (no I/O) — only the connect() call
-            # itself blocks, but that's the work this method is doing.
-            self._adbc_conn = self._runtime.open_adbc_connection()
-            return self._adbc_conn
-
-    def _execute_adbc_dml_sync(self, sql: str, params: tuple[Any, ...]) -> int:
-        """Execute ``sql`` with ``params`` on the ADBC connection.
-
-        Commits the statement and returns the DBAPI ``rowcount`` (or -1 when
-        the driver does not report one) for callers that need it; most ADBC
-        writes ignore it. Poison-aware: a failure poisons the cached connection
-        and a fatal driver error is reclassified so the engine does not retry
-        it forever.
-        """
-        with self._adbc_op_lock:
-            conn = self._reopen_adbc_if_needed_sync()
-            try:
-                cursor = conn.cursor()
-                try:
-                    cursor.execute(sql, params)
-                    rowcount = getattr(cursor, "rowcount", -1)
-                    conn.commit()
-                    return rowcount if isinstance(rowcount, int) else -1
-                finally:
-                    _close_cursor_quietly(cursor)
-            except Exception as exc:
-                self._poison_adbc_connection()
-                if _is_fatal_adbc_error(exc):
-                    raise _reclassify_as_fatal(exc) from exc
-                raise
-
-    async def _write_batch_adbc_only(
-        self,
-        state: _StreamState,
-        run_id: str,
-        stream_id: str,
-        batch_seq: int,
-        record_batch: pa.RecordBatch,
-        truncate_now: bool,
-    ) -> None:
-        """Full write path for ADBC-only mode.
-
-        Keyless insert: MERGE on ``_record_hash`` (insert-if-not-exists,
-        issue #285). Keyed insert: plain append; the database PK prevents
-        duplicate rows, but a retry that re-reads the inclusive cursor
-        boundary may surface a constraint violation rather than a silent
-        skip. Truncate-insert: TRUNCATE TABLE on the read's first batch
-        (``truncate_now``, issue #307), then plain append. Upsert: ingest
-        into a session-scoped temp table, then ``MERGE INTO`` keyed on
-        ``conflict_keys``.
-
-        Idempotent under retry: upsert on conflict keys; truncate_insert
-        via full-refresh semantics; keyless insert via content-hash dedup.
-        Keyed insert is at-least-once on the ADBC transport.
-        """
-        if state.schema_contract is None:
-            raise AdbcConfigurationError(
-                f"ADBC-only write for {state.address} "
-                "requires a configured SchemaContract; schema alignment was skipped"
-            )
-        cast_batch = state.schema_contract.cast_arrow_batch(record_batch)
-
-        if state.write_mode == "truncate_insert" and truncate_now:
-            await asyncio.to_thread(
-                self._truncate_then_ingest_sync,
-                cast_batch,
-                state.address,
-            )
-        elif state.write_mode == "truncate_insert":
-            await asyncio.to_thread(
-                self._adbc_only_ingest_sync,
-                cast_batch,
-                state.address,
-            )
-        elif state.write_mode == "upsert":
-            # ``conflict_keys`` is the stream's Infra-validated upsert
-            # target; the contract guarantees it is non-empty for an
-            # upsert. If it is empty the stream is misconfigured — fail
-            # loud rather than silently ingest, which would duplicate rows.
-            if not state.conflict_keys:
-                raise SchemaConfigurationError(
-                    f"upsert requested for {state.address} "
-                    f"but the stream carries no conflict_keys; refusing to fall "
-                    f"back to plain ingest (would silently duplicate rows)"
-                )
-            # Fingerprint via SHA-256 over (run_id, stream_id, batch_seq)
-            # gives a fixed-width collision-resistant token that survives
-            # any future identifier-length pressure. Critical here because
-            # Postgres' NAMEDATALEN is 63 and a UUID-shaped stream_id would
-            # otherwise force truncation that drops batch_seq, defeating
-            # the per-batch uniqueness this token exists to provide. Hex
-            # digest first 16 chars = 64 bits of entropy, plenty for
-            # per-(stream, batch) uniqueness within a destination handler's
-            # lifetime; "b" prefix keeps the token a valid identifier in
-            # every supported dialect.
-            stage_token = (
-                "b"
-                + hashlib.sha256(
-                    f"{run_id}|{stream_id}|{batch_seq}".encode()
-                ).hexdigest()[:16]
-            )
-            await asyncio.to_thread(
-                self._merge_ingest_sync,
-                cast_batch,
-                state.address,
-                list(cast_batch.schema.names),
-                state.conflict_keys,
-                stage_token,
-            )
-        elif self._needs_record_hash(state):
-            # Keyless insert: dedup via stage-MERGE keyed on _record_hash so
-            # a same-run retry does not duplicate rows (issue #285).
-            hashed_batch = self._attach_record_hash_to_batch(cast_batch, state)
-            stage_token = (
-                "b"
-                + hashlib.sha256(
-                    f"{run_id}|{stream_id}|{batch_seq}".encode()
-                ).hexdigest()[:16]
-            )
-            await asyncio.to_thread(
-                self._merge_ingest_sync,
-                hashed_batch,
-                state.address,
-                list(hashed_batch.schema.names),
-                [self.RECORD_HASH_COLUMN],
-                stage_token,
-                insert_only=True,
-            )
-        else:
-            await asyncio.to_thread(
-                self._adbc_only_ingest_sync,
-                cast_batch,
-                state.address,
-            )
-
-    def _adbc_only_ingest_sync(
-        self,
-        cast_batch: pa.RecordBatch,
-        address: TableAddress,
-    ) -> None:
-        """ADBC ingest for ADBC-only mode (poison-aware, fatal-reclassifying)."""
-        with self._adbc_op_lock:
-            conn = self._reopen_adbc_if_needed_sync()
-            try:
-                ingest_kwargs = self.dialect.adbc_ingest_kwargs(address)
-                self._check_adbc_session_schema_sync(conn, address, ingest_kwargs)
-                cursor = conn.cursor()
-                try:
-                    cursor.adbc_ingest(
-                        address.table,
-                        cast_batch,
-                        mode="append",
-                        **ingest_kwargs,
-                    )
-                    conn.commit()
-                finally:
-                    _close_cursor_quietly(cursor)
-            except Exception as exc:
-                self._poison_adbc_connection()
-                if _is_fatal_adbc_error(exc):
-                    raise _reclassify_as_fatal(exc) from exc
-                raise
-
-    def _check_adbc_session_schema_sync(
-        self,
-        conn: Any,
-        address: TableAddress,
-        ingest_kwargs: Mapping[str, Any],
-    ) -> None:
-        """Guard bare-name ingest against a session/target schema mismatch.
-
-        The declared ``sql_capabilities.session_targeting`` is the
-        authority for which regime a bare-name operation is in. When the
-        ingest kwargs carry no ``db_schema_name`` while the address has a
-        schema, ``adbc_ingest`` resolves the bare table name against the
-        connection's session schema; the invariant *session schema ==
-        target schema* (issue #377) is then checked for a declared
-        ``session_default`` system, refused as undeclared when no
-        declaration exists, and reported as a connector defect for a
-        declared ``per_statement`` system whose dialect failed to target
-        the statement.
-
-        The ``session_default`` probe runs
-        :meth:`SqlDialect.adbc_session_schema_sql` once per connection
-        (cached; reset whenever ``_adbc_conn`` is dropped) and compares
-        the dialect-normalized result against ``address.schema``. Runs
-        under ``_adbc_op_lock`` inside the caller's poison/reclassify
-        scope, so a failing probe is handled like any other ingest-path
-        driver error.
-        """
-        if "db_schema_name" in ingest_kwargs or not address.schema:
-            return
-        caps = self._capabilities
-        if caps is None:
-            raise AdbcConfigurationError(
-                str(
-                    undeclared_capability_error(
-                        "session_targeting",
-                        need=f"a bare-name ADBC operation against {address} "
-                        f"must know whether the session or the statement "
-                        f"selects the schema",
-                    )
-                )
-            )
-        if caps.session_targeting == "per_statement":
-            raise AdbcConfigurationError(
-                f"connector declares sql_capabilities.session_targeting "
-                f"'per_statement', but dialect {self.dialect.name!r} "
-                f"returned no db_schema_name targeting kwarg for {address} "
-                f"— the declaration and the dialect's adbc_ingest_kwargs "
-                f"disagree; fix the connector."
-            )
-        if not self._adbc_session_schema_known:
-            cursor = conn.cursor()
-            try:
-                cursor.execute(self.dialect.adbc_session_schema_sql())
-                row = cursor.fetchone()
-            finally:
-                _close_cursor_quietly(cursor)
-            raw = row[0] if row else None
-            self._adbc_session_schema = (
-                self.dialect.normalize_ident(raw) if raw else None
-            )
-            self._adbc_session_schema_known = True
-        if self._adbc_session_schema != address.schema:
-            raise AdbcConfigurationError(
-                f"dialect {self.dialect.name!r} does not support per-statement "
-                f"ingest targeting, so adbc_ingest resolves bare table names "
-                f"against the connection's session schema "
-                f"({self._adbc_session_schema!r}"
-                f"{'' if self._adbc_session_schema else ' — no schema selected'}), "
-                f"but this write targets schema {address.schema!r}. Refusing to "
-                f"ingest into the wrong schema; align the connection's schema "
-                f"with the stream's target schema."
-            )
-
-    def _adbc_truncate_sync(self, address: TableAddress) -> None:
-        """TRUNCATE the target table on the ADBC connection (own commit)."""
-        qualified = self.dialect.quote_table(address)
-        with self._adbc_op_lock:
-            conn = self._reopen_adbc_if_needed_sync()
-            try:
-                cursor = conn.cursor()
-                try:
-                    cursor.execute(f"TRUNCATE TABLE {qualified}")
-                finally:
-                    _close_cursor_quietly(cursor)
-                conn.commit()
-            except Exception as exc:
-                self._poison_adbc_connection()
-                if _is_fatal_adbc_error(exc):
-                    raise _reclassify_as_fatal(exc) from exc
-                raise
-
-    def _truncate_then_ingest_sync(
-        self,
-        cast_batch: pa.RecordBatch,
-        address: TableAddress,
-    ) -> None:
-        # RLock is reentrant: the same-thread acquires inside
-        # _adbc_truncate_sync and _adbc_only_ingest_sync are safe.
-        with self._adbc_op_lock:
-            # Guard before the TRUNCATE — the destructive statement of
-            # this path. TRUNCATE is schema-qualified and commits, so on
-            # a session/target mismatch running it first would empty the
-            # correct target and then refuse the refill (issue #377).
-            # The probe result is cached, so the subsequent ingest's own
-            # check is a cache hit.
-            conn = self._reopen_adbc_if_needed_sync()
-            try:
-                self._check_adbc_session_schema_sync(
-                    conn, address, self.dialect.adbc_ingest_kwargs(address)
-                )
-            except Exception as exc:
-                self._poison_adbc_connection()
-                if _is_fatal_adbc_error(exc):
-                    raise _reclassify_as_fatal(exc) from exc
-                raise
-            self._adbc_truncate_sync(address)
-            self._adbc_only_ingest_sync(cast_batch, address)
-
-    def _merge_ingest_sync(
-        self,
-        cast_batch: pa.RecordBatch,
-        address: TableAddress,
-        all_columns: list[str],
-        conflict_keys: list[str],
-        stage_token: str,
-        *,
-        insert_only: bool = False,
-    ) -> None:
-        """Upsert (or insert-if-not-exists) via ingest-to-stage + ``MERGE INTO``.
-
-        Creates a stage table named ``_analitiq_stage_<target>_<token>``
-        in the target schema, ingests the cast batch via
-        ``adbc_ingest``, runs ``MERGE INTO target USING stage``, then
-        explicitly DROPs the stage. ``stage_token`` is a fixed-width
-        SHA-256 fingerprint of ``(run_id, stream_id, batch_seq)``
-        computed at the call site, so the name is unique across
-        concurrent streams writing to the same target, across batches
-        of the same stream, and across retries overlapping the previous
-        attempt's DROP — all within Postgres' 63-char NAMEDATALEN budget.
-
-        When every column is a conflict key and ``insert_only=False``,
-        MERGE's ``WHEN MATCHED THEN UPDATE`` is omitted and the operation
-        degrades to insert-if-not-exists; a warning surfaces this so
-        operators don't silently see "matched rows unchanged" without an
-        explanation. When ``insert_only=True`` the UPDATE clause is
-        suppressed without a warning — the caller is asserting intent
-        (e.g. content-hash dedup where a matching row is byte-identical).
-        """
-        # Suffix with the per-write token so concurrent streams and
-        # retries (which may overlap before the previous DROP completes)
-        # do not collide on the stage table name. The stage shares the
-        # target's schema/catalog; its engine-generated name is used
-        # verbatim (no re-normalization) so the quoted DDL and the raw
-        # ingest name stay the same string.
-        stage_address = replace(
-            address, table=f"_analitiq_stage_{address.table}_{stage_token}"
-        )
-        target_qualified = self.dialect.quote_table(address)
-        stage_qualified = self.dialect.quote_table(stage_address)
-        update_cols = [c for c in all_columns if c not in conflict_keys]
-        if not update_cols and not insert_only:
-            logger.warning(
-                "ADBC upsert into %s has no non-key columns to update "
-                "(all_columns == conflict_keys); MERGE will only INSERT "
-                "new rows. Consider write_mode='insert' for clarity.",
-                address,
-            )
-        # _adbc_op_lock serializes the full DROP+CREATE+INGEST+MERGE+DROP
-        # sequence so concurrent streams against the same handler don't
-        # interleave cursor operations on the cached connection
-        # (PEP-249 threadsafety=1). One acquire for the whole transaction
-        # so a parallel ingest can't slip between CREATE and INGEST and
-        # leave the stage table empty.
-        with self._adbc_op_lock:
-            self._merge_ingest_locked_sync(
-                cast_batch,
-                target_qualified,
-                stage_qualified,
-                stage_address,
-                all_columns,
-                conflict_keys,
-                update_cols,
-                insert_only=insert_only,
-            )
-
-    def _merge_ingest_locked_sync(
-        self,
-        cast_batch: pa.RecordBatch,
-        target_qualified: str,
-        stage_qualified: str,
-        stage_address: TableAddress,
-        all_columns: list[str],
-        conflict_keys: list[str],
-        update_cols: list[str],
-        *,
-        insert_only: bool = False,
-    ) -> None:
-        """Run the body of :meth:`_merge_ingest_sync` under the held lock.
-
-        Called while ``_adbc_op_lock`` is held. Extracted so the lock
-        acquisition site is small and obvious; the inner method assumes the
-        lock and never reacquires. When ``insert_only`` is ``True``, the
-        ``WHEN MATCHED THEN UPDATE`` clause is omitted from the generated
-        MERGE statement regardless of ``update_cols``.
-        """
-        conn = self._reopen_adbc_if_needed_sync()
-        try:
-            # Guard before any stage DDL: a session/target schema
-            # mismatch fails here, not after a stage table was created
-            # (issue #377). The stage shares the target's schema, so
-            # checking the stage address covers the target too.
-            ingest_kwargs = self.dialect.adbc_ingest_kwargs(stage_address)
-            self._check_adbc_session_schema_sync(conn, stage_address, ingest_kwargs)
-            cursor = conn.cursor()
-            try:
-                # DROP-IF-EXISTS before CREATE so a retry of the same
-                # (run_id, batch_seq) — typical when the previous
-                # attempt crashed between adbc_ingest and the success-
-                # path DROP — finds a clean slate. Without this, the
-                # retry's CREATE TABLE hits "already exists" → PEP-249
-                # ProgrammingError → fatal reclassification → engine
-                # stops retrying a recoverable batch. The leftover
-                # stage is opaque to the warehouse's planner, so the
-                # extra DROP is one cheap statement per upsert.
-                cursor.execute(f"DROP TABLE IF EXISTS {stage_qualified}")
-                cursor.execute(
-                    self.dialect.adbc_stage_table_sql(stage_qualified, target_qualified)
-                )
-                conn.commit()
-                # Stage lives in the target schema/catalog. Dialects that
-                # support per-statement ingest targeting resolve it via the
-                # address-derived kwargs (components pre-normalized, so a
-                # case-folding system's stored name matches the connector's
-                # conventional lowercase one); dialects that don't fall back
-                # to the connection's session defaults — verified above to
-                # match the target schema (the ADBC path mandates an explicit
-                # one) — where the stage was just created.
-                cursor.adbc_ingest(
-                    stage_address.table,
-                    cast_batch,
-                    mode="append",
-                    **ingest_kwargs,
-                )
-                conn.commit()
-                on_clause = " AND ".join(
-                    f"t.{self.dialect.quote_ident(k)} = s.{self.dialect.quote_ident(k)}"
-                    for k in conflict_keys
-                )
-                set_clause = ", ".join(
-                    f"t.{self.dialect.quote_ident(c)} = s.{self.dialect.quote_ident(c)}"
-                    for c in update_cols
-                )
-                insert_cols = ", ".join(
-                    self.dialect.quote_ident(c) for c in all_columns
-                )
-                insert_vals = ", ".join(
-                    f"s.{self.dialect.quote_ident(c)}" for c in all_columns
-                )
-                merge_sql = (
-                    f"MERGE INTO {target_qualified} t USING {stage_qualified} s "
-                    f"ON {on_clause} "
-                )
-                if update_cols and not insert_only:
-                    merge_sql += (
-                        f"WHEN MATCHED THEN UPDATE SET {set_clause} "  # nosec B608
-                    )
-                merge_sql += (
-                    f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                    f"VALUES ({insert_vals})"
-                )
-                cursor.execute(merge_sql)
-                conn.commit()
-            finally:
-                _close_cursor_quietly(cursor)
-        except Exception as exc:
-            # Best-effort stage cleanup using the local ``conn`` (not
-            # ``self._adbc_conn``) so a concurrent poisoning by another
-            # thread cannot turn this into a use-after-poison race or
-            # commit() against a freshly-reopened connection that owns
-            # no transaction state for the stage. If ``conn`` itself is
-            # the one that failed, the DROP will also fail and the warn
-            # below will fire — same observable outcome, no race.
-            try:
-                drop_cursor = conn.cursor()
-                try:
-                    drop_cursor.execute(f"DROP TABLE IF EXISTS {stage_qualified}")
-                    conn.commit()
-                finally:
-                    _close_cursor_quietly(drop_cursor)
-            except Exception:
-                # Only a failure that is actually retried gets cleaned
-                # up by the next attempt's pre-flight DROP-IF-EXISTS;
-                # after a FATAL reclassification or exhausted retries
-                # nothing re-sends this batch and the orphan needs a
-                # manual drop.
-                logger.warning(
-                    "ADBC stage table %s left behind after MERGE failure; a "
-                    "retryable failure with retries remaining is cleaned up "
-                    "by the next attempt's pre-flight DROP-IF-EXISTS, but "
-                    "after a FATAL failure or exhausted retries the table "
-                    "must be dropped manually",
-                    stage_qualified,
-                    exc_info=True,
-                )
-            self._poison_adbc_connection()
-            if _is_fatal_adbc_error(exc):
-                raise _reclassify_as_fatal(exc) from exc
-            raise
-        # Successful path — DROP the stage so it does not outlive the
-        # batch. Once the SUCCESS ack for this batch lands, nothing ever
-        # retries it, and the stage name embeds this batch's
-        # fingerprint, so the pre-flight DROP-IF-EXISTS only serves
-        # retries of FAILED batches and never reaches this table (the
-        # one exception — a SUCCESS ack lost in transit replaying the
-        # batch — makes the replay's own pre-flight DROP clean it up).
-        # Try twice, then poison the connection — a failed DROP implies
-        # a possibly-dead handle (mirroring the failure path), and
-        # without the poison the next batch burns one retryable failure
-        # on the cached handle before healing — and log honestly that
-        # the table is orphaned.
-        dropped = False
-        last_exc: Exception | None = None
-        for attempt in (1, 2):
-            try:
-                drop_cursor = conn.cursor()
-                try:
-                    drop_cursor.execute(f"DROP TABLE IF EXISTS {stage_qualified}")
-                    conn.commit()
-                    dropped = True
-                finally:
-                    _close_cursor_quietly(drop_cursor)
-            except Exception as exc:
-                last_exc = exc
-                logger.debug(
-                    "post-MERGE DROP of ADBC stage table %s failed (attempt %d/2)",
-                    stage_qualified,
-                    attempt,
-                    exc_info=True,
-                )
-            if dropped:
-                break
-        if not dropped:
-            self._poison_adbc_connection()
-            # exc_info carries the last attempt's exception: at the
-            # default log level the per-attempt DEBUG records are never
-            # written, and the cause (permissions vs lock vs dead
-            # connection) decides what the operator's manual drop needs.
-            logger.warning(
-                "ADBC stage table %s could not be dropped after a successful "
-                "MERGE (two attempts). The batch is acked and never retried, "
-                "so no automatic cleanup reaches this table: it is orphaned "
-                "— a full copy of this batch — until dropped manually or "
-                "removed by a table-expiration policy. The connection was "
-                "discarded and reopens on the next operation",
-                stage_qualified,
-                exc_info=last_exc,
-            )
-        elif last_exc is not None:
-            # Surface the recovery at INFO: a handle failing its first
-            # DROP on every batch would otherwise have no footprint at
-            # the default log level until it escalates to an orphan.
-            logger.info(
-                "post-MERGE DROP of ADBC stage table %s succeeded on the "
-                "second attempt",
-                stage_qualified,
-            )
-
     async def health_check(self) -> bool:
-        """Check database health."""
-        if not self._connected:
-            return False
-
-        if self._adbc_only:
-            try:
-                await asyncio.to_thread(self._health_check_adbc_sync)
-                return True
-            except Exception as e:
-                logger.warning(f"Health check failed: {e}")
-                return False
-
-        if self._sync_engine is not None:
-            try:
-                await asyncio.to_thread(self._health_check_sync_engine)
-                return True
-            except Exception as e:
-                logger.warning(f"Health check failed: {e}")
-                return False
-
-        if self._engine is None:
+        """Check database health through the transport backend's probe."""
+        if not self._connected or self._backend is None:
             return False
         try:
-            async with self._engine.connect() as conn:
-                await conn.execute(text("SELECT 1"))
+            await self._backend.health_check()
             return True
         except Exception as e:
             logger.warning(f"Health check failed: {e}")
             return False
-
-    def _health_check_sync_engine(self) -> None:
-        """Health probe for the sync engine (worker thread)."""
-        with self._require_sync_engine().connect() as conn:
-            conn.execute(text("SELECT 1"))
-
-    def _health_check_adbc_sync(self) -> None:
-        """Health probe for ADBC-only mode.
-
-        Self-heals a poisoned cached connection by reopening through
-        the runtime. Without the reopen, a poisoned cache would make
-        this probe fail until some other caller (next write_batch)
-        repopulated the cache — i.e. liveness would lag the actual
-        DB reachability by one batch interval. The reopen makes the
-        probe self-sufficient. ``_adbc_op_lock`` held so the SELECT 1
-        does not interleave with a concurrent ingest on the same
-        connection.
-        """
-        with self._adbc_op_lock:
-            conn = self._reopen_adbc_if_needed_sync()
-            try:
-                cursor = conn.cursor()
-                try:
-                    cursor.execute("SELECT 1")
-                    cursor.fetchone()
-                finally:
-                    _close_cursor_quietly(cursor)
-            except Exception:
-                self._poison_adbc_connection()
-                raise
 
     # ==================================================================
     # Readable role (source reads)
@@ -2633,7 +1725,7 @@ class GenericSQLConnector(BaseDestinationHandler):
     # handed, pages the table, and releases the runtime on exit. No prior
     # ``connect()`` is required — ``runtime`` is the only connection input,
     # matching the ``Readable`` Protocol. The write role's connection state
-    # (``self._engine`` / ``self._adbc_conn``) is untouched; a source-role
+    # (``self._engine`` / ``self._backend``) is untouched; a source-role
     # instance and a write-role instance are distinct objects.
 
     async def read_batches(  # skipcq: PY-R1000

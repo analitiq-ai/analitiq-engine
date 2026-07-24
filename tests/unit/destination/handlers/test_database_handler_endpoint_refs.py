@@ -8,7 +8,7 @@ that contract without the full gRPC/materialization stack.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -231,8 +231,6 @@ class TestWriteBatchFatalOnTypeMapError:
 
     @pytest.mark.asyncio
     async def test_missing_schema_contract_classified_as_fatal(self):
-        from unittest.mock import MagicMock
-
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 
         handler = _stage_capable(GenericSQLConnector())
@@ -264,8 +262,6 @@ class TestWriteBatchFatalOnTypeMapError:
 
     @pytest.mark.asyncio
     async def test_type_map_error_classified_as_fatal(self):
-        from unittest.mock import MagicMock
-
         from cdk.type_map import UnmappedTypeError
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 
@@ -307,7 +303,6 @@ class TestWriteBatchFatalOnTypeMapError:
         # mode's post-connect check (SqlDialect.verify_tls_state) mid-run.
         # Retrying reconnects to the same downgraded endpoint, so the write
         # must classify fatal, not retryable (issue #376).
-        from unittest.mock import MagicMock
 
         from cdk.sql.exceptions import TlsVerificationError
 
@@ -362,6 +357,7 @@ class TestWriteBatchFatalOnTypeMapError:
         handler = GenericSQLConnector()
         handler._connected = True
         handler._adbc_only = True
+        handler._backend = MagicMock()
         handler._streams["s1"] = _StreamState(
             address=TableAddress(table="events", schema="myschema"),
             write_mode="insert",
@@ -390,7 +386,6 @@ class TestWriteBatchFatalOnTypeMapError:
         # End-to-end through write_batch: the plan builder's raise must be
         # classified FATAL (deterministic — retrying an unkeyed upsert can
         # never heal), not retried forever or degraded.
-        from unittest.mock import MagicMock
 
         from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 
@@ -484,37 +479,42 @@ class TestUpsertFailsLoudWithoutConflictKeys:
         assert plan.mode_sql == "MERGE ..."
 
     @pytest.mark.asyncio
-    async def test_adbc_upsert_without_conflict_keys_raises(self):
-        # ADBC twin of the SQLAlchemy raise: the same fail-loud semantics
-        # must hold on the MERGE path (Snowflake/BigQuery), before any ingest.
-        from unittest.mock import MagicMock
+    async def test_adbc_upsert_without_conflict_keys_fails_before_any_write(self):
+        # ADBC twin of the SQLAlchemy classification test: the plan
+        # builder's raise is the same code on both transports, and it must
+        # fire before anything reaches the backend — no partial write.
 
-        handler = GenericSQLConnector()
+        import pyarrow as pa
+
+        from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
+
+        handler = _stage_capable(GenericSQLConnector())
+        handler._connected = True
         handler._adbc_only = True
-        handler._merge_ingest_sync = MagicMock()  # type: ignore[method-assign]
-        handler._adbc_only_ingest_sync = MagicMock()  # type: ignore[method-assign]
+        handler._backend = MagicMock()
+        handler._backend.execute_write = AsyncMock()
         contract = MagicMock()
-        contract.cast_arrow_batch.return_value = MagicMock()
-        state = _StreamState(
+        contract.cast_arrow_batch.side_effect = lambda rb: rb
+        handler._streams["s1"] = _StreamState(
             address=TableAddress(table="events", schema="analytics"),
             write_mode="upsert",
             conflict_keys=[],
             schema_contract=contract,
         )
 
-        with pytest.raises(SchemaConfigurationError, match="no conflict_keys"):
-            await handler._write_batch_adbc_only(
-                state,
-                "run-1",
-                "s1",
-                1,
-                MagicMock(),
-                truncate_now=False,
-            )
+        result = await handler.write_batch(
+            run_id="run-1",
+            stream_id="s1",
+            batch_seq=1,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["1"],
+            cursor=Cursor(token=b""),
+            emitted_at=_EMITTED_AT,
+        )
 
-        # Fail before any ingest/MERGE — no partial write.
-        handler._merge_ingest_sync.assert_not_called()
-        handler._adbc_only_ingest_sync.assert_not_called()
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert "no conflict_keys" in result.failure_summary
+        handler._backend.execute_write.assert_not_called()
 
 
 class TestEnsureTablesEngineNoneRaises:
@@ -524,7 +524,6 @@ class TestEnsureTablesEngineNoneRaises:
 
     @pytest.mark.asyncio
     async def test_engine_none_raises_adbc_configuration_error(self):
-        from unittest.mock import MagicMock
         from unittest.mock import patch as mock_patch
 
         from cdk.adbc_registry import AdbcConfigurationError
@@ -567,8 +566,8 @@ class TestWriteModeDispatch:
             handler._get_write_mode(99)
 
 
-class TestPrepareSqlAlchemyBatch:
-    """``_prepare_sqlalchemy_batch`` aligns the batch to the destination
+class TestPrepareWriteBatch:
+    """``_prepare_write_batch`` aligns the batch to the destination
     schema in Arrow space; the backend materialises it at landing time.
     Json columns stay as their wire-format string so they bind directly
     into TEXT / JSONB columns without per-row coercion."""
@@ -603,7 +602,7 @@ class TestPrepareSqlAlchemyBatch:
             [{"id": "r1", "metadata": '{"k": "v", "n": 1}'}],
             schema=contract.arrow_schema,
         )
-        prepared = handler._prepare_sqlalchemy_batch(state, batch)
+        prepared = handler._prepare_write_batch(state, batch)
         # The Json column bind value is the raw wire string -- PG
         # accepts it as JSONB text input; other dialects treat it as
         # TEXT. No per-row dict/list parsing happens here.
@@ -632,7 +631,7 @@ class TestPrepareSqlAlchemyBatch:
             [{"metadata": None}],
             schema=contract.arrow_schema,
         )
-        prepared = handler._prepare_sqlalchemy_batch(state, batch)
+        prepared = handler._prepare_write_batch(state, batch)
         assert prepared.to_pylist() == [{"metadata": None}]
 
     def test_keyless_insert_attaches_and_dedups_record_hash(self):
@@ -660,7 +659,7 @@ class TestPrepareSqlAlchemyBatch:
             [{"id": "a"}, {"id": "a"}, {"id": "b"}],
             schema=contract.arrow_schema,
         )
-        prepared = handler._prepare_sqlalchemy_batch(state, batch)
+        prepared = handler._prepare_write_batch(state, batch)
         # Byte-identical rows collapse to the first occurrence and every
         # surviving row carries the content-derived hash (issue #282).
         assert prepared.num_rows == 2
@@ -697,7 +696,7 @@ class TestPrepareSqlAlchemyBatch:
             [{"id": "k", "v": "first"}, {"id": "k", "v": "second"}],
             schema=contract.arrow_schema,
         )
-        prepared = handler._prepare_sqlalchemy_batch(state, batch)
+        prepared = handler._prepare_write_batch(state, batch)
         assert prepared.to_pylist() == [{"id": "k", "v": "first"}]
 
     @pytest.mark.parametrize("mode", ["upsert", "truncate_insert"])
@@ -739,7 +738,7 @@ class TestPrepareSqlAlchemyBatch:
             [{"id": "k", "v": "first"}, {"id": "k", "v": "second"}],
             schema=contract.arrow_schema,
         )
-        prepared = handler._prepare_sqlalchemy_batch(state, batch)
+        prepared = handler._prepare_write_batch(state, batch)
         assert prepared.num_rows == 2
 
     def test_record_hash_digest_is_pinned(self):
@@ -789,7 +788,7 @@ class TestPrepareSqlAlchemyBatch:
         with pytest.raises(
             AdbcConfigurationError, match=r"public\.events.*SchemaContract"
         ):
-            handler._prepare_sqlalchemy_batch(state, batch)
+            handler._prepare_write_batch(state, batch)
 
 
 class TestDDLLockSerialization:
