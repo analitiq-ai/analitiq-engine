@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -28,7 +29,7 @@ from cdk.conformance.roundtrip import probe_canonicals, render_probe
 from cdk.conformance.target import ConformanceTarget
 from cdk.type_map.exceptions import UnmappedTypeError
 
-from .kit_runner import REFERENCE_CLASS, REFERENCE_DIR, run_kit_suite
+from .kit_runner import REFERENCE_CLASS, REFERENCE_DIR, REPO_ROOT, run_kit_suite
 
 #: The tier-1 suite currently ships 22 tests for a full write-capable
 #: target; a floor well above zero guards against the suite silently
@@ -129,11 +130,6 @@ class TestPluginImportStaysLight:
         CDK installed; the import must not reach pyarrow or the SQL
         surface, or a core-only consumer's pytest runs crash before
         collection."""
-        import subprocess
-        import sys
-
-        from .kit_runner import REPO_ROOT
-
         probe = (
             "import sys\n"
             "import cdk.conformance.plugin\n"
