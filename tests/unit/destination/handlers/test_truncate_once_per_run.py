@@ -121,7 +121,7 @@ _SQLITE_CAPS = SqlCapabilities.from_declaration(
         "catalog": "none",
         "session_targeting": "per_statement",
         "merge_form": "none",
-        "bulk_load": "none",
+        "bulk_load": {},
         "stage": {"scope": "temp", "schema": "target", "transactional_ddl": True},
     },
     source="<test>",

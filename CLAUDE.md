@@ -30,7 +30,8 @@ CDK and connector packages (`connector-module-architecture.md`), gRPC protocol
 (`grpc-streaming-architecture.md`), Arrow and the SQLAlchemy-vs-ADBC transport
 strategy (`pyarrow-and-destinations.md`), the SQL write primitive and batch
 coalescing (`sql-write-path-v2.md`), config shapes (`source-config.md`,
-`destination-config.md`), mapping (`mapping-and-transformations.md`).
+`destination-config.md`), mapping (`mapping-and-transformations.md`), the
+connector conformance suite (`conformance-kit.md`).
 
 ## Configuration Layout
 

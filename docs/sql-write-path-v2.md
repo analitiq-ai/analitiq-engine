@@ -284,7 +284,10 @@ A schema-validated block in `connector.json` (contract change tracked in
   "catalog": "none" | "read" | "full",
   "session_targeting": "per_statement" | "session_default",
   "merge_form": "merge" | "insert_on_conflict" | "insert_on_duplicate_key" | "none",
-  "bulk_load": "none" | "copy_from" | "load_data_local_infile" | "adbc_ingest" | "load_job",
+  "bulk_load": {
+    "sqlalchemy": "copy_from" | "load_data_local_infile" | "load_job",
+    "adbc": "adbc_ingest" | "copy_from" | "load_data_local_infile" | "load_job"
+  },
   "stage": {
     "scope": "temp" | "real",
     "schema": "target" | "dedicated",
@@ -293,6 +296,18 @@ A schema-validated block in `connector.json` (contract change tracked in
   }
 }
 ```
+
+`bulk_load` maps each SQL transport family to the mechanism its
+connections land with — the mechanism is a fact about a transport, not
+the connector as a whole (`copy_from` needs the driver's wire
+connection; `adbc_ingest` needs an ADBC cursor). An absent family lands
+via executemany, the declared default; an empty object declares no bulk
+anywhere; a mechanism a family cannot run (`adbc_ingest` under
+`sqlalchemy`) is unrepresentable — the parse refuses it, so no
+downstream consumer ever meets a declared-but-unrunnable mechanism. A
+dual-transport connector declares both entries (postgres: ADBC
+connections ingest natively, SQLAlchemy connections COPY) instead of
+picking one and silently falling back on the other.
 
 and one connector-level (not SQL-specific) declaration for §8:
 
@@ -624,7 +639,7 @@ compatibility layer, per the engine's no-legacy rule:
   specified in §6-§7. Once it lands, the BigQuery connector's registry repo
   moves its load-job landing from the private `_adbc_only_ingest_sync` /
   `_merge_ingest_locked_sync` overrides onto `bulk_land` with
-  `bulk_load: "load_job"` — until then that connector fails the §10 override
+  `bulk_load: {"adbc": "load_job"}` — until then that connector fails the §10 override
   rule by construction.
 - #390: the `sql_capabilities` + `write_unit` contract block; deletes the
   `supports_*` dialect booleans and every guessing default. Connector

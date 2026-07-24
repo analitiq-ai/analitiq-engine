@@ -26,15 +26,33 @@ from typing import Any
 CATALOG_VALUES = ("none", "read", "full")
 SESSION_TARGETING_VALUES = ("per_statement", "session_default")
 MERGE_FORM_VALUES = ("merge", "insert_on_conflict", "insert_on_duplicate_key", "none")
-BULK_LOAD_VALUES = (
-    "none",
-    "copy_from",
-    "load_data_local_infile",
-    "adbc_ingest",
-    "load_job",
-)
 STAGE_SCOPE_VALUES = ("temp", "real")
 STAGE_SCHEMA_VALUES = ("target", "dedicated")
+
+#: SQL transport families a bulk mechanism can be declared for. A bulk
+#: mechanism is a fact about a transport, not about the connector as a
+#: whole — ``copy_from`` needs the driver's wire connection,
+#: ``adbc_ingest`` needs an ADBC cursor — so ``bulk_load`` maps each
+#: family to its mechanism instead of declaring one connector-wide value
+#: that only one family could run.
+SQL_TRANSPORT_TYPES = ("sqlalchemy", "adbc")
+
+#: Mechanisms implemented by the connector's dialect (its ``bulk_land``
+#: hook). ``adbc_ingest`` is not among them: it is the ADBC backend's own
+#: native landing and involves no dialect code.
+DIALECT_IMPLEMENTED_BULK_MECHANISMS = frozenset(
+    {"copy_from", "load_data_local_infile", "load_job"}
+)
+
+#: The mechanisms each transport family can actually run. Declaring a
+#: mechanism for a family that cannot run it is unrepresentable — the
+#: parse refuses — instead of a state downstream checks must catch
+#: (``adbc_ingest`` on the SQLAlchemy family would silently fall back to
+#: executemany on every batch).
+BULK_MECHANISMS_BY_TRANSPORT: dict[str, frozenset[str]] = {
+    "sqlalchemy": DIALECT_IMPLEMENTED_BULK_MECHANISMS,
+    "adbc": DIALECT_IMPLEMENTED_BULK_MECHANISMS | {"adbc_ingest"},
+}
 
 
 class SqlCapabilitiesError(ValueError):
@@ -86,18 +104,34 @@ class StageCapabilities:
 
 @dataclass(frozen=True)
 class SqlCapabilities:
-    """Typed view of a connector's declared ``sql_capabilities`` block."""
+    """Typed view of a connector's declared ``sql_capabilities`` block.
+
+    ``bulk_load`` maps a SQL transport family (``sqlalchemy`` / ``adbc``)
+    to the bulk mechanism its connections land with; an absent family
+    lands via executemany (the default that needs no declaration). An
+    empty mapping declares no bulk mechanism anywhere.
+    """
 
     catalog: str
     session_targeting: str
     merge_form: str
-    bulk_load: str
+    bulk_load: Mapping[str, str]
     stage: StageCapabilities
 
     @property
     def supports_upsert(self) -> bool:
         """Whether the declared merge form gives the system an upsert path."""
         return self.merge_form != "none"
+
+    def bulk_mechanism(self, transport_type: str) -> str | None:
+        """Return the declared mechanism for *transport_type*, if any.
+
+        ``None`` means the family lands via executemany — the default,
+        not a refusal: bulk is a declared speed slot, and absence of a
+        declaration is the one capability fact whose meaning is defined
+        (ADR sql-write-path-v2 section 2) rather than guessed.
+        """
+        return self.bulk_load.get(transport_type)
 
     @classmethod
     def from_declaration(
@@ -144,11 +178,42 @@ class SqlCapabilities:
             merge_form=_require_enum(
                 block.get("merge_form"), "merge_form", MERGE_FORM_VALUES, source=source
             ),
-            bulk_load=_require_enum(
-                block.get("bulk_load"), "bulk_load", BULK_LOAD_VALUES, source=source
-            ),
+            bulk_load=cls._parse_bulk_load(block.get("bulk_load"), source=source),
             stage=stage,
         )
+
+    @staticmethod
+    def _parse_bulk_load(block: Any, *, source: str) -> dict[str, str]:
+        """Parse the per-transport bulk mapping, refusing unrunnable pairs."""
+        if not isinstance(block, Mapping):
+            raise SqlCapabilitiesError(
+                f"sql_capabilities.bulk_load in {source} must be an object "
+                f"mapping a SQL transport type to its bulk mechanism (an "
+                f"empty object declares none), got {block!r}"
+            )
+        mechanisms: dict[str, str] = {}
+        for transport_type, mechanism in block.items():
+            if transport_type not in SQL_TRANSPORT_TYPES:
+                raise SqlCapabilitiesError(
+                    f"sql_capabilities.bulk_load in {source} names transport "
+                    f"type {transport_type!r}; expected one of "
+                    f"{list(SQL_TRANSPORT_TYPES)}"
+                )
+            allowed = BULK_MECHANISMS_BY_TRANSPORT[transport_type]
+            if not isinstance(mechanism, str) or mechanism not in allowed:
+                detail = ""
+                if mechanism == "adbc_ingest":
+                    detail = (
+                        " (adbc_ingest is the ADBC backend's own landing "
+                        "and cannot run on the sqlalchemy transport)"
+                    )
+                raise SqlCapabilitiesError(
+                    f"sql_capabilities.bulk_load.{transport_type} in {source} "
+                    f"is {mechanism!r}; expected one of "
+                    f"{sorted(allowed)}{detail}"
+                )
+            mechanisms[transport_type] = str(mechanism)
+        return mechanisms
 
     @staticmethod
     def _parse_stage(block: Mapping[str, Any], *, source: str) -> StageCapabilities:

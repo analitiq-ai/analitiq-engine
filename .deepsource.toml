@@ -4,8 +4,11 @@ version = 1
 # test-appropriate rules to these files and suppresses checks that are false
 # positives for pytest -- notably PTC-W0049 (no-self-use), since pytest test
 # methods idiomatically take `self` without using it (the class is only a
-# grouping for collection).
-test_patterns = ["tests/**"]
+# grouping for collection). cdk/cdk/conformance is the connector conformance
+# suite (issue #391): shipped WITH the CDK but pytest test code by nature --
+# assert statements and self-less test methods are its mechanism, exactly the
+# BAN-B101 / PYL-R0201 false-positive class test_patterns exists to suppress.
+test_patterns = ["tests/**", "cdk/cdk/conformance/**"]
 
 # protoc writes everything under src/grpc/generated/. It is not hand-edited and
 # is overwritten on every regeneration, so findings there are unactionable --

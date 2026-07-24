@@ -58,7 +58,7 @@ def _ready_handler(write_error: Exception) -> GenericSQLConnector:
             "catalog": "none",
             "session_targeting": "per_statement",
             "merge_form": "none",
-            "bulk_load": "adbc_ingest",
+            "bulk_load": {"adbc": "adbc_ingest"},
             "stage": {"scope": "real", "schema": "target", "transactional_ddl": False},
         },
         source="<test>",

@@ -393,7 +393,11 @@ class TestAdbcWriteSinks:
 
         dialect = _CatalogAdbcDialect()
         caps = SqlCapabilities.from_declaration(
-            caps_block(catalog="full", bulk_load="adbc_ingest", stage_scope="real")
+            caps_block(
+                catalog="full",
+                bulk_load={"adbc": "adbc_ingest"},
+                stage_scope="real",
+            )
         )
         dialect.capabilities = caps
         plan = build_stage_write_plan(
@@ -412,7 +416,7 @@ class TestAdbcWriteSinks:
         backend = AdbcBackend(dialect)
         conn = _CapturingConn()
         backend._conn = conn
-        backend._bulk_load = caps.bulk_load
+        backend._bulk_load = caps.bulk_mechanism("adbc") or "none"
         backend._execute_write_sync(
             plan, pa.record_batch([pa.array([1]), pa.array(["a"])], names=["id", "v"])
         )

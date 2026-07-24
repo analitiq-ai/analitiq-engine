@@ -31,6 +31,9 @@ aiohttp = { version = "^3.8.0", optional = true }
 # Optional: S3 / S3-compatible object store for s3:// secret refs
 # (cdk.secrets.resolvers.scheme.SchemeSecretsResolver s3 scheme).
 boto3 = { version = "^1.26.0", optional = true }
+# Optional: the connector conformance suite (cdk.conformance) a connector
+# repo runs in its own CI against the pinned CDK version (issue #391).
+pytest = { version = ">=7.0", optional = true }
 
 [tool.poetry.extras]
 # Arrow columnar streaming surface (cdk.schema_contract, cdk.sql_types,
@@ -43,6 +46,16 @@ api = ["aiohttp"]
 s3 = ["boto3"]
 # Full streaming connector surface the engine consumes: both of the above.
 streaming = ["pyarrow", "aiohttp"]
+# The connector conformance suite (issue #391): tier 1 contract tests and
+# the tier 2 live suite a connector repo runs in its own CI.
+# `pytest --pyargs cdk.conformance.tier1 --connector-dir .`
+conformance = ["pytest", "pyarrow"]
+
+# Registers the conformance suite's pytest options (--connector-dir,
+# --connector-class, --live-connection) wherever this package is installed.
+# The plugin only adds options; it collects nothing on its own.
+[tool.poetry.plugins."pytest11"]
+analitiq_conformance = "cdk.conformance.plugin"
 
 [build-system]
 requires = ["poetry-core"]

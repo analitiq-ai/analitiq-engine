@@ -1,0 +1,51 @@
+{
+  "kind": "database",
+  "connector_id": "conformance-reference",
+  "display_name": "Conformance Reference (PostgreSQL-shaped)",
+  "description": "Reference connector for the CDK conformance kit's own acceptance tests. PostgreSQL over the async SQLAlchemy transport, on the sanctioned v2 write surface.",
+  "version": "0.0.1",
+  "default_transport": "sqlalchemy",
+  "transports": {
+    "sqlalchemy": {
+      "transport_type": "sqlalchemy",
+      "driver": "postgresql+asyncpg",
+      "dsn": {
+        "kind": "url_template",
+        "template": "postgresql+asyncpg://{username}:{password}@{host}:{port}/{database}",
+        "bindings": {
+          "username": {
+            "value": { "ref": "connection.parameters.username" },
+            "encoding": "url_userinfo"
+          },
+          "password": {
+            "value": { "ref": "secrets.password" },
+            "encoding": "url_userinfo"
+          },
+          "host": {
+            "value": { "ref": "connection.parameters.host" },
+            "encoding": "host"
+          },
+          "port": {
+            "value": { "ref": "connection.parameters.port" },
+            "encoding": "raw"
+          },
+          "database": {
+            "value": { "ref": "connection.parameters.database" },
+            "encoding": "url_path_segment"
+          }
+        }
+      }
+    }
+  },
+  "sql_capabilities": {
+    "catalog": "none",
+    "session_targeting": "per_statement",
+    "merge_form": "insert_on_conflict",
+    "bulk_load": { "sqlalchemy": "copy_from" },
+    "stage": {
+      "scope": "temp",
+      "schema": "target",
+      "transactional_ddl": true
+    }
+  }
+}

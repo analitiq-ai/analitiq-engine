@@ -182,7 +182,9 @@ class SqlAlchemyBackend(TransportBackend):
         else:
             self._engine = runtime.engine
         caps = getattr(self._dialect, "capabilities", None)
-        self._bulk_declared = caps is not None and caps.bulk_load != "none"
+        self._bulk_declared = (
+            caps is not None and caps.bulk_mechanism("sqlalchemy") is not None
+        )
 
     async def disconnect(self) -> None:
         """Drop backend-held refs; the facade disposes the runtime."""

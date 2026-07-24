@@ -8,11 +8,12 @@ session-schema invariant probe (issue #377), and the stage-cycle commit
 shape. It holds no write-mode logic — which statement runs is the plan's,
 decided by the facade.
 
-Landing into the stage is by declared mechanism: ``bulk_load:
-"adbc_ingest"`` uses ``cursor.adbc_ingest`` (Arrow straight through — the
-sanctioned home of what used to be an ADBC-private code path), any other
-declared mechanism consults the dialect's ``bulk_land`` hook (executemany
-fallback when declined, logged INFO), and ``"none"`` lands via executemany
+Landing into the stage is by this family's declared mechanism
+(``sql_capabilities.bulk_load.adbc``): ``"adbc_ingest"`` uses
+``cursor.adbc_ingest`` (Arrow straight through — the sanctioned home of
+what used to be an ADBC-private code path), any other declared mechanism
+consults the dialect's ``bulk_land`` hook (executemany fallback when
+declined, logged INFO), and an undeclared family lands via executemany
 ``INSERT``. Stage contents are identical whichever mechanism lands them.
 
 PEP-249 reports ``threadsafety = 1`` for every ADBC driver we ship —
@@ -91,17 +92,19 @@ class AdbcBackend(TransportBackend):
         # legitimately has no schema selected (None).
         self._session_schema: str | None = None
         self._session_schema_known: bool = False
-        # The connector's declared landing mechanism
-        # (``sql_capabilities.bulk_load``), read off the dialect binding
-        # at connect(). Only a declared mechanism is ever used; "none"
-        # lands via executemany.
+        # This transport family's declared landing mechanism
+        # (``sql_capabilities.bulk_load.adbc``), read off the dialect
+        # binding at connect(). Only a declared mechanism is ever used;
+        # "none" (no adbc entry declared) lands via executemany.
         self._bulk_load: str = "none"
 
     async def connect(self, runtime: ConnectionRuntime) -> None:
         """Open the ADBC connection eagerly through *runtime*."""
         self._runtime = runtime
         caps = getattr(self._dialect, "capabilities", None)
-        self._bulk_load = caps.bulk_load if caps is not None else "none"
+        self._bulk_load = (
+            caps.bulk_mechanism("adbc") or "none" if caps is not None else "none"
+        )
         conn = await asyncio.to_thread(runtime.open_adbc_connection)
         with self._conn_lock:
             self._conn = conn
