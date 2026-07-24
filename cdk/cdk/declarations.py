@@ -355,16 +355,22 @@ def _read_sqlstate(member: BaseException) -> str | None:
 
 
 def _read_vendor_code(member: BaseException) -> str | None:
-    """Read a driver's numeric vendor code off the common attribute spellings.
+    """Read a driver's numeric vendor code off the common spellings.
 
-    ``errno`` is the MySQL-family spelling — but on an ``OSError`` the same
-    attribute is the operating-system errno (ECONNREFUSED is 111, not a
-    driver fact), so the ``errno`` spelling is never read off an OSError
-    subclass; an explicit ``vendor_code`` attribute is honored on any type.
+    ``errno`` is one MySQL-family spelling (mysql-connector), and several
+    DB-API drivers (pymysql, MySQLdb) expose the code only as
+    ``exc.args[0]`` — both are read. On an ``OSError`` those slots carry
+    the operating-system errno (ECONNREFUSED is 111, not a driver fact),
+    so OSError subclasses only ever contribute an explicit ``vendor_code``
+    attribute.
     """
     value = getattr(member, "vendor_code", None)
     if value is None and not isinstance(member, OSError):
         value = getattr(member, "errno", None)
+        if value is None and member.args:
+            first = member.args[0]
+            if isinstance(first, int) and not isinstance(first, bool):
+                value = first
     if isinstance(value, bool):
         return None
     if isinstance(value, int):

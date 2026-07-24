@@ -269,24 +269,13 @@ class StreamingEngine:
 
         The processor owns everything stream-scoped; this wrapper hands it
         the pipeline-wide pieces and surfaces the partial-completion cause
-        run() returns at pipeline level. ``pacing_gate`` (issue #401) holds
-        the stream until a slot under the source connection's declared
-        ceiling frees up.
+        run() returns at pipeline level. ``pacing_gate`` (issue #401) is
+        forwarded to the processor, which holds a slot for the extract
+        stage's lifetime only — the source worker's connection is open
+        exactly that long, and gating the whole stream would serialize
+        streams beyond the declared source ceiling while destinations
+        drain.
         """
-        if pacing_gate is not None:
-            async with pacing_gate:
-                await self._run_stream_processor(
-                    stream_id, stream_config, pipeline_config
-                )
-            return
-        await self._run_stream_processor(stream_id, stream_config, pipeline_config)
-
-    async def _run_stream_processor(
-        self,
-        stream_id: str,
-        stream_config: dict[str, Any],
-        pipeline_config: dict[str, Any],
-    ) -> None:
         processor = StreamProcessor(
             stream_id=stream_id,
             stream_config=stream_config,
@@ -301,6 +290,7 @@ class StreamingEngine:
             max_retries=self.max_retries,
             retry_delay=self.retry_delay,
             error_strategy=self.error_strategy,
+            pacing_gate=pacing_gate,
         )
         partial_error_code = await processor.run()
         if partial_error_code is not None:

@@ -46,15 +46,28 @@ def identifier_budget(caps: SqlCapabilities | None, dialect: SqlDialect) -> int:
 
 
 def rows_per_statement(
-    caps: SqlCapabilities, columns: Sequence[str], *, target: TableAddress
+    caps: SqlCapabilities,
+    columns: Sequence[str],
+    *,
+    target: TableAddress,
+    bindless_landing: bool = False,
 ) -> int | None:
     """Rows one landing statement may carry under the declared bind cap.
 
     ``floor(max_bind_params / column_count)`` when the connector declares
     ``sql_capabilities.limits.max_bind_params``; ``None`` when undeclared
     (no chunking, current behavior). A cap too small to hold even one row
-    is refused loudly — no statement shape can honor it.
+    is refused loudly — no statement shape can honor it. The refusal and
+    the chunk math apply only where binds can actually flow:
+    ``bindless_landing`` marks the one landing that can never reach the
+    executemany path (ADBC transport with declared ``adbc_ingest`` — Arrow
+    goes straight to the driver, no bind parameters, no decline fallback),
+    so a declared cap must not block a wide-table write there. A declared
+    ``bulk_land`` mechanism is NOT bindless: a decline falls back to
+    executemany, where the cap holds.
     """
+    if bindless_landing:
+        return None
     cap = caps.limits.max_bind_params
     if cap is None:
         return None
@@ -226,6 +239,7 @@ def build_stage_write_plan(
     run_id: str,
     stream_id: str,
     batch_seq: int,
+    bindless_landing: bool = False,
 ) -> StageWritePlan:
     """Assemble the complete plan for one batch write.
 
@@ -279,5 +293,7 @@ def build_stage_write_plan(
         mode_sql=mode_sql,
         drop_stage_sql=f"DROP TABLE IF EXISTS {dialect.quote_table(stage)}",
         columns=tuple(columns),
-        rows_per_statement=rows_per_statement(caps, columns, target=target),
+        rows_per_statement=rows_per_statement(
+            caps, columns, target=target, bindless_landing=bindless_landing
+        ),
     )

@@ -125,6 +125,18 @@ class TestErrorMapLookup:
         assert match is not None
         assert (match.family, match.category) == ("vendor_code", "auth")
 
+    def test_vendor_code_from_args_first_element(self, error_map):
+        # pymysql/MySQLdb expose the code only as args[0], never .errno.
+        exc = Exception(1045, "Access denied for user")
+        match = error_map.match_exception(exc)
+        assert match is not None
+        assert (match.family, match.identifier) == ("vendor_code", "1045")
+
+    def test_oserror_args_never_contribute_a_vendor_code(self, error_map):
+        vendor_111 = parse_declared_error_map({"vendor_code": {"111": "auth"}})
+        assert vendor_111 is not None
+        assert vendor_111.match_exception(OSError(111, "refused")) is None
+
     def test_oserror_errno_is_never_a_vendor_code(self, error_map):
         # ECONNREFUSED is 111 on Linux; a declared vendor code "111" must
         # not claim an operating-system errno.

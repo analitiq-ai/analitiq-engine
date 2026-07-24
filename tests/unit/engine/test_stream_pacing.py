@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from src.engine.engine import StreamingEngine
+from src.engine.stream_processor import StreamProcessor
 
 
 def _stream_config(runtime) -> dict:
@@ -77,40 +78,86 @@ class TestPacingGateBoundsConcurrency:
         assert peak == 2
 
 
-class TestProcessStreamHonorsTheGate:
-    """Drive the real ``_process_stream``, not a re-implemented semaphore:
-    a dropped ``async with pacing_gate`` in the wrapper would pass the
-    shape test above while unleashing full fan-out."""
+class TestProcessStreamForwardsTheGate:
+    """`_process_stream` hands the gate to the processor, which paces the
+    extract stage — a dropped forward would pass the shape tests above
+    while unleashing full fan-out."""
 
-    async def test_shared_gate_serializes_the_streams(self):
+    async def test_gate_reaches_the_stream_processor(self, monkeypatch):
+        import src.engine.engine as engine_module
+
         engine = object.__new__(StreamingEngine)
+        engine.pipeline_id = "p1"
+        engine.state_manager = MagicMock()
+        engine.metrics = MagicMock()
+        engine._worker_readable = MagicMock()
+        engine.dlq_path = "./deadletter/"
+        engine.batch_size = 1
+        engine.buffer_size = 1
+        engine.max_retries = 1
+        engine.retry_delay = 0.0
+        engine.error_strategy = "fail"
+        engine._partial_error_codes = []
+
+        captured: dict = {}
+
+        class _Processor:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            async def run(self):
+                return None
+
+        monkeypatch.setattr(engine_module, "StreamProcessor", _Processor)
+        gate = asyncio.Semaphore(2)
+        await engine._process_stream("s1", {}, {}, pacing_gate=gate)
+        assert captured["pacing_gate"] is gate
+
+
+class TestPacedHoldsTheSlotForExtractOnly:
+    """The processor's `_paced` wrapper bounds live source connections:
+    the slot is held while the extract coroutine runs and released the
+    moment it finishes — a stream still draining its destination must not
+    block other streams' reads."""
+
+    def _processor(self, gate) -> StreamProcessor:
+        processor = object.__new__(StreamProcessor)
+        processor.pacing_gate = gate
+        return processor
+
+    async def test_extract_stages_serialize_under_a_one_slot_gate(self):
+        gate = asyncio.Semaphore(1)
         active = 0
         peak = 0
 
-        async def record_concurrency(stream_id, stream_config, pipeline_config):
+        async def extract():
             nonlocal active, peak
             active += 1
             peak = max(peak, active)
             await asyncio.sleep(0.01)
             active -= 1
 
-        engine._run_stream_processor = record_concurrency
-        gate = asyncio.Semaphore(1)
         await asyncio.gather(
-            *[
-                engine._process_stream(f"s{i}", {}, {}, pacing_gate=gate)
-                for i in range(4)
-            ]
+            *[self._processor(gate)._paced(extract()) for _ in range(4)]
         )
         assert peak == 1
 
-    async def test_no_gate_still_runs_the_stream(self):
-        engine = object.__new__(StreamingEngine)
-        ran: list[str] = []
+    async def test_slot_is_released_when_extraction_finishes(self):
+        gate = asyncio.Semaphore(1)
 
-        async def record(stream_id, stream_config, pipeline_config):
-            ran.append(stream_id)
+        async def extract():
+            return None
 
-        engine._run_stream_processor = record
-        await engine._process_stream("s1", {}, {}, pacing_gate=None)
-        assert ran == ["s1"]
+        await self._processor(gate)._paced(extract())
+        # The slot is free again even though the stream's load stage would
+        # still be draining at this point.
+        assert gate._value == 1
+
+    async def test_no_gate_runs_the_stage_directly(self):
+        ran: list[bool] = []
+
+        async def extract():
+            ran.append(True)
+
+        await self._processor(None)._paced(extract())
+        assert ran == [True]

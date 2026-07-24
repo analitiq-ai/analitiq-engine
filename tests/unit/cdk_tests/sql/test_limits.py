@@ -112,6 +112,36 @@ class TestRowsPerStatement:
         target = TableAddress(table="events")
         assert rows_per_statement(caps, ["a", "b"], target=target) == 5
 
+    def test_bindless_landing_ignores_the_cap(self):
+        # ADBC + declared adbc_ingest never reaches executemany, so a wide
+        # table must not be chunked or refused by a bind cap it never uses.
+        caps = _caps(limits={"max_bind_params": 2})
+        target = TableAddress(table="events")
+        assert (
+            rows_per_statement(
+                caps, ["a", "b", "c"], target=target, bindless_landing=True
+            )
+            is None
+        )
+
+    def test_bindless_plan_carries_no_chunking(self):
+        caps = _caps(limits={"max_bind_params": 2}, bulk_load="adbc_ingest")
+        plan = build_stage_write_plan(
+            _StagingDialect(),
+            caps,
+            target=TableAddress(table="events", schema="public"),
+            columns=("a", "b", "c"),
+            write_mode="insert",
+            conflict_keys=[],
+            identity=["a"],
+            truncate_now=False,
+            run_id="r1",
+            stream_id="s1",
+            batch_seq=1,
+            bindless_landing=True,
+        )
+        assert plan.rows_per_statement is None
+
 
 class TestIterLandingChunks:
     def test_no_cap_yields_whole_batch(self):

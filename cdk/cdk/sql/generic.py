@@ -1438,9 +1438,10 @@ class GenericSQLConnector(BaseDestinationHandler):
                 # collapse — all semantics), renders the plan, and the
                 # backend executes it.
                 prepared = self._prepare_write_batch(state, record_batch)
+                caps = self._require_declared_capabilities(state)
                 plan = build_stage_write_plan(
                     self.dialect,
-                    self._require_declared_capabilities(state),
+                    caps,
                     target=state.address,
                     columns=tuple(prepared.schema.names),
                     write_mode=state.write_mode,
@@ -1450,6 +1451,12 @@ class GenericSQLConnector(BaseDestinationHandler):
                     run_id=run_id,
                     stream_id=stream_id,
                     batch_seq=batch_seq,
+                    # ADBC + declared adbc_ingest never reaches executemany
+                    # (Arrow straight to the driver, no decline fallback), so
+                    # a declared bind cap must not chunk or refuse there.
+                    bindless_landing=(
+                        self._adbc_only and caps.bulk_load == "adbc_ingest"
+                    ),
                 )
                 await self._require_backend().execute_write(plan, prepared)
 

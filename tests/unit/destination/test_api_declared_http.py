@@ -115,6 +115,34 @@ class TestDestinationConnectWiring:
             result.failure_category == FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED
         )
 
+    async def test_per_record_fatal_failure_keeps_the_declared_category(self):
+        # A declared fatal status handled inside single-record mode must not
+        # lose its category to the batch verdict's UNSPECIFIED default —
+        # the engine would then fall back to text for a declared failure.
+        handler = ApiDestinationHandler()
+        runtime = MagicMock()
+        runtime.connector_id = "demo"
+        runtime.declared_error_map = {"http": {"401": "auth"}}
+        runtime.materialize = AsyncMock()
+        runtime.raw_config = {}
+        runtime.session.headers = {}
+        await handler.connect(runtime)
+
+        handler._streams["s1"] = _StreamState(endpoint="/things")
+        handler._send_request = AsyncMock(side_effect=_response_error(401))
+
+        result = await handler.write_batch(
+            run_id="r1",
+            stream_id="s1",
+            batch_seq=1,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}, {"id": 2}]),
+            record_ids=["rec-1", "rec-2"],
+            cursor=Cursor(),
+            emitted_at=datetime.now(timezone.utc),
+        )
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
+
 
 class TestSourceHttpReadError:
     def test_declared_transient_status_retries(self):
