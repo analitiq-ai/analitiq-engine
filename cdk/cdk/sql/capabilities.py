@@ -120,7 +120,6 @@ class SqlCapabilities:
     merge_form: str
     bulk_load: str
     stage: StageCapabilities
-    # Additive (issue #401): undeclared caps are None-valued, never a refusal.
     limits: SqlLimits = field(default_factory=SqlLimits.undeclared)
 
     @property
