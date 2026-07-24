@@ -32,14 +32,17 @@ from .execution import execute_ddl
 def _check_identifier_budget(
     dialect: SqlDialect, address: TableAddress, columns: Sequence[ColumnDef]
 ) -> None:
-    """Refuse DDL identifiers over the declared identifier cap (issue #401).
+    """Refuse created identifiers over the declared identifier cap (issue #401).
 
     Only the connector's declared ``sql_capabilities.limits.max_identifier_len``
-    is enforced — an undeclared cap keeps current behavior (additive absence).
-    Systems over their cap either reject the DDL server-side or silently
-    truncate the name (Postgres), so the created table would diverge from the
-    address every later statement targets; refuse before composing any SQL.
-    The budget is bytes, matching the stage-name grammar's UTF-8 accounting.
+    is enforced — an undeclared cap keeps current behavior (additive absence) —
+    and only for the identifiers this DDL *creates* (the table name and its
+    columns): the schema/catalog segments name pre-existing namespaces the
+    system already accepted. Systems over their cap either reject the DDL
+    server-side or silently truncate the name (Postgres), so the created table
+    would diverge from the address every later statement targets; refuse
+    before composing any SQL. The budget is bytes, matching the stage-name
+    grammar's UTF-8 accounting.
     """
     caps = dialect.capabilities
     cap = caps.limits.max_identifier_len if caps is not None else None

@@ -19,7 +19,7 @@ from typing import Any
 import pyarrow as pa
 
 from cdk.contract import Readable
-from cdk.declarations import parse_declared_error_map
+from cdk.declarations import error_map_for
 from cdk.types import CheckpointStore, FailureCategory
 
 from ..grpc.client import (
@@ -166,12 +166,7 @@ class StreamProcessor:
             None,
         )
         self._source_error_map = (
-            parse_declared_error_map(
-                source_runtime.declared_error_map,
-                source=f"connector {source_runtime.connector_id!r}",
-            )
-            if source_runtime is not None
-            else None
+            error_map_for(source_runtime) if source_runtime is not None else None
         )
         # stream_data starts the state run before any processor is built, so
         # the run id is known at construction time.

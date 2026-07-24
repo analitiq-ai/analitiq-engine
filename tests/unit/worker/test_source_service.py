@@ -77,6 +77,10 @@ def _runtime():
     return runtime
 
 
+class OperationalError(Exception):
+    """Bears a driver exception name for the declared-error-map tests."""
+
+
 async def _collect(servicer, request=None):
     request = request or ReadRequest(stream_name="s1", batch_size=10)
     return [r async for r in servicer.ReadStream(request, MagicMock())]
@@ -201,6 +205,31 @@ class TestReadStream:
         assert terminal.WhichOneof("message") == "error"
         assert terminal.error.deterministic is False
         assert str(exc) in terminal.error.message
+
+    async def test_declared_transient_marks_retryable(self):
+        # Wiring, not helper logic: the map parsed in __init__ must reach
+        # ReadStream's classification without private-attr injection.
+        runtime = _runtime()
+        runtime.declared_error_map = {"exception": {"OperationalError": "transient"}}
+        readable = _FakeReadable([], error=OperationalError("server went away"))
+        servicer = SourceWorkerServicer(readable, runtime, {})
+        responses = await _collect(servicer)
+        terminal = responses[-1]
+        assert terminal.WhichOneof("message") == "error"
+        assert terminal.error.deterministic is False
+
+    async def test_declared_config_marks_deterministic(self):
+        # The load-bearing inverse: OperationalError is outside the
+        # deterministic type ladder, so deterministic=True can only come
+        # from the declaration having reached the classification.
+        runtime = _runtime()
+        runtime.declared_error_map = {"exception": {"OperationalError": "config"}}
+        readable = _FakeReadable([], error=OperationalError("bad search_path"))
+        servicer = SourceWorkerServicer(readable, runtime, {})
+        responses = await _collect(servicer)
+        terminal = responses[-1]
+        assert terminal.WhichOneof("message") == "error"
+        assert terminal.error.deterministic is True
 
     async def test_error_ends_stream_without_complete(self):
         readable = _FakeReadable([_batch([{"id": 1}])], error=ValueError("x"))

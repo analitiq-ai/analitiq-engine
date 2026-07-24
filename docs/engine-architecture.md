@@ -282,11 +282,14 @@ A connector may declare its driver's failure taxonomy as data — the
 states, exception class names, vendor codes, HTTP statuses, each mapped to
 an engine-owned category (`transient | config | auth | unreachable |
 rate_limited | write_rejected`). The engine alone derives the verdicts
-(`AckStatus`, `FailureCategory`, `ErrorCode`, backoff) from a declared
-category; connectors never self-declare verdicts. Every classification
-site consults the declared map first, so a declaring connector gets
-deterministic classification for declared identifiers with zero connector
-Python.
+(`AckStatus`, `FailureCategory`, `ErrorCode`) from a declared category;
+connectors never self-declare verdicts. The connector-facing boundaries
+(the CDK write ladder, the ADBC boundary, the source worker, both API
+connectors) consult the declared map before their heuristics, and its
+verdict reaches the engine's classifiers as structured signals — the
+worker's deterministic flag, the ack's failure category, the extract tag —
+so a declaring connector gets deterministic classification for declared
+identifiers with zero connector Python.
 
 The name/phrase heuristics remain in three narrow roles only, each running
 strictly after the declared map and the structured signals, and each logs
@@ -303,8 +306,9 @@ or path can never be misread as source auth.
 
 The `error_code` enum is the stable, audited contract. The one residual
 best-effort area is the source-extract fine split above, and only for a
-connector that declares no `error_map`: an un-typed, undeclared source
-driver error's auth-vs-unreachable-vs-rate is inferred from its text and can
+failure no declared fact claims — a partial map is the normal case, and a
+declared `transient`/`write_rejected` names no source code by design: such
+a failure's auth-vs-unreachable-vs-rate is inferred from its text and can
 fall to a neighbouring code or `INTERNAL`. It is never a secret leak (only
 class names and codes ever reach `error_detail`) and never a cross-stage
 error (the stage is always known from the tag).

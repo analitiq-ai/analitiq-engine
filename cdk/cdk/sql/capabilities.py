@@ -12,9 +12,11 @@ declared block into the resolved worker payload (the same channel that
 delivers transport specs), and both sides parse it here — fail-loud, at the
 process boundary, so a malformed or partially-declared block never reaches a
 consumer site. ``None`` (no block declared) is legal at parse time; every
-consumer treats a needed-but-undeclared fact as a loud configuration error
-via :func:`undeclared_capability_error` — no base-class default ever fills
-in a guess.
+consumer treats a needed-but-undeclared shape fact as a loud configuration
+error via :func:`undeclared_capability_error` — no base-class default ever
+fills in a guess. The one exception is the ``limits`` member (issue #401),
+whose absence is additive: an undeclared cap means "no declared cap" and
+current behavior applies.
 """
 
 from __future__ import annotations

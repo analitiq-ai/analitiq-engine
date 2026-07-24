@@ -156,8 +156,7 @@ class TestIdentifierBudget:
 class TestDdlIdentifierCap:
     def _columns(self, names):
         return [
-            ColumnDef(name=name, canonical_type="Utf8", nullable=True)
-            for name in names
+            ColumnDef(name=name, canonical_type="Utf8", nullable=True) for name in names
         ]
 
     def _mapper(self):

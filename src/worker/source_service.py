@@ -19,11 +19,7 @@ import pyarrow as pa
 
 import grpc
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.declarations import (
-    DECLARED_READ_DETERMINISTIC,
-    ErrorMap,
-    parse_declared_error_map,
-)
+from cdk.declarations import DECLARED_READ_DETERMINISTIC, ErrorMap, error_map_for
 from cdk.exceptions import TransportSpecError
 from cdk.sql.exceptions import (
     ReadError,
@@ -154,10 +150,7 @@ class SourceWorkerServicer(SourceServiceServicer):
         # from the resolved payload the bootstrap carried. A declared fact
         # classifies a driver failure with zero connector Python; None
         # keeps the typed-error ladder (additive absence).
-        self._error_map = parse_declared_error_map(
-            runtime.declared_error_map,
-            source=f"connector {runtime.connector_id!r}",
-        )
+        self._error_map = error_map_for(runtime)
 
     async def ReadStream(
         self,

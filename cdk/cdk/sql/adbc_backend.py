@@ -34,7 +34,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from cdk.adbc_registry import AdbcConfigurationError
-from cdk.declarations import ErrorMap, parse_declared_error_map
+from cdk.declarations import ErrorMap, error_map_for
 
 from ._adbc_utils import (
     _close_cursor_quietly,
@@ -66,7 +66,10 @@ class AdbcBackend(TransportBackend):
     next operation reopens through the runtime, so writes are
     self-healing. Deterministic PEP-249 failure classes are reclassified
     as :class:`AdbcConfigurationError` at this boundary so the facade's
-    ack ladder marks them fatal instead of retrying forever.
+    ack ladder marks them fatal instead of retrying forever — except a
+    write-cycle failure claimed by the connector's declared ``error_map``
+    (issue #401), which propagates raw so the ladder derives the declared
+    verdict instead.
     """
 
     def __init__(self, dialect: SqlDialect) -> None:
@@ -114,27 +117,32 @@ class AdbcBackend(TransportBackend):
         self._runtime = runtime
         caps = getattr(self._dialect, "capabilities", None)
         self._bulk_load = caps.bulk_load if caps is not None else "none"
-        self._error_map = parse_declared_error_map(
-            runtime.declared_error_map,
-            source=f"connector {runtime.connector_id!r}",
-        )
+        self._error_map = error_map_for(runtime)
         conn = await asyncio.to_thread(runtime.open_adbc_connection)
         with self._conn_lock:
             self._conn = conn
             self._session_schema = None
             self._session_schema_known = False
 
-    def _reraise_driver_error(self, exc: Exception) -> NoReturn:
-        """Reraise a driver failure, promoting to fatal only when undeclared.
+    def _reraise_driver_error(self, exc: Exception, *, write_cycle: bool) -> NoReturn:
+        """Reraise a driver failure, promoting to fatal only when unclaimed.
 
-        Resolution order per issue #401: a declared ``error_map`` fact
-        claims the failure first — the raw exception then propagates so the
-        facade's ack ladder derives the verdict from the declared category.
-        Only an unclaimed exception is subject to the PEP-249 class-name
-        heuristic that reclassifies deterministic classes as
-        :class:`AdbcConfigurationError` (fatal).
+        Resolution order per issue #401, on the write cycle only: a declared
+        ``error_map`` fact claims the failure first — the raw exception then
+        propagates so the facade's ack ladder derives the verdict from the
+        declared category. On the DDL / readiness-probe path
+        (``write_cycle=False``) nothing downstream consumes a declared
+        category — the schema handshake rejects on
+        :class:`AdbcConfigurationError` — so the fatal promotion always
+        applies there; skipping it would turn a clean schema rejection into
+        a raw RPC failure. An exception the PEP-249 class-name heuristic
+        does not claim reraises raw either way.
         """
-        if self._error_map is not None and self._error_map.match_exception(exc):
+        if (
+            write_cycle
+            and self._error_map is not None
+            and self._error_map.match_exception(exc)
+        ):
             raise exc
         if _is_fatal_adbc_error(exc):
             raise _reclassify_as_fatal(exc) from exc
@@ -226,7 +234,7 @@ class AdbcBackend(TransportBackend):
                     )
                 except Exception as exc:
                     self._poison_sync()
-                    self._reraise_driver_error(exc)
+                    self._reraise_driver_error(exc, write_cycle=True)
             if plan.transactional:
                 self._run_transactional_cycle(conn, plan, batch)
             else:
@@ -256,7 +264,7 @@ class AdbcBackend(TransportBackend):
                 _close_cursor_quietly(cursor)
         except Exception as exc:
             self._poison_sync()
-            self._reraise_driver_error(exc)
+            self._reraise_driver_error(exc, write_cycle=True)
 
     def _run_stepwise_cycle(
         self, conn: Any, plan: StageWritePlan, batch: pa.RecordBatch
@@ -295,7 +303,7 @@ class AdbcBackend(TransportBackend):
             # batch must not inherit.
             self._drop_stage_after_failure(conn, plan)
             self._poison_sync()
-            self._reraise_driver_error(exc)
+            self._reraise_driver_error(exc, write_cycle=True)
         self._drop_stage_after_success(conn, plan)
 
     def _land(
@@ -574,7 +582,7 @@ class AdbcBackend(TransportBackend):
                     _close_cursor_quietly(cursor)
             except Exception as exc:
                 self._poison_sync()
-                self._reraise_driver_error(exc)
+                self._reraise_driver_error(exc, write_cycle=False)
 
     def _target_columns_sync(self, target: TableAddress) -> tuple[str, ...]:
         # Dialect-quoted identifiers only; no user values.
@@ -604,7 +612,7 @@ class AdbcBackend(TransportBackend):
                     _close_cursor_quietly(cursor)
             except Exception as exc:
                 self._poison_sync()
-                self._reraise_driver_error(exc)
+                self._reraise_driver_error(exc, write_cycle=False)
         return tuple(col[0] for col in description)
 
     def _health_check_sync(self) -> None:

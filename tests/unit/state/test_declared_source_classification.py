@@ -47,8 +47,7 @@ class TestDeclaredFirst:
 
         exc = OperationalTeapotError("E418 short and stout")
         assert (
-            classify_source_extract(exc, error_map=error_map)
-            == ErrorCode.RATE_LIMITED
+            classify_source_extract(exc, error_map=error_map) == ErrorCode.RATE_LIMITED
         )
 
     def test_boundary_collapsed_name_matches(self, error_map):
@@ -58,9 +57,7 @@ class TestDeclaredFirst:
         exc = RuntimeError("AutoReconnect: connection pool closed (worker x)")
         # transient claims no source code; the text split then sees no
         # recognizable phrase in this message and stays INTERNAL.
-        assert (
-            classify_source_extract(exc, error_map=error_map) == ErrorCode.INTERNAL
-        )
+        assert classify_source_extract(exc, error_map=error_map) == ErrorCode.INTERNAL
 
     def test_transient_falls_through_to_text(self, error_map):
         class AutoReconnect(Exception):
@@ -83,17 +80,14 @@ class TestFallbackUnchanged:
     def test_unclaimed_exception_uses_text(self, error_map):
         exc = Exception("too many requests")
         assert (
-            classify_source_extract(exc, error_map=error_map)
-            == ErrorCode.RATE_LIMITED
+            classify_source_extract(exc, error_map=error_map) == ErrorCode.RATE_LIMITED
         )
 
     def test_local_io_guard_still_precedes_the_map(self, error_map):
         # A local permission failure is engine infra, never source auth —
         # even a declared map cannot reach past the local-I/O guard.
         exc = PermissionError(13, "Permission denied")
-        assert (
-            classify_source_extract(exc, error_map=error_map) == ErrorCode.INTERNAL
-        )
+        assert classify_source_extract(exc, error_map=error_map) == ErrorCode.INTERNAL
 
     def test_heuristic_fallback_logs(self, error_map, caplog):
         import logging

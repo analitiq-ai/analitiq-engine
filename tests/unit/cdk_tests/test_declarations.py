@@ -60,9 +60,7 @@ class TestErrorMapParse:
         with pytest.raises(ConnectorDeclarationError, match="must be an object"):
             parse_declared_error_map({"http": ["429"]})
 
-    @pytest.mark.parametrize(
-        "key", ["8", "080", "28000X", "08-1", "sqlstate", "28abc"]
-    )
+    @pytest.mark.parametrize("key", ["8", "080", "28000X", "08-1", "sqlstate", "28abc"])
     def test_malformed_sqlstate_key_fails(self, key):
         with pytest.raises(ConnectorDeclarationError, match="key grammar"):
             parse_declared_error_map({"sqlstate": {key: "auth"}})
@@ -204,9 +202,7 @@ class TestVerdictTables:
         for category in ("transient", "unreachable", "rate_limited"):
             status, failure_category = DECLARED_WRITE_VERDICTS[category]
             assert status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
-            assert (
-                failure_category == FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED
-            )
+            assert failure_category == FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED
 
     def test_deterministic_write_categories(self):
         assert DECLARED_WRITE_VERDICTS["auth"] == (

@@ -7,11 +7,12 @@ testable facts in the connector definition:
 - ``error_map`` — how the system's driver identifies failures. Connectors
   declare facts about their driver's taxonomy (SQLSTATE classes, exception
   class names, vendor codes, HTTP statuses); the engine alone derives the
-  verdicts (``AckStatus``, ``FailureCategory``, ``ErrorCode``, backoff).
-  Connectors never self-declare verdicts.
+  verdicts (``AckStatus``, ``FailureCategory``, ``ErrorCode`` — and with
+  them whether the engine's bounded retry applies). Connectors never
+  self-declare verdicts.
 - ``concurrency`` — the system's connection ceiling (``max_connections``),
-  consumed by the engine's stream fan-out pacing and transport pool sizing.
-  Connector-level (not a SQL fact): API systems have connection ceilings too.
+  consumed by the engine's stream fan-out pacing. Connector-level (not a
+  SQL fact): API systems have connection ceilings too.
 
 Absence is additive, unlike the shape capabilities in
 :mod:`cdk.sql.capabilities`: a missing ``merge_form`` blocks an upsert, but a
@@ -29,12 +30,16 @@ channel that delivers the ``sql_capabilities`` block.
 
 from __future__ import annotations
 
+import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 from .types import AckStatus, FailureCategory
+
+logger = logging.getLogger(__name__)
 
 # The engine-owned category vocabulary, aligned with the existing
 # FailureCategory and ErrorCode surfaces. The derivation from a category to
@@ -54,8 +59,10 @@ ERROR_CATEGORY_VALUES = (
 # Write context: declared category -> (ack status, failure category).
 # Retryable categories carry WRITE_REJECTED so an exhausted retry classifies
 # as a destination write failure, exactly like the undeclared retryable
-# branch of the ack ladder.
-DECLARED_WRITE_VERDICTS: dict[str, tuple[AckStatus, FailureCategory]] = {
+# branch of the ack ladder. MappingProxyType: consumers read these tables at
+# verdict time; handing out the live dict would let any importer rewrite
+# engine verdicts.
+DECLARED_WRITE_VERDICTS: Mapping[str, tuple[AckStatus, FailureCategory]] = {
     "transient": (
         AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
         FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED,
@@ -86,7 +93,7 @@ DECLARED_WRITE_VERDICTS: dict[str, tuple[AckStatus, FailureCategory]] = {
 # the engine shell fails the stream fatally instead of retrying).
 # ``write_rejected`` reads as deterministic: the system refused the
 # operation, and an identical request cannot fare better.
-DECLARED_READ_DETERMINISTIC: dict[str, bool] = {
+DECLARED_READ_DETERMINISTIC: Mapping[str, bool] = {
     "transient": False,
     "unreachable": False,
     "rate_limited": False,
@@ -108,6 +115,9 @@ for _table_name, _table in (
             f"{_table_name} must map every declared error category; "
             f"missing: {sorted(_unmapped)}"
         )
+
+DECLARED_WRITE_VERDICTS = MappingProxyType(dict(DECLARED_WRITE_VERDICTS))
+DECLARED_READ_DETERMINISTIC = MappingProxyType(dict(DECLARED_READ_DETERMINISTIC))
 
 # Identifier grammar per family. Keys are driver-taxonomy facts:
 # - sqlstate: a 2-char SQLSTATE class ("08") or a full 5-char state ("28000")
@@ -140,12 +150,21 @@ class DeclaredMatch:
     ``family``/``identifier`` name the connector's declared fact (a class
     name, an SQLSTATE, a code) — developer-chosen identifiers, safe for
     logs and failure summaries. ``category`` is the engine-vocabulary value
-    the consumer derives its verdict from.
+    the consumer derives its verdict from; membership is re-checked here so
+    a match constructed outside :class:`ErrorMap` can never smuggle an
+    off-vocabulary category into a verdict-table lookup.
     """
 
     family: str
     identifier: str
     category: str
+
+    def __post_init__(self) -> None:
+        if self.category not in ERROR_CATEGORY_VALUES:
+            raise ConnectorDeclarationError(
+                f"DeclaredMatch category {self.category!r} is not in the "
+                f"engine vocabulary {list(ERROR_CATEGORY_VALUES)}"
+            )
 
 
 def _require_category(value: Any, path: str, *, source: str) -> str:
@@ -201,6 +220,13 @@ class ErrorMap:
     vendor_code: Mapping[str, str]
     http: Mapping[int, str]
 
+    def __post_init__(self) -> None:
+        # Make the frozenness real: these maps live on long-lived handlers
+        # and decide ack verdicts, so the field values must not be
+        # rewritable through the plain dicts from_declaration builds.
+        for name in ("sqlstate", "exception", "vendor_code", "http"):
+            object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name))))
+
     @classmethod
     def from_declaration(
         cls, block: Mapping[str, Any], *, source: str = "<connector definition>"
@@ -244,15 +270,21 @@ class ErrorMap:
             return None
         return DeclaredMatch(family="http", identifier=str(status), category=category)
 
-    def match_names(self, names: Any) -> DeclaredMatch | None:
+    def match_names(self, names: Iterable[str]) -> DeclaredMatch | None:
         """Match declared exception class names against a name collection.
 
         For sites where only class names survive (the engine side of a
         process boundary, where the live type is a wrapper and the original
         class name was promoted from the worker's ``error_type:`` prefix).
         Iteration order of *names* is the caller's specificity order; the
-        first declared name wins.
+        first declared name wins. A bare string is refused: iterating it
+        would compare single characters and silently never match.
         """
+        if isinstance(names, str):
+            raise TypeError(
+                "match_names takes an iterable of class names, not a bare "
+                "string; wrap the single name in a list"
+            )
         for name in names:
             category = self.exception.get(name)
             if category is not None:
@@ -266,10 +298,23 @@ class ErrorMap:
 
         Walks the exception chain outermost-first; per member the
         most-specific declared fact wins (full SQLSTATE, SQLSTATE class,
-        vendor code, then exception class name in MRO order).
+        vendor code, then exception class name in MRO order). Never raises:
+        the members are untrusted connector/driver objects whose attributes
+        may be misbehaving properties, and a classifier crash here would
+        displace the original failure at the exact moment it is being
+        reported — an unreadable member logs a WARNING and matches nothing.
         """
         for member in _walk_chain(exc):
-            match = self._match_member(member)
+            try:
+                match = self._match_member(member)
+            except Exception:
+                logger.warning(
+                    "declared error_map lookup failed reading %s; treating "
+                    "the member as unmatched",
+                    type(member).__name__,
+                    exc_info=True,
+                )
+                continue
             if match is not None:
                 return match
         return None
@@ -314,7 +359,8 @@ def _read_vendor_code(member: BaseException) -> str | None:
 
     ``errno`` is the MySQL-family spelling — but on an ``OSError`` the same
     attribute is the operating-system errno (ECONNREFUSED is 111, not a
-    driver fact), so OSError subclasses never contribute a vendor code.
+    driver fact), so the ``errno`` spelling is never read off an OSError
+    subclass; an explicit ``vendor_code`` attribute is honored on any type.
     """
     value = getattr(member, "vendor_code", None)
     if value is None and not isinstance(member, OSError):
@@ -329,11 +375,16 @@ def _read_vendor_code(member: BaseException) -> str | None:
 
 
 def _walk_chain(exc: BaseException) -> list[BaseException]:
-    """Flatten an exception, its group members, and its cause/context chain.
+    """Flatten an exception, its group members, and its explicit-link chain.
 
-    Outermost-first, depth-capped, identity-deduplicated — the same walk
-    shape the engine's classifier uses, kept local because the CDK cannot
-    import engine modules.
+    Outermost-first, depth-capped, identity-deduplicated. Follows only
+    explicit links — ``ExceptionGroup`` members, ``raise ... from``
+    (``__cause__``), and the engine's own ``original_error`` wrapper
+    attribute — never the implicit ``__context__``: a declared fact riding
+    an exception that merely happened to be in flight (a driver's internal
+    retry, a cleanup failure) must not claim the verdict for the failure
+    that was actually raised. The engine's text heuristics walk wider on
+    purpose; declared claims trade recall for precision.
     """
     seen: set[int] = set()
     out: list[BaseException] = []
@@ -347,8 +398,15 @@ def _walk_chain(exc: BaseException) -> list[BaseException]:
         nested: list[BaseException] = []
         if isinstance(current, BaseExceptionGroup):
             nested.extend(current.exceptions)
-        for attr in ("__cause__", "__context__"):
-            linked = getattr(current, attr, None)
+        for attr in ("original_error", "__cause__"):
+            # The members are untrusted objects; a misbehaving property on
+            # a link attribute must not crash the walk (the caller is in
+            # the middle of reporting the original failure), so a raising
+            # read degrades to "no link".
+            try:
+                linked = getattr(current, attr, None)
+            except Exception:
+                linked = None
             if isinstance(linked, BaseException):
                 nested.append(linked)
         for child in nested:
@@ -368,6 +426,22 @@ def parse_declared_error_map(
     if block is None:
         return None
     return ErrorMap.from_declaration(block, source=source)
+
+
+def error_map_for(runtime: Any) -> ErrorMap | None:
+    """Parse a runtime's declared ``error_map`` with the canonical source label.
+
+    The one call shape every consumer site uses — the SQL facade, the ADBC
+    backend, the API connectors, the source worker, and the engine's extract
+    boundary — so a new consumer cannot forget the parse or label the error
+    source inconsistently. Reads ``runtime.declared_error_map`` strictly: a
+    runtime object without the attribute is a wiring defect, not an
+    undeclared connector.
+    """
+    return parse_declared_error_map(
+        runtime.declared_error_map,
+        source=f"connector {runtime.connector_id!r}",
+    )
 
 
 def parse_declared_concurrency(
@@ -399,4 +473,4 @@ def parse_declared_concurrency(
             f"concurrency.max_connections in {source} is {value!r}; "
             f"expected a positive integer"
         )
-    return value
+    return int(value)

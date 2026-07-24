@@ -565,11 +565,13 @@ def classify_source_extract(
 ) -> ErrorCode:
     """Classify a source-extract failure into its concrete source code.
 
-    Declared map first (issue #401): the source connector's ``error_map``
-    claims the failure structurally — off the live exception chain
-    (SQLSTATE, vendor code, class MRO) or, across the worker boundary where
-    only class names survive, off the collapsed name set. Only an unclaimed
-    failure falls to the text split, and that fallback is logged.
+    Declared map before the text split (issue #401; the local-filesystem
+    guard still runs first — an engine-infra fault is never the source's to
+    classify): the source connector's ``error_map`` claims the failure
+    structurally — off the live exception chain (SQLSTATE, vendor code,
+    class MRO) or, across the worker boundary where only class names
+    survive, off the collapsed name set. Only an unclaimed failure falls to
+    the text split, and that fallback is logged.
 
     The extract stage knows the failure is source-side, but auth-vs-unreachable-
     vs-rate for an opaque driver/HTTP error is only legible from the error
@@ -617,8 +619,8 @@ def classify_source_extract(
         )
     else:
         logger.info(
-            "no declaration or tag claimed the source failure; text "
-            "heuristic classified it %s",
+            "no declaration claimed the source failure; text heuristic "
+            "classified it %s",
             code.value,
         )
     return code

@@ -29,7 +29,7 @@ from pydantic import ValidationError
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult, reject_batch
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.declarations import DECLARED_WRITE_VERDICTS, ErrorMap, parse_declared_error_map
+from cdk.declarations import DECLARED_WRITE_VERDICTS, ErrorMap, error_map_for
 from cdk.json_utils import decode_json_fields
 from cdk.rate_limiter import RateLimiter
 from cdk.request_binding import (
@@ -553,10 +553,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
         """
         self._runtime = runtime
         runtime.acquire()
-        self._error_map = parse_declared_error_map(
-            runtime.declared_error_map,
-            source=f"connector {runtime.connector_id!r}",
-        )
+        self._error_map = error_map_for(runtime)
         await runtime.materialize()
         self._base_url = runtime.base_url
         self._rate_limiter = runtime.rate_limiter

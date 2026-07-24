@@ -7,14 +7,21 @@ engine classifies structurally instead of from text.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
+import pyarrow as pa
 import pytest
 
 from cdk.declarations import parse_declared_error_map
-from cdk.types import AckStatus, FailureCategory
-from src.destination.connectors.api import _classify_http_error, _http_verdict
+from cdk.types import AckStatus, Cursor, FailureCategory
+from src.destination.connectors.api import (
+    ApiDestinationHandler,
+    _classify_http_error,
+    _http_verdict,
+    _StreamState,
+)
 from src.source.connectors.api import (
     ReadError,
     TransientReadError,
@@ -66,6 +73,47 @@ class TestDestinationHttpVerdict:
         )
         assert status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
         assert category == FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+
+
+class TestDestinationConnectWiring:
+    """The declaration flows runtime -> connect() -> write ack.
+
+    The verdict tests above feed ``_http_verdict`` directly, so a dropped
+    ``error_map_for`` line in ``connect()`` would pass them all while
+    silently disabling the feature.
+    """
+
+    async def test_declared_category_rides_the_write_ack(self):
+        handler = ApiDestinationHandler()
+        runtime = MagicMock()
+        runtime.connector_id = "demo"
+        runtime.declared_error_map = {"http": {"402": "rate_limited"}}
+        runtime.materialize = AsyncMock()
+        runtime.raw_config = {}
+        # connect() lowercases the session's default header names.
+        runtime.session.headers = {}
+        await handler.connect(runtime)
+
+        # Stream state is orthogonal plumbing; the wiring under test is
+        # the declaration's path from the runtime into the ack.
+        handler._streams["s1"] = _StreamState(endpoint="/things")
+        handler._send_request = AsyncMock(side_effect=_response_error(402))
+
+        result = await handler.write_batch(
+            run_id="r1",
+            stream_id="s1",
+            batch_seq=1,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["rec-1"],
+            cursor=Cursor(),
+            emitted_at=datetime.now(timezone.utc),
+        )
+        # 402 would be FATAL under the heuristic; the declared category
+        # makes the ack RETRYABLE and carries the structured category.
+        assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        assert (
+            result.failure_category == FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED
+        )
 
 
 class TestSourceHttpReadError:

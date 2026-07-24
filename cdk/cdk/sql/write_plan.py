@@ -35,8 +35,10 @@ def identifier_budget(caps: SqlCapabilities | None, dialect: SqlDialect) -> int:
     The declared ``sql_capabilities.limits.max_identifier_len`` (issue #401)
     makes the bound a per-system fact; an undeclared cap keeps the dialect's
     assumed ``max_identifier_length`` — additive absence, current behavior.
-    Defined once so the stage-name grammar and DDL rendering agree on the
-    bound.
+    This budget bounds the stage-name grammar, which always truncates to
+    something; DDL rendering (``cdk.sql.ddl``) separately refuses over-cap
+    identifiers, and only against a *declared* cap — a refusal from an
+    assumed default would be a guess.
     """
     if caps is not None and caps.limits.max_identifier_len is not None:
         return caps.limits.max_identifier_len
@@ -107,9 +109,10 @@ def stage_table_name(
         # exists to prevent. A budget this tight is a dialect authoring
         # error; refuse it loudly.
         raise SchemaConfigurationError(
-            f"dialect identifier budget {max_identifier_length} cannot hold "
+            f"identifier budget {max_identifier_length} cannot hold "
             f"the {len(head)}-byte stage-name prefix and uniqueness token; "
-            f"fix the dialect's max_identifier_length"
+            f"fix the declared sql_capabilities.limits.max_identifier_len "
+            f"or the dialect's max_identifier_length"
         )
     tail_budget = max_identifier_length - len(head) - 1
     if tail_budget <= 0 or not target_table:

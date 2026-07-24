@@ -23,7 +23,7 @@ import pyarrow as pa
 
 import grpc
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.declarations import parse_declared_error_map
+from cdk.declarations import error_map_for
 from cdk.sql.exceptions import ReadError
 from cdk.types import CheckpointStore
 from src.grpc import DEFAULT_MAX_MESSAGE_SIZE
@@ -75,10 +75,7 @@ class WorkerReadable:
         # The connector's declared error taxonomy (issue #401): the fine
         # source split consults it on a worker failure, where only the
         # error_type class name survives the boundary.
-        error_map = parse_declared_error_map(
-            runtime.declared_error_map,
-            source=f"connector {runtime.connector_id!r}",
-        )
+        error_map = error_map_for(runtime)
 
         initial_cursor = await checkpoint.get_cursor(stream_name, partition)
 

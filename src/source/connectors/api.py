@@ -61,11 +61,7 @@ from analitiq.contracts.endpoints import (
 from pydantic import ValidationError
 
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.declarations import (
-    DECLARED_READ_DETERMINISTIC,
-    ErrorMap,
-    parse_declared_error_map,
-)
+from cdk.declarations import DECLARED_READ_DETERMINISTIC, ErrorMap, error_map_for
 from cdk.exceptions import TransportSpecError
 from cdk.rate_limiter import RateLimiter
 from cdk.request_binding import bind_param_refs, resolve_param_defaults
@@ -83,7 +79,8 @@ from .response_expr import evaluate_predicate, resolve_response_expr
 logger = logging.getLogger(__name__)
 
 # HTTP statuses retrying can heal: request timeout, rate limit, upstream
-# outages. Everything else non-200 is a deterministic contract/config error.
+# outages. Absent a declared error_map mapping for the status, everything
+# else non-200 is a deterministic contract/config error.
 _TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 
 
@@ -152,10 +149,7 @@ class APIConnector(BaseConnector):
         try:
             self._runtime = runtime
             runtime.acquire()
-            self._error_map = parse_declared_error_map(
-                runtime.declared_error_map,
-                source=f"connector {runtime.connector_id!r}",
-            )
+            self._error_map = error_map_for(runtime)
             await runtime.materialize()
             self.session = runtime.session
             self.base_url = runtime.base_url

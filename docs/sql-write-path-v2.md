@@ -349,16 +349,21 @@ Properties:
   mapping is a connector defect, fixed by declaring it — never worked around
   in the engine. Declared content is still validated fail-loud
   (`cdk.sql.capabilities` for `limits`, `cdk.declarations` for `error_map`
-  and `concurrency`), at config load on the trusted side and again where the
-  resolved payload is parsed.
+  and `concurrency`) at config load on the trusted side; `error_map` and
+  `limits` re-validate where the resolved payload is parsed (`concurrency`
+  has no worker-side consumer — the engine's fan-out is its only reader).
 - **`error_map` declares facts, never verdicts.** The value vocabulary is
   engine-owned — `transient | config | auth | unreachable | rate_limited |
   write_rejected` — and the engine alone derives `AckStatus`,
-  `FailureCategory`, `ErrorCode`, and backoff from it (the per-context
-  verdict tables in `cdk.declarations`, the same trust rule as retry
-  semantics, §9). Resolution order everywhere: declared map → the
-  connector's sanctioned typed errors → engine text heuristic last resort
-  only, and the heuristic logs that it ran.
+  `FailureCategory`, and `ErrorCode` from it (the per-context verdict
+  tables in `cdk.declarations`, the same trust rule as retry semantics,
+  §9). The heuristics are demoted to last resort, per context: the read
+  path resolves declared map → sanctioned typed errors; the write ack
+  ladder resolves its typed engine errors (type-map, dialect, TLS —
+  engine contracts a driver map must not re-route) → declared map →
+  class-name heuristic; the ADBC boundary and both HTTP sites resolve
+  declared map → built-in heuristic. The engine-side classifiers log
+  when a text heuristic decided.
 - **`limits` consumption.** The executemany stage landing chunks rows by
   `floor(max_bind_params / column_count)` (`StageWritePlan.rows_per_statement`,
   applied identically by both transport backends); stage-name rendering and

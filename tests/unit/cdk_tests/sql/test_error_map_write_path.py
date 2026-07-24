@@ -8,6 +8,8 @@ the ladder, where the declaration derives the verdict).
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pyarrow as pa
 import pytest
 
@@ -18,6 +20,8 @@ from cdk.sql.backend import StageWritePlan
 from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.generic import GenericSQLConnector
 from cdk.types import AckStatus, FailureCategory
+
+from .conftest import caps_block
 
 
 class ProgrammingError(Exception):
@@ -43,8 +47,7 @@ class TestAckLadderDeclaredFirst:
         result = handler._classify_unexpected_write_error(ProgrammingError("boom"))
         assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
         assert (
-            result.failure_category
-            == FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED
+            result.failure_category == FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED
         )
         assert "declared error_map" in result.failure_summary
 
@@ -54,9 +57,7 @@ class TestAckLadderDeclaredFirst:
         exc.sqlstate = "28000"
         result = handler._classify_unexpected_write_error(exc)
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
-        assert (
-            result.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
-        )
+        assert result.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
 
     def test_declared_write_rejected_is_fatal_write_rejected(self):
         handler = self._handler(_error_map({"sqlstate": {"23": "write_rejected"}}))
@@ -65,17 +66,14 @@ class TestAckLadderDeclaredFirst:
         result = handler._classify_unexpected_write_error(exc)
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert (
-            result.failure_category
-            == FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED
+            result.failure_category == FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED
         )
 
     def test_unclaimed_exception_keeps_the_heuristic(self):
         handler = self._handler(_error_map({"exception": {"SomeOther": "auth"}}))
         result = handler._classify_unexpected_write_error(ProgrammingError("boom"))
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
-        assert (
-            result.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
-        )
+        assert result.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
 
     def test_no_map_keeps_the_heuristic(self):
         handler = self._handler(None)
@@ -91,6 +89,31 @@ class TestAckLadderDeclaredFirst:
         assert any("class-name heuristic" in r.message for r in caplog.records)
 
 
+class TestConnectWiring:
+    """The declaration flows runtime -> connect() -> bind -> verdict.
+
+    Every other test in this file injects ``_error_map`` directly, so a
+    dropped ``error_map_for`` line in the connect path would pass them all
+    while silently disabling the feature.
+    """
+
+    @pytest.mark.asyncio
+    async def test_declared_map_reaches_the_ack_ladder_through_connect(self):
+        handler = GenericSQLConnector()
+        runtime = MagicMock()
+        runtime.connector_id = "demo"
+        runtime.declared_sql_capabilities = caps_block()
+        runtime.declared_error_map = {"exception": {"ProgrammingError": "transient"}}
+        runtime.is_adbc = False
+        runtime.is_sync_sqlalchemy = False
+        runtime.driver = "postgresql"
+        runtime.engine = MagicMock()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()):
+            await handler.connect(runtime)
+        result = handler._classify_unexpected_write_error(ProgrammingError("boom"))
+        assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+
+
 class TestAdbcBoundary:
     def _backend(self, error_map=None) -> AdbcBackend:
         backend = AdbcBackend(SqlDialect())
@@ -103,17 +126,27 @@ class TestAdbcBoundary:
         )
         exc = ProgrammingError("boom")
         with pytest.raises(ProgrammingError):
-            backend._reraise_driver_error(exc)
+            backend._reraise_driver_error(exc, write_cycle=True)
 
     def test_unclaimed_fatal_name_still_reclassifies(self):
         backend = self._backend(_error_map({"exception": {"SomeOther": "auth"}}))
         with pytest.raises(AdbcConfigurationError):
-            backend._reraise_driver_error(ProgrammingError("boom"))
+            backend._reraise_driver_error(ProgrammingError("boom"), write_cycle=True)
 
     def test_non_fatal_unclaimed_exception_reraises_raw(self):
         backend = self._backend(None)
         with pytest.raises(ValueError):
-            backend._reraise_driver_error(ValueError("flaky"))
+            backend._reraise_driver_error(ValueError("flaky"), write_cycle=True)
+
+    def test_ddl_path_promotes_fatal_even_when_declared(self):
+        # Outside the write cycle nothing consumes a declared category —
+        # the schema handshake rejects on AdbcConfigurationError — so the
+        # fatal promotion must apply regardless of the declaration.
+        backend = self._backend(
+            _error_map({"exception": {"ProgrammingError": "config"}})
+        )
+        with pytest.raises(AdbcConfigurationError):
+            backend._reraise_driver_error(ProgrammingError("boom"), write_cycle=False)
 
 
 class _RecordingCursor:
@@ -169,8 +202,6 @@ class TestSqlAlchemyChunking:
         )
 
     def _backend_with_recording_conn(self):
-        from unittest.mock import MagicMock
-
         from cdk.sql.backend import SqlAlchemyBackend
 
         backend = SqlAlchemyBackend(SqlDialect())

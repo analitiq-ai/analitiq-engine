@@ -307,8 +307,8 @@ class ConnectionRuntime:
     def declared_concurrency(self) -> dict[str, Any] | None:
         """The connector's declared ``concurrency`` block, verbatim (issue #401).
 
-        ``None`` means no declared connection ceiling — fan-out pacing and
-        pool sizing keep their current behavior. Parsed at consumption via
+        ``None`` means no declared connection ceiling — the engine's stream
+        fan-out pacing keeps its current behavior. Parsed at consumption via
         ``cdk.declarations.parse_declared_concurrency``.
         """
         return (

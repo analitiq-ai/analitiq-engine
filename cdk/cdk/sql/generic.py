@@ -53,7 +53,7 @@ from cdk.connection_runtime import (
     materialize_runtime,
 )
 from cdk.database_utils import acquire_connection
-from cdk.declarations import DECLARED_WRITE_VERDICTS, ErrorMap, parse_declared_error_map
+from cdk.declarations import DECLARED_WRITE_VERDICTS, ErrorMap, error_map_for
 from cdk.query_builder import Filter, ParamsLike, QueryBuilder, QueryConfig
 from cdk.schema_contract import SchemaContract
 from cdk.type_map import InvalidTypeMapError, TypeMapper, UnmappedTypeError
@@ -462,10 +462,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         describe the same connector.
         """
         self._capabilities = bind_dialect_capabilities(self.dialect, runtime)
-        self._error_map = parse_declared_error_map(
-            runtime.declared_error_map,
-            source=f"connector {runtime.connector_id!r}",
-        )
+        self._error_map = error_map_for(runtime)
 
     def _dialect_renders_merge_statement(self) -> bool:
         """Whether the active dialect implements the merge-form statement hook.

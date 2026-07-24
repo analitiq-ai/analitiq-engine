@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 from analitiq.contracts.endpoint_identity import derive_db_endpoint_id
 
+from cdk.declarations import ConnectorDeclarationError
 from cdk.types import EndpointScope
 from src.config.schema_validator import BundleValidationError, ContractValidationError
 from src.engine.pipeline_config_prep import PipelineConfigPrep, _split_stream_ref
@@ -773,6 +774,58 @@ class TestRegistryDiscoveredKinds:
         )
         prep = PipelineConfigPrep()
         with pytest.raises(ContractValidationError, match="graphql|discriminator"):
+            prep.create_config()
+
+
+# ---------------------------------------------------------------------------
+# Declared connector facts (#401)
+# ---------------------------------------------------------------------------
+
+
+class TestDeclaredConnectorFacts:
+    """``_load_connector`` parses the declared ``error_map`` / ``concurrency``
+    blocks fail-loud on the trusted side, at config load — a dropped parse
+    line there would defer a malformed declaration to a spawned worker."""
+
+    @pytest.fixture(autouse=True)
+    def _permissive_connector_contract(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The pinned contract models (1.0.0rc16) predate the #401 connector
+        # fields and reject them as extra inputs, which would mask the
+        # engine-side parse under test; skip contract validation for the
+        # connector document only, so create_config reaches the parse.
+        from src.engine import pipeline_config_prep as prep_module
+
+        real_validate = prep_module.validate_artifact
+
+        def _validate(kind: str, document: dict, *, source: str = "<inline>"):
+            if kind == "connector":
+                return None
+            return real_validate(kind, document, source=source)
+
+        monkeypatch.setattr(prep_module, "validate_artifact", _validate)
+
+    def _write_connector(self, root: Path, connector_doc: dict[str, Any]) -> None:
+        _write_json(
+            root / "connectors" / CONNECTOR_ID / "definition" / "connector.json",
+            connector_doc,
+        )
+
+    def test_malformed_error_map_identifier_rejected(self, pipeline_tree: Path) -> None:
+        connector_doc = _connector_doc()
+        connector_doc["error_map"] = {"sqlstate": {"XYZ!": "auth"}}
+        self._write_connector(pipeline_tree, connector_doc)
+        prep = PipelineConfigPrep()
+        with pytest.raises(ConnectorDeclarationError, match="XYZ!"):
+            prep.create_config()
+
+    def test_non_positive_concurrency_ceiling_rejected(
+        self, pipeline_tree: Path
+    ) -> None:
+        connector_doc = _connector_doc()
+        connector_doc["concurrency"] = {"max_connections": 0}
+        self._write_connector(pipeline_tree, connector_doc)
+        prep = PipelineConfigPrep()
+        with pytest.raises(ConnectorDeclarationError, match="max_connections"):
             prep.create_config()
 
 

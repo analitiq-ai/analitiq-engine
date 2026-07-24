@@ -75,3 +75,42 @@ class TestPacingGateBoundsConcurrency:
 
         await asyncio.gather(*[stream_body() for _ in range(6)])
         assert peak == 2
+
+
+class TestProcessStreamHonorsTheGate:
+    """Drive the real ``_process_stream``, not a re-implemented semaphore:
+    a dropped ``async with pacing_gate`` in the wrapper would pass the
+    shape test above while unleashing full fan-out."""
+
+    async def test_shared_gate_serializes_the_streams(self):
+        engine = object.__new__(StreamingEngine)
+        active = 0
+        peak = 0
+
+        async def record_concurrency(stream_id, stream_config, pipeline_config):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+
+        engine._run_stream_processor = record_concurrency
+        gate = asyncio.Semaphore(1)
+        await asyncio.gather(
+            *[
+                engine._process_stream(f"s{i}", {}, {}, pacing_gate=gate)
+                for i in range(4)
+            ]
+        )
+        assert peak == 1
+
+    async def test_no_gate_still_runs_the_stream(self):
+        engine = object.__new__(StreamingEngine)
+        ran: list[str] = []
+
+        async def record(stream_id, stream_config, pipeline_config):
+            ran.append(stream_id)
+
+        engine._run_stream_processor = record
+        await engine._process_stream("s1", {}, {}, pacing_gate=None)
+        assert ran == ["s1"]
