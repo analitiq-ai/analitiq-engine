@@ -96,6 +96,16 @@ class TestDestinationHttpVerdict:
         assert status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
         assert category == FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED
 
+    def test_exception_family_never_claims_a_response_status(self):
+        # A broad exception declaration (meant for status-less transport
+        # blips) must not turn a deterministic unmapped 4xx retryable —
+        # the status is the concrete fact, and its miss falls to the
+        # built-in heuristic.
+        error_map = _map({"exception": {"ClientResponseError": "transient"}})
+        status, category = _http_verdict(_response_error(404), error_map)
+        assert status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert category == FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+
 
 class TestDestinationConnectWiring:
     """The declaration flows runtime -> connect() -> write ack.

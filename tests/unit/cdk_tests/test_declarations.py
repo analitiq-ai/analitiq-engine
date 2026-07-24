@@ -179,6 +179,22 @@ class TestErrorMapLookup:
         assert match is not None
         assert match.category == "auth"
 
+    def test_inner_fact_outranks_a_declared_wrapper_class(self, error_map):
+        # FULL_BLOCK declares OperationalError -> transient. A wrapper of
+        # that class carrying a driver exception with a declared SQLSTATE
+        # must classify by the inner fact, not the generic wrapper name —
+        # otherwise an auth failure retries as transient.
+        class OperationalError(Exception):
+            pass
+
+        driver_exc = Exception("password rejected")
+        driver_exc.sqlstate = "28000"
+        wrapper = OperationalError("wrapped")
+        wrapper.orig = driver_exc
+        match = error_map.match_exception(wrapper)
+        assert match is not None
+        assert (match.family, match.category) == ("sqlstate", "auth")
+
     def test_http_lookup(self, error_map):
         match = error_map.match_http(429)
         assert match is not None

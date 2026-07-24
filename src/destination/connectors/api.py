@@ -296,11 +296,17 @@ def _http_verdict(
     engine, where ``classify_destination_failure`` reads it structurally
     instead of falling back to text. An unclaimed error keeps the built-in
     4xx heuristic with an UNSPECIFIED category, exactly as before. The
-    status family wins over the exception family for a response error —
-    the status is the more specific declared fact.
+    families are disjoint by error shape: a response error resolves by its
+    status only (the concrete HTTP fact), a non-response transport error
+    by the exception family only.
     """
     if error_map is not None:
         if isinstance(exc, aiohttp.ClientResponseError):
+            # The status IS the concrete fact for a response error: an
+            # unmapped status falls to the built-in 4xx heuristic, never
+            # to a broad declared exception class — otherwise
+            # exception.ClientError (meant for status-less transport
+            # blips) would claim deterministic 4xx rejections.
             match = error_map.match_http(exc.status)
             if match is not None:
                 logger.info(
@@ -309,15 +315,16 @@ def _http_verdict(
                     match.category,
                 )
                 return DECLARED_WRITE_VERDICTS[match.category]
-        match = error_map.match_exception(exc)
-        if match is not None:
-            logger.info(
-                "declared error_map classified the transport error: %s %s -> %s",
-                match.family,
-                match.identifier,
-                match.category,
-            )
-            return DECLARED_WRITE_VERDICTS[match.category]
+        else:
+            match = error_map.match_exception(exc)
+            if match is not None:
+                logger.info(
+                    "declared error_map classified the transport error: " "%s %s -> %s",
+                    match.family,
+                    match.identifier,
+                    match.category,
+                )
+                return DECLARED_WRITE_VERDICTS[match.category]
     return (
         _classify_http_error(exc),
         FailureCategory.FAILURE_CATEGORY_UNSPECIFIED,

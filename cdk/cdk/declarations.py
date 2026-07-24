@@ -207,10 +207,12 @@ def _parse_family(
 class ErrorMap:
     """Typed view of a connector's declared ``error_map`` block.
 
-    Lookup precedence within one exception is most-specific-first: full
-    SQLSTATE, then SQLSTATE class, then vendor code, then exception class
-    name (MRO order, subclass before base). Across a chained exception the
-    outermost member that yields any match wins. HTTP statuses are not
+    Lookup precedence is most-specific-first, chain-wide: every chained
+    member's structured driver facts (full SQLSTATE, then SQLSTATE class,
+    then vendor code) are consulted before any member's exception class
+    name (MRO order, subclass before base) — a declared generic wrapper
+    class never shadows the fact on the driver exception it links. Within
+    each specificity tier the outermost member wins. HTTP statuses are not
     read off exceptions — HTTP call sites pass the status explicitly to
     :meth:`match_http`.
     """
@@ -296,17 +298,21 @@ class ErrorMap:
     def match_exception(self, exc: BaseException) -> DeclaredMatch | None:
         """Return the declared classification for a live exception, if any.
 
-        Walks the exception chain outermost-first; per member the
-        most-specific declared fact wins (full SQLSTATE, SQLSTATE class,
-        vendor code, then exception class name in MRO order). Never raises:
+        Fact specificity is chain-wide, not per-member: the whole chain is
+        scanned for structured driver facts (full SQLSTATE, SQLSTATE class,
+        vendor code) before any exception class name is considered — a
+        generic declared wrapper class (SQLAlchemy's OperationalError) must
+        never shadow the more specific fact on the driver exception it
+        links. Within each pass the walk is outermost-first. Never raises:
         the members are untrusted connector/driver objects whose attributes
         may be misbehaving properties, and a classifier crash here would
         displace the original failure at the exact moment it is being
         reported — an unreadable member logs a WARNING and matches nothing.
         """
-        for member in _walk_chain(exc):
+        chain = _walk_chain(exc)
+        for member in chain:
             try:
-                match = self._match_member(member)
+                match = self._match_member_facts(member)
             except Exception:
                 logger.warning(
                     "declared error_map lookup failed reading %s; treating "
@@ -317,9 +323,14 @@ class ErrorMap:
                 continue
             if match is not None:
                 return match
+        for member in chain:
+            match = self.match_names(cls.__name__ for cls in type(member).__mro__)
+            if match is not None:
+                return match
         return None
 
-    def _match_member(self, member: BaseException) -> DeclaredMatch | None:
+    def _match_member_facts(self, member: BaseException) -> DeclaredMatch | None:
+        """Match one member's structured driver facts (never class names)."""
         sqlstate = _read_sqlstate(member)
         if sqlstate is not None:
             for candidate in (sqlstate, sqlstate[:2]):
@@ -335,7 +346,7 @@ class ErrorMap:
                 return DeclaredMatch(
                     family="vendor_code", identifier=vendor, category=category
                 )
-        return self.match_names(cls.__name__ for cls in type(member).__mro__)
+        return None
 
 
 def _read_sqlstate(member: BaseException) -> str | None:
