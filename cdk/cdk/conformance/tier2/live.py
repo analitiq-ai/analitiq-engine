@@ -26,6 +26,7 @@ connection carries it (``secret_refs`` included; ``env:`` / ``file:`` /
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import uuid
 from dataclasses import dataclass, field
@@ -152,6 +153,37 @@ class LiveHarness:
             )
         return connector
 
+    def executemany_forced(self) -> LiveHarness:
+        """Build a sibling harness (own table) whose bulk mechanism declines.
+
+        The dialect subclass returns ``False`` from ``bulk_land``, so the
+        CDK backend takes its documented fallback and lands via
+        executemany — the reference state the declared mechanism's
+        landing is compared against. Suite-side subclassing only; the
+        connector under test is never modified.
+        """
+        base = self.target.connector_class
+        if base is None or not issubclass(base, GenericSQLConnector):
+            raise ConformanceSetupError(
+                "no GenericSQLConnector subclass resolved for the live tier"
+            )
+        declined_dialect = type(
+            f"{base.dialect_class.__name__}ExecutemanyProbe",
+            (base.dialect_class,),
+            {"bulk_land": _decline_bulk_land},
+        )
+        forced_connector = type(
+            f"{base.__name__}ExecutemanyProbe",
+            (base,),
+            {"dialect_class": declined_dialect},
+        )
+        return LiveHarness(
+            target=dataclasses.replace(self.target, connector_class=forced_connector),
+            document_path=self.document_path,
+            schema=self.schema,
+            table=f"conformance_{uuid.uuid4().hex[:12]}",
+        )
+
     def endpoint_document(self) -> dict[str, Any]:
         """Return the suite table's contract endpoint document."""
         return {
@@ -275,6 +307,18 @@ class LiveHarness:
             await _run_statement(runtime, statement)
         finally:
             await runtime.close()
+
+
+def _decline_bulk_land(
+    self: SqlDialect,
+    conn: Any,
+    stage: Any,
+    batch: Any,
+    *,
+    runtime: Any,
+) -> bool:
+    """Decline the bulk mechanism so the CDK lands via executemany."""
+    return False
 
 
 async def _run_statement(runtime: ConnectionRuntime, statement: str) -> None:

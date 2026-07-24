@@ -20,10 +20,11 @@ What must hold is:
 Uncovered probes are skipped — a connector is not required to render
 the whole canonical vocabulary — but the skipping is guarded two ways,
 so it can never absorb a defect: a write map that covers *zero* probes
-is a violation (the check must not go inert), and every write rule must
-be reachable from the probe universe (a regex written against an
-unnormalized spelling would otherwise drop its whole family out of the
-probe set and read as "chose not to cover it").
+is a violation (the check must not go inert), and a regex rule that
+matches a pre-normalization spelling of a probe while matching no
+normalized probe is flagged as dead — a provable authoring defect. A
+regex that simply matches no probe is left alone: a finite probe set
+cannot prove a partial-family rule unreachable.
 
 Exemplars are generated from the published canonical grammar
 (:data:`~cdk.type_map.grammar.ARROW_TYPE_GRAMMAR`) plus the concrete
@@ -37,7 +38,13 @@ from typing import TYPE_CHECKING
 
 from cdk.sql.dialects import SqlDialect
 from cdk.type_map.exceptions import InvalidTypeMapError, UnmappedTypeError
-from cdk.type_map.grammar import ARROW_TYPE_GRAMMAR, IntParam, TimezoneParam, UnitParam
+from cdk.type_map.grammar import (
+    ARROW_TYPE_GRAMMAR,
+    UNIT_LONG_TO_SHORT,
+    IntParam,
+    TimezoneParam,
+    UnitParam,
+)
 from cdk.type_map.rules import normalize_canonical_type, normalize_native_type
 
 from .violations import Violation
@@ -136,39 +143,67 @@ def probe_canonicals(mapper: TypeMapper) -> list[str]:
     return probes
 
 
-def _unreachable_write_rules(mapper: TypeMapper, probes: list[str]) -> list[Violation]:
-    """Flag write rules no probe can ever exercise (dead rules).
+def _misnormalized_write_rules(
+    mapper: TypeMapper, probes: list[str]
+) -> list[Violation]:
+    """Flag regex write rules dead for a *provable* normalization reason.
 
-    A rule the probe universe cannot reach is indistinguishable from an
-    uncovered family in the main loop — but the author shipped it, so a
-    non-matching pattern is a defect (typically wrong anchoring or a
-    spelling the normalizer never produces), not a choice. Structural
-    spellings join the match universe here because nested-type rules are
-    legitimate write rules the scalar probes cannot reach.
+    A finite probe set cannot prove a regex unreachable — a rule
+    legitimately covering only part of a parameterized family (a
+    low-precision decimal range, one timezone) matches valid grammar
+    while matching none of the probes — so matching nothing is never,
+    by itself, a violation. What is provable is a normalization defect:
+    lookups always arrive normalized (comma-space separated, long-form
+    temporal units), so a pattern that matches a *pre-normalization*
+    spelling of a probe while matching no normalized candidate was
+    authored against a spelling the matcher can never receive. The
+    witness names the exact defect.
     """
     universe = [
         normalize_canonical_type(c) for c in probes + list(_STRUCTURAL_MATCH_EXEMPLARS)
     ]
     violations: list[Violation] = []
-    for rule in mapper.write_rules:
-        if rule.match == "exact":
-            normalized = normalize_canonical_type(rule.canonical)
-            if any(candidate == normalized for candidate in universe):
-                continue
-        else:
-            pattern = rule.compile_pattern()
-            if any(pattern.fullmatch(candidate) for candidate in universe):
-                continue
+    regex_rules = [rule for rule in mapper.write_rules if rule.match != "exact"]
+    for rule in regex_rules:
+        pattern = rule.compile_pattern()
+        if any(pattern.fullmatch(candidate) for candidate in universe):
+            continue
+        witness = next(
+            (
+                (candidate, variant)
+                for candidate in universe
+                for variant in _pre_normalization_variants(candidate)
+                if pattern.fullmatch(variant)
+            ),
+            None,
+        )
+        if witness is None:
+            continue
+        candidate, variant = witness
         violations.append(
             Violation(
                 CHECK_COVERAGE,
-                f"write rule for canonical {rule.canonical!r} matches nothing "
-                f"the published grammar can produce; the rule is dead "
-                f"(wrong anchoring, or a spelling normalization never "
-                f"emits) and its family is silently unrenderable.",
+                f"write rule for canonical {rule.canonical!r} matches the "
+                f"pre-normalization spelling {variant!r} but not the "
+                f"normalized {candidate!r} the matcher actually receives; "
+                f"the rule is dead. Author the pattern against normalized "
+                f"spellings (comma followed by one space, long-form "
+                f"temporal units).",
             )
         )
     return violations
+
+
+def _pre_normalization_variants(candidate: str) -> list[str]:
+    """Spellings an author plausibly wrote that normalization never emits."""
+    variants = [candidate.replace(", ", ",")]
+    for long_form, short_form in UNIT_LONG_TO_SHORT.items():
+        if long_form in candidate:
+            variants.append(candidate.replace(long_form, short_form))
+    lowered = candidate.lower()
+    if lowered != candidate:
+        variants.append(lowered)
+    return [v for v in variants if v != candidate]
 
 
 def render_probe(
@@ -198,7 +233,7 @@ def check_type_map_round_trip(
     if not mapper.has_write_map:
         return []
     probes = probe_canonicals(mapper)
-    violations: list[Violation] = _unreachable_write_rules(mapper, probes)
+    violations: list[Violation] = _misnormalized_write_rules(mapper, probes)
     rendered = 0
     for canonical in probes:
         try:

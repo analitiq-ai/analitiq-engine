@@ -204,12 +204,31 @@ def _hook_shape_problem(klass: type, name: str) -> str | None:
     )
 
 
+def _is_authored_callable(value: Any) -> bool:
+    """Whether a class-dict value is authored behavior, not metadata.
+
+    Separates a lifecycle dunder someone wrote (``__init__``,
+    ``__init_subclass__``) from the strings and dicts the interpreter
+    stamps on every class (``__doc__``, ``__module__``,
+    ``__annotations__``), which carry no behavior to audit.
+    """
+    return callable(value) or isinstance(value, (staticmethod, classmethod, property))
+
+
 def _audit_connector_class(connector_cls: type) -> list[Violation]:
-    """Audit the connector class: ``dialect_class`` and nothing else."""
+    """Audit the connector class: ``dialect_class`` and nothing else.
+
+    Dunders are audited too when they are authored callables — a
+    connector defining ``__init__`` (or any lifecycle hook) carries
+    exactly the facade coupling this check exists to refuse; only
+    interpreter-stamped metadata dunders are exempt.
+    """
     violations: list[Violation] = []
     for klass in _mro_span(connector_cls, GenericSQLConnector):
-        for name in vars(klass):
-            if not _is_audited(name) or name in CONNECTOR_CLASS_ALLOWED_ATTRS:
+        for name, value in vars(klass).items():
+            if name in CONNECTOR_CLASS_ALLOWED_ATTRS or name in _INTERPRETER_MANAGED:
+                continue
+            if _is_dunder(name) and not _is_authored_callable(value):
                 continue
             if hasattr(GenericSQLConnector, name):
                 violations.append(

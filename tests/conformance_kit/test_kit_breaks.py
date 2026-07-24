@@ -305,9 +305,11 @@ class TestDeclarationBreaks:
     def test_undeclared_bulk_override_fails(
         self, reference_target: ConformanceTarget
     ) -> None:
-        violations = check_declaration_consistency(
-            _with_connector(reference_target, _UndeclaredBulkConnector)
+        doctored = dataclasses.replace(
+            _with_connector(reference_target, _UndeclaredBulkConnector),
+            declared_capabilities=_caps_with(reference_target, bulk_load="none"),
         )
+        violations = check_declaration_consistency(doctored)
         report = _messages(violations)
         assert "bulk_land" in report
         assert "bulk_load" in report
@@ -323,11 +325,9 @@ class TestDeclarationBreaks:
     def test_declared_bulk_without_implementation_fails(
         self, reference_target: ConformanceTarget
     ) -> None:
-        doctored = dataclasses.replace(
-            reference_target,
-            declared_capabilities=_caps_with(reference_target, bulk_load="copy_from"),
+        violations = check_declaration_consistency(
+            _with_connector(reference_target, _NoMergeConnector)
         )
-        violations = check_declaration_consistency(doctored)
         report = _messages(violations)
         assert "copy_from" in report
         assert "bulk_land" in report
@@ -398,6 +398,22 @@ class TestTargetLoadingBreaks:
             load_target(reference_target.root)
 
 
+class _LifecycleDunderConnector(ReferenceConnector):
+    def __init__(self) -> None:
+        self.eager_state: dict[str, str] = {}
+
+
+class TestDunderBreaks:
+    def test_connector_init_override_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """An authored lifecycle dunder is facade coupling, not metadata."""
+        violations = check_override_surface(
+            _with_connector(reference_target, _LifecycleDunderConnector)
+        )
+        assert "__init__" in _messages(violations)
+
+
 class TestGateInversionBreaks:
     """A defect must never disable the gate that would have caught it."""
 
@@ -439,6 +455,39 @@ class TestTypeMapBreaks:
         report = _messages(violations)
         assert "type-map-coverage" in report
         assert "rendered none" in report
+
+    def test_partial_family_regex_is_not_flagged_dead(self) -> None:
+        """A rule covering part of a parameterized family is legitimate.
+
+        The finite probe set cannot prove such a rule unreachable, so it
+        must never be reported dead — only provable normalization
+        defects are.
+        """
+        mapper = build_type_mapper(
+            "partial-family",
+            [
+                {"match": "exact", "native": "TEXT", "canonical": "Utf8"},
+                {
+                    "match": "regex",
+                    "native": "^NUMERIC\\((?<p>[1-5]), (?<s>\\d)\\)$",
+                    "canonical": "Decimal128(${p}, ${s})",
+                },
+            ],
+            [
+                {"match": "exact", "canonical": "Utf8", "native": "TEXT"},
+                # Covers only precision 1-5: matches no probe, but valid.
+                {
+                    "match": "regex",
+                    "canonical": "^Decimal128\\((?<p>[1-5]), (?<s>\\d)\\)$",
+                    "native": "NUMERIC(${p}, ${s})",
+                },
+            ],
+        )
+        violations = check_type_map_round_trip(mapper)
+        assert violations == [], (
+            f"a partial-family regex must not be reported dead: "
+            f"{_messages(violations)}"
+        )
 
     def test_dead_write_rule_fails(self) -> None:
         """A regex no normalized canonical can match is a dead rule."""

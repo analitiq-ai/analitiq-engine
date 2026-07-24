@@ -3,15 +3,16 @@
 Every database read renders through the CDK's ``QueryBuilder`` using
 the connector's declared driver and the dialect's
 ``sqlalchemy_registry_name`` (issue #105 unified the cursor filter
-there) — with the driver's native parameter style on the SQLAlchemy
-transport and the forced ``qmark`` style on the ADBC transport. The
-shapes checked here are exactly the ones the connector's declared
-transports make the engine use; a wrong registry name, a missing
-SQLAlchemy dialect package in the connector's requirements, or a broken
-transports block breaks every read at runtime, so a database connector
-that cannot even derive a driver *fails* these tests rather than
-skipping them (the gate's input must not be supplied by the defect it
-gates).
+there). Each declared transport is probed with the exact construction
+its read path uses: the SQLAlchemy read binds in the driver's native
+style and consults the dialect's paging fallback; the ADBC-only read
+forces qmark binding, quotes every identifier, and inlines LIMIT/OFFSET
+— the shape where quoting and literal-paging dialect quirks actually
+bite. A wrong registry name, a missing SQLAlchemy dialect package in
+the connector's requirements, or a broken transports block breaks every
+read at runtime, so a database connector that cannot even derive a
+driver *fails* these tests rather than skipping them (the gate's input
+must not be supplied by the defect it gates).
 """
 
 from __future__ import annotations
@@ -25,9 +26,10 @@ from cdk.connection_runtime import ConnectionRuntime
 from cdk.query_builder import QueryBuilder, QueryConfig
 from cdk.sql.dialects import SqlDialect
 
-#: transport_type -> the paramstyle the engine builds QueryBuilder with
-#: on that transport (None = the driver's native style).
-_TRANSPORT_PARAMSTYLES = {"sqlalchemy": None, "adbc": "qmark"}
+#: The SQL transport types the engine reads through; anything else in
+#: the transports block (an http transport on a hybrid connector) does
+#: not carry database reads.
+_SQL_TRANSPORT_TYPES = ("sqlalchemy", "adbc")
 
 
 def _declared_driver(target: ConformanceTarget) -> str:
@@ -63,44 +65,55 @@ def _declared_driver(target: ConformanceTarget) -> str:
     return driver
 
 
-def _required_paramstyles(target: ConformanceTarget) -> list[str | None]:
-    """The QueryBuilder parameter styles the declared transports need."""
+def _declared_sql_transports(target: ConformanceTarget) -> list[str]:
+    """The SQL transport types the connector declares, fail-loud when none."""
     transports = target.definition.get("transports") or {}
-    styles: list[str | None] = []
+    declared: list[str] = []
     for block in transports.values():
         transport_type = (
             block.get("transport_type") if isinstance(block, dict) else None
         )
-        if transport_type in _TRANSPORT_PARAMSTYLES:
-            style = _TRANSPORT_PARAMSTYLES[transport_type]
-            if style not in styles:
-                styles.append(style)
-    if not styles:
+        if transport_type in _SQL_TRANSPORT_TYPES and transport_type not in declared:
+            declared.append(transport_type)
+    if not declared:
         pytest.fail(
             f"connector.json declares no SQL transport (sqlalchemy/adbc) in "
             f"transports {sorted(transports)}; a database connector needs "
             f"one for the engine's read path"
         )
-    return styles
+    return declared
 
 
 def _query_builder(
-    target: ConformanceTarget, dialect: SqlDialect, paramstyle: str | None
+    target: ConformanceTarget, dialect: SqlDialect, transport_type: str
 ) -> QueryBuilder:
-    """Build the read-path query builder in one engine construction shape."""
+    """Build the read-path query builder exactly as the engine does.
+
+    Mirrors ``GenericSQLConnector``'s two construction sites: the
+    SQLAlchemy read (native binding plus the paging fallback hook) and
+    the ADBC-only read (forced qmark, quoted identifiers, inline
+    paging). Probing any other shape would certify SQL the engine never
+    executes.
+    """
     driver = _declared_driver(target)
     try:
+        if transport_type == "adbc":
+            return QueryBuilder(
+                driver,
+                paramstyle="qmark",
+                registry_name=dialect.sqlalchemy_registry_name,
+                quote_identifiers=True,
+                inline_paging=True,
+            )
         return QueryBuilder(
             driver,
-            paramstyle=paramstyle,
             registry_name=dialect.sqlalchemy_registry_name,
             paging_order_fallback=dialect.paging_order_fallback,
         )
     except Exception as err:  # noqa: BLE001 - reported as a conformance failure
-        shape = "native" if paramstyle is None else paramstyle
         pytest.fail(
             f"QueryBuilder cannot resolve a SQLAlchemy dialect for driver "
-            f"{driver!r} with the {shape} parameter style (registry_name="
+            f"{driver!r} in the {transport_type} read shape (registry_name="
             f"{dialect.sqlalchemy_registry_name!r}): {err}. The engine "
             f"renders every read on this declared transport through this "
             f"shape; add the SQLAlchemy dialect package to the connector's "
@@ -114,8 +127,8 @@ def test_read_query_compiles_on_every_declared_transport(
     """A plain projection renders in each declared transport's shape."""
     require_database(conformance_target)
     dialect = require_dialect(conformance_target)
-    for paramstyle in _required_paramstyles(conformance_target):
-        builder = _query_builder(conformance_target, dialect, paramstyle)
+    for transport_type in _declared_sql_transports(conformance_target):
+        builder = _query_builder(conformance_target, dialect, transport_type)
         sql, _params = builder.build_select_query(
             QueryConfig(
                 schema_name="conformance",
@@ -137,8 +150,8 @@ def test_cursor_read_orders_by_the_cursor_field(
     """
     require_database(conformance_target)
     dialect = require_dialect(conformance_target)
-    for paramstyle in _required_paramstyles(conformance_target):
-        builder = _query_builder(conformance_target, dialect, paramstyle)
+    for transport_type in _declared_sql_transports(conformance_target):
+        builder = _query_builder(conformance_target, dialect, transport_type)
         sql, _params = builder.build_select_query(
             QueryConfig(
                 schema_name="conformance",

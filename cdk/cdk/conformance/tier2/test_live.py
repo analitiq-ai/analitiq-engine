@@ -162,6 +162,53 @@ def test_upsert_without_conflict_keys_is_rejected_fatally(
     asyncio.run(scenario())
 
 
+def test_declared_bulk_and_executemany_land_identically(
+    harness: LiveHarness,
+) -> None:
+    """Landing is a pure speed slot: bulk and executemany agree (ADR s.2).
+
+    The batch is written twice — once through the declared bulk
+    mechanism, once through a suite-side dialect that declines so the
+    CDK takes its executemany fallback — into two tables, and the
+    resulting contents must be identical. This is the live form of the
+    ADR's landing-equivalence assertion; native bulk protocols cannot
+    execute against generic fakes, so the contract tier certifies the
+    declaration/hook pairing and this scenario certifies the semantics.
+    """
+    caps = harness.target.declared_capabilities
+    if caps is None or caps.bulk_load == "none":
+        pytest.skip(
+            "connector declares no bulk mechanism; landing is executemany "
+            "by definition"
+        )
+
+    async def scenario() -> None:
+        batch = rows_batch([(i, f"v{i}", i) for i in range(1, 6)])
+        expect_success(
+            await harness.write_phase("insert", [(1, batch)]),
+            "bulk-landed write",
+        )
+        bulk_rows = by_id(await harness.read_phase())
+
+        forced = harness.executemany_forced()
+        try:
+            expect_success(
+                await forced.write_phase("insert", [(1, batch)]),
+                "executemany-landed write",
+            )
+            executemany_rows = by_id(await forced.read_phase())
+        finally:
+            await forced.drop_phase()
+
+        assert bulk_rows == executemany_rows, (
+            "the declared bulk mechanism and the executemany fallback left "
+            "different target contents; bulk_land is a pure speed slot and "
+            "must not change what lands (ADR sql-write-path-v2 section 2)"
+        )
+
+    asyncio.run(scenario())
+
+
 def test_first_batch_truncates_then_appends(harness: LiveHarness) -> None:
     """Pre-existing rows vanish on batch 1; batch 2 appends."""
 

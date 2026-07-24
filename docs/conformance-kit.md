@@ -49,7 +49,13 @@ through `connect` / `configure_schema` / `write_batch`, read-back and
 incremental resume through `read_batches`, and replay — each phase on a
 fresh connector instance over a fresh connection, so every test also
 certifies a restart. A replayed batch must leave the target unchanged
-for the exactly-once modes.
+for the exactly-once modes. For a connector declaring a bulk mechanism,
+the same batch is landed once through `bulk_land` and once through the
+executemany fallback (a suite-side dialect that declines), and the two
+targets must be identical — landing is a pure speed slot, certified
+where it can actually execute (native bulk protocols cannot run against
+generic fakes, so this assertion lives in the live tier, not the
+contract tier).
 
 Cloud warehouses with no containerizable server (Snowflake, BigQuery,
 Redshift) run tier 1 only — the accepted residual risk recorded in
