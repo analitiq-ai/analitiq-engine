@@ -9,6 +9,7 @@ asserts the kit fails with a message naming the offending member.
 from __future__ import annotations
 
 import dataclasses
+import shutil
 from collections.abc import Sequence
 from typing import Any
 
@@ -171,6 +172,49 @@ class _PrivateHelperConnector(GenericSQLConnector):
     dialect_class = _PrivateHelperDialect
 
 
+class _HelperMixin:
+    """A helper mixin listed after the framework base in the MRO."""
+
+    def mixin_helper(self) -> None:
+        return None
+
+
+class _TrailingMixinDialect(ReferencePostgresDialect, _HelperMixin):
+    """Inherits a public helper from a mixin behind the framework base."""
+
+
+class _TrailingMixinDialectConnector(GenericSQLConnector):
+    dialect_class = _TrailingMixinDialect
+
+
+class _TrailingMixinConnector(ReferenceConnector, _HelperMixin):
+    """The connector-class variant of the trailing-mixin injection."""
+
+
+class _RequiredOptionalDialect(ReferencePostgresDialect):
+    """Makes render_column_type's optional params keyword required."""
+
+    def render_column_type(  # type: ignore[override]
+        self, canonical: str, type_mapper: Any, *, params: Any
+    ) -> str:
+        return super().render_column_type(canonical, type_mapper, params=params)
+
+
+class _RequiredOptionalConnector(GenericSQLConnector):
+    dialect_class = _RequiredOptionalDialect
+
+
+class _PositionalOnlyDialect(ReferencePostgresDialect):
+    """De-keywords empty_table_sql's keyword-passable target parameter."""
+
+    def empty_table_sql(self, target: TableAddress, /) -> str:
+        return super().empty_table_sql(target)
+
+
+class _PositionalOnlyConnector(GenericSQLConnector):
+    dialect_class = _PositionalOnlyDialect
+
+
 class _ExtraDefaultParamDialect(ReferencePostgresDialect):
     """Adds a defaulted parameter of its own — the documented allowance."""
 
@@ -301,6 +345,55 @@ class TestOverrideSurfaceBreaks:
         report = _messages(violations)
         assert "table_address" in report
         assert "framework-owned" in report
+
+    def test_trailing_mixin_on_dialect_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A mixin behind the framework base still supplies attributes.
+
+        MRO position grants no exemption: the helper is reachable on the
+        dialect either way, so it must be audited either way.
+        """
+        violations = check_override_surface(
+            _with_connector(reference_target, _TrailingMixinDialectConnector)
+        )
+        assert "mixin_helper" in _messages(violations)
+
+    def test_trailing_mixin_on_connector_class_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        violations = check_override_surface(
+            _with_connector(reference_target, _TrailingMixinConnector)
+        )
+        assert "mixin_helper" in _messages(violations)
+
+    def test_optional_parameter_made_required_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """The base signature admits calls that omit defaulted parameters.
+
+        DDL calls render_column_type without params; an override that
+        requires it binds the fully-populated call but breaks the first
+        real DDL operation, so the omitting shape must be checked too.
+        """
+        violations = check_override_surface(
+            _with_connector(reference_target, _RequiredOptionalConnector)
+        )
+        report = _messages(violations)
+        assert "render_column_type" in report
+        assert "params" in report
+        assert "omitting" in report
+
+    def test_keyword_parameter_made_positional_only_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """The base signature admits keyword calls; de-keywording narrows it."""
+        violations = check_override_surface(
+            _with_connector(reference_target, _PositionalOnlyConnector)
+        )
+        report = _messages(violations)
+        assert "empty_table_sql" in report
+        assert "keyword" in report
 
     def test_public_dialect_addition_fails_naming_each_attribute(
         self, reference_target: ConformanceTarget
@@ -490,6 +583,20 @@ class TestTargetLoadingBreaks:
         )
         loaded = load_target(reference_target.root)
         assert loaded.connector_class is ReferenceConnector
+
+    def test_empty_write_map_file_is_a_setup_error(self, tmp_path: Any) -> None:
+        """A shipped-but-empty type-map-write.json must not read as absent.
+
+        Once parsed, an empty write map is indistinguishable from an
+        absent one (has_write_map is rule truthiness), and absence gates
+        the whole write role off — so the file the connector explicitly
+        ships would silently skip every write check.
+        """
+        root = tmp_path / "reference"
+        shutil.copytree(REFERENCE_DIR, root)
+        (root / "definition" / "type-map-write.json").write_text("[]")
+        with pytest.raises(ConformanceSetupError, match="no rules"):
+            load_target(root, class_path=REFERENCE_CLASS)
 
 
 class _LifecycleDunderConnector(ReferenceConnector):

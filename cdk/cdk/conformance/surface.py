@@ -65,74 +65,99 @@ def _is_audited(name: str) -> bool:
 
 
 def _mro_span(cls: type, base: type) -> list[type]:
-    """List the classes between *cls* (inclusive) and *base* (exclusive).
+    """List the connector package's own classes in *cls*'s MRO.
 
-    These are the connector package's own classes — the ones whose
-    definitions this check audits. Classes outside *base*'s tree (mixins
-    from elsewhere) are included: whatever injects an attribute into the
-    connector's MRO is part of its override surface.
+    Everything except *base* and *base*'s own ancestors — the framework's
+    classes — is the connector's, and every one of them is audited:
+    whatever injects an attribute into the connector's MRO is part of its
+    override surface, and a mixin listed after the framework base still
+    supplies attributes to the audited class, so MRO position grants no
+    exemption.
     """
-    span: list[type] = []
-    for klass in cls.__mro__:
-        if klass is base:
-            break
-        if klass is object:
-            continue
-        span.append(klass)
-    return span
+    framework = set(base.__mro__)
+    return [klass for klass in cls.__mro__ if klass not in framework]
 
 
-def _base_call_shape(base_fn: Any) -> tuple[list[Any], dict[str, Any]]:
-    """Build placeholder args/kwargs for the call the CDK makes on the hook.
+def _base_call_shapes(base_fn: Any) -> list[tuple[str, list[Any], dict[str, Any]]]:
+    """Enumerate the call shapes the base hook's signature admits.
 
-    Positional parameters are passed positionally and keyword-only
-    parameters by name, mirroring every call site in the CDK; an
-    override must accept exactly this shape.
+    The base signature is the published contract, so the CDK may make
+    any call it allows — today's call sites are one point in that space,
+    not its boundary. Three shapes cover the ways an override can narrow
+    it: the full positional call (a dropped or renamed parameter), the
+    call omitting every defaulted parameter (an optional parameter made
+    required), and the all-keyword call (a keyword-passable parameter
+    made positional-only).
     """
-    args: list[Any] = []
-    kwargs: dict[str, Any] = {}
     parameters = list(inspect.signature(base_fn).parameters.values())
     if parameters and parameters[0].name == "self":
         parameters = parameters[1:]
+    full_args: list[Any] = []
+    full_kwargs: dict[str, Any] = {}
+    minimal_args: list[Any] = []
+    minimal_kwargs: dict[str, Any] = {}
+    named_args: list[Any] = []
+    named_kwargs: dict[str, Any] = {}
     for param in parameters:
-        if param.kind in (
-            inspect.Parameter.POSITIONAL_ONLY,
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        ):
-            args.append(None)
+        if param.kind is inspect.Parameter.POSITIONAL_ONLY:
+            full_args.append(None)
+            named_args.append(None)
+        elif param.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD:
+            full_args.append(None)
+            named_kwargs[param.name] = None
         elif param.kind is inspect.Parameter.KEYWORD_ONLY:
-            kwargs[param.name] = None
-    return args, kwargs
+            full_kwargs[param.name] = None
+            named_kwargs[param.name] = None
+        else:
+            continue
+        if param.default is inspect.Parameter.empty:
+            # Required positional parameters always precede defaulted
+            # ones, so the minimal positional prefix is a valid call.
+            if param.kind is inspect.Parameter.KEYWORD_ONLY:
+                minimal_kwargs[param.name] = None
+            else:
+                minimal_args.append(None)
+    return [
+        ("the full positional call", full_args, full_kwargs),
+        (
+            "the call omitting every optional parameter",
+            minimal_args,
+            minimal_kwargs,
+        ),
+        ("the all-keyword call", named_args, named_kwargs),
+    ]
 
 
 def _signature_mismatch(
     base_fn: Any, override_fn: Any, *, takes_self: bool
 ) -> str | None:
-    """Explain why *override_fn* cannot take the base hook's call, if it cannot.
+    """Explain why *override_fn* cannot take the base hook's calls, if so.
 
-    Checked by simulating the exact call shape the CDK uses on the base
-    signature and binding it against the override's signature — so an
+    Checked by binding every call shape the base signature admits (see
+    :func:`_base_call_shapes`) against the override's signature — so an
     override may add defaulted parameters of its own, but a dropped,
-    renamed, or de-keyworded parameter fails with the binder's own
-    explanation. ``takes_self`` is False only for static/class-method
-    overrides (whose resolved signature carries no instance parameter);
-    a plain method that *forgot* ``self`` must not slip through the
-    self-less bind, so the choice comes from the descriptor type, never
-    from which bind happens to succeed.
+    renamed, de-keyworded, or made-required parameter fails with the
+    binder's own explanation. ``takes_self`` is False only for
+    static/class-method overrides (whose resolved signature carries no
+    instance parameter); a plain method that *forgot* ``self`` must not
+    slip through the self-less bind, so the choice comes from the
+    descriptor type, never from which bind happens to succeed.
     """
-    args, kwargs = _base_call_shape(base_fn)
     try:
         override_sig = inspect.signature(override_fn)
     except (TypeError, ValueError):
         return "its signature cannot be introspected"
     self_placeholder = (None,) if takes_self else ()
-    try:
-        override_sig.bind(*self_placeholder, *args, **kwargs)
-        return None
-    except TypeError as err:
-        problem = str(err)
-    base_shape = str(inspect.signature(base_fn))
-    return f"it cannot accept the CDK's call shape {base_shape}: {problem}"
+    for shape_name, args, kwargs in _base_call_shapes(base_fn):
+        try:
+            override_sig.bind(*self_placeholder, *args, **kwargs)
+        except TypeError as err:
+            base_shape = str(inspect.signature(base_fn))
+            return (
+                f"it cannot accept {shape_name} admitted by the base "
+                f"signature {base_shape}: {err}"
+            )
+    return None
 
 
 def _audit_dialect_class(dialect_cls: type) -> list[Violation]:

@@ -282,6 +282,16 @@ def _load_type_mapper(definition_dir: Path, connector_id: str) -> TypeMapper | N
         raise ConformanceSetupError(str(err)) from err
     if raw is None:
         return None
+    if raw["write_rules"] == []:
+        # An empty write map is indistinguishable from an absent one once
+        # parsed (has_write_map is rule truthiness), and absence is what
+        # gates every write check off — so the shipped-but-empty file
+        # would silently skip the connector's whole write role.
+        raise ConformanceSetupError(
+            f"connector {connector_id!r} ships a type-map-write.json with "
+            f"no rules; a write map that renders no type cannot serve the "
+            f"write role. Add rules or delete the file."
+        )
     try:
         return build_type_mapper(
             f"connector {connector_id!r}",
