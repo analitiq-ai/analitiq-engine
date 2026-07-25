@@ -436,7 +436,7 @@ def _attach_tls_verification(engine: Engine, sql_dialect: Any, mode: str) -> Non
         )
 
     @event.listens_for(engine, "connect")
-    def _verify_tls(dbapi_connection: Any, connection_record: Any) -> None:
+    def _verify_tls(dbapi_connection: Any, _connection_record: Any) -> None:
         _run_closing_on_failure(
             dbapi_connection,
             lambda: sql_dialect.verify_tls_state(dbapi_connection, mode),
@@ -506,7 +506,7 @@ def _attach_session_init(engine: Engine, statements: list[str]) -> None:
     """
 
     @event.listens_for(engine, "connect")
-    def _session_init(dbapi_connection: Any, connection_record: Any) -> None:
+    def _session_init(dbapi_connection: Any, _connection_record: Any) -> None:
         _run_closing_on_failure(
             dbapi_connection,
             lambda: _execute_session_init(dbapi_connection, statements),
@@ -929,9 +929,16 @@ def resolve_http_spec(spec: Mapping[str, Any], *, resolver: Resolver) -> dict[st
 
 
 async def build_http_from_spec(
-    resolved: Mapping[str, Any], *, sql_dialect: Any = None
+    resolved: Mapping[str, Any],
+    *,
+    sql_dialect: Any = None,  # skipcq: PYL-W0613 - uniform transport-kind interface
 ) -> HttpTransport:
-    """Build the HTTP transport from a resolved spec (worker side)."""
+    """Build the HTTP transport from a resolved spec (worker side).
+
+    ``sql_dialect`` is part of the uniform ``build_from_spec`` interface
+    every transport kind is called through; HTTP has no SQL dialect to
+    consume.
+    """
     # aiohttp is the only ``api`` extra dependency the CDK pulls; import it
     # lazily so a database-only (control-plane / SQL) install never needs it.
     try:
