@@ -39,6 +39,46 @@ def declared_transport_types(target: ConformanceTarget) -> set[str]:
     }
 
 
+def _database_shaped_kind_mismatch(target: ConformanceTarget) -> list[Violation]:
+    """Catch a non-database kind carrying a database-shaped definition.
+
+    The kind vocabulary is owned by the published schema and open to
+    registry-discovered kinds, so the suite pins no list of its own.
+    What it can decide from independent evidence is a *mismatch*: a
+    definition declaring SQL transports, ``sql_capabilities``, or a
+    write map is database-shaped, and under any other kind every SQL
+    check would skip vacuously — a typo'd kind must fail loudly, while
+    a genuinely new kind (which carries none of that evidence) passes
+    through untouched.
+    """
+    evidence: list[str] = []
+    transports = target.declared_transports()
+    sql_transports = sorted(
+        {
+            str(block["transport_type"])
+            for block in transports.values()
+            if block.get("transport_type") in ("sqlalchemy", "adbc")
+        }
+    )
+    if sql_transports:
+        evidence.append(f"declares SQL transports {sql_transports}")
+    if target.declared_capabilities is not None:
+        evidence.append("declares sql_capabilities")
+    if target.has_write_map:
+        evidence.append("ships type-map-write.json")
+    if not evidence:
+        return []
+    return [
+        Violation(
+            CHECK,
+            f"connector.json declares kind {target.kind!r} but the "
+            f"definition is database-shaped ({'; '.join(evidence)}); under "
+            f"this kind every SQL check would skip vacuously. Fix the kind "
+            f"or remove the database surface.",
+        )
+    ]
+
+
 def _write_signals(target: ConformanceTarget) -> list[str]:
     """Name every write-capability signal the connector carries.
 
@@ -77,7 +117,7 @@ def check_declaration_consistency(target: ConformanceTarget) -> list[Violation]:
     (the gate's input must not be supplied by the defect it gates).
     """
     if not target.is_database:
-        return []
+        return _database_shaped_kind_mismatch(target)
     if not target.write_role:
         signals = _write_signals(target)
         if not signals:

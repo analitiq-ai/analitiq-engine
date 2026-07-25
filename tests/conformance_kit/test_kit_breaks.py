@@ -442,15 +442,30 @@ class TestDunderBreaks:
 
 
 class TestTargetKindGate:
-    def test_unrecognized_kind_fails_setup(self, tmp_path: Any) -> None:
-        """A typo'd kind must fail loudly, never skip every check."""
+    def test_database_shaped_definition_under_wrong_kind_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A typo'd kind on a database-shaped definition must fail loudly.
+
+        The kind vocabulary is owned by the published schema (and open
+        to registry-discovered kinds), so the suite pins no list; the
+        mismatch is decided from the definition's own evidence.
+        """
+        doctored = dataclasses.replace(reference_target, kind="databse")
+        violations = check_declaration_consistency(doctored)
+        report = _messages(violations)
+        assert "databse" in report
+        assert "database-shaped" in report
+
+    def test_genuinely_new_kind_passes_through(self, tmp_path: Any) -> None:
+        """A registry-discovered kind with no SQL surface is not flagged."""
         definition_dir = tmp_path / "definition"
         definition_dir.mkdir()
         (definition_dir / "connector.json").write_text(
-            '{"kind": "databse", "connector_id": "conformance-typo"}'
+            '{"kind": "queue", "connector_id": "conformance-queue"}'
         )
-        with pytest.raises(ConformanceSetupError, match="databse"):
-            load_target(tmp_path)
+        target = load_target(tmp_path)
+        assert check_declaration_consistency(target) == []
 
 
 class _AsyncHookDialect(ReferencePostgresDialect):

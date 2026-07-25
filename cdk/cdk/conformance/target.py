@@ -31,14 +31,6 @@ from cdk.type_map.mapper import TypeMapper
 
 CONNECTOR_DEFINITION_FILENAME = "connector.json"
 
-#: The connector kinds the engine's registries resolve. The vocabulary
-#: is owned by the published connector schema; it is pinned here because
-#: ``kind`` gates every applicability decision the suite makes — an
-#: unrecognized kind must fail setup loudly, not slide every check into
-#: a vacuous skip (the gate's input must not be supplied by the defect
-#: it gates).
-KNOWN_KINDS = ("api", "database", "file", "stdout")
-
 
 class ConformanceSetupError(Exception):
     """The suite cannot load the connector under test.
@@ -329,12 +321,6 @@ def load_target(
     if not isinstance(kind, str) or not kind:
         raise ConformanceSetupError(
             f"{definition_dir / CONNECTOR_DEFINITION_FILENAME} declares no kind"
-        )
-    if kind not in KNOWN_KINDS:
-        raise ConformanceSetupError(
-            f"{definition_dir / CONNECTOR_DEFINITION_FILENAME} declares kind "
-            f"{kind!r}; expected one of {list(KNOWN_KINDS)}. An unrecognized "
-            f"kind would silently skip every check."
         )
 
     try:
