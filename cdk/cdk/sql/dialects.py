@@ -334,7 +334,8 @@ class SqlDialect:
         statement either way. Return ``True`` when landed; ``False``
         declines and the backend falls back to executemany (logged INFO —
         a speed downgrade is visible, never silent). Called only when the
-        connector declares a bulk mechanism (``sql_capabilities.bulk_load``).
+        connector declares a bulk mechanism for this transport
+        (``sql_capabilities.bulk_load.<transport>``).
 
         ``conn`` is the backend's native connection object (the sync
         SQLAlchemy ``Connection`` on the SQLAlchemy transport). ``runtime``

@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 from analitiq.contracts.endpoint_identity import derive_db_endpoint_id
 
+from cdk.declarations import ConnectorDeclarationError
 from cdk.types import EndpointScope
 from src.config.schema_validator import BundleValidationError, ContractValidationError
 from src.engine.pipeline_config_prep import PipelineConfigPrep, _split_stream_ref
@@ -774,6 +775,75 @@ class TestRegistryDiscoveredKinds:
         prep = PipelineConfigPrep()
         with pytest.raises(ContractValidationError, match="graphql|discriminator"):
             prep.create_config()
+
+
+# ---------------------------------------------------------------------------
+# Declared connector facts (#401)
+# ---------------------------------------------------------------------------
+
+
+class TestDeclaredConnectorFacts:
+    """The declared ``error_map`` / ``concurrency`` blocks (#401) at config load.
+
+    Two gates run on the trusted side and both are pinned here: the
+    published contract validates the declaration's shape, and
+    ``_load_connector`` parses it through the CDK's typed view — the same
+    parse the worker re-runs at its process boundary, so a dropped line
+    here would defer a malformed declaration to a spawned worker.
+    """
+
+    def _write_connector(self, root: Path, connector_doc: dict[str, Any]) -> None:
+        _write_json(
+            root / "connectors" / CONNECTOR_ID / "definition" / "connector.json",
+            connector_doc,
+        )
+
+    def test_declared_blocks_are_parsed_at_config_load(
+        self, pipeline_tree: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A valid declaration loads, and the CDK parse runs on it — spied
+        # rather than mocked away, so the assertion is that the parse
+        # happened, not that validation was bypassed.
+        from src.engine import pipeline_config_prep as prep_module
+
+        seen: list[Any] = []
+        real_parse = prep_module.parse_declared_error_map
+
+        def _spy(block: Any, *, source: str = "<inline>"):
+            seen.append(block)
+            return real_parse(block, source=source)
+
+        monkeypatch.setattr(prep_module, "parse_declared_error_map", _spy)
+
+        connector_doc = _connector_doc()
+        connector_doc["error_map"] = {"sqlstate": {"08": "unreachable"}}
+        connector_doc["concurrency"] = {"max_connections": 4}
+        self._write_connector(pipeline_tree, connector_doc)
+
+        PipelineConfigPrep().create_config()
+        assert {"sqlstate": {"08": "unreachable"}} in seen
+
+    def test_malformed_error_map_identifier_rejected(self, pipeline_tree: Path) -> None:
+        # The published contract enforces the same key grammar the CDK
+        # parser does, so a malformed identifier fails at the first gate.
+        connector_doc = _connector_doc()
+        connector_doc["error_map"] = {"sqlstate": {"XYZ!": "auth"}}
+        self._write_connector(pipeline_tree, connector_doc)
+        prep = PipelineConfigPrep()
+        with pytest.raises((ContractValidationError, ConnectorDeclarationError)) as err:
+            prep.create_config()
+        assert "sqlstate" in str(err.value)
+
+    def test_non_positive_concurrency_ceiling_rejected(
+        self, pipeline_tree: Path
+    ) -> None:
+        connector_doc = _connector_doc()
+        connector_doc["concurrency"] = {"max_connections": 0}
+        self._write_connector(pipeline_tree, connector_doc)
+        prep = PipelineConfigPrep()
+        with pytest.raises((ContractValidationError, ConnectorDeclarationError)) as err:
+            prep.create_config()
+        assert "max_connections" in str(err.value)
 
 
 # ---------------------------------------------------------------------------

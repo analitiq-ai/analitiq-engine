@@ -562,6 +562,13 @@ def test_source_unreachable_by_builtin_type():
             "CatalogAddressingError",
             "connector declares sql_capabilities.catalog 'none'",
         ),
+        # Connector-level declared-fact refusals (issue #401): a malformed
+        # error_map / concurrency block in the connector definition.
+        (
+            "ConnectorDeclarationError",
+            "error_map.sqlstate in connector 'demo' declares malformed "
+            "identifier 'XYZ!'",
+        ),
     ],
 )
 def test_type_and_mapping_defects_are_config_invalid(name, message):
@@ -716,6 +723,7 @@ def test_real_typemap_mro_routing():
         ("SecretNotFoundError", ErrorCode.CONFIG_INVALID),
         ("ConnectorNotRegisteredError", ErrorCode.CONFIG_INVALID),
         ("SecretAccessDeniedError", ErrorCode.CONFIG_INVALID),
+        ("ConnectorDeclarationError", ErrorCode.CONFIG_INVALID),
     ],
 )
 def test_worker_error_type_prefix_promoted_to_name(error_type, expected):

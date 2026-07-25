@@ -905,6 +905,7 @@ class _SyncReadRuntime:
         self.driver = driver
         self.connector_id = driver
         self.declared_sql_capabilities = None
+        self.declared_error_map = None
         self.close = AsyncMock()
 
 
@@ -977,6 +978,7 @@ class _SyncWriteRuntime:
                 "transactional_ddl": True,
             },
         }
+        self.declared_error_map = None
         self.close = AsyncMock()
 
     @property

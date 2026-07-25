@@ -62,6 +62,14 @@ def _make_processor(
     return processor
 
 
+def _resolved_source() -> MagicMock:
+    """Resolved-source double whose runtime declares no error taxonomy (#401)."""
+    resolved = MagicMock()
+    resolved.runtime.connector_id = "demo"
+    resolved.runtime.declared_error_map = None
+    return resolved
+
+
 def _batch(rows: list[dict]) -> pa.RecordBatch:
     return pa.RecordBatch.from_pylist(rows)
 
@@ -430,7 +438,7 @@ class TestFirstBatchDropGuard:
     previous refresh's rows — stale data mixed into a partial snapshot."""
 
     def _config(self, write_mode: str) -> dict:
-        resolved_source = MagicMock()
+        resolved_source = _resolved_source()
         resolved_source.replication = None
         resolved_source.primary_keys = []
         return {
@@ -524,7 +532,7 @@ class TestZeroBatchTruncate:
     # ------------------------------------------------------------------ #
 
     def _config(self, write_mode: str) -> dict:
-        resolved_source = MagicMock()
+        resolved_source = _resolved_source()
         resolved_source.replication = None
         resolved_source.primary_keys = []
         return {
@@ -583,7 +591,7 @@ class TestZeroBatchTruncate:
         """Minimal StreamProcessor for run() outer-scope tests."""
         stream_config = {
             "name": "s",
-            "source": {"_resolved_source": MagicMock()},
+            "source": {"_resolved_source": _resolved_source()},
             "destination": {"write_mode": write_mode},
             "mapping": {},
         }

@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+from collections.abc import Coroutine
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum, auto
@@ -135,8 +136,16 @@ class StreamProcessor:
         max_retries: int,
         retry_delay: float,
         error_strategy: str,
+        pacing_gate: asyncio.Semaphore | None = None,
     ) -> None:
         self.stream_id = stream_id
+        # One slot under the source connection's declared ceiling
+        # (concurrency.max_connections, issue #401), shared with every
+        # stream on the same connection. Held for the extract stage's
+        # lifetime only — the source worker's connection is open exactly
+        # that long; holding it through destination load would serialize
+        # streams beyond the declared source ceiling.
+        self.pacing_gate = pacing_gate
         self.stream_name = stream_config.get("name", stream_id)
         # Absent version -> 1, mirroring _split_stream_ref's bare -> 1 rule so
         # an unversioned or minimally-built config stays runnable.
@@ -368,7 +377,7 @@ class StreamProcessor:
         load_queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=self.buffer_size)
         return [
             asyncio.create_task(
-                self._extract_stage(source_readable, extract_queue),
+                self._paced(self._extract_stage(source_readable, extract_queue)),
                 name=f"extract-{self.stream_name}",
             ),
             asyncio.create_task(
@@ -389,6 +398,20 @@ class StreamProcessor:
         """Whether this stream's destination write mode is truncate_insert."""
         mode = (self.stream_config.get("destination") or {}).get("write_mode", "")
         return str(mode).lower() == "truncate_insert"
+
+    async def _paced(self, stage: Coroutine[Any, Any, None]) -> None:
+        """Run *stage* holding a slot under the source connection's ceiling.
+
+        Wraps the extract stage only: the pacing gate bounds live source
+        connections, and the extract stage's lifetime is exactly the source
+        worker's. The slot is released the moment extraction completes (or
+        fails), while transform/load keep draining — a stream slowly
+        writing must not block other streams from starting their reads.
+        """
+        if self.pacing_gate is None:
+            return await stage
+        async with self.pacing_gate:
+            return await stage
 
     async def _extract_stage(
         self, source_readable: Readable, queue: asyncio.Queue[Any]
