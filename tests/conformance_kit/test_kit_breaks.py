@@ -467,6 +467,30 @@ class TestTargetLoadingBreaks:
         with pytest.raises(ConformanceSetupError, match="failed to load"):
             load_target(reference_target.root)
 
+    def test_case_variant_entry_point_is_matched(
+        self, reference_target: ConformanceTarget, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Entry-point matching mirrors the registry's case-insensitive
+        resolution: a name differing from connector_id only by case is
+        the class production loads, so the suite must audit that class —
+        never silently fall back to the generic one."""
+
+        class _CaseVariantEntryPoint:
+            name = reference_target.connector_id.upper()
+            dist = None
+
+            @staticmethod
+            def load() -> type:
+                return ReferenceConnector
+
+        monkeypatch.setattr(
+            target_module.metadata,
+            "entry_points",
+            lambda group: [_CaseVariantEntryPoint()],
+        )
+        loaded = load_target(reference_target.root)
+        assert loaded.connector_class is ReferenceConnector
+
 
 class _LifecycleDunderConnector(ReferenceConnector):
     def __init__(self) -> None:

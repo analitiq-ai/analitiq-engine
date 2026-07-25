@@ -2,5 +2,6 @@
 
 Run from a connector repo::
 
-    pytest --pyargs cdk.conformance.tier1 --connector-dir .
+    pytest -p cdk.conformance.plugin --pyargs cdk.conformance.tier1 \
+        --connector-dir .
 """

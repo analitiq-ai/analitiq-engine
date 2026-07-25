@@ -191,14 +191,20 @@ def _load_class(class_path: str) -> type:
 def _entry_point_class(group: str, connector_id: str) -> type | None:
     """Load the installed entry point named *connector_id* in *group*.
 
+    Matching is case-insensitive because ``ConnectorRegistry.register``
+    and ``resolve`` lowercase every identifier: an entry point differing
+    from ``connector_id`` only by case is the class production loads, so
+    the suite must audit it rather than fall back to the generic class.
+
     Unlike the engine registry's best-effort discovery, a matching entry
     point that fails to load is a hard error here: the suite exists to
     surface exactly that defect in the connector's own CI.
     """
+    wanted = connector_id.lower()
     matches = [
         entry
         for entry in metadata.entry_points(group=group)
-        if entry.name == connector_id
+        if entry.name.lower() == wanted
     ]
     if not matches:
         return None
