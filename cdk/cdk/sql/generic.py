@@ -1240,11 +1240,10 @@ class GenericSQLConnector(BaseDestinationHandler):
         deadline = self._statement_deadline()
         self._ddl_deadline_expired = False
         try:
-            async with deadline:
-                async with self._ddl_lock:
-                    backend = self._require_backend()
-                    await backend.run_ddl(statements)
-                    target_columns = await backend.target_columns(state.address)
+            async with deadline, self._ddl_lock:
+                backend = self._require_backend()
+                await backend.run_ddl(statements)
+                target_columns = await backend.target_columns(state.address)
         finally:
             # Record the deadline's own answer before it goes out of scope:
             # the caller classifies a TimeoutError by whether OUR deadline
