@@ -34,6 +34,7 @@ exactly the vocabulary the contract defines and can never drift from it.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 from cdk.sql.dialects import SqlDialect
@@ -206,18 +207,18 @@ def probe_canonicals(mapper: TypeMapper) -> list[str]:
 def _misnormalized_write_rules(
     mapper: TypeMapper, probes: list[str]
 ) -> list[Violation]:
-    """Flag regex write rules dead for a *provable* normalization reason.
+    """Flag regex write rules dead for a *provable* spelling reason.
 
     A finite probe set cannot prove a regex unreachable — a rule
     legitimately covering only part of a parameterized family (a
     low-precision decimal range, one timezone) matches valid grammar
     while matching none of the probes — so matching nothing is never,
-    by itself, a violation. What is provable is a normalization defect:
-    lookups always arrive normalized (comma-space separated, long-form
-    temporal units), so a pattern that matches a *pre-normalization*
-    spelling of a probe while matching no normalized candidate was
-    authored against a spelling the matcher can never receive. The
-    witness names the exact defect.
+    by itself, a violation. What is provable is a spelling defect: the
+    matcher only ever receives the normalized canonical, so a pattern
+    that matches some *other* spelling of a probe while matching no
+    candidate was authored against a string the matcher can never
+    receive. The witness names both the spelling and why it never
+    arrives.
     """
     universe = [
         normalize_canonical_type(c) for c in probes + list(_STRUCTURAL_MATCH_EXEMPLARS)
@@ -230,40 +231,79 @@ def _misnormalized_write_rules(
             continue
         witness = next(
             (
-                (candidate, variant)
+                found
                 for candidate in universe
-                for variant in _pre_normalization_variants(candidate)
-                if pattern.fullmatch(variant)
+                if (found := _unreachable_spelling(pattern, candidate)) is not None
             ),
             None,
         )
         if witness is None:
             continue
-        candidate, variant = witness
+        candidate, spelling, reason = witness
         violations.append(
             Violation(
                 CHECK_COVERAGE,
-                f"write rule for canonical {rule.canonical!r} matches the "
-                f"pre-normalization spelling {variant!r} but not the "
-                f"normalized {candidate!r} the matcher actually receives; "
-                f"the rule is dead. Author the pattern against normalized "
-                f"spellings (comma followed by one space, long-form "
-                f"temporal units).",
+                f"write rule for canonical {rule.canonical!r} matches "
+                f"{spelling!r} but not the {candidate!r} the matcher "
+                f"actually receives, so the rule is dead: {reason}.",
             )
         )
     return violations
 
 
+def _unreachable_spelling(
+    pattern: re.Pattern[str], candidate: str
+) -> tuple[str, str, str] | None:
+    """Find a spelling of *candidate* that *pattern* matches but never sees.
+
+    Two classes, each with its own true explanation. A pre-normalization
+    spelling is rewritten before matching; a case variant is not
+    rewritten at all, because canonical matching preserves case — the
+    Arrow vocabulary is mixed-case and folding it would collapse
+    distinct types. Reporting the second under the first's explanation
+    would send the author to fix the wrong thing.
+    """
+    for spelling in _pre_normalization_variants(candidate):
+        if pattern.fullmatch(spelling):
+            return (
+                candidate,
+                spelling,
+                "normalization rewrites that spelling before matching "
+                "(commas are re-spaced and short temporal units expand to "
+                "their long form)",
+            )
+    lowered = candidate.lower()
+    if lowered != candidate and pattern.fullmatch(lowered):
+        return (
+            candidate,
+            lowered,
+            "canonical matching preserves case, so the mixed-case Arrow "
+            "spelling is the only one ever offered",
+        )
+    return None
+
+
 def _pre_normalization_variants(candidate: str) -> list[str]:
-    """Spellings an author plausibly wrote that normalization never emits."""
-    variants = [candidate.replace(", ", ",")]
+    """Spellings an author plausibly wrote that normalization never emits.
+
+    The generated spellings are proposals; the normalizer itself decides
+    which are real. A proposal counts only when it normalizes back to
+    *candidate*, so this list can never claim a witness the matcher would
+    in fact have accepted, and a change to normalization narrows the lint
+    instead of turning it into a source of false accusations.
+    """
+    proposals = [candidate.replace(", ", ",")]
     for long_form, short_form in UNIT_LONG_TO_SHORT.items():
         if long_form in candidate:
-            variants.append(candidate.replace(long_form, short_form))
+            proposals.append(candidate.replace(long_form, short_form))
     lowered = candidate.lower()
     if lowered != candidate:
-        variants.append(lowered)
-    return [v for v in variants if v != candidate]
+        proposals.append(lowered)
+    return [
+        proposal
+        for proposal in proposals
+        if proposal != candidate and normalize_canonical_type(proposal) == candidate
+    ]
 
 
 def render_probe(

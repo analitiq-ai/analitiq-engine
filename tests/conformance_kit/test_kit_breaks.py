@@ -781,6 +781,32 @@ class TestTypeMapBreaks:
         assert "type-map-coverage" in report
         assert "Decimal128" in report
 
+    def test_case_variant_write_rule_fails_with_the_case_reason(self) -> None:
+        """A lowercase canonical pattern is dead, and says why truthfully.
+
+        Canonical matching preserves case (the Arrow vocabulary is
+        mixed-case), so normalization never rewrites this spelling — the
+        rule is dead for a different reason than a comma or unit defect,
+        and must not be reported under that explanation.
+        """
+        mapper = build_type_mapper(
+            "case-variant-rule",
+            [{"match": "exact", "native": "TEXT", "canonical": "Utf8"}],
+            [
+                {"match": "exact", "canonical": "Utf8", "native": "TEXT"},
+                {
+                    "match": "regex",
+                    "canonical": "^decimal128\\((?<p>\\d+), (?<s>\\d+)\\)$",
+                    "native": "NUMERIC(${p}, ${s})",
+                },
+            ],
+        )
+        report = _messages(check_type_map_round_trip(mapper))
+        assert "type-map-coverage" in report
+        assert "decimal128" in report
+        assert "preserves case" in report
+        assert "normalization rewrites" not in report
+
     def test_hint_requiring_rule_fails_like_production_ddl(self) -> None:
         """A template needing a hint no capture provides must fail.
 
