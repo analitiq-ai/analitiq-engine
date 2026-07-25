@@ -454,6 +454,8 @@ class TestTargetKindGate:
 
 
 class _AsyncHookDialect(ReferencePostgresDialect):
+    # skipcq: PYL-W0236 - the async-ness IS the deliberate defect this
+    # fixture models; the kit must reject it, and the test below pins that.
     async def session_init_sql(self) -> list[str]:  # type: ignore[override]
         return []
 
