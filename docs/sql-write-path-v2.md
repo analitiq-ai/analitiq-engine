@@ -609,8 +609,10 @@ The contract tier (#391, no live database) certifies this ADR's surface:
   loud config error, not SQL.
 - **The override surface is the sanctioned one.** A connector may override
   the §4 hooks plus `session_init_sql`, `verify_tls_state`, and the
-  existing DDL/discovery/TLS hooks; overriding a private
-  `GenericSQLConnector` or backend internal fails the suite.
+  existing DDL/discovery/TLS hooks — and adds nothing public of its own
+  (helpers are underscore-private, so a stale pre-v2 attribute cannot
+  ride along silently); overriding a private `GenericSQLConnector` or
+  backend internal fails the suite.
 - **Landing is semantics-free.** For a connector declaring a bulk mechanism,
   bulk-landed and executemany-landed stages produce identical stage
   contents against the suite's fakes.

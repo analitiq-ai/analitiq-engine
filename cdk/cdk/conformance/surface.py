@@ -1,13 +1,16 @@
 """The sanctioned-override-surface check (ADR sql-write-path-v2 section 10).
 
 A connector's per-system code is its dialect: the connector class
-carries ``dialect_class`` and nothing else, and the dialect overrides
-only the public :class:`~cdk.sql.dialects.SqlDialect` surface — the
-stage-then-merge hooks, the session/TLS hooks, and the existing
-DDL/discovery/identifier hooks. Overriding a private CDK internal is
-contract-less coupling that breaks silently on any CDK refactor (the
-defect class that parked mysql#29); this check turns it into a red CI
-run in the connector's own repo, with the member named.
+carries ``dialect_class`` and nothing else, and the dialect's public
+namespace is exactly the public :class:`~cdk.sql.dialects.SqlDialect`
+surface — the stage-then-merge hooks, the session/TLS hooks, and the
+existing DDL/discovery/identifier hooks. Overriding a private CDK
+internal is contract-less coupling that breaks silently on any CDK
+refactor (the defect class that parked mysql#29); a *public addition*
+of the dialect's own is either a stale hook from an older write path
+(``supports_upsert_sqlalchemy`` and friends) riding along unnoticed,
+or a helper that belongs under a leading underscore. Both become a red
+CI run in the connector's own repo, with the member named.
 
 The sanctioned set is computed from the CDK base classes themselves, so
 a new sanctioned hook added to ``SqlDialect`` is sanctioned everywhere
@@ -166,6 +169,18 @@ def _audit_dialect_class(dialect_cls: type) -> list[Violation]:
                         f"{klass.__name__}.{name} overrides a framework-owned "
                         f"SqlDialect attribute; the CDK binds it and no "
                         f"connector may redefine it.",
+                    )
+                )
+            else:
+                violations.append(
+                    Violation(
+                        CHECK,
+                        f"{klass.__name__}.{name} adds a public attribute to "
+                        f"the dialect; a dialect's public namespace is "
+                        f"exactly the sanctioned SqlDialect surface, so a "
+                        f"public addition is either a stale hook from an "
+                        f"older write path or a helper that belongs under a "
+                        f"leading underscore (rename it to _{name}).",
                     )
                 )
     return violations

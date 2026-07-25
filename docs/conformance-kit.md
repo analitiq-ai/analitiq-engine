@@ -22,9 +22,13 @@ in a customer pipeline (issue #391; ADR
   addressing without a declaration (or against `catalog: "none"`) — a
   loud error, never a guessed default.
 - **The override surface is the sanctioned one.** The connector class
-  carries `dialect_class` and nothing else; the dialect overrides only
-  the public `SqlDialect` surface, with base-compatible signatures.
-  Overriding a private CDK internal fails with the member named.
+  carries `dialect_class` and nothing else; the dialect's public
+  namespace is exactly the public `SqlDialect` surface, with
+  base-compatible signatures. Overriding a private CDK internal fails
+  with the member named, and so does a public addition of the
+  dialect's own — connector helpers live under a leading underscore,
+  which is what keeps stale hooks from older write paths from riding
+  along unnoticed.
 - **Declared and implemented agree, both ways.** A declared
   `merge_form` needs `merge_statement_sql`; a `bulk_land` override
   needs a declared `bulk_load` mechanism; a write-capable connector

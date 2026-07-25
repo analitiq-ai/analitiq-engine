@@ -147,6 +147,30 @@ class _TableAddressOverrideConnector(GenericSQLConnector):
     dialect_class = _TableAddressOverrideDialect
 
 
+class _PublicAdditionDialect(ReferencePostgresDialect):
+    """Carries a stale pre-v2 flag and a public helper of its own."""
+
+    supports_upsert_sqlalchemy = True
+
+    def build_upsert_helper(self) -> str:
+        return "SELECT 1"
+
+
+class _PublicAdditionConnector(GenericSQLConnector):
+    dialect_class = _PublicAdditionDialect
+
+
+class _PrivateHelperDialect(ReferencePostgresDialect):
+    """The same helper under a leading underscore — the sanctioned spelling."""
+
+    def _build_upsert_helper(self) -> str:
+        return "SELECT 1"
+
+
+class _PrivateHelperConnector(GenericSQLConnector):
+    dialect_class = _PrivateHelperDialect
+
+
 class _ExtraDefaultParamDialect(ReferencePostgresDialect):
     """Adds a defaulted parameter of its own — the documented allowance."""
 
@@ -277,6 +301,37 @@ class TestOverrideSurfaceBreaks:
         report = _messages(violations)
         assert "table_address" in report
         assert "framework-owned" in report
+
+    def test_public_dialect_addition_fails_naming_each_attribute(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A dialect's public namespace equals the base surface exactly.
+
+        The public-addition hole is where stale hooks from older write
+        paths hide (a pre-v2 ``supports_upsert_sqlalchemy`` passes every
+        other check silently); both a data attribute and a method the
+        base does not define must fail, each named.
+        """
+        violations = check_override_surface(
+            _with_connector(reference_target, _PublicAdditionConnector)
+        )
+        report = _messages(violations)
+        assert "supports_upsert_sqlalchemy" in report
+        assert "build_upsert_helper" in report
+        assert (
+            "underscore" in report
+        ), f"the failure must say how to spell a legitimate helper: {report}"
+
+    def test_private_dialect_helper_is_allowed(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A connector's own helper lives under a leading underscore."""
+        assert (
+            check_override_surface(
+                _with_connector(reference_target, _PrivateHelperConnector)
+            )
+            == []
+        )
 
     def test_extra_defaulted_parameter_is_allowed(
         self, reference_target: ConformanceTarget
