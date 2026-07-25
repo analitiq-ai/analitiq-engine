@@ -96,6 +96,20 @@ from .write_plan import build_stage_write_plan
 logger = logging.getLogger(__name__)
 
 
+def _deadline_expired(deadline: AbstractAsyncContextManager[Any]) -> bool:
+    """Whether the engine's own statement deadline is what fired.
+
+    ``asyncio.timeout`` records this on the context object, so the caller
+    reads the fact instead of inferring it from configuration: a driver or
+    socket can raise its own ``TimeoutError`` inside a bounded block long
+    before the deadline expires, and that one is the driver's error (issue
+    #401 — the declared taxonomy classifies it). ``nullcontext`` has no
+    ``expired``, which is the honest answer for the unbounded paths.
+    """
+    expired = getattr(deadline, "expired", None)
+    return bool(expired()) if callable(expired) else False
+
+
 # Tracks (table, column) pairs already warned about ORDER BY fallback so a
 # long-lived source connector warns once per stream, not once per page.
 _order_by_fallback_logged: set = set()
@@ -308,6 +322,10 @@ class GenericSQLConnector(BaseDestinationHandler):
         # instances, or unset) means unbounded - asyncio.timeout(None) never
         # fires. See _statement_deadline.
         self._statement_timeout_seconds: float | None = None
+        # Whether the DDL handshake's own deadline fired, recorded by
+        # _ensure_tables_exist so configure_schema classifies a TimeoutError
+        # by the fact rather than by whether a timeout was configured.
+        self._ddl_deadline_expired: bool = False
         # ADBC-only mode: the runtime exposes no SQLAlchemy engine and the
         # backend is AdbcBackend. Set in ``connect()`` from
         # ``runtime.is_adbc``. The facade keeps the flag for the
@@ -922,16 +940,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         try:
             await self._ensure_tables_exist(state, type_mapper)
         except TimeoutError as exc:
-            if (
-                self._adbc_only
-                or self._sync_engine is not None
-                or self._statement_timeout_seconds is None
-            ):
-                # Only the async-SQLAlchemy DDL is wrapped in asyncio.timeout;
-                # ADBC and sync-engine DDL run in a worker thread. A
-                # TimeoutError here is a driver timeout, not our cancellation
-                # - let it propagate as the raw driver error rather than
-                # mislabel it.
+            if not self._ddl_deadline_expired:
+                # The deadline did not fire, so this is the driver's own
+                # timeout (the ADBC and sync-engine paths are never bounded;
+                # a bounded block can still see a driver timeout first) -
+                # let it propagate as the raw driver error rather than
+                # mislabel it as our cancellation.
                 raise
             # The bounded DDL transaction was cancelled. Re-raise as the
             # deterministic schema error the gRPC layer translates into the
@@ -1223,11 +1237,19 @@ class GenericSQLConnector(BaseDestinationHandler):
             *self._schema_preparation_statements(state.address),
             target_ddl,
         ]
-        async with self._statement_deadline():
-            async with self._ddl_lock:
-                backend = self._require_backend()
-                await backend.run_ddl(statements)
-                target_columns = await backend.target_columns(state.address)
+        deadline = self._statement_deadline()
+        self._ddl_deadline_expired = False
+        try:
+            async with deadline:
+                async with self._ddl_lock:
+                    backend = self._require_backend()
+                    await backend.run_ddl(statements)
+                    target_columns = await backend.target_columns(state.address)
+        finally:
+            # Record the deadline's own answer before it goes out of scope:
+            # the caller classifies a TimeoutError by whether OUR deadline
+            # fired, never by whether one was configured (issue #401).
+            self._ddl_deadline_expired = _deadline_expired(deadline)
 
         if self._needs_record_hash(state) and (
             self.RECORD_HASH_COLUMN not in target_columns
@@ -1344,27 +1366,24 @@ class GenericSQLConnector(BaseDestinationHandler):
         run_id: str,
         stream_id: str,
         batch_seq: int,
+        deadline_expired: bool,
     ) -> BatchWriteResult:
         """Log and classify a ``TimeoutError`` raised out of the write attempt.
 
-        Only the async-SQLAlchemy path is wrapped in ``asyncio.timeout``. The
-        ADBC and sync-engine paths run in a worker thread (and a handler with
-        no budget set is never bounded), so a TimeoutError from those is a
-        driver/socket timeout, not our cancellation - classify it generically
-        rather than claiming a statement was cancelled.
+        ``deadline_expired`` is the deadline's own answer (``asyncio.Timeout
+        .expired()``), not an inference from configuration: only the
+        async-SQLAlchemy path is bounded at all, and even inside a bounded
+        block a driver or socket can raise its own ``TimeoutError`` before
+        the deadline fires.
 
-        That split decides whether the connector's declared taxonomy applies
-        (issue #401): a driver/socket timeout is the driver's error, so a
+        That fact decides whether the connector's declared taxonomy applies
+        (issue #401): an unexpired deadline means the driver raised, so a
         declared fact on it (a SQLSTATE, a vendor code, the exception class)
-        classifies it like any other driver failure. The bounded-statement
-        branch is the engine's own cancellation — the engine knows it
-        cancelled, and no declaration overrides that.
+        classifies it like any other driver failure. An expired deadline is
+        the engine's own cancellation — the engine knows it cancelled, and
+        no declaration overrides that.
         """
-        if (
-            self._adbc_only
-            or self._sync_engine is not None
-            or self._statement_timeout_seconds is None
-        ):
+        if not deadline_expired:
             declared = self._declared_write_verdict(e)
             if declared is not None:
                 logger.error(
@@ -1447,7 +1466,8 @@ class GenericSQLConnector(BaseDestinationHandler):
             # each its own full budget, which can sum past the ack deadline and
             # let the engine retry while the first write is still running
             # (issue #231).
-            async with self._statement_deadline():
+            deadline = self._statement_deadline()
+            async with deadline:
                 record_count = record_batch.num_rows
 
                 # A full refresh truncates on the read's FIRST batch
@@ -1614,6 +1634,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 run_id=run_id,
                 stream_id=stream_id,
                 batch_seq=batch_seq,
+                deadline_expired=_deadline_expired(deadline),
             )
         except Exception as e:
             # The transport (ADBC vs SQLAlchemy) decides which driver raised,

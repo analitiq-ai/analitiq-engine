@@ -96,48 +96,45 @@ class TestDriverTimeoutVerdict:
     knows it cancelled, so no declaration overrides that branch.
     """
 
-    def _handler(self, error_map, *, adbc: bool) -> GenericSQLConnector:
+    def _handler(self, error_map) -> GenericSQLConnector:
         handler = GenericSQLConnector()
         handler._error_map = error_map
-        handler._adbc_only = adbc
-        handler._sync_engine = None
-        handler._statement_timeout_seconds = None if adbc else 30.0
+        handler._statement_timeout_seconds = 30.0
         return handler
 
-    def _timeout(self, handler):
+    def _timeout(self, handler, *, deadline_expired: bool):
         return handler._timeout_failure(
             MagicMock(address="public.events"),
             TimeoutError("read timed out"),
             run_id="r1",
             stream_id="s1",
             batch_seq=1,
+            deadline_expired=deadline_expired,
         )
 
     def test_declared_fact_classifies_a_driver_timeout(self):
-        # Unbounded ADBC path: the TimeoutError came from the driver, and
-        # a declared config fact makes it fatal instead of retrying forever.
-        handler = self._handler(
-            _error_map({"exception": {"TimeoutError": "config"}}), adbc=True
-        )
-        result = self._timeout(handler)
+        # The deadline did not fire, so the driver raised: a declared
+        # config fact makes it fatal instead of retrying forever. This holds
+        # inside a bounded block too — the fact is the deadline's own
+        # answer, not whether a timeout was configured.
+        handler = self._handler(_error_map({"exception": {"TimeoutError": "config"}}))
+        result = self._timeout(handler, deadline_expired=False)
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert result.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
 
     def test_undeclared_driver_timeout_keeps_the_generic_verdict(self):
-        handler = self._handler(None, adbc=True)
-        result = self._timeout(handler)
+        handler = self._handler(None)
+        result = self._timeout(handler, deadline_expired=False)
         assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
         assert (
             result.failure_category == FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED
         )
 
     def test_engine_cancellation_is_never_overridden(self):
-        # The bounded async-SQLAlchemy branch: the engine cancelled its own
+        # The deadline itself expired: the engine cancelled its own
         # statement, so a declared TimeoutError fact must not claim it.
-        handler = self._handler(
-            _error_map({"exception": {"TimeoutError": "config"}}), adbc=False
-        )
-        result = self._timeout(handler)
+        handler = self._handler(_error_map({"exception": {"TimeoutError": "config"}}))
+        result = self._timeout(handler, deadline_expired=True)
         assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
         assert "statement timeout" in result.failure_summary
 

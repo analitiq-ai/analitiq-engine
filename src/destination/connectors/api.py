@@ -624,6 +624,15 @@ class ApiDestinationHandler(BaseDestinationHandler):
         retry_options = ExponentialRetry(
             attempts=self._max_retries,
             statuses=self._retry_statuses,
+            # The status set above is authoritative — it already carries
+            # the built-in 5xx choices and whatever the connector declared.
+            # aiohttp_retry otherwise retries EVERY 5xx on top of it
+            # (retry_all_server_errors defaults True), which would both
+            # re-retry a status the declaration calls fatal — burning the
+            # ACK deadline before the fatal ack exists — and contradict the
+            # long-standing intent that 5xx outside the set are
+            # single-attempt.
+            retry_all_server_errors=False,
         )
         self._session = RetryClient(
             client_session=runtime.session,

@@ -200,6 +200,21 @@ class TestTransportRetryPolicy:
         error_map = _map({"http": {"402": "rate_limited"}})
         assert 402 in _declared_retry_statuses(error_map)
 
+    async def test_retry_client_does_not_blanket_retry_server_errors(self):
+        # aiohttp_retry retries every 5xx by default, which would re-retry a
+        # status the declaration calls fatal no matter what the set says.
+        handler = ApiDestinationHandler()
+        runtime = MagicMock()
+        runtime.connector_id = "demo"
+        runtime.declared_error_map = {"http": {"503": "auth"}}
+        runtime.materialize = AsyncMock()
+        runtime.raw_config = {}
+        runtime.session.headers = {}
+        await handler.connect(runtime)
+        options = handler._session._retry_options
+        assert options.retry_all_server_errors is False
+        assert 503 not in options.statuses
+
     async def test_connect_applies_the_declared_policy(self):
         handler = ApiDestinationHandler()
         runtime = MagicMock()
