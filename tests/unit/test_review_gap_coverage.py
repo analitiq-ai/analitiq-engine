@@ -22,7 +22,7 @@ def _merge_capable_caps():
             "catalog": "none",
             "session_targeting": "per_statement",
             "merge_form": "merge",
-            "bulk_load": "none",
+            "bulk_load": {},
             "stage": {"scope": "real", "schema": "target", "transactional_ddl": True},
         }
     )

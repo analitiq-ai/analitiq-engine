@@ -58,7 +58,7 @@ class TestCapabilityProperties:
                 "catalog": "none",
                 "session_targeting": "per_statement",
                 "merge_form": "none",
-                "bulk_load": "none",
+                "bulk_load": {},
                 "stage": {
                     "scope": "temp",
                     "schema": "target",

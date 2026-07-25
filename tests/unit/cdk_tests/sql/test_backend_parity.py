@@ -190,7 +190,7 @@ class _AdbcHarness:
         self.backend = AdbcBackend(self.dialect)
         self.backend._conn = _SqliteAdbcConnection(self._uri)
         self.backend._runtime = _AdbcRuntimeStub(self._uri)
-        self.backend._bulk_load = caps.bulk_load
+        self.backend._bulk_load = caps.bulk_mechanism("adbc") or "none"
 
     async def prepare(self):
         await self.backend.run_ddl([TARGET_DDL])
@@ -233,7 +233,7 @@ def _caps(transactional: bool) -> SqlCapabilities:
     # declared native mechanism — one declaration, both backends.
     return SqlCapabilities.from_declaration(
         caps_block(
-            bulk_load="adbc_ingest",
+            bulk_load={"adbc": "adbc_ingest"},
             stage_scope="temp",
             transactional_ddl=transactional,
         )

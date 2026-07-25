@@ -32,7 +32,7 @@ def caps_block(
     catalog: str = "none",
     session_targeting: str = "per_statement",
     merge_form: str = "merge",
-    bulk_load: str = "none",
+    bulk_load: dict[str, str] | None = None,
     stage_scope: str = "temp",
     stage_schema: str = "target",
     dedicated_schema: str | None = None,
@@ -54,7 +54,7 @@ def caps_block(
         "catalog": catalog,
         "session_targeting": session_targeting,
         "merge_form": merge_form,
-        "bulk_load": bulk_load,
+        "bulk_load": dict(bulk_load or {}),
         "stage": stage,
     }
 

@@ -48,7 +48,7 @@ from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.exceptions import TransportSpecError, UnresolvedValueError
 from cdk.rate_limiter import RateLimiter
 from cdk.resolver import ResolutionContext, Resolver
-from cdk.sql.dialects import SqlDialect
+from cdk.sql.dialects import dialect_overrides
 
 logger = logging.getLogger(__name__)
 
@@ -270,6 +270,27 @@ def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[st
     return out
 
 
+def merged_transports(connector: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return every transport block with ``transport_defaults`` deep-merged.
+
+    The one place ``transport_defaults`` is applied: transport selection
+    (:func:`_select_transport`), the pre-materialization driver
+    derivation (``ConnectionRuntime.driver``), and the conformance
+    suite's transport view all read through this function, so no
+    consumer can disagree about what a block declares. Non-object
+    entries are dropped — they cannot describe a transport.
+    """
+    transports = connector.get("transports") or {}
+    defaults = connector.get("transport_defaults") or {}
+    if not isinstance(defaults, Mapping):
+        defaults = {}
+    return {
+        ref: _deep_merge(defaults, block)
+        for ref, block in transports.items()
+        if isinstance(block, Mapping)
+    }
+
+
 def _select_transport(
     connector: Mapping[str, Any], transport_ref: str | None
 ) -> tuple[str, Mapping[str, Any]]:
@@ -291,8 +312,7 @@ def _select_transport(
             f"Connector {connector.get('connector_id')!r}: transport {ref!r} not in "
             f"declared transports {sorted(transports)}"
         )
-    defaults = connector.get("transport_defaults") or {}
-    merged = _deep_merge(defaults, transports[ref])
+    merged = merged_transports(connector)[ref]
     return ref, merged
 
 
@@ -422,7 +442,7 @@ def _attach_tls_verification(engine: Engine, sql_dialect: Any, mode: str) -> Non
     ``sync_engine`` facade; the event fires inside the greenlet bridge, so
     the dialect's DBAPI cursor calls work on the adapted connection.
     """
-    if type(sql_dialect).verify_tls_state is SqlDialect.verify_tls_state:
+    if not dialect_overrides(type(sql_dialect), "verify_tls_state"):
         # Armed-but-vacuous must be greppable: with the inherited no-op the
         # declared mode is only as strong as the driver's own connect-arg
         # enforcement, which some drivers silently skip.
@@ -436,7 +456,7 @@ def _attach_tls_verification(engine: Engine, sql_dialect: Any, mode: str) -> Non
         )
 
     @event.listens_for(engine, "connect")
-    def _verify_tls(dbapi_connection: Any, connection_record: Any) -> None:
+    def _verify_tls(dbapi_connection: Any, _connection_record: Any) -> None:
         _run_closing_on_failure(
             dbapi_connection,
             lambda: sql_dialect.verify_tls_state(dbapi_connection, mode),
@@ -506,7 +526,7 @@ def _attach_session_init(engine: Engine, statements: list[str]) -> None:
     """
 
     @event.listens_for(engine, "connect")
-    def _session_init(dbapi_connection: Any, connection_record: Any) -> None:
+    def _session_init(dbapi_connection: Any, _connection_record: Any) -> None:
         _run_closing_on_failure(
             dbapi_connection,
             lambda: _execute_session_init(dbapi_connection, statements),
@@ -929,9 +949,16 @@ def resolve_http_spec(spec: Mapping[str, Any], *, resolver: Resolver) -> dict[st
 
 
 async def build_http_from_spec(
-    resolved: Mapping[str, Any], *, sql_dialect: Any = None
+    resolved: Mapping[str, Any],
+    *,
+    sql_dialect: Any = None,  # skipcq: PYL-W0613 - uniform transport-kind interface
 ) -> HttpTransport:
-    """Build the HTTP transport from a resolved spec (worker side)."""
+    """Build the HTTP transport from a resolved spec (worker side).
+
+    ``sql_dialect`` is part of the uniform ``build_from_spec`` interface
+    every transport kind is called through; HTTP has no SQL dialect to
+    consume.
+    """
     # aiohttp is the only ``api`` extra dependency the CDK pulls; import it
     # lazily so a database-only (control-plane / SQL) install never needs it.
     try:

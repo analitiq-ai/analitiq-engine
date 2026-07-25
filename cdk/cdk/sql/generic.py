@@ -79,7 +79,7 @@ from .capabilities import (
 )
 from .ddl import build_create_table_sql
 from .ddl import create_table as _sql_create_table
-from .dialects import SqlDialect, TableAddress
+from .dialects import SqlDialect, TableAddress, dialect_overrides
 from .discovery import list_columns as _sql_list_columns
 from .discovery import list_schemas as _sql_list_schemas
 from .discovery import list_tables as _sql_list_tables
@@ -176,6 +176,34 @@ class _StreamState:
     write_mode: WriteMode = "upsert"
     endpoint_document: dict[str, Any] = field(default_factory=dict)
     schema_contract: SchemaContract | None = None
+
+
+def read_query_builder(
+    dialect: SqlDialect, driver: str, *, adbc_only: bool
+) -> QueryBuilder:
+    """Build the SQL read path's ``QueryBuilder`` — the one construction.
+
+    Both read flavors and the conformance suite call this, so the shape
+    the engine executes and the shape the suite certifies cannot drift:
+    the SQLAlchemy read binds in the driver's native style and consults
+    the dialect's paging fallback; the ADBC-only read forces qmark
+    binding, quotes every identifier (Snowflake folds unquoted names,
+    BigQuery is case-sensitive), and inlines LIMIT/OFFSET (Snowflake
+    rejects bound paging values).
+    """
+    if adbc_only:
+        return QueryBuilder(
+            driver,
+            paramstyle="qmark",
+            registry_name=dialect.sqlalchemy_registry_name,
+            quote_identifiers=True,
+            inline_paging=True,
+        )
+    return QueryBuilder(
+        driver,
+        registry_name=dialect.sqlalchemy_registry_name,
+        paging_order_fallback=dialect.paging_order_fallback,
+    )
 
 
 class GenericSQLConnector(BaseDestinationHandler):
@@ -465,9 +493,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         renders that form is an implementation fact checked at handshake so
         the disagreement fails before DDL, not on the first batch.
         """
-        return (
-            type(self.dialect).merge_statement_sql is not SqlDialect.merge_statement_sql
-        )
+        return dialect_overrides(type(self.dialect), "merge_statement_sql")
 
     def _dialect_renders_stage_table(self) -> bool:
         """Whether the active dialect implements the stage DDL hook.
@@ -476,7 +502,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         write-role connector without ``stage_table_sql`` cannot write at
         all — checked at handshake, alongside the declared stage shape.
         """
-        return type(self.dialect).stage_table_sql is not SqlDialect.stage_table_sql
+        return dialect_overrides(type(self.dialect), "stage_table_sql")
 
     def _stage_ready(self) -> bool:
         """Whether the stage cycle can run for this connector (any transport).
@@ -1887,11 +1913,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 logger.debug("Source read (ADBC-only) completed")
                 return
 
-            builder = QueryBuilder(
-                driver,
-                registry_name=self.dialect.sqlalchemy_registry_name,
-                paging_order_fallback=self.dialect.paging_order_fallback,
-            )
+            builder = read_query_builder(self.dialect, driver, adbc_only=False)
 
             def page_query(offset: int) -> tuple[str, ParamsLike]:
                 """Build the per-page SELECT.
@@ -2042,13 +2064,7 @@ class GenericSQLConnector(BaseDestinationHandler):
 
         order_by = _page_order_by(order_by_field, cursor_field, columns, address.table)
 
-        builder = QueryBuilder(
-            driver,
-            paramstyle="qmark",
-            registry_name=self.dialect.sqlalchemy_registry_name,
-            quote_identifiers=True,
-            inline_paging=True,
-        )
+        builder = read_query_builder(self.dialect, driver, adbc_only=True)
 
         # Initial cursor value is fixed for the duration of the read;
         # last_cursor_value advances purely for checkpoint state.

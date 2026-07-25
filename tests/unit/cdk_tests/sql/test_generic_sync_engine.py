@@ -110,7 +110,7 @@ def _declared_caps(**stage_overrides: Any) -> SqlCapabilities:
             "catalog": "none",
             "session_targeting": "per_statement",
             "merge_form": "insert_on_conflict",
-            "bulk_load": "none",
+            "bulk_load": {},
             "stage": stage,
         },
         source="<test>",
@@ -137,7 +137,7 @@ def _wire_backend(
     handler._capabilities = caps
     backend = SqlAlchemyBackend(handler.dialect)
     backend._sync_engine = engine
-    backend._bulk_declared = caps.bulk_load != "none"
+    backend._bulk_declared = caps.bulk_mechanism("sqlalchemy") is not None
     backend._targets[address] = Table(address.table, MetaData(), autoload_with=engine)
     handler._backend = backend
 
@@ -805,7 +805,7 @@ class TestDedicatedStageSchemaPreDdl:
                 "catalog": "none",
                 "session_targeting": "per_statement",
                 "merge_form": "insert_on_conflict",
-                "bulk_load": "none",
+                "bulk_load": {},
                 "stage": {
                     "scope": "real",
                     "schema": "dedicated",
@@ -970,7 +970,7 @@ class _SyncWriteRuntime:
             "catalog": "none",
             "session_targeting": "per_statement",
             "merge_form": "insert_on_conflict",
-            "bulk_load": "none",
+            "bulk_load": {},
             "stage": {
                 "scope": "temp",
                 "schema": "target",

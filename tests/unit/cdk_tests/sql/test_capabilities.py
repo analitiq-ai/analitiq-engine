@@ -41,7 +41,7 @@ class TestParse:
                 catalog="full",
                 session_targeting="session_default",
                 merge_form="merge",
-                bulk_load="copy_from",
+                bulk_load={"sqlalchemy": "copy_from"},
                 stage_scope="real",
                 stage_schema="dedicated",
                 dedicated_schema="_analitiq",
@@ -51,7 +51,9 @@ class TestParse:
         assert caps.catalog == "full"
         assert caps.session_targeting == "session_default"
         assert caps.merge_form == "merge"
-        assert caps.bulk_load == "copy_from"
+        assert caps.bulk_load == {"sqlalchemy": "copy_from"}
+        assert caps.bulk_mechanism("sqlalchemy") == "copy_from"
+        assert caps.bulk_mechanism("adbc") is None
         assert caps.stage.scope == "real"
         assert caps.stage.schema == "dedicated"
         assert caps.stage.dedicated_schema == "_analitiq"
@@ -70,7 +72,9 @@ class TestParse:
             ("catalog", "sometimes"),
             ("session_targeting", "both"),
             ("merge_form", "upsert"),
-            ("bulk_load", "fast"),
+            ("bulk_load", "fast"),  # not a mapping
+            ("bulk_load", {"sqlalchemy": "adbc_ingest"}),  # unrunnable pair
+            ("bulk_load", {"http": "copy_from"}),  # unknown transport type
         ],
     )
     def test_off_vocabulary_value_fails_naming_the_field(self, field, value):
@@ -385,7 +389,9 @@ class TestConnectBinding:
     def _adbc_runtime(**overrides):
         runtime = MagicMock()
         runtime.connector_id = "demo"
-        runtime.declared_sql_capabilities = caps_block(bulk_load="adbc_ingest")
+        runtime.declared_sql_capabilities = caps_block(
+            bulk_load={"adbc": "adbc_ingest"}
+        )
         runtime.is_adbc = True
         runtime.driver = "snowflake"
         runtime.close = AsyncMock()
