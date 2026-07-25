@@ -41,7 +41,10 @@ def caps_block(
     """A declared ``sql_capabilities`` block as connector.json would carry it.
 
     Defaults describe a plain per-statement, merge-capable system; tests
-    override exactly the fact they exercise.
+    override exactly the fact they exercise. ``bulk_load`` is declared per
+    transport (``{"adbc": "adbc_ingest"}``, ``{"sqlalchemy": "copy_from"}``);
+    ``None`` emits the empty object — no mechanism on either transport, so
+    every landing goes through executemany.
     """
     stage: dict[str, Any] = {
         "scope": stage_scope,

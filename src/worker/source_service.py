@@ -19,6 +19,7 @@ import pyarrow as pa
 
 import grpc
 from cdk.connection_runtime import ConnectionRuntime
+from cdk.declarations import DECLARED_READ_DETERMINISTIC, ErrorMap, error_map_for
 from cdk.exceptions import TransportSpecError
 from cdk.sql.exceptions import (
     ReadError,
@@ -64,6 +65,31 @@ _DETERMINISTIC_READ_ERRORS = (
     TypeError,
     ValueError,
 )
+
+
+def classify_read_error(
+    exc: BaseException, error_map: ErrorMap | None
+) -> tuple[bool, str | None]:
+    """Classify a read failure: declared verdicts first, isinstance ladder after.
+
+    Returns ``(deterministic, declared_category)`` where
+    ``declared_category`` is the engine-vocabulary value the connector's
+    declarations claimed for this failure — carried on the typed error by
+    its birth site (a connector's HTTP status match) or matched here
+    against the raw driver exception — and ``None`` when the verdict came
+    from the type ladder. The category crosses the process boundary on the
+    ``ReadError`` wire message so the engine reports the declared code
+    instead of re-deriving from text. Resolution order per issue #401:
+    declared verdicts, then the connector's sanctioned typed errors
+    (``_DETERMINISTIC_READ_ERRORS`` — the hook), never text.
+    """
+    birth_site = getattr(exc, "declared_category", None)
+    if isinstance(birth_site, str) and birth_site in DECLARED_READ_DETERMINISTIC:
+        return DECLARED_READ_DETERMINISTIC[birth_site], birth_site
+    match = error_map.match_exception(exc) if error_map is not None else None
+    if match is not None:
+        return DECLARED_READ_DETERMINISTIC[match.category], match.category
+    return isinstance(exc, _DETERMINISTIC_READ_ERRORS), None
 
 
 class _RelayCheckpoint:
@@ -123,6 +149,11 @@ class SourceWorkerServicer(SourceServiceServicer):
         self._readable = readable
         self._runtime = runtime
         self._source_config = source_config
+        # The connector's declared error taxonomy (issue #401), restored
+        # from the resolved payload the bootstrap carried. A declared fact
+        # classifies a driver failure with zero connector Python; None
+        # keeps the typed-error ladder (additive absence).
+        self._error_map = error_map_for(runtime)
 
     async def ReadStream(
         self,
@@ -170,11 +201,13 @@ class SourceWorkerServicer(SourceServiceServicer):
         except (
             Exception
         ) as exc:  # noqa: BLE001 — every failure crosses as a typed event
-            deterministic = isinstance(exc, _DETERMINISTIC_READ_ERRORS)
+            deterministic, declared = classify_read_error(exc, self._error_map)
             logger.error(
-                "source worker read failed (%s, deterministic=%s): %s",
+                "source worker read failed (%s, deterministic=%s, "
+                "classified by %s): %s",
                 type(exc).__name__,
                 deterministic,
+                f"declared category {declared}" if declared else "type ladder",
                 exc,
                 exc_info=True,
             )
@@ -183,6 +216,7 @@ class SourceWorkerServicer(SourceServiceServicer):
                     message=str(exc),
                     deterministic=deterministic,
                     error_type=type(exc).__name__,
+                    declared_category=declared or "",
                 )
             )
             return

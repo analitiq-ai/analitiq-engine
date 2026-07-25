@@ -32,6 +32,7 @@ from src.state.error_classification import (
     ErrorCode,
     FailureStage,
     classify_source_extract,
+    source_code_for_declared_category,
     tag_failure,
 )
 from src.state.store import decode_cursor_state, encode_cursor_state
@@ -123,6 +124,17 @@ class WorkerReadable:
                         )
                     elif kind == "error":
                         err = response.error
+                        # The worker classified the failure at its birth
+                        # site; its declared category (issue #401) names
+                        # the published source code directly — no engine
+                        # re-derivation. transient/write_rejected (and an
+                        # empty field) name no code and fall to the
+                        # text-split/tag flow below.
+                        declared_code = (
+                            source_code_for_declared_category(err.declared_category)
+                            if err.declared_category
+                            else None
+                        )
                         if err.deterministic:
                             exc = ReadError(
                                 f"{err.error_type}: {err.message} "
@@ -137,15 +149,29 @@ class WorkerReadable:
                             # connector class survives in the error_type prefix, so
                             # the source classifier reads it; an opaque one floors to
                             # CONFIG_INVALID (deterministic == a setup defect).
-                            code = classify_source_extract(exc)
+                            code = declared_code or classify_source_extract(exc)
                             if code is ErrorCode.INTERNAL:
                                 code = ErrorCode.CONFIG_INVALID
                             raise tag_failure(
                                 exc, code=code, stage=FailureStage.SOURCE_EXTRACT
                             )
-                        raise RuntimeError(
+                        retryable_exc: BaseException = RuntimeError(
                             f"{err.error_type}: {err.message} (worker {label})"
                         )
+                        if declared_code is not None:
+                            # A retryable failure that exhausts retries
+                            # still reports the declared code (e.g. a
+                            # declared rate_limited 403 must not read as
+                            # auth via the text split). tag_failure is
+                            # no-overwrite, so retry machinery is
+                            # unaffected and only terminal classification
+                            # consumes it.
+                            tag_failure(
+                                retryable_exc,
+                                code=declared_code,
+                                stage=FailureStage.SOURCE_EXTRACT,
+                            )
+                        raise retryable_exc
                     elif kind == "complete":
                         logger.info(
                             "%s complete: %d records / %d batches",

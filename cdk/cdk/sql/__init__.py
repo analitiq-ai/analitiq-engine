@@ -30,6 +30,7 @@ from .._extras import reraise_for_missing_extra
 from .capabilities import (
     SqlCapabilities,
     SqlCapabilitiesError,
+    SqlLimits,
     StageCapabilities,
     bind_dialect_capabilities,
     parse_declared_capabilities,
@@ -86,6 +87,7 @@ __all__ = [
     "SqlDialect",
     "TableAddress",
     "SqlCapabilities",
+    "SqlLimits",
     "StageCapabilities",
     "SqlCapabilitiesError",
     "bind_dialect_capabilities",

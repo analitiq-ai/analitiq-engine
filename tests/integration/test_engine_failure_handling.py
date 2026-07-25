@@ -47,6 +47,14 @@ class MockBatchResult:
     failure_category: FailureCategory = FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
 
 
+def _mock_runtime() -> MagicMock:
+    """Runtime double declaring no #401 blocks (StreamProcessor parses them)."""
+    runtime = MagicMock()
+    runtime.connector_id = "demo"
+    runtime.declared_error_map = None
+    return runtime
+
+
 def _make_processor(
     stream_config: dict[str, Any],
     grpc_client: AsyncMock,
@@ -119,7 +127,7 @@ def sample_stream_config():
                     scope="connector", connection_id="c", endpoint_id="e"
                 ),
                 connection_ref="conn",
-                runtime=MagicMock(),
+                runtime=_mock_runtime(),
                 endpoint_document={},
                 stream_source={},
                 replication=ReplicationConfig(
@@ -384,7 +392,7 @@ class TestEngineFatalFailureHandling:
                 scope="connector", connection_id="c", endpoint_id="e"
             ),
             connection_ref="conn",
-            runtime=MagicMock(),
+            runtime=_mock_runtime(),
             endpoint_document={},
             stream_source={},
             replication=None,
@@ -980,7 +988,9 @@ class TestEngineStreamFailurePropagation:
         # Track which stream is being processed
         call_count = 0
 
-        async def mock_process_stream(stream_id, stream_config, pipeline_config):
+        async def mock_process_stream(
+            stream_id, stream_config, pipeline_config, pacing_gate=None
+        ):
             nonlocal call_count
             call_count += 1
             if stream_config.get("name") == "failing-stream":

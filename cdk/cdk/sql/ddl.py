@@ -29,6 +29,37 @@ from .exceptions import CatalogAddressingError, CreateTableError
 from .execution import execute_ddl
 
 
+def _check_identifier_budget(
+    dialect: SqlDialect, address: TableAddress, columns: Sequence[ColumnDef]
+) -> None:
+    """Refuse created identifiers over the declared identifier cap (issue #401).
+
+    Only the connector's declared ``sql_capabilities.limits.max_identifier_len``
+    is enforced — an undeclared cap keeps current behavior (additive absence) —
+    and only for the identifiers this DDL *creates* (the table name and its
+    columns): the schema/catalog segments name pre-existing namespaces the
+    system already accepted. Systems over their cap either reject the DDL
+    server-side or silently truncate the name (Postgres), so the created table
+    would diverge from the address every later statement targets; refuse
+    before composing any SQL. The budget is bytes, matching the stage-name
+    grammar's UTF-8 accounting.
+    """
+    caps = dialect.capabilities
+    cap = caps.limits.max_identifier_len if caps is not None else None
+    if cap is None:
+        return
+    identifiers = [("table", address.table)]
+    identifiers.extend(("column", col.name) for col in columns)
+    for kind, name in identifiers:
+        if len(name.encode()) > cap:
+            raise CreateTableError(
+                f"create_table for {address.table!r}: {kind} identifier "
+                f"{name!r} is {len(name.encode())} bytes, over the declared "
+                f"sql_capabilities.limits.max_identifier_len {cap}; the "
+                f"system would reject or silently truncate it"
+            )
+
+
 def build_create_table_sql(
     dialect: SqlDialect,
     type_mapper: Any,
@@ -52,6 +83,8 @@ def build_create_table_sql(
         raise CreateTableError(
             f"create_table for {table!r} requires at least one column"
         )
+
+    _check_identifier_budget(dialect, address, columns)
 
     declared = {col.name for col in columns}
     unknown_pks = [pk for pk in primary_keys if pk not in declared]

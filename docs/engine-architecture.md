@@ -260,12 +260,19 @@ aggregated `ExceptionGroup` (every stream failed) the highest-priority tag acros
 the leaves wins, and `error_detail` keeps every per-stream leaf rather than
 collapsing to `All streams failed (N sub-exceptions)`.
 
-Three structured signals cross process boundaries so the tag survives isolation:
+Four structured signals cross process boundaries so the tag survives isolation:
 
 - The source worker's `deterministic` flag (a config/contract error retrying
   cannot heal) is preserved across the gRPC worker boundary as a `CONFIG_INVALID`
   tag, so a deterministic source-config error classifies as `CONFIG_INVALID`
   regardless of the `ReadError`/`RuntimeError` wrapper its type collapses into.
+- The source worker's `declared_category` (`ReadError` wire message, issue
+  #401): the worker classifies a read failure at its birth site against the
+  connector's declared `error_map` and sends the matched engine-vocabulary
+  category; the engine maps it to the published code
+  (`source_code_for_declared_category`) and tags both deterministic and
+  retryable errors with it — a declared `rate_limited` 403 that exhausts
+  retries reports `RATE_LIMITED`, never the text split's reading of "403".
 - The destination-handshake reason (engine/proxy-generated, including the inner
   reason forwarded across the worker proxy) is split transport-vs-config at the
   raise site by `classify_handshake_failure`, so a proxied destination outage
@@ -277,24 +284,45 @@ Three structured signals cross process boundaries so the tag survives isolation:
   category directly (`CONFIG_INVALID` / `DESTINATION_WRITE_FAILED` /
   `INTERNAL`) instead of substring-matching the `failure_summary` prose.
 
-The name/phrase heuristics remain in three narrow roles only: the
-**source-extract fine split** (`classify_source_extract`), which picks
-auth-vs-unreachable-vs-rate for an opaque source driver/HTTP error — a split a
-tag genuinely cannot make without inspecting the error; the
-**destination-load fallback** (`classify_destination_failure`) for a batch
-failure whose ack declares no category — a thick connector's own ack, or a
-failure with no ack at all; and a defensive
-**fallback** (`classify_exception` over class names + message text, mirroring
-`cdk.sql._adbc_utils._is_fatal_adbc_error`) for any exception that reaches the runner
-with no tag. Because the source split runs *only* at the source boundary, a
-destination port (`host:401`) or path can never be misread as source auth.
+A connector may declare its driver's failure taxonomy as data — the
+`error_map` block in `connector.json` (issue #401): SQLSTATE classes and
+states, exception class names, vendor codes, HTTP statuses, each mapped to
+an engine-owned category (`transient | config | auth | unreachable |
+rate_limited | write_rejected`). The engine alone derives the verdicts
+(`AckStatus`, `FailureCategory`, `ErrorCode`) from a declared category;
+connectors never self-declare verdicts. Classification happens at the
+failure's birth site: the boundary that just caught the driver's error (the
+CDK write ladder, the ADBC boundary, the source worker, both API
+connectors) matches the immediate exception — plus at most its single
+explicit driver link, SQLAlchemy's `orig` or `raise ... from` — against
+the declared map, and the verdict crosses process boundaries as the
+structured signals above (the deterministic flag, the wire
+`declared_category`, the ack's failure category). Nothing downstream
+re-derives a declared classification from exception chains or text, so a
+declaring connector gets deterministic classification for declared
+identifiers with zero connector Python.
+
+The name/phrase heuristics remain in three narrow roles only, each running
+strictly after the declared map and the structured signals, and each logs
+when it decided: the **source-extract fine split**
+(`classify_source_extract`), which picks auth-vs-unreachable-vs-rate for an
+opaque, undeclared source driver/HTTP error; the **destination-load
+fallback** (`classify_destination_failure`) for a batch failure whose ack
+declares no category — a thick connector's own ack, or a failure with no
+ack at all; and a defensive **fallback** (`classify_exception` over class
+names + message text, mirroring `cdk.sql._adbc_utils._is_fatal_adbc_error`)
+for any exception that reaches the runner with no tag. Because the source
+split runs *only* at the source boundary, a destination port (`host:401`)
+or path can never be misread as source auth.
 
 The `error_code` enum is the stable, audited contract. The one residual
-best-effort area is the source-extract fine split above: for an un-typed source
-driver error, auth-vs-unreachable-vs-rate is inferred from its text and can fall
-to a neighbouring code or `INTERNAL`. It is never a secret leak (only class names
-and codes ever reach `error_detail`) and never a cross-stage error (the stage is
-always known from the tag).
+best-effort area is the source-extract fine split above, and only for a
+failure no declared fact claims — a partial map is the normal case, and a
+declared `transient`/`write_rejected` names no source code by design: such
+a failure's auth-vs-unreachable-vs-rate is inferred from its text and can
+fall to a neighbouring code or `INTERNAL`. It is never a secret leak (only
+class names and codes ever reach `error_detail`) and never a cross-stage
+error (the stage is always known from the tag).
 
 ## ConnectionRuntime and Transports
 

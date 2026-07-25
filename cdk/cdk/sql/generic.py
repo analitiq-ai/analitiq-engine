@@ -53,6 +53,7 @@ from cdk.connection_runtime import (
     materialize_runtime,
 )
 from cdk.database_utils import acquire_connection
+from cdk.declarations import DECLARED_WRITE_VERDICTS, ErrorMap, error_map_for
 from cdk.query_builder import Filter, ParamsLike, QueryBuilder, QueryConfig
 from cdk.schema_contract import SchemaContract
 from cdk.type_map import InvalidTypeMapError, TypeMapper, UnmappedTypeError
@@ -93,6 +94,20 @@ from .exceptions import (
 from .write_plan import build_stage_write_plan
 
 logger = logging.getLogger(__name__)
+
+
+def _deadline_expired(deadline: AbstractAsyncContextManager[Any]) -> bool:
+    """Whether the engine's own statement deadline is what fired.
+
+    ``asyncio.timeout`` records this on the context object, so the caller
+    reads the fact instead of inferring it from configuration: a driver or
+    socket can raise its own ``TimeoutError`` inside a bounded block long
+    before the deadline expires, and that one is the driver's error (issue
+    #401 — the declared taxonomy classifies it). ``nullcontext`` has no
+    ``expired``, which is the honest answer for the unbounded paths.
+    """
+    expired = getattr(deadline, "expired", None)
+    return bool(expired()) if callable(expired) else False
 
 
 # Tracks (table, column) pairs already warned about ORDER BY fallback so a
@@ -283,6 +298,10 @@ class GenericSQLConnector(BaseDestinationHandler):
         # consumer refuses a needed-but-undeclared fact loudly instead of
         # guessing a default.
         self._capabilities: SqlCapabilities | None = None
+        # The connector's declared error taxonomy (issue #401), parsed
+        # alongside the capability binding. None = undeclared: the write
+        # ack ladder keeps its class-name heuristic (additive absence).
+        self._error_map: ErrorMap | None = None
         self._runtime: ConnectionRuntime | None = None
         self._engine: AsyncEngine | None = None
         # Sync SQLAlchemy engine for sync-only drivers (e.g. Redshift's
@@ -303,6 +322,10 @@ class GenericSQLConnector(BaseDestinationHandler):
         # instances, or unset) means unbounded - asyncio.timeout(None) never
         # fires. See _statement_deadline.
         self._statement_timeout_seconds: float | None = None
+        # Whether the DDL handshake's own deadline fired, recorded by
+        # _ensure_tables_exist so configure_schema classifies a TimeoutError
+        # by the fact rather than by whether a timeout was configured.
+        self._ddl_deadline_expired: bool = False
         # ADBC-only mode: the runtime exposes no SQLAlchemy engine and the
         # backend is AdbcBackend. Set in ``connect()`` from
         # ``runtime.is_adbc``. The facade keeps the flag for the
@@ -480,9 +503,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         gate. Runs on ``connect()``, on ``read_batches`` (the
         runtime-taking source entry), and on every control-plane entry
         that takes a runtime directly; the standalone helpers bind
-        themselves through the same function.
+        themselves through the same function. The declared error taxonomy
+        (issue #401) binds at the same point so both declarations always
+        describe the same connector.
         """
         self._capabilities = bind_dialect_capabilities(self.dialect, runtime)
+        self._error_map = error_map_for(runtime)
 
     def _dialect_renders_merge_statement(self) -> bool:
         """Whether the active dialect implements the merge-form statement hook.
@@ -914,16 +940,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         try:
             await self._ensure_tables_exist(state, type_mapper)
         except TimeoutError as exc:
-            if (
-                self._adbc_only
-                or self._sync_engine is not None
-                or self._statement_timeout_seconds is None
-            ):
-                # Only the async-SQLAlchemy DDL is wrapped in asyncio.timeout;
-                # ADBC and sync-engine DDL run in a worker thread. A
-                # TimeoutError here is a driver timeout, not our cancellation
-                # - let it propagate as the raw driver error rather than
-                # mislabel it.
+            if not self._ddl_deadline_expired:
+                # The deadline did not fire, so this is the driver's own
+                # timeout (the ADBC and sync-engine paths are never bounded;
+                # a bounded block can still see a driver timeout first) -
+                # let it propagate as the raw driver error rather than
+                # mislabel it as our cancellation.
                 raise
             # The bounded DDL transaction was cancelled. Re-raise as the
             # deterministic schema error the gRPC layer translates into the
@@ -1215,11 +1237,18 @@ class GenericSQLConnector(BaseDestinationHandler):
             *self._schema_preparation_statements(state.address),
             target_ddl,
         ]
-        async with self._statement_deadline():
-            async with self._ddl_lock:
+        deadline = self._statement_deadline()
+        self._ddl_deadline_expired = False
+        try:
+            async with deadline, self._ddl_lock:
                 backend = self._require_backend()
                 await backend.run_ddl(statements)
                 target_columns = await backend.target_columns(state.address)
+        finally:
+            # Record the deadline's own answer before it goes out of scope:
+            # the caller classifies a TimeoutError by whether OUR deadline
+            # fired, never by whether one was configured (issue #401).
+            self._ddl_deadline_expired = _deadline_expired(deadline)
 
         if self._needs_record_hash(state) and (
             self.RECORD_HASH_COLUMN not in target_columns
@@ -1336,20 +1365,36 @@ class GenericSQLConnector(BaseDestinationHandler):
         run_id: str,
         stream_id: str,
         batch_seq: int,
+        deadline_expired: bool,
     ) -> BatchWriteResult:
         """Log and classify a ``TimeoutError`` raised out of the write attempt.
 
-        Only the async-SQLAlchemy path is wrapped in ``asyncio.timeout``. The
-        ADBC and sync-engine paths run in a worker thread (and a handler with
-        no budget set is never bounded), so a TimeoutError from those is a
-        driver/socket timeout, not our cancellation - classify it generically
-        rather than claiming a statement was cancelled.
+        ``deadline_expired`` is the deadline's own answer (``asyncio.Timeout
+        .expired()``), not an inference from configuration: only the
+        async-SQLAlchemy path is bounded at all, and even inside a bounded
+        block a driver or socket can raise its own ``TimeoutError`` before
+        the deadline fires.
+
+        That fact decides whether the connector's declared taxonomy applies
+        (issue #401): an unexpired deadline means the driver raised, so a
+        declared fact on it (a SQLSTATE, a vendor code, the exception class)
+        classifies it like any other driver failure. An expired deadline is
+        the engine's own cancellation — the engine knows it cancelled, and
+        no declaration overrides that.
         """
-        if (
-            self._adbc_only
-            or self._sync_engine is not None
-            or self._statement_timeout_seconds is None
-        ):
+        if not deadline_expired:
+            declared = self._declared_write_verdict(e)
+            if declared is not None:
+                logger.error(
+                    "Driver timeout writing batch (run=%s, stream=%s, seq=%s), "
+                    "classified by the declared error_map: %s",
+                    run_id,
+                    stream_id,
+                    batch_seq,
+                    e,
+                    exc_info=True,
+                )
+                return declared
             logger.error(
                 "Error writing batch (run=%s, stream=%s, seq=%s): %s",
                 run_id,
@@ -1420,7 +1465,8 @@ class GenericSQLConnector(BaseDestinationHandler):
             # each its own full budget, which can sum past the ack deadline and
             # let the engine retry while the first write is still running
             # (issue #231).
-            async with self._statement_deadline():
+            deadline = self._statement_deadline()
+            async with deadline:
                 record_count = record_batch.num_rows
 
                 # A full refresh truncates on the read's FIRST batch
@@ -1456,9 +1502,10 @@ class GenericSQLConnector(BaseDestinationHandler):
                 # collapse — all semantics), renders the plan, and the
                 # backend executes it.
                 prepared = self._prepare_write_batch(state, record_batch)
+                caps = self._require_declared_capabilities(state)
                 plan = build_stage_write_plan(
                     self.dialect,
-                    self._require_declared_capabilities(state),
+                    caps,
                     target=state.address,
                     columns=tuple(prepared.schema.names),
                     write_mode=state.write_mode,
@@ -1468,6 +1515,14 @@ class GenericSQLConnector(BaseDestinationHandler):
                     run_id=run_id,
                     stream_id=stream_id,
                     batch_seq=batch_seq,
+                    # adbc_ingest never reaches executemany (Arrow straight
+                    # to the driver, no decline fallback), so a declared
+                    # bind cap must not chunk or refuse there. The
+                    # mechanism is read for the transport actually in use.
+                    bindless_landing=(
+                        caps.bulk_mechanism("adbc" if self._adbc_only else "sqlalchemy")
+                        == "adbc_ingest"
+                    ),
                 )
                 await self._require_backend().execute_write(plan, prepared)
 
@@ -1578,6 +1633,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 run_id=run_id,
                 stream_id=stream_id,
                 batch_seq=batch_seq,
+                deadline_expired=_deadline_expired(deadline),
             )
         except Exception as e:
             # The transport (ADBC vs SQLAlchemy) decides which driver raised,
@@ -1593,27 +1649,73 @@ class GenericSQLConnector(BaseDestinationHandler):
             )
             return self._classify_unexpected_write_error(e)
 
+    def _declared_write_verdict(self, e: BaseException) -> BatchWriteResult | None:
+        """Ack *e* by the connector's declared taxonomy, or ``None`` if unclaimed.
+
+        The one declared-verdict lookup for the write path (issue #401),
+        shared by the unexpected-error ack and the driver-timeout branch of
+        :meth:`_timeout_failure`, so a declared fact means the same thing
+        wherever a driver error surfaces. Engine-typed failures never route
+        through here — the map classifies the driver's errors, not the
+        engine's own contracts.
+        """
+        if self._error_map is None:
+            return None
+        match = self._error_map.match_exception(e)
+        if match is None:
+            return None
+        status, category = DECLARED_WRITE_VERDICTS[match.category]
+        transport = "adbc" if self._adbc_only else "sqlalchemy"
+        logger.info(
+            "declared error_map classified the write failure: %s %s -> %s (%s)",
+            match.family,
+            match.identifier,
+            match.category,
+            type(e).__name__,
+        )
+        return BatchWriteResult(
+            status=status,
+            records_written=0,
+            failure_summary=(
+                f"{transport}: declared error_map "
+                f"{match.family}:{match.identifier} -> {match.category}: "
+                f"{type(e).__name__}: {e}"
+            ),
+            failure_category=category,
+        )
+
     def _classify_unexpected_write_error(self, e: Exception) -> BatchWriteResult:
         """Ack an exception the typed ladder did not claim.
 
-        Same intent, same verdict on both transports: the deterministic
-        PEP-249 classes (ProgrammingError, IntegrityError, DataError,
-        NotSupportedError) are fatal — broken rendered SQL, a duplicate
-        conflict key inside one source batch, or a constraint violation
-        cannot heal between retries against an identical request. The
-        ADBC backend already reclassifies them as
-        ``AdbcConfigurationError`` at its boundary (caught earlier in the
-        ladder); SQLAlchemy's wrapper exceptions carry the same class
-        names and are claimed here. Everything else stays retryable.
+        Declared map first (issue #401): a connector-declared ``error_map``
+        fact (SQLSTATE, vendor code, exception class) claims the failure
+        deterministically, and the engine-owned verdict table derives the
+        ack — connectors declare facts, never verdicts. Only an unclaimed
+        exception falls to the class-name heuristic, and that fallback is
+        logged: the deterministic PEP-249 classes (ProgrammingError,
+        IntegrityError, DataError, NotSupportedError) are fatal — broken
+        rendered SQL, a duplicate conflict key inside one source batch, or
+        a constraint violation cannot heal between retries against an
+        identical request. The ADBC backend already reclassifies them as
+        ``AdbcConfigurationError`` at its boundary when no declared fact
+        claims the failure (caught earlier in the ladder); SQLAlchemy's
+        wrapper exceptions carry the same class names and are claimed
+        here. Everything else stays retryable.
         """
+        declared = self._declared_write_verdict(e)
+        if declared is not None:
+            return declared
+        transport = "adbc" if self._adbc_only else "sqlalchemy"
+        logger.info(
+            "no declared error_map fact matched %s; falling back to the "
+            "class-name heuristic",
+            type(e).__name__,
+        )
         if _is_fatal_adbc_error(e):
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,
-                failure_summary=(
-                    f"{'adbc' if self._adbc_only else 'sqlalchemy'}: "
-                    f"{type(e).__name__}: {e}"
-                ),
+                failure_summary=(f"{transport}: " f"{type(e).__name__}: {e}"),
                 failure_category=FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
             )
         return BatchWriteResult(

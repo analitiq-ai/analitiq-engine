@@ -228,9 +228,9 @@ SHAPES = [True, False]
 
 
 def _caps(transactional: bool) -> SqlCapabilities:
-    # adbc_ingest is inert on the SQLAlchemy backend (its landing is
-    # executemany; the base bulk_land declines), and the AdbcBackend's
-    # declared native mechanism — one declaration, both backends.
+    # One declaration, both backends: adbc_ingest is the AdbcBackend's
+    # native mechanism, and the SQLAlchemy backend reads only its own
+    # transport's entry — undeclared here, so it lands via executemany.
     return SqlCapabilities.from_declaration(
         caps_block(
             bulk_load={"adbc": "adbc_ingest"},

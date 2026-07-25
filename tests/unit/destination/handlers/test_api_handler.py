@@ -14,7 +14,7 @@ import aiohttp
 import pyarrow as pa
 import pytest
 
-from cdk.types import RetrySemantics
+from cdk.types import FailureCategory, RetrySemantics
 from src.destination.connectors.api import (
     _API_WRITE_MODE_KEYS,
     ApiDestinationHandler,
@@ -168,7 +168,12 @@ class TestApiHandlerWriteBatchFailures:
         # Mock _write_single_mode to return (0, all-ids, reason) — every
         # record failed
         api_handler._write_single_mode = AsyncMock(
-            return_value=(0, list(sample_record_ids), "boom")
+            return_value=(
+                0,
+                list(sample_record_ids),
+                "boom",
+                FailureCategory.FAILURE_CATEGORY_UNSPECIFIED,
+            )
         )
 
         # Execute
@@ -210,7 +215,14 @@ class TestApiHandlerWriteBatchFailures:
 
         # Mock: 1 out of 3 records succeeded; the other two ids come back failed
         failed = list(sample_record_ids[1:])
-        api_handler._write_single_mode = AsyncMock(return_value=(1, failed, "boom"))
+        api_handler._write_single_mode = AsyncMock(
+            return_value=(
+                1,
+                failed,
+                "boom",
+                FailureCategory.FAILURE_CATEGORY_UNSPECIFIED,
+            )
+        )
 
         # Execute
         result = await api_handler.write_batch(
@@ -246,7 +258,9 @@ class TestApiHandlerWriteBatchFailures:
         api_handler._session = MagicMock()
 
         # Mock: all 3 records succeeded, none failed
-        api_handler._write_single_mode = AsyncMock(return_value=(3, [], ""))
+        api_handler._write_single_mode = AsyncMock(
+            return_value=(3, [], "", FailureCategory.FAILURE_CATEGORY_UNSPECIFIED)
+        )
 
         # Execute
         result = await api_handler.write_batch(
@@ -510,9 +524,12 @@ class TestApiHandlerWriteSingleMode:
         api_handler._send_request = mock_send_request
         state = api_handler._streams["test-stream"]
 
-        written, failed, first_failure = await api_handler._write_single_mode(
-            state, records, record_ids
-        )
+        (
+            written,
+            failed,
+            first_failure,
+            _category,
+        ) = await api_handler._write_single_mode(state, records, record_ids)
         # Loop continues past the FATAL 4xx; records 1 and 3 succeed.
         assert written == 2
         assert failed == ["rec-2"]
@@ -538,7 +555,7 @@ class TestApiHandlerWriteSingleMode:
         )
         state = api_handler._streams["test-stream"]
 
-        written, failed, _ = await api_handler._write_single_mode(
+        written, failed, _, _category = await api_handler._write_single_mode(
             state, records, record_ids
         )
         assert written == 0
@@ -652,7 +669,7 @@ class TestApiHandlerWriteSingleMode:
         state = api_handler._streams["test-stream"]
 
         # Execute
-        written, failed, _ = await api_handler._write_single_mode(
+        written, failed, _, _category = await api_handler._write_single_mode(
             state, records, record_ids
         )
 
@@ -715,7 +732,12 @@ class TestApiHandlerChunkedWrites:
 
         # Mock: 3 of 5 written; the unsent tail comes back as failed ids
         api_handler._write_chunked_mode = AsyncMock(
-            return_value=(3, ["rec-3", "rec-4"], "boom")
+            return_value=(
+                3,
+                ["rec-3", "rec-4"],
+                "boom",
+                FailureCategory.FAILURE_CATEGORY_UNSPECIFIED,
+            )
         )
 
         # Execute
@@ -761,9 +783,12 @@ class TestApiHandlerChunkedWrites:
         records = [{"id": i} for i in range(5)]
         record_ids = [f"r{i}" for i in range(5)]
 
-        written, failed, first_failure = await api_handler._write_chunked_mode(
-            state, records, record_ids
-        )
+        (
+            written,
+            failed,
+            first_failure,
+            _category,
+        ) = await api_handler._write_chunked_mode(state, records, record_ids)
         # First chunk (r0, r1) landed; everything from the failed chunk on fails.
         assert written == 2
         assert failed == ["r2", "r3", "r4"]
@@ -843,9 +868,12 @@ class TestApiHandlerChunkedWrites:
         records = [{"id": i} for i in range(6)]
         record_ids = [f"r{i}" for i in range(6)]
 
-        written, failed, first_failure = await api_handler._write_chunked_mode(
-            state, records, record_ids
-        )
+        (
+            written,
+            failed,
+            first_failure,
+            _category,
+        ) = await api_handler._write_chunked_mode(state, records, record_ids)
         # Chunk (r0,r1) landed; the build-failed chunk (r2,r3) stops the
         # loop, so (r4,r5) is never sent and the whole tail is attributed.
         assert written == 2
@@ -870,7 +898,12 @@ class TestApiHandlerChunkedWrites:
         api_handler._build_body = _build
         api_handler._send_request = AsyncMock(return_value={})
 
-        written, failed, first_failure = await api_handler._write_chunked_mode(
+        (
+            written,
+            failed,
+            first_failure,
+            _category,
+        ) = await api_handler._write_chunked_mode(
             state, [{"id": i} for i in range(4)], [f"r{i}" for i in range(4)]
         )
         assert written == 0
@@ -1855,9 +1888,12 @@ class TestApiHandlerDeterministic4xxClassification:
         records = [{"id": i} for i in range(4)]
         record_ids = [f"r{i}" for i in range(4)]
 
-        written, failed, first_failure = await api_handler._write_chunked_mode(
-            state, records, record_ids
-        )
+        (
+            written,
+            failed,
+            first_failure,
+            _category,
+        ) = await api_handler._write_chunked_mode(state, records, record_ids)
         assert written == 0
         assert failed == record_ids
         assert "400" in first_failure or "Bad Request" in first_failure
@@ -2197,7 +2233,7 @@ class TestApiHandlerBodySpec:
             return {}
 
         handler._send_request = _capture  # type: ignore[assignment]
-        written, failed, _ = await handler._write_single_mode(
+        written, failed, _, _category = await handler._write_single_mode(
             state, [{"id": 1}, {"id": 2}], ["r1", "r2"]
         )
         assert written == 2
@@ -2223,7 +2259,7 @@ class TestApiHandlerBodySpec:
             return {}
 
         handler._send_request = _capture  # type: ignore[assignment]
-        written, failed, _ = await handler._write_chunked_mode(
+        written, failed, _, _category = await handler._write_chunked_mode(
             state, [{"id": 1}, {"id": 2}], ["r1", "r2"]
         )
         assert written == 2
@@ -2246,7 +2282,7 @@ class TestApiHandlerBodySpec:
             return {}
 
         handler._send_request = _capture  # type: ignore[assignment]
-        written, failed, _ = await handler._write_chunked_mode(
+        written, failed, _, _category = await handler._write_chunked_mode(
             state, [{"id": 1}, {"id": 2}, {"id": 3}], ["r1", "r2", "r3"]
         )
         assert written == 3
@@ -2539,7 +2575,7 @@ class TestApiHandlerIdempotencyInjection:
             return {}
 
         handler._send_request = _capture  # type: ignore[assignment]
-        written, failed, _ = await handler._write_single_mode(
+        written, failed, _, _category = await handler._write_single_mode(
             state, [{"id": 1}, {"id": 2}], ["r1", "r2"]
         )
         assert (written, failed) == (2, [])
@@ -2560,7 +2596,7 @@ class TestApiHandlerIdempotencyInjection:
             return {}
 
         handler._send_request = _capture  # type: ignore[assignment]
-        written, failed, _ = await handler._write_single_mode(
+        written, failed, _, _category = await handler._write_single_mode(
             state, [{"id": 1}], ["r1"]
         )
         assert (written, failed) == (1, [])
@@ -2590,7 +2626,7 @@ class TestApiHandlerIdempotencyInjection:
             return {}
 
         handler._send_request = _capture  # type: ignore[assignment]
-        written, failed, _ = await handler._write_single_mode(
+        written, failed, _, _category = await handler._write_single_mode(
             state,
             [{"id": 1, "idempotency_key": "mine"}, {"id": 2}],
             ["r1", "r2"],
