@@ -51,12 +51,6 @@ streaming = ["pyarrow", "aiohttp"]
 # `pytest --pyargs cdk.conformance.tier1 --connector-dir .`
 conformance = ["pytest", "pyarrow"]
 
-# Registers the conformance suite's pytest options (--connector-dir,
-# --connector-class, --live-connection) wherever this package is installed.
-# The plugin only adds options; it collects nothing on its own.
-[tool.poetry.plugins."pytest11"]
-analitiq_conformance = "cdk.conformance.plugin"
-
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"

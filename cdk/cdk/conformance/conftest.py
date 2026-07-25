@@ -3,9 +3,9 @@
 Loaded automatically when the suite is collected via
 ``pytest --pyargs cdk.conformance...`` (pytest picks up the package's
 own conftest). The command-line options live in
-:mod:`cdk.conformance.plugin` (auto-registered where ``analitiq-cdk``
-is pip-installed); every option doubles as an environment variable so
-the suite runs even where the plugin is not loaded:
+:mod:`cdk.conformance.plugin`, loaded explicitly with
+``-p cdk.conformance.plugin``; every option doubles as an environment
+variable so a plugin-less run works identically:
 ``--connector-dir`` / ``ANALITIQ_CONNECTOR_DIR``, ``--connector-class``
 / ``ANALITIQ_CONNECTOR_CLASS``, ``--live-connection`` /
 ``ANALITIQ_LIVE_CONNECTION``.

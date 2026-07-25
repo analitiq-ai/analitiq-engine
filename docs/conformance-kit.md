@@ -50,9 +50,9 @@ incremental resume through `read_batches`, and replay — each phase on a
 fresh connector instance over a fresh connection, so every test also
 certifies a restart. A replayed batch must leave the target unchanged
 for the exactly-once modes. For a connector declaring a bulk mechanism,
-the same batch is landed once through `bulk_land` and once through the
-executemany fallback (a suite-side dialect that declines), and the two
-targets must be identical — landing is a pure speed slot, certified
+the same batch is landed once through the declared mechanism and once
+through executemany (a probe whose declaration is doctored to no bulk),
+and the two targets must be identical — landing is a pure speed slot, certified
 where it can actually execute (native bulk protocols cannot run against
 generic fakes, so this assertion lives in the live tier, not the
 contract tier).
@@ -67,9 +67,12 @@ The suite needs three inputs: the connector checkout
 (`--connector-dir`, holding `definition/connector.json`), the connector
 class (resolved from the installed package's entry points; overridable
 with `--connector-class package.module:Class`), and — for tier 2 — a
-live connection document (`--live-connection`). Each option doubles as
-an environment variable (`ANALITIQ_CONNECTOR_DIR`,
-`ANALITIQ_CONNECTOR_CLASS`, `ANALITIQ_LIVE_CONNECTION`).
+live connection document (`--live-connection`). The flags come from an
+options plugin loaded explicitly (`-p cdk.conformance.plugin` — it is
+deliberately not a `pytest11` entry point, so installing the CDK never
+changes unrelated pytest runs); each option doubles as an environment
+variable (`ANALITIQ_CONNECTOR_DIR`, `ANALITIQ_CONNECTOR_CLASS`,
+`ANALITIQ_LIVE_CONNECTION`), so a plugin-less run works identically.
 
 The live connection document is a saved-connection-shaped JSON whose
 secrets come through the standard `secret_refs` schemes (`env:` /
@@ -116,13 +119,16 @@ jobs:
           pip install "analitiq-cdk[conformance] @ git+https://github.com/analitiq-ai/analitiq-core.git@<pinned-tag>#subdirectory=cdk"
           pip install .
       - name: Tier 1 (contract)
-        run: pytest --pyargs cdk.conformance.tier1 --connector-dir .
+        run: >-
+          pytest -p cdk.conformance.plugin
+          --pyargs cdk.conformance.tier1 --connector-dir .
       - name: Tier 2 (live)
         env:
           CONFORMANCE_DB_PASSWORD: conformance
           ANALITIQ_CONFORMANCE_REQUIRE_LIVE: "1"
         run: >-
-          pytest --pyargs cdk.conformance.tier2 --connector-dir .
+          pytest -p cdk.conformance.plugin
+          --pyargs cdk.conformance.tier2 --connector-dir .
           --live-connection ci/live-connection.json
 ```
 

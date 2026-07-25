@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -29,7 +28,7 @@ from cdk.conformance.roundtrip import probe_canonicals, render_probe
 from cdk.conformance.target import ConformanceTarget
 from cdk.type_map.exceptions import UnmappedTypeError
 
-from .kit_runner import REFERENCE_CLASS, REFERENCE_DIR, REPO_ROOT, run_kit_suite
+from .kit_runner import REFERENCE_CLASS, REFERENCE_DIR, run_kit_suite
 
 #: The tier-1 suite currently ships 22 tests for a full write-capable
 #: target; a floor well above zero guards against the suite silently
@@ -120,36 +119,6 @@ class TestThinConnectorPassesVacuously:
         assert target.connector_class is not None, "thin path falls back"
         assert check_override_surface(target) == []
         assert check_declaration_consistency(target) == []
-
-
-class TestPluginImportStaysLight:
-    """The pytest11 entry point must not require the optional extras."""
-
-    def test_plugin_import_pulls_no_heavy_dependencies(self) -> None:
-        """Pytest imports the plugin at startup in every env with the core
-        CDK installed; the import must not reach pyarrow or the SQL
-        surface, or a core-only consumer's pytest runs crash before
-        collection."""
-        probe = (
-            "import sys\n"
-            "import cdk.conformance.plugin\n"
-            "heavy = [m for m in ('pyarrow', 'cdk.sql.generic', "
-            "'cdk.sql.dialects') if m in sys.modules]\n"
-            "assert not heavy, f'plugin import loaded {heavy}'\n"
-        )
-        completed = subprocess.run(
-            [sys.executable, "-c", probe],
-            cwd=REPO_ROOT,
-            env={"PYTHONPATH": str(REPO_ROOT / "cdk")},
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-        )
-        assert completed.returncode == 0, (
-            f"importing the pytest plugin dragged in optional dependencies:"
-            f"\n{completed.stdout}{completed.stderr}"
-        )
 
 
 class TestSuiteInvocation:

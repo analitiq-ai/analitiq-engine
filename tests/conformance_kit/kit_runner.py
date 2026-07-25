@@ -27,10 +27,9 @@ def run_kit_suite(
 ) -> subprocess.CompletedProcess[str]:
     """Run one kit suite (``cdk.conformance.tier1`` / ``tier2``) end to end.
 
-    ``load_plugin`` mirrors the two consumer situations: a connector repo
-    with the package pip-installed gets the options plugin via its entry
-    point (here loaded explicitly with ``-p``); a plugin-less run
-    configures the suite purely through environment variables.
+    ``load_plugin`` mirrors the two consumer invocations: flags via the
+    explicitly loaded options plugin (``-p cdk.conformance.plugin``), or
+    a plugin-less run configured purely through environment variables.
     """
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(

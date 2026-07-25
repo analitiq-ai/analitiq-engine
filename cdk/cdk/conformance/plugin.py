@@ -2,11 +2,12 @@
 
 Options must exist before argument parsing, which a package conftest
 loaded via ``--pyargs`` is too late for — so they live in this plugin,
-auto-registered through the ``pytest11`` entry point wherever
-``analitiq-cdk`` is pip-installed (every connector repo). An in-tree
-consumer without the entry point loads it explicitly
-(``-p cdk.conformance.plugin``) or configures the suite through the
-environment variables the fixtures fall back to.
+loaded explicitly by the invocation that wants flags
+(``pytest -p cdk.conformance.plugin --pyargs cdk.conformance.tier1``).
+A run configured purely through the environment variables the fixtures
+read needs no plugin at all. Deliberately not a ``pytest11`` entry
+point: auto-loading into every pytest run of every environment that
+merely installs the core CDK is a side effect nobody asked for.
 """
 
 from __future__ import annotations

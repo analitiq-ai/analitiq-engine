@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-import sqlalchemy
+from sqlalchemy.util import await_only
 
 from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.generic import GenericSQLConnector
@@ -69,26 +69,25 @@ class ReferencePostgresDialect(SqlDialect):
         *,
         runtime: Any,
     ) -> bool:
-        """Land the batch through the declared bulk mechanism.
+        """Land the batch through PostgreSQL's COPY protocol — the
+        mechanism the connector declares.
 
-        The fixture's mechanism is a single multi-row text INSERT on the
-        transport connection — the COPY wire protocol itself would add
-        driver plumbing without adding anything the kit certifies (the
-        contract is that the mechanism's landed contents equal the
-        executemany fallback's, which tier 2 compares).
+        ``conn`` is the sync-facing SQLAlchemy ``Connection`` the
+        backend runs the stage cycle on; ``driver_connection`` is the
+        underlying asyncpg connection (SQLAlchemy 2.0 public API), and
+        ``await_only`` is the sanctioned dialect-author bridge for
+        driving its coroutines from inside the greenlet context the
+        cycle already runs in. COPY lands on the same session that
+        created the temp-scope stage, so visibility holds.
         """
-        rows = batch.to_pylist()
-        if not rows:
-            return False
         columns = list(batch.schema.names)
-        column_list = ", ".join(self.quote_ident(c) for c in columns)
-        placeholders = ", ".join(f":{c}" for c in columns)
-        # Identifiers are dialect-quoted; values bind as parameters.
-        statement = sqlalchemy.text(
-            f"INSERT INTO {self.quote_table(stage)} "  # nosec B608
-            f"({column_list}) VALUES ({placeholders})"
+        records = [tuple(row[c] for c in columns) for row in batch.to_pylist()]
+        driver_connection = conn.connection.driver_connection
+        await_only(
+            driver_connection.copy_records_to_table(
+                stage.table, records=records, columns=columns
+            )
         )
-        conn.execute(statement, rows)
         return True
 
     def schema_is_implicit_default(self, schema_name: str) -> bool:
