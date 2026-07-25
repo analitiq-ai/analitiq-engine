@@ -395,3 +395,51 @@ class TestConnectionContractValidation:
             connector_definition={"connector_id": "demo"},
         )
         runtime._validate_connection_contract({})  # no raise
+
+
+class TestDriverDerivation:
+    """``ConnectionRuntime.driver`` derives through the merged transports."""
+
+    def test_driver_supplied_via_transport_defaults_derives(self):
+        """Defaults-supplied fields must derive exactly as they materialize.
+
+        The materialization path merges ``transport_defaults`` before
+        resolving a transport; the pre-materialization derivation reads
+        through the same merged view, so a connector supplying driver or
+        transport_type through defaults cannot derive as driverless.
+        """
+        runtime = ConnectionRuntime(
+            raw_config={"parameters": {}},
+            connection_id="c1",
+            connector_id="demo",
+            connector_type="database",
+            resolver=_resolver({}),
+            connector_definition={
+                "connector_id": "demo",
+                "default_transport": "sqlalchemy",
+                "transport_defaults": {
+                    "transport_type": "sqlalchemy",
+                    "driver": "postgresql+asyncpg",
+                },
+                "transports": {"sqlalchemy": {"dsn": {"kind": "url_template"}}},
+            },
+        )
+        assert runtime.driver == "postgresql"
+
+    def test_block_fields_override_defaults(self):
+        runtime = ConnectionRuntime(
+            raw_config={"parameters": {}},
+            connection_id="c1",
+            connector_id="demo",
+            connector_type="database",
+            resolver=_resolver({}),
+            connector_definition={
+                "connector_id": "demo",
+                "default_transport": "adbc",
+                "transport_defaults": {"driver": "postgresql+asyncpg"},
+                "transports": {
+                    "adbc": {"transport_type": "adbc", "driver": "snowflake"}
+                },
+            },
+        )
+        assert runtime.driver == "snowflake"

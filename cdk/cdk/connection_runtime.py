@@ -50,6 +50,7 @@ from cdk.transport_factory import (
     SqlAlchemyTransport,
     build_transport,
     build_transport_from_spec,
+    merged_transports,
     resolve_transport_spec,
 )
 from cdk.type_map import InvalidTypeMapError, TypeMapper, UnmappedTypeError
@@ -77,7 +78,7 @@ def _derive_dialect(connector_definition: Mapping[str, Any] | None) -> str | Non
     """
     if not connector_definition:
         return None
-    transports = connector_definition.get("transports") or {}
+    transports = merged_transports(connector_definition)
     default_ref = connector_definition.get("default_transport")
     if not default_ref or default_ref not in transports:
         return None

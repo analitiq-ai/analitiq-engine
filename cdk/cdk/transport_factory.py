@@ -270,6 +270,27 @@ def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[st
     return out
 
 
+def merged_transports(connector: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return every transport block with ``transport_defaults`` deep-merged.
+
+    The one place ``transport_defaults`` is applied: transport selection
+    (:func:`_select_transport`), the pre-materialization driver
+    derivation (``ConnectionRuntime.driver``), and the conformance
+    suite's transport view all read through this function, so no
+    consumer can disagree about what a block declares. Non-object
+    entries are dropped — they cannot describe a transport.
+    """
+    transports = connector.get("transports") or {}
+    defaults = connector.get("transport_defaults") or {}
+    if not isinstance(defaults, Mapping):
+        defaults = {}
+    return {
+        ref: _deep_merge(defaults, block)
+        for ref, block in transports.items()
+        if isinstance(block, Mapping)
+    }
+
+
 def _select_transport(
     connector: Mapping[str, Any], transport_ref: str | None
 ) -> tuple[str, Mapping[str, Any]]:
@@ -291,8 +312,7 @@ def _select_transport(
             f"Connector {connector.get('connector_id')!r}: transport {ref!r} not in "
             f"declared transports {sorted(transports)}"
         )
-    defaults = connector.get("transport_defaults") or {}
-    merged = _deep_merge(defaults, transports[ref])
+    merged = merged_transports(connector)[ref]
     return ref, merged
 
 

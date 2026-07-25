@@ -25,6 +25,7 @@ from cdk.sql.capabilities import (
 )
 from cdk.sql.dialects import SqlDialect
 from cdk.sql.generic import GenericSQLConnector
+from cdk.transport_factory import merged_transports
 from cdk.type_map.exceptions import InvalidTypeMapError
 from cdk.type_map.loader import build_type_mapper, read_raw_type_maps
 from cdk.type_map.mapper import TypeMapper
@@ -63,23 +64,12 @@ class ConformanceTarget:
     def declared_transports(self) -> dict[str, dict[str, Any]]:
         """Return transport blocks with ``transport_defaults`` merged.
 
-        The engine merges defaults before resolving a transport, so every
-        kit site reading ``transport_type``/``driver`` consumes this view;
-        reading raw blocks would false-fail a connector supplying those
-        fields through defaults. Shallow merge: the fields the kit reads
-        are top-level scalars.
+        Delegates to the engine's own
+        :func:`~cdk.transport_factory.merged_transports` — the one place
+        defaults are applied — so what the kit reads and what the engine
+        materializes are the same blocks by construction.
         """
-        transports = self.definition.get("transports") or {}
-        defaults = self.definition.get("transport_defaults") or {}
-        merged: dict[str, dict[str, Any]] = {}
-        for ref, block in transports.items():
-            if not isinstance(block, dict):
-                continue
-            if isinstance(defaults, dict) and defaults:
-                merged[ref] = {**defaults, **block}
-            else:
-                merged[ref] = dict(block)
-        return merged
+        return merged_transports(self.definition)
 
     @property
     def has_write_map(self) -> bool:
