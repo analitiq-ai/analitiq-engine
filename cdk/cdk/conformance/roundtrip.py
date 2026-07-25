@@ -34,7 +34,7 @@ exactly the vocabulary the contract defines and can never drift from it.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from cdk.sql.dialects import SqlDialect
 from cdk.type_map.exceptions import InvalidTypeMapError, UnmappedTypeError
@@ -141,7 +141,9 @@ def _foreign_literal_violations(mapper: TypeMapper) -> list[Violation]:
     """
     violations: list[Violation] = []
     seen: set[str] = set()
-    directions = [("read", rule) for rule in mapper.rules if rule.match == "exact"]
+    directions: list[tuple[str, Any]] = [
+        ("read", rule) for rule in mapper.rules if rule.match == "exact"
+    ]
     directions += [
         ("write", rule) for rule in mapper.write_rules if rule.match == "exact"
     ]
