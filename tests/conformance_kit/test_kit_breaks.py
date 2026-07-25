@@ -429,6 +429,38 @@ class TestDunderBreaks:
         )
         assert "__init__" in _messages(violations)
 
+    def test_async_hook_override_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A coroutine hook would hand the CDK an unawaited coroutine."""
+        violations = check_override_surface(
+            _with_connector(reference_target, _AsyncHookConnector)
+        )
+        report = _messages(violations)
+        assert "session_init_sql" in report
+        assert "async" in report
+
+
+class TestTargetKindGate:
+    def test_unrecognized_kind_fails_setup(self, tmp_path: Any) -> None:
+        """A typo'd kind must fail loudly, never skip every check."""
+        definition_dir = tmp_path / "definition"
+        definition_dir.mkdir()
+        (definition_dir / "connector.json").write_text(
+            '{"kind": "databse", "connector_id": "conformance-typo"}'
+        )
+        with pytest.raises(ConformanceSetupError, match="databse"):
+            load_target(tmp_path)
+
+
+class _AsyncHookDialect(ReferencePostgresDialect):
+    async def session_init_sql(self) -> list[str]:  # type: ignore[override]
+        return []
+
+
+class _AsyncHookConnector(GenericSQLConnector):
+    dialect_class = _AsyncHookDialect
+
 
 class TestGateInversionBreaks:
     """A defect must never disable the gate that would have caught it."""

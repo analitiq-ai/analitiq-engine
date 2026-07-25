@@ -192,6 +192,12 @@ def _hook_shape_problem(klass: type, name: str) -> str | None:
         )
     base_fn = inspect.unwrap(getattr(SqlDialect, name))
     override_fn = getattr(klass, name)
+    if inspect.iscoroutinefunction(inspect.unwrap(override_fn)):
+        return (
+            f"{klass.__name__}.{name} is declared async; the CDK calls "
+            f"every dialect hook synchronously and would receive an "
+            f"unawaited coroutine instead of the hook's result."
+        )
     mismatch = _signature_mismatch(
         base_fn,
         override_fn,
