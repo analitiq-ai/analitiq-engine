@@ -40,6 +40,7 @@ from cdk.sql.dialects import SqlDialect
 from cdk.type_map.exceptions import InvalidTypeMapError, UnmappedTypeError
 from cdk.type_map.grammar import (
     ARROW_TYPE_GRAMMAR,
+    STRUCTURAL_FAMILIES,
     UNIT_LONG_TO_SHORT,
     IntParam,
     TimezoneParam,
@@ -113,19 +114,76 @@ def _grammar_exemplars() -> list[str]:
     return exemplars
 
 
+def _canonical_family(spelling: str) -> str:
+    """Return the family name of a canonical spelling (before arguments)."""
+    for separator in ("(", "<"):
+        index = spelling.find(separator)
+        if index != -1:
+            spelling = spelling[:index]
+    return spelling.strip()
+
+
+def _in_published_grammar(spelling: str) -> bool:
+    """Whether a canonical literal's family exists in the published grammar."""
+    family = _canonical_family(spelling)
+    return family in ARROW_TYPE_GRAMMAR or family in STRUCTURAL_FAMILIES
+
+
+def _foreign_literal_violations(mapper: TypeMapper) -> list[Violation]:
+    """Flag exact-rule canonicals whose family the grammar does not define.
+
+    The rule loaders are string-level and accept any spelling, but a
+    canonical outside the published grammar can never appear in an
+    endpoint document — the rule is unreachable by construction. Left
+    uncaught, such a literal would also count toward probe coverage (it
+    trivially round-trips with itself), letting a write map that cannot
+    render any real canonical read as covered.
+    """
+    violations: list[Violation] = []
+    seen: set[str] = set()
+    directions = [("read", rule) for rule in mapper.rules if rule.match == "exact"]
+    directions += [
+        ("write", rule) for rule in mapper.write_rules if rule.match == "exact"
+    ]
+    for direction, rule in directions:
+        if "${" in rule.canonical or _in_published_grammar(rule.canonical):
+            continue
+        normalized = normalize_canonical_type(rule.canonical)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        violations.append(
+            Violation(
+                CHECK_COVERAGE,
+                f"{direction} rule declares canonical {rule.canonical!r}, "
+                f"whose family {_canonical_family(rule.canonical)!r} is not "
+                f"in the published grammar; no endpoint document can ever "
+                f"produce it, so the rule is unreachable and does not count "
+                f"as coverage.",
+            )
+        )
+    return violations
+
+
 def _rule_exemplars(mapper: TypeMapper) -> list[str]:
     """Concrete canonicals named by the connector's own rules.
 
     Exact rules carry a literal canonical on both directions; regex
     rules carry templates and are probed through the grammar exemplars
-    instead.
+    instead. Literals outside the published grammar are excluded — they
+    are reported as violations, and letting them probe would count
+    self-round-tripping garbage toward coverage.
     """
     exemplars: list[str] = []
     for read_rule in mapper.rules:
-        if read_rule.match == "exact" and "${" not in read_rule.canonical:
+        if (
+            read_rule.match == "exact"
+            and "${" not in read_rule.canonical
+            and _in_published_grammar(read_rule.canonical)
+        ):
             exemplars.append(read_rule.canonical)
     for write_rule in mapper.write_rules:
-        if write_rule.match == "exact":
+        if write_rule.match == "exact" and _in_published_grammar(write_rule.canonical):
             exemplars.append(write_rule.canonical)
     return exemplars
 
@@ -233,7 +291,8 @@ def check_type_map_round_trip(
     if not mapper.has_write_map:
         return []
     probes = probe_canonicals(mapper)
-    violations: list[Violation] = _misnormalized_write_rules(mapper, probes)
+    violations: list[Violation] = _foreign_literal_violations(mapper)
+    violations += _misnormalized_write_rules(mapper, probes)
     rendered = 0
     for canonical in probes:
         try:

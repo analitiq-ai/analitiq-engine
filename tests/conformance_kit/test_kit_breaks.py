@@ -503,6 +503,26 @@ class TestGateInversionBreaks:
 
 
 class TestTypeMapBreaks:
+    def test_foreign_canonical_literal_fails_and_never_counts(self) -> None:
+        """A made-up canonical must be a violation, not self-certifying.
+
+        An exact rule pair Foo <-> TEXT round-trips with itself and
+        previously counted toward probe coverage, certifying a write map
+        that cannot render any canonical an endpoint document can carry.
+        """
+        mapper = build_type_mapper(
+            "foreign-literal",
+            [{"match": "exact", "native": "TEXT", "canonical": "Foo"}],
+            [{"match": "exact", "canonical": "Foo", "native": "TEXT"}],
+        )
+        violations = check_type_map_round_trip(mapper)
+        report = _messages(violations)
+        assert "Foo" in report
+        assert "published grammar" in report
+        assert (
+            "rendered none" in report
+        ), f"the foreign literal must not count toward coverage: {report}"
+
     def test_zero_probe_coverage_fails(self) -> None:
         """A write map rendering no probe must not read as fully certified."""
         mapper = build_type_mapper(
