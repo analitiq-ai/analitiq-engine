@@ -48,7 +48,7 @@ from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.exceptions import TransportSpecError, UnresolvedValueError
 from cdk.rate_limiter import RateLimiter
 from cdk.resolver import ResolutionContext, Resolver
-from cdk.sql.dialects import SqlDialect
+from cdk.sql.dialects import dialect_overrides
 
 logger = logging.getLogger(__name__)
 
@@ -422,7 +422,7 @@ def _attach_tls_verification(engine: Engine, sql_dialect: Any, mode: str) -> Non
     ``sync_engine`` facade; the event fires inside the greenlet bridge, so
     the dialect's DBAPI cursor calls work on the adapted connection.
     """
-    if type(sql_dialect).verify_tls_state is SqlDialect.verify_tls_state:
+    if not dialect_overrides(type(sql_dialect), "verify_tls_state"):
         # Armed-but-vacuous must be greppable: with the inherited no-op the
         # declared mode is only as strong as the driver's own connect-arg
         # enforcement, which some drivers silently skip.

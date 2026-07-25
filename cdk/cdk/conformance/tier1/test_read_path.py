@@ -24,12 +24,9 @@ from cdk.conformance.skips import require_database, require_dialect
 from cdk.conformance.target import ConformanceTarget
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.query_builder import QueryBuilder, QueryConfig
+from cdk.sql.capabilities import SQL_TRANSPORT_TYPES
 from cdk.sql.dialects import SqlDialect
-
-#: The SQL transport types the engine reads through; anything else in
-#: the transports block (an http transport on a hybrid connector) does
-#: not carry database reads.
-_SQL_TRANSPORT_TYPES = ("sqlalchemy", "adbc")
+from cdk.sql.generic import read_query_builder
 
 
 def _declared_driver(target: ConformanceTarget) -> str:
@@ -80,7 +77,7 @@ def _declared_sql_transports(target: ConformanceTarget) -> list[tuple[str, str]]
     declared: list[tuple[str, str]] = []
     for ref, block in target.declared_transports().items():
         transport_type = block.get("transport_type")
-        if transport_type not in _SQL_TRANSPORT_TYPES:
+        if transport_type not in SQL_TRANSPORT_TYPES:
             continue
         raw_driver = block.get("driver")
         if not isinstance(raw_driver, str) or not raw_driver:
@@ -105,26 +102,12 @@ def _query_builder(
 ) -> QueryBuilder:
     """Build the read-path query builder exactly as the engine does.
 
-    Mirrors ``GenericSQLConnector``'s two construction sites: the
-    SQLAlchemy read (native binding plus the paging fallback hook) and
-    the ADBC-only read (forced qmark, quoted identifiers, inline
-    paging). Probing any other shape would certify SQL the engine never
-    executes.
+    Calls the engine's own :func:`~cdk.sql.generic.read_query_builder`
+    — the single construction both read flavors use — so the shape the
+    suite certifies and the shape the engine executes cannot drift.
     """
     try:
-        if transport_type == "adbc":
-            return QueryBuilder(
-                driver,
-                paramstyle="qmark",
-                registry_name=dialect.sqlalchemy_registry_name,
-                quote_identifiers=True,
-                inline_paging=True,
-            )
-        return QueryBuilder(
-            driver,
-            registry_name=dialect.sqlalchemy_registry_name,
-            paging_order_fallback=dialect.paging_order_fallback,
-        )
+        return read_query_builder(dialect, driver, adbc_only=transport_type == "adbc")
     except Exception as err:  # noqa: BLE001 - reported as a conformance failure
         pytest.fail(
             f"QueryBuilder cannot resolve a SQLAlchemy dialect for driver "

@@ -21,7 +21,7 @@ from cdk.conformance.skips import (
 from cdk.conformance.target import ConformanceTarget
 from cdk.sql.backend import StageWritePlan
 from cdk.sql.capabilities import SqlCapabilities
-from cdk.sql.dialects import SqlDialect, TableAddress
+from cdk.sql.dialects import SqlDialect, TableAddress, dialect_overrides
 from cdk.sql.exceptions import CatalogAddressingError, SchemaConfigurationError
 from cdk.sql.generic import GenericSQLConnector
 from cdk.sql.write_plan import build_stage_write_plan
@@ -79,8 +79,8 @@ def _require_merge_rendering(
     dialect, caps = require_stage_rendering(target)
     if caps.merge_form == "none":
         pytest.skip("connector declares merge_form 'none'; no upsert to render")
-    if (
-        type(dialect).merge_statement_sql is SqlDialect.merge_statement_sql
+    if not dialect_overrides(
+        type(dialect), "merge_statement_sql"
     ):  # pragma: no cover - reported by the declaration check
         pytest.skip(
             "merge_statement_sql not implemented; reported by the "

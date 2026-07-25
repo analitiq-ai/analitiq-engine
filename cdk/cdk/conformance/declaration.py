@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cdk.sql.capabilities import DIALECT_IMPLEMENTED_BULK_MECHANISMS, SqlCapabilities
-from cdk.sql.dialects import SqlDialect
+from cdk.sql.dialects import dialect_overrides
 
 from .violations import Violation
 
@@ -37,16 +37,6 @@ def declared_transport_types(target: ConformanceTarget) -> set[str]:
         for block in target.declared_transports().values()
         if block.get("transport_type")
     }
-
-
-def dialect_overrides(dialect_cls: type, hook: str) -> bool:
-    """Whether *dialect_cls* replaces the base definition of *hook*.
-
-    The same identity test the facade's handshake gates use
-    (``type(dialect).hook is not SqlDialect.hook``), so the suite and
-    the runtime can never disagree about what counts as implemented.
-    """
-    return getattr(dialect_cls, hook) is not getattr(SqlDialect, hook)
 
 
 def _write_signals(target: ConformanceTarget) -> list[str]:

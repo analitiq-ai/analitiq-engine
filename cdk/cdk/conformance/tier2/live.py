@@ -26,6 +26,7 @@ connection carries it (``secret_refs`` included; ``env:`` / ``file:`` /
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import json
 import uuid
@@ -39,7 +40,7 @@ import pytest
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.secrets.resolvers.scheme import SchemeSecretsResolver
-from cdk.sql.dialects import SqlDialect
+from cdk.sql.execution import execute_ddl
 from cdk.sql.generic import GenericSQLConnector
 from cdk.types import BatchWriteResult, Cursor, SchemaSpec, WriteMode
 
@@ -122,7 +123,12 @@ class LiveHarness:
 
     @property
     def document(self) -> dict[str, Any]:
-        """Return the parsed live connection document, re-read per access."""
+        """Return the live connection document, parsed fresh per access.
+
+        Fresh so every phase's runtime owns an independent config tree —
+        one phase scrubbing or mutating its resolved state can never
+        leak into the next phase's connection.
+        """
         document: dict[str, Any] = json.loads(self.document_path.read_text())
         return document
 
@@ -169,7 +175,7 @@ class LiveHarness:
             raise ConformanceSetupError(
                 "executemany_forced needs declared sql_capabilities"
             )
-        definition = json.loads(json.dumps(self.target.definition))
+        definition = copy.deepcopy(self.target.definition)
         definition["sql_capabilities"]["bulk_load"] = {}
         return LiveHarness(
             target=dataclasses.replace(
@@ -302,31 +308,9 @@ class LiveHarness:
         runtime = self.runtime()
         try:
             await runtime.materialize(sql_dialect=dialect)
-            await _run_statement(runtime, statement)
+            await execute_ddl(runtime, statement)
         finally:
             await runtime.close()
-
-
-async def _run_statement(runtime: ConnectionRuntime, statement: str) -> None:
-    """Execute one committed statement on whichever transport materialized."""
-    if runtime.is_adbc:
-        connection = runtime.open_adbc_connection()
-        try:
-            cursor = connection.cursor()
-            try:
-                cursor.execute(statement)
-            finally:
-                cursor.close()
-            connection.commit()
-        finally:
-            connection.close()
-        return
-    if runtime.is_sync_sqlalchemy:
-        with runtime.sync_engine.begin() as connection:
-            connection.exec_driver_sql(statement)
-        return
-    async with runtime.engine.begin() as connection:
-        await connection.exec_driver_sql(statement)
 
 
 def expect_success(results: list[BatchWriteResult], context: str) -> None:
@@ -347,10 +331,3 @@ def by_id(rows: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
         assert row_id not in indexed, f"duplicate id {row_id} in {rows!r}"
         indexed[row_id] = row
     return indexed
-
-
-def dialect_of(harness: LiveHarness) -> SqlDialect:
-    """Return the harness target's dialect (present by construction)."""
-    dialect = harness.target.dialect
-    assert dialect is not None
-    return dialect

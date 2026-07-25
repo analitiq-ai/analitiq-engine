@@ -615,3 +615,15 @@ class SqlDialect:
             params.append(catalog)
         sql += " ORDER BY kcu.ordinal_position"
         return sql, params
+
+
+def dialect_overrides(dialect_cls: type[SqlDialect], hook: str) -> bool:
+    """Return whether *dialect_cls* replaces the base definition of *hook*.
+
+    The one identity test for "does this dialect implement the hook".
+    Every consumer — the facade's handshake gates, the transport
+    factory's TLS-probe armed check, and the conformance suite — calls
+    this function, so no two consumers can drift on what counts as
+    implemented.
+    """
+    return getattr(dialect_cls, hook) is not getattr(SqlDialect, hook)

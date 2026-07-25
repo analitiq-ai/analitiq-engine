@@ -12,9 +12,8 @@ from __future__ import annotations
 import pytest
 
 from cdk.sql.capabilities import SqlCapabilities
-from cdk.sql.dialects import SqlDialect
+from cdk.sql.dialects import SqlDialect, dialect_overrides
 
-from .declaration import dialect_overrides
 from .target import ConformanceTarget
 
 
