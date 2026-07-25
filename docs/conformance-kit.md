@@ -14,7 +14,8 @@ in a customer pipeline (issue #391; ADR
 
 - **Rendering matches declaration.** The stage DDL carries the
   temporary form iff `sql_capabilities.stage.scope` is `temp`; the
-  upsert statement carries exactly the declared `merge_form`; the
+  upsert statement carries exactly the declared `merge_form` and states
+  the stream's `conflict_keys` where that form names its match keys; the
   target-emptying statement is DELETE-shaped, never `TRUNCATE`;
   identical batches build identical plans (self-healing retries) and
   distinct batches never share a stage name.
@@ -34,6 +35,10 @@ in a customer pipeline (issue #391; ADR
   needs a declared `bulk_load` mechanism; a write-capable connector
   (one shipping `type-map-write.json`) needs `sql_capabilities` and
   `stage_table_sql`.
+- **Canonical types are in the published grammar.** Every literal
+  canonical a rule names must belong to a family the engine can parse —
+  checked for read rules whether or not the connector ships a write map,
+  since a source-only connector still emits canonicals from discovery.
 - **Type maps are round-trip stable.** Every native type the write map
   renders must be readable by the read map (a table the connector
   creates stays discoverable), and one write/read round must reach a
@@ -145,7 +150,8 @@ variable can never silently retire the live tier while CI stays green.
 
 The checks are also plain importable functions
 (`cdk.conformance.check_override_surface`,
-`check_declaration_consistency`, `check_type_map_round_trip`) for repos
+`check_declaration_consistency`, `check_type_map_grammar`,
+`check_type_map_round_trip`) for repos
 that want them inside their own harness.
 
 ## How the kit itself is certified

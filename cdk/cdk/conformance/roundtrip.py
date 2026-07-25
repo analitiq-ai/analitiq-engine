@@ -131,20 +131,26 @@ def _in_published_grammar(spelling: str) -> bool:
 
 
 def _foreign_literal_violations(mapper: TypeMapper) -> list[Violation]:
-    """Flag exact-rule canonicals whose family the grammar does not define.
+    """Flag rule canonicals whose family the grammar does not define.
 
     The rule loaders are string-level and accept any spelling, but a
-    canonical outside the published grammar can never appear in an
-    endpoint document — the rule is unreachable by construction. Left
+    canonical outside the published grammar is a defect in either
+    direction: a read rule emitting one hands discovery a family
+    ``parse_arrow_type`` rejects, and a write rule matching one is
+    unreachable, since no endpoint document can ever carry it. Left
     uncaught, such a literal would also count toward probe coverage (it
     trivially round-trips with itself), letting a write map that cannot
     render any real canonical read as covered.
+
+    Which rules carry a literal canonical differs by direction, because
+    the field means different things: a read rule's ``canonical`` is its
+    *output*, literal whenever it interpolates no capture, so regex read
+    rules are checked too; a write rule's ``canonical`` is its *match*,
+    a pattern rather than a family name unless the rule is exact.
     """
     violations: list[Violation] = []
     seen: set[str] = set()
-    directions: list[tuple[str, Any]] = [
-        ("read", rule) for rule in mapper.rules if rule.match == "exact"
-    ]
+    directions: list[tuple[str, Any]] = [("read", rule) for rule in mapper.rules]
     directions += [
         ("write", rule) for rule in mapper.write_rules if rule.match == "exact"
     ]
@@ -326,10 +332,29 @@ def render_probe(
     return mapper.to_native_type(canonical)
 
 
+def check_type_map_grammar(mapper: TypeMapper) -> list[Violation]:
+    """Certify every literal canonical against the published grammar.
+
+    Applies to any connector that ships a type map, write map or not:
+    a source-only connector still emits canonicals from discovery, and
+    one outside the grammar fails at runtime in
+    :func:`~cdk.type_map.arrow.parse_arrow_type`. Gating this on a write
+    map would let exactly that connector — the one with nothing else to
+    certify — pass with nothing certified.
+    """
+    return _foreign_literal_violations(mapper)
+
+
 def check_type_map_round_trip(
     mapper: TypeMapper, dialect: SqlDialect | None = None
 ) -> list[Violation]:
-    """Certify read closure and convergence for every covered probe."""
+    """Certify read closure and convergence for every covered probe.
+
+    The write-direction half of the type-map contract; a connector
+    shipping no write map has no round trip to certify. Its read-side
+    literals are certified by :func:`check_type_map_grammar`, which runs
+    either way.
+    """
     if not mapper.has_write_map:
         return []
     probes = probe_canonicals(mapper)

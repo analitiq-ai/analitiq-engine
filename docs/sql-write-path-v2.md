@@ -603,7 +603,14 @@ The contract tier (#391, no live database) certifies this ADR's surface:
 - **Rendering matches declaration.** The rendered stage DDL carries the
   temp form iff `stage.scope` is `temp` and the declared schema placement;
   the rendered upsert statement matches the declared `merge_form`;
-  declared-but-wrong and used-but-undeclared both fail.
+  declared-but-wrong and used-but-undeclared both fail. The stream's
+  `conflict_keys` must appear where the declared form states the match
+  keys — the `ON` clause of a `MERGE`, the conflict target of an
+  `INSERT … ON CONFLICT` — so a renderer that names the key only among
+  the inserted columns and matches on something else fails. The
+  `insert_on_duplicate_key` form names no keys in the statement at all
+  (MySQL reads them from the unique index), and carries no such
+  assertion.
 - **Refusals fire.** Upsert with empty `conflict_keys`, upsert against
   `merge_form: "none"`, and any needed-but-undeclared capability produce the
   loud config error, not SQL.

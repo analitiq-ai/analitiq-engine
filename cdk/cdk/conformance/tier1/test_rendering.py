@@ -40,6 +40,37 @@ _MERGE_FORM_TOKENS = {
     "insert_on_duplicate_key": _ON_DUPLICATE_KEY_TOKEN,
 }
 
+#: Where each declared form states the keys it matches rows on: the region
+#: opened by the form's own token and closed by the clause that follows it.
+#: ``insert_on_duplicate_key`` is absent deliberately — MySQL takes the keys
+#: from the table's unique index and the statement never names them, so there
+#: is no region to read rather than a region this kit declines to read.
+_KEY_REGION_BOUNDS = {
+    "merge": (re.compile(r"\bON\b"), re.compile(r"\bWHEN\b")),
+    "insert_on_conflict": (_ON_CONFLICT_TOKEN, re.compile(r"\bDO\b")),
+}
+
+
+def _key_region(rendered: str, merge_form: str) -> str | None:
+    """Return the part of *rendered* that states the match keys.
+
+    Anchored on the form the connector itself declared, not on a parse of
+    the vendor's grammar: the opening token is the same one that
+    certifies the form, and the closing token is the clause that must
+    follow it. Returns ``None`` when the declared form names no keys in
+    the statement at all.
+    """
+    bounds = _KEY_REGION_BOUNDS.get(merge_form)
+    if bounds is None:
+        return None
+    opener, closer = bounds
+    start = opener.search(rendered)
+    if start is None:
+        return None
+    tail = rendered[start.end() :]
+    end = closer.search(tail)
+    return tail if end is None else tail[: end.start()]
+
 
 def _target_address(dialect: SqlDialect) -> TableAddress:
     return dialect.table_address("conformance_target", schema="conformance")
@@ -189,6 +220,17 @@ def test_merge_statement_references_stage_target_and_keys(
         assert reference in plan.mode_sql, (
             f"the rendered upsert statement does not reference the "
             f"{label} ({reference}): {plan.mode_sql!r}"
+        )
+    # Present in the statement is not the same as used as the match key:
+    # a renderer that lists the key only among the inserted columns would
+    # satisfy the check above while matching rows on something else.
+    region = _key_region(plan.mode_sql, caps.merge_form)
+    if region is not None:
+        assert dialect.quote_ident("seq") in region, (
+            f"the conflict key {dialect.quote_ident('seq')} does not appear "
+            f"where merge_form {caps.merge_form!r} states the keys rows are "
+            f"matched on ({region!r}); the statement would merge on other "
+            f"columns: {plan.mode_sql!r}"
         )
 
 

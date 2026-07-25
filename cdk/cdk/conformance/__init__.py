@@ -36,7 +36,7 @@ wrappers over these functions.
 """
 
 from .declaration import check_declaration_consistency
-from .roundtrip import check_type_map_round_trip
+from .roundtrip import check_type_map_grammar, check_type_map_round_trip
 from .surface import check_override_surface, sanctioned_dialect_surface
 from .target import ConformanceSetupError, ConformanceTarget, load_target
 from .violations import Violation, violation_report
@@ -47,6 +47,7 @@ __all__ = [
     "Violation",
     "check_declaration_consistency",
     "check_override_surface",
+    "check_type_map_grammar",
     "check_type_map_round_trip",
     "load_target",
     "sanctioned_dialect_surface",

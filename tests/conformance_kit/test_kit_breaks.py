@@ -18,6 +18,7 @@ import pytest
 from cdk.conformance import (
     check_declaration_consistency,
     check_override_surface,
+    check_type_map_grammar,
     check_type_map_round_trip,
     load_target,
 )
@@ -279,6 +280,27 @@ class _MergeFormDialect(ReferencePostgresDialect):
 
 class _MergeFormConnector(GenericSQLConnector):
     dialect_class = _MergeFormDialect
+
+
+class _WrongMatchKeyDialect(ReferencePostgresDialect):
+    """Names every conflict key, but matches rows on the id column.
+
+    The keys still appear in the statement (in the inserted column list
+    and the assignments), so only reading the match region catches it.
+    """
+
+    def merge_statement_sql(
+        self,
+        stage: TableAddress,
+        target: TableAddress,
+        conflict_keys: Sequence[str],
+        columns: Sequence[str],
+    ) -> str:
+        return super().merge_statement_sql(stage, target, ["id"], columns)
+
+
+class _WrongMatchKeyConnector(GenericSQLConnector):
+    dialect_class = _WrongMatchKeyDialect
 
 
 class TestOverrideSurfaceBreaks:
@@ -709,6 +731,63 @@ class TestTypeMapBreaks:
             "rendered none" in report
         ), f"the foreign literal must not count toward coverage: {report}"
 
+    def test_source_only_connector_still_earns_its_read_canonicals(self) -> None:
+        """No write map is not a reason to certify nothing.
+
+        A source-only connector emits canonicals from discovery alone, so
+        a foreign literal in its read map fails at runtime in
+        parse_arrow_type. Gating the grammar check on a write map let
+        exactly that connector pass with nothing checked.
+        """
+        mapper = build_type_mapper(
+            "source-only",
+            [{"match": "exact", "native": "TEXT", "canonical": "Bogus"}],
+            None,
+        )
+        assert not mapper.has_write_map
+        report = _messages(check_type_map_grammar(mapper))
+        assert "Bogus" in report
+        assert "published grammar" in report
+
+    def test_regex_read_rule_with_a_foreign_literal_output_fails(self) -> None:
+        """A regex read rule's canonical is its output, so it is checked.
+
+        The match kind says nothing about whether the emitted canonical
+        is a literal; this one interpolates no capture, so discovery
+        would emit the foreign family verbatim.
+        """
+        mapper = build_type_mapper(
+            "regex-foreign-output",
+            [
+                {"match": "exact", "native": "TEXT", "canonical": "Utf8"},
+                {
+                    "match": "regex",
+                    "native": "^VARCHAR\\((?<n>\\d+)\\)$",
+                    "canonical": "Bogus",
+                },
+            ],
+            [{"match": "exact", "canonical": "Utf8", "native": "TEXT"}],
+        )
+        report = _messages(check_type_map_grammar(mapper))
+        assert "Bogus" in report
+        assert "published grammar" in report
+
+    def test_regex_read_rule_interpolating_a_capture_is_not_flagged(self) -> None:
+        """A templated canonical is not a literal family; it must pass."""
+        mapper = build_type_mapper(
+            "regex-templated-output",
+            [
+                {"match": "exact", "native": "TEXT", "canonical": "Utf8"},
+                {
+                    "match": "regex",
+                    "native": "^NUMERIC\\((?<p>\\d+), *(?<s>\\d+)\\)$",
+                    "canonical": "Decimal128(${p}, ${s})",
+                },
+            ],
+            [{"match": "exact", "canonical": "Utf8", "native": "TEXT"}],
+        )
+        assert check_type_map_grammar(mapper) == []
+
     def test_zero_probe_coverage_fails(self) -> None:
         """A write map rendering no probe must not read as fully certified."""
         mapper = build_type_mapper(
@@ -888,6 +967,21 @@ class TestRenderingBreaks:
         )
         with pytest.raises(AssertionError, match="merge_form"):
             kit_rendering.test_merge_statement_matches_declared_form(doctored)
+
+    def test_keys_outside_the_match_region_fail(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """Naming the key somewhere is not using it as the match key.
+
+        This renderer matches on the id column while still writing every
+        declared key into the statement, so it passes a check that only
+        asks whether the key appears anywhere.
+        """
+        doctored = _with_connector(reference_target, _WrongMatchKeyConnector)
+        with pytest.raises(AssertionError, match="matched on"):
+            kit_rendering.test_merge_statement_references_stage_target_and_keys(
+                doctored
+            )
 
 
 def _caps_with(target: ConformanceTarget, **facts: Any) -> SqlCapabilities:
