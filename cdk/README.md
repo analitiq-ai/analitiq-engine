@@ -44,6 +44,8 @@ surface never pulls `pyarrow`/`aiohttp`.
 | `[arrow]` | `pyarrow` | columnar streaming: `schema_contract`, `sql_types`, `sql.adbc_reader`, `type_map.parse_arrow_type`, `GenericSQLConnector` read/write |
 | `[api]` | `aiohttp` | HTTP transport for API connectors |
 | `[streaming]` | `pyarrow` + `aiohttp` | full connector surface the engine consumes (`[arrow]` + `[api]`) |
+| `[s3]` | `boto3` | `s3://` secret refs (`SchemeSecretsResolver`) |
+| `[conformance]` | `pytest` + `pyarrow` | the connector conformance suite a connector repo runs in its own CI |
 
 Plus the per-driver DB package a given connector needs (asyncpg, adbc-driver-*, …).
 
@@ -66,16 +68,19 @@ importing these modules directly.
 
 ## Install
 
+Published on PyPI as [`analitiq-cdk`](https://pypi.org/project/analitiq-cdk/).
+Releases are currently pre-releases, so pip needs `--pre` (or an exact pin).
+
 Control-plane only (discover + create-table, no `pyarrow`/`aiohttp`):
 
 ```
-pip install "analitiq-cdk @ git+https://github.com/analitiq-ai/analitiq-engine@vX.Y.Z#subdirectory=cdk"
+pip install --pre analitiq-cdk
 ```
 
 Full streaming surface:
 
 ```
-pip install "analitiq-cdk[streaming] @ git+https://github.com/analitiq-ai/analitiq-engine@vX.Y.Z#subdirectory=cdk"
+pip install --pre "analitiq-cdk[streaming]"
 ```
 
 The engine consumes it in-tree (it is on `PYTHONPATH` alongside `src/`) and

@@ -125,7 +125,7 @@ jobs:
         with: { python-version: "3.11" }
       - name: Install the pinned CDK with the suite, then this connector
         run: |
-          pip install "analitiq-cdk[conformance] @ git+https://github.com/analitiq-ai/analitiq-core.git@<pinned-tag>#subdirectory=cdk"
+          pip install "analitiq-cdk[conformance]==<pinned-version>"
           pip install .
       - name: Tier 1 (contract)
         run: >-
