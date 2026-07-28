@@ -39,7 +39,15 @@ npm install @analitiq-ai/conversion-matrix
 ## Usage
 
 ```ts
-import { conversionMatrix, getConversion, arrowFamilies } from "@analitiq-ai/conversion-matrix";
+import {
+  conversionMatrix,
+  getConversion,
+  arrowFamilies,
+  matrixVersion,
+} from "@analitiq-ai/conversion-matrix";
+
+matrixVersion;
+// "2.0.0"  (the engine artifact this build carries, not the npm version)
 
 getConversion("Int64", "Utf8");
 // { mode: "explicit", fn: "to_string", runtime_checked: false }
@@ -58,18 +66,22 @@ in the grid, including prototype names, so a caller can trust a truthy result.
 - `fn`: the mapping function an `explicit` conversion must declare (`null` otherwise)
 - `runtime_checked`: a permitted conversion a per-row guard may still reject
 
-The raw grid is also shipped as JSON:
+The raw engine artifact is also shipped as JSON — the grid under `conversions`,
+beside the version it was published as:
 
 ```ts
 import matrix from "@analitiq-ai/conversion-matrix/conversion_matrix.json" with { type: "json" };
+
+matrix.version;                    // "2.0.0"
+matrix.conversions.Int64.Utf8;     // { mode: "explicit", fn: "to_string", runtime_checked: false }
 ```
 
 ## Versioned JSON on S3
 
 For consumers that cannot (or should not) pull a private npm package, the
 engine's contract artifacts are published to S3 as versioned JSON, under a
-bucket configured outside this repo — one prefix per artifact, each with its
-own independent version history:
+bucket configured outside this repo — one prefix per artifact, each versioned
+on its own content:
 
 ```
 conversion-matrix/v{version}/conversion_matrix.json     immutable, one object per version
@@ -88,10 +100,15 @@ should derive their validation from these artifacts rather than hand-writing
 it. The one part that is not fully machine-derivable is IANA timezone names,
 which additionally need a tz database on the consumer side.
 
+Each artifact **carries its own version** in a top-level `version` field, so a
+consumer holding the bytes — from S3, from this package, or from an installed
+`analitiq-cdk` wheel — can state which vocabulary it got without asking the
+publisher. The publisher reads that field; it never assigns one.
+
 Pin a version by fetching its immutable object; discover the current one via
 that artifact's `latest.json`. Versions here are **independent of the npm
 package version**: the npm digest covers the shipped TS helpers too, while an
-S3 version is cut only when that artifact's content itself changes.
+S3 version changes only when that artifact's content itself changes.
 
 CI publishes with short-lived GitHub OIDC credentials (`sync-s3` job in
 `.github/workflows/conversion-matrix.yml`), one leg per target environment
@@ -106,13 +123,14 @@ leg with skipped steps, and once the role ARN is set the remaining variables
 are required and fail loud when missing. The assumed role needs
 `s3:GetObject` and `s3:PutObject` covering the prefix and `s3:ListBucket` on
 the bucket (so a missing manifest reads as absence rather than Forbidden); it
-needs no delete permissions. The sync reconciles against `latest.json`
-(sha256 compare, patch-bump on change, manifest written last as the commit
-point), so re-runs and partial failures converge without cutting spurious
-versions. Each environment's bucket keeps its own independent version
-history — an environment enabled later starts numbering fresh — so pin a
-version within one bucket and compare content across buckets by the manifest
-`sha256`.
+needs no delete permissions. The sync reconciles against `latest.json` (sha256
+compare, publish under the version the artifact declares, manifest written
+last as the commit point), so re-runs and partial failures converge without
+cutting spurious versions. Content that changed without a version bump aborts
+the run rather than overwriting an immutable object; the `verify` job catches
+that in the pull request first. Because the version travels with the bytes,
+every environment's bucket publishes the same version for the same content,
+whenever it was enabled.
 
 ## Publishing (maintainers)
 
@@ -122,7 +140,8 @@ The engine repo owns and publishes this package; consumers only pin it. CI
 1. **Build** reproducibly from the committed lockfile (`npm ci`) and pinned
    TypeScript, regenerating the grid from the engine artifact.
 2. **Verify** (every PR) that the packaged grid is byte-identical to the engine
-   source.
+   source, and that an artifact whose bytes changed on the branch also declares
+   a changed version.
 3. **Publish** (push to `main`) only when the built tarball content changed:
    `scripts/publish-if-changed.mjs` hashes the exact `npm pack` file set and
    compares it to the digest recorded on the last published version, so an

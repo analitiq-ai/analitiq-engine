@@ -1,8 +1,12 @@
 """Unit tests for the typed resolved-runtime models and their invariants."""
 
+from typing import Literal
 from unittest.mock import MagicMock
 
 import pytest
+from analitiq.contracts.pipelines.config import ErrorHandling as ContractErrorHandling
+from analitiq.contracts.stream import Replication
+from pydantic import BaseModel, TypeAdapter, create_model
 
 from src.engine.pipeline_config_prep import _parse_replication, _parse_runtime_config
 from src.models.resolved import (
@@ -13,6 +17,8 @@ from src.models.resolved import (
     ResolvedPipeline,
     ResolvedStream,
     RuntimeConfig,
+    _contract_literals,
+    _contract_replication_methods,
 )
 
 
@@ -33,6 +39,24 @@ class TestBatchingConfig:
             BatchingConfig(max_concurrent_batches=value)
 
 
+class TestContractLiterals:
+    """The reader fails loud rather than narrowing a boundary to nothing."""
+
+    def test_reads_a_literal_field(self):
+        class Model(BaseModel):
+            kind: Literal["a", "b"]
+
+        assert _contract_literals(Model, "kind") == {"a", "b"}
+
+    @pytest.mark.parametrize("annotation", [str, int, str | None])
+    def test_rejects_a_field_that_is_not_a_string_literal(self, annotation):
+        # A contract that stops declaring an enum here must break the engine
+        # loudly; an empty vocabulary would reject every value instead.
+        model = create_model("Model", kind=(annotation, ...))
+        with pytest.raises(RuntimeError, match="not a Literal of strings"):
+            _contract_literals(model, "kind")
+
+
 class TestErrorHandlingConfig:
     def test_defaults(self):
         cfg = ErrorHandlingConfig()
@@ -40,9 +64,20 @@ class TestErrorHandlingConfig:
         assert cfg.max_retries == 3
         assert cfg.retry_delay_seconds == 5
 
-    @pytest.mark.parametrize("strategy", ["fail", "dlq", "skip"])
+    def test_vocabulary_equals_the_published_contract_enum(self):
+        # Two independent readings of the same fact: the engine reads the
+        # field's Literal annotation, this reads the enum of the schema the
+        # contract publishes. Neither restates it.
+        published = ContractErrorHandling.model_json_schema()
+        assert _contract_literals(ContractErrorHandling, "strategy") == set(
+            published["properties"]["strategy"]["enum"]
+        )
+
+    @pytest.mark.parametrize(
+        "strategy", sorted(_contract_literals(ContractErrorHandling, "strategy"))
+    )
     def test_accepts_every_contract_strategy(self, strategy):
-        # Must mirror the published pipeline contract enum exactly, so a
+        # Must accept the published pipeline contract enum exactly, so a
         # contract-valid pipeline is never rejected at this boundary.
         assert ErrorHandlingConfig(strategy=strategy).strategy == strategy
 
@@ -201,7 +236,15 @@ class TestParseRuntimeConfig:
 
 
 class TestReplicationConfig:
-    @pytest.mark.parametrize("method", ["full_refresh", "incremental"])
+    def test_vocabulary_equals_the_published_contract_enum(self):
+        # Two independent readings of the same fact: the engine walks the
+        # union's method literals, this reads the discriminator mapping of the
+        # schema the contract publishes. A hand-kept copy would reject a
+        # contract-valid document the moment the contract adds a method.
+        published = TypeAdapter(Replication).json_schema()["discriminator"]["mapping"]
+        assert _contract_replication_methods() == set(published)
+
+    @pytest.mark.parametrize("method", sorted(_contract_replication_methods()))
     def test_accepts_every_contract_method(self, method):
         assert ReplicationConfig(method=method).method == method
 

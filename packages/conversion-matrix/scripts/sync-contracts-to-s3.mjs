@@ -5,11 +5,16 @@
 //   v{version}/{artifact}.json   immutable, one object per published version
 //   latest.json                  mutable manifest {version, sha256, commit, publishedAt}
 //
-// S3 is its own source of truth, independently per artifact: each artifact's
-// sha256 is compared against its own manifest and a patch version is cut only
-// when that artifact's content changed. This is deliberately independent of
-// the npm package version — that digest also covers the shipped TS code, so a
-// helper fix bumps npm without touching what consumers pin here.
+// The version is carried by the artifact itself (its top-level `version`
+// field, generated from the CDK's GRAMMAR_VERSION / CONVERSION_MATRIX_VERSION)
+// so a consumer holding the bytes can name the vocabulary it got. This script
+// reads that version; it never assigns one. Each artifact's sha256 is compared
+// against its own manifest, and content that changed without a version bump
+// aborts rather than overwriting an immutable published object.
+//
+// Versioning here is deliberately independent of the npm package version —
+// that digest also covers the shipped TS code, so a helper fix bumps npm
+// without touching what consumers pin here.
 //
 // The manifest is written last: it is the commit point. A run that dies after
 // uploading the versioned object leaves an orphan no consumer can discover;
@@ -38,19 +43,44 @@ export const ARTIFACTS = [
   { prefix: "arrow-type-grammar", file: "arrow_type_grammar.json" },
 ];
 
+const SEMVER = /^(\d+)\.(\d+)\.(\d+)$/;
+
+/** The three numeric parts of a plain semver string, or null if it is not one. */
+export function parseVersion(value) {
+  const parts = SEMVER.exec(value ?? "");
+  return parts === null ? null : parts.slice(1, 4).map(Number);
+}
+
+/** -1, 0 or 1, comparing two parsed versions part by part. */
+function compareVersions(left, right) {
+  for (let i = 0; i < 3; i += 1) {
+    if (left[i] !== right[i]) return left[i] < right[i] ? -1 : 1;
+  }
+  return 0;
+}
+
 /**
  * Decide what this run must do for one artifact, from the manifest currently
- * on S3 (raw JSON text, or null when none exists yet) and the sha256 of the
- * local artifact.
+ * on S3 (raw JSON text, or null when none exists yet), the sha256 of the local
+ * artifact, and the version the local artifact declares.
  *
  * Returns {action: "skip"} when the published artifact already matches, or
- * {action: "publish", version} with the version to cut. A manifest that does
- * not parse, or whose version is not plain semver when a new version must be
- * cut, aborts: guessing a version on top of corrupt state could overwrite a
- * published object.
+ * {action: "publish", version} with the declared version to publish under.
+ *
+ * Everything else aborts, because every remaining case would either overwrite
+ * an immutable published object or publish under a version that lies about
+ * what it contains: an artifact with no plain-semver version, a manifest that
+ * does not parse or has no usable version, changed content whose version was
+ * not bumped, and a declared version older than the published one.
  */
-export function planSync(manifestText, currentSha) {
-  if (manifestText === null) return { action: "publish", version: "1.0.0" };
+export function planSync(manifestText, currentSha, declaredVersion) {
+  const declared = parseVersion(declaredVersion);
+  if (declared === null) {
+    throw new Error(
+      `artifact declares no usable version (got ${JSON.stringify(declaredVersion)})`
+    );
+  }
+  if (manifestText === null) return { action: "publish", version: declaredVersion };
   let manifest;
   try {
     manifest = JSON.parse(manifestText);
@@ -61,14 +91,27 @@ export function planSync(manifestText, currentSha) {
     throw new Error("latest.json on S3 is not a JSON object");
   }
   if (manifest.sha256 === currentSha) return { action: "skip" };
-  const parts = /^(\d+)\.(\d+)\.(\d+)$/.exec(manifest.version ?? "");
-  if (!parts) {
+  const published = parseVersion(manifest.version);
+  if (published === null) {
     throw new Error(
       `latest.json on S3 has no usable version (got ${JSON.stringify(manifest.version)})`
     );
   }
-  const next = `${parts[1]}.${parts[2]}.${Number(parts[3]) + 1}`;
-  return { action: "publish", version: next };
+  const order = compareVersions(declared, published);
+  if (order === 0) {
+    throw new Error(
+      `artifact content changed but its version is still ${declaredVersion}, ` +
+        `already published with a different sha256; bump the version constant ` +
+        `in the CDK and regenerate`
+    );
+  }
+  if (order < 0) {
+    throw new Error(
+      `artifact declares version ${declaredVersion}, older than the published ` +
+        `${manifest.version}; a revert must be published as a new higher version`
+    );
+  }
+  return { action: "publish", version: declaredVersion };
 }
 
 const aws = (args, opts = {}) =>
@@ -119,7 +162,15 @@ function syncArtifact(bucket, commit, { prefix, file }) {
   const base = `s3://${bucket}/${prefix}`;
   const content = readFileSync(sourcePath);
   const currentSha = createHash("sha256").update(content).digest("hex");
-  const plan = planSync(fetchManifestOrAbsent(bucket, `${prefix}/latest.json`), currentSha);
+  const manifestText = fetchManifestOrAbsent(bucket, `${prefix}/latest.json`);
+  let plan;
+  try {
+    plan = planSync(manifestText, currentSha, JSON.parse(content).version);
+  } catch (err) {
+    // Two artifacts sync in one run; without the prefix the operator cannot
+    // tell which one refused to publish.
+    throw new Error(`${prefix}: ${err.message}`, { cause: err });
+  }
 
   if (plan.action === "skip") {
     console.log(`${prefix} unchanged on S3 (sha256 ${currentSha.slice(0, 12)}); nothing to sync`);

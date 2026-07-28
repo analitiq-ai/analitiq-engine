@@ -14,7 +14,11 @@ model) live as explicit typed fields rather than ``_runtime`` /
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, get_args
+
+from analitiq.contracts.pipelines.config import ErrorHandling as ContractErrorHandling
+from analitiq.contracts.stream import Replication
+from pydantic import BaseModel
 
 from cdk.connection_runtime import ConnectionRuntime
 from src.config import settings
@@ -35,8 +39,44 @@ def dump_endpoint_document(document: EndpointDocument) -> dict[str, Any]:
     return document.model_dump(mode="json", by_alias=True, exclude_unset=True)
 
 
-# Mirrors the published stream contract's replication-method enum.
-_VALID_REPLICATION_METHODS = frozenset({"full_refresh", "incremental"})
+def _contract_literals(model: type[BaseModel], field_name: str) -> frozenset[str]:
+    """Read one contract model field's ``Literal`` vocabulary.
+
+    Restating a contract enum in engine code is how a contract-valid document
+    starts being rejected: the contract gains a value, the copy does not, and
+    nothing fails until an author hits it. Reading the annotation keeps one
+    source. A field that is not a populated ``Literal`` of strings fails loud
+    here rather than silently narrowing this boundary to nothing.
+    """
+    values = get_args(model.model_fields[field_name].annotation)
+    if not values or not all(isinstance(value, str) for value in values):
+        raise RuntimeError(
+            f"{model.__name__}.{field_name} is not a Literal of strings; the "
+            "contract changed shape and this reader must follow it"
+        )
+    return frozenset(values)
+
+
+def _contract_replication_methods() -> frozenset[str]:
+    """Read the replication-method vocabulary from the published contract.
+
+    ``Replication`` is ``Annotated[<variant union>, Field(discriminator=...)]``
+    and each variant pins ``method`` to one ``Literal``, so the accepted
+    methods are exactly those literals.
+    """
+    union, *_ = get_args(Replication)
+    variants = get_args(union)
+    if not variants:
+        raise RuntimeError(
+            "analitiq.contracts.stream.Replication is no longer a union of "
+            "method-discriminated variants; this reader must follow it"
+        )
+    return frozenset().union(
+        *(_contract_literals(variant, "method") for variant in variants)
+    )
+
+
+_VALID_REPLICATION_METHODS = _contract_replication_methods()
 
 
 @dataclass(frozen=True)
@@ -163,10 +203,11 @@ class BatchingConfig:
             )
 
 
-# The published pipeline contract's error-handling strategy enum. Kept in sync
-# with the contract rather than narrowed to what the engine branches on today,
-# so a contract-valid pipeline is never rejected at this boundary.
-_VALID_ERROR_STRATEGIES = frozenset({"fail", "dlq", "skip"})
+# The published pipeline contract's error-handling strategy enum, read from the
+# contract rather than narrowed to what the engine branches on, so a
+# contract-valid pipeline is never rejected at this boundary. The engine's own
+# *default* is separate and deliberately differs from the contract's.
+_VALID_ERROR_STRATEGIES = _contract_literals(ContractErrorHandling, "strategy")
 
 
 @dataclass(frozen=True)

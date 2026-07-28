@@ -23,6 +23,8 @@ from cdk.schema_contract import SchemaContract
 from cdk.type_map.arrow import arrow_family, parse_arrow_type
 from cdk.type_map.conversions import (
     ARROW_FAMILIES,
+    CONVERSION_MATRIX_VERSION,
+    build_conversion_grid,
     build_conversion_matrix,
     classify_conversion,
     load_published_matrix,
@@ -49,10 +51,18 @@ class TestPublishedArtifactDrift:
     def test_loaded_matrix_equals_built_matrix(self) -> None:
         assert load_published_matrix() == build_conversion_matrix()
 
+    def test_published_document_states_its_own_version(self) -> None:
+        # The publisher reads this field rather than assigning one, so a
+        # consumer holding only the bytes can name the policy it got.
+        assert load_published_matrix()["version"] == CONVERSION_MATRIX_VERSION
+
+    def test_document_carries_the_grid_and_nothing_else(self) -> None:
+        assert set(load_published_matrix()) == {"version", "conversions"}
+
     def test_grid_covers_every_family_pair(self) -> None:
-        matrix = build_conversion_matrix()
-        assert set(matrix) == set(ARROW_FAMILIES)
-        for source, row in matrix.items():
+        grid = build_conversion_grid()
+        assert set(grid) == set(ARROW_FAMILIES)
+        for source, row in grid.items():
             assert set(row) == set(ARROW_FAMILIES), source
 
 
@@ -89,7 +99,7 @@ class TestMatrixBoundToFunctionCatalog:
         catalog = _FUNCTION_CATALOG
         named = {
             conv["fn"]
-            for row in build_conversion_matrix().values()
+            for row in build_conversion_grid().values()
             for conv in row.values()
             if conv["fn"] is not None
         }

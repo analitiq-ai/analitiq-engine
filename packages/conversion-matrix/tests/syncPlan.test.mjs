@@ -12,38 +12,71 @@ const SHA_B = "b".repeat(64);
 const manifest = (fields) =>
   JSON.stringify({ version: "1.2.3", sha256: SHA_A, commit: "abc", ...fields });
 
-test("no manifest yet publishes 1.0.0", () => {
-  assert.deepEqual(planSync(null, SHA_A), { action: "publish", version: "1.0.0" });
+test("no manifest yet publishes the version the artifact declares", () => {
+  assert.deepEqual(planSync(null, SHA_A, "2.1.0"), { action: "publish", version: "2.1.0" });
 });
 
 test("matching sha256 skips", () => {
-  assert.deepEqual(planSync(manifest({}), SHA_A), { action: "skip" });
+  assert.deepEqual(planSync(manifest({}), SHA_A, "1.2.3"), { action: "skip" });
 });
 
-test("changed sha256 patch-bumps the manifest version", () => {
-  assert.deepEqual(planSync(manifest({}), SHA_B), { action: "publish", version: "1.2.4" });
+test("changed sha256 publishes the declared version", () => {
+  assert.deepEqual(planSync(manifest({}), SHA_B, "1.3.0"), { action: "publish", version: "1.3.0" });
 });
 
-test("a matching sha256 skips even with a malformed version", () => {
-  // The version is only needed to cut a new one; an up-to-date grid never
-  // aborts the sync job over a field it does not use.
-  assert.deepEqual(planSync(manifest({ version: "not-semver" }), SHA_A), { action: "skip" });
+test("a matching sha256 skips even with a malformed manifest version", () => {
+  // The manifest version is only consulted to rule on a new one; an
+  // up-to-date artifact never aborts over a field the decision does not use.
+  assert.deepEqual(planSync(manifest({ version: "not-semver" }), SHA_A, "1.2.3"), {
+    action: "skip",
+  });
+});
+
+test("an artifact with no usable version aborts before anything else", () => {
+  // The publisher reads this field and cannot assign one, so a malformed
+  // artifact must never reach S3 — not even on a first publish.
+  for (const declared of [undefined, "", "v1.2.3", "1.2", "1.2.3-rc1", 123]) {
+    assert.throws(
+      () => planSync(null, SHA_A, declared),
+      /artifact declares no usable version/,
+      String(declared)
+    );
+  }
+});
+
+test("changed content at an unbumped version aborts instead of overwriting", () => {
+  // The versioned object is immutable; republishing different bytes under the
+  // published version would silently change what a pinned consumer resolves.
+  assert.throws(() => planSync(manifest({}), SHA_B, "1.2.3"), /still 1\.2\.3/);
+});
+
+test("a declared version older than the published one aborts", () => {
+  assert.throws(() => planSync(manifest({}), SHA_B, "1.2.2"), /older than the published/);
+  assert.throws(() => planSync(manifest({}), SHA_B, "0.9.9"), /older than the published/);
+});
+
+test("version ordering compares parts numerically, not as text", () => {
+  assert.deepEqual(planSync(manifest({ version: "1.9.0" }), SHA_B, "1.10.0"), {
+    action: "publish",
+    version: "1.10.0",
+  });
+  assert.throws(() => planSync(manifest({ version: "1.10.0" }), SHA_B, "1.9.0"), /older than/);
 });
 
 test("unparseable manifest aborts", () => {
-  assert.throws(() => planSync("{not json", SHA_A), /not valid JSON/);
+  assert.throws(() => planSync("{not json", SHA_A, "1.2.3"), /not valid JSON/);
 });
 
 test("manifest that parses to a non-object aborts with context", () => {
-  assert.throws(() => planSync("null", SHA_A), /not a JSON object/);
-  assert.throws(() => planSync("42", SHA_A), /not a JSON object/);
-  assert.throws(() => planSync("[]", SHA_A), /not a JSON object/);
+  assert.throws(() => planSync("null", SHA_A, "1.2.3"), /not a JSON object/);
+  assert.throws(() => planSync("42", SHA_A, "1.2.3"), /not a JSON object/);
+  assert.throws(() => planSync("[]", SHA_A, "1.2.3"), /not a JSON object/);
 });
 
 test("manifest without a usable version aborts instead of guessing", () => {
-  assert.throws(() => planSync(manifest({ version: "v1.2.3" }), SHA_B), /no usable version/);
-  assert.throws(() => planSync(manifest({ version: undefined }), SHA_B), /no usable version/);
-  assert.throws(() => planSync(JSON.stringify({ sha256: SHA_A }), SHA_B), /no usable version/);
+  assert.throws(() => planSync(manifest({ version: "v1.2.3" }), SHA_B, "1.2.4"), /no usable version/);
+  assert.throws(() => planSync(manifest({ version: undefined }), SHA_B, "1.2.4"), /no usable version/);
+  assert.throws(() => planSync(JSON.stringify({ sha256: SHA_A }), SHA_B, "1.2.4"), /no usable version/);
 });
 
 test("only NoSuchKey classifies as an absent manifest", () => {

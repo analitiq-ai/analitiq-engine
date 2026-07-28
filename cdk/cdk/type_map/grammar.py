@@ -127,6 +127,18 @@ STRUCTURAL_FAMILIES: Final[dict[str, str]] = {
     "List": "items",
 }
 
+# The published grammar's own version, carried inside the artifact so any
+# consumer -- an installed wheel, a downloaded object, a conformance run --
+# can state which vocabulary it holds without asking the publisher.
+#
+# Bump it in the same commit as any change to what build_arrow_type_grammar()
+# emits: minor for an additive change (a new family, a widened range), major
+# when an existing declaration narrows or changes shape. The publisher reads
+# this version rather than assigning one, and refuses to republish changed
+# content under an already-published version, so an unbumped change fails the
+# sync run instead of overwriting an immutable object.
+GRAMMAR_VERSION: Final[str] = "1.1.0"
+
 # Timestamp(unit, null) is the explicit timezone-naive spelling.
 NULL_TZ_SENTINEL: Final[str] = "null"
 
@@ -337,12 +349,14 @@ def _param_to_json(spec: GrammarParam) -> dict[str, Any]:
 
 
 def build_arrow_type_grammar() -> dict[str, Any]:
-    """Materialise the grammar for publication.
+    """Materialise the published grammar document.
 
     :data:`ARROW_TYPE_GRAMMAR` is the single source of truth; this flattens it
     into the serialisable document consumers read instead of hand-writing
     their own patterns. Scalar families carry ``params``; the structural
-    markers carry the sub-schema key their shape comes from.
+    markers carry the sub-schema key their shape comes from. The document
+    states its own :data:`GRAMMAR_VERSION`, so a consumer holding the bytes
+    can name the vocabulary it got.
     """
     families: dict[str, Any] = {
         family: {"params": [_param_to_json(spec) for spec in params]}
@@ -350,7 +364,7 @@ def build_arrow_type_grammar() -> dict[str, Any]:
     }
     for family, sub_schema in STRUCTURAL_FAMILIES.items():
         families[family] = {"structural": sub_schema}
-    return {"families": families}
+    return {"version": GRAMMAR_VERSION, "families": families}
 
 
 # The published artifact, committed beside this module. Generated from

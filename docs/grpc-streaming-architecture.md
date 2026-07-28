@@ -27,7 +27,11 @@ Both containers run the same Docker image, toggled by `RUN_MODE` (`source` or `d
 
 ## Wire Protocol
 
-The service is one bidirectional RPC plus side RPCs (`proto/analitiq/v1/`):
+The service is one bidirectional RPC plus side RPCs (`proto/analitiq/v1/`).
+The Python modules under `src/grpc/generated/` are committed; `proto/generate.sh`
+regenerates every one of them from the definitions, and a conformance test
+compares each committed module's descriptor against its `.proto` so an edited
+definition cannot ship without its regenerated modules.
 
 ```protobuf
 service DestinationService {

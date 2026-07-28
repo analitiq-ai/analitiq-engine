@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ARTIFACTS } from "../scripts/sync-contracts-to-s3.mjs";
+import { ARTIFACTS, parseVersion } from "../scripts/sync-contracts-to-s3.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const typeMapDir = join(repoRoot, "cdk", "cdk", "type_map");
@@ -18,6 +18,13 @@ for (const { prefix, file } of ARTIFACTS) {
 
   test(`${prefix}: source file is valid JSON`, () => {
     assert.doesNotThrow(() => JSON.parse(readFileSync(sourcePath, "utf8")));
+  });
+
+  test(`${prefix}: source file declares a plain-semver version`, () => {
+    // The publisher reads this field instead of assigning one, so an artifact
+    // that lost it cannot be published at all.
+    const { version } = JSON.parse(readFileSync(sourcePath, "utf8"));
+    assert.notEqual(parseVersion(version), null, `version: ${JSON.stringify(version)}`);
   });
 
   test(`${prefix}: source file is tracked by git`, () => {

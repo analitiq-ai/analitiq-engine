@@ -40,11 +40,17 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal
+from typing import Any, Final, Literal
 
 from .exceptions import InvalidTypeMapError
 
 ConversionMode = Literal["identity", "auto", "explicit", "forbidden"]
+
+# The published grid's own version, carried inside the artifact so any consumer
+# can state which policy it holds without asking the publisher. Bump rules and
+# the publisher's refusal to republish under an already-published version are
+# the same as for :data:`cdk.type_map.grammar.GRAMMAR_VERSION`.
+CONVERSION_MATRIX_VERSION: Final[str] = "2.0.0"
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,13 +226,12 @@ def classify_conversion(source_family: str, target_family: str) -> Conversion:
     return Conversion("forbidden")
 
 
-def build_conversion_matrix() -> dict[str, dict[str, dict[str, object]]]:
-    """Materialise the full ``source -> target`` grid for publication.
+def build_conversion_grid() -> dict[str, dict[str, dict[str, object]]]:
+    """Materialise the full ``source -> target`` grid.
 
     :func:`classify_conversion` is the single source of truth; this flattens it
     into the serialisable grid the control plane publishes and the frontend
-    consumes verbatim. Regenerating and diffing this against the committed
-    artifact (the conformance test) turns drift into a test failure.
+    consumes verbatim.
     """
     return {
         source: {
@@ -237,6 +242,20 @@ def build_conversion_matrix() -> dict[str, dict[str, dict[str, object]]]:
     }
 
 
+def build_conversion_matrix() -> dict[str, Any]:
+    """Materialise the published document: the grid under its own version.
+
+    The grid lives under ``conversions``; ``version`` is
+    :data:`CONVERSION_MATRIX_VERSION`, so a consumer holding the bytes can name
+    the policy it got. Regenerating and diffing this against the committed
+    artifact (the conformance test) turns drift into a test failure.
+    """
+    return {
+        "version": CONVERSION_MATRIX_VERSION,
+        "conversions": build_conversion_grid(),
+    }
+
+
 # The published artifact, committed beside this module. Generated from
 # build_conversion_matrix(); the conformance test fails if the two drift.
 # Regenerate with:  CONVERSION_MATRIX_PATH.write_text(render_conversion_matrix())
@@ -244,22 +263,20 @@ CONVERSION_MATRIX_PATH: Final[Path] = Path(__file__).with_name("conversion_matri
 
 
 def render_conversion_matrix() -> str:
-    """Canonical serialisation of the grid, matching the committed artifact."""
+    """Canonical serialisation of the document, matching the committed artifact."""
     return json.dumps(build_conversion_matrix(), indent=2, sort_keys=True) + "\n"
 
 
-def load_published_matrix() -> dict[str, dict[str, dict[str, object]]]:
-    """Return the committed, published grid.
+def load_published_matrix() -> dict[str, Any]:
+    """Return the committed, published document (``version`` + ``conversions``).
 
     Consumers outside the engine (the control plane, the frontend build) read
     this artifact; the engine itself classifies live through
     :func:`classify_conversion`. The conformance test asserts the file equals
     :func:`render_conversion_matrix` so the export cannot drift from the policy.
     """
-    matrix: dict[str, dict[str, dict[str, object]]] = json.loads(
-        CONVERSION_MATRIX_PATH.read_text()
-    )
-    return matrix
+    document: dict[str, Any] = json.loads(CONVERSION_MATRIX_PATH.read_text())
+    return document
 
 
 def _kind_of(family: str, side: str) -> str:

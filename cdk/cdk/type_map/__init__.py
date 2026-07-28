@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from .._extras import reraise_for_missing_extra
 from .conversions import (
+    CONVERSION_MATRIX_VERSION,
     Conversion,
     build_conversion_matrix,
     classify_conversion,
@@ -26,6 +27,7 @@ from .exceptions import (
     UnmappedTypeError,
 )
 from .grammar import (
+    GRAMMAR_VERSION,
     build_arrow_type_grammar,
     load_published_grammar,
     render_arrow_type_grammar,
@@ -81,7 +83,9 @@ def __getattr__(name: str) -> Any:
 
 
 __all__ = [
+    "CONVERSION_MATRIX_VERSION",
     "Conversion",
+    "GRAMMAR_VERSION",
     "InvalidTypeMapError",
     "TYPE_MAP_FILENAME",
     "WRITE_TYPE_MAP_FILENAME",
