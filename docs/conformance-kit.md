@@ -6,7 +6,7 @@ connector repo runs it in its own CI against the pinned CDK version, so
 a CDK change that breaks a connector — or a connector change that
 breaks its contract — turns that connector's CI red before release, not
 in a customer pipeline (issue #391; ADR
-[sql-write-path-v2](sql-write-path-v2.md) §10).
+[sql-write-path](sql-write-path.md) §10).
 
 ## What each tier certifies
 

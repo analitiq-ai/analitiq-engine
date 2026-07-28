@@ -1,4 +1,4 @@
-r"""Connector conformance kit (issue #391; ADR sql-write-path-v2 section 10).
+r"""Connector conformance kit (issue #391; spec sql-write-path section 10).
 
 The CDK's acceptance suite for connector packages: every connector repo
 installs ``analitiq-cdk[conformance]``, points the suite at its own

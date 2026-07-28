@@ -15,7 +15,7 @@ The active transport is selected by the connector definition and set on the
 engine) or ``transport_type: "adbc"`` (direct ADBC DBAPI). Type casting is
 handled by the Arrow-based ``SchemaContract``.
 
-Writes are stage-then-merge on both transports (ADR sql-write-path-v2):
+Writes are stage-then-merge on both transports (spec sql-write-path):
 this facade owns the semantics — write modes, identity and duplicate
 rules, refusals, retry verdicts, timeouts — and hands each batch to the
 runtime-selected :class:`~cdk.sql.backend.TransportBackend`
@@ -604,7 +604,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         """Retry-safety verdict per write mode and keys (#286).
 
         Transport-independent under stage-then-merge (ADR
-        sql-write-path-v2 §9): upsert merges on its conflict keys; insert
+        sql-write-path §9): upsert merges on its conflict keys; insert
         anti-joins on row identity (contract primary key, or the
         synthetic ``_record_hash`` for a keyless stream) from the stage
         on every transport. The honest-verdict rule for insert: the

@@ -1,4 +1,4 @@
-"""Declared SQL dialect capabilities (issue #390; ADR sql-write-path-v2 §5).
+"""Declared SQL dialect capabilities (issue #390; spec sql-write-path §5).
 
 SQL-shape capabilities are facts about the target system — catalog
 addressability, session-targeting regime, merge form, bulk-load mechanism,
@@ -157,7 +157,7 @@ class SqlCapabilities:
         ``None`` means the family lands via executemany — the default,
         not a refusal: bulk is a declared speed slot, and absence of a
         declaration is the one capability fact whose meaning is defined
-        (ADR sql-write-path-v2 section 2) rather than guessed.
+        (spec sql-write-path section 2) rather than guessed.
         """
         return self.bulk_load.get(transport_type)
 

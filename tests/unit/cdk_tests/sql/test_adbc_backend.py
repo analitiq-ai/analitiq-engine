@@ -1,7 +1,7 @@
 """AdbcBackend: stage-cycle mechanics over a fake ADBC DBAPI connection.
 
 The backend executes the facade's ``StageWritePlan``s; these tests pin
-its transport mechanics (issue #389, ADR sql-write-path-v2 §6-§7):
+its transport mechanics (issue #389, spec sql-write-path §6-§7):
 
 * the declared transaction shape — one transaction spanning every step,
   or per-step commits with the pre-flight drop;

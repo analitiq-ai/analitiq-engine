@@ -115,7 +115,7 @@ transport_type: "sqlalchemy"  → SqlAlchemyBackend (stage-then-merge:
                                   every batch lands in a per-batch
                                   stage table, one mode statement
                                   applies it — see
-                                  sql-write-path-v2.md). Breadth
+                                  sql-write-path.md). Breadth
                                   layer for every dialect SA covers.
                                   Async engine for dialects with an
                                   async driver (asyncpg, aiomysql);

@@ -1,4 +1,4 @@
-"""The sanctioned-override-surface check (ADR sql-write-path-v2 section 10).
+"""The sanctioned-override-surface check (spec sql-write-path section 10).
 
 A connector's per-system code is its dialect: the connector class
 carries ``dialect_class`` and nothing else, and the dialect's public
@@ -283,7 +283,7 @@ def _audit_connector_class(connector_cls: type) -> list[Violation]:
                         f"{klass.__name__}.{name} overrides a "
                         f"GenericSQLConnector member; the facade's semantics "
                         f"are defined once in the CDK, and the per-system "
-                        f"surface is the dialect (ADR sql-write-path-v2 "
+                        f"surface is the dialect (spec sql-write-path "
                         f"section 4: the connector class carries "
                         f"dialect_class only). Move the quirk onto the "
                         f"dialect's sanctioned hooks.",
@@ -295,7 +295,7 @@ def _audit_connector_class(connector_cls: type) -> list[Violation]:
                         CHECK,
                         f"{klass.__name__}.{name} adds a member to the "
                         f"connector class; the connector class carries "
-                        f"dialect_class only (ADR sql-write-path-v2 section "
+                        f"dialect_class only (spec sql-write-path section "
                         f"4). Helpers belong on the connector's own dialect "
                         f"class.",
                     )

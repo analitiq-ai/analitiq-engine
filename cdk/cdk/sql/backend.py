@@ -1,6 +1,6 @@
 """Transport backends for the stage-then-merge write primitive.
 
-Every SQL write is stage-then-merge (ADR sql-write-path-v2): land the batch
+Every SQL write is stage-then-merge (spec sql-write-path): land the batch
 in a stage table, then run exactly one mode statement from stage to target.
 The facade (``GenericSQLConnector``) owns the semantics — write modes,
 identity and duplicate rules, refusals, retry verdicts, timeouts — and

@@ -1,7 +1,7 @@
 """StageWritePlan building: naming, placement, and the ANSI renderers.
 
 The plan is the whole interface between the facade's semantics and a
-transport backend's mechanics (ADR sql-write-path-v2 §3), so its rendering
+transport backend's mechanics (spec sql-write-path §3), so its rendering
 rules are pinned here as pure-function tests: the deterministic stage name
 whose uniqueness token no identifier budget can cut off, the declared
 scope/schema placement, and the two statements the CDK renders itself.

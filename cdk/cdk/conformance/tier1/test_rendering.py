@@ -1,4 +1,4 @@
-"""Rendering matches declaration; refusals fire (ADR sql-write-path-v2 s.10).
+"""Rendering matches declaration; refusals fire (spec sql-write-path s.10).
 
 Every assertion drives the connector's real dialect and declared
 capabilities through the same plan builder the write path uses
@@ -307,7 +307,7 @@ def test_empty_table_statement_is_delete_shaped(
         f"several systems: {statement!r}"
     )
     assert "DELETE" in statement.upper(), (
-        f"empty_table_sql must be DELETE-shaped (ADR sql-write-path-v2 "
+        f"empty_table_sql must be DELETE-shaped (spec sql-write-path "
         f"section 4); any other emptying statement (a DROP) breaks the "
         f"append phase: {statement!r}"
     )
