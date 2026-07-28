@@ -30,6 +30,8 @@ jobs:
   build:
     name: build + verify distributions
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: cdk
