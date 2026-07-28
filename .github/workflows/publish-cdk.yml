@@ -16,8 +16,9 @@ name: publish-cdk
 # reviewer is the second gate, so a tag push alone never uploads.
 #
 # The same build job also runs on pull requests that touch cdk/**, so a package
-# that cannot be built or fails ``twine check`` is caught at review time rather
-# than at release time.
+# that cannot be built, fails ``twine check``, or ships without the contract
+# artifacts it reads at runtime is caught at review time rather than at release
+# time.
 
 on:
   push:
@@ -73,6 +74,61 @@ jobs:
         run: |
           pipx install twine
           twine check dist/*
+
+      - name: The built distributions carry the published contract artifacts
+        # twine check validates metadata; nothing above opens the artifact. The
+        # CDK reads two JSON documents from beside its own modules at runtime
+        # (the Arrow type grammar, the conversion matrix), and whether a data
+        # file lands in a distribution is a packaging decision, not a code one.
+        # A distribution missing one imports cleanly and fails on first use --
+        # in every connector repo at once, since the conformance suite reads
+        # the grammar. So install the wheel into a clean venv and read both
+        # documents back through the installed package, from a directory where
+        # the source checkout cannot satisfy the import.
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/wheel-check
+          /tmp/wheel-check/bin/pip install --quiet --upgrade pip
+          /tmp/wheel-check/bin/pip install --quiet dist/*.whl
+          sdist="$(ls dist/*.tar.gz)"
+          cd /tmp
+          SDIST="$OLDPWD/$sdist" /tmp/wheel-check/bin/python - <<'PY'
+          import os
+          import tarfile
+          from pathlib import Path
+
+          import cdk
+          from cdk.type_map.conversions import CONVERSION_MATRIX_PATH, load_published_matrix
+          from cdk.type_map.grammar import ARROW_TYPE_GRAMMAR_PATH, load_published_grammar
+
+          installed = Path(cdk.__file__).resolve().parent
+          assert "wheel-check" in installed.parts, (
+              f"cdk imported from {installed}, not the installed wheel; this "
+              f"check would certify the checkout instead of the artifact"
+          )
+
+          artifacts = (
+              ("arrow type grammar", ARROW_TYPE_GRAMMAR_PATH, load_published_grammar),
+              ("conversion matrix", CONVERSION_MATRIX_PATH, load_published_matrix),
+          )
+          for label, path, load in artifacts:
+              assert path.resolve().is_relative_to(installed), (
+                  f"the {label} resolves to {path}, outside the installed "
+                  f"package"
+              )
+              assert load(), f"the {label} loaded from the wheel is empty"
+              print(f"wheel carries the {label}: {path.name}")
+
+          # The sdist is published too, and a source install rebuilds from it.
+          with tarfile.open(os.environ["SDIST"]) as archive:
+              members = {Path(name).name for name in archive.getnames()}
+          for label, path, _load in artifacts:
+              assert path.name in members, (
+                  f"the sdist ships no {path.name}; a source install of this "
+                  f"release would have no {label}"
+              )
+              print(f"sdist carries the {label}: {path.name}")
+          PY
 
       - uses: actions/upload-artifact@v4
         with:

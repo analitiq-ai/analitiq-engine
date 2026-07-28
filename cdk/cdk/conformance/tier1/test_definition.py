@@ -19,13 +19,18 @@ def test_definition_identifies_the_connector(
     assert conformance_target.kind
 
 
-def test_database_connector_ships_a_read_type_map(
+def test_connector_ships_a_read_type_map(
     conformance_target: ConformanceTarget,
 ) -> None:
-    """A database connector cannot canonicalize types without a read map."""
-    if not conformance_target.is_database:
-        return
+    """No connector can canonicalize its source types without a read map.
+
+    The read map is the connector's type vocabulary whatever its kind:
+    a database canonicalizes the native types discovery returns, an API
+    canonicalizes each field's declared JSON ``type``/``format``. Without
+    one, every stream whose schema the connector does not hand-annotate
+    fails on its first read.
+    """
     assert conformance_target.type_mapper is not None, (
-        "kind 'database' requires definition/type-map-read.json; the engine "
-        "cannot canonicalize discovered native types without it"
+        "the connector ships no definition/type-map-read.json; the engine "
+        "canonicalizes every source type it discovers through that map"
     )

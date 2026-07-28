@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from .applicability import declared_kinds
 from .target import ConformanceTarget, load_target
 
 
@@ -39,6 +40,26 @@ def conformance_target(request: pytest.FixtureRequest) -> ConformanceTarget:
         request.config, "--connector-class", "ANALITIQ_CONNECTOR_CLASS"
     )
     return load_target(Path(root), class_path=class_path)
+
+
+@pytest.fixture(autouse=True)
+def kind_scope(
+    request: pytest.FixtureRequest, conformance_target: ConformanceTarget
+) -> None:
+    """Skip a check whose module does not apply to the target's kind.
+
+    The other half of the same declaration
+    (:mod:`cdk.conformance.applicability`): the kinds a check module
+    states it applies to gate it here, and the applicability check reads
+    the same statement to decide whether the run assessed anything at
+    all.
+    """
+    kinds = declared_kinds(request.node)
+    if kinds and conformance_target.kind not in kinds:
+        pytest.skip(
+            f"connector kind is {conformance_target.kind!r}; this check "
+            f"applies to kind {', '.join(repr(k) for k in sorted(kinds))}"
+        )
 
 
 @pytest.fixture(scope="session")

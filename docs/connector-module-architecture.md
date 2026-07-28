@@ -421,6 +421,15 @@ string-only surface (`TypeMapper`, the rule parsers, `list_*`, standalone
 access and raise `cdk.MissingExtraError` with the install hint if the extra is
 absent.
 
+The package also ships two generated contract artifacts beside the modules that
+read them: the Arrow type grammar and the conversion matrix. Both are data
+files, so whether they land in a built distribution is a packaging decision
+rather than a code one — and a distribution missing one imports cleanly and
+fails on first use, in every consumer at once. The publish workflow therefore
+installs the built wheel into a clean environment and reads both documents back
+through the installed package, and checks the sdist carries them too, before a
+release can proceed.
+
 A connector is a **self-contained, independently releasable unit** carrying
 everything DB-specific: definition, type-map, its own driver, and as much or as
 little code as that database needs. It depends on the CDK; the CDK never depends
