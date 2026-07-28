@@ -4,8 +4,6 @@
 
 Analitiq Data Sync Engine runs pre-built data pipelines. It reads from a source system (API, database, SFTP), transforms the data, and writes to a destination system. Pipelines are built separately using the [Pipeline Builder plugin](https://github.com/analitiq-ai/ai-plugins-official) for Claude Code.
 
-Connectors are pluggable, independently versioned packages. Each targets one system (a database such as `postgres`, or an API such as `xero`) and ships everything that system needs: its definition, its type map, and its own driver. Most connectors are pure declarative config authored against the published schema contract; a connector adds code only when the system is quirky (the thin -> thick gradient). Adding a connector never modifies the engine.
-
 ## Running a Pipeline
 
 Pipelines run in Docker. The only required input is a pipeline ID from `pipelines/manifest.json`.
@@ -18,31 +16,9 @@ cd docker && \
 
 The engine and destination run from the same Docker image, toggled by `RUN_MODE` (`source` or `destination`). Both containers load config from the same `PIPELINE_ID`.
 
-## How It Works
-
-1. **Extract** — read from source in batches
-2. **Transform** — apply field mappings and type conversions
-3. **Load** — write to destination with fault tolerance
-4. **Checkpoint** — save progress so interrupted runs resume automatically
-
-Architecture details live in `docs/`: engine lifecycle (`engine-architecture.md`),
-CDK and connector packages (`connector-module-architecture.md`), gRPC protocol
-(`grpc-streaming-architecture.md`), Arrow and the SQLAlchemy-vs-ADBC transport
-strategy (`pyarrow-and-destinations.md`), the SQL write primitive and batch
-coalescing (`sql-write-path.md`), config shapes (`source-config.md`,
-`destination-config.md`), mapping (`mapping-and-transformations.md`), the
-connector conformance suite (`conformance-kit.md`).
-
 ## Configuration Layout
 
-Configuration is assembled from modular files. The plugin generates all of this automatically.
-
-```
-connectors/{connector_id}/       # One installable connector package per system (from the registry)
-connections/{alias}/             # Connection configs and credentials
-pipelines/manifest.json          # Central index of all pipelines
-pipelines/{pipeline_id}/         # Pipeline config and stream definitions
-```
+Configuration is assembled from modular files under `connectors/`, `connections/`, and `pipelines/`. The plugin generates them automatically.
 
 `connector_id` is the connector's canonical identifier and repo name (`postgres`, `mysql`, `xero`, `pipedrive`).
 
@@ -70,12 +46,6 @@ See the table in [README.md](README.md#environment-variables).
 ## Storage
 
 All runtime data (state, logs, dead letters, metrics) uses local filesystem at project root: `state/`, `logs/`, `deadletter/`, `metrics/`.
-
-## Connector Kinds
-
-`api`, `database`, `file`, `stdout`
-
-A connector resolves in two steps: its `kind` (above) selects the family, and its `connector_id` selects the concrete connector. A `connector_id` with no dedicated class falls back to the generic class for its kind (the thin path); per-system quirks live in that connector's own class, never in the generic base.
 
 ## Contributing
 
