@@ -146,7 +146,6 @@ class TestPackageStructure:
             "shared",
             "source",
             "state",
-            "transformations",
             "worker",
         ]
         for attr in code_attrs:

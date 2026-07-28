@@ -31,17 +31,19 @@ record_batch
 
 ### Source side
 
-- `src/source/connectors/api.py:221` -- HTTP returns `List[Dict]`, then
-  `schema_contract.from_pylist(deduped)` rebuilds a `pa.RecordBatch`.
+- `APIConnector._read_batches_impl` (`src/source/connectors/api.py`) -- HTTP
+  returns `List[Dict]`, then `schema_contract.from_pylist(...)` rebuilds a
+  `pa.RecordBatch`.
 - `GenericSQLConnector.read_batches` (`cdk/cdk/sql/generic.py`) --
   SQLAlchemy returns rows, rows are turned into dicts, then
   `from_pylist(rows)` rebuilds a batch.
 
 ### gRPC transport
 
-- Engine encodes with `pa.ipc.new_stream()` (`src/grpc/client.py:551`).
-- Destination decodes with `pa.ipc.open_stream()`
-  (`src/destination/server.py:349`).
+- Engine encodes with `pa.ipc.new_stream()` in `_encode_arrow_ipc`
+  (`src/grpc/client.py`).
+- Destination decodes with `pa.ipc.open_stream()` in `_decode_arrow_ipc`
+  (`src/destination/server.py`).
 
 ## Where Arrow Earns Its Keep
 

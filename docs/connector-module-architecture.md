@@ -191,7 +191,7 @@ reality.
    transport the data path uses and canonicalizing native types via the
    connection-scoped read type-map (`runtime.type_mapper_for(scope=CONNECTION)`
    — connection rules over connector rules, since discovery introspects the
-   connection's own database; #368). `list_columns` returns **both** the
+   connection's own database). `list_columns` returns **both** the
    columns and the primary keys (`tuple[list[ColumnDef], list[str]]`).
 3. **`create_table` is standalone.** DDL is decoupled from the gRPC streaming
    flow: the destination base and the contract speak CDK-native DTOs
@@ -199,7 +199,7 @@ reality.
    `server.py` translating at the wire boundary. A control-plane caller
    constructs `ColumnDef`s directly and calls `TableCreator.create_table`
    (`cdk/cdk/sql/ddl.py`) with no engine orchestration.
-4. **The write-direction type map shipped (#564).** `TypeMapper`
+4. **The write-direction type map.** `TypeMapper`
    (`cdk/cdk/type_map/mapper.py`) now exposes `to_native_type()` driven by a
    separate `type-map-write.json` rule set (Arrow canonical → native), the
    inverse `create_table` DDL needs. The two directions are independent rule
@@ -240,7 +240,7 @@ it's generic and can live in the CDK. By that test, the CDK holds:
 3. the **`SecretsResolver`** ABC (credential fetching seam),
 4. the **`TypeMapper` mechanism** (the type-map *engine*, not any mappings) —
    including the **write-direction** support `create_table` needs (§3, item 4 /
-   issue #564); the per-DB mappings themselves are the connector's data,
+   the per-DB mappings themselves are the connector's data,
 5. **optional reusable building blocks** — e.g. a generic, dialect-agnostic
    SQL-database base a connector can use as-is or subclass (so
    batching/streaming/error handling is battle-tested, not reinvented per
@@ -390,7 +390,7 @@ definitions, not a connector-wide flag.)
 - **Type translation lives with the connector.** The CDK's `TypeMapper`
   provides both `to_arrow_type(native)` (read direction) and `to_native_type()`
   (write direction, canonical → native), the latter what `create_table` DDL
-  needs (#564, shipped). Read direction is fed by `type-map-read.json`, write
+  needs. Read direction is fed by `type-map-read.json`, write
   direction by a separate `type-map-write.json` — the *mappings* are the
   connector's data, the *mechanism* is the CDK's.
 - **The contract is versioned.** Connectors declare a `cdk_version`; runtimes
@@ -402,7 +402,7 @@ definitions, not a connector-wide flag.)
 
 ### CDK packaging — core + opt-in extras
 
-The CDK (`analitiq-cdk`) is **dependency-tiered** (shipped, PR #141). The core
+The CDK (`analitiq-cdk`) is **dependency-tiered**. The core
 install pulls only `sqlalchemy` + `pydantic`, so a database-only consumer (e.g.
 a control-plane process doing discovery / DDL) stays lightweight. The heavier
 capabilities are opt-in extras:
@@ -436,7 +436,7 @@ just declares "use the CDK's generic SQL base."
 connectors/postgresql/
   definition/
     connector.json        # kind, transports (no capabilities block — see §4)
-    type-map-read.json         # native <-> arrow mappings (this DB's data; #564 home)
+    type-map-read.json         # native <-> arrow mappings (this DB's data)
   connector.py            # ~10 lines: subclass the CDK SQL base, no overrides
   requirements.txt        # this DB's driver only (asyncpg / adbc-driver-postgresql)
   pyproject.toml          # packaged as `analitiq-connector-postgresql`
@@ -486,7 +486,7 @@ Under the CDK, the plugin emits the same data **plus** four things:
 
 | New output | Why it's needed |
 |---|---|
-| **Write-direction `type-map`** (canonical → native) | `create_table` needs the inverse the read map cannot give — the write half of #564 |
+| **Write-direction `type-map`** (canonical → native) | `create_table` needs the inverse the read map cannot give |
 | **`requirements.txt`** (this DB's driver) | drivers are no longer baked into the engine; the connector brings its own |
 | **`pyproject.toml`** | the connector is now an installable package |
 | **`connector.py`** | the code seam — thin (subclass the CDK SQL base, no overrides) for a well-behaved DB, thick (subclass + override dialect DDL / pagination / type quirks) for a quirky one |
@@ -566,7 +566,7 @@ installed packages are discovered additively.
 - A separate synchronous control-plane can reuse the same CDK as a thin client
   instead of reimplementing drivers.
 - Engine stays a clean, self-contained deployable.
-- Type handling converges (#564) instead of drifting across two stacks.
+- Type handling converges instead of drifting across two stacks.
 - Capability stays honest: protocol conformance derived from code, authorization
   owned by DB grants — no static flag to drift or misrepresent.
 
@@ -607,22 +607,3 @@ installed packages are discovered additively.
 4. **MSSQL → a first-class module.** SQL Server is a proper connector module
    (driver + type-map), not an optional `pyproject` extra. *Rationale:* users
    expect it; dropping it would be a regression.
-
-## 10. What shipped
-
-The design above is implemented. The work landed as these phases:
-
-- **Write-direction type-map (#124).** `TypeMapper.to_native_type()` +
-  `type-map-write.json` rule set — the inverse `create_table` DDL needs (#564).
-- **CDK extraction (#115 / #117 / #118).** Transports, `ConnectionRuntime`,
-  `SecretsResolver`, `TypeMapper`, and the generic SQL machinery factored into
-  the `cdk/` package; engine consumes it in-tree.
-- **`Discoverable` + standalone `create_table` (#131).** `list_schemas` /
-  `list_tables` / `list_columns` (returning columns **and** primary keys) and
-  DDL decoupled from the gRPC flow onto CDK-native DTOs.
-- **Dynamic registry + `GenericSQLConnector` (#135).** `ConnectorRegistry` +
-  `build_registries(..., discover=True)`; one SQL connector class implementing
-  all four protocols over SQLAlchemy and ADBC; the engine and destination wire
-  the registries.
-- **Core / extras split (#141).** The dependency-tiered packaging in §5 and
-  decision 2 — lazy imports + `cdk.MissingExtraError`.

@@ -1,8 +1,8 @@
 # Field Mapping, Transformations & Validation
 
 **Scope:** this doc owns the assignment syntax, the expression AST, the
-validation rules, and the transformation registry
-(`src/transformations/registry.py`). For Arrow type-system and
+validation rules, and the function catalog (`_FUNCTION_CATALOG` in
+`src/engine/data_transformer.py`). For Arrow type-system and
 schema-contract internals see
 [`pyarrow-and-destinations.md`](pyarrow-and-destinations.md).
 

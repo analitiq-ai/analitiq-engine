@@ -224,7 +224,7 @@ formatter config.
 A `path_template` with time placeholders (`{year}/{month}/{day}/{hour}`)
 resolves them from the batch's engine-stamped emit instant, not the
 write-time wall clock, so a replayed batch lands in the same partition
-directory and overwrites in place (issue #353). See the `emitted_at_unix_ms`
+directory and overwrites in place. See the `emitted_at_unix_ms`
 field in [grpc-streaming-architecture.md](grpc-streaming-architecture.md).
 
 ### Stdout destination
@@ -298,7 +298,7 @@ enforced depends on the write mode:
 
 - **`upsert`** — MERGE / INSERT-or-UPDATE on the stream's `conflict_keys`.
 - **`truncate_insert`** — full refresh: the target is emptied on the
-  read's first batch (`batch_seq` 1, issue #307) via the dialect's
+  read's first batch (`batch_seq` 1) via the dialect's
   target-emptying statement (ANSI `DELETE FROM`, never `TRUNCATE`),
   plain append from the stage after that with no
   row-identity dedup (deduping a full refresh would collapse legitimate
@@ -330,24 +330,24 @@ enforced depends on the write mode:
 ### File / S3 (content-addressed filenames)
 
 Each batch file's name carries the first 16 hex chars of
-SHA-256(serialized bytes) (issue #319), and there is no batch-level
-commit ledger (issue #306). The write itself is the idempotency
+SHA-256(serialized bytes), and there is no batch-level
+commit ledger. The write itself is the idempotency
 mechanism: a true replay serializes to the same bytes, hashes to the
 same filename, and overwrites the same file — atomically, via a temp
 file renamed into place, so a crash mid-rewrite cannot truncate
 committed output — while a same-run restart,
 which re-reads the inclusive cursor boundary and re-batches those rows
 into different content, lands in a new file instead of being skipped as
-a replay (the row-drop class of issue #282) or overwriting committed
+a replay (the row-drop class) or overwriting committed
 data. Duplicates are possible across a restart, drops are not; the file
 destination reports itself as at-least-once in the schema ack
-(issue #286).
+for that handler.
 
 ### API (per-record idempotency key)
 
 An API `upsert` is idempotent through the endpoint's own `conflict_keys`.
 For `insert`, the api-endpoint contract's
-`operations.write.<mode>.idempotency` block (infra#890) declares where a
+`operations.write.<mode>.idempotency` block declares where a
 per-request idempotency key lands:
 
 ```json
@@ -379,7 +379,7 @@ The block cannot be combined with a `batching` block — the contract has
 no batching mode; a present block IS the multi-record case. Both the
 published schema and `configure_schema` reject the combination, because
 a restart re-batches records and a per-request key spanning several
-records cannot dedup (issue #286). Without the block, API `insert` is
+records cannot dedup. Without the block, API `insert` is
 at-least-once on a same-run restart. Every destination reports its
 per-stream verdict in the schema ack (`retry_semantics` + reason) and
 the engine logs it at stream start.

@@ -266,7 +266,7 @@ Four structured signals cross process boundaries so the tag survives isolation:
   tag, so a deterministic source-config error classifies as `CONFIG_INVALID`
   regardless of the `ReadError`/`RuntimeError` wrapper its type collapses into.
 - The source worker's `declared_category` (`ReadError` wire message, issue
-  #401): the worker classifies a read failure at its birth site against the
+  the worker classifies a read failure at its birth site against the
   connector's declared `error_map` and sends the matched engine-vocabulary
   category; the engine maps it to the published code
   (`source_code_for_declared_category`) and tags both deterministic and
@@ -277,14 +277,14 @@ Four structured signals cross process boundaries so the tag survives isolation:
   raise site by `classify_handshake_failure`, so a proxied destination outage
   classifies `DESTINATION_WRITE_FAILED` and a destination-config defect
   `CONFIG_INVALID` — no schema-vs-transport guessing.
-- The batch ack's `FailureCategory` (`BatchAck` field 9, issue #351): the
+- The batch ack's `FailureCategory` (`BatchAck` field 9): the
   destination declares config-defect / write-rejected / not-ready where the
   failure is caught, and `classify_destination_failure` maps the declared
   category directly (`CONFIG_INVALID` / `DESTINATION_WRITE_FAILED` /
   `INTERNAL`) instead of substring-matching the `failure_summary` prose.
 
 A connector may declare its driver's failure taxonomy as data — the
-`error_map` block in `connector.json` (issue #401): SQLSTATE classes and
+`error_map` block in `connector.json`: SQLSTATE classes and
 states, exception class names, vendor codes, HTTP statuses, each mapped to
 an engine-owned category (`transient | config | auth | unreachable |
 rate_limited | write_rejected`). The engine alone derives the verdicts

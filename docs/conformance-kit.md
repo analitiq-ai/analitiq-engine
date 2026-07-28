@@ -5,7 +5,7 @@ The CDK ships an acceptance suite for connector packages
 connector repo runs it in its own CI against the pinned CDK version, so
 a CDK change that breaks a connector — or a connector change that
 breaks its contract — turns that connector's CI red before release, not
-in a customer pipeline (issue #391; ADR
+in a customer pipeline (spec
 [sql-write-path](sql-write-path.md) §10).
 
 ## What each tier certifies
@@ -67,8 +67,7 @@ generic fakes, so this assertion lives in the live tier, not the
 contract tier).
 
 Cloud warehouses with no containerizable server (Snowflake, BigQuery,
-Redshift) run tier 1 only — the accepted residual risk recorded in
-issue #391.
+Redshift) run tier 1 only; that is an accepted residual risk.
 
 ## Wiring a connector repo
 
