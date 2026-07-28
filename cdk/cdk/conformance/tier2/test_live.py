@@ -25,6 +25,10 @@ from cdk.types import AckStatus, RetrySemantics, SchemaSpec, WriteMode
 
 from .live import STREAM_ID, LiveHarness, by_id, expect_success, rows_batch
 
+#: The live tier drives the SQL write primitive (see
+#: cdk.conformance.applicability).
+APPLIES_TO_KINDS = ("database",)
+
 
 def _truncate_spec() -> SchemaSpec:
     """The handshake spec for a truncate_insert stream."""

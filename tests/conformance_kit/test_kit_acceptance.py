@@ -14,25 +14,28 @@ from __future__ import annotations
 
 import re
 import subprocess
+import types
 from pathlib import Path
 
 import pytest
 
 from cdk.conformance import (
     check_declaration_consistency,
+    check_kind_applicability,
     check_override_surface,
     check_type_map_round_trip,
     load_target,
 )
 from cdk.conformance.roundtrip import probe_canonicals, render_probe
 from cdk.conformance.target import ConformanceTarget
+from cdk.conformance.tier1 import test_definition as kit_definition
 from cdk.type_map.exceptions import UnmappedTypeError
 
-from .kit_runner import REFERENCE_CLASS, REFERENCE_DIR, run_kit_suite
+from .kit_runner import API_REFERENCE_DIR, REFERENCE_CLASS, REFERENCE_DIR, run_kit_suite
 
-#: The tier-1 suite currently ships 22 tests for a full write-capable
-#: target; a floor well above zero guards against the suite silently
-#: collecting or skipping everything.
+#: The tier-1 suite ships 25 tests for a full write-capable target; a
+#: floor well above zero guards against the suite silently collecting or
+#: skipping everything.
 TIER1_MIN_PASSED = 10
 
 
@@ -119,6 +122,88 @@ class TestThinConnectorPassesVacuously:
         assert target.connector_class is not None, "thin path falls back"
         assert check_override_surface(target) == []
         assert check_declaration_consistency(target) == []
+
+
+class _FakeItem:
+    """A collected check, as the applicability ledger reads one."""
+
+    def __init__(self, kinds: object) -> None:
+        self.module = types.SimpleNamespace(APPLIES_TO_KINDS=kinds)
+
+
+class TestUnassessableKindIsNotAPass:
+    """A kind the suite carries no checks for must fail, never pass.
+
+    Every behavioural tier-1 check gates on the connector being a
+    database, so an API connector collects almost nothing but skips —
+    and pytest exits 0 on an all-skipped run. A required status check
+    that goes green for an artifact it structurally cannot evaluate
+    reports "not assessed" as "passed"; the verdict has to come from the
+    kit, not from a kind branch in every connector repo's CI.
+    """
+
+    def test_api_connector_fails_tier1_naming_the_reason(self) -> None:
+        """The end-to-end shape: a well-formed API connector turns CI red."""
+        completed = run_kit_suite(
+            "cdk.conformance.tier1",
+            options=["--connector-dir", str(API_REFERENCE_DIR)],
+        )
+        output = completed.stdout + completed.stderr
+        assert completed.returncode != 0, (
+            f"a connector the suite cannot assess must not exit green:\n" f"{output}"
+        )
+        assert "kind-applicability" in output
+        assert "ungated" in output, f"the failure must name the reason:\n{output}"
+        assert re.search(r"\b1 failed", output), (
+            f"the applicability verdict must be the only failure; anything "
+            f"else means the API fixture is itself broken:\n{output}"
+        )
+
+    def test_the_verdict_names_what_the_run_does_assess(self) -> None:
+        target = load_target(API_REFERENCE_DIR)
+        report = "\n".join(
+            str(v)
+            for v in check_kind_applicability(
+                target, [_FakeItem(("database",)), _FakeItem(None)]
+            )
+        )
+        assert "'api'" in report
+        assert "'database'" in report
+
+    def test_a_check_for_the_target_kind_clears_the_verdict(self) -> None:
+        """The ledger is derived, so new checks for a kind gate it.
+
+        Nothing here names the covered kinds: a module of API checks
+        stating its own scope satisfies this the day it lands, with no
+        list to keep in step.
+        """
+        target = load_target(API_REFERENCE_DIR)
+        assert check_kind_applicability(target, [_FakeItem(("api",))]) == []
+        assert check_kind_applicability(target, [_FakeItem("api")]) == []
+
+    def test_a_run_of_only_kind_agnostic_checks_fails(self) -> None:
+        """Scaffolding checks certify no kind, so they satisfy nothing."""
+        target = load_target(REFERENCE_DIR, class_path=REFERENCE_CLASS)
+        violations = check_kind_applicability(target, [_FakeItem(None)])
+        assert violations
+        assert "no check collected here states a kind" in str(violations[0])
+
+    def test_the_read_type_map_check_covers_every_kind(self, tmp_path: Path) -> None:
+        """The one tier-1 check scoped by wording rather than dependency.
+
+        Its body reads ``type_mapper``, which loads for every kind; an
+        API connector without a read map cannot canonicalize the JSON
+        types its endpoints declare, so it must fail here too.
+        """
+        definition_dir = tmp_path / "definition"
+        definition_dir.mkdir()
+        (definition_dir / "connector.json").write_text(
+            '{"kind": "api", "connector_id": "conformance-api-no-map"}'
+        )
+        target = load_target(tmp_path)
+        assert not target.is_database
+        with pytest.raises(AssertionError, match="type-map-read.json"):
+            kit_definition.test_connector_ships_a_read_type_map(target)
 
 
 class TestSuiteInvocation:

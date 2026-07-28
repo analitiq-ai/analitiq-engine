@@ -26,6 +26,10 @@ from cdk.sql.exceptions import CatalogAddressingError, SchemaConfigurationError
 from cdk.sql.generic import GenericSQLConnector
 from cdk.sql.write_plan import build_stage_write_plan
 
+#: Every check here drives a dialect's SQL rendering (see
+#: cdk.conformance.applicability).
+APPLIES_TO_KINDS = ("database",)
+
 _TEMP_TOKEN = re.compile(r"\bTEMP(ORARY)?\b")
 _TRUNCATE_TOKEN = re.compile(r"\bTRUNCATE\b")
 _MERGE_TOKEN = re.compile(r"\bMERGE\b")

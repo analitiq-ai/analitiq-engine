@@ -18,6 +18,11 @@ Two tiers:
   provides as a CI service container. Skips itself, loudly, when no
   live connection is configured.
 
+Either tier *fails* when it carries no check for the connector's kind
+(:mod:`cdk.conformance.applicability`): a suite that structurally cannot
+assess a connector must not report success for it, or its green check
+would mean "not assessed" while reading as "passed".
+
 Run from a connector repo (the package installed, the repo root holding
 ``definition/connector.json``) — the options plugin is loaded
 explicitly, or skipped entirely by configuring through the environment
@@ -35,6 +40,7 @@ so a repo can wire them into its own harness; the pytest modules are thin
 wrappers over these functions.
 """
 
+from .applicability import check_kind_applicability
 from .declaration import check_declaration_consistency
 from .roundtrip import check_type_map_grammar, check_type_map_round_trip
 from .surface import check_override_surface, sanctioned_dialect_surface
@@ -46,6 +52,7 @@ __all__ = [
     "ConformanceTarget",
     "Violation",
     "check_declaration_consistency",
+    "check_kind_applicability",
     "check_override_surface",
     "check_type_map_grammar",
     "check_type_map_round_trip",
