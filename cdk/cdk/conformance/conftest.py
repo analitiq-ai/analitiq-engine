@@ -43,7 +43,7 @@ def conformance_target(request: pytest.FixtureRequest) -> ConformanceTarget:
 
 
 @pytest.fixture(autouse=True)
-def kind_scope(
+def _conformance_kind_scope(
     request: pytest.FixtureRequest, conformance_target: ConformanceTarget
 ) -> None:
     """Skip a check whose module does not apply to the target's kind.
@@ -53,6 +53,10 @@ def kind_scope(
     states it applies to gate it here, and the applicability check reads
     the same statement to decide whether the run assessed anything at
     all.
+
+    Named for the kit, and privately, because a fixture a consuming repo
+    could shadow from its own conftest is a gate a repo could switch off
+    by accident.
     """
     kinds = declared_kinds(request.node)
     if kinds and conformance_target.kind not in kinds:
