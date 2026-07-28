@@ -1,10 +1,23 @@
 [tool.poetry]
 name = "analitiq-cdk"
-version = "0.2.0"
+version = "0.2.0rc1"
 description = "Analitiq Connector Development Kit: vendor-neutral, transport-neutral building blocks (transports, ConnectionRuntime, type-map, secrets seam, query builder, read/write contracts) shared by the engine and the cloud control-plane."
 authors = ["Analitiq Core Team <dev@analitiq.com>"]
-license = "MIT"
+# Matches the repository LICENSE (Apache-2.0), which is the licence the shipped
+# source is actually under.
+license = "Apache-2.0"
 readme = "README.md"
+homepage = "https://github.com/analitiq-ai/analitiq-engine"
+repository = "https://github.com/analitiq-ai/analitiq-engine"
+documentation = "https://github.com/analitiq-ai/analitiq-engine/blob/main/docs/connector-module-architecture.md"
+keywords = ["connector", "cdk", "etl", "data-integration", "arrow"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
 packages = [{ include = "cdk" }]
 
 [tool.poetry.dependencies]

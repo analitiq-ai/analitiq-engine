@@ -1,0 +1,105 @@
+name: publish-cdk
+
+# Publishes the CDK (``cdk/``) to PyPI as ``analitiq-cdk`` when a ``cdk-v*`` tag
+# is pushed. Authentication is PyPI Trusted Publishing over GitHub OIDC: the
+# ``pypi`` environment's OIDC subject is what PyPI trusts, so no API token is
+# stored in this repo or in any secret.
+#
+# Releasing:
+#   1. bump ``version`` in cdk/pyproject.toml and ``__version__`` in
+#      cdk/cdk/__init__.py to the same value,
+#   2. merge to main,
+#   3. ``git tag cdk-v<version> && git push origin cdk-v<version>``,
+#   4. approve the pending ``pypi`` deployment in the Actions run.
+# The build job refuses to proceed unless all three versions agree, so a
+# mistyped tag fails before anything reaches PyPI; the environment's required
+# reviewer is the second gate, so a tag push alone never uploads.
+#
+# The same build job also runs on pull requests that touch cdk/**, so a package
+# that cannot be built or fails ``twine check`` is caught at review time rather
+# than at release time.
+
+on:
+  push:
+    tags:
+      - "cdk-v*"
+  pull_request:
+    paths:
+      - cdk/**
+      - .github/workflows/publish-cdk.yml
+
+jobs:
+  build:
+    name: build + verify distributions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: cdk
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Tag, pyproject and __version__ must name the same version
+        # Only meaningful for a tag push; on a PR there is no tag to compare, so
+        # the two in-tree sources are still checked against each other.
+        env:
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          set -euo pipefail
+          project_version="$(poetry version --short)"
+          module_version="$(PYTHONPATH=. python -c 'import cdk; print(cdk.__version__)')"
+          if [ "$project_version" != "$module_version" ]; then
+            echo "::error::cdk/pyproject.toml version ($project_version) != cdk.__version__ ($module_version)"
+            exit 1
+          fi
+          if [ -n "$TAG" ] && [ "${TAG#cdk-v}" != "$project_version" ]; then
+            echo "::error::tag $TAG does not name version $project_version"
+            exit 1
+          fi
+          echo "version $project_version"
+
+      - name: Build sdist and wheel
+        run: poetry build
+
+      - name: Validate the rendered package metadata
+        run: |
+          pipx install twine
+          twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: analitiq-cdk-dist
+          path: cdk/dist/
+          if-no-files-found: error
+
+  publish:
+    name: publish to PyPI
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    # PyPI's trusted publisher for analitiq-cdk pins this repository, this
+    # workflow filename and this environment name; changing any of the three
+    # requires updating the publisher on PyPI. The environment also carries a
+    # required reviewer, so the upload waits for a human approval on the run.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/analitiq-cdk
+    permissions:
+      # Mints the short-lived OIDC token PyPI exchanges for an upload token.
+      # No other permission is needed: this job does not touch the repository.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: analitiq-cdk-dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
