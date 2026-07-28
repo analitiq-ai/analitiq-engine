@@ -9,9 +9,11 @@ name: publish-cdk
 #   1. bump ``version`` in cdk/pyproject.toml and ``__version__`` in
 #      cdk/cdk/__init__.py to the same value,
 #   2. merge to main,
-#   3. ``git tag cdk-v<version> && git push origin cdk-v<version>``.
-# The build job refuses to proceed unless all three agree, so a mistyped tag
-# fails before anything reaches PyPI.
+#   3. ``git tag cdk-v<version> && git push origin cdk-v<version>``,
+#   4. approve the pending ``pypi`` deployment in the Actions run.
+# The build job refuses to proceed unless all three versions agree, so a
+# mistyped tag fails before anything reaches PyPI; the environment's required
+# reviewer is the second gate, so a tag push alone never uploads.
 #
 # The same build job also runs on pull requests that touch cdk/**, so a package
 # that cannot be built or fails ``twine check`` is caught at review time rather
@@ -85,7 +87,8 @@ jobs:
     runs-on: ubuntu-latest
     # PyPI's trusted publisher for analitiq-cdk pins this repository, this
     # workflow filename and this environment name; changing any of the three
-    # requires updating the publisher on PyPI.
+    # requires updating the publisher on PyPI. The environment also carries a
+    # required reviewer, so the upload waits for a human approval on the run.
     environment:
       name: pypi
       url: https://pypi.org/p/analitiq-cdk
