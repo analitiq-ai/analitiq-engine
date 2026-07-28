@@ -256,7 +256,7 @@ class SqlDialect:
         """
         return None
 
-    # ---- stage-then-merge write path (ADR sql-write-path-v2) ---------------
+    # ---- stage-then-merge write path (spec sql-write-path) ---------------
     def stage_table_sql(
         self, stage: TableAddress, target: TableAddress, *, temp: bool
     ) -> str:

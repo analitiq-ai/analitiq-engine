@@ -3,7 +3,7 @@
 Every destination handler reports, per configured stream, whether a
 same-``RUN_ID`` restart can duplicate writes. The SQL verdict is write
 mode x key aware and transport-independent (stage-then-merge, ADR
-sql-write-path-v2 §9); file writes content-addressed files; stdout has
+sql-write-path §9); file writes content-addressed files; stdout has
 nothing to dedup with. The base default is the only honest claim for a
 handler that declares nothing: at-least-once.
 """
@@ -82,7 +82,7 @@ class TestFileAndStdoutVerdicts:
 @pytest.mark.unit
 class TestSqlVerdicts:
     """The SQL verdict is transport-independent under stage-then-merge
-    (ADR sql-write-path-v2 §9): upsert dedups on its conflict keys;
+    (spec sql-write-path §9): upsert dedups on its conflict keys;
     insert anti-joins on row identity from the stage on both transports;
     truncate-insert truncates on the run's first batch (issue #307) but
     appends with no row-identity dedup, so it cannot claim replay

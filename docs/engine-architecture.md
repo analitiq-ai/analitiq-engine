@@ -33,7 +33,6 @@ cdk/cdk/                     # Connector Development Kit (shared by source + des
 ├── derived_functions.py     # `lookup`, `basic_auth`, `base64_encode`, `url_encode`
 ├── type_map/                # TypeMapper, canonical Arrow types
 ├── schema_contract.py       # Arrow-based vectorized casting
-├── sql_types.py             # arrow_to_sqlalchemy + per-driver native renderers
 ├── base_handler.py          # BaseDestinationHandler ABC
 ├── contract.py              # Readable / Writable / Discoverable / TableCreator Protocols
 ├── types.py                 # Shared CDK types
@@ -267,7 +266,7 @@ Four structured signals cross process boundaries so the tag survives isolation:
   tag, so a deterministic source-config error classifies as `CONFIG_INVALID`
   regardless of the `ReadError`/`RuntimeError` wrapper its type collapses into.
 - The source worker's `declared_category` (`ReadError` wire message, issue
-  #401): the worker classifies a read failure at its birth site against the
+  the worker classifies a read failure at its birth site against the
   connector's declared `error_map` and sends the matched engine-vocabulary
   category; the engine maps it to the published code
   (`source_code_for_declared_category`) and tags both deterministic and
@@ -278,14 +277,14 @@ Four structured signals cross process boundaries so the tag survives isolation:
   raise site by `classify_handshake_failure`, so a proxied destination outage
   classifies `DESTINATION_WRITE_FAILED` and a destination-config defect
   `CONFIG_INVALID` — no schema-vs-transport guessing.
-- The batch ack's `FailureCategory` (`BatchAck` field 9, issue #351): the
+- The batch ack's `FailureCategory` (`BatchAck` field 9): the
   destination declares config-defect / write-rejected / not-ready where the
   failure is caught, and `classify_destination_failure` maps the declared
   category directly (`CONFIG_INVALID` / `DESTINATION_WRITE_FAILED` /
   `INTERNAL`) instead of substring-matching the `failure_summary` prose.
 
 A connector may declare its driver's failure taxonomy as data — the
-`error_map` block in `connector.json` (issue #401): SQLSTATE classes and
+`error_map` block in `connector.json`: SQLSTATE classes and
 states, exception class names, vendor codes, HTTP statuses, each mapped to
 an engine-owned category (`transient | config | auth | unreachable |
 rate_limited | write_rejected`). The engine alone derives the verdicts
@@ -337,13 +336,25 @@ Each connection loaded by `PipelineConfigPrep` becomes a
   not blocked at config time.
 - When the connector declares a `transports` block, builds the actual
   transport (SQLAlchemy async engine, aiohttp ClientSession, etc.) via
-  `cdk/cdk/transport_factory.py`. The factory drives:
-  - `_materialize_derived` — fixpoint-evaluates the connector's
-    `derived` block.
-  - `_ssl_dict_to_context` — builds an `ssl.SSLContext` from declarative
-    `{verify_mode, check_hostname}` dicts (CPython-safe ordering).
-  - `build_sqlalchemy_transport` and `build_http_transport` — assemble
-    the final transport, rejecting half-specified `rate_limit` shapes.
+  `cdk/cdk/transport_factory.py`. The factory keeps resolution and
+  construction apart, so no live object ever crosses to the connector
+  side:
+  - `resolve_transport_spec` — trusted side. Renders the selected
+    transport into a JSON-safe spec (DSN with secrets in place,
+    `db_kwargs`, TLS mode + CA PEM, headers, engine kwargs) through a
+    `Resolver` carrying `DEFAULT_FUNCTIONS`. Per-kind resolvers
+    (`resolve_sqlalchemy_spec`, `resolve_http_spec`) validate as they
+    go — `resolve_http_spec` rejects a half-specified `rate_limit`,
+    which needs both `max_requests` and `time_window_seconds`.
+  - `build_transport_from_spec` — connector side. Dispatches on
+    `transport_type` to the per-kind builder
+    (`build_sqlalchemy_from_spec`, `build_adbc_from_spec`,
+    `build_http_from_spec`) that assembles the live transport.
+  - `build_transport` — both steps in one call, for the in-process
+    paths (control-plane, tests).
+  - `ca_ssl_context` — builds a verifying `ssl.SSLContext` from a PEM CA
+    bundle; the shared helper behind connector packages' own
+    `build_tls_connect_arg`.
 - Reference-counts handles so multiple streams sharing a connection
   share the same engine / session.
 

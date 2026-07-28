@@ -31,17 +31,19 @@ record_batch
 
 ### Source side
 
-- `src/source/connectors/api.py:221` -- HTTP returns `List[Dict]`, then
-  `schema_contract.from_pylist(deduped)` rebuilds a `pa.RecordBatch`.
+- `APIConnector._read_batches_impl` (`src/source/connectors/api.py`) -- HTTP
+  returns `List[Dict]`, then `schema_contract.from_pylist(...)` rebuilds a
+  `pa.RecordBatch`.
 - `GenericSQLConnector.read_batches` (`cdk/cdk/sql/generic.py`) --
   SQLAlchemy returns rows, rows are turned into dicts, then
   `from_pylist(rows)` rebuilds a batch.
 
 ### gRPC transport
 
-- Engine encodes with `pa.ipc.new_stream()` (`src/grpc/client.py:551`).
-- Destination decodes with `pa.ipc.open_stream()`
-  (`src/destination/server.py:349`).
+- Engine encodes with `pa.ipc.new_stream()` in `_encode_arrow_ipc`
+  (`src/grpc/client.py`).
+- Destination decodes with `pa.ipc.open_stream()` in `_decode_arrow_ipc`
+  (`src/destination/server.py`).
 
 ## Where Arrow Earns Its Keep
 
@@ -57,11 +59,14 @@ record_batch
    `forbidden` or `explicit` conversion (e.g. an `Int64 → Utf8` whose mapping
    omitted `to_string`) fails loud here instead of silently stringifying.
    Faster and more correct than a per-row Python coercion loop.
-3. **Type vocabulary.** `TypeMapper` (`cdk/cdk/type_map/mapper.py`) ->
-   `parse_arrow_type` (`cdk/cdk/type_map/arrow.py`) ->
-   `arrow_to_sqlalchemy` (`cdk/cdk/sql_types.py`) is a clean single
-   source of truth for types across all connectors. Arrow happens to
-   have a good vocabulary to standardize on.
+3. **Type vocabulary.** `parse_arrow_type` (`cdk/cdk/type_map/arrow.py`)
+   -> `TypeMapper.to_native_type` (`cdk/cdk/type_map/mapper.py`) ->
+   `SqlDialect.render_column_type` (`cdk/cdk/sql/dialects.py`) is a clean
+   single source of truth for types across all connectors: the canonical
+   Arrow string parses to a `pa.DataType` on the read side, and the
+   connector's own `type-map-write.json` renders it back to native DDL on
+   the write side. Arrow happens to have a good vocabulary to standardize
+   on.
 
 ## Where Arrow Is Ceremony
 
@@ -112,7 +117,7 @@ transport_type: "sqlalchemy"  → SqlAlchemyBackend (stage-then-merge:
                                   every batch lands in a per-batch
                                   stage table, one mode statement
                                   applies it — see
-                                  sql-write-path-v2.md). Breadth
+                                  sql-write-path.md). Breadth
                                   layer for every dialect SA covers.
                                   Async engine for dialects with an
                                   async driver (asyncpg, aiomysql);

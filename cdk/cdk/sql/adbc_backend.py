@@ -1,7 +1,7 @@
 """ADBC transport backend for the stage-then-merge write primitive.
 
 ``AdbcBackend`` executes :class:`~cdk.sql.backend.StageWritePlan`s over a
-direct ADBC DBAPI connection (issue #389, ADR sql-write-path-v2). It owns
+direct ADBC DBAPI connection (issue #389, spec sql-write-path). It owns
 everything transport-mechanical the facade must never touch: the cached
 connection, its locks, reopen/poison handling after failures, the
 session-schema invariant probe (issue #377), and the stage-cycle commit

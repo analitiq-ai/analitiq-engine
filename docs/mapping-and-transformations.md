@@ -1,8 +1,8 @@
 # Field Mapping, Transformations & Validation
 
 **Scope:** this doc owns the assignment syntax, the expression AST, the
-validation rules, and the transformation registry
-(`src/transformations/registry.py`). For Arrow type-system and
+validation rules, and the function catalog (`_FUNCTION_CATALOG` in
+`src/engine/data_transformer.py`). For Arrow type-system and
 schema-contract internals see
 [`pyarrow-and-destinations.md`](pyarrow-and-destinations.md).
 
@@ -55,11 +55,12 @@ destination's schema contract and are independent of the assignment AST.
 ```
 
 - `assignments[]` is an ordered list, evaluated top to bottom. Each
-  assignment's `get` reads only from the **source record** — the
-  in-progress result is threaded through evaluation as `partial_result`
-  but no current `op` consults it, so earlier assignments are **not**
-  visible to later ones. Treat every assignment as a pure function of
-  the source record.
+  assignment compiles to a closure typed `Callable[[pa.RecordBatch],
+  pa.Array]` (`_ExprFn` in `src/engine/data_transformer.py`), so the only
+  input any assignment can read is the **source batch** — no in-progress
+  result is threaded through evaluation at all, and earlier assignments
+  are therefore **not** visible to later ones. Treat every assignment as
+  a pure function of the source record.
 - `source_to_generic` / `generic_to_destination` are consumed by the
   destination's `SchemaContract` for vectorized Arrow casting (see
   `cdk/cdk/schema_contract.py`; details in

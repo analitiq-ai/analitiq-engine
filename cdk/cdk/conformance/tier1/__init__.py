@@ -1,4 +1,4 @@
-"""Tier 1 — contract tests: no live database (ADR sql-write-path-v2 s.10).
+"""Tier 1 — contract tests: no live database (spec sql-write-path s.10).
 
 Run from a connector repo::
 

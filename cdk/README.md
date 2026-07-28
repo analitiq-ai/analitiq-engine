@@ -41,7 +41,7 @@ surface never pulls `pyarrow`/`aiohttp`.
 | Tier | Pulls | Surface |
 |---|---|---|
 | core (always) | `sqlalchemy`, `pydantic` | SQL control-plane: `cdk.sql` discovery + standalone `create_table`, `ConnectionRuntime`/transport seam, type-map (string surface), secrets |
-| `[arrow]` | `pyarrow` | columnar streaming: `schema_contract`, `sql_types`, `sql.adbc_reader`, `type_map.parse_arrow_type`, `GenericSQLConnector` read/write |
+| `[arrow]` | `pyarrow` | columnar streaming: `schema_contract`, `sql.adbc_reader`, `type_map.parse_arrow_type`, `GenericSQLConnector` read/write |
 | `[api]` | `aiohttp` | HTTP transport for API connectors |
 | `[streaming]` | `pyarrow` + `aiohttp` | full connector surface the engine consumes (`[arrow]` + `[api]`) |
 | `[s3]` | `boto3` | `s3://` secret refs (`SchemeSecretsResolver`) |
@@ -53,14 +53,14 @@ The thin-surface entry points raise `cdk.MissingExtraError` (naming the extra,
 e.g. `analitiq-cdk[arrow]`) when the extra is absent, rather than a bare
 `No module named 'pyarrow'`: the package-level lazy reexports
 (`cdk.sql.AdbcReader` / `open_adbc_reader`, `cdk.type_map.parse_arrow_type` /
-`resolve_arrow_type`) and the HTTP transport (`build_http_transport`). A
+`resolve_arrow_type`) and the HTTP transport (`build_http_from_spec`). A
 genuinely-absent extra is relabelled; an *unrelated* or *broken-install*
 import failure (a partial build failing on a submodule, a missing transitive
 dep) is re-raised untouched so the real cause survives.
 
 Directly importing a streaming module that belongs to an extra
-(`cdk.schema_contract`, `cdk.sql_types`, `cdk.sql.adbc_reader`,
-`cdk.type_map.arrow`, `cdk.sql.generic`, `cdk.base_handler`) without that extra
+(`cdk.schema_contract`, `cdk.sql.adbc_reader`, `cdk.type_map.arrow`,
+`cdk.sql.generic`, `cdk.base_handler`) without that extra
 raises a plain `ImportError` naming `pyarrow` on the import line — those modules
 *are* the extra and require it by design; a thin control-plane consumer reaches
 the Arrow surface only through the guarded lazy reexports above, never by

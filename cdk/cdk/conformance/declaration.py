@@ -1,4 +1,4 @@
-"""Declared-vs-implemented consistency (ADR sql-write-path-v2 sections 5, 10).
+"""Declared-vs-implemented consistency (spec sql-write-path sections 5, 10).
 
 ``connector.json`` declares *whether* the system has a SQL shape; the
 dialect class renders *how*. The two must agree, both ways:
@@ -141,7 +141,7 @@ def check_declaration_consistency(target: ConformanceTarget) -> list[Violation]:
                 "connector) but declares no sql_capabilities block in "
                 "connector.json; every write is refused at handshake — the "
                 "engine never guesses an undeclared capability. Declare the "
-                "block (ADR sql-write-path-v2 section 5).",
+                "block (spec sql-write-path section 5).",
             )
         )
     dialect = target.dialect
@@ -164,7 +164,7 @@ def check_declaration_consistency(target: ConformanceTarget) -> list[Violation]:
                 f"{dialect_cls.__name__} does not implement stage_table_sql; "
                 f"every SQL write lands in a stage table first, so a "
                 f"write-capable connector without stage DDL cannot write at "
-                f"all (ADR sql-write-path-v2 section 2).",
+                f"all (spec sql-write-path section 2).",
             )
         )
 
@@ -238,7 +238,7 @@ def _hook_declaration_violations(
                 f"{dialect_cls.__name__} implements bulk_land but "
                 f"connector.json declares no bulk_load mechanism that routes "
                 f"through it (adbc_ingest is the ADBC backend's own "
-                f"landing); the hook is never called (ADR sql-write-path-v2 "
+                f"landing); the hook is never called (spec sql-write-path "
                 f"section 5). Declare the mechanism or delete the override.",
             )
         )

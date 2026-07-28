@@ -1,4 +1,4 @@
-r"""Tier 2 — live tests against a real database (ADR sql-write-path-v2 s.10).
+r"""Tier 2 — live tests against a real database (spec sql-write-path s.10).
 
 Runs only where the connector repo provides its system as a CI service
 container and points the suite at it::

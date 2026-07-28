@@ -1,7 +1,7 @@
 """The write primitive end-to-end against the connector's real system.
 
 All write modes, replay, and restart, exactly as the ADR's live tier
-specifies (sql-write-path-v2 section 10): every phase runs a fresh
+specifies (sql-write-path section 10): every phase runs a fresh
 connector instance over a fresh connection, so a passing test also
 certifies restart behaviour; a replayed batch must observably match the
 connector's declared retry semantics.
@@ -215,7 +215,7 @@ def test_declared_bulk_and_executemany_land_identically(
         assert bulk_rows == executemany_rows, (
             "the declared bulk mechanism and the executemany fallback left "
             "different target contents; bulk_land is a pure speed slot and "
-            "must not change what lands (ADR sql-write-path-v2 section 2)"
+            "must not change what lands (spec sql-write-path section 2)"
         )
 
     asyncio.run(scenario())
