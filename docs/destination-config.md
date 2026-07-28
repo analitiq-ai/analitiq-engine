@@ -66,7 +66,10 @@ Shared building blocks moved to the CDK at `cdk/cdk/`:
 - `sql/generic.py` — `GenericSQLConnector` (the database handler).
 - `base_handler.py` — `BaseDestinationHandler` ABC and `BatchWriteResult`.
 - `schema_contract.py` — Arrow-based `SchemaContract`.
-- `sql_types.py` — `arrow_to_sqlalchemy` mapper.
+- `type_map/mapper.py` — `TypeMapper`, the canonical-Arrow <-> native-type
+  mapper driven by the connector's own type maps.
+- `sql/ddl.py` — `build_create_table_sql`, which renders each column's
+  canonical type through `SqlDialect.render_column_type`.
 - `registry.py` — `ConnectorRegistry` / `build_registries`.
 
 ## Environment Variables

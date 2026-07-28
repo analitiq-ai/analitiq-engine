@@ -57,11 +57,14 @@ record_batch
    `forbidden` or `explicit` conversion (e.g. an `Int64 → Utf8` whose mapping
    omitted `to_string`) fails loud here instead of silently stringifying.
    Faster and more correct than a per-row Python coercion loop.
-3. **Type vocabulary.** `TypeMapper` (`cdk/cdk/type_map/mapper.py`) ->
-   `parse_arrow_type` (`cdk/cdk/type_map/arrow.py`) ->
-   `arrow_to_sqlalchemy` (`cdk/cdk/sql_types.py`) is a clean single
-   source of truth for types across all connectors. Arrow happens to
-   have a good vocabulary to standardize on.
+3. **Type vocabulary.** `parse_arrow_type` (`cdk/cdk/type_map/arrow.py`)
+   -> `TypeMapper.to_native_type` (`cdk/cdk/type_map/mapper.py`) ->
+   `SqlDialect.render_column_type` (`cdk/cdk/sql/dialects.py`) is a clean
+   single source of truth for types across all connectors: the canonical
+   Arrow string parses to a `pa.DataType` on the read side, and the
+   connector's own `type-map-write.json` renders it back to native DDL on
+   the write side. Arrow happens to have a good vocabulary to standardize
+   on.
 
 ## Where Arrow Is Ceremony
 

@@ -33,7 +33,6 @@ cdk/cdk/                     # Connector Development Kit (shared by source + des
 ├── derived_functions.py     # `lookup`, `basic_auth`, `base64_encode`, `url_encode`
 ├── type_map/                # TypeMapper, canonical Arrow types
 ├── schema_contract.py       # Arrow-based vectorized casting
-├── sql_types.py             # arrow_to_sqlalchemy + per-driver native renderers
 ├── base_handler.py          # BaseDestinationHandler ABC
 ├── contract.py              # Readable / Writable / Discoverable / TableCreator Protocols
 ├── types.py                 # Shared CDK types
@@ -337,13 +336,25 @@ Each connection loaded by `PipelineConfigPrep` becomes a
   not blocked at config time.
 - When the connector declares a `transports` block, builds the actual
   transport (SQLAlchemy async engine, aiohttp ClientSession, etc.) via
-  `cdk/cdk/transport_factory.py`. The factory drives:
-  - `_materialize_derived` — fixpoint-evaluates the connector's
-    `derived` block.
-  - `_ssl_dict_to_context` — builds an `ssl.SSLContext` from declarative
-    `{verify_mode, check_hostname}` dicts (CPython-safe ordering).
-  - `build_sqlalchemy_transport` and `build_http_transport` — assemble
-    the final transport, rejecting half-specified `rate_limit` shapes.
+  `cdk/cdk/transport_factory.py`. The factory keeps resolution and
+  construction apart, so no live object ever crosses to the connector
+  side:
+  - `resolve_transport_spec` — trusted side. Renders the selected
+    transport into a JSON-safe spec (DSN with secrets in place,
+    `db_kwargs`, TLS mode + CA PEM, headers, engine kwargs) through a
+    `Resolver` carrying `DEFAULT_FUNCTIONS`. Per-kind resolvers
+    (`resolve_sqlalchemy_spec`, `resolve_http_spec`) validate as they
+    go — `resolve_http_spec` rejects a half-specified `rate_limit`,
+    which needs both `max_requests` and `time_window_seconds`.
+  - `build_transport_from_spec` — connector side. Dispatches on
+    `transport_type` to the per-kind builder
+    (`build_sqlalchemy_from_spec`, `build_adbc_from_spec`,
+    `build_http_from_spec`) that assembles the live transport.
+  - `build_transport` — both steps in one call, for the in-process
+    paths (control-plane, tests).
+  - `ca_ssl_context` — builds a verifying `ssl.SSLContext` from a PEM CA
+    bundle; the shared helper behind connector packages' own
+    `build_tls_connect_arg`.
 - Reference-counts handles so multiple streams sharing a connection
   share the same engine / session.
 
