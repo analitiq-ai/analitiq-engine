@@ -28,10 +28,11 @@ Both containers run the same Docker image, toggled by `RUN_MODE` (`source` or `d
 ## Wire Protocol
 
 The service is one bidirectional RPC plus side RPCs (`proto/analitiq/v1/`).
-The Python modules under `src/grpc/generated/` are committed; `proto/generate.sh`
-regenerates every one of them from the definitions, and a conformance test
-compares each committed module's descriptor against its `.proto` so an edited
-definition cannot ship without its regenerated modules.
+The generated Python lives under `src/grpc/generated/` and is committed.
+`proto/generate.sh` regenerates the `_pb2` and `_pb2_grpc` modules from every
+definition; the package's `__init__.py` re-exports them and is hand-written.
+A conformance test holds all three to the definitions -- descriptors, dispatch
+paths, and re-exported names -- so an edited `.proto` cannot ship without them.
 
 ```protobuf
 service DestinationService {

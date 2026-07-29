@@ -1,17 +1,26 @@
 // Publish @analitiq-ai/conversion-matrix to GitHub Packages only when the built
-// package content changed, patch-bumping off the last published release.
+// package content changed.
 //
 // The gate hashes the whole built dist/ -- the grid data AND the package's own
 // code/types -- so a grid change or a fix to getConversion both cut a new
 // version, while an engine release that changes nothing we ship does not. The
 // registry is the source of truth: the digest is recorded on each published
 // version (analitiqPackageSha256) and compared on the next run.
+//
+// Versions patch-bump off the last published release, EXCEPT when package.json
+// declares one higher than that -- then the declared version wins. The package
+// re-exports the engine artifact verbatim (dist/conversion_matrix.json is a
+// documented entry point), so an artifact shape change is a breaking change
+// here too, and a patch bump would walk consumers' semver ranges straight into
+// it. Declaring the version in package.json is how that break is announced.
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { compareVersions, parseVersion } from "./sync-contracts-to-s3.mjs";
 
 const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const pkgName = "@analitiq-ai/conversion-matrix";
@@ -67,13 +76,28 @@ if (publishedSha && publishedSha === currentSha) {
   process.exit(0);
 }
 
+const declaredVersion = npm(["pkg", "get", "version"]).replace(/"/g, "");
+if (parseVersion(declaredVersion) === null) {
+  throw new Error(`package.json declares no plain-semver version (got ${declaredVersion})`);
+}
+
 const lastVersion = npmViewOrAbsent(["view", pkgName, "version"]);
+const lastParsed = lastVersion ? parseVersion(lastVersion) : null;
 let nextVersion;
-if (lastVersion) {
+if (!lastVersion) {
+  nextVersion = declaredVersion;
+} else if (
+  // An unparseable published version (a prerelease tag, say) is left to
+  // `npm version patch`, which understands spellings this comparison does not.
+  lastParsed !== null &&
+  compareVersions(parseVersion(declaredVersion), lastParsed) > 0
+) {
+  // A deliberate bump in package.json -- the maintainer is announcing a change
+  // consumers' ranges must not cross silently. Honour it verbatim.
+  nextVersion = declaredVersion;
+} else {
   npm(["pkg", "set", `version=${lastVersion}`]);
   npm(["--no-git-tag-version", "version", "patch"]);
-  nextVersion = npm(["pkg", "get", "version"]).replace(/"/g, "");
-} else {
   nextVersion = npm(["pkg", "get", "version"]).replace(/"/g, "");
 }
 

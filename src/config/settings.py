@@ -72,7 +72,7 @@ def default_buffer_size() -> int:
 def default_error_strategy() -> str:
     """Fault policy when a batch exhausts retries (``ANALITIQ_ERROR_STRATEGY``).
 
-    One of ``fail`` | ``dlq`` | ``skip``; validated by
+    Validated against the published pipeline contract's enum by
     :class:`src.models.resolved.ErrorHandlingConfig`.
     """
     return os.getenv("ANALITIQ_ERROR_STRATEGY") or "fail"

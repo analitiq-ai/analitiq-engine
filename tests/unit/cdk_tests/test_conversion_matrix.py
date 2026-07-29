@@ -14,6 +14,7 @@ boundary consults. These tests pin three things so it cannot silently rot:
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 
 import pyarrow as pa
@@ -55,6 +56,7 @@ class TestPublishedArtifactDrift:
         # The publisher reads this field rather than assigning one, so a
         # consumer holding only the bytes can name the policy it got.
         assert load_published_matrix()["version"] == CONVERSION_MATRIX_VERSION
+        assert re.fullmatch(r"\d+\.\d+\.\d+", CONVERSION_MATRIX_VERSION)
 
     def test_document_carries_the_grid_and_nothing_else(self) -> None:
         assert set(load_published_matrix()) == {"version", "conversions"}

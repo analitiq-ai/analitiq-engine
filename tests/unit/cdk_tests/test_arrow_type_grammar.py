@@ -21,6 +21,8 @@ suite and this one together cover the published surface.
 
 from __future__ import annotations
 
+import re
+
 import pyarrow as pa
 import pytest
 
@@ -54,7 +56,10 @@ class TestPublishedArtifactDrift:
     def test_published_document_states_its_own_version(self) -> None:
         # The publisher reads this field rather than assigning one, so a
         # consumer holding only the bytes can name the vocabulary it got.
+        # The format is pinned here too: it is typed in Python but parsed by
+        # the publisher, and a version it cannot read is unpublishable.
         assert load_published_grammar()["version"] == GRAMMAR_VERSION
+        assert re.fullmatch(r"\d+\.\d+\.\d+", GRAMMAR_VERSION)
 
     def test_document_carries_the_families_and_nothing_else(self) -> None:
         assert set(load_published_grammar()) == {"version", "families"}

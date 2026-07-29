@@ -80,8 +80,8 @@ matrix.conversions.Int64.Utf8;     // { mode: "explicit", fn: "to_string", runti
 
 For consumers that cannot (or should not) pull a private npm package, the
 engine's contract artifacts are published to S3 as versioned JSON, under a
-bucket configured outside this repo — one prefix per artifact, each versioned
-on its own content:
+bucket configured outside this repo — one prefix per artifact, each carrying
+the version the engine declares for it:
 
 ```
 conversion-matrix/v{version}/conversion_matrix.json     immutable, one object per version
@@ -108,7 +108,7 @@ publisher. The publisher reads that field; it never assigns one.
 Pin a version by fetching its immutable object; discover the current one via
 that artifact's `latest.json`. Versions here are **independent of the npm
 package version**: the npm digest covers the shipped TS helpers too, while an
-S3 version changes only when that artifact's content itself changes.
+S3 version changes only when the engine declares a new one for that artifact.
 
 CI publishes with short-lived GitHub OIDC credentials (`sync-s3` job in
 `.github/workflows/conversion-matrix.yml`), one leg per target environment
@@ -146,9 +146,13 @@ The engine repo owns and publishes this package; consumers only pin it. CI
    `scripts/publish-if-changed.mjs` hashes the exact `npm pack` file set and
    compares it to the digest recorded on the last published version, so an
    engine release that changes nothing we ship never cuts a new version.
-4. **Version** auto-bumps the patch off the last published release. The package
-   is private on GitHub Packages (the `analitiq-ai` org does not allow public
-   packages), like `@analitiq-ai/contracts`.
+4. **Version** patch-bumps off the last published release, unless `package.json`
+   declares a higher version — then that one is published. Declaring it is how a
+   breaking change is announced: `dist/conversion_matrix.json` is a documented
+   entry point re-exporting the engine artifact verbatim, so an artifact shape
+   change breaks consumers here too, and a patch bump would walk their semver
+   ranges straight into it. The package is private on GitHub Packages (the
+   `analitiq-ai` org does not allow public packages), like `@analitiq-ai/contracts`.
 
 The published data always matches the engine commit that produced it.
 

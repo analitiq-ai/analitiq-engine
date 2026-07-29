@@ -18,13 +18,15 @@
 //
 // The manifest is written last: it is the commit point. A run that dies after
 // uploading the versioned object leaves an orphan no consumer can discover;
-// the next run recomputes the same next version and overwrites it — possibly
-// with different bytes, if the artifact moved in between. Only a consumer that
-// probed a version no manifest ever referenced could observe that window.
+// the next run rewrites that same key and then commits the manifest. The bytes
+// cannot differ between the two runs — the version is part of the content, so
+// an artifact that moved in between declares a different version and lands on
+// a different key. Only a consumer that probed a version no manifest ever
+// referenced could observe that window.
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -45,14 +47,20 @@ export const ARTIFACTS = [
 
 const SEMVER = /^(\d+)\.(\d+)\.(\d+)$/;
 
-/** The three numeric parts of a plain semver string, or null if it is not one. */
+/**
+ * The three numeric parts of a plain semver string, or null if it is not one.
+ *
+ * Non-strings are rejected outright rather than coerced: `["1.2.3"]` stringifies
+ * to a matching `1.2.3`, and would then be interpolated into the S3 key.
+ */
 export function parseVersion(value) {
-  const parts = SEMVER.exec(value ?? "");
+  if (typeof value !== "string") return null;
+  const parts = SEMVER.exec(value);
   return parts === null ? null : parts.slice(1, 4).map(Number);
 }
 
 /** -1, 0 or 1, comparing two parsed versions part by part. */
-function compareVersions(left, right) {
+export function compareVersions(left, right) {
   for (let i = 0; i < 3; i += 1) {
     if (left[i] !== right[i]) return left[i] < right[i] ? -1 : 1;
   }
@@ -124,8 +132,10 @@ const aws = (args, opts = {}) =>
  * a never-written manifest — the first publish — or an out-of-band deletion
  * of latest.json, which the publisher role cannot cause (no delete
  * permission). Everything else — NoSuchBucket, AccessDenied, ExpiredToken,
- * network errors — must abort the run, not be misread as a first publish
- * (which would reset versioning to 1.0.0 over an existing history).
+ * network errors — must abort the run, not be misread as a first publish.
+ * A first publish skips the ordering check entirely and writes the declared
+ * version, so misreading absence would overwrite the immutable object already
+ * published at that version and repoint latest.json at it.
  */
 export function manifestAbsent(cliOutput) {
   return cliOutput.includes("NoSuchKey");
@@ -141,11 +151,16 @@ function fetchManifestOrAbsent(bucket, key) {
   const dir = mkdtempSync(join(tmpdir(), "engine-contracts-"));
   const outfile = join(dir, "latest.json");
   try {
-    aws(["s3api", "get-object", "--bucket", bucket, "--key", key, outfile]);
+    // Only the AWS call is classified. A read failure on the file the CLI just
+    // wrote is a local fault, and must not be fed to an AWS error classifier
+    // that could only ever conclude "no manifest, publish as if first".
+    try {
+      aws(["s3api", "get-object", "--bucket", bucket, "--key", key, outfile]);
+    } catch (err) {
+      if (manifestAbsent(`${err.stdout ?? ""}${err.stderr ?? ""}`)) return null;
+      throw err;
+    }
     return readFileSync(outfile, "utf8");
-  } catch (err) {
-    if (manifestAbsent(`${err.stdout ?? ""}${err.stderr ?? ""}`)) return null;
-    throw err;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -220,6 +235,10 @@ function main() {
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// realpathSync on both sides: `resolve` does not follow symlinks, so a
+// checkout reached through one (macOS /var, a symlinked CI workspace) makes
+// the two spellings differ and main() silently never runs -- the job then
+// succeeds having published nothing.
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   main();
 }

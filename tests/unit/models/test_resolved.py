@@ -18,7 +18,7 @@ from src.models.resolved import (
     ResolvedStream,
     RuntimeConfig,
     _contract_literals,
-    _contract_replication_methods,
+    _variant_literals,
 )
 
 
@@ -48,7 +48,9 @@ class TestContractLiterals:
 
         assert _contract_literals(Model, "kind") == {"a", "b"}
 
-    @pytest.mark.parametrize("annotation", [str, int, str | None])
+    @pytest.mark.parametrize(
+        "annotation", [str, int, str | None, list[str], Literal[1, 2]]
+    )
     def test_rejects_a_field_that_is_not_a_string_literal(self, annotation):
         # A contract that stops declaring an enum here must break the engine
         # loudly; an empty vocabulary would reject every value instead.
@@ -64,14 +66,18 @@ class TestErrorHandlingConfig:
         assert cfg.max_retries == 3
         assert cfg.retry_delay_seconds == 5
 
-    def test_vocabulary_equals_the_published_contract_enum(self):
-        # Two independent readings of the same fact: the engine reads the
-        # field's Literal annotation, this reads the enum of the schema the
-        # contract publishes. Neither restates it.
-        published = ContractErrorHandling.model_json_schema()
-        assert _contract_literals(ContractErrorHandling, "strategy") == set(
-            published["properties"]["strategy"]["enum"]
-        )
+    def test_vocabulary_is_the_one_the_engine_has_handling_for(self):
+        # Deriving means a contract that gains a strategy widens what this
+        # boundary accepts on its own. That is the right runtime behavior -- a
+        # contract-valid pipeline is never rejected here -- but the engine
+        # would then accept a strategy it has no code path for, so the widening
+        # has to reach a human. This is the only place the set is written down,
+        # and it fails on the commit that pulls in such a contract.
+        assert _contract_literals(ContractErrorHandling, "strategy") == {
+            "fail",
+            "dlq",
+            "skip",
+        }
 
     @pytest.mark.parametrize(
         "strategy", sorted(_contract_literals(ContractErrorHandling, "strategy"))
@@ -237,14 +243,22 @@ class TestParseRuntimeConfig:
 
 class TestReplicationConfig:
     def test_vocabulary_equals_the_published_contract_enum(self):
-        # Two independent readings of the same fact: the engine walks the
-        # union's method literals, this reads the discriminator mapping of the
-        # schema the contract publishes. A hand-kept copy would reject a
-        # contract-valid document the moment the contract adds a method.
+        # Two genuinely independent readings: the engine walks each variant's
+        # method literal, this reads the discriminator mapping pydantic renders
+        # into the published schema. A reader that visited only the first
+        # variant would pass every other test in this class.
         published = TypeAdapter(Replication).json_schema()["discriminator"]["mapping"]
-        assert _contract_replication_methods() == set(published)
+        assert _variant_literals(Replication, "method") == set(published)
 
-    @pytest.mark.parametrize("method", sorted(_contract_replication_methods()))
+    def test_vocabulary_is_the_one_the_engine_has_handling_for(self):
+        # Same reason as the error-strategy canary: deriving lets a contract
+        # widen this boundary silently, and the engine branches on the method.
+        assert _variant_literals(Replication, "method") == {
+            "full_refresh",
+            "incremental",
+        }
+
+    @pytest.mark.parametrize("method", sorted(_variant_literals(Replication, "method")))
     def test_accepts_every_contract_method(self, method):
         assert ReplicationConfig(method=method).method == method
 

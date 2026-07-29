@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ARTIFACTS, parseVersion } from "../scripts/sync-contracts-to-s3.mjs";
+import { matrixVersion } from "../dist/index.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const typeMapDir = join(repoRoot, "cdk", "cdk", "type_map");
@@ -38,3 +39,10 @@ for (const { prefix, file } of ARTIFACTS) {
     );
   });
 }
+
+test("the built package reports the engine artifact's own version", () => {
+  // matrixVersion is public API and documented as equal to the artifact's
+  // version; nothing else compares the built value against the source.
+  const { version } = JSON.parse(readFileSync(join(typeMapDir, "conversion_matrix.json"), "utf8"));
+  assert.equal(matrixVersion, version);
+});

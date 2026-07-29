@@ -245,10 +245,10 @@ def build_conversion_grid() -> dict[str, dict[str, dict[str, object]]]:
 def build_conversion_matrix() -> dict[str, Any]:
     """Materialise the published document: the grid under its own version.
 
-    The grid lives under ``conversions``; ``version`` is
-    :data:`CONVERSION_MATRIX_VERSION`, so a consumer holding the bytes can name
-    the policy it got. Regenerating and diffing this against the committed
-    artifact (the conformance test) turns drift into a test failure.
+    The grid lives under ``conversions``; the top-level ``version`` field is
+    filled from :data:`CONVERSION_MATRIX_VERSION`, so a consumer holding the
+    bytes can name the policy it got. Regenerating and diffing this against
+    the committed artifact (the conformance test) turns drift into a failure.
     """
     return {
         "version": CONVERSION_MATRIX_VERSION,

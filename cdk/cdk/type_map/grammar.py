@@ -132,11 +132,14 @@ STRUCTURAL_FAMILIES: Final[dict[str, str]] = {
 # can state which vocabulary it holds without asking the publisher.
 #
 # Bump it in the same commit as any change to what build_arrow_type_grammar()
-# emits: minor for an additive change (a new family, a widened range), major
-# when an existing declaration narrows or changes shape. The publisher reads
-# this version rather than assigning one, and refuses to republish changed
-# content under an already-published version, so an unbumped change fails the
-# sync run instead of overwriting an immutable object.
+# emits, across both axes: the vocabulary (a family, a unit, a range) and the
+# document's own shape (a top-level key). Minor for anything purely additive,
+# major when an existing declaration narrows, moves, or changes meaning. There
+# is no patch tier -- a consumer either reads the same declarations or it does
+# not. The publisher reads this version rather than assigning one, and refuses
+# to republish changed content under an already-published version, so an
+# unbumped change fails the sync run instead of overwriting an immutable
+# object.
 GRAMMAR_VERSION: Final[str] = "1.1.0"
 
 # Timestamp(unit, null) is the explicit timezone-naive spelling.
@@ -355,8 +358,9 @@ def build_arrow_type_grammar() -> dict[str, Any]:
     into the serialisable document consumers read instead of hand-writing
     their own patterns. Scalar families carry ``params``; the structural
     markers carry the sub-schema key their shape comes from. The document
-    states its own :data:`GRAMMAR_VERSION`, so a consumer holding the bytes
-    can name the vocabulary it got.
+    states its own version in a top-level ``version`` field, filled from
+    :data:`GRAMMAR_VERSION`, so a consumer holding the bytes can name the
+    vocabulary it got.
     """
     families: dict[str, Any] = {
         family: {"params": [_param_to_json(spec) for spec in params]}

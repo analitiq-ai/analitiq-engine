@@ -1,22 +1,26 @@
 // Pre-merge net: an artifact whose bytes changed on this branch must also
-// carry a changed `version`.
+// carry a higher `version`.
 //
 // The publisher (sync-contracts-to-s3.mjs) refuses to republish changed
-// content under an already-published version, but it runs post-merge — an
-// unbumped change would land on main and strand the artifact unpublished.
-// This check moves the same failure into the pull request.
+// content under an already-published version, and refuses a version older than
+// the published one. It runs post-merge, so either mistake lands on main and
+// strands the artifact unpublished. This check moves both failures into the
+// pull request.
 //
-// It asserts the version *changed*, not that it increased: the base branch is
-// not the published history (a bucket can be behind main, or ahead of it after
-// a revert), so only the publisher, holding the manifest, can rule on
-// ordering. Here the question is whether the author bumped at all.
+// It rules on ordering against the base branch even though the base is not the
+// published history. It can, because the publisher requires a strict increase
+// over whatever the bucket holds: a head version below the base's is
+// unpublishable no matter where the bucket sits, since the bucket is either at
+// the base's version or behind it, and being behind only lowers the floor. What
+// this check cannot do is confirm a version is high ENOUGH — the bucket may
+// have moved ahead of main — so the publisher still has the last word.
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ARTIFACTS, parseVersion } from "./sync-contracts-to-s3.mjs";
+import { ARTIFACTS, compareVersions, parseVersion } from "./sync-contracts-to-s3.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 // Repo-relative, forward-slashed: this is a git pathspec, not a filesystem path.
@@ -26,8 +30,12 @@ const typeMapPath = "cdk/cdk/type_map";
  * Verdict for one artifact, from the base branch's copy (raw text, or null
  * when the branch adds the artifact) and this branch's copy.
  *
- * Returns {changed, version}. Throws when this branch's artifact declares no
- * plain-semver version, or when its bytes moved while its version did not.
+ * Returns a status of "added" (no baseline to compare against), "unchanged",
+ * or "bumped" — "added" and "unchanged" are kept apart so the caller cannot
+ * report a skipped comparison as a passed one.
+ *
+ * Throws when this branch's artifact declares no plain-semver version, or when
+ * its bytes moved without the version increasing.
  */
 export function checkVersionBump(baseText, headText) {
   const version = JSON.parse(headText).version;
@@ -37,33 +45,52 @@ export function checkVersionBump(baseText, headText) {
         `publisher reads this field and cannot assign one`
     );
   }
-  if (baseText === null || baseText === headText) return { changed: false, version };
-  // A malformed or absent base version compares unequal, which is the right
-  // answer: anything this branch declares is a change from it.
-  if (JSON.parse(baseText).version === version) {
+  if (baseText === null) return { status: "added", version };
+  if (baseText === headText) return { status: "unchanged", version };
+
+  // A base that does not parse, or whose version is absent or malformed, gives
+  // nothing to order against — it predates versioned artifacts or is corrupt.
+  // Requiring a change is all this check can say; the publisher, which holds
+  // the real published version, still enforces the increase.
+  let baseVersion = null;
+  try {
+    baseVersion = parseVersion(JSON.parse(baseText).version);
+  } catch (err) {
+    // Reported, not swallowed: a base branch whose artifact will not parse is
+    // a real problem, just not this branch's, and not one to fail its author
+    // for. The publisher on that branch is already refusing to publish it.
+    console.warn(`  base copy does not parse (${err.message}); ordering skipped`);
+  }
+  if (baseVersion === null) return { status: "bumped", version };
+
+  if (compareVersions(parseVersion(version), baseVersion) <= 0) {
     throw new Error(
-      `content changed but version is still ${version}; bump the version ` +
-        `constant in the CDK and regenerate the artifact`
+      `content changed but version ${version} does not increase on the base ` +
+        `branch's ${baseVersion.join(".")}; bump the version constant in the ` +
+        `CDK and regenerate the artifact`
     );
   }
-  return { changed: true, version };
+  return { status: "bumped", version };
 }
 
-/** The artifact as of *ref*, or null when *ref* does not have that path. */
+/**
+ * The artifact as of *ref*, or null when *ref* does not contain that path.
+ *
+ * `git show` reports a bad ref and an absent path the same way — a non-zero
+ * exit with a prose message — so absence is established with `ls-tree`, where
+ * it is an exit-0 empty listing and every non-zero exit is unambiguously a
+ * real failure. Matching git's wording would make the gate fail OPEN the day
+ * that wording changes.
+ */
 function readAtRef(ref, path) {
-  try {
-    return execFileSync("git", ["show", `${ref}:${path}`], {
+  const git = (args) =>
+    execFileSync("git", args, {
       cwd: repoRoot,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
-  } catch (err) {
-    const output = `${err.stdout ?? ""}${err.stderr ?? ""}`;
-    if (output.includes("does not exist") || output.includes("exists on disk, but not in")) {
-      return null;
-    }
-    throw err;
-  }
+  if (git(["ls-tree", "--name-only", ref, "--", path]).trim() === "") return null;
+  return git(["show", `${ref}:${path}`]);
 }
 
 function main() {
@@ -79,14 +106,18 @@ function main() {
     } catch (err) {
       throw new Error(`${prefix}: ${err.message}`, { cause: err });
     }
-    console.log(
-      verdict.changed
-        ? `${prefix} changed and declares v${verdict.version}`
-        : `${prefix} unchanged against ${baseRef} (v${verdict.version})`
-    );
+    const report = {
+      added: `absent in ${baseRef}, added here at v${verdict.version} (not compared)`,
+      unchanged: `unchanged against ${baseRef} (v${verdict.version})`,
+      bumped: `changed and declares v${verdict.version}`,
+    };
+    console.log(`${prefix} ${report[verdict.status]}`);
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// realpathSync on both sides: `resolve` does not follow symlinks, so a
+// checkout reached through one makes the two spellings differ and main()
+// silently never runs -- the gate then reports success having checked nothing.
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   main();
 }

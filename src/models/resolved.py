@@ -14,7 +14,7 @@ model) live as explicit typed fields rather than ``_runtime`` /
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, get_args
+from typing import Annotated, Any, get_args, get_origin
 
 from analitiq.contracts.pipelines.config import ErrorHandling as ContractErrorHandling
 from analitiq.contracts.stream import Replication
@@ -45,10 +45,19 @@ def _contract_literals(model: type[BaseModel], field_name: str) -> frozenset[str
     Restating a contract enum in engine code is how a contract-valid document
     starts being rejected: the contract gains a value, the copy does not, and
     nothing fails until an author hits it. Reading the annotation keeps one
-    source. A field that is not a populated ``Literal`` of strings fails loud
-    here rather than silently narrowing this boundary to nothing.
+    source.
+
+    Every shape this cannot read raises here, naming the model and the field.
+    These run at import, so the alternative to a loud failure is an engine that
+    starts up and rejects documents the contract permits.
     """
-    values = get_args(model.model_fields[field_name].annotation)
+    fields = getattr(model, "model_fields", None)
+    if fields is None or field_name not in fields:
+        raise RuntimeError(
+            f"{model!r} does not declare a {field_name!r} field; the contract "
+            "changed shape and this reader must follow it"
+        )
+    values = get_args(fields[field_name].annotation)
     if not values or not all(isinstance(value, str) for value in values):
         raise RuntimeError(
             f"{model.__name__}.{field_name} is not a Literal of strings; the "
@@ -57,31 +66,34 @@ def _contract_literals(model: type[BaseModel], field_name: str) -> frozenset[str
     return frozenset(values)
 
 
-def _contract_replication_methods() -> frozenset[str]:
-    """Read the replication-method vocabulary from the published contract.
+def _variant_literals(annotation: Any, field_name: str) -> frozenset[str]:
+    """Read *field_name*'s vocabulary across every variant of a union annotation.
 
-    ``Replication`` is ``Annotated[<variant union>, Field(discriminator=...)]``
-    and each variant pins ``method`` to one ``Literal``, so the accepted
-    methods are exactly those literals.
+    Accepts the union bare or wrapped in ``Annotated`` (the contract's
+    discriminated unions carry a ``Field(discriminator=...)``); the wrapper is
+    stripped explicitly rather than by unpacking ``get_args``, so an annotation
+    that stops being a union reaches the error below instead of failing on a
+    bare unpack that names neither the contract nor the cause.
     """
-    union, *_ = get_args(Replication)
-    variants = get_args(union)
+    if get_origin(annotation) is Annotated:
+        annotation = get_args(annotation)[0]
+    variants = get_args(annotation)
     if not variants:
         raise RuntimeError(
-            "analitiq.contracts.stream.Replication is no longer a union of "
-            "method-discriminated variants; this reader must follow it"
+            f"{annotation!r} is no longer a union of contract variants; this "
+            "reader must follow it"
         )
     return frozenset().union(
-        *(_contract_literals(variant, "method") for variant in variants)
+        *(_contract_literals(variant, field_name) for variant in variants)
     )
 
 
-_VALID_REPLICATION_METHODS = _contract_replication_methods()
+_VALID_REPLICATION_METHODS = _variant_literals(Replication, "method")
 
 
 @dataclass(frozen=True)
 class ReplicationConfig:
-    """Source replication policy, mirroring the published stream contract.
+    """Source replication policy, typed against the published stream contract.
 
     ``safety_window_seconds`` is intentionally not carried: the engine never
     reads it (it travels to the connector inside the ``stream_source`` wire

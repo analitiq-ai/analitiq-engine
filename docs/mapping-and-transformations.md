@@ -280,9 +280,9 @@ The same policy is published as a generated artifact
 (`cdk/cdk/type_map/conversion_matrix.json`, built from the canonical table by
 `build_conversion_matrix()`) so the mapping authoring UI offers exactly the
 conversions the engine accepts and auto-wires the function an `explicit`
-conversion needs. The artifact states its own version — `CONVERSION_MATRIX_VERSION`,
-beside the grid it carries — so a consumer holding the bytes can name the policy
-it got; the publisher reads that version rather than assigning one. The frontend consumes it as the `@analitiq-ai/conversion-matrix`
+conversion needs. The artifact states its own version in a top-level `version` field, filled from
+`CONVERSION_MATRIX_VERSION`, so a consumer holding the bytes can name the policy
+it got; the publisher reads that field rather than assigning a version. The frontend consumes it as the `@analitiq-ai/conversion-matrix`
 npm package (`packages/conversion-matrix/`), which regenerates from that artifact
 on every build and is republished to GitHub Packages whenever the grid changes.
 

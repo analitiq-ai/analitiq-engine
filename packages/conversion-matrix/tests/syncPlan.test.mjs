@@ -74,9 +74,9 @@ test("manifest that parses to a non-object aborts with context", () => {
 });
 
 test("manifest without a usable version aborts instead of guessing", () => {
-  assert.throws(() => planSync(manifest({ version: "v1.2.3" }), SHA_B, "1.2.4"), /no usable version/);
-  assert.throws(() => planSync(manifest({ version: undefined }), SHA_B, "1.2.4"), /no usable version/);
-  assert.throws(() => planSync(JSON.stringify({ sha256: SHA_A }), SHA_B, "1.2.4"), /no usable version/);
+  assert.throws(() => planSync(manifest({ version: "v1.2.3" }), SHA_B, "1.2.4"), /latest\.json on S3 has no usable version/);
+  assert.throws(() => planSync(manifest({ version: undefined }), SHA_B, "1.2.4"), /latest\.json on S3 has no usable version/);
+  assert.throws(() => planSync(JSON.stringify({ sha256: SHA_A }), SHA_B, "1.2.4"), /latest\.json on S3 has no usable version/);
 });
 
 test("only NoSuchKey classifies as an absent manifest", () => {
@@ -91,7 +91,9 @@ test("only NoSuchKey classifies as an absent manifest", () => {
 
 test("every other AWS failure re-throws instead of reading as first publish", () => {
   // A broadened match here (e.g. any "404" or "error") would let a mistyped
-  // bucket or a permissions problem reset published versioning to 1.0.0.
+  // bucket or a permissions problem read as "nothing published yet", which
+  // skips the ordering check and overwrites the immutable object already at
+  // the declared version.
   for (const output of [
     "An error occurred (NoSuchBucket) when calling the GetObject operation: The specified bucket does not exist",
     "An error occurred (404) when calling the HeadObject operation: Not Found",
