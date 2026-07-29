@@ -20,6 +20,6 @@ the re-export pulls only ``typing``.
 
 from ._extras import MissingExtraError
 
-__version__ = "0.2.0rc1"
+__version__ = "0.2.1"
 
 __all__ = ["MissingExtraError"]
