@@ -71,24 +71,24 @@ test("an artifact new on this branch is reported as added, not as unchanged", ()
   });
 });
 
-test("a base with no orderable version only requires a change", () => {
-  // Pre-versioning or corrupt base: nothing to order against. The publisher,
-  // which holds the real published version, still enforces the increase.
+test("a base with no orderable version reports uncomparable, not bumped", () => {
+  // Nothing to order against, so nothing was checked -- and it must not be
+  // reported as a verified increase. The publisher, which holds the real
+  // published version, is then the only thing enforcing the increase.
   for (const base of [JSON.stringify({ families: {} }), '{"version": "v1", "families": {}}']) {
-    assert.deepEqual(checkVersionBump(base, artifact("1.1.0", {})), {
-      status: "bumped",
-      version: "1.1.0",
-    });
+    const verdict = checkVersionBump(base, artifact("1.1.0", {}));
+    assert.equal(verdict.status, "uncomparable");
+    assert.equal(verdict.version, "1.1.0");
+    assert.match(verdict.reason, /declares no orderable version/);
   }
 });
 
 test("an unparseable base blames the base, not this branch's artifact", () => {
   // JSON.parse on the base must not throw a SyntaxError that main() then
   // relabels as a problem with the artifact the author actually changed.
-  assert.deepEqual(checkVersionBump("{not json", artifact("1.1.0", {})), {
-    status: "bumped",
-    version: "1.1.0",
-  });
+  const verdict = checkVersionBump("{not json", artifact("1.1.0", {}));
+  assert.equal(verdict.status, "uncomparable");
+  assert.match(verdict.reason, /does not parse/);
 });
 
 test("an artifact with no usable version fails whether or not it changed", () => {
@@ -167,6 +167,25 @@ test("a path absent at the base ref is reported as added, not compared", () => {
     const out = runCli(cli, base);
     assert.match(out, /conversion-matrix absent in .* added here at v2\.0\.0 \(not compared\)/);
     assert.match(out, /arrow-type-grammar absent in .* added here at v1\.1\.0 \(not compared\)/);
+  });
+});
+
+test("an unversioned base is reported as not compared, and names the artifact", () => {
+  // The state of main before versioned artifacts existed. The check cannot
+  // order against it, and must not print the line it uses for a verified bump.
+  withRepo((dir, cli) => {
+    for (const file of ["conversion_matrix.json", "arrow_type_grammar.json"]) {
+      writeFileSync(join(dir, "cdk", "cdk", "type_map", file), JSON.stringify({ families: {} }));
+    }
+    git(dir, ["add", "-A"]);
+    git(dir, ["commit", "-qm", "unversioned"]);
+    const base = git(dir, ["rev-parse", "HEAD"]).trim();
+    writeFileSync(join(dir, "cdk", "cdk", "type_map", "conversion_matrix.json"), artifact("2.0.0", {}));
+    writeFileSync(join(dir, "cdk", "cdk", "type_map", "arrow_type_grammar.json"), artifact("1.1.0", {}));
+    const out = runCli(cli, base);
+    assert.match(out, /conversion-matrix declares v2\.0\.0; the copy in .* declares no orderable version \(not compared/);
+    assert.match(out, /arrow-type-grammar declares v1\.1\.0; the copy in .* declares no orderable version \(not compared/);
+    assert.doesNotMatch(out, /changed and declares/);
   });
 });
 

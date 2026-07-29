@@ -23,16 +23,17 @@ import { fileURLToPath } from "node:url";
 import { ARTIFACTS, compareVersions, parseVersion } from "./sync-contracts-to-s3.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-// Repo-relative, forward-slashed: this is a git pathspec, not a filesystem path.
 const typeMapPath = "cdk/cdk/type_map";
 
 /**
  * Verdict for one artifact, from the base branch's copy (raw text, or null
  * when the branch adds the artifact) and this branch's copy.
  *
- * Returns a status of "added" (no baseline to compare against), "unchanged",
- * or "bumped" — "added" and "unchanged" are kept apart so the caller cannot
- * report a skipped comparison as a passed one.
+ * Returns one of four statuses: "added" (the base has no copy), "unchanged",
+ * "bumped" (compared, and the version increased), or "uncomparable" (the base
+ * copy states no orderable version). Every status that did NOT compare is kept
+ * distinct from the ones that did, so a caller cannot report a skipped check
+ * as a passed one.
  *
  * Throws when this branch's artifact declares no plain-semver version, or when
  * its bytes moved without the version increasing.
@@ -49,19 +50,19 @@ export function checkVersionBump(baseText, headText) {
   if (baseText === headText) return { status: "unchanged", version };
 
   // A base that does not parse, or whose version is absent or malformed, gives
-  // nothing to order against — it predates versioned artifacts or is corrupt.
-  // Requiring a change is all this check can say; the publisher, which holds
-  // the real published version, still enforces the increase.
+  // nothing to order against — it predates versioned artifacts, or it is
+  // corrupt. Neither is this author's fault and neither should fail them, but
+  // the result is an UNCOMPARED artifact and says so: the publisher, which
+  // holds the real published version, is then the only thing enforcing the
+  // increase.
   let baseVersion = null;
+  let reason = "declares no orderable version";
   try {
     baseVersion = parseVersion(JSON.parse(baseText).version);
   } catch (err) {
-    // Reported, not swallowed: a base branch whose artifact will not parse is
-    // a real problem, just not this branch's, and not one to fail its author
-    // for. The publisher on that branch is already refusing to publish it.
-    console.warn(`  base copy does not parse (${err.message}); ordering skipped`);
+    reason = `does not parse (${err.message})`;
   }
-  if (baseVersion === null) return { status: "bumped", version };
+  if (baseVersion === null) return { status: "uncomparable", version, reason };
 
   if (compareVersions(parseVersion(version), baseVersion) <= 0) {
     throw new Error(
@@ -89,7 +90,11 @@ function readAtRef(ref, path) {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
-  if (git(["ls-tree", "--name-only", ref, "--", path]).trim() === "") return null;
+  // `:/` is git's top-level pathspec magic. Without it the pathspec resolves
+  // against the process cwd, where a miss is an exit-0 empty listing -- the
+  // same signal as a genuinely absent path, so the gate would switch itself
+  // off silently rather than fail.
+  if (git(["ls-tree", "--name-only", ref, "--", `:/${path}`]).trim() === "") return null;
   return git(["show", `${ref}:${path}`]);
 }
 
@@ -97,11 +102,12 @@ function main() {
   const baseRef = process.argv[2];
   if (!baseRef) throw new Error("usage: check-version-bump.mjs <base-ref>");
   for (const { prefix, file } of ARTIFACTS) {
+    const path = `${typeMapPath}/${file}`;
     let verdict;
     try {
       verdict = checkVersionBump(
-        readAtRef(baseRef, `${typeMapPath}/${file}`),
-        readFileSync(join(repoRoot, "cdk", "cdk", "type_map", file), "utf8")
+        readAtRef(baseRef, path),
+        readFileSync(join(repoRoot, path), "utf8")
       );
     } catch (err) {
       throw new Error(`${prefix}: ${err.message}`, { cause: err });
@@ -110,6 +116,9 @@ function main() {
       added: `absent in ${baseRef}, added here at v${verdict.version} (not compared)`,
       unchanged: `unchanged against ${baseRef} (v${verdict.version})`,
       bumped: `changed and declares v${verdict.version}`,
+      uncomparable:
+        `declares v${verdict.version}; the copy in ${baseRef} ` +
+        `${verdict.reason} (not compared — only the publisher can order this)`,
     };
     console.log(`${prefix} ${report[verdict.status]}`);
   }

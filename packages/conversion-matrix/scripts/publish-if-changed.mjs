@@ -82,16 +82,20 @@ if (parseVersion(declaredVersion) === null) {
 }
 
 const lastVersion = npmViewOrAbsent(["view", pkgName, "version"]);
-const lastParsed = lastVersion ? parseVersion(lastVersion) : null;
 let nextVersion;
 if (!lastVersion) {
   nextVersion = declaredVersion;
-} else if (
-  // An unparseable published version (a prerelease tag, say) is left to
-  // `npm version patch`, which understands spellings this comparison does not.
-  lastParsed !== null &&
-  compareVersions(parseVersion(declaredVersion), lastParsed) > 0
-) {
+} else if (parseVersion(lastVersion) === null) {
+  // A published version this script cannot order against is a state it must
+  // not guess at. `npm version patch` does not rescue it: on a prerelease it
+  // DROPS the suffix rather than incrementing (0.3.0-rc.1 -> 0.3.0), which
+  // would promote an rc to its final release and discard a declared breaking
+  // version at the same time.
+  throw new Error(
+    `${pkgName}@${lastVersion} is published but is not plain semver; ` +
+      `set package.json to the version this release should carry`
+  );
+} else if (compareVersions(parseVersion(declaredVersion), parseVersion(lastVersion)) > 0) {
   // A deliberate bump in package.json -- the maintainer is announcing a change
   // consumers' ranges must not cross silently. Honour it verbatim.
   nextVersion = declaredVersion;

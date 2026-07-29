@@ -14,8 +14,11 @@ Three things are pinned, because the tree has three kinds of file:
   while the boilerplate around it is a function of the protoc version, and the
   Python dependency set is not locked (``grpcio-tools`` floats on a caret
   range), so a byte comparison would fail on a routine bump.
-- ``*_pb2_grpc.py`` carry no descriptor, only the RPC path strings the client
-  and server dispatch on, so those are compared instead.
+- ``*_pb2_grpc.py`` carry no descriptor. What they do carry is the RPC path
+  strings the client and server dispatch on and the message classes they
+  serialize through, and both are pinned: identical paths over a renamed
+  message still fail at the first call, and regenerating one module without
+  the other is exactly how that happens.
 - ``__init__.py`` is hand-written, not generated, and is the surface the engine
   imports these names through. It must name every message and enum the
   definitions declare, or a regenerated tree ships a symbol nothing can import.
@@ -47,6 +50,10 @@ assert _PROTO_STEMS, f"no .proto definitions found under {_PROTO_DIR}"
 # The RPC paths a generated stub dispatches on, e.g.
 # '/analitiq.v1.SourceService/ReadStream'.
 _RPC_PATH_RE = re.compile(r"'(/[A-Za-z0-9_.]+/[A-Za-z0-9_]+)'")
+
+# The message a stub serializes an RPC through, e.g. the ReadRequest in
+# `analitiq_dot_v1_dot_source__service__pb2.ReadRequest.SerializeToString`.
+_SERIALIZER_RE = re.compile(r"_pb2\.([A-Za-z0-9_]+)\.(?:SerializeToString|FromString)")
 
 
 def _drop_json_names(
@@ -153,6 +160,29 @@ def test_committed_stub_dispatches_its_declared_rpcs(
     )
 
 
+@pytest.mark.parametrize("stem", _PROTO_STEMS)
+def test_committed_stub_serializes_declared_messages(
+    compiled: dict[str, descriptor_pb2.FileDescriptorProto], stem: str
+) -> None:
+    """Every message a stub serializes through must still exist.
+
+    A stub regenerated out of step with its ``_pb2`` keeps its RPC paths while
+    naming a message that was renamed or removed, and fails only at the first
+    call. The names come from the whole compiled set, not just this file's,
+    because a service's request type may be imported from another .proto.
+    """
+    stub = (_GENERATED / f"{stem}_pb2_grpc.py").read_text()
+    declared = {
+        message.name for file in compiled.values() for message in file.message_type
+    }
+    referenced = set(_SERIALIZER_RE.findall(stub))
+    assert referenced <= declared, (
+        f"{stem}_pb2_grpc.py serializes through "
+        f"{sorted(referenced - declared)}, which no .proto declares; "
+        f"run proto/generate.sh and commit the result"
+    )
+
+
 def test_package_exports_every_declared_message(
     compiled: dict[str, descriptor_pb2.FileDescriptorProto],
 ) -> None:
@@ -169,8 +199,13 @@ def test_package_exports_every_declared_message(
         for file in compiled.values()
         for entity in list(file.message_type) + list(file.enum_type)
     }
-    missing = declared - set(package.__all__)
-    assert not missing, (
+    # Both halves: an attribute that is missing breaks `from ... import Name`,
+    # and a name absent from __all__ breaks a star-import while still passing
+    # an attribute check. Testing __all__ alone would pass a name listed there
+    # but never imported -- the failure this exists to catch.
+    unimportable = {name for name in declared if not hasattr(package, name)}
+    unexported = declared - set(package.__all__)
+    assert not (unimportable | unexported), (
         f"src/grpc/generated/analitiq/v1/__init__.py does not re-export "
-        f"{sorted(missing)}; add them to its imports and __all__"
+        f"{sorted(unimportable | unexported)}; add them to its imports and __all__"
     )
