@@ -20,7 +20,11 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { compareVersions, parseVersion } from "./sync-contracts-to-s3.mjs";
+import {
+  compareVersions,
+  parseVersion,
+  planVersionedPublish,
+} from "./sync-contracts-to-s3.mjs";
 
 const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const pkgName = "@analitiq-ai/conversion-matrix";
@@ -42,12 +46,19 @@ const npmViewOrAbsent = (args) => {
   }
 };
 
+// Fields this script writes back onto package.json. They are excluded from the
+// digest below, which would otherwise depend on its own previous output.
+const SELF_WRITTEN_FIELDS = [
+  "version",
+  "analitiqPackageSha256",
+  "analitiqMatrixVersion",
+  "analitiqMatrixSha256",
+];
+
 // Digest of the exact tarball contents npm will publish -- enumerated from
 // `npm pack` so it stays honest as the file set evolves (dist, README, LICENSE,
-// package.json metadata). package.json is hashed without the two fields this
-// script mutates (version, analitiqPackageSha256), which would otherwise make
-// the digest depend on its own output. Any other shipped change cuts a version;
-// a no-op rebuild does not.
+// package.json metadata). Any other shipped change cuts a version; a no-op
+// rebuild does not.
 function shipDigest() {
   const listing = JSON.parse(npm(["pack", "--dry-run", "--json"]));
   const paths = listing[0].files.map((f) => f.path).sort();
@@ -57,8 +68,7 @@ function shipDigest() {
     hash.update("\0");
     if (path === "package.json") {
       const pkg = JSON.parse(readFileSync(join(pkgRoot, path), "utf8"));
-      delete pkg.version;
-      delete pkg.analitiqPackageSha256;
+      for (const field of SELF_WRITTEN_FIELDS) delete pkg[field];
       hash.update(Buffer.from(JSON.stringify(pkg)));
     } else {
       hash.update(readFileSync(join(pkgRoot, path)));
@@ -75,6 +85,21 @@ if (publishedSha && publishedSha === currentSha) {
   console.log(`package unchanged (sha256 ${currentSha.slice(0, 12)}); nothing to publish`);
   process.exit(0);
 }
+
+// This package re-exports the engine artifact verbatim, so it is a publishing
+// channel for it and must hold the same version invariant the S3 sync does --
+// enforced here rather than only in the pull-request gate, which a direct push
+// to main or a merge whose final bytes were never gated would bypass. Without
+// it npm can ship a changed grid under an unchanged matrixVersion while the
+// S3 sync refuses the same bytes, leaving one channel's invariant broken.
+const artifact = readFileSync(join(pkgRoot, "dist", "conversion_matrix.json"));
+const artifactSha = createHash("sha256").update(artifact).digest("hex");
+planVersionedPublish(
+  npmViewOrAbsent(["view", pkgName, "analitiqMatrixVersion"]) || null,
+  npmViewOrAbsent(["view", pkgName, "analitiqMatrixSha256"]) || null,
+  artifactSha,
+  JSON.parse(artifact).version
+);
 
 const declaredVersion = npm(["pkg", "get", "version"]).replace(/"/g, "");
 if (parseVersion(declaredVersion) === null) {
@@ -105,6 +130,13 @@ if (!lastVersion) {
   nextVersion = npm(["pkg", "get", "version"]).replace(/"/g, "");
 }
 
-npm(["pkg", "set", `version=${nextVersion}`, `analitiqPackageSha256=${currentSha}`]);
+npm([
+  "pkg",
+  "set",
+  `version=${nextVersion}`,
+  `analitiqPackageSha256=${currentSha}`,
+  `analitiqMatrixVersion=${JSON.parse(artifact).version}`,
+  `analitiqMatrixSha256=${artifactSha}`,
+]);
 console.log(`publishing ${pkgName}@${nextVersion} (package sha256 ${currentSha.slice(0, 12)})`);
 execFileSync("npm", ["publish"], { cwd: pkgRoot, stdio: "inherit" });

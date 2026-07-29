@@ -71,41 +71,34 @@ export function compareVersions(left, right) {
 }
 
 /**
- * Decide what this run must do for one artifact, from the manifest currently
- * on S3 (raw JSON text, or null when none exists yet), the sha256 of the local
- * artifact, and the version the local artifact declares.
+ * The version invariant, independent of the channel enforcing it: an artifact
+ * declares a plain-semver version; identical bytes are already published; and
+ * different bytes require a strictly higher version than the one recorded
+ * against the published copy.
  *
- * Returns {action: "skip"} when the published artifact already matches, or
- * {action: "publish", version} with the declared version to publish under.
+ * Returns {action: "skip"} or {action: "publish", version}, and throws for
+ * every state that would publish bytes under a version that lies about them.
+ * `publishedVersion` / `publishedSha` are null when nothing is published yet.
  *
- * Everything else aborts, because every remaining case would either overwrite
- * an immutable published object or publish under a version that lies about
- * what it contains: an artifact with no plain-semver version, a manifest that
- * does not parse or has no usable version, changed content whose version was
- * not bumped, and a declared version older than the published one.
+ * Shared rather than restated: every channel that ships these bytes -- S3, the
+ * npm package -- has to hold the same line, and a second copy of the rule is
+ * how one channel ends up with the invariant broken while the other refuses.
  */
-export function planSync(manifestText, currentSha, declaredVersion) {
+export function planVersionedPublish(publishedVersion, publishedSha, currentSha, declaredVersion) {
   const declared = parseVersion(declaredVersion);
   if (declared === null) {
     throw new Error(
       `artifact declares no usable version (got ${JSON.stringify(declaredVersion)})`
     );
   }
-  if (manifestText === null) return { action: "publish", version: declaredVersion };
-  let manifest;
-  try {
-    manifest = JSON.parse(manifestText);
-  } catch (err) {
-    throw new Error(`latest.json on S3 is not valid JSON: ${err.message}`);
+  if (publishedSha === null && publishedVersion === null) {
+    return { action: "publish", version: declaredVersion };
   }
-  if (manifest === null || typeof manifest !== "object" || Array.isArray(manifest)) {
-    throw new Error("latest.json on S3 is not a JSON object");
-  }
-  if (manifest.sha256 === currentSha) return { action: "skip" };
-  const published = parseVersion(manifest.version);
+  if (publishedSha === currentSha) return { action: "skip" };
+  const published = parseVersion(publishedVersion);
   if (published === null) {
     throw new Error(
-      `latest.json on S3 has no usable version (got ${JSON.stringify(manifest.version)})`
+      `the published copy has no usable version (got ${JSON.stringify(publishedVersion)})`
     );
   }
   const order = compareVersions(declared, published);
@@ -119,10 +112,44 @@ export function planSync(manifestText, currentSha, declaredVersion) {
   if (order < 0) {
     throw new Error(
       `artifact declares version ${declaredVersion}, older than the published ` +
-        `${manifest.version}; a revert must be published as a new higher version`
+        `${publishedVersion}; a revert must be published as a new higher version`
     );
   }
   return { action: "publish", version: declaredVersion };
+}
+
+/**
+ * The same decision for the S3 channel, whose published state arrives as the
+ * raw text of its latest.json manifest (or null when none exists yet).
+ *
+ * A manifest that does not parse aborts: guessing on top of corrupt state
+ * could overwrite a published object.
+ */
+export function planSync(manifestText, currentSha, declaredVersion) {
+  if (manifestText === null) {
+    return planVersionedPublish(null, null, currentSha, declaredVersion);
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(manifestText);
+  } catch (err) {
+    throw new Error(`latest.json on S3 is not valid JSON: ${err.message}`);
+  }
+  if (manifest === null || typeof manifest !== "object" || Array.isArray(manifest)) {
+    throw new Error("latest.json on S3 is not a JSON object");
+  }
+  try {
+    return planVersionedPublish(
+      manifest.version ?? null,
+      manifest.sha256 ?? null,
+      currentSha,
+      declaredVersion
+    );
+  } catch (err) {
+    throw new Error(err.message.replace("the published copy", "latest.json on S3"), {
+      cause: err,
+    });
+  }
 }
 
 const aws = (args, opts = {}) =>

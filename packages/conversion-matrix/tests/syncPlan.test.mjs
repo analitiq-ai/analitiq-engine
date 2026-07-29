@@ -4,7 +4,11 @@
 // the version/skip decisions and the fail-loud paths are pinned here.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { manifestAbsent, planSync } from "../scripts/sync-contracts-to-s3.mjs";
+import {
+  manifestAbsent,
+  planSync,
+  planVersionedPublish,
+} from "../scripts/sync-contracts-to-s3.mjs";
 
 const SHA_A = "a".repeat(64);
 const SHA_B = "b".repeat(64);
@@ -118,4 +122,40 @@ test("every other AWS failure re-throws instead of reading as first publish", ()
   ]) {
     assert.equal(manifestAbsent(output), false, output || "(empty output)");
   }
+});
+
+// planVersionedPublish is the channel-neutral core both publishers hold to.
+// planSync's own cases above already cover it via the S3 wrapper; these pin the
+// contract the npm publisher calls directly.
+
+test("nothing published yet publishes the declared version", () => {
+  assert.deepEqual(planVersionedPublish(null, null, SHA_A, "2.0.0"), {
+    action: "publish",
+    version: "2.0.0",
+  });
+});
+
+test("identical bytes skip regardless of the recorded version", () => {
+  assert.deepEqual(planVersionedPublish("2.0.0", SHA_A, SHA_A, "2.0.0"), { action: "skip" });
+});
+
+test("changed bytes at the recorded version abort on any channel", () => {
+  // The npm channel's version of the S3 abort: shipping a changed grid under
+  // an unchanged matrixVersion would leave two different grids both claiming
+  // the same version.
+  assert.throws(
+    () => planVersionedPublish("2.0.0", SHA_A, SHA_B, "2.0.0"),
+    /content changed but its version is still 2\.0\.0/
+  );
+  assert.throws(
+    () => planVersionedPublish("2.0.0", SHA_A, SHA_B, "1.9.0"),
+    /older than the published 2\.0\.0/
+  );
+});
+
+test("a recorded version that cannot be ordered aborts, naming no channel", () => {
+  assert.throws(
+    () => planVersionedPublish("not-semver", SHA_A, SHA_B, "2.0.1"),
+    /the published copy has no usable version/
+  );
 });
