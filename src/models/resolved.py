@@ -14,7 +14,11 @@ model) live as explicit typed fields rather than ``_runtime`` /
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Annotated, Any, get_args, get_origin
+
+from analitiq.contracts.pipelines.config import ErrorHandling as ContractErrorHandling
+from analitiq.contracts.stream import Replication
+from pydantic import BaseModel
 
 from cdk.connection_runtime import ConnectionRuntime
 from src.config import settings
@@ -35,13 +39,61 @@ def dump_endpoint_document(document: EndpointDocument) -> dict[str, Any]:
     return document.model_dump(mode="json", by_alias=True, exclude_unset=True)
 
 
-# Mirrors the published stream contract's replication-method enum.
-_VALID_REPLICATION_METHODS = frozenset({"full_refresh", "incremental"})
+def _contract_literals(model: type[BaseModel], field_name: str) -> frozenset[str]:
+    """Read one contract model field's ``Literal`` vocabulary.
+
+    Restating a contract enum in engine code is how a contract-valid document
+    starts being rejected: the contract gains a value, the copy does not, and
+    nothing fails until an author hits it. Reading the annotation keeps one
+    source.
+
+    Every shape this cannot read raises here, naming the model and the field.
+    These run at import, so the alternative to a loud failure is an engine that
+    starts up and rejects documents the contract permits.
+    """
+    fields = getattr(model, "model_fields", None)
+    if fields is None or field_name not in fields:
+        raise RuntimeError(
+            f"{model!r} does not declare a {field_name!r} field; the contract "
+            "changed shape and this reader must follow it"
+        )
+    values = get_args(fields[field_name].annotation)
+    if not values or not all(isinstance(value, str) for value in values):
+        raise RuntimeError(
+            f"{model.__name__}.{field_name} is not a Literal of strings; the "
+            "contract changed shape and this reader must follow it"
+        )
+    return frozenset(values)
+
+
+def _variant_literals(annotation: Any, field_name: str) -> frozenset[str]:
+    """Read *field_name*'s vocabulary across every variant of a union annotation.
+
+    Accepts the union bare or wrapped in ``Annotated`` (the contract's
+    discriminated unions carry a ``Field(discriminator=...)``); the wrapper is
+    stripped explicitly rather than by unpacking ``get_args``, so an annotation
+    that stops being a union reaches the error below instead of failing on a
+    bare unpack that names neither the contract nor the cause.
+    """
+    if get_origin(annotation) is Annotated:
+        annotation = get_args(annotation)[0]
+    variants = get_args(annotation)
+    if not variants:
+        raise RuntimeError(
+            f"{annotation!r} is no longer a union of contract variants; this "
+            "reader must follow it"
+        )
+    return frozenset().union(
+        *(_contract_literals(variant, field_name) for variant in variants)
+    )
+
+
+_VALID_REPLICATION_METHODS = _variant_literals(Replication, "method")
 
 
 @dataclass(frozen=True)
 class ReplicationConfig:
-    """Source replication policy, mirroring the published stream contract.
+    """Source replication policy, typed against the published stream contract.
 
     ``safety_window_seconds`` is intentionally not carried: the engine never
     reads it (it travels to the connector inside the ``stream_source`` wire
@@ -163,10 +215,11 @@ class BatchingConfig:
             )
 
 
-# The published pipeline contract's error-handling strategy enum. Kept in sync
-# with the contract rather than narrowed to what the engine branches on today,
-# so a contract-valid pipeline is never rejected at this boundary.
-_VALID_ERROR_STRATEGIES = frozenset({"fail", "dlq", "skip"})
+# The published pipeline contract's error-handling strategy enum, read from the
+# contract rather than narrowed to what the engine branches on, so a
+# contract-valid pipeline is never rejected at this boundary. The engine's own
+# *default* is separate and deliberately differs from the contract's.
+_VALID_ERROR_STRATEGIES = _contract_literals(ContractErrorHandling, "strategy")
 
 
 @dataclass(frozen=True)

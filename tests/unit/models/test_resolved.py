@@ -1,8 +1,12 @@
 """Unit tests for the typed resolved-runtime models and their invariants."""
 
+from typing import Annotated, Literal
 from unittest.mock import MagicMock
 
 import pytest
+from analitiq.contracts.pipelines.config import ErrorHandling as ContractErrorHandling
+from analitiq.contracts.stream import Replication
+from pydantic import BaseModel, Field, TypeAdapter, create_model
 
 from src.engine.pipeline_config_prep import _parse_replication, _parse_runtime_config
 from src.models.resolved import (
@@ -13,6 +17,8 @@ from src.models.resolved import (
     ResolvedPipeline,
     ResolvedStream,
     RuntimeConfig,
+    _contract_literals,
+    _variant_literals,
 )
 
 
@@ -33,6 +39,76 @@ class TestBatchingConfig:
             BatchingConfig(max_concurrent_batches=value)
 
 
+class TestContractLiterals:
+    """The reader fails loud rather than narrowing a boundary to nothing."""
+
+    def test_reads_a_literal_field(self):
+        class Model(BaseModel):
+            kind: Literal["a", "b"]
+
+        assert _contract_literals(Model, "kind") == {"a", "b"}
+
+    @pytest.mark.parametrize(
+        "annotation", [str, int, str | None, list[str], Literal[1, 2]]
+    )
+    def test_rejects_a_field_that_is_not_a_string_literal(self, annotation):
+        # A contract that stops declaring an enum here must break the engine
+        # loudly; an empty vocabulary would reject every value instead.
+        model = create_model("Model", kind=(annotation, ...))
+        with pytest.raises(RuntimeError, match="not a Literal of strings"):
+            _contract_literals(model, "kind")
+
+    def test_rejects_a_renamed_or_dropped_field(self):
+        # A renamed field is at least as likely as a retyped one, and must
+        # reach the same explanation rather than a bare KeyError.
+        model = create_model("Model", kind=(Literal["a"], ...))
+        with pytest.raises(RuntimeError, match="does not declare a 'method' field"):
+            _contract_literals(model, "method")
+
+    def test_rejects_a_variant_that_is_not_a_model(self):
+        # An Optional variant puts NoneType in the union; reading model_fields
+        # off it must explain, not raise AttributeError.
+        with pytest.raises(RuntimeError, match="does not declare"):
+            _contract_literals(type(None), "method")
+
+
+class TestVariantLiterals:
+    """The union reader states which shape it could not read."""
+
+    def test_reads_an_annotated_discriminated_union(self):
+        class A(BaseModel):
+            kind: Literal["a"]
+
+        class B(BaseModel):
+            kind: Literal["b"]
+
+        annotated = Annotated[A | B, Field(discriminator="kind")]
+        assert _variant_literals(annotated, "kind") == {"a", "b"}
+
+    def test_reads_a_bare_union(self):
+        # The contract wraps its unions in Annotated today; the reader does not
+        # depend on that, so dropping the discriminator is not a silent break.
+        class A(BaseModel):
+            kind: Literal["a"]
+
+        class B(BaseModel):
+            kind: Literal["b"]
+
+        assert _variant_literals(A | B, "kind") == {"a", "b"}
+
+    @pytest.mark.parametrize("shape", ["plain_model", "annotated_single"])
+    def test_rejects_an_annotation_that_is_not_a_union(self, shape):
+        # The likeliest shape change: the contract collapses the union to one
+        # model. Before the Annotated strip was explicit this raised a bare
+        # unpack ValueError naming neither the contract nor the cause.
+        class A(BaseModel):
+            kind: Literal["a"]
+
+        annotation = A if shape == "plain_model" else Annotated[A, Field()]
+        with pytest.raises(RuntimeError, match="no longer a union"):
+            _variant_literals(annotation, "kind")
+
+
 class TestErrorHandlingConfig:
     def test_defaults(self):
         cfg = ErrorHandlingConfig()
@@ -40,9 +116,25 @@ class TestErrorHandlingConfig:
         assert cfg.max_retries == 3
         assert cfg.retry_delay_seconds == 5
 
-    @pytest.mark.parametrize("strategy", ["fail", "dlq", "skip"])
+    def test_vocabulary_is_the_one_the_engine_has_handling_for(self):
+        # Deriving means a contract that gains a strategy widens what this
+        # boundary accepts on its own. That is the right runtime behavior -- a
+        # contract-valid pipeline is never rejected here -- but the strategy
+        # dispatch in StreamProcessor would then reject it mid-run, on the
+        # first failed batch, rather than at config time. This is the only
+        # place the set is written down, so a contract that adds one fails
+        # here and gets a code path before it can reach a pipeline.
+        assert _contract_literals(ContractErrorHandling, "strategy") == {
+            "fail",
+            "dlq",
+            "skip",
+        }
+
+    @pytest.mark.parametrize(
+        "strategy", sorted(_contract_literals(ContractErrorHandling, "strategy"))
+    )
     def test_accepts_every_contract_strategy(self, strategy):
-        # Must mirror the published pipeline contract enum exactly, so a
+        # Must accept the published pipeline contract enum exactly, so a
         # contract-valid pipeline is never rejected at this boundary.
         assert ErrorHandlingConfig(strategy=strategy).strategy == strategy
 
@@ -201,7 +293,24 @@ class TestParseRuntimeConfig:
 
 
 class TestReplicationConfig:
-    @pytest.mark.parametrize("method", ["full_refresh", "incremental"])
+    def test_vocabulary_equals_the_published_contract_enum(self):
+        # Two genuinely independent readings: the engine walks each variant's
+        # method literal, this reads the discriminator mapping pydantic renders
+        # into the published schema. A reader that visited only the first
+        # variant would pass every other test in this class.
+        published = TypeAdapter(Replication).json_schema()["discriminator"]["mapping"]
+        assert _variant_literals(Replication, "method") == set(published)
+
+    def test_vocabulary_is_the_one_the_engine_has_handling_for(self):
+        # Same reason as the error-strategy canary: deriving lets a contract
+        # widen this boundary on its own, and the engine branches on the
+        # method, so a new one needs a code path before a pipeline can use it.
+        assert _variant_literals(Replication, "method") == {
+            "full_refresh",
+            "incremental",
+        }
+
+    @pytest.mark.parametrize("method", sorted(_variant_literals(Replication, "method")))
     def test_accepts_every_contract_method(self, method):
         assert ReplicationConfig(method=method).method == method
 

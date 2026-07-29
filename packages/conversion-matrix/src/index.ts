@@ -12,7 +12,15 @@
 export type { ConversionMode, ConversionCell, ArrowFamily, ConversionMatrix } from "./types.js";
 
 import type { ConversionCell } from "./types.js";
-import { conversionMatrix, arrowFamilies } from "./matrix.generated.js";
+import { conversionMatrix, arrowFamilies, matrixVersion } from "./matrix.generated.js";
+
+/**
+ * The version of the engine artifact this build was generated from — the same
+ * value the published `conversion-matrix/v{version}/conversion_matrix.json`
+ * object carries. Independent of this package's npm version, whose digest also
+ * covers the helpers this package ships.
+ */
+export { matrixVersion };
 
 export { conversionMatrix, arrowFamilies };
 

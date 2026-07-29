@@ -7,10 +7,10 @@ name: conversion-matrix
 #   1. @analitiq-ai/conversion-matrix on GitHub Packages, so the frontend can
 #      pin the typed helpers over the grid.
 #   2. Versioned raw JSON on S3 (sync-s3 job) — the conversion grid and the
-#      arrow_type parameter grammar, each under its own prefix with its own
-#      independent version history — one leg per target environment (dev,
-#      prod), so non-npm consumers can pin the contracts without registry
-#      credentials. Authentication is GitHub OIDC (short-lived, no stored
+#      arrow_type parameter grammar, each under its own prefix and carrying its
+#      own version — one leg per target environment (dev, prod), so non-npm
+#      consumers can pin the contracts without registry credentials.
+#      Authentication is GitHub OIDC (short-lived, no stored
 #      keys); the role, region, and bucket come exclusively from GitHub
 #      Environment variables, so no cloud identifiers live in this repo. An
 #      environment with no role ARN configured skips its steps; once the role
@@ -50,6 +50,14 @@ jobs:
         run: npm test
       - name: Packaged grid is byte-identical to the engine source
         run: cmp dist/conversion_matrix.json ../../cdk/cdk/type_map/conversion_matrix.json
+      # The publisher refuses to republish changed content under an
+      # already-published version, but it only runs post-merge. This moves
+      # that failure into the pull request.
+      - name: A changed artifact declares a changed version
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --depth=1 origin "$GITHUB_BASE_REF"
+          node scripts/check-version-bump.mjs FETCH_HEAD
 
   publish:
     if: github.event_name == 'push'
@@ -88,12 +96,12 @@ jobs:
   sync-s3:
     # Versions on S3 are independent of the npm version: the npm digest covers
     # the shipped TS code too, while each S3 artifact (the grid, the grammar)
-    # versions alone on its own content. The sync script reconciles against
-    # the latest.json manifest on S3, so a re-run after a partial failure
-    # converges on its own. (The first-ever run additionally needs the role to
-    # grant s3:ListBucket, so a missing manifest reads as absence, not as
-    # Forbidden.) Each environment's bucket keeps its own independent version
-    # history; content is compared across buckets by the manifest sha256.
+    # states its own version in its own bytes. The sync script reads that
+    # version and reconciles against the latest.json manifest on S3, so a
+    # re-run after a partial failure converges on its own, and every
+    # environment publishes the same version for the same content. (The
+    # first-ever run additionally needs the role to grant s3:ListBucket, so a
+    # missing manifest reads as absence, not as Forbidden.)
     #
     # The role/region/bucket variables are ENVIRONMENT-scoped — each
     # environment carries its own values under the same names — which is why
