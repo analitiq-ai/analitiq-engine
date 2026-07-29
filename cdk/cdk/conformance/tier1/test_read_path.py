@@ -20,13 +20,17 @@ from __future__ import annotations
 import pytest
 
 from cdk.conformance.fakes import NoSecretsResolver
-from cdk.conformance.skips import require_database, require_dialect
+from cdk.conformance.skips import require_dialect
 from cdk.conformance.target import ConformanceTarget
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.query_builder import QueryBuilder, QueryConfig
 from cdk.sql.capabilities import SQL_TRANSPORT_TYPES
 from cdk.sql.dialects import SqlDialect
 from cdk.sql.generic import read_query_builder
+
+#: Every check here renders SQL through a dialect (see
+#: cdk.conformance.applicability).
+APPLIES_TO_KINDS = ("database",)
 
 
 def _declared_driver(target: ConformanceTarget) -> str:
@@ -123,7 +127,6 @@ def test_definition_derives_a_driver(
     conformance_target: ConformanceTarget,
 ) -> None:
     """The default transport yields a driver the engine can materialize."""
-    require_database(conformance_target)
     assert _declared_driver(conformance_target)
 
 
@@ -131,7 +134,6 @@ def test_read_query_compiles_on_every_declared_transport(
     conformance_target: ConformanceTarget,
 ) -> None:
     """A plain projection renders in each declared transport's shape."""
-    require_database(conformance_target)
     dialect = require_dialect(conformance_target)
     for transport_type, driver in _declared_sql_transports(conformance_target):
         builder = _query_builder(dialect, transport_type, driver)
@@ -154,7 +156,6 @@ def test_cursor_read_orders_by_the_cursor_field(
     maximum only when pages are ordered by the cursor — the ordering is
     what makes saved cursors monotonic.
     """
-    require_database(conformance_target)
     dialect = require_dialect(conformance_target)
     for transport_type, driver in _declared_sql_transports(conformance_target):
         builder = _query_builder(dialect, transport_type, driver)

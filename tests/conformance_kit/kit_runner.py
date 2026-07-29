@@ -16,6 +16,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REFERENCE_DIR = Path(__file__).parent / "fixtures" / "reference"
 REFERENCE_CLASS = "tests.conformance_kit.reference_connector:ReferenceConnector"
+#: A well-formed connector of a kind the suite carries no checks for.
+API_REFERENCE_DIR = Path(__file__).parent / "fixtures" / "api"
 
 
 def run_kit_suite(

@@ -35,6 +35,11 @@ in a customer pipeline (spec
   needs a declared `bulk_load` mechanism; a write-capable connector
   (one shipping `type-map-write.json`) needs `sql_capabilities` and
   `stage_table_sql`.
+- **Every connector states its type vocabulary.**
+  `definition/type-map-read.json` is what the engine canonicalizes
+  discovered source types through, whatever the connector's kind: a
+  database canonicalizes the native types discovery returns, an API the
+  JSON `type`/`format` its endpoint fields declare.
 - **Canonical types are in the published grammar.** Every literal
   canonical a rule names must belong to a family the engine can parse —
   checked for read rules whether or not the connector ships a write map,
@@ -68,6 +73,35 @@ contract tier).
 
 Cloud warehouses with no containerizable server (Snowflake, BigQuery,
 Redshift) run tier 1 only; that is an accepted residual risk.
+
+## What it cannot assess, it does not pass
+
+Every behavioural check in both tiers applies to `kind: database` — each
+one renders SQL through a dialect or drives the write primitive. Pointed
+at a connector of any other kind, the suite would collect nothing but
+skips and still exit zero, reporting *not assessed* as *passed*. That is
+the one outcome a required status check must never produce, and the fix
+belongs in the kit rather than in a kind branch in every connector
+repo's CI.
+
+So a run that collects no check for its target's kind fails, naming it:
+
+```
+[kind-applicability] no check in this run applies to connector kind
+'api', so this connector is ungated: the checks collected here apply to
+kind 'database'.
+```
+
+A check module states the kinds it applies to once (`APPLIES_TO_KINDS`),
+and that single statement does both jobs: it skips the module for every
+other kind, and it is what the run reads back to decide whether it
+assessed anything. A module of checks for a new kind therefore clears
+the gate for that kind the day it lands, with no list anywhere to keep
+in step.
+
+Until the suite carries checks for a kind, a connector of that kind has
+no conformance gate to wire: its tier-1 job is red, and red is the
+accurate report.
 
 ## Wiring a connector repo
 
@@ -141,7 +175,7 @@ jobs:
 ```
 
 Systems without a service container drop the tier-2 step; the tier-1
-step is mandatory in every connector repo. A job that *does* provision
+step is mandatory in every connector repo whose kind the suite assesses. A job that *does* provision
 a container should also set `ANALITIQ_CONFORMANCE_REQUIRE_LIVE=1`
 (as the snippet's engine-side counterpart does): with it, a missing
 live connection fails the job instead of skipping, so a typo'd

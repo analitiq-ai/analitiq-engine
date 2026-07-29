@@ -1,10 +1,13 @@
-"""Applicability gates: skip, with the reason spelled out, never guess.
+"""Prerequisite gates: skip, with the reason spelled out, never guess.
 
-Each check declares what it applies to; a connector outside that scope
-skips loudly so the CI log records *why* nothing ran. Prerequisite
-failures (a missing hook, an undeclared block) are reported once by the
-declaration-consistency check — dependent tests skip instead of failing
-a second time with a less actionable message.
+A check whose prerequisite the connector does not carry skips loudly, so
+the CI log records *why* nothing ran. Each such gap is already reported
+once by the declaration-consistency check, with the actionable message;
+failing every dependent check again would only bury it.
+
+The connector *kind* is gated elsewhere: a check module states the kinds
+it applies to (:mod:`cdk.conformance.applicability`), which both skips
+it for every other kind and records what the run covered.
 """
 
 from __future__ import annotations
@@ -17,18 +20,8 @@ from cdk.sql.dialects import SqlDialect, dialect_overrides
 from .target import ConformanceTarget
 
 
-def require_database(target: ConformanceTarget) -> None:
-    """Skip the calling test for non-database connectors."""
-    if not target.is_database:
-        pytest.skip(
-            f"connector kind is {target.kind!r}; this check applies to kind "
-            f"'database' only"
-        )
-
-
 def require_write_role(target: ConformanceTarget) -> None:
     """Skip the calling test when the write-path checks do not apply."""
-    require_database(target)
     if not target.has_write_map:
         pytest.skip(
             "connector ships no type-map-write.json (source-only); "
@@ -38,7 +31,6 @@ def require_write_role(target: ConformanceTarget) -> None:
 
 def require_dialect(target: ConformanceTarget) -> SqlDialect:
     """Return the connector's dialect, or skip naming the prerequisite."""
-    require_database(target)
     dialect = target.dialect
     if dialect is None:
         pytest.skip(
