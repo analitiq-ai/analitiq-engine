@@ -14,14 +14,15 @@ Three things are pinned, because the tree has three kinds of file:
   while the boilerplate around it is a function of the protoc version, and the
   Python dependency set is not locked (``grpcio-tools`` floats on a caret
   range), so a byte comparison would fail on a routine bump.
-- ``*_pb2_grpc.py`` carry no descriptor. What they do carry is the RPC path
-  strings the client and server dispatch on and the message classes they
-  serialize through, and both are pinned: identical paths over a renamed
-  message still fail at the first call, and regenerating one module without
-  the other is exactly how that happens.
+- ``*_pb2_grpc.py`` carry no descriptor. They carry the RPC paths the client
+  and server dispatch on and the classes each RPC serializes through, and both
+  are pinned -- the second by driving the committed stub and servicer and
+  reading back what they bound, so a method that keeps its path while swapping
+  to another live message is caught here rather than at the first call.
 - ``__init__.py`` is hand-written, not generated, and is the surface the engine
-  imports these names through. It must name every message and enum the
-  definitions declare, or a regenerated tree ships a symbol nothing can import.
+  imports these names through. It must name every message, enum and service
+  the definitions declare, or a regenerated tree ships a symbol nothing can
+  import.
 """
 
 from __future__ import annotations
@@ -32,6 +33,8 @@ import sys
 import tempfile
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 from google.protobuf import descriptor_pb2
@@ -51,9 +54,61 @@ assert _PROTO_STEMS, f"no .proto definitions found under {_PROTO_DIR}"
 # '/analitiq.v1.SourceService/ReadStream'.
 _RPC_PATH_RE = re.compile(r"'(/[A-Za-z0-9_.]+/[A-Za-z0-9_]+)'")
 
-# The message a stub serializes an RPC through, e.g. the ReadRequest in
-# `analitiq_dot_v1_dot_source__service__pb2.ReadRequest.SerializeToString`.
-_SERIALIZER_RE = re.compile(r"_pb2\.([A-Za-z0-9_]+)\.(?:SerializeToString|FromString)")
+
+class _RecordingChannel:
+    """Captures what a generated Stub binds each RPC path to."""
+
+    def __init__(self) -> None:
+        self.bound: dict[str, Any] = {}
+
+    def _record(self, path: str, response_deserializer: Any = None, **_: Any) -> None:
+        # The request side is not recoverable here: protoc binds
+        # `Request.SerializeToString`, an unbound descriptor that does not name
+        # its class. The servicer below carries it as a bound classmethod.
+        self.bound[path] = response_deserializer
+        return None
+
+    unary_unary = unary_stream = stream_unary = stream_stream = _record
+
+
+class _RecordingServer:
+    """Captures the generic handler a generated ``add_*_to_server`` installs."""
+
+    def __init__(self) -> None:
+        self.handlers: list[Any] = []
+
+    def add_generic_rpc_handlers(self, handlers: Any) -> None:
+        self.handlers.extend(handlers)
+
+
+class _CallDetails:
+    def __init__(self, method: str) -> None:
+        self.method = method
+
+
+def _bound_rpc_types(
+    module: Any,
+    file: descriptor_pb2.FileDescriptorProto,
+    service: descriptor_pb2.ServiceDescriptorProto,
+) -> dict[str, tuple[str, str, bool, bool]]:
+    """What the committed stub and servicer actually bind, per RPC name."""
+    channel = _RecordingChannel()
+    getattr(module, f"{service.name}Stub")(channel)
+    server = _RecordingServer()
+    getattr(module, f"add_{service.name}Servicer_to_server")(MagicMock(), server)
+    generic = server.handlers[0]
+
+    bound = {}
+    for method in service.method:
+        path = f"/{file.package}.{service.name}/{method.name}"
+        handler = generic.service(_CallDetails(path))
+        bound[method.name] = (
+            handler.request_deserializer.__self__.DESCRIPTOR.full_name,
+            channel.bound[path].__self__.DESCRIPTOR.full_name,
+            handler.request_streaming,
+            handler.response_streaming,
+        )
+    return bound
 
 
 def _drop_json_names(
@@ -161,26 +216,41 @@ def test_committed_stub_dispatches_its_declared_rpcs(
 
 
 @pytest.mark.parametrize("stem", _PROTO_STEMS)
-def test_committed_stub_serializes_declared_messages(
+def test_committed_stub_binds_each_rpc_to_its_declared_types(
     compiled: dict[str, descriptor_pb2.FileDescriptorProto], stem: str
 ) -> None:
-    """Every message a stub serializes through must still exist.
+    """Each RPC must serialize through the exact types its .proto declares.
 
-    A stub regenerated out of step with its ``_pb2`` keeps its RPC paths while
-    naming a message that was renamed or removed, and fails only at the first
-    call. The names come from the whole compiled set, not just this file's,
-    because a service's request type may be imported from another .proto.
+    Checking that referenced messages merely exist is not enough: a method
+    that keeps its path but swaps its request type for another live message
+    passes that, and fails at the first call instead. So the committed stub
+    and servicer are driven for real -- a recording channel and a recording
+    server hand back the classes they bound -- and compared per RPC against
+    the descriptor, streaming arity included.
     """
-    stub = (_GENERATED / f"{stem}_pb2_grpc.py").read_text()
-    declared = {
-        message.name for file in compiled.values() for message in file.message_type
-    }
-    referenced = set(_SERIALIZER_RE.findall(stub))
-    assert referenced <= declared, (
-        f"{stem}_pb2_grpc.py serializes through "
-        f"{sorted(referenced - declared)}, which no .proto declares; "
-        f"run proto/generate.sh and commit the result"
+    services = compiled[stem].service
+    if not services:
+        pytest.skip(f"{stem}.proto declares no services")
+    module = __import__(
+        f"src.grpc.generated.analitiq.v1.{stem}_pb2_grpc", fromlist=["__name__"]
     )
+    for service in services:
+        bound = _bound_rpc_types(module, compiled[stem], service)
+        declared = {
+            method.name: (
+                # Descriptor type names are fully qualified with a leading dot.
+                method.input_type.lstrip("."),
+                method.output_type.lstrip("."),
+                method.client_streaming,
+                method.server_streaming,
+            )
+            for method in service.method
+        }
+        assert bound == declared, (
+            f"{stem}_pb2_grpc.py binds {service.name} to types "
+            f"{stem}.proto does not declare; run proto/generate.sh and commit "
+            f"the result"
+        )
 
 
 def test_package_exports_every_declared_message(
@@ -198,6 +268,20 @@ def test_package_exports_every_declared_message(
         entity.name
         for file in compiled.values()
         for entity in list(file.message_type) + list(file.enum_type)
+    }
+    # Services are re-exported under protoc's three generated spellings, and
+    # the engine imports them from the package (src/worker/readable.py takes
+    # SourceServiceStub this way), so a new service leaves __init__ stale in
+    # exactly the same way a new message does.
+    declared |= {
+        name
+        for file in compiled.values()
+        for service in file.service
+        for name in (
+            f"{service.name}Stub",
+            f"{service.name}Servicer",
+            f"add_{service.name}Servicer_to_server",
+        )
     }
     # Both halves: an attribute that is missing breaks `from ... import Name`,
     # and a name absent from __all__ breaks a star-import while still passing

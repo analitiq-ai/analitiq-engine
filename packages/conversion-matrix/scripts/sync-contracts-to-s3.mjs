@@ -45,7 +45,10 @@ export const ARTIFACTS = [
   { prefix: "arrow-type-grammar", file: "arrow_type_grammar.json" },
 ];
 
-const SEMVER = /^(\d+)\.(\d+)\.(\d+)$/;
+// Each component is `0` or a leading-zero-free number, as semver requires.
+// A bare \d+ would accept "01.2.3" and normalise it to 1.2.3, so the object
+// would publish at a key many semver parsers refuse to read back.
+const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
 /**
  * The three numeric parts of a plain semver string, or null if it is not one.

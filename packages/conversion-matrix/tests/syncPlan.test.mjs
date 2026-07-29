@@ -35,7 +35,20 @@ test("a matching sha256 skips even with a malformed manifest version", () => {
 test("an artifact with no usable version aborts before anything else", () => {
   // The publisher reads this field and cannot assign one, so a malformed
   // artifact must never reach S3 — not even on a first publish.
-  for (const declared of [undefined, "", "v1.2.3", "1.2", "1.2.3-rc1", 123]) {
+  // "01.2.3" would normalise to 1.2.3 under a bare \\d+ and publish at a key
+  // semver parsers reject; a non-string that stringifies to semver likewise.
+  for (const declared of [
+    undefined,
+    "",
+    "v1.2.3",
+    "1.2",
+    "1.2.3-rc1",
+    123,
+    "01.2.3",
+    "1.02.3",
+    "1.2.03",
+    ["1.2.3"],
+  ]) {
     assert.throws(
       () => planSync(null, SHA_A, declared),
       /artifact declares no usable version/,
