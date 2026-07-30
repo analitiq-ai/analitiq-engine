@@ -73,18 +73,18 @@ class FileDestinationHandler(BaseDestinationHandler):
     Destination handler that writes records to files.
 
     Supports:
-    - Multiple storage backends (local, s3)
     - Multiple output formats (jsonl, csv, parquet)
     - Content-addressed filenames (a replayed batch overwrites the same
       file with the same bytes)
     - Configurable file paths with partitioning
 
-    The storage backend follows the runtime's connector kind ("file" or
-    "s3"). Configuration:
+    The storage backend follows the runtime's connector kind. The registry
+    routes both "file" and the planned "s3" kind here; only "file" has a
+    backend, so an "s3" connection is refused at connect() with
+    ``StorageBackendNotBuiltError``. Configuration:
     - file_format: Output format (jsonl, csv, parquet). Default: jsonl
     - path: Base path for files (required for local storage)
-    - bucket: S3 bucket name (required for S3 storage)
-    - prefix: S3 key prefix (optional)
+    - prefix: Key prefix (optional)
     - path_template: Template for file paths with placeholders
     """
 
@@ -118,7 +118,13 @@ class FileDestinationHandler(BaseDestinationHandler):
         """File destinations support bulk writes."""
         return True
 
-    def retry_semantics(self, stream_id: str) -> RetryVerdict:
+    # skipcq PYL-R0201: this is the CDK's per-stream verdict hook, not a
+    # utility. Its siblings answer from instance state (the API handler
+    # returns the verdict it computed at configure time); a file sink's
+    # verdict happens to follow from how it writes, so this override reads
+    # no attribute. Making one implementation of an overridable hook a
+    # @staticmethod would hide that it is an override.
+    def retry_semantics(self, stream_id: str) -> RetryVerdict:  # skipcq: PYL-R0201
         """Report at-least-once: a restart may duplicate boundary rows (#306).
 
         Batch files are content-addressed: the filename carries a hash of
@@ -147,25 +153,33 @@ class FileDestinationHandler(BaseDestinationHandler):
 
         Args:
             runtime: ConnectionRuntime with enriched config
+
+        Raises:
+            StorageBackendNotBuiltError: If the runtime's connector kind has
+                no storage backend yet (the planned "s3" kind).
         """
-        runtime.acquire()
-        await runtime.materialize()
-        connection_config = runtime.resolved_config
         # The kind lives on the runtime (resolved from the connector
         # definition), not in the connection config — an s3 connection's
         # JSON carries no "connector_type" key.
         self._connector_type = runtime.connector_type
+
+        # The kind alone decides the backend, so resolve it before the runtime
+        # is acquired: an unbuilt kind then fails naming itself, with no
+        # shared ownership taken, no config materialized and no storage
+        # connection opened. It does not spare the secret store — the engine
+        # shell resolves the connection (ConnectionRuntime.resolve_spec) into
+        # the worker's launch bootstrap before this process starts, so the
+        # credentials were already fetched by the time connect() runs.
+        storage = get_storage_backend(self._connector_type)
+        self._storage = storage
+
+        runtime.acquire()
+        await runtime.materialize()
+        connection_config = runtime.resolved_config
         self._runtime = runtime
 
         try:
-            # Determine storage backend type
-            storage_type = (
-                "local" if self._connector_type == "file" else self._connector_type
-            )
-
-            # Create storage backend
-            self._storage = get_storage_backend(storage_type)
-            await self._storage.connect(connection_config)
+            await storage.connect(connection_config)
 
             # Create formatter
             file_format = connection_config.get("file_format", "jsonl")
@@ -191,7 +205,7 @@ class FileDestinationHandler(BaseDestinationHandler):
         self._connected = True
         logger.info(
             "FileDestinationHandler connected: storage=%s, format=%s",
-            storage_type,
+            storage.storage_type,
             file_format,
         )
 
@@ -204,7 +218,15 @@ class FileDestinationHandler(BaseDestinationHandler):
         self._connected = False
         logger.info("FileDestinationHandler disconnected")
 
-    async def configure_schema(self, schema_spec: SchemaSpec) -> bool:
+    # skipcq PYL-R0201: configure_schema is abstract on
+    # BaseDestinationHandler and a member of the Writable protocol, so the
+    # contract owns its shape. A file destination pre-creates nothing, which
+    # is why this implementation reads no attribute -- a reason to keep the
+    # method empty of work, not a reason to restate the contract's own
+    # signature as a @staticmethod.
+    async def configure_schema(  # skipcq: PYL-R0201
+        self, schema_spec: SchemaSpec
+    ) -> bool:
         """Accept the schema for a stream.
 
         File destinations don't pre-create anything; the formatter shapes

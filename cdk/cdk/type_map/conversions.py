@@ -27,12 +27,14 @@ than truncating. (``safe=True`` is not total: a finite ``Float64`` magnitude
 beyond ``Float32`` range still casts to +/-inf; that residue is tracked for a
 follow-up, not relied on here.)
 
-The grid is keyed on the **published arrow_type family vocabulary** -- the same
-head names :func:`~cdk.type_map.arrow.parse_arrow_type` consumes (``"Int64"``,
-``"Utf8"``, ``"Timestamp"``) -- so the control plane can publish it and the
-frontend can consume it verbatim. This module imports no ``pyarrow``; the
-runtime helper that maps a live ``DataType`` to its family lives in
-:mod:`cdk.type_map.arrow`.
+The grid is keyed on the **published arrow_type family vocabulary** -- the one
+table in :mod:`cdk.type_map.grammar`, whose head names
+:func:`~cdk.type_map.arrow.parse_arrow_type` consumes (``"Int64"``, ``"Utf8"``,
+``"Timestamp"``) -- so the control plane can publish it and the frontend can
+consume it verbatim. The policy here reasons in the *kind* each family declares
+there, never in family names, so a family added to the table is classified
+without a second edit. This module imports no ``pyarrow``; the runtime helper
+that maps a live ``DataType`` to its family lives in :mod:`cdk.type_map.arrow`.
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ from pathlib import Path
 from typing import Any, Final, Literal
 
 from .exceptions import InvalidTypeMapError
+from .grammar import ARROW_FAMILIES, ConversionKind
 
 ConversionMode = Literal["identity", "auto", "explicit", "forbidden"]
 
@@ -74,46 +77,6 @@ class Conversion:
             "runtime_checked": self.runtime_checked,
         }
 
-
-# Each arrow_type family (the head of a canonical type string, e.g. "Int64",
-# "Utf8", "Timestamp") belongs to one conversion *kind* -- a group of families
-# that share a conversion policy. Width/precision/unit differences inside a kind
-# (Int32 vs Int64, Decimal128(10, 2) vs Decimal128(38, 9), Timestamp units) are
-# settled by the runtime safe-cast, not by separate matrix entries.
-_FAMILY_KIND: Final[dict[str, str]] = {
-    "Null": "null",
-    "Boolean": "bool",
-    "Int8": "int",
-    "Int16": "int",
-    "Int32": "int",
-    "Int64": "int",
-    "UInt8": "int",
-    "UInt16": "int",
-    "UInt32": "int",
-    "UInt64": "int",
-    "Float16": "float",
-    "Float32": "float",
-    "Float64": "float",
-    "Utf8": "string",
-    "LargeUtf8": "string",
-    "Json": "json",
-    "Binary": "binary",
-    "LargeBinary": "binary",
-    "FixedSizeBinary": "binary",
-    "Date32": "date",
-    "Date64": "date",
-    "Time32": "time",
-    "Time64": "time",
-    "Timestamp": "timestamp",
-    "Duration": "duration",
-    "Decimal128": "decimal",
-    "Decimal256": "decimal",
-    "Object": "nested",
-    "List": "nested",
-}
-
-# Stable publication order: the grid is materialised over these.
-ARROW_FAMILIES: Final[tuple[str, ...]] = tuple(_FAMILY_KIND)
 
 # The mapping function a "scalar -> string" formatting resolves to. Every fn
 # named in this module must exist in the engine's mapping FUNCTION_CATALOG; the
@@ -231,7 +194,8 @@ def build_conversion_grid() -> dict[str, dict[str, dict[str, object]]]:
 
     :func:`classify_conversion` is the single source of truth; this flattens it
     into the serialisable grid the control plane publishes and the frontend
-    consumes verbatim.
+    consumes verbatim. Both axes are the family names of
+    :data:`~cdk.type_map.grammar.ARROW_FAMILIES`, in its declaration order.
     """
     return {
         source: {
@@ -279,11 +243,11 @@ def load_published_matrix() -> dict[str, Any]:
     return document
 
 
-def _kind_of(family: str, side: str) -> str:
-    kind = _FAMILY_KIND.get(family)
-    if kind is None:
+def _kind_of(family: str, side: str) -> ConversionKind:
+    spec = ARROW_FAMILIES.get(family)
+    if spec is None:
         raise InvalidTypeMapError(
             f"unknown {side} arrow_type family {family!r}; expected one of "
             f"{', '.join(ARROW_FAMILIES)}"
         )
-    return kind
+    return spec.kind

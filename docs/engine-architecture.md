@@ -181,14 +181,9 @@ Defined in `src/engine/exceptions.py`:
 
 ```
 StreamProcessingError                   (base for runtime stream failures)
-├── TransformationError
-├── ConnectorError
-└── StreamExecutionError                (carries stage + batch context)
+└── TransformationError
 
-ConfigurationError                      (base for config-time failures)
-├── StreamConfigurationError
-├── PipelineValidationError
-└── StageConfigurationError
+ConfigurationError                      (config-time failures)
 ```
 
 Concurrent stream failures are aggregated with Python 3.11+

@@ -66,7 +66,14 @@ record_batch
    Arrow string parses to a `pa.DataType` on the read side, and the
    connector's own `type-map-write.json` renders it back to native DDL on
    the write side. Arrow happens to have a good vocabulary to standardize
-   on.
+   on. The families themselves are declared once, in `ARROW_FAMILIES`
+   (`cdk/cdk/type_map/grammar.py`): each entry carries the family's
+   parameter grammar, its conversion kind, the pyarrow factory that builds
+   it, and the `pyarrow.types` predicates that recognise it in a live
+   batch. The parser, the conversion matrix, `arrow_family`, the
+   conformance probe set, and both published artifacts derive from that one
+   table, so a family added there needs no second edit. The engine
+   publishes this vocabulary; the contract mirrors it.
 
 ## Where Arrow Is Ceremony
 
