@@ -22,11 +22,11 @@ import pytest
 from sqlalchemy import Column, Integer, MetaData, String, Table, create_engine, select
 from sqlalchemy.pool import StaticPool
 
-from cdk.sql.backend import SqlAlchemyBackend
 from cdk.sql.capabilities import SqlCapabilities
 from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.generic import GenericSQLConnector
 from cdk.sql.generic import _StreamState as SqlStreamState
+from cdk.sql.sqlalchemy_backend import SqlAlchemyBackend
 from src.engine.stream_processor import StreamProcessor, _FullRefreshCheckpoint
 
 # A fixed, timezone-aware emit instant for write_batch/send_batch calls; the

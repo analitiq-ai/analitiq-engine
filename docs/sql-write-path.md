@@ -141,34 +141,75 @@ class StageWritePlan:
 class TransportBackend(ABC):
     """Executes plans; owns connections, cursors, and commit calls.
 
-    Holds no write-mode logic. SqlAlchemyBackend serves both engine
-    flavors (async engine, and sync engine on a worker thread) through one
-    shared sync-Connection body, never a per-flavor fork. AdbcBackend owns
-    the ADBC connection, its locks, and reopen/poison handling.
+    Holds no write-mode logic and no step order. SqlAlchemyBackend serves
+    both engine flavors (async engine, and sync engine on a worker thread)
+    through one shared sync-Connection body, never a per-flavor fork.
+    AdbcBackend owns the ADBC connection, its locks, and reopen/poison
+    handling.
     """
 
     async def connect(self, runtime: ConnectionRuntime) -> None: ...
     async def disconnect(self) -> None: ...
     async def run_ddl(self, statements: Sequence[str]) -> None: ...
+    async def target_columns(self, target: TableAddress) -> tuple[str, ...]: ...
+    async def health_check(self) -> None: ...
 
     async def execute_write(self, plan: StageWritePlan, batch: pa.RecordBatch) -> None:
-        """Create the stage, land the batch (declared bulk mechanism first,
-        executemany fallback), run plan.truncate_sql when set, run
-        plan.mode_sql, drop the stage.
+        """Run one stage cycle for the batch under the backend's write lock.
 
-        One transaction spanning every step when plan.transactional -- the
-        target-emptying DELETE shares the batch transaction, so a failed
-        first batch rolls the emptying back with it. Stepwise commits with
-        the section-6
-        poisoning rules when not: the DELETE then commits as its own step,
-        and a failure before the append heals on retry -- the same
-        first-batch plan re-runs it.
+        The body is the shared StageCycle; what a backend adds here is the
+        cancellation discipline of its own lock.
         Success is returning without raising. Deliberately returns nothing:
         database rowcounts lie about the batch (an idempotent replay's
         anti-join affects 0 rows; MySQL upserts count 2 per updated row),
         so the facade reports records_written from the batch's own row
         count -- a backend rowcount never reaches the ack."""
 ```
+
+**The step order is not a backend's either.** `StageCycle` owns it once
+above both transports: the pre-flight drop, the stage creation, the
+landing and its verification, the optional target-emptying statement, the
+mode statement, the drop after success or failure, the poisoning rule
+(§6) and the honest orphan log. It is a sync object — the cycle is
+already on a worker thread (or inside `AsyncConnection.run_sync`) when it
+starts — handed the live connection as a `StageConnection`:
+
+```python
+class StageConnection(Protocol):
+    def run_statement(self, sql: str, *, commit: bool) -> None: ...
+    def land_rows(self, plan: StageWritePlan, batch: pa.RecordBatch) -> int: ...
+    def commit(self) -> None: ...
+    def rollback(self) -> None: ...
+    def invalidate(self) -> None: ...
+```
+
+`land_rows` returns the rows now staged, so land verification is one copy
+in the cycle while each transport still lands its own way (executemany,
+`adbc_ingest`, a declared bulk mechanism); a landing that ran the
+untrusted `bulk_land` hook reports what the stage actually holds, and a
+count that is not the batch's is refused before any target mutation. The
+session-schema guard (§4) is inside the ADBC transport's `land_rows`, a
+precondition of that transport's ingest mode rather than a cycle step.
+`commit` and `rollback` are what let one body express both transaction
+shapes; `invalidate` is how a transport satisfies the poisoning rule —
+discarding a pooled SQLAlchemy connection, closing the cached ADBC handle.
+
+`execute_write` stays on the backend rather than moving into the cycle:
+the SQLAlchemy backend shields its thread future and re-awaits on
+cancellation to keep holding the *write* lock, while the ADBC backend
+shields and attaches a done-callback because its thread finishes or
+abandons under the *op* lock. Different locks, different cancellation
+contracts, and one discipline cannot cover both. `target_columns` stays
+for the mirror-image reason: SQLAlchemy reflects, ADBC reads the
+description of a zero-row probe — same intent, two mechanisms — and it is
+called after DDL, outside any write cycle.
+
+**A plan is complete for every dialect-specific write statement, and the
+backends render no SQL at all.** The generic statements around the write
+— the liveness probe, the stage row count, the zero-row column probe, the
+qmark landing `INSERT` — are plain ANSI whose only dialect-aware part is
+identifier quoting, so they are rendered once above the transport seam
+through the dialect and handed down; a backend executes what it is given.
 
 The facade prepares the batch once (type casting, `_record_hash` attachment,
 duplicate collapsing — all semantics) and hands the backend Arrow; each
@@ -232,10 +273,12 @@ returning ANSI `DELETE FROM <target>`, overridable.
 **Retained hooks, and the per-connection composition order**
 
 On every new pooled connection, in order: `verify_tls_state` →
-`session_init_sql` → the connection is usable. Per batch: the session-schema
-guard (`adbc_session_schema_sql`, checked when the declared session-targeting
-mode is `session_default`) runs before any bare-name landing or destructive
-statement, then the stage cycle of §2.
+`session_init_sql` → the connection is usable. Per batch: the stage cycle
+of §2, with the session-schema guard (`adbc_session_schema_sql`, checked
+when the declared session-targeting mode is `session_default`) immediately
+before the bare-name landing it protects — the only statement of the cycle
+that is not fully qualified, since every statement a plan carries is
+rendered with its address.
 `adbc_ingest_kwargs`, TLS connect-arg hooks, DDL/discovery hooks, and the
 identifier hooks are unchanged.
 
@@ -410,8 +453,9 @@ one.
   expiration mechanism where one exists (BigQuery table expiration), so an
   orphan is time-bounded even after a process crash.
 
-**Cleanup and poisoning.** These rules apply on both backends and govern the
-**non-transactional** path (`transactional_ddl:
+**Cleanup and poisoning.** These rules are the stage cycle's, so they read
+the same on every transport, and they govern the **non-transactional**
+path (`transactional_ddl:
 false`, §7). On the transactional path they do not apply: every step,
 the drop included, lives inside the batch transaction, so a failed drop
 aborts the transaction and the batch returns a retryable failure — success
@@ -425,9 +469,18 @@ is never acked past a failed step, and nothing can be committed or orphaned.
   the next batch must not inherit it) and the log tells the truth: for real
   scope, the named stage table is orphaned and needs manual cleanup or the
   expiration policy — no false "will be cleaned up on retry" promises.
+- **Poisoning is scoped to this path, and to every failed step of it.**
+  A step that fails here leaves unknown session state and a stage that may
+  have committed, so the connection is discarded and the next batch
+  reopens. On the transactional path the rollback *is* the recovery —
+  nothing committed, so nothing survives to clean up — and a rejected row
+  says nothing about the connection's health. Discarding a pooled
+  connection on every constraint violation is what no connection pool
+  does: HikariCP evicts on connection-level SQLStates, SQLAlchemy
+  invalidates on `is_disconnect`, neither on every DBAPI error.
 - The session-schema invariant guard holds throughout: under
   `session_targeting: "session_default"`, the session schema must equal the
-  target schema before any bare-name landing or destructive statement runs.
+  target schema before any bare-name landing runs.
 
 ## 7. Transaction boundaries
 
@@ -453,12 +506,14 @@ Declared per system as `stage.transactional_ddl`:
   lost ack duplicates on the retry — the mode's documented at-least-once
   contract (§9), not a stage-cycle defect.
 
-Both SQLAlchemy flavors share one sync-`Connection` cycle body,
-`SqlAlchemyBackend._run_stage_cycle` — entered from the async flavor through
-`conn.run_sync(...)` and from the sync flavor on a worker thread. The split is
-by connection acquisition and cancellation semantics only; the cycle itself is
-never forked per flavor. The ADBC backend commits per step rather than on a
-fixed three-commit cycle, following the self-healing and poisoning rules of §6.
+Both shapes are the same `StageCycle` body; what a declaration selects is
+whether each step commits as its own unit or the whole cycle commits once
+at the end. Both SQLAlchemy flavors reach that body over one sync
+`Connection` — entered from the async flavor through `conn.run_sync(...)`
+and from the sync flavor on a worker thread — so the split is by
+connection acquisition and cancellation semantics only, never a forked
+cycle. The ADBC backend reaches the same body over its cached DBAPI
+connection.
 
 Statement-timeout policy stays in the facade (`GenericSQLConnector`), not the
 backends: one deadline covers the whole batch write, set per stream through
@@ -636,7 +691,11 @@ The contract tier (no live database) certifies this document's surface:
   existing DDL/discovery/TLS hooks — and adds nothing public of its own
   (helpers are underscore-private, so a stale attribute cannot ride along
   silently); overriding a private `GenericSQLConnector` or
-  backend internal fails the suite.
+  backend internal fails the suite. `StageConnection` is implementable but
+  not connector surface: the transports that satisfy it are the CDK's, and
+  a connector class or dialect that grows its members fails the same check
+  as any other public addition — the write primitive is not extended by
+  supplying a second cycle to run it on.
 - **Landing is semantics-free.** For a connector declaring a bulk mechanism,
   bulk-landed and executemany-landed stages produce identical stage
   contents against the suite's fakes.
@@ -691,10 +750,12 @@ warehouses are contract-tier-only; that is an accepted residual risk.
 2. **Landing is executemany by default, bulk-load by declaration.**
    *Rationale:* a pure speed slot with identical semantics is the only bulk
    hook that cannot fork behavior.
-3. **Facade + backend split.** `GenericSQLConnector` owns semantics;
-   `SqlAlchemyBackend` / `AdbcBackend` own mechanics behind
-   `TransportBackend` (§3). *Rationale:* define-once for every rule that
-   would otherwise exist twice.
+3. **Facade + cycle + backend split.** `GenericSQLConnector` owns
+   semantics; `StageCycle` owns the step order and its cleanup and
+   poisoning rules; `SqlAlchemyBackend` / `AdbcBackend` own mechanics
+   behind `TransportBackend` (§3). *Rationale:* define-once for every rule
+   that would otherwise exist twice — a step order held per transport is a
+   second copy, and second copies drift.
 4. **Dialect capabilities are declared data in `connector.json`**
    (vocabulary in §5). *Rationale:* guessed defaults are the mechanism of
    per-dialect divergence; facts about a system belong in validated data,

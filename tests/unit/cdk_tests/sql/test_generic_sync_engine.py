@@ -16,19 +16,23 @@ implements the two rendering hooks the primitive needs.
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pyarrow as pa
 import pytest
 from sqlalchemy import MetaData, Table, create_engine
 from sqlalchemy.pool import StaticPool
 
-from cdk.sql.backend import SqlAlchemyBackend, StageWritePlan
+from cdk.sql.backend import StageWritePlan
 from cdk.sql.capabilities import SqlCapabilities
 from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.generic import GenericSQLConnector, _StreamState
+from cdk.sql.sqlalchemy_backend import SqlAlchemyBackend
+from cdk.sql.stage_cycle import StageCycle
 from cdk.types import AckStatus, Cursor
 
 
@@ -38,6 +42,10 @@ def _sqlite_sync_engine():
     The handler dispatches sync-engine work via ``asyncio.to_thread``, so
     the default per-thread SQLite memory connection would see an empty
     database; StaticPool + check_same_thread=False shares one connection.
+    The database lives in shared cache with an anchor connection holding
+    it open, so it survives a discarded connection — the non-transactional
+    path poisons on a failed step, and a private in-memory database would
+    be erased with it rather than showing what the failure left behind.
     The isolation-level/BEGIN recipe makes pysqlite genuinely
     transactional for DDL too (by default it silently commits before
     DDL), so the declared ``transactional_ddl: true`` stage shape behaves
@@ -45,15 +53,25 @@ def _sqlite_sync_engine():
     """
     from sqlalchemy import event
 
+    uri = f"file:sync_engine_{uuid4().hex}?mode=memory&cache=shared"
+    anchor = sqlite3.connect(
+        uri, uri=True, check_same_thread=False, isolation_level=None
+    )
     engine = create_engine(
         "sqlite://",
-        connect_args={"check_same_thread": False, "isolation_level": None},
+        creator=lambda: sqlite3.connect(
+            uri, uri=True, check_same_thread=False, isolation_level=None
+        ),
         poolclass=StaticPool,
     )
 
     @event.listens_for(engine, "begin")
     def _do_begin(conn):
         conn.exec_driver_sql("BEGIN")
+
+    @event.listens_for(engine, "engine_disposed")
+    def _close_anchor(disposed):
+        anchor.close()
 
     return engine
 
@@ -431,147 +449,20 @@ class TestNonTransactionalFailureRules:
         finally:
             engine.dispose()
 
-    def test_drop_failure_after_failed_batch_warns_and_swallows(self, caplog):
-        import logging
 
-        backend = SqlAlchemyBackend(_SqliteStageDialect())
-        plan = StageWritePlan(
-            stage=TableAddress(table="stg"),
-            target=TableAddress(table="events"),
-            scope="real",
-            transactional=False,
-            create_stage_sql="",
-            truncate_sql=None,
-            mode_sql="",
-            drop_stage_sql='DROP TABLE IF EXISTS "stg"',
-            columns=("id",),
-        )
-        conn = MagicMock()
-        conn.exec_driver_sql.side_effect = RuntimeError("connection gone")
-        with caplog.at_level(logging.WARNING, logger="cdk.sql.backend"):
-            backend._drop_stage_after_failure(conn, plan)
-        assert any(
-            "could not be dropped after a failed batch" in r.getMessage()
-            for r in caplog.records
-        )
-
-    def test_rollback_failure_says_the_drop_was_never_attempted(self, caplog):
-        import logging
-
-        backend = SqlAlchemyBackend(_SqliteStageDialect())
-        plan = StageWritePlan(
-            stage=TableAddress(table="stg"),
-            target=TableAddress(table="events"),
-            scope="temp",
-            transactional=False,
-            create_stage_sql="",
-            truncate_sql=None,
-            mode_sql="",
-            drop_stage_sql='DROP TABLE IF EXISTS "stg"',
-            columns=("id",),
-        )
-        conn = MagicMock()
-        conn.rollback.side_effect = RuntimeError("dead")
-        with caplog.at_level(logging.WARNING, logger="cdk.sql.backend"):
-            backend._drop_stage_after_failure(conn, plan)
-        message = "\n".join(r.getMessage() for r in caplog.records)
-        assert "was not attempted" in message
-        # Scope-accurate consequence: a temp stage needs no manual drop.
-        assert "manual drop" not in message
-        conn.exec_driver_sql.assert_not_called()
-
-
-class TestSuccessDropRules:
-    """The #379 rules generalized to this backend: a committed mode
-    statement stays SUCCESS whatever happens to the drop."""
-
-    def _plan(self, scope: str = "real"):
-        return StageWritePlan(
-            stage=TableAddress(table="stg"),
-            target=TableAddress(table="events"),
-            scope=scope,  # type: ignore[arg-type]
-            transactional=False,
-            create_stage_sql="",
-            truncate_sql=None,
-            mode_sql="",
-            drop_stage_sql='DROP TABLE IF EXISTS "stg"',
-            columns=("id",),
-        )
-
-    def test_second_attempt_recovery_logs_the_first_cause(self, caplog):
-        import logging
-
-        backend = SqlAlchemyBackend(_SqliteStageDialect())
-        conn = MagicMock()
-        conn.exec_driver_sql.side_effect = [RuntimeError("lock timeout"), None]
-        with caplog.at_level(logging.INFO, logger="cdk.sql.backend"):
-            backend._drop_stage_after_success(conn, self._plan())
-        messages = [r.getMessage() for r in caplog.records]
-        assert any("attempt 1/2" in m for m in messages)
-        assert any("succeeded on the second attempt" in m for m in messages)
-        conn.invalidate.assert_not_called()
-
-    def test_double_failure_warns_orphan_then_invalidates(self, caplog):
-        import logging
-
-        backend = SqlAlchemyBackend(_SqliteStageDialect())
-        conn = MagicMock()
-        conn.exec_driver_sql.side_effect = RuntimeError("still locked")
-        with caplog.at_level(logging.WARNING, logger="cdk.sql.backend"):
-            backend._drop_stage_after_success(conn, self._plan("real"))
-        warnings = [
-            r.getMessage()
-            for r in caplog.records
-            if "could not be dropped after a successful" in r.getMessage()
-        ]
-        assert len(warnings) == 1
-        assert "orphaned" in warnings[0]
-        conn.invalidate.assert_called_once()
-
-    def test_temp_scope_double_failure_notes_session_death(self, caplog):
-        import logging
-
-        backend = SqlAlchemyBackend(_SqliteStageDialect())
-        conn = MagicMock()
-        conn.exec_driver_sql.side_effect = RuntimeError("still locked")
-        with caplog.at_level(logging.WARNING, logger="cdk.sql.backend"):
-            backend._drop_stage_after_success(conn, self._plan("temp"))
-        warnings = [
-            r.getMessage()
-            for r in caplog.records
-            if "could not be dropped after a successful" in r.getMessage()
-        ]
-        assert len(warnings) == 1
-        assert "dies with the discarded connection" in warnings[0]
-        assert "orphaned" not in warnings[0]
-
+class TestCommittedBatchSurvivesADropFailure:
     @pytest.mark.asyncio
-    async def test_committed_batch_acks_success_despite_double_drop_failure(
-        self, tmp_path
-    ):
-        # The single most important rule: the mode statement committed, so
-        # the ack is SUCCESS — a drop failure must never turn a committed
-        # batch into a reported failure (the retry would double-append a
-        # truncate_insert batch). File-backed database: the double
-        # failure invalidates the connection, which would erase an
-        # in-memory one.
-        from sqlalchemy import event
-
-        engine = create_engine(
-            f"sqlite:///{tmp_path}/t.db",
-            connect_args={"check_same_thread": False, "isolation_level": None},
-            poolclass=StaticPool,
-        )
-
-        @event.listens_for(engine, "begin")
-        def _do_begin(conn):
-            conn.exec_driver_sql("BEGIN")
-
+    async def test_committed_batch_acks_success_despite_double_drop_failure(self):
+        # The single most important rule around the stage drop: the mode
+        # statement committed, so the ack is SUCCESS — a drop failure must
+        # never turn a committed batch into a reported failure (the retry
+        # would double-append a truncate_insert batch). The drop rules
+        # themselves are the cycle's, certified in test_stage_cycle.py.
+        engine = _sqlite_sync_engine()
         try:
             handler = _connected_handler(engine, transactional=False)
-            backend = handler._backend
             with patch.object(
-                backend, "_try_drop", side_effect=lambda c, p: RuntimeError("boom")
+                StageCycle, "_try_drop", side_effect=lambda c, p: RuntimeError("boom")
             ):
                 result = await _write(handler)
             assert result.status == AckStatus.ACK_STATUS_SUCCESS
@@ -646,7 +537,7 @@ class TestBulkLandFallback:
             # declines, so landing falls back to executemany with an
             # INFO log — a visible speed downgrade, never a silent one.
             handler._backend._bulk_declared = True
-            with caplog.at_level(logging.INFO, logger="cdk.sql.backend"):
+            with caplog.at_level(logging.INFO, logger="cdk.sql.stage_cycle"):
                 # bulk_land needs the runtime it connected with.
                 handler._backend._runtime = MagicMock()
                 result = await _write(handler)

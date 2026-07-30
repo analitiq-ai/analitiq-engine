@@ -200,11 +200,24 @@ class TestAdbcBoundary:
 
 
 class _RecordingCursor:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def executemany(self, sql, rows):
+        self._conn.executemany_calls.append((sql, list(rows)))
+
+    def close(self):
+        """Nothing to release; the recorder outlives the cursor."""
+
+
+class _RecordingConn:
+    """A PEP-249 connection whose cursors record what they were bound."""
+
     def __init__(self):
         self.executemany_calls: list[tuple[str, list]] = []
 
-    def executemany(self, sql, rows):
-        self.executemany_calls.append((sql, list(rows)))
+    def cursor(self):
+        return _RecordingCursor(self)
 
 
 def _plan(columns, rows_per_statement):
@@ -231,18 +244,18 @@ class TestAdbcChunking:
 
     def test_chunked_landing_never_exceeds_the_cap(self):
         backend = AdbcBackend(SqlDialect())
-        cursor = _RecordingCursor()
-        backend._executemany_land(cursor, _plan(["id", "v"], 4), self._batch(10))
-        sizes = [len(rows) for _, rows in cursor.executemany_calls]
+        conn = _RecordingConn()
+        backend._executemany_land(conn, _plan(["id", "v"], 4), self._batch(10))
+        sizes = [len(rows) for _, rows in conn.executemany_calls]
         assert sizes == [4, 4, 2]
-        landed = [row for _, rows in cursor.executemany_calls for row in rows]
+        landed = [row for _, rows in conn.executemany_calls for row in rows]
         assert landed == [(i, f"v{i}") for i in range(10)]
 
     def test_undeclared_cap_lands_in_one_statement(self):
         backend = AdbcBackend(SqlDialect())
-        cursor = _RecordingCursor()
-        backend._executemany_land(cursor, _plan(["id", "v"], None), self._batch(10))
-        assert len(cursor.executemany_calls) == 1
+        conn = _RecordingConn()
+        backend._executemany_land(conn, _plan(["id", "v"], None), self._batch(10))
+        assert len(conn.executemany_calls) == 1
 
 
 class TestSqlAlchemyChunking:
@@ -252,7 +265,7 @@ class TestSqlAlchemyChunking:
         )
 
     def _backend_with_recording_conn(self):
-        from cdk.sql.backend import SqlAlchemyBackend
+        from cdk.sql.sqlalchemy_backend import SqlAlchemyBackend
 
         backend = SqlAlchemyBackend(SqlDialect())
         stage_table = MagicMock()
