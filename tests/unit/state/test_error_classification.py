@@ -434,19 +434,13 @@ def test_config_real_exceptions_classify_config_invalid():
         ConfigValidationError,
         ConnectorNotFoundError,
     )
-    from src.engine.exceptions import (
-        ConfigurationError,
-        PipelineValidationError,
-        StreamConfigurationError,
-    )
+    from src.engine.exceptions import ConfigurationError
 
     exceptions = [
         ConfigValidationError("invalid", field="streams"),
         ConfigNotFoundError("/x/pipeline.json"),
         ConnectorNotFoundError("postgres"),
         ConfigurationError("bad config"),
-        StreamConfigurationError("missing source", stream_id="s1"),
-        PipelineValidationError("validation failed"),
         TransportSpecError("malformed transport spec"),
         SecretNotFoundError("conn-1"),
         PlaceholderExpansionError("password", "conn-1"),
@@ -550,7 +544,6 @@ def test_source_unreachable_by_builtin_type():
             "No forward type-map rule for 'geography' in connector 'postgres'",
         ),
         ("TransformationError", "cannot convert value to Int64"),
-        ("SchemaError", "source schema could not be read"),
         ("SchemaConfigurationError", "unsupported proto write mode"),
         # Declared-capability refusals (issue #390): authoring defects in or
         # against the connector's sql_capabilities block.
@@ -582,7 +575,6 @@ def test_type_and_mapping_defects_are_config_invalid(name, message):
             "StreamProcessingError",
             "Failed to connect to gRPC destination for stream orders",
         ),
-        ("WriteError", "destination write failed"),
         # Load-stage wrappers from the engine around a destination ack failure: the
         # destination summary alone (e.g. "permission denied") would look like auth,
         # so the wrapper text must route it to the destination bucket.
@@ -855,13 +847,14 @@ def test_exception_group_detail_enumerates_leaves_by_class_name():
         [
             _make("ReadError", message="Stream s1: connection refused at upstream"),
             _make(
-                "WriteError", message="Stream s2: Batch 4 fatal failure: duplicate key"
+                "StreamProcessingError",
+                message="Stream s2: Batch 4 fatal failure: duplicate key",
             ),
         ],
     )
     _, _, detail = classify_for_metrics(group)
     assert "ReadError" in detail
-    assert "WriteError" in detail
+    assert "StreamProcessingError" in detail
     # The raw messages never enter the detail.
     assert "connection refused at upstream" not in detail
     assert "duplicate key" not in detail
@@ -1049,6 +1042,7 @@ def test_metrics_record_failure_carries_safe_fields():
         pipeline_id="p1",
         start_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
         end_time=datetime(2026, 1, 1, 0, 0, 5, tzinfo=timezone.utc),
+        records_skipped=0,
         status="failed",
         error_code=code,
         error_message=message,
@@ -1077,6 +1071,7 @@ def test_metrics_record_success_leaves_error_fields_none():
         start_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
         end_time=datetime(2026, 1, 1, 0, 0, 5, tzinfo=timezone.utc),
         records_processed=10,
+        records_skipped=0,
         status="success",
     )
     assert rec.status == "success"
