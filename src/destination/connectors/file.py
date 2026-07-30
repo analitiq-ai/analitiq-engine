@@ -118,7 +118,13 @@ class FileDestinationHandler(BaseDestinationHandler):
         """File destinations support bulk writes."""
         return True
 
-    def retry_semantics(self, stream_id: str) -> RetryVerdict:
+    # skipcq PYL-R0201: this is the CDK's per-stream verdict hook, not a
+    # utility. Its siblings answer from instance state (the API handler
+    # returns the verdict it computed at configure time); a file sink's
+    # verdict happens to follow from how it writes, so this override reads
+    # no attribute. Making one implementation of an overridable hook a
+    # @staticmethod would hide that it is an override.
+    def retry_semantics(self, stream_id: str) -> RetryVerdict:  # skipcq: PYL-R0201
         """Report at-least-once: a restart may duplicate boundary rows (#306).
 
         Batch files are content-addressed: the filename carries a hash of
@@ -212,7 +218,15 @@ class FileDestinationHandler(BaseDestinationHandler):
         self._connected = False
         logger.info("FileDestinationHandler disconnected")
 
-    async def configure_schema(self, schema_spec: SchemaSpec) -> bool:
+    # skipcq PYL-R0201: configure_schema is abstract on
+    # BaseDestinationHandler and a member of the Writable protocol, so the
+    # contract owns its shape. A file destination pre-creates nothing, which
+    # is why this implementation reads no attribute -- a reason to keep the
+    # method empty of work, not a reason to restate the contract's own
+    # signature as a @staticmethod.
+    async def configure_schema(  # skipcq: PYL-R0201
+        self, schema_spec: SchemaSpec
+    ) -> bool:
         """Accept the schema for a stream.
 
         File destinations don't pre-create anything; the formatter shapes
