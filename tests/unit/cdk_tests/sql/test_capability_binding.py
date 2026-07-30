@@ -159,7 +159,10 @@ class TestEveryConsumerPathCarriesTheDeclaration:
         )
         assert await connector.list_tables(runtime, "ds", catalog="proj") == ["orders"]
         sql, params = runtime.connections[-1].executed[-1]
+        # The declared catalog reaches both halves of the statement: the
+        # information_schema reference it composes and the predicate it binds.
         assert '"proj".information_schema.tables' in sql
+        assert params == ["ds", "proj"]
         assert connector.dialect.capabilities is not None
 
     @pytest.mark.asyncio
