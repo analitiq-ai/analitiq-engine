@@ -1,0 +1,67 @@
+"""A registered destination kind with no storage backend says so (issue #424).
+
+``s3`` is a planned destination kind: the worker registry routes it to
+``FileDestinationHandler`` exactly like ``file``, but no S3 storage backend
+exists yet. The operator must learn that from one message naming the kind and
+the missing backend -- not from a lookup failure deep in a storage registry
+they have no reason to know exists.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock
+
+import pytest
+
+from cdk.connection_runtime import ConnectionRuntime
+from src.destination.connectors.file import FileDestinationHandler
+from src.destination.storage import StorageBackendNotBuiltError
+from src.destination.storage.local import LocalFileStorage
+from src.worker import build_worker_registries
+
+
+def _runtime(kind: str, config: dict[str, object]) -> ConnectionRuntime:
+    return ConnectionRuntime(
+        raw_config=config,
+        connection_id=f"conn-{kind}",
+        connector_id=kind,
+        connector_type=kind,
+        driver=None,
+        resolver=AsyncMock(resolve=AsyncMock(return_value={})),
+    )
+
+
+class TestPlannedKindWithoutBackend:
+    @pytest.mark.asyncio
+    async def test_s3_destination_refuses_to_connect(self):
+        """The kind the worker registry hands the file handler is refused at
+        connect, through the same registry a pipeline resolves it with."""
+        _, registry = build_worker_registries()
+        handler = registry.create("s3", "my-bucket")
+        assert isinstance(handler, FileDestinationHandler)
+
+        with pytest.raises(StorageBackendNotBuiltError) as excinfo:
+            await handler.connect(_runtime("s3", {"prefix": "data/"}))
+
+        message = str(excinfo.value)
+        assert "'s3'" in message
+        assert "s3 storage backend" in message
+        assert "does not exist yet" in message
+        assert "planned, not" in message
+        assert "misconfigured" in message
+        # The one built backend is named, so the message is actionable.
+        assert "file (LocalFileStorage)" in message
+
+    @pytest.mark.asyncio
+    async def test_file_destination_still_connects_through_local_storage(self, tmp_path):
+        """The refusal is scoped to the unbuilt kind: ``file`` still resolves
+        the local filesystem backend and connects."""
+        _, registry = build_worker_registries()
+        handler = registry.create("file", "csvbox")
+
+        await handler.connect(_runtime("file", {"path": str(tmp_path)}))
+        try:
+            assert isinstance(handler._storage, LocalFileStorage)
+            assert await handler.health_check() is True
+        finally:
+            await handler.disconnect()

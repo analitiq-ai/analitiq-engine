@@ -8,6 +8,7 @@ import pytest
 from cdk.connection_runtime import ConnectionRuntime
 from src.destination.connectors.file import FileDestinationHandler
 from src.destination.connectors.stream import StreamDestinationHandler
+from src.destination.storage import StorageBackendNotBuiltError
 
 # A fixed, timezone-aware emit instant for write_batch/send_batch calls; the
 # engine stamps this per batch (issue #353). Value is arbitrary for sinks
@@ -106,29 +107,25 @@ class TestFileHandlerSecretRetention:
         assert runtime._resolved_config is None
 
     @pytest.mark.asyncio
-    async def test_s3_kind_selects_s3_backend(self):
-        """The storage backend follows the runtime's connector kind, not a
-        config key — an s3 connection's JSON carries no "connector_type"."""
+    async def test_unbuilt_kind_refused_before_secrets_are_resolved(self):
+        """The backend is knowable from the kind alone, so an unbuilt kind
+        fails before the resolver is ever asked for the connection's secrets."""
+        resolver = AsyncMock(resolve=AsyncMock(return_value={"MY_SECRET": "top"}))
         runtime = ConnectionRuntime(
-            raw_config={"bucket": "my-bucket", "prefix": "data/"},
+            raw_config={"prefix": "data/", "secret_field": "${MY_SECRET}"},
             connection_id="conn-s3-test",
             connector_id="s3",
             connector_type="s3",
             driver=None,
-            resolver=AsyncMock(resolve=AsyncMock(return_value={})),
+            resolver=resolver,
         )
         handler = FileDestinationHandler()
 
-        mock_storage = AsyncMock()
-
-        with patch(
-            "src.destination.connectors.file.get_storage_backend",
-            return_value=mock_storage,
-        ) as get_backend:
+        with pytest.raises(StorageBackendNotBuiltError):
             await handler.connect(runtime)
 
-        get_backend.assert_called_once_with("s3")
-        assert handler.connector_type == "s3"
+        resolver.resolve.assert_not_awaited()
+        assert runtime._resolved_config is None
 
     @pytest.mark.asyncio
     async def test_write_batch_uses_reduced_config(self):

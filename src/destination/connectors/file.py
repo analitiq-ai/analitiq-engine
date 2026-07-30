@@ -73,18 +73,18 @@ class FileDestinationHandler(BaseDestinationHandler):
     Destination handler that writes records to files.
 
     Supports:
-    - Multiple storage backends (local, s3)
     - Multiple output formats (jsonl, csv, parquet)
     - Content-addressed filenames (a replayed batch overwrites the same
       file with the same bytes)
     - Configurable file paths with partitioning
 
-    The storage backend follows the runtime's connector kind ("file" or
-    "s3"). Configuration:
+    The storage backend follows the runtime's connector kind. The registry
+    routes both "file" and the planned "s3" kind here; only "file" has a
+    backend, so an "s3" connection is refused at connect() with
+    ``StorageBackendNotBuiltError``. Configuration:
     - file_format: Output format (jsonl, csv, parquet). Default: jsonl
     - path: Base path for files (required for local storage)
-    - bucket: S3 bucket name (required for S3 storage)
-    - prefix: S3 key prefix (optional)
+    - prefix: Key prefix (optional)
     - path_template: Template for file paths with placeholders
     """
 
@@ -147,25 +147,30 @@ class FileDestinationHandler(BaseDestinationHandler):
 
         Args:
             runtime: ConnectionRuntime with enriched config
+
+        Raises:
+            StorageBackendNotBuiltError: If the runtime's connector kind has
+                no storage backend yet (the planned "s3" kind).
         """
-        runtime.acquire()
-        await runtime.materialize()
-        connection_config = runtime.resolved_config
         # The kind lives on the runtime (resolved from the connector
         # definition), not in the connection config — an s3 connection's
         # JSON carries no "connector_type" key.
         self._connector_type = runtime.connector_type
+
+        # The kind alone decides the backend, so resolve it before the
+        # runtime is acquired and its secrets resolved: a kind whose backend
+        # is not built yet must fail here, naming itself, rather than after
+        # the operator's credentials were fetched and a connection opened.
+        storage = get_storage_backend(self._connector_type)
+        self._storage = storage
+
+        runtime.acquire()
+        await runtime.materialize()
+        connection_config = runtime.resolved_config
         self._runtime = runtime
 
         try:
-            # Determine storage backend type
-            storage_type = (
-                "local" if self._connector_type == "file" else self._connector_type
-            )
-
-            # Create storage backend
-            self._storage = get_storage_backend(storage_type)
-            await self._storage.connect(connection_config)
+            await storage.connect(connection_config)
 
             # Create formatter
             file_format = connection_config.get("file_format", "jsonl")
@@ -191,7 +196,7 @@ class FileDestinationHandler(BaseDestinationHandler):
         self._connected = True
         logger.info(
             "FileDestinationHandler connected: storage=%s, format=%s",
-            storage_type,
+            storage.storage_type,
             file_format,
         )
 
