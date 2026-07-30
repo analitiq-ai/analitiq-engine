@@ -274,9 +274,10 @@ class TestEveryConsumerPathCarriesTheDeclaration:
         )
 
         failing = AsyncMock(side_effect=OSError("host unreachable"))
-        with patch("cdk.sql.generic.materialize_runtime", new=failing):
-            with pytest.raises(ConnectionError):
-                await connector.connect(_connectable_runtime())
+        with patch("cdk.sql.generic.materialize_runtime", new=failing), pytest.raises(
+            ConnectionError
+        ):
+            await connector.connect(_connectable_runtime())
         assert (await _write_a_batch(connector)).failure_summary == (
             "Handler not connected"
         )
