@@ -20,20 +20,23 @@ against what :mod:`cdk.transport_factory` can actually build from it:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Container, Mapping
 from typing import TYPE_CHECKING, Any
 
-from cdk.exceptions import TransportSpecError
 from cdk.transport_factory import (
     HTTP_TRANSPORT_TYPE,
     registered_transport_kinds,
     resolve_http_spec,
 )
 
+from .api_endpoints import read_operations
 from .declared_connection import (
     CREDENTIAL_PREFIXES,
+    RESOLVE_FAILURES,
     AskedPath,
     connect_probe,
+    declared_connection,
+    guaranteed_connection,
     optional_paths,
     unsatisfied,
 )
@@ -74,27 +77,66 @@ def selected_transport(
     return str(ref), block
 
 
+def check_read_transport_selection(target: ConformanceTarget) -> list[Violation]:
+    """Certify that no read asks for a transport the API path will not open.
+
+    The published contract lets a request name the transport it dispatches
+    through (``operations.read.request.transport_ref``, defaulting to
+    ``default_transport``). The CDK's generic API path does not implement
+    that selection: it materializes one connection at connect time and
+    every read goes out on it. A definition naming any other transport is
+    therefore contract-valid and unexecutable — and unexecutable
+    *silently*, since the request still succeeds against the wrong origin
+    with the wrong headers.
+
+    Reported here rather than tolerated: a check that stayed quiet would
+    certify a connector whose every read reaches the wrong host.
+    """
+    default_ref = target.definition.get("default_transport")
+    violations: list[Violation] = []
+    for label, read in read_operations(target):
+        request = read.get("request")
+        ref = request.get("transport_ref") if isinstance(request, Mapping) else None
+        if ref is None or ref == default_ref:
+            continue
+        violations.append(
+            Violation(
+                CHECK,
+                f"endpoint {label!r}: the read requests transport_ref {ref!r}, "
+                f"but the CDK's API path opens one connection at connect time "
+                f"and dispatches every read through default_transport "
+                f"({default_ref!r}). This read would go out on the wrong "
+                f"origin with the wrong headers and still succeed. Move the "
+                f"endpoint onto the default transport, or split the connector.",
+            )
+        )
+    return violations
+
+
 def probe_transports(
-    target: ConformanceTarget, *, include_optional: bool = True
+    target: ConformanceTarget,
+    raw_config: Mapping[str, Any],
+    refs: Container[str] | None = None,
 ) -> tuple[list[Violation], list[AskedPath]]:
-    """Resolve every http transport, returning its failures and asked paths.
+    """Resolve http transports against *raw_config*, with failures and paths.
 
     One walk serving both checks here: the transport check reports the
     failures, the auth check reads the paths to decide whether a
-    credential reached the request it opens.
+    credential reached the request it opens. Both go through this function
+    so they cannot resolve the same block against different connections
+    and reach contradictory verdicts.
 
-    ``include_optional=False`` resolves against the narrowest connection
-    the contract admits — the entries every connection carries — which is
-    what an http field that resolves strictly has to survive.
+    *refs* narrows the walk to named transports; ``None`` walks every
+    declared http block.
     """
-    resolver, asked = connect_probe(
-        target.definition, include_optional=include_optional
-    )
+    resolver, asked = connect_probe(target.definition, raw_config)
     violations: list[Violation] = []
     for ref, block in _http_transports(target).items():
+        if refs is not None and ref not in refs:
+            continue
         try:
             resolve_http_spec(block, resolver=resolver)
-        except (TransportSpecError, KeyError, TypeError, ValueError) as err:
+        except RESOLVE_FAILURES as err:
             violations.append(
                 Violation(
                     CHECK,
@@ -197,8 +239,11 @@ def check_api_transport(target: ConformanceTarget) -> list[Violation]:
     # Against the narrowest connection the contract admits, so an http field
     # reading an entry a user may leave blank is reported rather than
     # papered over by a stand-in the contract never promised.
-    transport_violations, _asked = probe_transports(target, include_optional=False)
+    transport_violations, _asked = probe_transports(
+        target, guaranteed_connection(target.definition)
+    )
     violations.extend(transport_violations)
+    violations.extend(check_read_transport_selection(target))
     return violations
 
 
@@ -242,14 +287,16 @@ def check_api_auth(target: ConformanceTarget) -> list[Violation]:
     # transport nothing selects — an auth-operation block the control plane
     # drives, a discovery origin — authenticates none of the requests a read
     # sends, so counting it would pass a connector that reads unauthenticated.
-    ref, block = selected
-    resolver, asked = connect_probe(target.definition)
-    try:
-        resolve_http_spec(block, resolver=resolver)
-    except (TransportSpecError, KeyError, TypeError, ValueError):
-        # The failure itself is check_api_transport's to report; what it
-        # recorded on the way there is still the credential evidence.
-        pass
+    #
+    # Against the WIDEST connection the contract admits: an optional
+    # credential is still a credential the connector reads, and whether a
+    # strict field may read one is check_api_transport's question, reported
+    # there. Any resolve failure here is likewise reported there; this walk
+    # keeps only what the resolver was asked for on the way.
+    ref, _block = selected
+    _violations, asked = probe_transports(
+        target, declared_connection(target.definition), refs={ref}
+    )
     credentials = sorted({entry.path for entry in asked if entry.is_credential})
 
     if auth_type == "none" and credentials:

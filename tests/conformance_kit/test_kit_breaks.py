@@ -1116,6 +1116,38 @@ class TestApiTransportBreaks:
         report = _messages(check_api_transport(doctored))
         assert "response.body.next" in report
 
+    def test_a_read_naming_a_non_default_transport_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """The contract allows the selection the CDK's API path does not make.
+
+        `operations.read.request.transport_ref` is contract-valid and
+        unimplemented: the API path opens one connection at connect time.
+        A read naming another transport still succeeds — against the wrong
+        origin — so silence here would certify a connector whose every read
+        reaches the wrong host. Naming the default explicitly is fine.
+        """
+        transports = copy.deepcopy(api_target.definition["transports"])
+        transports["eu"] = {
+            "transport_type": "http",
+            "base_url": "https://eu.example.invalid",
+        }
+        request = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["request"]
+        )
+        request["transport_ref"] = "eu"
+        doctored = _api_target(
+            api_target, definition={"transports": transports}, read={"request": request}
+        )
+        report = _messages(check_api_transport(doctored))
+        assert "transport_ref 'eu'" in report and "default_transport" in report
+
+        request["transport_ref"] = api_target.definition["default_transport"]
+        naming_the_default = _api_target(
+            api_target, definition={"transports": transports}, read={"request": request}
+        )
+        assert check_api_transport(naming_the_default) == []
+
     def test_an_optional_input_behind_a_strict_transport_field_fails(
         self, api_target: ConformanceTarget
     ) -> None:

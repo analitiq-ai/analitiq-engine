@@ -38,16 +38,17 @@ every read after one page.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from cdk.api_paging import page_response_scope
 from cdk.connection_runtime import ConnectionRuntime, transport_resolution_context
 from cdk.derived_functions import DEFAULT_FUNCTIONS
-from cdk.exceptions import UnresolvedValueError
+from cdk.exceptions import TransportSpecError, UnresolvedValueError
 from cdk.resolver import ResolutionContext, Resolver
-from cdk.secrets.protocol import SecretsResolver
+
+from .fakes import NoSecretsResolver
 
 #: The value every stand-in scope entry carries. A string so it survives
 #: template substitution (which refuses non-scalars) and DSN encoding.
@@ -55,6 +56,12 @@ STAND_IN = "conformance-stand-in"
 
 #: The connection id the stand-in connection is built under.
 STAND_IN_CONNECTION_ID = "conformance-declared-connection"
+
+#: What a resolve pass raises for an authoring defect, as opposed to for
+#: missing data — which the per-request policy absorbs and the probes
+#: record instead. One statement of it, so the checks that turn a resolve
+#: failure into a violation cannot disagree about which failures those are.
+RESOLVE_FAILURES = (TransportSpecError, KeyError, TypeError, ValueError)
 
 #: Storage targets a ``connection_contract`` entry may name, mapped to the
 #: connection block the CDK reads that storage from. The vocabulary is the
@@ -177,25 +184,6 @@ class _RecordingContext(ResolutionContext):
             super().with_response(response), self._asked, self._opaque
         )
 
-    def with_runtime(self, runtime: Mapping[str, Any]) -> _RecordingContext:
-        """Return a context with a replaced runtime scope, still recording."""
-        return _RecordingContext(
-            super().with_runtime(runtime), self._asked, self._opaque
-        )
-
-
-class _StandInSecretsResolver(SecretsResolver):
-    """Return a stand-in value for every secret the connection declares."""
-
-    async def resolve(
-        self, connection_id: str, secret_refs: Mapping[str, str]
-    ) -> dict[str, str]:
-        """Answer every declared ref with :data:`STAND_IN`."""
-        return {name: STAND_IN for name in secret_refs}
-
-    async def close(self) -> None:
-        """Nothing to release."""
-
 
 def _declared_entries(
     definition: Mapping[str, Any],
@@ -256,27 +244,15 @@ def optional_paths(definition: Mapping[str, Any]) -> set[str]:
     }
 
 
-def declared_connection(
-    definition: Mapping[str, Any], *, include_optional: bool = True
+def _connection(
+    definition: Mapping[str, Any], carries: Callable[[Mapping[str, Any]], bool]
 ) -> dict[str, Any]:
-    """Build the connection a connector's ``connection_contract`` promises.
-
-    Every declared input and post-auth output becomes a stand-in value in
-    the connection block its ``storage`` names — so a value expression
-    resolves exactly when the contract promises what it addresses, and
-    fails to resolve exactly when it does not.
-
-    ``include_optional=False`` builds the *narrowest* connection the
-    contract still admits: only the entries every connection carries. A
-    field the CDK resolves strictly — an http ``base_url``, a header —
-    must resolve against that one, or it fails to connect for the users
-    who left the optional value blank.
-    """
+    """Build a stand-in connection from the entries *carries* admits."""
     blocks: dict[str, dict[str, Any]] = {
         block: {} for block in dict.fromkeys(_STORAGE_BLOCKS.values())
     }
     for block, name, spec in _declared_entries(definition):
-        if include_optional or _guaranteed(spec):
+        if carries(spec):
             blocks[block][name] = STAND_IN
     return {
         "connection_id": STAND_IN_CONNECTION_ID,
@@ -286,21 +262,50 @@ def declared_connection(
         "selections": blocks["selections"],
         "discovered": blocks["discovered"],
         # The declared secret names, as the refs a connection would carry.
-        # _StandInSecretsResolver answers each with a stand-in value.
+        # connect_probe hands the resolved values in directly, so nothing
+        # here resolves a ref.
         "secret_refs": {name: STAND_IN for name in blocks["secrets"]},
     }
 
 
+def declared_connection(definition: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the widest connection a connector's contract admits.
+
+    Every declared input and post-auth output becomes a stand-in value in
+    the connection block its ``storage`` names — so a value expression
+    resolves exactly when the contract declares what it addresses, and
+    fails to resolve exactly when it does not.
+    """
+    return _connection(definition, lambda _spec: True)
+
+
+def guaranteed_connection(definition: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the narrowest connection a connector's contract still admits.
+
+    Only the entries *every* connection carries: required ones, and
+    optional ones the contract gives a default. A field the CDK resolves
+    strictly — an http ``base_url``, a header — must resolve against this
+    one, or it fails to connect for the users who left an optional value
+    blank.
+    """
+    return _connection(definition, _guaranteed)
+
+
 def connect_probe(
-    definition: Mapping[str, Any], *, include_optional: bool = True
+    definition: Mapping[str, Any], raw_config: Mapping[str, Any]
 ) -> tuple[Resolver, list[AskedPath]]:
-    """Return a connect-phase resolver over the declared connection, and its record.
+    """Return a connect-phase resolver over *raw_config*, and its record.
+
+    The caller names the connection it wants certified —
+    :func:`declared_connection` for the widest the contract admits,
+    :func:`guaranteed_connection` for the narrowest — because the two
+    answer different questions and a strict http field has to survive the
+    narrow one.
 
     The scopes come from the CDK's own connect-phase assembly, so what the
     kit certifies and what the engine resolves a transport against cannot
     be different scope sets.
     """
-    raw_config = declared_connection(definition, include_optional=include_optional)
     asked: list[AskedPath] = []
     scopes = transport_resolution_context(
         raw_config=raw_config,
@@ -323,14 +328,28 @@ def request_probe(
     Built through :meth:`ConnectionRuntime.request_resolver` — the same
     call the API connector makes once per read — so the narrower
     request-time scope set is the CDK's statement of it, not a copy.
+
+    Against the *widest* connection the contract admits, unlike the
+    connect-phase probe: an unresolved request-time expression omits its
+    param or field rather than failing the connection, so an optional
+    input left blank is the contract working, not a defect. What this
+    probe reports is a path no connection could ever carry.
+
+    The connection carries no ``secret_refs``: request-time scopes hold no
+    secrets, and this runtime never materializes a transport — which is
+    what :class:`NoSecretsResolver` refuses to let drift unnoticed.
     """
-    raw_config = declared_connection(definition)
+    raw_config = {
+        key: value
+        for key, value in declared_connection(definition).items()
+        if key != "secret_refs"
+    }
     runtime = ConnectionRuntime(
         raw_config=raw_config,
         connection_id=STAND_IN_CONNECTION_ID,
         connector_id=str(definition.get("connector_id") or "conformance-target"),
         connector_type=str(definition.get("kind") or "api"),
-        resolver=_StandInSecretsResolver(),
+        resolver=NoSecretsResolver(),
         connector_definition=dict(definition),
     )
     asked: list[AskedPath] = []

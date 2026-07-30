@@ -24,7 +24,7 @@ promises, and reports every path that phase does not carry.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
@@ -35,12 +35,17 @@ from cdk.api_response import (
     records_items_schema,
     resolve_record_arrow_types,
 )
-from cdk.exceptions import TransportSpecError
 from cdk.request_binding import bind_param_refs, resolve_param_defaults
 from cdk.resolver import Resolver
 from cdk.type_map import TypeMapper
 
-from .declared_connection import STAND_IN, page_probe, request_probe, unsatisfied
+from .declared_connection import (
+    RESOLVE_FAILURES,
+    STAND_IN,
+    page_probe,
+    request_probe,
+    unsatisfied,
+)
 from .violations import Violation
 
 if TYPE_CHECKING:
@@ -49,10 +54,6 @@ if TYPE_CHECKING:
 REQUEST_CHECK = "api-request-expressions"
 PAGINATION_CHECK = "api-pagination"
 RECORDS_CHECK = "api-response-records"
-
-#: Failures a resolve pass raises for an authoring defect. Missing data is
-#: absorbed by the per-request policy and recorded by the probe instead.
-RESOLVE_FAILURES = (TransportSpecError, KeyError, TypeError, ValueError)
 
 #: Authored paging values the contract types as ``Any``, so a value that is
 #: not a positive integer reaches the engine and fails the read there — and
@@ -91,6 +92,17 @@ def read_operations(target: ConformanceTarget) -> list[tuple[str, Mapping[str, A
             label = document.get("endpoint_id")
             reads.append((str(label) if label else stem, read))
     return reads
+
+
+def _mapper_accessor(mapper: TypeMapper) -> Callable[[], TypeMapper]:
+    """Wrap an already-loaded mapper as the accessor the walk calls.
+
+    :func:`~cdk.api_response.resolve_record_arrow_types` takes a callable
+    because the engine resolves its mapper lazily — an endpoint that
+    annotates every field needs none. The kit's mapper is loaded with the
+    target, so there is nothing to defer.
+    """
+    return lambda: mapper
 
 
 def _dig(block: Mapping[str, Any], path: tuple[str, ...]) -> Any:
@@ -314,11 +326,6 @@ def check_api_response_records(target: ConformanceTarget) -> list[Violation]:
     # fails test_connector_ships_a_read_type_map; saying it again per
     # endpoint here would only bury that one.
     mapper = target.type_mapper
-
-    def get_mapper() -> TypeMapper:
-        assert mapper is not None  # nosec B101 - guarded at each call site
-        return mapper
-
     for label, read in read_operations(target):
         response = read.get("response")
         if not isinstance(response, Mapping):
@@ -349,7 +356,9 @@ def check_api_response_records(target: ConformanceTarget) -> list[Violation]:
             # On the walk's own copy: the engine annotates the schema it is
             # about to build a batch from, and a check must not leave the
             # target's documents mutated for whatever runs next.
-            resolve_record_arrow_types(deepcopy(record_schema), get_mapper)
+            resolve_record_arrow_types(
+                deepcopy(record_schema), _mapper_accessor(mapper)
+            )
         except RecordTypeError as err:
             violations.append(
                 Violation(

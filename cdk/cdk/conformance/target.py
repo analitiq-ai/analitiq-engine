@@ -127,27 +127,33 @@ class ConformanceTarget:
         return dialect
 
 
-def _load_definition(definition_dir: Path) -> dict[str, Any]:
-    """Read and parse ``connector.json`` from *definition_dir*."""
-    path = definition_dir / CONNECTOR_DEFINITION_FILENAME
+def _load_json_object(path: Path, label: str) -> dict[str, Any]:
+    """Read *path* as a JSON object, fail-loud on anything else.
+
+    One reader for every document the target is assembled from, so
+    tightening how the suite reads one cannot leave the others behind.
+    *label* names the document in the error the author sees.
+    """
     try:
         raw = path.read_text()
     except OSError as err:
-        raise ConformanceSetupError(
-            f"cannot read connector definition {path}: {err}"
-        ) from err
+        raise ConformanceSetupError(f"cannot read {label} {path}: {err}") from err
     try:
         document = json.loads(raw)
     except json.JSONDecodeError as err:
-        raise ConformanceSetupError(
-            f"connector definition {path} is not valid JSON: {err}"
-        ) from err
+        raise ConformanceSetupError(f"{label} {path} is not valid JSON: {err}") from err
     if not isinstance(document, dict):
         raise ConformanceSetupError(
-            f"connector definition {path} must be a JSON object, got "
-            f"{type(document).__name__}"
+            f"{label} {path} must be a JSON object, got {type(document).__name__}"
         )
     return document
+
+
+def _load_definition(definition_dir: Path) -> dict[str, Any]:
+    """Read and parse ``connector.json`` from *definition_dir*."""
+    return _load_json_object(
+        definition_dir / CONNECTOR_DEFINITION_FILENAME, "connector definition"
+    )
 
 
 def _load_endpoints(definition_dir: Path) -> dict[str, dict[str, Any]]:
@@ -162,21 +168,10 @@ def _load_endpoints(definition_dir: Path) -> dict[str, dict[str, Any]]:
     endpoint_dir = definition_dir / ENDPOINT_DIRECTORY_NAME
     if not endpoint_dir.is_dir():
         return {}
-    documents: dict[str, dict[str, Any]] = {}
-    for path in sorted(endpoint_dir.glob("*.json")):
-        try:
-            document = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError) as err:
-            raise ConformanceSetupError(
-                f"endpoint document {path} is unreadable: {err}"
-            ) from err
-        if not isinstance(document, dict):
-            raise ConformanceSetupError(
-                f"endpoint document {path} must be a JSON object, got "
-                f"{type(document).__name__}"
-            )
-        documents[path.stem] = document
-    return documents
+    return {
+        path.stem: _load_json_object(path, "endpoint document")
+        for path in sorted(endpoint_dir.glob("*.json"))
+    }
 
 
 def _resolve_definition_dir(root: Path) -> Path:
