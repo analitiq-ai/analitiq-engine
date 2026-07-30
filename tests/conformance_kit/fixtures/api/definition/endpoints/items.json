@@ -1,0 +1,70 @@
+{
+  "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
+  "endpoint_id": "items",
+  "operations": {
+    "read": {
+      "request": {
+        "method": "GET",
+        "path": "/items",
+        "query": {
+          "updated_since": { "from_param": "updated_since" },
+          "per_page": { "from_param": "per_page" },
+          "offset": { "from_param": "offset" }
+        }
+      },
+      "params": {
+        "updated_since": {
+          "in": "query",
+          "type": "string",
+          "required": false,
+          "default": { "literal": "1970-01-01T00:00:00Z" }
+        },
+        "per_page": {
+          "in": "query",
+          "type": "integer",
+          "required": false,
+          "controlled_by": "pagination"
+        },
+        "offset": {
+          "in": "query",
+          "type": "integer",
+          "required": false,
+          "controlled_by": "pagination"
+        }
+      },
+      "pagination": {
+        "type": "offset",
+        "offset": {
+          "param": "offset",
+          "initial": 0,
+          "increment_by": { "ref": "response.record_count" }
+        },
+        "limit": {
+          "param": "per_page",
+          "default": { "ref": "runtime.batch_size" },
+          "max": 200
+        },
+        "stop_when": { "empty": { "ref": "response.body.records" } }
+      },
+      "response": {
+        "schema": {
+          "type": "object",
+          "properties": {
+            "records": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": { "type": "integer" },
+                  "name": { "type": "string" },
+                  "updated_at": { "type": "string", "format": "date-time" }
+                }
+              }
+            }
+          }
+        },
+        "records": { "ref": "response.body.records" }
+      }
+    }
+  }
+}

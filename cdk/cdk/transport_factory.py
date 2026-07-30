@@ -261,12 +261,26 @@ def ca_ssl_context(ca_pem: str, *, check_hostname: bool) -> _ssl.SSLContext:
 
 
 def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
+    """Merge *override* onto *base*, treating value expressions as values.
+
+    Object-valued transport fields (``headers``, ``rate_limit``) merge
+    key by key. A value expression is a *value* even though it is written
+    as an object, so it replaces wholesale: merging one into another
+    would splice two nodes together — a ``{"function": ...}`` header
+    overriding a ``{"template": ...}`` default would come out carrying
+    both markers, which the resolver refuses (and, where the markers
+    happen to agree, would silently carry the wrong operands).
+    """
     out: dict[str, Any] = {k: copy.deepcopy(v) for k, v in base.items()}
     for k, v in override.items():
-        if k in out and isinstance(out[k], dict) and isinstance(v, Mapping):
-            out[k] = _deep_merge(out[k], v)
-        else:
-            out[k] = copy.deepcopy(v)
+        mergeable = (
+            k in out
+            and isinstance(out[k], dict)
+            and isinstance(v, Mapping)
+            and not Resolver.is_expression_node(out[k])
+            and not Resolver.is_expression_node(v)
+        )
+        out[k] = _deep_merge(out[k], v) if mergeable else copy.deepcopy(v)
     return out
 
 
@@ -885,6 +899,12 @@ def _ping_adbc(conn: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
+#: The ``transport_type`` an API connector declares to reach the HTTP
+#: transport. Named once here, used by the registration below and by anything
+#: that has to recognise an http block without matching a literal.
+HTTP_TRANSPORT_TYPE = "http"
+
+
 @dataclass(frozen=True)
 class HttpTransport:
     """Materialized HTTP transport ready for ``aiohttp`` requests."""
@@ -940,7 +960,7 @@ def resolve_http_spec(spec: Mapping[str, Any], *, resolver: Resolver) -> dict[st
             }
 
     return {
-        "transport_type": "http",
+        "transport_type": HTTP_TRANSPORT_TYPE,
         "base_url": base_url,
         "headers": headers,
         "timeout_seconds": float(timeout_seconds),
@@ -1075,7 +1095,9 @@ register_transport_kind(
     "adbc", resolve_spec=resolve_adbc_spec, build_from_spec=build_adbc_from_spec
 )
 register_transport_kind(
-    "http", resolve_spec=resolve_http_spec, build_from_spec=build_http_from_spec
+    HTTP_TRANSPORT_TYPE,
+    resolve_spec=resolve_http_spec,
+    build_from_spec=build_http_from_spec,
 )
 
 

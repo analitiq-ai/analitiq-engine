@@ -16,8 +16,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REFERENCE_DIR = Path(__file__).parent / "fixtures" / "reference"
 REFERENCE_CLASS = "tests.conformance_kit.reference_connector:ReferenceConnector"
-#: A well-formed connector of a kind the suite carries no checks for.
+#: A well-formed API connector: transport, auth and endpoint document that
+#: earn every API check. It ships no class, as api registry repos do not.
 API_REFERENCE_DIR = Path(__file__).parent / "fixtures" / "api"
+#: A well-formed connector of a kind the suite carries no checks for.
+UNASSESSABLE_REFERENCE_DIR = Path(__file__).parent / "fixtures" / "unassessable"
 
 
 def run_kit_suite(

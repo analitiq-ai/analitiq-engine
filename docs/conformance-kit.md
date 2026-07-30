@@ -57,6 +57,42 @@ in a customer pipeline (spec
   connector's own installed requirements, and cursor reads order by the
   cursor field — the precondition for monotonic checkpoints.
 
+The database checks above audit a connector *class*. An API connector has
+none — the CDK's generic API path executes its definition directly, and
+api registry repos ship no `.py` file — so its checks audit the
+definition against what that path can execute from it. Every one applies
+with no connector code installed:
+
+- **The transport materializes.** Every declared `transport_ref` resolves
+  through the CDK's own http resolve phase, against the connection the
+  connector's `connection_contract` promises; `default_transport` names a
+  declared transport, and every `transport_type` is one the CDK
+  registers. A `${secrets.api_key}` header with no input declaring
+  `storage: secrets` under that name is a connection that can never be
+  built.
+- **The declared auth reaches the wire.** The only auth behaviour the CDK
+  executes is resolving credential material into the request the transport
+  opens (`authorize` / `token_exchange` / `refresh` are the control
+  plane's). So `type: "none"` while reading a secret, and any other type
+  while reading none, are both reported: the second means every request
+  goes out unauthenticated.
+- **Request expressions resolve at request time.** Declared param defaults
+  and the request body resolve against the request-phase scopes —
+  `connection.parameters` / `selections` / `discovered` and `runtime`, and
+  deliberately *not* secrets, which never cross to where per-request
+  resolution runs. An unresolvable expression omits its param or field, so
+  the request silently goes out without it.
+- **Paging resolves against a page.** The strategy's `stop_when` operands,
+  `next_cursor`, `next_url` and `increment_by` resolve against the scope a
+  page carries (`response.body`, `response.record_count`, plus the
+  request-time scopes), and an authored page size or step literal is a
+  positive integer. A `stop_when` on `response.headers` never holds; a
+  `next_cursor` that never resolves ends the read after one page.
+- **The records ref addresses the declared schema.** The engine builds the
+  Arrow schema it emits by walking `response.schema` along
+  `response.records.ref`; a ref naming a field the schema does not declare
+  fails the read on its first page.
+
 **Tier 2 — live tests** (`cdk.conformance.tier2`, the connector's
 system as a CI service container): all three write modes end-to-end
 through `connect` / `configure_schema` / `write_batch`, read-back and
@@ -76,20 +112,20 @@ Redshift) run tier 1 only; that is an accepted residual risk.
 
 ## What it cannot assess, it does not pass
 
-Every behavioural check in both tiers applies to `kind: database` — each
-one renders SQL through a dialect or drives the write primitive. Pointed
-at a connector of any other kind, the suite would collect nothing but
-skips and still exit zero, reporting *not assessed* as *passed*. That is
-the one outcome a required status check must never produce, and the fix
-belongs in the kit rather than in a kind branch in every connector
-repo's CI.
+Every behavioural check is scoped to a kind — it renders SQL through a
+dialect, drives the write primitive, or resolves an API definition.
+Pointed at a connector of a kind the suite carries no checks for, it
+would collect nothing but skips and still exit zero, reporting *not
+assessed* as *passed*. That is the one outcome a required status check
+must never produce, and the fix belongs in the kit rather than in a kind
+branch in every connector repo's CI.
 
 So a run that collects no check for its target's kind fails, naming it:
 
 ```
 [kind-applicability] no check in this run applies to connector kind
-'api', so this connector is ungated: the checks collected here apply to
-kind 'database'.
+'stdout', so this connector is ungated: the checks collected here apply
+to kind 'api', 'database'.
 ```
 
 A check module states the kinds it applies to once (`APPLIES_TO_KINDS`),
@@ -181,11 +217,25 @@ a container should also set `ANALITIQ_CONFORMANCE_REQUIRE_LIVE=1`
 live connection fails the job instead of skipping, so a typo'd
 variable can never silently retire the live tier while CI stays green.
 
+An API connector repo runs the tier-1 step and nothing else: there is no
+class to install, no service container to provision, and no live tier.
+
+```yaml
+      - name: Install the pinned CDK with the suite
+        run: pip install "analitiq-cdk[conformance]==<pinned-version>"
+      - name: Tier 1 (contract)
+        run: >-
+          pytest -p cdk.conformance.plugin
+          --pyargs cdk.conformance.tier1 --connector-dir .
+```
+
 The checks are also plain importable functions
 (`cdk.conformance.check_override_surface`,
 `check_declaration_consistency`, `check_type_map_grammar`,
-`check_type_map_round_trip`) for repos
-that want them inside their own harness.
+`check_type_map_round_trip`, `check_api_transport`, `check_api_auth`,
+`check_api_request_expressions`, `check_api_pagination`,
+`check_api_response_records`) for repos that want them inside their own
+harness.
 
 ## How the kit itself is certified
 
@@ -197,3 +247,12 @@ service container job in `ci.yml`; and `test_kit_breaks.py` proves that
 a bent hook signature, a private-internal override, an
 undeclared-capability use, and a declared-but-unimplemented capability
 each fail with a message naming the offending member.
+
+An API reference connector (`tests/conformance_kit/fixtures/api/`) does
+the same for the API checks, with no class installed at all: tier 1 runs
+green against it, and each deliberate break — an undeclared secret in a
+header, `auth: none` beside a credential read, a param default reading
+secrets, a `stop_when` on a scope no page carries, a records ref the
+response schema does not declare — fails with the offending path named.
+A `stdout` fixture holds the other half of the invariant: a kind the
+suite carries no checks for fails on applicability alone.

@@ -8,6 +8,7 @@ asserts the kit fails with a message naming the offending member.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import shutil
 from collections.abc import Sequence
@@ -16,6 +17,11 @@ from typing import Any
 import pytest
 
 from cdk.conformance import (
+    check_api_auth,
+    check_api_pagination,
+    check_api_request_expressions,
+    check_api_response_records,
+    check_api_transport,
     check_declaration_consistency,
     check_override_surface,
     check_type_map_grammar,
@@ -30,13 +36,18 @@ from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.generic import GenericSQLConnector
 from cdk.type_map.loader import build_type_mapper
 
-from .kit_runner import REFERENCE_CLASS, REFERENCE_DIR
+from .kit_runner import API_REFERENCE_DIR, REFERENCE_CLASS, REFERENCE_DIR
 from .reference_connector import ReferenceConnector, ReferencePostgresDialect
 
 
 @pytest.fixture()
 def reference_target() -> ConformanceTarget:
     return load_target(REFERENCE_DIR, class_path=REFERENCE_CLASS)
+
+
+@pytest.fixture()
+def api_target() -> ConformanceTarget:
+    return load_target(API_REFERENCE_DIR)
 
 
 def _with_connector(
@@ -989,3 +1000,142 @@ def _caps_with(target: ConformanceTarget, **facts: Any) -> SqlCapabilities:
     caps = target.declared_capabilities
     assert caps is not None
     return dataclasses.replace(caps, **facts)
+
+
+def _api_target(
+    api_target: ConformanceTarget,
+    *,
+    definition: dict[str, Any] | None = None,
+    read: dict[str, Any] | None = None,
+) -> ConformanceTarget:
+    """The API reference with its definition or its read operation doctored.
+
+    ``read`` is merged into the ``items`` endpoint's read operation, so a
+    break names only what it changes and the rest of the document stays
+    the one the reference earns its checks with.
+    """
+    doctored = copy.deepcopy(api_target.definition)
+    doctored.update(definition or {})
+    endpoints = copy.deepcopy(api_target.endpoints)
+    if read:
+        endpoints["items"]["operations"]["read"].update(read)
+    return dataclasses.replace(api_target, definition=doctored, endpoints=endpoints)
+
+
+class TestApiTransportBreaks:
+    """The connection an API definition promises, against what it reads."""
+
+    def test_a_transport_reading_an_undeclared_secret_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """No input declares it, so no connection ever carries it."""
+        transports = copy.deepcopy(api_target.definition["transports"])
+        transports["api"]["headers"]["Authorization"] = {
+            "template": "Bearer ${secrets.absent_token}"
+        }
+        doctored = _api_target(api_target, definition={"transports": transports})
+        report = _messages(check_api_transport(doctored))
+        assert "secrets.absent_token" in report
+
+    def test_default_transport_naming_nothing_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """A read that names no transport_ref falls back to it."""
+        doctored = _api_target(api_target, definition={"default_transport": "absent"})
+        report = _messages(check_api_transport(doctored))
+        assert "default_transport" in report and "'absent'" in report
+
+    def test_an_unregistered_transport_type_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """The CDK materializes only the transport kinds it registers."""
+        transports = copy.deepcopy(api_target.definition["transports"])
+        transports["api"]["transport_type"] = "graphql"
+        doctored = _api_target(api_target, definition={"transports": transports})
+        report = _messages(check_api_transport(doctored))
+        assert "graphql" in report
+
+    def test_auth_none_while_reading_a_secret_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """A connection with no auth flow never carries credential material."""
+        doctored = _api_target(api_target, definition={"auth": {"type": "none"}})
+        report = _messages(check_api_auth(doctored))
+        assert "secrets.api_token" in report
+
+    def test_a_declared_auth_type_carrying_no_credential_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """Declaring api_key while sending nothing authenticates nothing."""
+        transports = copy.deepcopy(api_target.definition["transports"])
+        del transports["api"]["headers"]["Authorization"]
+        doctored = _api_target(api_target, definition={"transports": transports})
+        report = _messages(check_api_auth(doctored))
+        assert "unauthenticated" in report
+
+
+class TestApiEndpointBreaks:
+    """The three passes of a read, each against the scopes it actually has."""
+
+    def test_a_param_default_reading_a_secret_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """Secrets are not in request scope, so the param is dropped silently."""
+        params = copy.deepcopy(api_target.endpoints["items"]["operations"]["read"])
+        params["params"]["updated_since"]["default"] = {"ref": "secrets.api_token"}
+        doctored = _api_target(api_target, read={"params": params["params"]})
+        report = _messages(check_api_request_expressions(doctored))
+        assert "secrets.api_token" in report
+
+    def test_a_request_body_reading_a_secret_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """The body resolves in the same phase the params do."""
+        doctored = _api_target(
+            api_target,
+            read={
+                "request": {
+                    "method": "POST",
+                    "path": "/items",
+                    "body": {"token": {"ref": "secrets.api_token"}},
+                }
+            },
+        )
+        report = _messages(check_api_request_expressions(doctored))
+        assert "secrets.api_token" in report
+
+    def test_stop_when_on_a_scope_no_page_carries_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """An operand that never resolves makes the predicate never hold."""
+        pagination = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["pagination"]
+        )
+        pagination["stop_when"] = {"empty": {"ref": "response.headers.next"}}
+        doctored = _api_target(api_target, read={"pagination": pagination})
+        report = _messages(check_api_pagination(doctored))
+        assert "response.headers.next" in report
+
+    def test_a_non_positive_page_size_literal_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """The loop parses the authored literal before the first request."""
+        pagination = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["pagination"]
+        )
+        pagination["limit"]["default"] = 0
+        doctored = _api_target(api_target, read={"pagination": pagination})
+        report = _messages(check_api_pagination(doctored))
+        assert "limit.default" in report and "positive" in report
+
+    def test_a_records_ref_the_schema_does_not_declare_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """The read builds its Arrow schema by walking this ref."""
+        response = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["response"]
+        )
+        response["records"] = {"ref": "response.body.data"}
+        doctored = _api_target(api_target, read={"response": response})
+        report = _messages(check_api_response_records(doctored))
+        assert "response.body.data" in report and "records" in report

@@ -20,6 +20,11 @@ from pathlib import Path
 import pytest
 
 from cdk.conformance import (
+    check_api_auth,
+    check_api_pagination,
+    check_api_request_expressions,
+    check_api_response_records,
+    check_api_transport,
     check_declaration_consistency,
     check_kind_applicability,
     check_override_surface,
@@ -31,22 +36,35 @@ from cdk.conformance.target import ConformanceTarget
 from cdk.conformance.tier1 import test_definition as kit_definition
 from cdk.type_map.exceptions import UnmappedTypeError
 
-from .kit_runner import API_REFERENCE_DIR, REFERENCE_CLASS, REFERENCE_DIR, run_kit_suite
+from .kit_runner import (
+    API_REFERENCE_DIR,
+    REFERENCE_CLASS,
+    REFERENCE_DIR,
+    UNASSESSABLE_REFERENCE_DIR,
+    run_kit_suite,
+)
 
 #: The tier-1 suite ships 25 tests for a full write-capable target; a
 #: floor well above zero guards against the suite silently collecting or
 #: skipping everything.
 TIER1_MIN_PASSED = 10
 
+#: The API path collects the five API checks plus the kind-agnostic ones;
+#: a floor above the kind-agnostic count alone keeps an all-skip
+#: regression on the API side from reading as green.
+API_TIER1_MIN_PASSED = 8
+
 
 def _assert_suite_passed(
     completed: subprocess.CompletedProcess[str], *, minimum: int = TIER1_MIN_PASSED
 ) -> None:
-    """Green, above the floor, and with nothing skipped.
+    """Green, above the floor, and skipping nothing that applies.
 
-    Every check applies to the full write-capable reference, so a skip
-    here means a gating regression quietly switched a check off — the
-    exact failure shape the kit exists to prevent in connector repos.
+    Every check written for this connector's kind applies to the full
+    write-capable reference, so the only sanctioned skip is a check
+    scoped to another kind. Any other skip means a gating regression
+    quietly switched a check off — the exact failure shape the kit exists
+    to prevent in connector repos.
     """
     output = completed.stdout + completed.stderr
     assert completed.returncode == 0, f"tier 1 failed against the reference:\n{output}"
@@ -54,9 +72,18 @@ def _assert_suite_passed(
     assert (
         passed and int(passed.group(1)) >= minimum
     ), f"expected the tier-1 suite to actually run, got:\n{output}"
-    assert not re.search(r"\d+ skipped", output), (
-        f"no tier-1 check may skip against the full reference connector; a "
-        f"skip is a gating regression:\n{output}"
+    _assert_only_other_kinds_skipped(output)
+
+
+def _assert_only_other_kinds_skipped(output: str) -> None:
+    """Every skip in *output* is a check scoped to a different kind."""
+    reported = re.search(r"(\d+) skipped", output)
+    skipped = int(reported.group(1)) if reported else 0
+    kind_scoped = len(re.findall(r"this check applies to kind", output))
+    assert skipped == kind_scoped, (
+        f"{skipped - kind_scoped} tier-1 check(s) skipped for a reason other "
+        f"than being scoped to another connector kind; a skip that gates off "
+        f"an applicable check is a regression:\n{output}"
     )
 
 
@@ -124,6 +151,55 @@ class TestThinConnectorPassesVacuously:
         assert check_declaration_consistency(target) == []
 
 
+@pytest.fixture(scope="module")
+def api_target() -> ConformanceTarget:
+    return load_target(API_REFERENCE_DIR)
+
+
+class TestApiReferencePassesTier1:
+    """The API reference earns every API check, with no class installed.
+
+    ``connector_class`` is ``None`` here — api registry repos ship no
+    ``.py`` file and the CDK owns no API base class — so this pins that
+    every API check is assessable from the definition alone.
+    """
+
+    def test_no_connector_class_resolves(self, api_target: ConformanceTarget) -> None:
+        assert api_target.connector_class is None
+
+    def test_transport_materializes(self, api_target: ConformanceTarget) -> None:
+        assert check_api_transport(api_target) == []
+
+    def test_auth_reaches_the_request(self, api_target: ConformanceTarget) -> None:
+        assert check_api_auth(api_target) == []
+
+    def test_request_expressions_resolve(self, api_target: ConformanceTarget) -> None:
+        assert check_api_request_expressions(api_target) == []
+
+    def test_pagination_resolves(self, api_target: ConformanceTarget) -> None:
+        assert check_api_pagination(api_target) == []
+
+    def test_records_ref_addresses_the_schema(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        assert check_api_response_records(api_target) == []
+
+    def test_tier1_runs_green_end_to_end(self) -> None:
+        """The shipped suite, invoked as an api registry repo invokes it."""
+        completed = run_kit_suite(
+            "cdk.conformance.tier1",
+            options=["--connector-dir", str(API_REFERENCE_DIR)],
+        )
+        output = completed.stdout + completed.stderr
+        assert (
+            completed.returncode == 0
+        ), f"tier 1 failed against the API reference:\n{output}"
+        passed = re.search(r"(\d+) passed", output)
+        assert (
+            passed and int(passed.group(1)) >= API_TIER1_MIN_PASSED
+        ), f"expected the API checks to actually run, got:\n{output}"
+
+
 class _FakeItem:
     """A collected check, as the applicability ledger reads one."""
 
@@ -134,19 +210,19 @@ class _FakeItem:
 class TestUnassessableKindIsNotAPass:
     """A kind the suite carries no checks for must fail, never pass.
 
-    Every behavioural tier-1 check gates on the connector being a
-    database, so an API connector collects almost nothing but skips —
-    and pytest exits 0 on an all-skipped run. A required status check
-    that goes green for an artifact it structurally cannot evaluate
-    reports "not assessed" as "passed"; the verdict has to come from the
-    kit, not from a kind branch in every connector repo's CI.
+    Every check gates on the connector's kind, so a target of an
+    uncovered kind collects nothing but skips — and pytest exits 0 on an
+    all-skipped run. A required status check that goes green for an
+    artifact it structurally cannot evaluate reports "not assessed" as
+    "passed"; the verdict has to come from the kit, not from a kind
+    branch in every connector repo's CI.
     """
 
-    def test_api_connector_fails_tier1_naming_the_reason(self) -> None:
-        """The end-to-end shape: a well-formed API connector turns CI red."""
+    def test_uncovered_kind_fails_tier1_naming_the_reason(self) -> None:
+        """The end-to-end shape: a well-formed uncovered kind turns CI red."""
         completed = run_kit_suite(
             "cdk.conformance.tier1",
-            options=["--connector-dir", str(API_REFERENCE_DIR)],
+            options=["--connector-dir", str(UNASSESSABLE_REFERENCE_DIR)],
         )
         output = completed.stdout + completed.stderr
         assert completed.returncode != 0, (
@@ -156,30 +232,30 @@ class TestUnassessableKindIsNotAPass:
         assert "ungated" in output, f"the failure must name the reason:\n{output}"
         assert re.search(r"\b1 failed", output), (
             f"the applicability verdict must be the only failure; anything "
-            f"else means the API fixture is itself broken:\n{output}"
+            f"else means the fixture is itself broken:\n{output}"
         )
 
     def test_the_verdict_names_what_the_run_does_assess(self) -> None:
-        target = load_target(API_REFERENCE_DIR)
+        target = load_target(UNASSESSABLE_REFERENCE_DIR)
         report = "\n".join(
             str(v)
             for v in check_kind_applicability(
                 target, [_FakeItem(("database",)), _FakeItem(None)]
             )
         )
-        assert "'api'" in report
+        assert "'stdout'" in report
         assert "'database'" in report
 
     def test_a_check_for_the_target_kind_clears_the_verdict(self) -> None:
         """The ledger is derived, so new checks for a kind gate it.
 
-        Nothing here names the covered kinds: a module of API checks
-        stating its own scope satisfies this the day it lands, with no
-        list to keep in step.
+        Nothing here names the covered kinds: a module of checks stating
+        its own scope satisfies this the day it lands, with no list to
+        keep in step.
         """
-        target = load_target(API_REFERENCE_DIR)
-        assert check_kind_applicability(target, [_FakeItem(("api",))]) == []
-        assert check_kind_applicability(target, [_FakeItem("api")]) == []
+        target = load_target(UNASSESSABLE_REFERENCE_DIR)
+        assert check_kind_applicability(target, [_FakeItem(("stdout",))]) == []
+        assert check_kind_applicability(target, [_FakeItem("stdout")]) == []
 
     def test_a_run_of_only_kind_agnostic_checks_fails(self) -> None:
         """Scaffolding checks certify no kind, so they satisfy nothing."""

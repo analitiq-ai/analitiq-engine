@@ -60,6 +60,8 @@ from analitiq.contracts.endpoints import (
 )
 from pydantic import ValidationError
 
+from cdk.api_paging import PageValueError, page_response_scope, positive_page_value
+from cdk.api_response import ResponseSchemaError, records_items_schema
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.declarations import DECLARED_READ_DETERMINISTIC, ErrorMap, error_map_for
 from cdk.exceptions import TransportSpecError
@@ -408,47 +410,17 @@ class APIConnector(BaseConnector):
     ) -> dict[str, Any]:
         """Walk operations.read.response.schema via records.ref to per-record items.
 
-        Accepted records.ref forms: ``response.body`` and
-        ``response.body.<field>[.<field>...]``. The response schema itself
-        is free-form JSON Schema in the contract (``dict[str, Any]``), so
-        the walk below stays dict-shaped.
+        The walk itself is :func:`~cdk.api_response.records_items_schema` --
+        the one statement of how a records ref addresses a record schema,
+        shared with the conformance kit so what the kit certifies offline
+        and what this read does cannot diverge. A disagreement between the
+        ref and the schema is a deterministic config defect, so it surfaces
+        as :class:`ReadError` with the endpoint named.
         """
-        response_schema = response.schema_
-        records_ref = response.records.ref
-
-        if records_ref == "response.body":
-            node = response_schema
-        elif records_ref.startswith("response.body."):
-            node = response_schema
-            for field in records_ref[len("response.body.") :].split("."):
-                properties = node.get("properties") if isinstance(node, dict) else None
-                if not isinstance(properties, dict) or field not in properties:
-                    available = (
-                        sorted(properties.keys())
-                        if isinstance(properties, dict)
-                        else []
-                    )
-                    raise ReadError(
-                        f"endpoint {endpoint_id!r}: records.ref "
-                        f"{records_ref!r} references field {field!r} that is "
-                        f"not declared under properties; available: {available}"
-                    )
-                node = properties[field]
-        else:
-            raise ReadError(
-                f"endpoint {endpoint_id!r}: unsupported "
-                f"records.ref {records_ref!r}; expected 'response.body' "
-                f"or 'response.body.<field>[.<field>...]'"
-            )
-
-        items = node.get("items") if node.get("type") == "array" else node
-        if not isinstance(items, dict) or not items.get("properties"):
-            raise ReadError(
-                f"endpoint {endpoint_id!r}: cannot resolve "
-                f"record schema at {records_ref!r} (no 'properties' under "
-                f"the addressed items)"
-            )
-        return items
+        try:
+            return records_items_schema(response.records.ref, response.schema_)
+        except ResponseSchemaError as err:
+            raise ReadError(f"endpoint {endpoint_id!r}: {err}") from err
 
     def _apply_read_type_map(
         self, items_schema: dict[str, Any], endpoint_ref: dict[str, Any]
@@ -729,22 +701,6 @@ class APIConnector(BaseConnector):
             == (target.port or default_ports.get(target_scheme))
         )
 
-    @staticmethod
-    def _page_scope(data: Any, records: list[dict[str, Any]]) -> dict[str, Any]:
-        """Build the ``response`` scope a page's expressions resolve against.
-
-        ``record_count`` is the contract's name for how many records the
-        page carried (RESERVED_RESPONSE_SCOPES); an offset that counts
-        records advances by it. Built here so every strategy's per-page
-        expressions — ``stop_when``, ``next_cursor``, ``next_url``,
-        ``increment_by`` — see the same scope.
-
-        Two of the contract's six reserved response names; ``headers``,
-        ``status``, ``records`` and ``metadata`` are not exposed to page
-        expressions yet, so a ref naming one resolves to nothing.
-        """
-        return {"body": data, "record_count": len(records)}
-
     def _advance_step(
         self, increment_by: Any, resolver: Resolver, *, context: str
     ) -> int:
@@ -765,26 +721,16 @@ class APIConnector(BaseConnector):
     def _positive_step(value: Any, *, context: str) -> int:
         """Parse an authored pagination value into a positive int.
 
-        Used for ``increment_by`` steps and the resolved ``limit.default``
-        page size. A non-positive step cannot advance its loop (the same
-        request would repeat unbounded), a non-positive page size is a
-        meaningless request, and a non-numeric value is an authoring
-        defect; all fail deterministically before any request.
+        The parse itself is :func:`~cdk.api_paging.positive_page_value` — the
+        one statement of the rule, shared with the conformance kit that
+        certifies a declared step offline. Here it is re-raised as a
+        :class:`ReadError` so a malformed declaration classifies as the
+        deterministic read failure it is.
         """
         try:
-            step = int(value)
-        except (TypeError, ValueError) as err:
-            raise ReadError(
-                f"pagination {context} must be an integer, got {value!r}"
-            ) from err
-        if not isinstance(value, str) and step != value:
-            # int() truncates fractional floats/Decimals; a fractional
-            # step or page size is malformed data, not a roundable one.
-            # (Strings either parse as exact ints above or raise.)
-            raise ReadError(f"pagination {context} must be an integer, got {value!r}")
-        if step <= 0:
-            raise ReadError(f"pagination {context} must be positive, got {step}")
-        return step
+            return positive_page_value(value, context=context)
+        except PageValueError as err:
+            raise ReadError(str(err)) from err
 
     def _effective_page_size(
         self, limit: PageSize | None, batch_size: int, resolver: Resolver
@@ -918,7 +864,9 @@ class APIConnector(BaseConnector):
                 )
                 if not records:
                     return
-                page_resolver = resolver.with_response(self._page_scope(data, records))
+                page_resolver = resolver.with_response(
+                    page_response_scope(data, records)
+                )
                 stop = self._stop_requested(pagination.stop_when, page_resolver)
                 short = len(records) < page_size
                 if not (stop or short):
@@ -959,7 +907,9 @@ class APIConnector(BaseConnector):
                 )
                 if not records:
                     return
-                page_resolver = resolver.with_response(self._page_scope(data, records))
+                page_resolver = resolver.with_response(
+                    page_response_scope(data, records)
+                )
                 stop = self._stop_requested(pagination.stop_when, page_resolver)
                 short = len(records) < page_size
                 yield records
@@ -984,7 +934,9 @@ class APIConnector(BaseConnector):
                 )
                 if not records:
                     return
-                page_resolver = resolver.with_response(self._page_scope(data, records))
+                page_resolver = resolver.with_response(
+                    page_response_scope(data, records)
+                )
                 stop = self._stop_requested(pagination.stop_when, page_resolver)
                 cursor_token = None
                 if not stop:
@@ -1024,7 +976,9 @@ class APIConnector(BaseConnector):
                 )
                 if not records:
                     return
-                page_resolver = resolver.with_response(self._page_scope(data, records))
+                page_resolver = resolver.with_response(
+                    page_response_scope(data, records)
+                )
                 stop = self._stop_requested(pagination.stop_when, page_resolver)
                 if not stop:
                     # Validate the continuation before yielding: a page the
@@ -1086,7 +1040,7 @@ class APIConnector(BaseConnector):
         while True:
             if not records:
                 return
-            page_resolver = resolver.with_response(self._page_scope(data, records))
+            page_resolver = resolver.with_response(page_response_scope(data, records))
             stop = self._stop_requested(pagination.stop_when, page_resolver)
             next_target: str | None = None
             if not stop:

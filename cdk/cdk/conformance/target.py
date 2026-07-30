@@ -31,6 +31,7 @@ from cdk.type_map.loader import build_type_mapper, read_raw_type_maps
 from cdk.type_map.mapper import TypeMapper
 
 CONNECTOR_DEFINITION_FILENAME = "connector.json"
+ENDPOINT_DIRECTORY_NAME = "endpoints"
 
 
 class ConformanceSetupError(Exception):
@@ -50,6 +51,12 @@ class ConformanceTarget:
     package's own entry-point class when one is installed, else the
     CDK's generic fallback for ``kind: database`` (the thin path), else
     ``None`` for kinds whose generic classes live outside the CDK.
+
+    ``endpoints`` holds the connector's public endpoint documents keyed by
+    file stem, empty for a connector that ships none. They are read as
+    plain JSON: their structure is validated by ``analitiq-validate``
+    against the published contract, and the checks here assert what the
+    CDK can execute from a structurally valid document.
     """
 
     root: Path
@@ -60,6 +67,7 @@ class ConformanceTarget:
     declared_capabilities: SqlCapabilities | None
     type_mapper: TypeMapper | None
     connector_class: type | None
+    endpoints: dict[str, dict[str, Any]]
 
     def declared_transports(self) -> dict[str, dict[str, Any]]:
         """Return transport blocks with ``transport_defaults`` merged.
@@ -140,6 +148,35 @@ def _load_definition(definition_dir: Path) -> dict[str, Any]:
             f"{type(document).__name__}"
         )
     return document
+
+
+def _load_endpoints(definition_dir: Path) -> dict[str, dict[str, Any]]:
+    """Read every endpoint document under ``<definition_dir>/endpoints``.
+
+    Fail-loud on a file that does not parse or is not a JSON object: an
+    unreadable endpoint is not an absent one, and silently dropping it
+    would turn a broken document into a connector with fewer endpoints to
+    check. Absence of the directory itself is fine — a connector may ship
+    none.
+    """
+    endpoint_dir = definition_dir / ENDPOINT_DIRECTORY_NAME
+    if not endpoint_dir.is_dir():
+        return {}
+    documents: dict[str, dict[str, Any]] = {}
+    for path in sorted(endpoint_dir.glob("*.json")):
+        try:
+            document = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as err:
+            raise ConformanceSetupError(
+                f"endpoint document {path} is unreadable: {err}"
+            ) from err
+        if not isinstance(document, dict):
+            raise ConformanceSetupError(
+                f"endpoint document {path} must be a JSON object, got "
+                f"{type(document).__name__}"
+            )
+        documents[path.stem] = document
+    return documents
 
 
 def _resolve_definition_dir(root: Path) -> Path:
@@ -346,4 +383,5 @@ def load_target(
         declared_capabilities=capabilities,
         type_mapper=_load_type_mapper(definition_dir, connector_id),
         connector_class=_resolve_connector_class(connector_id, kind, class_path),
+        endpoints=_load_endpoints(definition_dir),
     )
