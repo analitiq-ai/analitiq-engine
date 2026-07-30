@@ -157,10 +157,13 @@ class FileDestinationHandler(BaseDestinationHandler):
         # JSON carries no "connector_type" key.
         self._connector_type = runtime.connector_type
 
-        # The kind alone decides the backend, so resolve it before the
-        # runtime is acquired and its secrets resolved: a kind whose backend
-        # is not built yet must fail here, naming itself, rather than after
-        # the operator's credentials were fetched and a connection opened.
+        # The kind alone decides the backend, so resolve it before the runtime
+        # is acquired: an unbuilt kind then fails naming itself, with no
+        # shared ownership taken, no config materialized and no storage
+        # connection opened. It does not spare the secret store — the engine
+        # shell resolves the connection (ConnectionRuntime.resolve_spec) into
+        # the worker's launch bootstrap before this process starts, so the
+        # credentials were already fetched by the time connect() runs.
         storage = get_storage_backend(self._connector_type)
         self._storage = storage
 

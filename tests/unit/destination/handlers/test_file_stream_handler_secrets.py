@@ -8,7 +8,6 @@ import pytest
 from cdk.connection_runtime import ConnectionRuntime
 from src.destination.connectors.file import FileDestinationHandler
 from src.destination.connectors.stream import StreamDestinationHandler
-from src.destination.storage import StorageBackendNotBuiltError
 
 # A fixed, timezone-aware emit instant for write_batch/send_batch calls; the
 # engine stamps this per batch (issue #353). Value is arbitrary for sinks
@@ -104,27 +103,6 @@ class TestFileHandlerSecretRetention:
                 await handler.connect(runtime)
 
         # Secrets must be scrubbed even on failure
-        assert runtime._resolved_config is None
-
-    @pytest.mark.asyncio
-    async def test_unbuilt_kind_refused_before_secrets_are_resolved(self):
-        """The backend is knowable from the kind alone, so an unbuilt kind
-        fails before the resolver is ever asked for the connection's secrets."""
-        resolver = AsyncMock(resolve=AsyncMock(return_value={"MY_SECRET": "top"}))
-        runtime = ConnectionRuntime(
-            raw_config={"prefix": "data/", "secret_field": "${MY_SECRET}"},
-            connection_id="conn-s3-test",
-            connector_id="s3",
-            connector_type="s3",
-            driver=None,
-            resolver=resolver,
-        )
-        handler = FileDestinationHandler()
-
-        with pytest.raises(StorageBackendNotBuiltError):
-            await handler.connect(runtime)
-
-        resolver.resolve.assert_not_awaited()
         assert runtime._resolved_config is None
 
     @pytest.mark.asyncio

@@ -216,18 +216,21 @@ optional `rate_limit`.
 ### File destination
 
 `file` and `s3` connector types are routed to `FileDestinationHandler`.
-The transport block defines `path` (or bucket/prefix), `file_format`,
-and an optional `path_template` for partitioning. Format-specific
-options (`compression`, `delimiter`, etc.) are passed through the
-formatter config.
+The connection config defines `path` (or `prefix`), `file_format`, and an
+optional `path_template` for partitioning. Format-specific options
+(`compression`, `delimiter`, etc.) are passed through the formatter
+config.
 
 The connector kind picks the storage backend that performs the write
 (`src/destination/storage/__init__.py`). Only `file` has one — the local
 filesystem. `s3` is a registered but unbuilt kind, so an `s3` destination
 raises `StorageBackendNotBuiltError` at the top of `connect()`, before the
-connection's secrets are resolved; the message names the kind, names the
-missing backend, and says it is planned rather than misconfigured. There
-is no fallback to local storage.
+runtime is acquired and before any storage connection is opened; the
+message names the kind, names the missing backend, and says it is planned
+rather than misconfigured. There is no fallback to local storage. The
+refusal happens inside the connector worker, after the engine shell has
+already resolved the connection's secrets into the worker's launch
+bootstrap.
 
 A `path_template` with time placeholders (`{year}/{month}/{day}/{hour}`)
 resolves them from the batch's engine-stamped emit instant, not the

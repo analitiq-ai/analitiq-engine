@@ -53,7 +53,29 @@ class TestPlannedKindWithoutBackend:
         assert "file (LocalFileStorage)" in message
 
     @pytest.mark.asyncio
-    async def test_file_destination_still_connects_through_local_storage(self, tmp_path):
+    async def test_refusal_precedes_acquiring_the_runtime(self):
+        """The kind alone decides the backend, so the refusal lands before
+        connect() takes shared ownership of the runtime or materializes its
+        config: nothing is held or opened for a kind that cannot write.
+
+        It does not spare the secret store -- the engine shell resolves the
+        connection into the worker's launch bootstrap before the worker
+        process exists, so the credentials were fetched long before connect().
+        """
+        runtime = _runtime("s3", {"prefix": "data/"})
+        handler = FileDestinationHandler()
+
+        with pytest.raises(StorageBackendNotBuiltError):
+            await handler.connect(runtime)
+
+        assert runtime._ref_count == 0
+        assert runtime._materialized is False
+        assert runtime._resolved_config is None
+
+    @pytest.mark.asyncio
+    async def test_file_destination_still_connects_through_local_storage(
+        self, tmp_path
+    ):
         """The refusal is scoped to the unbuilt kind: ``file`` still resolves
         the local filesystem backend and connects."""
         _, registry = build_worker_registries()
