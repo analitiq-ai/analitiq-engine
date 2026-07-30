@@ -172,6 +172,36 @@ def check_api_request_expressions(target: ConformanceTarget) -> list[Violation]:
     return violations
 
 
+def _pagination_phases(
+    pagination: Mapping[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Split a pagination block into what resolves before, and per, a page.
+
+    The loop reads the block in two moments. The effective page size and
+    the page-number step are resolved ONCE, before the first request, so
+    nothing under ``response`` exists for them yet. Everything else --
+    ``stop_when``, ``next_cursor``, ``next_url``, ``offset.increment_by``
+    -- is resolved per page against that page's response.
+    """
+    pre_page: dict[str, Any] = {}
+    for location, path, is_pre_page in _PAGE_VALUES:
+        value = _dig(pagination, path) if is_pre_page else None
+        if value is not None:
+            pre_page[location] = value
+
+    per_page: dict[str, Any] = {}
+    for key, value in pagination.items():
+        if key not in _PRE_PAGE_CONTAINERS:
+            per_page[key] = value
+        elif isinstance(value, Mapping):
+            per_page[key] = {
+                name: field
+                for name, field in value.items()
+                if (key, name) not in _PRE_PAGE_FIELDS
+            }
+    return pre_page, per_page
+
+
 def check_api_pagination(target: ConformanceTarget) -> list[Violation]:
     """Certify that each read's paging strategy resolves when the loop reads it."""
     violations: list[Violation] = []
@@ -180,34 +210,7 @@ def check_api_pagination(target: ConformanceTarget) -> list[Violation]:
         if not isinstance(pagination, Mapping):
             continue
 
-        # Two phases, because the loop reads the block in two moments. The
-        # effective page size and the page-number step are resolved ONCE,
-        # before the first request, with the request resolver -- no page has
-        # come back, so nothing under `response` exists yet. Everything else
-        # (stop_when, next_cursor, next_url, offset.increment_by) is resolved
-        # per page against that page's response.
-        pre_page = {
-            location: _dig(pagination, path)
-            for location, path, is_pre_page in _PAGE_VALUES
-            if is_pre_page and _dig(pagination, path) is not None
-        }
-        per_page = {
-            key: value
-            for key, value in pagination.items()
-            if key not in _PRE_PAGE_CONTAINERS
-        }
-        per_page.update(
-            {
-                key: {
-                    name: field
-                    for name, field in (pagination.get(key) or {}).items()
-                    if (key, name) not in _PRE_PAGE_FIELDS
-                }
-                for key in _PRE_PAGE_CONTAINERS
-                if isinstance(pagination.get(key), Mapping)
-            }
-        )
-
+        pre_page, per_page = _pagination_phases(pagination)
         request_resolver, request_asked = request_probe(target.definition)
         page_resolver, page_asked = page_probe(target.definition)
 
