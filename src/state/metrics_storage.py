@@ -56,6 +56,18 @@ class PipelineMetricsRecord(BaseModel):
     records_failed: int = Field(
         default=0, ge=0, description="Number of records that failed processing"
     )
+    # Required, unlike its sibling counts: a dropped record is unrecoverable
+    # (no dead-letter entry), so a default of 0 would let an emission path that
+    # forgets the count report "no drops" for a run that lost data. Required
+    # makes that omission a type error at the call site instead.
+    records_skipped: int = Field(
+        ...,
+        ge=0,
+        description=(
+            "Records dropped by the 'skip' error strategy (not dead-lettered, "
+            "so not recoverable)"
+        ),
+    )
     records_total: int = Field(
         default=0, ge=0, description="Total records attempted (processed + failed)"
     )
@@ -110,6 +122,8 @@ def create_metrics_record(
     pipeline_id: str,
     start_time: datetime,
     end_time: datetime,
+    *,
+    records_skipped: int,
     records_processed: int = 0,
     records_failed: int = 0,
     batches_processed: int = 0,
@@ -127,6 +141,7 @@ def create_metrics_record(
         pipeline_id: Pipeline identifier
         start_time: Pipeline start time
         end_time: Pipeline end time
+        records_skipped: Records dropped by the 'skip' error strategy (required)
         records_processed: Number of successfully processed records
         records_failed: Number of failed records
         batches_processed: Number of batches processed
@@ -156,6 +171,7 @@ def create_metrics_record(
         duration_seconds=round(duration_seconds, 2),
         records_processed=records_processed,
         records_failed=records_failed,
+        records_skipped=records_skipped,
         records_total=records_total,
         batches_processed=batches_processed,
         status=status,
@@ -171,6 +187,8 @@ def save_pipeline_metrics(
     pipeline_id: str,
     start_time: datetime,
     end_time: datetime,
+    *,
+    records_skipped: int,
     records_processed: int = 0,
     records_failed: int = 0,
     batches_processed: int = 0,
@@ -191,6 +209,7 @@ def save_pipeline_metrics(
         pipeline_id: Pipeline identifier
         start_time: Pipeline start time
         end_time: Pipeline end time
+        records_skipped: Records dropped by the 'skip' error strategy (required)
         records_processed: Number of successfully processed records
         records_failed: Number of failed records
         batches_processed: Number of batches processed
@@ -205,6 +224,7 @@ def save_pipeline_metrics(
         pipeline_id=pipeline_id,
         start_time=start_time,
         end_time=end_time,
+        records_skipped=records_skipped,
         records_processed=records_processed,
         records_failed=records_failed,
         batches_processed=batches_processed,

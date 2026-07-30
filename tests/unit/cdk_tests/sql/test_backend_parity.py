@@ -21,9 +21,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 
 from cdk.sql.adbc_backend import AdbcBackend
-from cdk.sql.backend import SqlAlchemyBackend
 from cdk.sql.capabilities import SqlCapabilities
 from cdk.sql.dialects import SqlDialect, TableAddress
+from cdk.sql.sqlalchemy_backend import SqlAlchemyBackend
 from cdk.sql.write_plan import build_stage_write_plan
 
 from .conftest import caps_block
@@ -66,13 +66,18 @@ class _SqliteParityDialect(SqlDialect):
 
 
 class _SqliteAdbcCursor:
-    def __init__(self, conn: sqlite3.Connection):
-        self._cursor = conn.cursor()
+    def __init__(self, conn: _SqliteAdbcConnection):
+        self._owner = conn
+        self._cursor = conn.raw.cursor()
 
     def execute(self, sql, params=None):
+        self._owner.begin_if_needed()
+        self._owner.statements.append(sql)
         self._cursor.execute(sql, params or ())
 
     def executemany(self, sql, params):
+        self._owner.begin_if_needed()
+        self._owner.statements.append(sql)
         self._cursor.executemany(sql, params)
 
     def adbc_ingest(self, table, batch: pa.RecordBatch, mode, **kwargs):
@@ -80,6 +85,7 @@ class _SqliteAdbcCursor:
         # batch's rows into *table* in batch column order. Targeting
         # kwargs are meaningless on schemaless SQLite.
         assert mode == "append"
+        self._owner.begin_if_needed()
         cols = ", ".join(f'"{c}"' for c in batch.schema.names)
         placeholders = ", ".join("?" for _ in batch.schema.names)
         rows = [tuple(row[c] for c in batch.schema.names) for row in batch.to_pylist()]
@@ -99,30 +105,58 @@ class _SqliteAdbcCursor:
 
 
 class _SqliteAdbcConnection:
+    """A PEP-249 connection that honors an explicit transaction, as ADBC does.
+
+    Python's sqlite3 in autocommit mode would commit every statement and
+    make ``rollback()`` a no-op, so a declared ``transactional_ddl: true``
+    would be a fiction and the transactional path's recovery could not be
+    observed. Statements therefore open a transaction on demand and
+    ``commit``/``rollback`` close it — the shape every real ADBC driver
+    presents. The shared-cache URI makes the database survive a discarded
+    connection, so the backend's reopen-and-retry path sees the same state
+    a real server would show it.
+    """
+
     def __init__(self, uri: str):
-        # Autocommit mode: the AdbcBackend's own commit calls delimit the
-        # steps, exactly as an ADBC driver's connection would. The
-        # shared-cache URI makes the database survive a poisoned
-        # connection, so the backend's reopen-and-retry path sees the
-        # same state a real server would show it.
-        self._conn = sqlite3.connect(
+        self.raw = sqlite3.connect(
             uri, uri=True, check_same_thread=False, isolation_level=None
         )
+        self.statements: list[str] = []
+        self._in_txn = False
+
+    def begin_if_needed(self):
+        if not self._in_txn:
+            self.raw.execute("BEGIN")
+            self._in_txn = True
 
     def cursor(self):
-        return _SqliteAdbcCursor(self._conn)
+        return _SqliteAdbcCursor(self)
 
     def commit(self):
-        self._conn.commit()
+        if self._in_txn:
+            self.raw.commit()
+            self._in_txn = False
 
     def rollback(self):
-        self._conn.rollback()
+        if self._in_txn:
+            self.raw.rollback()
+            self._in_txn = False
 
     def close(self):
-        self._conn.close()
+        self.raw.close()
 
 
 # ---- per-backend harnesses --------------------------------------------------
+
+
+def _shared_memory_uri() -> str:
+    """A private in-memory database several connections can share.
+
+    Shared-cache is what lets a discarded connection be replaced without
+    losing the database, so the stepwise path's poisoning rule can be
+    exercised against real state instead of an erased one.
+    """
+    return f"file:parity_{uuid4().hex}?mode=memory&cache=shared"
 
 
 class _SaHarness:
@@ -130,9 +164,15 @@ class _SaHarness:
 
     def __init__(self, caps: SqlCapabilities):
         self.dialect = _SqliteParityDialect(caps)
+        self._uri = _shared_memory_uri()
+        self._anchor = sqlite3.connect(
+            self._uri, uri=True, check_same_thread=False, isolation_level=None
+        )
         self._engine = create_engine(
             "sqlite://",
-            connect_args={"check_same_thread": False, "isolation_level": None},
+            creator=lambda: sqlite3.connect(
+                self._uri, uri=True, check_same_thread=False, isolation_level=None
+            ),
             poolclass=StaticPool,
         )
         from sqlalchemy import event
@@ -162,6 +202,7 @@ class _SaHarness:
 
     def dispose(self):
         self._engine.dispose()
+        self._anchor.close()
 
 
 class _AdbcRuntimeStub:
@@ -179,7 +220,7 @@ class _AdbcHarness:
 
     def __init__(self, caps: SqlCapabilities):
         self.dialect = _SqliteParityDialect(caps)
-        self._uri = f"file:parity_{uuid4().hex}?mode=memory&cache=shared"
+        self._uri = _shared_memory_uri()
         # The anchor keeps the shared in-memory database alive across the
         # backend's poison/reopen cycles and serves the assertions.
         self._anchor = sqlite3.connect(

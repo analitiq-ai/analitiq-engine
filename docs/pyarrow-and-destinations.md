@@ -66,7 +66,14 @@ record_batch
    Arrow string parses to a `pa.DataType` on the read side, and the
    connector's own `type-map-write.json` renders it back to native DDL on
    the write side. Arrow happens to have a good vocabulary to standardize
-   on.
+   on. The families themselves are declared once, in `ARROW_FAMILIES`
+   (`cdk/cdk/type_map/grammar.py`): each entry carries the family's
+   parameter grammar, its conversion kind, the pyarrow factory that builds
+   it, and the `pyarrow.types` predicates that recognise it in a live
+   batch. The parser, the conversion matrix, `arrow_family`, the
+   conformance probe set, and both published artifacts derive from that one
+   table, so a family added there needs no second edit. The engine
+   publishes this vocabulary; the contract mirrors it.
 
 ## Where Arrow Is Ceremony
 
@@ -141,12 +148,11 @@ transport_type: "adbc"        → AdbcBackend (the same stage-then-merge
 `GenericSQLConnector` is the facade and single semantic owner (write
 modes, truncate gating, identity and duplicate rules, refusals, retry
 verdicts, timeouts). It builds a `StageWritePlan` per batch and
-delegates execution to the runtime-selected `TransportBackend`
-(`cdk/cdk/sql/backend.py`, `cdk/cdk/sql/adbc_backend.py`) — the two
-SQLAlchemy flavours run one shared sync-`Connection` cycle body (the
-async engine enters it via `run_sync`), and the ADBC backend executes
-the identical plans, so write semantics cannot fork between
-transports; all paths share the cast/schema-contract logic.
+delegates execution to the runtime-selected `TransportBackend` — the two
+SQLAlchemy flavours run one shared sync-`Connection` body (the async
+engine enters it via `run_sync`), and the ADBC backend executes the
+identical plans through the same `StageCycle`, so write semantics cannot
+fork between transports; all paths share the cast/schema-contract logic.
 
 ### ADBC coverage (production-ready, 2026)
 

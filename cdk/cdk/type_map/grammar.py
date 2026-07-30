@@ -1,17 +1,25 @@
-"""Declarative parameter grammar for canonical ``arrow_type`` strings.
+"""The Arrow family vocabulary and the parameter grammar of each family.
 
-One table (:data:`ARROW_TYPE_GRAMMAR`) declares, per family, what may appear
-inside the parentheses: which temporal units, which integer ranges, whether a
-timezone is accepted. Every engine surface consumes it — the pyarrow-backed
-parser (:func:`cdk.type_map.arrow.parse_arrow_type`) binds parameters through
-:func:`bind_parameters`, the string-only rule normalizer
-(:mod:`cdk.type_map.rules`) derives its unit vocabulary from it — and the
-published ``arrow_type_grammar.json`` renders from it, so the grammar cannot
-drift between the parser, rule validation, and what consumers are told.
+One table (:data:`ARROW_FAMILIES`) declares every family the engine publishes
+and everything the engine knows about it: what may appear inside the
+parentheses (which temporal units, which integer ranges, whether a timezone is
+accepted), which conversion kind it belongs to, and which pyarrow factory
+builds it and which ``pyarrow.types`` predicates recognise it. Every surface
+derives its view from this table rather than restating the family names —
+the pyarrow-backed parser (:mod:`cdk.type_map.arrow`), the conversion policy
+(:mod:`cdk.type_map.conversions`), the string-only rule normalizer
+(:mod:`cdk.type_map.rules`), the conformance probe set
+(:mod:`cdk.conformance.roundtrip`), and the published
+``arrow_type_grammar.json`` / ``conversion_matrix.json`` artifacts. A family
+added here is therefore visible everywhere with no second edit.
+
+The engine is the publisher of this vocabulary and the contract mirrors it,
+never the other way round.
 
 This module must stay importable without ``pyarrow``: the string-only
 control-plane surface validates canonical strings through it (see the
-thin-import tests).
+thin-import tests), so the pyarrow bindings are declared by name and resolved
+in :mod:`cdk.type_map.arrow`, which is the only module that imports pyarrow.
 """
 
 from __future__ import annotations
@@ -81,50 +89,144 @@ class TimezoneParam:
 
 GrammarParam = UnitParam | IntParam | TimezoneParam
 
-# The parameter grammar per scalar family. A family missing here is not part
-# of the published arrow_type vocabulary; a family mapping to () takes no
-# parameters (and a parenthesised argument on it is rejected, not ignored).
-ARROW_TYPE_GRAMMAR: Final[dict[str, tuple[GrammarParam, ...]]] = {
-    "Null": (),
-    "Boolean": (),
-    "Int8": (),
-    "Int16": (),
-    "Int32": (),
-    "Int64": (),
-    "UInt8": (),
-    "UInt16": (),
-    "UInt32": (),
-    "UInt64": (),
-    "Float16": (),
-    "Float32": (),
-    "Float64": (),
-    "Utf8": (),
-    "LargeUtf8": (),
-    "Json": (),
-    "Binary": (),
-    "LargeBinary": (),
-    "Date32": (),
-    "Date64": (),
-    "Time32": (UnitParam("unit", ("SECOND", "MILLISECOND")),),
-    "Time64": (UnitParam("unit", ("MICROSECOND", "NANOSECOND")),),
-    "Duration": (UnitParam("unit", _ALL_UNITS),),
-    "Timestamp": (UnitParam("unit", _ALL_UNITS, style="enum"), TimezoneParam()),
-    "Decimal128": (
-        IntParam("precision", 1, 38),
-        IntParam("scale", 0, bounded_by="precision"),
-    ),
-    "Decimal256": (
-        IntParam("precision", 1, 76),
-        IntParam("scale", 0, bounded_by="precision"),
-    ),
-    "FixedSizeBinary": (IntParam("byte_width", 1),),
-}
+# The conversion kinds families are grouped into. Families sharing a kind share
+# a conversion policy (:mod:`cdk.type_map.conversions` reasons in kinds, never
+# in family names), and width/precision/unit differences inside a kind (Int32
+# vs Int64, Decimal128(10, 2) vs Decimal128(38, 9), Timestamp units) are
+# settled by the runtime safe-cast rather than by separate matrix entries.
+# Spelling a kind wrong is a type error here rather than a family that silently
+# converts to nothing.
+ConversionKind = Literal[
+    "null",
+    "bool",
+    "int",
+    "float",
+    "string",
+    "json",
+    "binary",
+    "date",
+    "time",
+    "timestamp",
+    "duration",
+    "decimal",
+    "nested",
+]
 
-# Nested-type markers: recognized vocabulary, but their shape comes from the
-# named sub-schema key, never from parentheses.
-STRUCTURAL_FAMILIES: Final[dict[str, str]] = {
-    "Object": "properties",
-    "List": "items",
+
+@dataclass(frozen=True, slots=True)
+class ArrowFamily:
+    """One family of the published arrow_type vocabulary.
+
+    ``params`` declares what may appear inside the parentheses; an empty tuple
+    means the family takes no parameters (and a parenthesised argument on it is
+    rejected, not ignored). ``kind`` is the conversion group the family belongs
+    to. ``builder`` and ``probes`` name pyarrow attributes rather than holding
+    the callables, so this module stays importable without pyarrow:
+    ``builder`` is the ``pyarrow`` factory the bound parameters are passed to
+    positionally, and ``probes`` are the ``pyarrow.types`` predicates that
+    recognise a live ``DataType`` as this family. ``sub_schema`` names the
+    field key a structural family reads its shape from, and is ``None`` for
+    every scalar family; a structural family has no ``builder`` because its
+    shape comes from that sub-schema, never from parentheses.
+    """
+
+    kind: ConversionKind
+    params: tuple[GrammarParam, ...] = ()
+    builder: str | None = None
+    probes: tuple[str, ...] = ()
+    sub_schema: str | None = None
+
+
+# The one vocabulary table. A family missing here is not part of the published
+# arrow_type vocabulary.
+ARROW_FAMILIES: Final[dict[str, ArrowFamily]] = {
+    "Null": ArrowFamily("null", builder="null", probes=("is_null",)),
+    "Boolean": ArrowFamily("bool", builder="bool_", probes=("is_boolean",)),
+    "Int8": ArrowFamily("int", builder="int8", probes=("is_int8",)),
+    "Int16": ArrowFamily("int", builder="int16", probes=("is_int16",)),
+    "Int32": ArrowFamily("int", builder="int32", probes=("is_int32",)),
+    "Int64": ArrowFamily("int", builder="int64", probes=("is_int64",)),
+    "UInt8": ArrowFamily("int", builder="uint8", probes=("is_uint8",)),
+    "UInt16": ArrowFamily("int", builder="uint16", probes=("is_uint16",)),
+    "UInt32": ArrowFamily("int", builder="uint32", probes=("is_uint32",)),
+    "UInt64": ArrowFamily("int", builder="uint64", probes=("is_uint64",)),
+    "Float16": ArrowFamily("float", builder="float16", probes=("is_float16",)),
+    "Float32": ArrowFamily("float", builder="float32", probes=("is_float32",)),
+    "Float64": ArrowFamily("float", builder="float64", probes=("is_float64",)),
+    "Utf8": ArrowFamily("string", builder="string", probes=("is_string",)),
+    "LargeUtf8": ArrowFamily(
+        "string", builder="large_string", probes=("is_large_string",)
+    ),
+    # Opaque JSON blob — shape not declared. Carried over the wire as a
+    # JSON-encoded string; destinations json.loads it back to a dict/list at
+    # the write boundary. It has no probe because a live Json column *is* a
+    # large_string, which classifies as LargeUtf8: the family exists so a
+    # declared arrow_type="Json" parses and so the published grid can say it
+    # cannot be retyped, never as the answer to "what family is this batch
+    # column?".
+    "Json": ArrowFamily("json", builder="large_string"),
+    "Binary": ArrowFamily("binary", builder="binary", probes=("is_binary",)),
+    "LargeBinary": ArrowFamily(
+        "binary", builder="large_binary", probes=("is_large_binary",)
+    ),
+    "Date32": ArrowFamily("date", builder="date32", probes=("is_date32",)),
+    "Date64": ArrowFamily("date", builder="date64", probes=("is_date64",)),
+    "Time32": ArrowFamily(
+        "time",
+        params=(UnitParam("unit", ("SECOND", "MILLISECOND")),),
+        builder="time32",
+        probes=("is_time32",),
+    ),
+    "Time64": ArrowFamily(
+        "time",
+        params=(UnitParam("unit", ("MICROSECOND", "NANOSECOND")),),
+        builder="time64",
+        probes=("is_time64",),
+    ),
+    "Duration": ArrowFamily(
+        "duration",
+        params=(UnitParam("unit", _ALL_UNITS),),
+        builder="duration",
+        probes=("is_duration",),
+    ),
+    "Timestamp": ArrowFamily(
+        "timestamp",
+        params=(UnitParam("unit", _ALL_UNITS, style="enum"), TimezoneParam()),
+        builder="timestamp",
+        probes=("is_timestamp",),
+    ),
+    "Decimal128": ArrowFamily(
+        "decimal",
+        params=(
+            IntParam("precision", 1, 38),
+            IntParam("scale", 0, bounded_by="precision"),
+        ),
+        builder="decimal128",
+        probes=("is_decimal128",),
+    ),
+    "Decimal256": ArrowFamily(
+        "decimal",
+        params=(
+            IntParam("precision", 1, 76),
+            IntParam("scale", 0, bounded_by="precision"),
+        ),
+        builder="decimal256",
+        probes=("is_decimal256",),
+    ),
+    "FixedSizeBinary": ArrowFamily(
+        "binary",
+        params=(IntParam("byte_width", 1),),
+        builder="binary",
+        probes=("is_fixed_size_binary",),
+    ),
+    # Nested-type markers: recognized vocabulary, but their shape comes from
+    # the named sub-schema key, never from parentheses. Arrow's large_list is
+    # the same declared shape as list, so both probe back to the one List
+    # family the contract emits.
+    "Object": ArrowFamily("nested", probes=("is_struct",), sub_schema="properties"),
+    "List": ArrowFamily(
+        "nested", probes=("is_list", "is_large_list"), sub_schema="items"
+    ),
 }
 
 # The published grammar's own version, carried inside the artifact so any
@@ -206,10 +308,10 @@ def bind_parameters(
     parameterless family when the caller signals ``has_parens`` (``Int64()``
     is an author-time mistake, and every other surface treats it as a distinct
     string from ``Int64``). The family must exist in
-    :data:`ARROW_TYPE_GRAMMAR`; callers gate unknown families first, where the
+    :data:`ARROW_FAMILIES`; callers gate unknown families first, where the
     original input string is available for the error message.
     """
-    params = ARROW_TYPE_GRAMMAR[family]
+    params = ARROW_FAMILIES[family].params
     if has_parens and not args and not params:
         raise InvalidTypeMapError(f"{family} takes no parameters; got ()")
     required = sum(1 for p in params if not isinstance(p, TimezoneParam))
@@ -312,10 +414,10 @@ def unit_families() -> dict[str, frozenset[str]]:
     this, so it can never disagree with the parser's grammar.
     """
     return {
-        family: frozenset(spec.allowed)
-        for family, params in ARROW_TYPE_GRAMMAR.items()
-        for spec in params
-        if isinstance(spec, UnitParam)
+        family: frozenset(param.allowed)
+        for family, spec in ARROW_FAMILIES.items()
+        for param in spec.params
+        if isinstance(param, UnitParam)
     }
 
 
@@ -354,7 +456,7 @@ def _param_to_json(spec: GrammarParam) -> dict[str, Any]:
 def build_arrow_type_grammar() -> dict[str, Any]:
     """Materialise the published grammar document.
 
-    :data:`ARROW_TYPE_GRAMMAR` is the single source of truth; this flattens it
+    :data:`ARROW_FAMILIES` is the single source of truth; this flattens it
     into the serialisable document consumers read instead of hand-writing
     their own patterns. Scalar families carry ``params``; the structural
     markers carry the sub-schema key their shape comes from. The document
@@ -363,11 +465,13 @@ def build_arrow_type_grammar() -> dict[str, Any]:
     vocabulary it got.
     """
     families: dict[str, Any] = {
-        family: {"params": [_param_to_json(spec) for spec in params]}
-        for family, params in ARROW_TYPE_GRAMMAR.items()
+        family: (
+            {"structural": spec.sub_schema}
+            if spec.sub_schema is not None
+            else {"params": [_param_to_json(param) for param in spec.params]}
+        )
+        for family, spec in ARROW_FAMILIES.items()
     }
-    for family, sub_schema in STRUCTURAL_FAMILIES.items():
-        families[family] = {"structural": sub_schema}
     return {"version": GRAMMAR_VERSION, "families": families}
 
 

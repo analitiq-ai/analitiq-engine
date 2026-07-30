@@ -12,6 +12,14 @@ of the dialect's own is either a stale hook from an older write path
 or a helper that belongs under a leading underscore. Both become a red
 CI run in the connector's own repo, with the member named.
 
+The write primitive's own protocol,
+:class:`~cdk.sql.stage_cycle.StageConnection`, is implementable but is
+not part of that surface: the transports satisfying it are the CDK's,
+and a connector supplying its own would be running the stage cycle on
+a connection the engine cannot reason about. No separate check is
+needed — its members are public additions, which is exactly what this
+one already refuses.
+
 The sanctioned set is computed from the CDK base classes themselves, so
 a new sanctioned hook added to ``SqlDialect`` is sanctioned everywhere
 without touching this module.

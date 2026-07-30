@@ -72,7 +72,7 @@ from ..contract import ColumnDef
 from ._adbc_utils import _is_fatal_adbc_error
 from .adbc_backend import AdbcBackend
 from .adbc_reader import open_adbc_reader
-from .backend import SqlAlchemyBackend, TransportBackend
+from .backend import TransportBackend
 from .capabilities import SqlCapabilities, undeclared_capability_error
 from .ddl import build_create_table_sql
 from .ddl import create_table as _sql_create_table
@@ -87,6 +87,7 @@ from .exceptions import (
     TlsVerificationError,
     UnsupportedDialectOperationError,
 )
+from .sqlalchemy_backend import SqlAlchemyBackend
 from .write_plan import build_stage_write_plan
 
 logger = logging.getLogger(__name__)

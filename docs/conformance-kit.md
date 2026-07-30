@@ -34,7 +34,10 @@ in a customer pipeline (spec
   with the member named, and so does a public addition of the
   dialect's own — connector helpers live under a leading underscore,
   which is what keeps stale hooks from older write paths from riding
-  along unnoticed.
+  along unnoticed. The write primitive's own protocol,
+  `StageConnection`, is implementable but is not connector surface: the
+  transports that satisfy it are the CDK's, so a connector growing its
+  members fails as the public addition it is.
 - **Declared and implemented agree, both ways.** A declared
   `merge_form` needs `merge_statement_sql`; a `bulk_land` override
   needs a declared `bulk_load` mechanism; a write-capable connector

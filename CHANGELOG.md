@@ -56,11 +56,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Modern Engine Architecture
 - **Pipeline Orchestration Layer** - New `PipelineOrchestrator` class for concurrent stream execution
 - **Factory Pattern Implementation** - Factory methods for connector and pipeline stage creation
-- **Enhanced Exception Hierarchy** - Specific exception types with contextual information:
-  - `StreamExecutionError` with stage and batch context
-  - `StreamConfigurationError` with stream ID and validation details
-  - `PipelineOrchestrationError` for orchestration failures
-  - `StageConfigurationError` for pipeline stage errors
 - **Python 3.11+ Exception Handling** - `ExceptionGroup` patterns for concurrent failure handling
 
 #### Pydantic v2 Integration

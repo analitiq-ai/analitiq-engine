@@ -390,9 +390,6 @@ yarn-error.log*
 # =============================================================================
 /examples
 
-# Generated test reports
-tests/e2e/reports/
-
 # Keep test fixtures
 !**/tests/**/fixtures/**
 !**/tests/**/data/**/*.json

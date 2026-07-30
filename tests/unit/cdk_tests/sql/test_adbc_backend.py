@@ -23,10 +23,16 @@ import pyarrow as pa
 import pytest
 
 from cdk.adbc_registry import AdbcConfigurationError
-from cdk.sql import adbc_backend as backend_module
+from cdk.sql import stage_cycle as cycle_module
 from cdk.sql.adbc_backend import AdbcBackend
 from cdk.sql.capabilities import SqlCapabilities
 from cdk.sql.dialects import SqlDialect
+from cdk.sql.stage_cycle import (
+    LIVENESS_PROBE_SQL,
+    render_column_probe_sql,
+    render_landing_insert_sql,
+    render_row_count_sql,
+)
 from cdk.sql.write_plan import build_stage_write_plan
 
 from .conftest import caps_block
@@ -38,6 +44,10 @@ class ProgrammingError(Exception):
 
 
 class OperationalError(Exception):
+    pass
+
+
+class IntegrityError(Exception):
     pass
 
 
@@ -124,9 +134,9 @@ class _FakeConn:
     """Programmable ADBC DBAPI fake.
 
     ``execute_hook(sql)`` may raise to inject a statement failure;
-    ``commit_hook()`` likewise for commits. The session-schema probe is
-    matched by exact SQL and counted, so the once-per-connection cache
-    is observable.
+    ``commit_hook()`` and ``rollback_hook()`` likewise for commits and
+    rollbacks. The session-schema probe is matched by exact SQL and
+    counted, so the once-per-connection cache is observable.
     """
 
     def __init__(
@@ -138,6 +148,7 @@ class _FakeConn:
         no_row=False,
         execute_hook=None,
         commit_hook=None,
+        rollback_hook=None,
         description=(),
         fetch_value=None,
     ):
@@ -147,6 +158,7 @@ class _FakeConn:
         self.no_row = no_row
         self.execute_hook = execute_hook
         self.commit_hook = commit_hook
+        self.rollback_hook = rollback_hook
         self.description = description
         self.fetch_value = fetch_value
         self.statements: list[str] = []
@@ -169,6 +181,8 @@ class _FakeConn:
 
     def rollback(self):
         self.rollbacks += 1
+        if self.rollback_hook is not None:
+            self.rollback_hook()
 
     def close(self):
         self.closed = True
@@ -315,7 +329,7 @@ class TestStepwiseCycle:
 
         conn = _FakeConn(execute_hook=fail_mode_then_drop)
         with (
-            caplog.at_level(logging.WARNING, logger=backend_module.logger.name),
+            caplog.at_level(logging.WARNING, logger=cycle_module.logger.name),
             pytest.raises(OperationalError, match="connection reset"),
         ):
             _backend(dialect, conn)._execute_write_sync(plan, _batch())
@@ -347,9 +361,35 @@ class TestTransactionalCycle:
         assert conn.statements.count(plan.drop_stage_sql) == 1  # in-txn only
         assert conn.commits == 1
 
-    def test_failure_poisons_without_a_cleanup_drop(self):
-        # The open transaction dies with the closed connection; no
-        # stepwise cleanup runs because nothing was committed.
+    def test_a_rejected_batch_rolls_back_and_keeps_the_connection(self):
+        # The rollback IS the recovery here: nothing committed, so no
+        # stepwise cleanup runs and no stage survives. A rejected row
+        # says nothing about the connection, so the next batch reuses it
+        # instead of paying for a reconnect.
+        caps = _caps(stage_scope="temp", transactional_ddl=True)
+        dialect = _StageDialect(caps)
+        plan = _plan(dialect, caps)
+
+        def fail_mode(sql):
+            if sql == plan.mode_sql:
+                raise IntegrityError("duplicate key value violates orders_pkey")
+
+        conn = _FakeConn(execute_hook=fail_mode)
+        backend = _backend(dialect, conn)
+        with pytest.raises(AdbcConfigurationError, match="IntegrityError"):
+            backend._execute_write_sync(plan, _batch())
+        assert conn.commits == 0
+        assert conn.rollbacks == 1
+        assert not conn.closed
+        assert backend._conn is conn
+        assert conn.statements.count(plan.drop_stage_sql) == 0
+
+    def test_a_broken_connection_is_discarded_and_the_next_batch_reopens(self):
+        # This backend IS its own pool — one cached handle, reopened only
+        # once dropped — so the transactional path's single discard rule
+        # is what keeps a connection-level failure from wedging every
+        # later batch of the run on a dead handle. The evidence is the
+        # rollback failing; a rejected batch rolls back cleanly.
         caps = _caps(stage_scope="temp", transactional_ddl=True)
         dialect = _StageDialect(caps)
         plan = _plan(dialect, caps)
@@ -358,13 +398,21 @@ class TestTransactionalCycle:
             if sql == plan.mode_sql:
                 raise OperationalError("connection reset")
 
-        conn = _FakeConn(execute_hook=fail_mode)
-        backend = _backend(dialect, conn)
+        def fail_rollback():
+            raise OperationalError("connection reset")
+
+        dead = _FakeConn(execute_hook=fail_mode, rollback_hook=fail_rollback)
+        fresh = _FakeConn()
+        runtime = _FakeRuntime([fresh])
+        backend = _backend(dialect, dead, runtime=runtime)
         with pytest.raises(OperationalError):
             backend._execute_write_sync(plan, _batch())
-        assert conn.commits == 0
-        assert conn.closed
+        assert dead.closed
         assert backend._conn is None
+        # Self-healing: the next batch reopens instead of inheriting it.
+        backend._execute_write_sync(plan, _batch())
+        assert backend._conn is fresh
+        assert fresh.commits == 1
 
 
 class TestLandingMechanisms:
@@ -390,11 +438,11 @@ class TestLandingMechanisms:
         conn = _FakeConn()
         _backend(dialect, conn, bulk_load="none")._execute_write_sync(plan, _batch())
         assert conn.ingests == []
-        # The landing INSERT is the parameterized one; the mode
-        # statement is the (set-based) INSERT ... SELECT anti-join.
+        # The landing INSERT is the one rendered above the transport
+        # seam; this backend only binds rows to it. (The mode statement
+        # is the set-based INSERT ... SELECT anti-join.)
         inserts = [s for s in conn.statements if s.endswith("VALUES (?, ?)")]
-        assert len(inserts) == 1
-        assert dialect.quote_table(plan.stage) in inserts[0]
+        assert inserts == [render_landing_insert_sql(dialect, plan.stage, plan.columns)]
         assert conn.executemany_params == [[(1, "a"), (2, "b")]]
 
     def test_declared_dialect_mechanism_calls_bulk_land_and_verifies(self):
@@ -414,8 +462,9 @@ class TestLandingMechanisms:
             dialect, conn, bulk_load="load_job", runtime=runtime
         )._execute_write_sync(plan, _batch())
         assert calls == [(plan.stage, 2, runtime)]
+        # The verification aggregate is the shared rendering too.
         counts = [s for s in conn.statements if s.startswith("SELECT COUNT(*)")]
-        assert len(counts) == 1
+        assert counts == [render_row_count_sql(dialect, plan.stage)]
         assert conn.ingests == []
         assert conn.executemany_params == []
 
@@ -444,7 +493,7 @@ class TestLandingMechanisms:
         # The fallback's stage is verified too, so the fake reports the
         # landed count.
         conn = _FakeConn(fetch_value=2)
-        with caplog.at_level(logging.INFO, logger=backend_module.logger.name):
+        with caplog.at_level(logging.INFO, logger=cycle_module.logger.name):
             _backend(
                 dialect, conn, bulk_load="load_job", runtime=_FakeRuntime([])
             )._execute_write_sync(plan, _batch())
@@ -478,8 +527,9 @@ class TestSessionSchemaGuard:
     """Issue #377 at the backend's ingest site: when a dialect opts out of
     per-statement ingest targeting, bare-name ingest resolves against the
     connection's session schema. The invariant *session schema == stage
-    schema* is checked before any stage DDL, so a mismatch leaves nothing
-    behind."""
+    schema* is a precondition of this transport's ingest mode, checked
+    immediately before the ingest — the cycle's only bare-name statement —
+    so nothing is ever ingested into the wrong schema."""
 
     def _setup(self, session_schema, *, dialect_cls=_SessionDefaultDialect, **caps_kw):
         caps = _caps(session_targeting="session_default", stage_scope="real", **caps_kw)
@@ -506,7 +556,7 @@ class TestSessionSchemaGuard:
         assert conn.probe_count == 1
         assert len(conn.ingests) == 2
 
-    def test_mismatch_refuses_before_any_stage_ddl(self):
+    def test_mismatch_refuses_before_the_ingest(self):
         dialect, plan, conn = self._setup("other")
         backend = _backend(dialect, conn)
         with pytest.raises(AdbcConfigurationError) as exc:
@@ -514,10 +564,12 @@ class TestSessionSchemaGuard:
         assert "'other'" in str(exc.value)
         assert "'public'" in str(exc.value)
         assert conn.ingests == []
-        assert not any("CREATE" in s for s in conn.statements)
-        # Poisoned: the next operation reopens.
-        assert conn.closed
-        assert backend._conn is None
+        # Declared transactional: the stage DDL this refusal interrupts
+        # is rolled back with the batch, and the connection is healthy.
+        assert conn.rollbacks == 1
+        assert conn.commits == 0
+        assert not conn.closed
+        assert backend._conn is conn
 
     def test_no_session_schema_refuses(self):
         dialect, plan, conn = self._setup(None)
@@ -615,17 +667,15 @@ class TestSessionSchemaGuard:
         with pytest.raises(AdbcConfigurationError, match="ProgrammingError"):
             backend._execute_write_sync(plan, _batch())
         assert conn.ingests == []
-        assert conn.closed
         assert not backend._session_schema_known  # retry re-probes
 
-    def test_probe_transient_error_propagates_and_poisons(self):
+    def test_probe_transient_error_propagates(self):
         dialect, plan, conn = self._setup("public")
         conn.probe_error = OperationalError("connection reset")
         backend = _backend(dialect, conn)
         with pytest.raises(OperationalError):
             backend._execute_write_sync(plan, _batch())
         assert conn.ingests == []
-        assert conn.closed
         assert not backend._session_schema_known
 
 
@@ -670,7 +720,7 @@ class TestSuccessPathDropRules:
         return [s for s in conn.statements[mode_at + 1 :] if s == plan.drop_stage_sql]
 
     def test_single_drop_success_no_retry_no_poison(self, caplog):
-        with caplog.at_level(logging.INFO, logger=backend_module.logger.name):
+        with caplog.at_level(logging.INFO, logger=cycle_module.logger.name):
             plan, conn, backend = self._run()
         assert len(self._post_mode_drops(plan, conn)) == 1
         assert not conn.closed
@@ -678,7 +728,7 @@ class TestSuccessPathDropRules:
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
     def test_drop_retry_second_attempt_succeeds_without_poison(self, caplog):
-        with caplog.at_level(logging.INFO, logger=backend_module.logger.name):
+        with caplog.at_level(logging.INFO, logger=cycle_module.logger.name):
             plan, conn, backend = self._run(drop_failures=1)
         assert len(self._post_mode_drops(plan, conn)) == 2
         assert not conn.closed
@@ -692,7 +742,7 @@ class TestSuccessPathDropRules:
         assert conn.rollbacks == 1
 
     def test_persistent_drop_failure_poisons_and_logs_orphan(self, caplog):
-        with caplog.at_level(logging.INFO, logger=backend_module.logger.name):
+        with caplog.at_level(logging.INFO, logger=cycle_module.logger.name):
             plan, conn, backend = self._run(drop_failures=2)  # must NOT raise
         assert len(self._post_mode_drops(plan, conn)) == 2
         assert conn.closed
@@ -711,7 +761,7 @@ class TestSuccessPathDropRules:
         # A fatal-classified name (ProgrammingError) on the success-path
         # DROP must not be reclassified or raised: the mode statement
         # committed, so the batch acks SUCCESS regardless.
-        with caplog.at_level(logging.WARNING, logger=backend_module.logger.name):
+        with caplog.at_level(logging.WARNING, logger=cycle_module.logger.name):
             _, conn, backend = self._run(
                 drop_failures=2, drop_error=ProgrammingError("permission denied")
             )
@@ -724,7 +774,7 @@ class TestSuccessPathDropRules:
     def test_drop_commit_failure_counts_as_failed_drop(self, caplog):
         # A dropped stage means a committed DROP: an executed DROP whose
         # commit is lost must take the same retry-poison-warn path.
-        with caplog.at_level(logging.WARNING, logger=backend_module.logger.name):
+        with caplog.at_level(logging.WARNING, logger=cycle_module.logger.name):
             plan, conn, backend = self._run(commit_failures=2)
         assert len(self._post_mode_drops(plan, conn)) == 2
         assert conn.closed
@@ -744,7 +794,7 @@ class TestSuccessPathDropRules:
                 raise OperationalError("reset during DROP")
 
         conn = _FakeConn(execute_hook=hook)
-        with caplog.at_level(logging.WARNING, logger=backend_module.logger.name):
+        with caplog.at_level(logging.WARNING, logger=cycle_module.logger.name):
             _backend(dialect, conn)._execute_write_sync(plan, _batch())
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warnings) == 1
@@ -829,15 +879,16 @@ class TestDdlAndProbes:
             dialect.table_address("orders", schema="public")
         )
         assert cols == ("id", "_record_hash")
-        probe = conn.statements[0]
-        assert probe == 'SELECT * FROM "public"."orders" WHERE 1=0'
+        address = dialect.table_address("orders", schema="public")
+        assert conn.statements == [render_column_probe_sql(dialect, address)]
+        assert conn.statements[0] == 'SELECT * FROM "public"."orders" WHERE 1=0'
 
     @pytest.mark.asyncio
     async def test_health_check_probes_and_poisons_on_failure(self):
         conn = _FakeConn()
         backend = _backend(_StageDialect(), conn)
         await backend.health_check()
-        assert conn.statements == ["SELECT 1"]
+        assert conn.statements == [LIVENESS_PROBE_SQL]
 
         sick = _FakeConn(
             execute_hook=lambda sql: (_ for _ in ()).throw(OperationalError("down"))
@@ -905,15 +956,10 @@ class TestWholeCycleMutualExclusion:
                 super().adbc_ingest(table, batch, mode, **kwargs)
 
         class _GatedConn(_FakeConn):
-            def __init__(self):
-                super().__init__()
-                self.gate_first = True
-
             def cursor(self):
-                if self.gate_first:
-                    self.gate_first = False
-                    return _GatedCursor(self)
-                return _FakeCursor(self)
+                # Every cursor gates, but only the landing blocks: the
+                # second cycle's ingest finds the gate already released.
+                return _GatedCursor(self)
 
         conn = _GatedConn()
         backend = _backend(dialect, conn)
