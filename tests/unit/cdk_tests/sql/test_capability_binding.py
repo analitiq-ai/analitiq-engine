@@ -71,6 +71,37 @@ class TestOneBindingSite:
         with pytest.raises(AttributeError):
             dialect.capabilities = None
 
+    def test_a_class_body_capability_is_refused_where_it_is_written(self):
+        # The route around the read-only property: a class attribute shadows
+        # it outright, so for_runtime's parse would land on _capabilities and
+        # never be read again — the dialect would answer gates with a fact
+        # its connector.json never declared.
+        with pytest.raises(TypeError, match="class body"):
+
+            class _SelfDeclaringDialect(SqlDialect):
+                capabilities = SqlCapabilities.from_declaration(
+                    caps_block(catalog="full")
+                )
+
+    def test_a_constructor_that_drops_the_declaration_is_refused(self):
+        # A dialect the CDK cannot hand a declaration to is named where it is
+        # defined, not as a bare TypeError at connect.
+        with pytest.raises(TypeError, match="forward it to super"):
+
+            class _ClosedDialect(SqlDialect):
+                def __init__(self) -> None:
+                    super().__init__()
+
+    def test_a_constructor_that_forwards_the_declaration_is_allowed(self):
+        class _ExtraStateDialect(SqlDialect):
+            def __init__(self, capabilities=None) -> None:
+                super().__init__(capabilities)
+                self.landings = 0
+
+        dialect = _ExtraStateDialect(SqlCapabilities.from_declaration(caps_block()))
+        assert dialect.capabilities is not None
+        assert dialect.landings == 0
+
     def test_for_runtime_keeps_the_connector_package_class(self):
         class _PackageDialect(SqlDialect):
             name = "packaged"
@@ -89,6 +120,18 @@ class TestOneBindingSite:
         )
         with pytest.raises(SqlCapabilitiesError, match="connector 'demo'"):
             SqlDialect.for_runtime(runtime)
+
+
+def _connectable_runtime():
+    """A runtime the facade's ``connect()`` accepts, declaring full catalog."""
+    runtime = MagicMock()
+    runtime.connector_id = "demo"
+    runtime.declared_sql_capabilities = caps_block(catalog="full")
+    runtime.declared_error_map = None
+    runtime.is_adbc = False
+    runtime.is_sync_sqlalchemy = False
+    runtime.driver = "postgresql"
+    return runtime
 
 
 def _route(rows_by_view):
@@ -144,14 +187,23 @@ class TestEveryConsumerPathCarriesTheDeclaration:
     @pytest.mark.asyncio
     async def test_connect_leaves_the_dialect_carrying_the_declaration(self):
         connector = GenericSQLConnector()
-        runtime = MagicMock()
-        runtime.connector_id = "demo"
-        runtime.declared_sql_capabilities = caps_block(catalog="full")
-        runtime.declared_error_map = None
-        runtime.is_adbc = False
-        runtime.is_sync_sqlalchemy = False
-        runtime.driver = "postgresql"
+        runtime = _connectable_runtime()
         with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()):
             await connector.connect(runtime)
         assert connector.dialect.capabilities is connector._capabilities
         assert connector.dialect.capabilities.catalog == "full"
+
+    @pytest.mark.asyncio
+    async def test_connect_builds_the_transport_with_the_declaring_dialect(self):
+        # The transport factory keeps the dialect it is handed and calls it
+        # later (verify_tls_state on every new DBAPI connection), so the
+        # dialect must already carry the declaration when the transport is
+        # built — the order read_batches uses.
+        connector = GenericSQLConnector()
+        runtime = _connectable_runtime()
+        materialize = AsyncMock()
+        with patch("cdk.sql.generic.materialize_runtime", new=materialize):
+            await connector.connect(runtime)
+        handed = materialize.await_args.kwargs["sql_dialect"]
+        assert handed is connector.dialect
+        assert handed.capabilities.catalog == "full"

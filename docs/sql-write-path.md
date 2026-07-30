@@ -329,9 +329,15 @@ Properties:
   block is parsed and attached; the facade calls it on every entry that
   takes a runtime (connect, the source read, each control-plane method) and
   hands the resulting dialect to the standalone helpers, which read it and
-  never bind anything themselves. `SqlDialect.capabilities` is read-only, so
-  no consumer can establish — or re-establish — what the system can do on a
-  dialect it was handed.
+  never bind anything themselves. The dialect is built before the transport,
+  because the transport factory keeps the dialect it is handed and calls back
+  into it later (TLS verification on every new DBAPI connection).
+  `SqlDialect.capabilities` is read-only, so no consumer can establish — or
+  re-establish — what the system can do on a dialect it was handed, and a
+  dialect subclass that sets `capabilities` in its class body or whose
+  constructor cannot accept the declaration is refused where the class is
+  defined. A connector dialect that needs its own `__init__` takes
+  `capabilities` and forwards it to `super().__init__()`.
 - Validated offline by the published validator like every other contract
   surface, and visible to any consumer of the connector definition.
 - `write_unit` sits at the connector level because it is not a SQL fact —

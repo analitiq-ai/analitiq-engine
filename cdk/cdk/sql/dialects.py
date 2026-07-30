@@ -47,6 +47,7 @@ named binds on the SQLAlchemy path.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Self
@@ -149,6 +150,40 @@ class SqlDialect:
         "not bound yet" one.
         """
         self._capabilities = capabilities
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Refuse a subclass that could settle its own declaration.
+
+        The read-only :attr:`capabilities` property closes assignment on an
+        instance; these close the two class-definition routes around it. A
+        class-body ``capabilities`` shadows the property outright, so what
+        :meth:`for_runtime` parsed would be written to ``_capabilities`` and
+        never read again — the dialect would answer every gate with a fact
+        its ``connector.json`` never declared. A constructor that does not
+        take the declaration cannot be handed one at all, by
+        :meth:`for_runtime` or by the conformance kit. Both raise where the
+        class is defined, so a connector package sees the rule it broke
+        instead of a bare ``TypeError`` at connect.
+        """
+        super().__init_subclass__(**kwargs)
+        if "capabilities" in vars(cls):
+            raise TypeError(
+                f"{cls.__name__} sets 'capabilities' in its class body, which "
+                f"shadows the declaration SqlDialect.for_runtime settles at "
+                f"construction. What a system can do is declared data in "
+                f"connector.json, never a dialect class attribute: remove it "
+                f"and declare sql_capabilities."
+            )
+        try:
+            inspect.signature(cls.__init__).bind(None, None)
+        except TypeError as err:
+            raise TypeError(
+                f"{cls.__name__}.__init__ cannot accept the declared "
+                f"capabilities every dialect is constructed with "
+                f"(SqlDialect.for_runtime and the conformance kit both call "
+                f"dialect_class(capabilities)): {err}. Take 'capabilities' "
+                f"and forward it to super().__init__()."
+            ) from err
 
     @classmethod
     def for_runtime(cls, runtime: Any) -> Self:

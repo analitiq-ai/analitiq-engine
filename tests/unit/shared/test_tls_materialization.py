@@ -284,7 +284,8 @@ class _VerifyingDialect(SqlDialect):
 
     name = "verifying"
 
-    def __init__(self) -> None:
+    def __init__(self, capabilities=None) -> None:
+        super().__init__(capabilities)
         self.calls: list[tuple[object, str]] = []
 
     def build_tls_connect_arg(self, mode, ca_pem):

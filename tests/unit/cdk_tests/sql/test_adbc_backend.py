@@ -890,7 +890,6 @@ class TestWholeCycleMutualExclusion:
     async def test_second_cycle_blocks_until_the_first_finishes(self):
         import threading as _threading
 
-        dialect = _StageDialect()
         caps = _caps(stage_scope="real", transactional_ddl=False)
         dialect = _StageDialect(caps)
         plan = _plan(dialect, caps)

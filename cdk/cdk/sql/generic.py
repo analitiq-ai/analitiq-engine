@@ -664,6 +664,15 @@ class GenericSQLConnector(BaseDestinationHandler):
             runtime: ConnectionRuntime with enriched config
         """
         self._runtime = runtime
+        # Build this runtime's dialect before the transport, in the order
+        # the source entry (read_batches) already uses: the factory hands
+        # the dialect to hooks that fire later — verify_tls_state on every
+        # new DBAPI connection — so a dialect built here must already carry
+        # the declaration those hooks read. (A malformed block already
+        # failed on the trusted side at config load; this parse
+        # re-validates at the process boundary, before anything is
+        # acquired.)
+        self._bind_capabilities(runtime)
         try:
             await materialize_runtime(runtime, sql_dialect=self.dialect)
         except DETERMINISTIC_CONNECT_ERRORS:
@@ -671,33 +680,6 @@ class GenericSQLConnector(BaseDestinationHandler):
         except Exception as e:
             logger.error("Database destination connection failed: %s", e)
             raise ConnectionError(f"Database connection failed: {e}") from e
-        # Bind the declared capability block only once the new runtime's
-        # transport is live, alongside the other per-connection state: a
-        # failed reconnect must not leave this runtime's declaration bound
-        # against the previous runtime's still-connected transport. (A
-        # malformed block already failed on the trusted side at config
-        # load; this parse re-validates at the process boundary.) Also
-        # attached to the dialect: its catalog gate (table_address /
-        # information_schema_ref) consults the declared fact at address
-        # construction.
-        try:
-            self._bind_capabilities(runtime)
-        except Exception:
-            # materialize() already acquired the runtime; the caller does
-            # not disconnect a handler whose connect() raised, so release
-            # the ref here to keep the lifecycle balanced (same rule as
-            # the ADBC eager-open failure below). The close is guarded so
-            # a failing release can never mask the binding error the
-            # operator actually needs.
-            try:
-                await runtime.close()
-            except Exception:
-                logger.warning(
-                    "runtime release after a failed capability bind also "
-                    "failed; the binding error below is the root cause",
-                    exc_info=True,
-                )
-            raise
         self._driver = runtime.driver or ""
         # Reset prior-connection state so a long-lived handler that
         # reconnects across runtimes (e.g. tests) doesn't carry the

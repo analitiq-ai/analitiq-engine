@@ -234,7 +234,8 @@ class TestSqlAlchemySessionInit:
         class _OrderProbeDialect(SqlDialect):
             name = "order-probe"
 
-            def __init__(self) -> None:
+            def __init__(self, capabilities=None) -> None:
+                super().__init__(capabilities)
                 self.user_version_during_tls: list[int] = []
 
             def build_tls_connect_arg(self, mode, ca_pem):

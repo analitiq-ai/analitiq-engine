@@ -345,14 +345,14 @@ class TestConfigureSchemaUpsertGate:
 
 class TestConnectBinding:
     @pytest.mark.asyncio
-    async def test_malformed_declaration_fails_at_connect_and_releases_runtime(
+    async def test_malformed_declaration_fails_before_anything_is_acquired(
         self,
     ):
         # The trusted side already parses at config load; connect()
-        # re-validates at the process boundary once the transport is live.
-        # materialize() acquired the runtime and the caller never
-        # disconnects a handler whose connect() raised, so the failed bind
-        # must release the ref itself.
+        # re-validates at the process boundary. The dialect the transport
+        # is built with must carry the declaration, so the parse runs
+        # before materialize() — a malformed block never reaches a
+        # transport, and there is no acquired runtime to release.
         handler = GenericSQLConnector()
         runtime = MagicMock()
         runtime.connector_id = "demo"
@@ -361,12 +361,14 @@ class TestConnectBinding:
         runtime.close = AsyncMock()
         from unittest.mock import patch
 
+        materialize = AsyncMock()
         with (
-            patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()),
+            patch("cdk.sql.generic.materialize_runtime", new=materialize),
             pytest.raises(SqlCapabilitiesError, match="sql_capabilities.catalog"),
         ):
             await handler.connect(runtime)
-        runtime.close.assert_awaited_once()
+        materialize.assert_not_awaited()
+        runtime.close.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_connect_binds_facade_and_dialect(self):
