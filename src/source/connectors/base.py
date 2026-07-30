@@ -191,12 +191,6 @@ class ConnectorConnectionError(ConnectorError):
     pass
 
 
-class SchemaError(ConnectorError):
-    """Exception raised for schema-related errors."""
-
-    pass
-
-
 class ReadError(ConnectorError):
     """Exception raised during read operations.
 
@@ -225,9 +219,3 @@ class TransientReadError(ConnectorError):
     def __init__(self, message: str, *, declared_category: str | None = None):
         super().__init__(message)
         self.declared_category = declared_category
-
-
-class WriteError(ConnectorError):
-    """Exception raised during write operations."""
-
-    pass
