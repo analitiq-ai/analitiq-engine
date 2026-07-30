@@ -3,9 +3,10 @@
 Every SQL write is stage-then-merge (spec sql-write-path section 2): land
 the batch in a stage table, then run exactly one mode statement from stage
 to target. :class:`StageCycle` owns that step order and everything hanging
-off it — the pre-flight drop, land verification, the drop after success or
-failure, the poisoning rule, and the honest orphan log — so no transport
-carries a second copy to drift from.
+off it — the pre-flight drop, the bulk-land dispatch with its fallback,
+land verification, the drop after success or failure, the poisoning rule,
+and the honest orphan log — so no transport carries a second copy to
+drift from. A transport supplies mechanisms, never rules.
 
 The cycle is the **sync body only**. It is handed a :class:`StageConnection`
 by a transport backend that has already put itself on a worker thread (or
@@ -36,6 +37,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol
 
 from cdk.adbc_registry import AdbcConfigurationError
@@ -94,30 +96,49 @@ def _stage_leftover_note(plan: StageWritePlan) -> str:
     )
 
 
-def consult_bulk_land(
+class BulkLandOutcome(Enum):
+    """What the connector's declared bulk mechanism did with a batch."""
+
+    #: No bulk mechanism is declared for this transport, so nothing ran.
+    UNDECLARED = "undeclared"
+    #: The declared mechanism claims it landed the whole batch.
+    LANDED = "landed"
+    #: The declared mechanism ran and refused this batch.
+    DECLINED = "declined"
+
+
+def offer_bulk_land(
     dialect: SqlDialect,
     conn: Any,
     plan: StageWritePlan,
     batch: pa.RecordBatch,
     *,
-    runtime: ConnectionRuntime,
-) -> bool:
+    runtime: ConnectionRuntime | None,
+    declared: bool,
+) -> BulkLandOutcome:
     """Offer the batch to the declared bulk mechanism; report what happened.
 
-    The hook is a pure speed slot — stage contents are identical either
-    way — and only a declared mechanism ever reaches it. A decline is
-    logged INFO before the caller falls back to executemany: a speed
-    downgrade is visible, never silent. *conn* is the backend's own native
-    connection object, which is what the hook's contract hands the dialect.
+    The one call into the untrusted hook, so "only a declared mechanism is
+    ever consulted" is stated once for every transport. *conn* is the
+    backend's own native connection object, which is what the hook's
+    contract hands the dialect, and *runtime* is the second half of that
+    contract — a declared mechanism reached without one means the backend
+    is landing before it connected, which is refused here rather than
+    handed to connector code as a ``None``. What follows a decline — the
+    fallback landing, the verification — is the cycle's rule, not a
+    transport's.
     """
+    if not declared:
+        return BulkLandOutcome.UNDECLARED
+    if runtime is None:
+        raise RuntimeError(
+            f"dialect {dialect.name!r} declares a bulk land mechanism but the "
+            f"backend reached it with no connection runtime; execute_write() "
+            f"ran before connect()"
+        )
     if dialect.bulk_land(conn, plan.stage, batch, runtime=runtime):
-        return True
-    logger.info(
-        "dialect %s declined the declared bulk land for %s; landing via executemany",
-        dialect.name,
-        dialect.quote_table(plan.stage),
-    )
-    return False
+        return BulkLandOutcome.LANDED
+    return BulkLandOutcome.DECLINED
 
 
 class StageConnection(Protocol):
@@ -131,15 +152,31 @@ class StageConnection(Protocol):
     def run_statement(self, sql: str, *, commit: bool) -> None:
         """Execute *sql*, committing it as its own unit when *commit*."""
 
-    def land_rows(self, plan: StageWritePlan, batch: pa.RecordBatch) -> int:
-        """Land *batch* into the stage; return the rows now staged.
+    def offer_bulk_land(
+        self, plan: StageWritePlan, batch: pa.RecordBatch
+    ) -> BulkLandOutcome:
+        """Offer *batch* to the connector's declared bulk mechanism.
 
-        Each transport lands its own way (``executemany``,
-        ``adbc_ingest``, a declared ``bulk_land`` mechanism). The returned
-        count is what the cycle verifies the batch against: a landing that
-        ran untrusted connector code reports what the stage actually
-        holds, so a mechanism that landed into the wrong place — or
-        partially, then declined — cannot ack a full batch.
+        Implemented by handing this transport's native connection to
+        :func:`offer_bulk_land`; a transport with no declared mechanism
+        reports :attr:`BulkLandOutcome.UNDECLARED` and lands nothing.
+        """
+
+    def land_batch(self, plan: StageWritePlan, batch: pa.RecordBatch) -> None:
+        """Land *batch* into the stage by this transport's own mechanism.
+
+        The CDK's own landing — ``executemany`` for SQLAlchemy,
+        ``adbc_ingest`` or ``executemany`` for ADBC — which is both the
+        undeclared path and the fallback the cycle runs when the declared
+        mechanism declines.
+        """
+
+    def stage_row_count(self, plan: StageWritePlan) -> int:
+        """Report the rows the stage actually holds.
+
+        Read back whenever the untrusted hook ran, so a mechanism that
+        landed into the wrong place — or partially, then declined —
+        cannot ack a full batch.
         """
 
     def commit(self) -> None:
@@ -259,17 +296,35 @@ class StageCycle:
     def _land(
         self, conn: StageConnection, plan: StageWritePlan, batch: pa.RecordBatch
     ) -> None:
-        """Land the batch and refuse a stage that is not the batch's.
+        """Dispatch the landing, then refuse a stage that is not the batch's.
 
-        A landing that ran untrusted connector code reports the stage's
-        real row count, so its claim — "landed" on a ``True`` return,
-        "landed nothing" on a decline — is checked before the mode
-        statement runs: a mechanism that landed into the wrong place (or
-        partially, then declined) would otherwise let a wrong stage ack a
-        full batch. A mismatch is a connector defect, refused loudly
-        before any target mutation.
+        One rule for every transport: the declared bulk mechanism gets
+        the batch first, a decline falls back to the transport's own
+        landing (logged INFO — a speed downgrade is visible, never
+        silent), and whenever untrusted connector code ran the stage's
+        real row count is read back and checked. Its claim — "landed" on
+        a ``True`` return, "landed nothing" on a decline — is verified
+        before the mode statement runs: a mechanism that landed into the
+        wrong place (or partially, then declined) would otherwise let a
+        wrong stage ack a full batch. A mismatch is a connector defect,
+        refused loudly before any target mutation.
+
+        Only the CDK's own mechanisms skip the read-back: they land the
+        batch they were handed, so the batch is its own count.
         """
-        landed = conn.land_rows(plan, batch)
+        outcome = conn.offer_bulk_land(plan, batch)
+        if outcome is BulkLandOutcome.UNDECLARED:
+            conn.land_batch(plan, batch)
+            return
+        if outcome is BulkLandOutcome.DECLINED:
+            logger.info(
+                "dialect %s declined the declared bulk land for %s; "
+                "landing via executemany",
+                self._dialect.name,
+                self._dialect.quote_table(plan.stage),
+            )
+            conn.land_batch(plan, batch)
+        landed = conn.stage_row_count(plan)
         if landed != batch.num_rows:
             raise AdbcConfigurationError(
                 f"dialect {self._dialect.name!r} bulk_land ran for "

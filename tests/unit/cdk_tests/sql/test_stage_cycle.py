@@ -32,6 +32,7 @@ from cdk.sql.capabilities import SqlCapabilities
 from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.stage_cycle import (
     LIVENESS_PROBE_SQL,
+    BulkLandOutcome,
     StageCycle,
     render_column_probe_sql,
     render_landing_insert_sql,
@@ -84,10 +85,12 @@ class _SqliteStageConnection:
 
     Everything a transport backend does for the cycle, done for real:
     statements execute, commits and rollbacks are the database's own, the
-    executemany landing binds the shared renderer's ``INSERT``. What it
-    adds is observability — the statements it was handed, and how often
-    the cycle committed, rolled back, or discarded it — plus a hook to
-    fail a chosen statement the way a driver would.
+    executemany landing binds the shared renderer's ``INSERT``, and the
+    row-count probe reads the stage the cycle just filled. What it adds
+    is observability — the statements it was handed, and how often the
+    cycle committed, rolled back, or discarded it — plus two injection
+    points: a hook to fail a chosen statement the way a driver would, and
+    a stand-in for a connector's declared bulk mechanism.
     """
 
     def __init__(
@@ -98,6 +101,7 @@ class _SqliteStageConnection:
         fail_hook=None,
         rollback_error=None,
         invalidate_error=None,
+        bulk=None,
     ):
         self._raw = raw
         self._dialect = dialect
@@ -108,11 +112,13 @@ class _SqliteStageConnection:
         # like; a discard that cannot run is a driver refusing to close.
         self._rollback_error = rollback_error
         self._invalidate_error = invalidate_error
+        # The connector's declared bulk mechanism, as untrusted code: it
+        # is handed the batch and answers "landed" (True) or "declined"
+        # (False). None is an undeclared family, which never offers.
+        self._bulk = bulk
         self._in_txn = False
-        #: A landing may be told to report a count that is not the
-        #: batch's, the way an untrusted bulk mechanism can.
-        self.land_report: int | None = None
         self.statements: list[str] = []
+        self.bulk_offers = 0
         self.commits = 0
         self.rollbacks = 0
         self.invalidations = 0
@@ -124,15 +130,26 @@ class _SqliteStageConnection:
         if commit:
             self.commit()
 
-    def land_rows(self, plan, batch: pa.RecordBatch) -> int:
+    def offer_bulk_land(self, plan, batch: pa.RecordBatch) -> BulkLandOutcome:
+        if self._bulk is None:
+            return BulkLandOutcome.UNDECLARED
+        self.bulk_offers += 1
+        if self._bulk(self, plan, batch):
+            return BulkLandOutcome.LANDED
+        return BulkLandOutcome.DECLINED
+
+    def land_batch(self, plan, batch: pa.RecordBatch) -> None:
         sql = render_landing_insert_sql(self._dialect, plan.stage, plan.columns)
         rows = [tuple(row[c] for c in plan.columns) for row in batch.to_pylist()]
         self.statements.append(sql)
         self._begin()
         self._raw.executemany(sql, rows)
-        if self.land_report is not None:
-            return self.land_report
-        return self._staged_rows(plan)
+
+    def stage_row_count(self, plan) -> int:
+        """Read what the stage holds, with the probe rendered above the seam."""
+        sql = render_row_count_sql(self._dialect, plan.stage)
+        self.statements.append(sql)
+        return int(self._raw.execute(sql).fetchone()[0])
 
     def commit(self) -> None:
         self.commits += 1
@@ -158,12 +175,6 @@ class _SqliteStageConnection:
         self._raw.close()
 
     # ---- the transport mechanics behind it ----------------------------
-
-    def _staged_rows(self, plan) -> int:
-        """Read what the stage holds, with the probe rendered above the seam."""
-        sql = render_row_count_sql(self._dialect, plan.stage)
-        self.statements.append(sql)
-        return int(self._raw.execute(sql).fetchone()[0])
 
     def _execute(self, sql: str) -> None:
         self.statements.append(sql)
@@ -278,6 +289,22 @@ def _fail_the_drops_after_the_mode_statement(plan, times: int):
     return hook
 
 
+def _declines(conn, plan, batch) -> bool:
+    """A declared mechanism that refuses this batch and lands nothing."""
+    return False
+
+
+def _claims_without_landing(conn, plan, batch) -> bool:
+    """Untrusted code claiming a land it never performed."""
+    return True
+
+
+def _lands_a_stray_row_then_declines(conn, plan, batch) -> bool:
+    """A mechanism that touches the stage and then refuses the batch."""
+    conn.land_batch(plan, pa.RecordBatch.from_pylist([{"id": 99, "name": "z"}]))
+    return False
+
+
 class TestPathScopedPoisoning:
     """Decision 2.1: every failed step of the non-transactional path
     discards the connection; the transactional path discards on exactly
@@ -383,10 +410,10 @@ class TestGenericProbesRenderedAboveTheSeam:
         # And a full cycle over a real database runs on those renderings
         # alone: the landing INSERT and the verification aggregate the
         # connection executed are the rendered strings, not text a
-        # backend composed.
+        # backend composed. A declining mechanism exercises both.
         caps = _caps(transactional=False)
         plan = _plan(dialect, caps)
-        conn = db.connection(dialect)
+        conn = db.connection(dialect, bulk=_declines)
         StageCycle(dialect).run(conn, plan, _batch())
         assert db.rows() == [(1, "a")]
         assert render_landing_insert_sql(dialect, plan.stage, plan.columns) in (
@@ -394,15 +421,62 @@ class TestGenericProbesRenderedAboveTheSeam:
         )
         assert render_row_count_sql(dialect, plan.stage) in conn.statements
 
-    def test_a_landing_that_does_not_match_the_batch_is_refused(self, db):
-        # What the verification exists for: the count the landing reports
-        # is checked against the batch before the mode statement runs, so
-        # an untrusted mechanism cannot ack rows it never landed.
+
+class TestBulkLandDispatch:
+    """The one dispatch rule, above both transports: the declared
+    mechanism gets the batch first, a decline falls back to the
+    transport's own landing, and whatever untrusted code ran is verified
+    against the stage's real row count before the mode statement."""
+
+    def test_an_undeclared_family_never_offers_and_never_re_counts(self, db):
+        # The CDK's own landing lands the batch it was handed, so the
+        # batch is its own count: no hook call, no verification probe.
         dialect = _SqliteDialect()
         caps = _caps(transactional=False)
         plan = _plan(dialect, caps)
         conn = db.connection(dialect)
-        conn.land_report = 0
+        StageCycle(dialect).run(conn, plan, _batch())
+        assert db.rows() == [(1, "a")]
+        assert conn.bulk_offers == 0
+        assert render_row_count_sql(dialect, plan.stage) not in conn.statements
+
+    def test_a_decline_falls_back_to_the_transport_landing_and_says_so(
+        self, db, caplog
+    ):
+        dialect = _SqliteDialect()
+        caps = _caps(transactional=False)
+        plan = _plan(dialect, caps)
+        conn = db.connection(dialect, bulk=_declines)
+        with caplog.at_level(logging.INFO, logger=CYCLE_LOGGER):
+            StageCycle(dialect).run(conn, plan, _batch())
+        assert conn.bulk_offers == 1
+        assert db.rows() == [(1, "a")]
+        # A speed downgrade is visible, never silent.
+        assert any(
+            "declined the declared bulk land" in r.getMessage() for r in caplog.records
+        )
+
+    def test_a_mechanism_that_lands_nothing_but_claims_it_is_refused(self, db):
+        # What the verification exists for: the stage's real count is
+        # checked against the batch before the mode statement runs, so an
+        # untrusted mechanism cannot ack rows it never landed.
+        dialect = _SqliteDialect()
+        caps = _caps(transactional=False)
+        plan = _plan(dialect, caps)
+        conn = db.connection(dialect, bulk=_claims_without_landing)
+        with pytest.raises(AdbcConfigurationError, match="did not land"):
+            StageCycle(dialect).run(conn, plan, _batch())
+        assert db.rows() == []
+        assert _stage_leftovers(db) == set()
+
+    def test_a_partial_landing_before_a_decline_is_refused(self, db):
+        # A decline must mean "landed nothing": rows left behind before
+        # returning False would be duplicated by the fallback, which the
+        # post-fallback count catches.
+        dialect = _SqliteDialect()
+        caps = _caps(transactional=False)
+        plan = _plan(dialect, caps)
+        conn = db.connection(dialect, bulk=_lands_a_stray_row_then_declines)
         with pytest.raises(AdbcConfigurationError, match="did not land"):
             StageCycle(dialect).run(conn, plan, _batch())
         assert db.rows() == []

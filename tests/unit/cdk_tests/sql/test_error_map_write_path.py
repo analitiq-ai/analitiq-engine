@@ -15,7 +15,7 @@ import pytest
 
 from cdk.adbc_registry import AdbcConfigurationError
 from cdk.declarations import parse_declared_error_map
-from cdk.sql.adbc_backend import AdbcBackend
+from cdk.sql.adbc_backend import AdbcBackend, _AdbcStageConnection
 from cdk.sql.backend import StageWritePlan
 from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.generic import GenericSQLConnector
@@ -236,25 +236,42 @@ def _plan(columns, rows_per_statement):
     )
 
 
+def _unused(*args, **kwargs):
+    """A collaborator the executemany landing must never reach."""
+    raise AssertionError(
+        "the executemany landing needs neither the ingest guard nor a discard"
+    )
+
+
 class TestAdbcChunking:
     def _batch(self, n):
         return pa.RecordBatch.from_pydict(
             {"id": list(range(n)), "v": [f"v{i}" for i in range(n)]}
         )
 
+    def _stage_connection(self, conn):
+        return _AdbcStageConnection(
+            conn,
+            dialect=SqlDialect(),
+            runtime=None,
+            bulk_load="none",
+            check_session_schema=_unused,
+            discard=_unused,
+        )
+
     def test_chunked_landing_never_exceeds_the_cap(self):
-        backend = AdbcBackend(SqlDialect())
         conn = _RecordingConn()
-        backend._executemany_land(conn, _plan(["id", "v"], 4), self._batch(10))
+        self._stage_connection(conn).land_batch(_plan(["id", "v"], 4), self._batch(10))
         sizes = [len(rows) for _, rows in conn.executemany_calls]
         assert sizes == [4, 4, 2]
         landed = [row for _, rows in conn.executemany_calls for row in rows]
         assert landed == [(i, f"v{i}") for i in range(10)]
 
     def test_undeclared_cap_lands_in_one_statement(self):
-        backend = AdbcBackend(SqlDialect())
         conn = _RecordingConn()
-        backend._executemany_land(conn, _plan(["id", "v"], None), self._batch(10))
+        self._stage_connection(conn).land_batch(
+            _plan(["id", "v"], None), self._batch(10)
+        )
         assert len(conn.executemany_calls) == 1
 
 
@@ -264,23 +281,30 @@ class TestSqlAlchemyChunking:
             {"id": list(range(n)), "v": [f"v{i}" for i in range(n)]}
         )
 
-    def _backend_with_recording_conn(self):
-        from cdk.sql.sqlalchemy_backend import SqlAlchemyBackend
+    def _stage_connection_with_recording_conn(self):
+        from cdk.sql.sqlalchemy_backend import _SqlAlchemyStageConnection
 
-        backend = SqlAlchemyBackend(SqlDialect())
-        stage_table = MagicMock()
-        backend._stage_table = MagicMock(return_value=stage_table)
         conn = MagicMock()
-        return backend, conn
+        stage_table = MagicMock()
+        return (
+            _SqlAlchemyStageConnection(
+                conn,
+                dialect=SqlDialect(),
+                runtime=None,
+                bulk_declared=False,
+                stage_table=lambda _conn, _plan: stage_table,
+            ),
+            conn,
+        )
 
     def test_chunked_landing_never_exceeds_the_cap(self):
-        backend, conn = self._backend_with_recording_conn()
-        backend._executemany_land(conn, _plan(["id", "v"], 4), self._batch(10))
+        stage_conn, conn = self._stage_connection_with_recording_conn()
+        stage_conn.land_batch(_plan(["id", "v"], 4), self._batch(10))
         sizes = [len(call.args[1]) for call in conn.execute.call_args_list]
         assert sizes == [4, 4, 2]
 
     def test_undeclared_cap_lands_in_one_statement(self):
-        backend, conn = self._backend_with_recording_conn()
-        backend._executemany_land(conn, _plan(["id", "v"], None), self._batch(10))
+        stage_conn, conn = self._stage_connection_with_recording_conn()
+        stage_conn.land_batch(_plan(["id", "v"], None), self._batch(10))
         assert len(conn.execute.call_args_list) == 1
         assert len(conn.execute.call_args_list[0].args[1]) == 10

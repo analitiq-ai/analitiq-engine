@@ -168,31 +168,46 @@ class TransportBackend(ABC):
 
 **The step order is not a backend's either.** `StageCycle` owns it once
 above both transports: the pre-flight drop, the stage creation, the
-landing and its verification, the optional target-emptying statement, the
-mode statement, the drop after success or failure, the poisoning rule
-(§6) and the honest orphan log. It is a sync object — the cycle is
-already on a worker thread (or inside `AsyncConnection.run_sync`) when it
-starts — handed the live connection as a `StageConnection`:
+bulk-land dispatch, the landing and its verification, the optional
+target-emptying statement, the mode statement, the drop after success or
+failure, the poisoning rule (§6) and the honest orphan log. It is a sync
+object — the cycle is already on a worker thread (or inside
+`AsyncConnection.run_sync`) when it starts — handed the live connection
+as a `StageConnection`:
 
 ```python
 class StageConnection(Protocol):
     def run_statement(self, sql: str, *, commit: bool) -> None: ...
-    def land_rows(self, plan: StageWritePlan, batch: pa.RecordBatch) -> int: ...
+    def offer_bulk_land(self, plan: StageWritePlan,
+                        batch: pa.RecordBatch) -> BulkLandOutcome: ...
+    def land_batch(self, plan: StageWritePlan, batch: pa.RecordBatch) -> None: ...
+    def stage_row_count(self, plan: StageWritePlan) -> int: ...
     def commit(self) -> None: ...
     def rollback(self) -> None: ...
     def invalidate(self) -> None: ...
 ```
 
-`land_rows` returns the rows now staged, so land verification is one copy
-in the cycle while each transport still lands its own way (executemany,
-`adbc_ingest`, a declared bulk mechanism); a landing that ran the
-untrusted `bulk_land` hook reports what the stage actually holds, and a
-count that is not the batch's is refused before any target mutation. The
-session-schema guard (§4) is inside the ADBC transport's `land_rows`, a
-precondition of that transport's ingest mode rather than a cycle step.
-`commit` and `rollback` are what let one body express both transaction
-shapes; `invalidate` is how a transport satisfies the poisoning rule —
-discarding a pooled SQLAlchemy connection, closing the cached ADBC handle.
+**A transport supplies mechanisms; the cycle supplies the rules.**
+`offer_bulk_land` hands the batch to the connector's declared mechanism
+and answers `LANDED`, `DECLINED` or `UNDECLARED`; `land_batch` is the
+transport's own landing (executemany, `adbc_ingest`); `stage_row_count`
+reads what the stage holds. What is done with those three — declared
+mechanism first, a decline falling back to `land_batch` with an INFO log,
+and a read-back verification whenever untrusted code ran, refused before
+any target mutation if the count is not the batch's — is one copy in the
+cycle, not a copy per transport. The CDK's own mechanisms skip the
+read-back: they land the batch they were handed. The session-schema guard
+(§4) is inside the ADBC transport's `land_batch`, a precondition of that
+transport's ingest mode rather than a cycle step. `commit` and `rollback`
+are what let one body express both transaction shapes; `invalidate` is
+how a transport satisfies the poisoning rule — discarding a pooled
+SQLAlchemy connection, closing the cached ADBC handle.
+
+The object satisfying the protocol owns its transport's landing outright
+and holds no handle back into its backend: what outlives one cycle — the
+reflected target cache, the ADBC session-schema probe cache, the cached
+handle a discard drops — reaches it as a named constructor argument, so
+the protocol is satisfiable from its own declaration.
 
 `execute_write` stays on the backend rather than moving into the cycle:
 the SQLAlchemy backend shields its thread future and re-awaits on
@@ -247,7 +262,7 @@ def merge_statement_sql(self, stage: TableAddress, target: TableAddress,
 def bulk_land(self, conn: Any, stage: TableAddress, batch: pa.RecordBatch,
               *, runtime: ConnectionRuntime) -> bool:
     """Native bulk load into the stage. Return True if landed; False
-    declines and the backend falls back to executemany (logged INFO).
+    declines and the cycle falls back to executemany (logged INFO).
     Called only when the connector declares a bulk mechanism (section 5);
     conn is the backend's native connection object. runtime is the same
     resolved ConnectionRuntime the backend connected with: a dialect whose

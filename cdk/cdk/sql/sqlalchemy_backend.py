@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Column, MetaData, Table
@@ -24,8 +24,9 @@ from .backend import StageWritePlan, TransportBackend, iter_landing_chunks
 from .dialects import SqlDialect, TableAddress
 from .stage_cycle import (
     LIVENESS_PROBE_SQL,
+    BulkLandOutcome,
     StageCycle,
-    consult_bulk_land,
+    offer_bulk_land,
     render_row_count_sql,
 )
 
@@ -175,12 +176,24 @@ class SqlAlchemyBackend(TransportBackend):
         self, conn: Connection, plan: StageWritePlan, batch: pa.RecordBatch
     ) -> None:
         """Hand the shared cycle this flavor's live sync ``Connection``."""
-        self._cycle.run(_SqlAlchemyStageConnection(self, conn), plan, batch)
+        self._cycle.run(
+            _SqlAlchemyStageConnection(
+                conn,
+                dialect=self._dialect,
+                runtime=self._runtime,
+                bulk_declared=self._bulk_declared,
+                stage_table=self._stage_table,
+            ),
+            plan,
+            batch,
+        )
 
     def _run_ddl_sync(self, statements: list[str]) -> None:
         with self._require_sync_engine().begin() as conn:
             for stmt in statements:
                 conn.exec_driver_sql(stmt)
+
+    # ---- target reflection ---------------------------------------------
 
     def _reflect_on_sync_engine(self, target: TableAddress) -> Table:
         with self._require_sync_engine().connect() as conn:
@@ -194,54 +207,6 @@ class SqlAlchemyBackend(TransportBackend):
             autoload_with=conn,
             schema=target.schema or None,
         )
-
-    # ---- landing ------------------------------------------------------
-
-    def _land(
-        self, conn: Connection, plan: StageWritePlan, batch: pa.RecordBatch
-    ) -> int:
-        """Land the batch into the stage: declared bulk mechanism first.
-
-        Returns the rows the cycle verifies against the batch. A landing
-        that consulted the dialect's untrusted ``bulk_land`` hook reports
-        what the stage actually holds — on a claimed land and on a
-        decline alike, since a connector that touched the stage before
-        declining would otherwise duplicate rows under the executemany
-        fallback. The plain executemany landing is the CDK's own and
-        reports the batch it just bound.
-        """
-        if self._bulk_declared:
-            if self._runtime is None:
-                raise RuntimeError(
-                    "SqlAlchemyBackend.execute_write() called before connect()"
-                )
-            if not consult_bulk_land(
-                self._dialect, conn, plan, batch, runtime=self._runtime
-            ):
-                self._executemany_land(conn, plan, batch)
-            return self._stage_row_count(conn, plan)
-        self._executemany_land(conn, plan, batch)
-        return int(batch.num_rows)
-
-    def _executemany_land(
-        self, conn: Connection, plan: StageWritePlan, batch: pa.RecordBatch
-    ) -> None:
-        """Land via executemany ``INSERT`` in plan column order (the default).
-
-        Chunked by the plan's ``rows_per_statement`` so no statement exceeds
-        the connector's declared bind-parameter cap (issue #401); an
-        undeclared cap lands the whole batch in one statement.
-        """
-        stage_table = self._stage_table(conn, plan)
-        records: list[dict[str, Any]] = batch.to_pylist()
-        for chunk in iter_landing_chunks(records, plan.rows_per_statement):
-            conn.execute(stage_table.insert(), list(chunk))
-
-    def _stage_row_count(self, conn: Connection, plan: StageWritePlan) -> int:
-        count = conn.exec_driver_sql(
-            render_row_count_sql(self._dialect, plan.stage)
-        ).scalar_one()
-        return int(count)
 
     def _stage_table(self, conn: Connection, plan: StageWritePlan) -> Table:
         """Build a lightweight stage ``Table`` with the target's column types.
@@ -296,11 +261,28 @@ class _SqlAlchemyStageConnection:
     transactional path's steps join one transaction and the closing
     :meth:`commit` ends it; on the non-transactional path each step
     commits its own unit.
+
+    It owns this transport's landing outright and holds no handle back
+    into the backend: what it cannot derive from the live connection —
+    the declared-mechanism flag, the runtime the hook's contract passes,
+    and the stage-table factory, which reads the target reflection the
+    backend caches across cycles — arrives as a named argument.
     """
 
-    def __init__(self, backend: SqlAlchemyBackend, conn: Connection) -> None:
-        self._backend = backend
+    def __init__(
+        self,
+        conn: Connection,
+        *,
+        dialect: SqlDialect,
+        runtime: ConnectionRuntime | None,
+        bulk_declared: bool,
+        stage_table: Callable[[Connection, StageWritePlan], Table],
+    ) -> None:
         self._conn = conn
+        self._dialect = dialect
+        self._runtime = runtime
+        self._bulk_declared = bulk_declared
+        self._stage_table = stage_table
 
     def run_statement(self, sql: str, *, commit: bool) -> None:
         """Execute *sql*, committing it as its own unit when *commit*."""
@@ -308,9 +290,37 @@ class _SqlAlchemyStageConnection:
         if commit:
             self.commit()
 
-    def land_rows(self, plan: StageWritePlan, batch: pa.RecordBatch) -> int:
-        """Land *batch* by the declared mechanism; report the staged rows."""
-        return self._backend._land(self._conn, plan, batch)
+    def offer_bulk_land(
+        self, plan: StageWritePlan, batch: pa.RecordBatch
+    ) -> BulkLandOutcome:
+        """Offer *batch* to the connector's declared bulk mechanism."""
+        return offer_bulk_land(
+            self._dialect,
+            self._conn,
+            plan,
+            batch,
+            runtime=self._runtime,
+            declared=self._bulk_declared,
+        )
+
+    def land_batch(self, plan: StageWritePlan, batch: pa.RecordBatch) -> None:
+        """Land via executemany ``INSERT`` in plan column order (the default).
+
+        Chunked by the plan's ``rows_per_statement`` so no statement exceeds
+        the connector's declared bind-parameter cap (issue #401); an
+        undeclared cap lands the whole batch in one statement.
+        """
+        stage_table = self._stage_table(self._conn, plan)
+        records: list[dict[str, Any]] = batch.to_pylist()
+        for chunk in iter_landing_chunks(records, plan.rows_per_statement):
+            self._conn.execute(stage_table.insert(), list(chunk))
+
+    def stage_row_count(self, plan: StageWritePlan) -> int:
+        """Read what the stage actually holds, for the cycle to verify."""
+        count = self._conn.exec_driver_sql(
+            render_row_count_sql(self._dialect, plan.stage)
+        ).scalar_one()
+        return int(count)
 
     def commit(self) -> None:
         """Commit the connection's current transaction."""
