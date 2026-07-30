@@ -16,6 +16,7 @@ already carries its connector's declaration.
 from __future__ import annotations
 
 import ast
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -119,6 +120,23 @@ class TestOneBindingSite:
             class _ClosedDialect(SqlDialect):
                 def __init__(self) -> None:
                     super().__init__()
+
+    def test_a_constructor_that_swallows_the_declaration_is_undeclared(self):
+        # A constructor that takes the declaration and then drops it is a
+        # connector defect no signature check can see. It yields an
+        # undeclared dialect -- the state every gate already refuses loudly
+        # on -- rather than an AttributeError from a missing attribute.
+        class _ForgetfulDialect(SqlDialect):
+            def __init__(self, capabilities=None) -> None:
+                pass
+
+        runtime = MagicMock()
+        runtime.connector_id = "demo"
+        runtime.declared_sql_capabilities = caps_block(catalog="full")
+        built = _ForgetfulDialect.for_runtime(runtime)
+        assert built.capabilities is None
+        with pytest.raises(CatalogAddressingError):
+            built.table_address("orders", schema="ds", catalog="proj")
 
     def test_a_constructor_that_forwards_the_declaration_is_allowed(self):
         class _ExtraStateDialect(SqlDialect):
@@ -326,6 +344,25 @@ class TestEveryConsumerPathCarriesTheDeclaration:
 
         first.disconnect.assert_awaited_once()
         assert connector._backend is not first
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_backend_close_stops_the_reconnect(self):
+        # _close_backend swallows CancelledError so the caller can finish its
+        # own releases, and hands it back to be re-raised. connect() must
+        # honour it: acquiring a new transport inside a cancelled task would
+        # hand a live connection to a caller that already stopped waiting.
+        connector = GenericSQLConnector()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()):
+            await connector.connect(_connectable_runtime())
+        first = connector._backend
+        assert first is not None
+        first.disconnect = AsyncMock(side_effect=asyncio.CancelledError())
+
+        acquire = AsyncMock()
+        with patch("cdk.sql.generic.materialize_runtime", new=acquire):
+            with pytest.raises(asyncio.CancelledError):
+                await connector.connect(_connectable_runtime())
+        acquire.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_a_failing_backend_close_does_not_stop_the_reconnect(self):

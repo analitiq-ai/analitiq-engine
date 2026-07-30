@@ -140,6 +140,15 @@ class SqlDialect:
     #: readable name tails.
     max_identifier_length: int = 63
 
+    #: Declared here as well as assigned in ``__init__`` so the attribute
+    #: always exists. A package constructor that takes the declaration and
+    #: then drops it (``def __init__(self, capabilities=None): pass``) is a
+    #: connector defect no signature check can see; without this it would
+    #: surface as an ``AttributeError`` deep in a gate. With it, such a
+    #: dialect is simply undeclared — the state every gate already refuses
+    #: loudly and actionably on.
+    _capabilities: SqlCapabilities | None = None
+
     def __init__(self, capabilities: SqlCapabilities | None = None) -> None:
         """Construct a dialect that carries *capabilities* for its lifetime.
 

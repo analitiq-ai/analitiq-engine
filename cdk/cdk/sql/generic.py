@@ -694,7 +694,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         # previous backend, so nulling it would leave an ADBC connection
         # open for the life of the process. A close failure is logged
         # inside; it must not stop this connect from proceeding.
-        await self._close_backend()
+        cancelled = await self._close_backend()
+        if cancelled is not None:
+            # The close was cancelled, so this connect() is already running
+            # inside a cancelled task. Going on to acquire a transport would
+            # hand a live connection back to a caller that stopped waiting.
+            raise cancelled
         # Build this runtime's dialect before the transport, in the order
         # the source entry (read_batches) already uses: the factory hands
         # the dialect to hooks that fire later — verify_tls_state on every
