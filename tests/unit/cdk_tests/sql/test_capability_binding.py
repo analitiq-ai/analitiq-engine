@@ -127,7 +127,14 @@ class TestOneBindingSite:
         # undeclared dialect -- the state every gate already refuses loudly
         # on -- rather than an AttributeError from a missing attribute.
         class _ForgetfulDialect(SqlDialect):
-            def __init__(self, capabilities=None) -> None:
+            # An empty body that never reaches super().__init__ is the
+            # defect under test, not an oversight in the fixture: this
+            # models the connector package whose constructor accepts the
+            # declaration and drops it. Writing it correctly would leave
+            # the assertions below with nothing to prove.
+            def __init__(  # skipcq: PTC-W0049, PYL-W0231
+                self, capabilities=None
+            ) -> None:
                 pass
 
         runtime = MagicMock()
@@ -359,9 +366,10 @@ class TestEveryConsumerPathCarriesTheDeclaration:
         first.disconnect = AsyncMock(side_effect=asyncio.CancelledError())
 
         acquire = AsyncMock()
-        with patch("cdk.sql.generic.materialize_runtime", new=acquire):
-            with pytest.raises(asyncio.CancelledError):
-                await connector.connect(_connectable_runtime())
+        with patch("cdk.sql.generic.materialize_runtime", new=acquire), pytest.raises(
+            asyncio.CancelledError
+        ):
+            await connector.connect(_connectable_runtime())
         acquire.assert_not_awaited()
 
     @pytest.mark.asyncio
