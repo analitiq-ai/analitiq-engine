@@ -226,6 +226,7 @@ class PipelineRunner:
         pipeline_config = None
         records_processed = 0
         records_failed = 0
+        records_skipped = 0
         batches_processed = 0
         status = "failed"
         error_code: ErrorCode | None = None
@@ -285,6 +286,7 @@ class PipelineRunner:
             records_processed = getattr(metrics, "records_processed", 0)
             batches_processed = getattr(metrics, "batches_processed", 0)
             records_failed = getattr(metrics, "records_failed", 0)
+            records_skipped = metrics.records_skipped
             streams_failed = getattr(metrics, "streams_failed", 0)
 
             logger.info(f"Records processed: {records_processed}")
@@ -333,9 +335,10 @@ class PipelineRunner:
                 error_message = customer_message(error_code)
                 # 'skip' drops exhausted batches without a DLQ entry, so those
                 # records are NOT recoverable; do not point operators at the DLQ.
-                if getattr(metrics, "records_skipped", 0) > 0:
+                if records_skipped > 0:
                     logger.warning(
-                        f"Skipped {records_failed} records (dropped, not dead-lettered)"
+                        f"Skipped {records_skipped} records "
+                        "(dropped, not dead-lettered)"
                     )
                     reason = "records skipped (dropped) after retries"
                 else:
@@ -390,6 +393,7 @@ class PipelineRunner:
                     end_time=end_time,
                     records_processed=records_processed,
                     records_failed=records_failed,
+                    records_skipped=records_skipped,
                     batches_processed=batches_processed,
                     status=status,
                     error_code=error_code,

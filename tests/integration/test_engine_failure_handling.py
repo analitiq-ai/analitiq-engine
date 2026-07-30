@@ -5,7 +5,10 @@ properly propagate to mark streams and pipelines as failed.
 """
 
 import asyncio
+import json
+import logging
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -32,6 +35,7 @@ from src.state.error_classification import (
     read_failure_tag,
     tag_failure,
 )
+from src.state.metrics_storage import save_pipeline_metrics
 
 
 @dataclass
@@ -86,6 +90,60 @@ def _make_processor(
     processor.stream_dlq = stream_dlq
     processor.run_id = "test-run-001"
     return processor
+
+
+async def _skip_one_batch(
+    mock_grpc_client: AsyncMock,
+    stream_config: dict[str, Any],
+    dlq_path: str,
+    pipeline_metrics: PipelineMetrics,
+) -> tuple[StreamProcessor, Any]:
+    """Drive one single-record batch to retry exhaustion under 'skip'.
+
+    Returns the processor and its dead letter queue (which must stay empty --
+    a skipped batch is dropped, not dead-lettered).
+    """
+    from src.state.dead_letter_queue import DeadLetterQueue
+
+    input_queue: asyncio.Queue = asyncio.Queue()
+    output_queue: asyncio.Queue = asyncio.Queue()
+    await input_queue.put(pa.RecordBatch.from_pylist([{"id": 1}]))
+    await input_queue.put(None)
+
+    mock_grpc_client.send_batch = AsyncMock(
+        return_value=MockBatchResult(
+            success=False,
+            status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+            records_written=0,
+            committed_cursor=None,
+            failed_record_ids=[],
+            failure_summary="Connection timeout",
+        )
+    )
+    stream_dlq = DeadLetterQueue(dlq_path)
+    processor = _make_processor(
+        dict(stream_config),
+        mock_grpc_client,
+        stream_dlq,
+        error_strategy="skip",
+        retry_delay=0.01,
+        pipeline_metrics=pipeline_metrics,
+    )
+
+    # Must NOT raise: the strategy drops the batch and continues.
+    await processor._load_stage(input_queue, output_queue)
+    return processor, stream_dlq
+
+
+def _emitted_metrics_payloads(caplog) -> dict[str, dict[str, Any]]:
+    """Parse captured ``ANALITIQ_METRICS::{json}`` lines, keyed by record type."""
+    payloads = {}
+    for record in caplog.records:
+        marker, sep, payload = record.getMessage().partition("::")
+        if sep and marker == "ANALITIQ_METRICS":
+            parsed = json.loads(payload)
+            payloads[parsed["type"]] = parsed
+    return payloads
 
 
 @pytest.fixture
@@ -747,38 +805,13 @@ class TestEngineFatalFailureHandling:
     ):
         """With error_strategy='skip', exhausting retries drops the batch and
         continues (no raise, no DLQ), but logs and counts it as failed."""
-        from src.state.dead_letter_queue import DeadLetterQueue
-
-        input_queue = asyncio.Queue()
-        output_queue = asyncio.Queue()
-
-        test_batch = pa.RecordBatch.from_pylist([{"id": 1}])
-        await input_queue.put(test_batch)
-        await input_queue.put(None)
-
-        retryable_result = MockBatchResult(
-            success=False,
-            status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
-            records_written=0,
-            committed_cursor=None,
-            failed_record_ids=[],
-            failure_summary="Connection timeout",
-        )
-        mock_grpc_client.send_batch = AsyncMock(return_value=retryable_result)
-
-        stream_dlq = DeadLetterQueue(f"{temp_dir}/dlq")
         pipeline_metrics = PipelineMetrics()
-        processor = _make_processor(
-            dict(sample_stream_config),
+        processor, stream_dlq = await _skip_one_batch(
             mock_grpc_client,
-            stream_dlq,
-            error_strategy="skip",
-            retry_delay=0.01,
-            pipeline_metrics=pipeline_metrics,
+            sample_stream_config,
+            f"{temp_dir}/dlq",
+            pipeline_metrics,
         )
-
-        # Must NOT raise.
-        await processor._load_stage(input_queue, output_queue)
 
         # Skipped: not dead-lettered, but counted as failed AND tracked as
         # skipped (distinct from DLQ'd) at both stream and pipeline level so
@@ -788,6 +821,67 @@ class TestEngineFatalFailureHandling:
         assert processor.metrics.records_skipped == 1
         assert processor.metrics.records_failed == 1
         assert pipeline_metrics.records_skipped == 1
+
+    @pytest.mark.asyncio
+    async def test_skipped_count_reaches_both_emitted_metrics_records(
+        self,
+        mock_grpc_client: AsyncMock,
+        sample_stream_config: dict[str, Any],
+        temp_dir: str,
+        caplog,
+        monkeypatch,
+    ):
+        """The dropped-record count must reach the emitted metrics records, not
+        only the log prose (issue #423). Both emission paths carry it: the
+        stream record built by create_metrics_record, and the pipeline record
+        emitted by save_pipeline_metrics."""
+        monkeypatch.setenv("METRICS_ENABLED", "true")
+        pipeline_metrics = PipelineMetrics()
+
+        with caplog.at_level(logging.WARNING, logger="src.engine.stream_processor"):
+            processor, _ = await _skip_one_batch(
+                mock_grpc_client,
+                sample_stream_config,
+                f"{temp_dir}/dlq",
+                pipeline_metrics,
+            )
+
+        dropped_lines = [
+            record.getMessage()
+            for record in caplog.records
+            if "records dropped" in record.getMessage()
+        ]
+        assert len(dropped_lines) == 1
+        assert "1 records dropped" in dropped_lines[0]
+
+        start_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        end_time = start_time + timedelta(seconds=5)
+
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="src.state.log_emitter"):
+            processor._emit_stream_metrics(
+                status="partial",
+                error_code=ErrorCode.DESTINATION_WRITE_FAILED,
+                error_message="destination write failed",
+                error_detail="DESTINATION_WRITE_FAILED",
+                start_time=start_time,
+                end_time=end_time,
+            )
+            save_pipeline_metrics(
+                run_id="test-run-001",
+                pipeline_id="test-pipeline",
+                start_time=start_time,
+                end_time=end_time,
+                records_processed=pipeline_metrics.records_processed,
+                records_failed=pipeline_metrics.records_failed,
+                records_skipped=pipeline_metrics.records_skipped,
+                status="partial",
+            )
+
+        emitted = _emitted_metrics_payloads(caplog)
+        # The count in each record is the one the log line reported.
+        assert emitted["stream"]["records_skipped"] == 1
+        assert emitted["pipeline"]["records_skipped"] == 1
 
     @pytest.mark.asyncio
     async def test_load_stage_unhandled_strategy_raises(
