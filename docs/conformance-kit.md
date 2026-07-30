@@ -73,7 +73,11 @@ with no connector code installed:
   header with no input declaring `storage: secrets` under that name is a
   connection that can never be built. So is one reading an input the
   contract declares *optional with no default* — a user may leave it
-  blank, and an http field resolves strictly.
+  blank, and an http field resolves strictly. And no read may name a
+  `transport_ref` other than the default: the contract allows the
+  selection, the CDK's API path does not make it (it opens one connection
+  at connect time), so such a read would go out on the wrong origin and
+  still succeed.
 - **The declared auth reaches the wire.** The only auth behaviour the CDK
   executes is resolving credential material into the request the transport
   opens (`authorize` / `token_exchange` / `refresh` are the control
