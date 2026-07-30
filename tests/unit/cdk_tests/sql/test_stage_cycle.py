@@ -90,12 +90,24 @@ class _SqliteStageConnection:
     fail a chosen statement the way a driver would.
     """
 
-    def __init__(self, raw: sqlite3.Connection, dialect: SqlDialect, *, fail_hook=None):
+    def __init__(
+        self,
+        raw: sqlite3.Connection,
+        dialect: SqlDialect,
+        *,
+        fail_hook=None,
+        rollback_error=None,
+        invalidate_error=None,
+    ):
         self._raw = raw
         self._dialect = dialect
         # Called with each statement before it runs; raises to inject the
         # driver failure a test is about.
         self._fail_hook = fail_hook
+        # A rollback that cannot run is what a broken connection looks
+        # like; a discard that cannot run is a driver refusing to close.
+        self._rollback_error = rollback_error
+        self._invalidate_error = invalidate_error
         self._in_txn = False
         #: A landing may be told to report a count that is not the
         #: batch's, the way an untrusted bulk mechanism can.
@@ -130,12 +142,16 @@ class _SqliteStageConnection:
 
     def rollback(self) -> None:
         self.rollbacks += 1
+        if self._rollback_error is not None:
+            raise self._rollback_error
         if self._in_txn:
             self._raw.rollback()
             self._in_txn = False
 
     def invalidate(self) -> None:
         self.invalidations += 1
+        if self._invalidate_error is not None:
+            raise self._invalidate_error
         # Closing discards the connection and any transaction on it,
         # which is what every transport's poison amounts to.
         self._in_txn = False
@@ -264,7 +280,8 @@ def _fail_the_drops_after_the_mode_statement(plan, times: int):
 
 class TestPathScopedPoisoning:
     """Decision 2.1: every failed step of the non-transactional path
-    discards the connection; no step of the transactional path does."""
+    discards the connection; the transactional path discards on exactly
+    one thing — a rollback that itself fails."""
 
     def test_a_failed_step_poisons_only_the_non_transactional_path(self, db):
         dialect = _SqliteDialect()
@@ -311,10 +328,37 @@ class TestPathScopedPoisoning:
             StageCycle(dialect).run(conn, plan, _batch())
         assert db.rows() == [(1, "a")]
         assert conn.invalidations == 1
-        warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        warnings = [
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        ]
         assert len(warnings) == 1
         assert plan.stage.table in warnings[0]
         assert "orphaned" in warnings[0]
+
+    def test_a_failed_rollback_discards_the_transactional_connection(self, db, caplog):
+        # The one transactional-path discard. A rollback that cannot run
+        # is evidence about the connection, not about the batch, and a
+        # transport that owns its cached handle (ADBC) would otherwise
+        # hand a dead connection, holding an open transaction, to every
+        # later batch of the run.
+        dialect = _SqliteDialect()
+        caps = _caps(transactional=True)
+        plan = _plan(dialect, caps)
+        conn = db.connection(
+            dialect,
+            fail_hook=_fail_statement(plan.mode_sql),
+            rollback_error=_StatementFailure("driver refused: ROLLBACK"),
+        )
+        with (
+            caplog.at_level(logging.WARNING, logger=CYCLE_LOGGER),
+            pytest.raises(_StatementFailure) as failure,
+        ):
+            StageCycle(dialect).run(conn, plan, _batch())
+        # The batch still fails with the step's own error, never the
+        # cleanup's.
+        assert plan.mode_sql in str(failure.value)
+        assert conn.invalidations == 1
+        assert "is discarded" in "\n".join(r.getMessage() for r in caplog.records)
 
 
 class TestGenericProbesRenderedAboveTheSeam:
@@ -397,10 +441,13 @@ class TestCleanupRules:
         # The batch fails with the step's own error and the stage is gone.
         assert _stage_leftovers(db) == set()
 
-    def test_a_failed_cleanup_drop_logs_the_scope_accurate_consequence(self, db, caplog):
+    def test_a_failed_cleanup_drop_logs_the_scope_accurate_consequence(
+        self, db, caplog
+    ):
         dialect = _SqliteDialect()
         caps = _caps(transactional=False)
         plan = _plan(dialect, caps)
+
         def fail_the_mode_then_the_cleanup_drop(statement: str) -> None:
             if statement == plan.mode_sql:
                 raise _StatementFailure("driver refused: the mode statement")
@@ -420,6 +467,55 @@ class TestCleanupRules:
         )
         assert "pre-flight drop" in message
         assert "manual drop" in message
+
+    def test_a_failed_rollback_says_the_drop_was_never_attempted(self, db, caplog):
+        # The cleanup's first step is a rollback; when that fails the
+        # drop cannot run, and the log says exactly that instead of
+        # claiming a cleanup that never happened. Temp scope, so the
+        # honest consequence names the session, not a manual drop.
+        dialect = _SqliteDialect()
+        caps = _caps(transactional=False, scope="temp")
+        plan = _plan(dialect, caps)
+        conn = db.connection(
+            dialect,
+            fail_hook=_fail_statement(plan.mode_sql),
+            rollback_error=_StatementFailure("driver refused: ROLLBACK"),
+        )
+        with (
+            caplog.at_level(logging.WARNING, logger=CYCLE_LOGGER),
+            pytest.raises(_StatementFailure) as failure,
+        ):
+            StageCycle(dialect).run(conn, plan, _batch())
+        assert plan.mode_sql in str(failure.value)
+        message = "\n".join(r.getMessage() for r in caplog.records)
+        assert "was not attempted" in message
+        assert "dies with the connection" in message
+        assert "manual drop" not in message
+        # Only the pre-flight drop ever ran, and the handle is discarded.
+        assert conn.statements.count(plan.drop_stage_sql) == 1
+        assert conn.invalidations == 1
+
+    def test_a_failing_discard_never_masks_the_batch_failure(self, db, caplog):
+        # The discard is best-effort for the same reason the drop is: the
+        # retry verdict belongs to the write failure, not to a connection
+        # that would not close. The pool keeping the handle is logged.
+        dialect = _SqliteDialect()
+        caps = _caps(transactional=False)
+        plan = _plan(dialect, caps)
+        conn = db.connection(
+            dialect,
+            fail_hook=_fail_statement(plan.mode_sql),
+            invalidate_error=_StatementFailure("driver refused: close"),
+        )
+        with (
+            caplog.at_level(logging.WARNING, logger=CYCLE_LOGGER),
+            pytest.raises(_StatementFailure) as failure,
+        ):
+            StageCycle(dialect).run(conn, plan, _batch())
+        assert plan.mode_sql in str(failure.value)
+        assert "could not discard the connection" in "\n".join(
+            r.getMessage() for r in caplog.records
+        )
 
     def test_a_second_drop_attempt_recovers_without_poisoning(self, db, caplog):
         dialect = _SqliteDialect()

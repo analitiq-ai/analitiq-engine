@@ -20,7 +20,10 @@ Two rules the cycle owns outright:
   connection is discarded (``invalidate``) and the next batch reopens. On
   the transactional path the rollback *is* the recovery — a rejected row
   says nothing about the connection, and discarding a healthy pooled
-  connection on every constraint violation is what no connection pool does.
+  connection on every constraint violation is what no connection pool
+  does. The single exception is a rollback that itself fails: that is the
+  transactional path's connection-level evidence, and the connection is
+  discarded on it.
 * **The backends render no SQL.** The write plan carries every
   dialect-specific write statement; the generic ANSI probes this module
   renders (``SELECT 1``, ``SELECT COUNT(*)``, the zero-row column probe,
@@ -110,8 +113,7 @@ def consult_bulk_land(
     if dialect.bulk_land(conn, plan.stage, batch, runtime=runtime):
         return True
     logger.info(
-        "dialect %s declined the declared bulk land for %s; landing "
-        "via executemany",
+        "dialect %s declined the declared bulk land for %s; landing via executemany",
         dialect.name,
         dialect.quote_table(plan.stage),
     )
@@ -198,7 +200,8 @@ class StageCycle:
             # is left to clean up and the connection stays healthy. A
             # constraint violation says nothing about the connection, and
             # discarding a pooled one per rejected row is what no pool
-            # does.
+            # does — unless the rollback itself fails, which is where the
+            # connection is discarded.
             self._rollback_after_failure(conn, plan)
             raise
 
@@ -280,16 +283,30 @@ class StageCycle:
     def _rollback_after_failure(
         self, conn: StageConnection, plan: StageWritePlan
     ) -> None:
-        """Undo the batch transaction without ever masking its error."""
+        """Undo the batch transaction; discard a connection that cannot.
+
+        A rollback that succeeds is the whole recovery, and the batch
+        still fails with its own error. A rollback that *fails* is this
+        path's connection-level evidence — the one signal here that the
+        connection itself is broken rather than the batch rejected — and
+        it is what a pool acts on too (SQLAlchemy invalidates when the
+        return-to-pool rollback raises). It cannot fire on a constraint
+        violation, which rolls back cleanly, so the discard costs nothing
+        the path-scoped rule protects; without it a transport that owns
+        its own cached handle would serve a dead connection, holding an
+        open transaction, to every later batch of the run.
+        """
         try:
             conn.rollback()
         except Exception:
             logger.warning(
                 "rollback of the batch transaction for %s failed; the "
-                "connection may still hold an open transaction",
+                "connection is discarded so the next batch does not "
+                "inherit its open transaction",
                 self._dialect.quote_table(plan.stage),
                 exc_info=True,
             )
+            self._discard(conn)
 
     def _drop_stage_after_failure(
         self, conn: StageConnection, plan: StageWritePlan

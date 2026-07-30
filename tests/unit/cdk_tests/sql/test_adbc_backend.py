@@ -47,6 +47,10 @@ class OperationalError(Exception):
     pass
 
 
+class IntegrityError(Exception):
+    pass
+
+
 class _StageDialect(SqlDialect):
     """Per-statement targeting dialect with the two rendering hooks."""
 
@@ -130,9 +134,9 @@ class _FakeConn:
     """Programmable ADBC DBAPI fake.
 
     ``execute_hook(sql)`` may raise to inject a statement failure;
-    ``commit_hook()`` likewise for commits. The session-schema probe is
-    matched by exact SQL and counted, so the once-per-connection cache
-    is observable.
+    ``commit_hook()`` and ``rollback_hook()`` likewise for commits and
+    rollbacks. The session-schema probe is matched by exact SQL and
+    counted, so the once-per-connection cache is observable.
     """
 
     def __init__(
@@ -144,6 +148,7 @@ class _FakeConn:
         no_row=False,
         execute_hook=None,
         commit_hook=None,
+        rollback_hook=None,
         description=(),
         fetch_value=None,
     ):
@@ -153,6 +158,7 @@ class _FakeConn:
         self.no_row = no_row
         self.execute_hook = execute_hook
         self.commit_hook = commit_hook
+        self.rollback_hook = rollback_hook
         self.description = description
         self.fetch_value = fetch_value
         self.statements: list[str] = []
@@ -175,6 +181,8 @@ class _FakeConn:
 
     def rollback(self):
         self.rollbacks += 1
+        if self.rollback_hook is not None:
+            self.rollback_hook()
 
     def close(self):
         self.closed = True
@@ -358,11 +366,36 @@ class TestTransactionalCycle:
         assert conn.statements.count(plan.drop_stage_sql) == 1  # in-txn only
         assert conn.commits == 1
 
-    def test_failure_rolls_back_and_keeps_the_connection(self):
+    def test_a_rejected_batch_rolls_back_and_keeps_the_connection(self):
         # The rollback IS the recovery here: nothing committed, so no
-        # stepwise cleanup runs and no stage survives. The connection is
-        # healthy — a rejected batch says nothing about it — so the next
-        # batch reuses it instead of paying for a reconnect.
+        # stepwise cleanup runs and no stage survives. A rejected row
+        # says nothing about the connection, so the next batch reuses it
+        # instead of paying for a reconnect.
+        dialect = _StageDialect()
+        caps = _caps(stage_scope="temp", transactional_ddl=True)
+        dialect.capabilities = caps
+        plan = _plan(dialect, caps)
+
+        def fail_mode(sql):
+            if sql == plan.mode_sql:
+                raise IntegrityError("duplicate key value violates orders_pkey")
+
+        conn = _FakeConn(execute_hook=fail_mode)
+        backend = _backend(dialect, conn)
+        with pytest.raises(AdbcConfigurationError, match="IntegrityError"):
+            backend._execute_write_sync(plan, _batch())
+        assert conn.commits == 0
+        assert conn.rollbacks == 1
+        assert not conn.closed
+        assert backend._conn is conn
+        assert conn.statements.count(plan.drop_stage_sql) == 0
+
+    def test_a_broken_connection_is_discarded_and_the_next_batch_reopens(self):
+        # This backend IS its own pool — one cached handle, reopened only
+        # once dropped — so the transactional path's single discard rule
+        # is what keeps a connection-level failure from wedging every
+        # later batch of the run on a dead handle. The evidence is the
+        # rollback failing; a rejected batch rolls back cleanly.
         dialect = _StageDialect()
         caps = _caps(stage_scope="temp", transactional_ddl=True)
         dialect.capabilities = caps
@@ -372,15 +405,21 @@ class TestTransactionalCycle:
             if sql == plan.mode_sql:
                 raise OperationalError("connection reset")
 
-        conn = _FakeConn(execute_hook=fail_mode)
-        backend = _backend(dialect, conn)
+        def fail_rollback():
+            raise OperationalError("connection reset")
+
+        dead = _FakeConn(execute_hook=fail_mode, rollback_hook=fail_rollback)
+        fresh = _FakeConn()
+        runtime = _FakeRuntime([fresh])
+        backend = _backend(dialect, dead, runtime=runtime)
         with pytest.raises(OperationalError):
             backend._execute_write_sync(plan, _batch())
-        assert conn.commits == 0
-        assert conn.rollbacks == 1
-        assert not conn.closed
-        assert backend._conn is conn
-        assert conn.statements.count(plan.drop_stage_sql) == 0
+        assert dead.closed
+        assert backend._conn is None
+        # Self-healing: the next batch reopens instead of inheriting it.
+        backend._execute_write_sync(plan, _batch())
+        assert backend._conn is fresh
+        assert fresh.commits == 1
 
 
 class TestLandingMechanisms:

@@ -454,12 +454,14 @@ one.
   orphan is time-bounded even after a process crash.
 
 **Cleanup and poisoning.** These rules are the stage cycle's, so they read
-the same on every transport, and they govern the **non-transactional**
-path (`transactional_ddl:
-false`, §7). On the transactional path they do not apply: every step,
-the drop included, lives inside the batch transaction, so a failed drop
-aborts the transaction and the batch returns a retryable failure — success
-is never acked past a failed step, and nothing can be committed or orphaned.
+the same on every transport, and the cleanup rules govern the
+**non-transactional** path (`transactional_ddl:
+false`, §7). On the transactional path the cleanup rules do not apply:
+every step, the drop included, lives inside the batch transaction, so a
+failed drop aborts the transaction and the batch returns a retryable
+failure — success is never acked past a failed step, and nothing can be
+committed or orphaned. That path's only cleanup is the rollback, and its
+only discard is a rollback that fails.
 
 - The stage is dropped after the mode statement, success or failure, in both
   scopes (a long-lived session accumulates temp stages otherwise).
@@ -478,6 +480,15 @@ is never acked past a failed step, and nothing can be committed or orphaned.
   connection on every constraint violation is what no connection pool
   does: HikariCP evicts on connection-level SQLStates, SQLAlchemy
   invalidates on `is_disconnect`, neither on every DBAPI error.
+- **The transactional path discards on exactly one thing: a rollback that
+  itself fails.** That is this path's connection-level evidence — a
+  constraint violation rolls back cleanly, so the rule cannot fire on a
+  rejected batch. It is not optional politeness: `SqlAlchemyBackend` has a
+  pool that evicts on `is_disconnect` behind it, but `AdbcBackend` *is* its
+  own pool — one cached handle, reopened only when it has been dropped — so
+  without this discard a single connection-level failure would leave every
+  later batch of the run running against a dead handle holding an open
+  transaction.
 - The session-schema invariant guard holds throughout: under
   `session_targeting: "session_default"`, the session schema must equal the
   target schema before any bare-name landing runs.
