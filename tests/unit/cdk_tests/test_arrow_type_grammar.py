@@ -26,12 +26,16 @@ suite and this one together cover the published surface.
 
 from __future__ import annotations
 
+import importlib
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import pyarrow as pa
 import pytest
 
+import cdk.type_map.arrow as arrow_module
 from cdk.conformance.roundtrip import probe_canonicals
 from cdk.type_map.arrow import arrow_family, parse_arrow_type
 from cdk.type_map.conversions import build_conversion_grid, classify_conversion
@@ -100,6 +104,11 @@ class TestFamilySetConformance:
         # without being buildable.
         for name, spec in ARROW_FAMILIES.items():
             assert (spec.builder is None) == (spec.sub_schema is not None), name
+        # The resolved factory table is the one the parser calls, so it is the
+        # one that must cover every family declaring a builder.
+        assert set(arrow_module._FACTORIES) == {
+            name for name, spec in ARROW_FAMILIES.items() if spec.builder is not None
+        }
 
     def test_rules_unit_vocabulary_derives_from_grammar(self) -> None:
         from cdk.type_map import rules
@@ -226,14 +235,37 @@ class TestFamilyProbes:
             ]
             assert len(matched) <= 1, (dtype, matched)
 
-    def test_every_probe_name_exists_on_pyarrow_types(self) -> None:
-        for name, spec in ARROW_FAMILIES.items():
-            for probe in spec.probes:
-                assert callable(getattr(pa.types, probe, None)), (name, probe)
+    def test_resolved_probes_cover_exactly_the_declared_ones(self) -> None:
+        # The probes are resolved to callables once at import; that resolved
+        # table is what arrow_family walks, so it is the thing that must match
+        # the vocabulary.
+        declared = [
+            (getattr(pa.types, probe), name)
+            for name, spec in ARROW_FAMILIES.items()
+            for probe in spec.probes
+        ]
+        assert list(arrow_module._FAMILY_PROBES) == declared
 
     def test_type_outside_the_vocabulary_fails_loud(self) -> None:
         with pytest.raises(InvalidTypeMapError, match="no conversion-matrix family"):
             arrow_family(pa.month_day_nano_interval())
+
+
+@contextmanager
+def _family_added(name: str, spec: ArrowFamily) -> Iterator[None]:
+    """Add a family to the one table as if it had always been declared there.
+
+    ``cdk.type_map.arrow`` resolves the table's pyarrow bindings once at
+    import, so a family added after that import is only reachable through a
+    reload -- which is exactly what a family added to the source table gets.
+    The reload on the way out rebuilds those bindings from the restored table.
+    """
+    try:
+        with patch.dict(ARROW_FAMILIES, {name: spec}):
+            importlib.reload(arrow_module)
+            yield
+    finally:
+        importlib.reload(arrow_module)
 
 
 class TestOneTableFeedsEverySurface:
@@ -263,7 +295,7 @@ class TestOneTableFeedsEverySurface:
                 source="test",
             ),
         )
-        with patch.dict(ARROW_FAMILIES, {"Interval": added}):
+        with _family_added("Interval", added):
             # The published grammar document.
             assert build_arrow_type_grammar()["families"]["Interval"] == {"params": []}
             # The conversion grid: a new axis, classified by its declared kind.

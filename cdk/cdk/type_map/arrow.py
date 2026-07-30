@@ -55,8 +55,9 @@ def _pyarrow_attribute(module: Any, name: str, family: str) -> Callable[..., Any
 
     The vocabulary table stays importable without pyarrow by naming its
     factories and predicates as strings; a name this pyarrow build does not
-    provide is a defect in the table, and surfacing it here beats a family
-    that silently builds nothing or matches no live column.
+    provide is a defect in the table, and surfacing it when this module is
+    imported beats a family that silently builds nothing or matches no live
+    column.
     """
     attribute = getattr(module, name, None)
     if not callable(attribute):
@@ -66,6 +67,30 @@ def _pyarrow_attribute(module: Any, name: str, family: str) -> Callable[..., Any
         )
     resolved: Callable[..., Any] = attribute
     return resolved
+
+
+# The table's pyarrow bindings, resolved once here rather than on every call:
+# this module is the only one that imports pyarrow, so the names can be looked
+# up at import time, which both keeps the per-batch classification path free of
+# attribute lookups and turns a name pyarrow does not provide into an import
+# failure instead of a first-batch one.
+#
+# Family -> the factory the bound parameters are passed to. A structural family
+# has none: its shape comes from its sub-schema, never from parentheses.
+_FACTORIES: Final[dict[str, Callable[..., Any]]] = {
+    family: _pyarrow_attribute(pa, spec.builder, family)
+    for family, spec in ARROW_FAMILIES.items()
+    if spec.builder is not None
+}
+
+# (predicate, family) pairs mapping a live DataType back to its family. The
+# predicates test the type id, so they are mutually exclusive and this order
+# does not decide the answer.
+_FAMILY_PROBES: Final[tuple[tuple[Callable[[pa.DataType], bool], str], ...]] = tuple(
+    (_pyarrow_attribute(pa.types, probe, family), family)
+    for family, spec in ARROW_FAMILIES.items()
+    for probe in spec.probes
+)
 
 
 def _build_arrow_type(
@@ -78,11 +103,11 @@ def _build_arrow_type(
     (``time32(unit)``, ``timestamp(unit, tz)``, ``decimal128(precision,
     scale)``) — with units translated to the short codes pyarrow expects.
     """
-    if spec.builder is None:
+    factory = _FACTORIES.get(family)
+    if factory is None:
         raise InvalidTypeMapError(
             f"arrow_type family {family!r} declares no pyarrow factory"
         )
-    factory = _pyarrow_attribute(pa, spec.builder, family)
     args = [
         (
             UNIT_LONG_TO_SHORT[values[param.name]]
@@ -175,9 +200,10 @@ def arrow_family(dtype: pa.DataType) -> str:
     """Return the conversion-matrix family name for a PyArrow ``DataType``.
 
     The inverse of the family head :func:`parse_arrow_type` consumes: the
-    probes each family declares in :data:`cdk.type_map.grammar.ARROW_FAMILIES`
-    are ``pyarrow.types`` predicates on the type id, so they are mutually
-    exclusive and the table order does not decide the answer. Width and
+    probes come from the ones each family declares in
+    :data:`cdk.type_map.grammar.ARROW_FAMILIES`, which are ``pyarrow.types``
+    predicates on the type id, so they are mutually exclusive and the table
+    order does not decide the answer. Width and
     parameter detail is intentionally dropped -- a DataType collapses to the
     family head :func:`~cdk.type_map.conversions.classify_conversion` keys its
     policy on (``int32`` -> ``"Int32"``, ``timestamp[us, tz=UTC]`` ->
@@ -191,10 +217,9 @@ def arrow_family(dtype: pa.DataType) -> str:
         # pc.cast transparently decodes it. Classify by the decoded value type
         # so dict<_, Utf8> is treated exactly like Utf8 rather than rejected.
         return arrow_family(dtype.value_type)
-    for family, spec in ARROW_FAMILIES.items():
-        for probe in spec.probes:
-            if _pyarrow_attribute(pa.types, probe, family)(dtype):
-                return family
+    for probe, family in _FAMILY_PROBES:
+        if probe(dtype):
+            return family
     raise InvalidTypeMapError(
         f"arrow type {dtype!r} has no conversion-matrix family; it is outside "
         f"the published arrow_type vocabulary"
