@@ -412,8 +412,8 @@ class PipelineRunner:
                     ) = _run_counters(engine.get_metrics())
                 except Exception as counter_error:
                     logger.warning(
-                        "Could not read engine counters for the failed run: "
-                        f"{counter_error}"
+                        "Could not read engine counters for the failed run: %s",
+                        counter_error,
                     )
             return False
 
