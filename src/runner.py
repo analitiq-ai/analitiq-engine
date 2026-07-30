@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 
 from cdk.connection_runtime import ConnectionRuntime
 from src.engine.engine import StreamingEngine
+from src.models.metrics import PipelineMetrics
 from src.models.resolved import (
     ResolvedDestination,
     ResolvedPipeline,
@@ -40,6 +41,21 @@ from .state.error_classification import (
 from .state.metrics_storage import save_pipeline_metrics
 
 logger = logging.getLogger(__name__)
+
+
+def _run_counters(metrics: PipelineMetrics) -> tuple[int, int, int, int]:
+    """Read the four run counters a pipeline metrics record reports.
+
+    A run reports the same counters whether it completed or raised, so both
+    paths read them here rather than each spelling out its own set -- that is
+    how ``records_skipped`` came to be reported on one path and not the other.
+    """
+    return (
+        metrics.records_processed,
+        metrics.batches_processed,
+        metrics.records_failed,
+        metrics.records_skipped,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +240,7 @@ class PipelineRunner:
         start_time = datetime.now(timezone.utc)
 
         pipeline_config = None
+        engine: StreamingEngine | None = None
         records_processed = 0
         records_failed = 0
         records_skipped = 0
@@ -283,10 +300,12 @@ class PipelineRunner:
             logger.info("Pipeline execution completed successfully!")
             logger.info(f"Duration: {duration}")
 
-            records_processed = getattr(metrics, "records_processed", 0)
-            batches_processed = getattr(metrics, "batches_processed", 0)
-            records_failed = getattr(metrics, "records_failed", 0)
-            records_skipped = metrics.records_skipped
+            (
+                records_processed,
+                batches_processed,
+                records_failed,
+                records_skipped,
+            ) = _run_counters(metrics)
             streams_failed = getattr(metrics, "streams_failed", 0)
 
             logger.info(f"Records processed: {records_processed}")
@@ -377,6 +396,25 @@ class PipelineRunner:
             logger.error(
                 f"Pipeline failed [{error_code.value}]: {error_detail}", exc_info=True
             )
+            # stream_data() raises only when every stream failed, but batches can
+            # already have been processed, dead-lettered or skipped before that
+            # point. The counters live on the engine, so a failed run that
+            # dropped records reports the drop instead of the initialised zeros.
+            # Reading them must never mask the failure just classified, so a
+            # counter read that itself fails is logged and the zeros stand.
+            if engine is not None:
+                try:
+                    (
+                        records_processed,
+                        batches_processed,
+                        records_failed,
+                        records_skipped,
+                    ) = _run_counters(engine.get_metrics())
+                except Exception as counter_error:
+                    logger.warning(
+                        "Could not read engine counters for the failed run: "
+                        f"{counter_error}"
+                    )
             return False
 
         finally:

@@ -1278,3 +1278,97 @@ class TestRunnerPartialRunReporting:
         # The emitted record reports the drops, not the failed-record count.
         assert emitted["pipeline"]["records_skipped"] == 2
         assert emitted["pipeline"]["records_failed"] == 5
+
+    @pytest.mark.asyncio
+    async def test_failed_run_still_reports_what_it_processed(
+        self,
+        caplog,
+        monkeypatch,
+    ):
+        """stream_data() raises only when every stream failed, but batches can
+        already have been processed, dead-lettered or dropped before that. The
+        emitted record carries those counters rather than the initialised zeros
+        (issue #423, raised on PR #438)."""
+        monkeypatch.setenv("PIPELINE_ID", "test-pipeline-423")
+        engine = MagicMock()
+        engine.stream_data = AsyncMock(side_effect=RuntimeError("every stream failed"))
+        # The run dropped 2 records under the 'skip' strategy and dead-lettered
+        # 4 before the last stream took it down. All four counters are distinct
+        # and non-zero, so reporting any one of them as 0 fails this test.
+        engine.get_metrics.return_value = PipelineMetrics(
+            records_processed=9,
+            records_failed=4,
+            records_skipped=2,
+            batches_processed=6,
+        )
+        config_prep = MagicMock()
+        config_prep.create_config.return_value = (
+            SimpleNamespace(
+                pipeline_id="test-pipeline-423",
+                name="Test Pipeline",
+                runtime=RuntimeConfig(),
+            ),
+            [],
+            {},
+            {},
+            {},
+        )
+
+        with caplog.at_level(logging.INFO), patch(
+            "src.runner.PipelineConfigPrep", return_value=config_prep
+        ), patch("src.runner._build_config_dict", return_value={}), patch(
+            "src.runner.StreamingEngine", return_value=engine
+        ):
+            runner = PipelineRunner()
+            assert await runner.run() is False
+
+        assert runner.status == "failed"
+        emitted = _emitted_metrics_payloads(caplog)
+        assert emitted["pipeline"]["records_skipped"] == 2
+        assert emitted["pipeline"]["records_failed"] == 4
+        assert emitted["pipeline"]["records_processed"] == 9
+        assert emitted["pipeline"]["batches_processed"] == 6
+
+    @pytest.mark.asyncio
+    async def test_unreadable_counters_do_not_mask_the_failure(
+        self,
+        caplog,
+        monkeypatch,
+    ):
+        """A counter read that itself fails is logged and the zeros stand: the
+        run still reports the exception that terminated it, not the one raised
+        while reading its counters."""
+        monkeypatch.setenv("PIPELINE_ID", "test-pipeline-423")
+        engine = MagicMock()
+        engine.stream_data = AsyncMock(side_effect=RuntimeError("every stream failed"))
+        engine.get_metrics.side_effect = RuntimeError("counters unavailable")
+        config_prep = MagicMock()
+        config_prep.create_config.return_value = (
+            SimpleNamespace(
+                pipeline_id="test-pipeline-423",
+                name="Test Pipeline",
+                runtime=RuntimeConfig(),
+            ),
+            [],
+            {},
+            {},
+            {},
+        )
+
+        with caplog.at_level(logging.INFO), patch(
+            "src.runner.PipelineConfigPrep", return_value=config_prep
+        ), patch("src.runner._build_config_dict", return_value={}), patch(
+            "src.runner.StreamingEngine", return_value=engine
+        ):
+            runner = PipelineRunner()
+            assert await runner.run() is False
+
+        assert runner.status == "failed"
+        emitted = _emitted_metrics_payloads(caplog)
+        assert emitted["pipeline"]["records_skipped"] == 0
+        warnings = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+        ]
+        assert any("Could not read engine counters" in w for w in warnings)
