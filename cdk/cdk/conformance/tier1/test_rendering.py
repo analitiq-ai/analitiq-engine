@@ -350,7 +350,11 @@ def test_upsert_without_conflict_keys_refuses(
 def test_catalog_refused_when_undeclared(conformance_target: ConformanceTarget) -> None:
     """A dialect with no declaration refuses catalog addressing."""
     dialect = require_dialect(conformance_target)
-    unbound = type(dialect)()
+    # Constructed with an explicit undeclared declaration, not with no
+    # argument: a connector dialect is allowed to make 'capabilities'
+    # required, and a zero-argument call would fail such a package's own
+    # conformance run with a TypeError before reaching the assertion.
+    unbound = type(dialect)(None)
     assert unbound.capabilities is None
     with pytest.raises(CatalogAddressingError):
         unbound.table_address("t", schema="s", catalog="other_catalog")

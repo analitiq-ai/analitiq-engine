@@ -353,6 +353,25 @@ class TestEveryConsumerPathCarriesTheDeclaration:
         assert connector._backend is not first
 
     @pytest.mark.asyncio
+    async def test_a_reconnect_releases_the_previous_runtime(self):
+        # The runtime, not the backend, owns what materialize_runtime
+        # acquired -- for SQLAlchemy the engine whose close() disposes the
+        # pool. self._runtime points at the new one straight away, so a
+        # reconnect that skipped this would leave the previous engine and
+        # its pooled connections alive with nothing left to close them.
+        connector = GenericSQLConnector()
+        first_runtime = _connectable_runtime()
+        first_runtime.close = AsyncMock()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()):
+            await connector.connect(first_runtime)
+        first_runtime.close.assert_not_awaited()
+
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()):
+            await connector.connect(_connectable_runtime())
+
+        first_runtime.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_a_cancelled_backend_close_stops_the_reconnect(self):
         # _close_backend swallows CancelledError so the caller can finish its
         # own releases, and hands it back to be re-raised. connect() must
@@ -416,6 +435,21 @@ class TestNoDialectBeforeADeclaration:
         )
         assert await connector.list_tables(runtime, "ds", catalog="proj") == ["orders"]
         assert connector.dialect.capabilities.catalog == "read"
+
+    def test_an_undeclared_copy_of_a_required_constructor_dialect_is_buildable(self):
+        # The conformance kit builds an undeclared copy of the connector's
+        # own dialect to prove catalog addressing is refused without a
+        # declaration. It must pass the declaration explicitly: a connector
+        # is allowed to make 'capabilities' required, and a zero-argument
+        # call would fail that package's conformance run with a TypeError
+        # before the assertion it exists to make.
+        declared = _RequiredDeclarationConnector.dialect_class(
+            SqlCapabilities.from_declaration(caps_block(catalog="full"))
+        )
+        unbound = type(declared)(None)
+        assert unbound.capabilities is None
+        with pytest.raises(CatalogAddressingError):
+            unbound.table_address("t", schema="s", catalog="other")
 
     def test_the_advertised_write_modes_answer_before_a_runtime_binds(self):
         # GetCapabilities reads these off the handler; which hooks a dialect

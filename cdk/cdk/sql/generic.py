@@ -676,6 +676,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         Args:
             runtime: ConnectionRuntime with enriched config
         """
+        previous_runtime = self._runtime
         self._runtime = runtime
         # Tear the previous connection down before anything of this
         # runtime's is bound. connect() replaces the dialect, the declared
@@ -696,6 +697,14 @@ class GenericSQLConnector(BaseDestinationHandler):
         # open for the life of the process. A close failure is logged
         # inside; it must not stop this connect from proceeding.
         cancelled = await self._close_backend()
+        # The runtime, not the backend, owns what materialize_runtime
+        # acquired -- for SQLAlchemy that is the engine whose close()
+        # disposes the pool. self._runtime already points at the new one, so
+        # releasing the previous one is this teardown's job; disconnect()
+        # would only ever reach the new runtime and the old engine and its
+        # pooled connections would outlive the handler.
+        if previous_runtime is not None and previous_runtime is not runtime:
+            cancelled = await self._close_runtime(previous_runtime) or cancelled
         if cancelled is not None:
             # The close was cancelled, so this connect() is already running
             # inside a cancelled task. Going on to acquire a transport would
@@ -796,6 +805,24 @@ class GenericSQLConnector(BaseDestinationHandler):
         self._backend = None
         return cancelled
 
+    async def _close_runtime(self, runtime: ConnectionRuntime) -> BaseException | None:
+        """Release what a runtime acquired, whatever it does on the way.
+
+        The only place a runtime is released. For SQLAlchemy this disposes
+        the engine and its pool, so a reconnect that skipped it would leave
+        the previous engine's pooled connections alive for the life of the
+        process. Returns a ``CancelledError`` for the caller to re-raise
+        once it has finished its own releases.
+        """
+        try:
+            await runtime.close()
+        except asyncio.CancelledError as exc:
+            logger.error("SQLAlchemy runtime close cancelled")
+            return exc
+        except Exception:
+            logger.error("Failed to close SQLAlchemy runtime", exc_info=True)
+        return None
+
     async def disconnect(self) -> None:
         """Close database connection.
 
@@ -807,16 +834,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         """
         cancelled: BaseException | None = await self._close_backend()
         if self._runtime:
-            try:
-                await self._runtime.close()
-            except asyncio.CancelledError as exc:
-                logger.error("SQLAlchemy runtime close cancelled during disconnect")
-                cancelled = exc
-            except Exception:
-                logger.error(
-                    "Failed to close SQLAlchemy runtime during disconnect",
-                    exc_info=True,
-                )
+            cancelled = await self._close_runtime(self._runtime) or cancelled
         self._connected = False
         logger.info("GenericSQLConnector disconnected")
         if cancelled is not None:
