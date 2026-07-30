@@ -273,12 +273,12 @@ class APIConnector(BaseConnector):
                 f"endpoint {endpoint_doc.endpoint_id!r}: operations.read is "
                 f"required to read this endpoint as a source"
             )
-        records_items_schema = self._resolve_records_items_schema(
+        record_schema = self._resolve_records_items_schema(
             endpoint_doc.endpoint_id,
             read.response,
         )
-        self._apply_read_type_map(records_items_schema, endpoint_ref)
-        schema_contract = SchemaContract(records_items_schema)
+        self._apply_read_type_map(record_schema, endpoint_ref)
+        schema_contract = SchemaContract(record_schema)
         full_url = join_url(self.base_url, read.request.path)
         method = read.request.method
 
