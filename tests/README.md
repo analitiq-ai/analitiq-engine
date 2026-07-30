@@ -22,16 +22,6 @@ poetry run pytest tests/unit/
 poetry run pytest tests/integration/
 ```
 
-### E2E Tests
-```bash
-poetry run pytest tests/e2e/
-```
-
-### Core Pipeline Tests
-```bash
-poetry run pytest tests/core_pipeline/
-```
-
 ## Fault Tolerance Tests
 
 Fault tolerance tests (rate limiter, dead letter queue) live in

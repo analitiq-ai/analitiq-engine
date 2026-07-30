@@ -332,9 +332,6 @@ _CONFIG_NAMES = frozenset(
         "ConnectionConfigError",
         "ContractValidationError",
         "ConfigurationError",
-        "StreamConfigurationError",
-        "PipelineValidationError",
-        "StageConfigurationError",
         "TransportSpecError",
         "TypeMapError",
         "InvalidTypeMapError",
@@ -347,7 +344,6 @@ _CONFIG_NAMES = frozenset(
         "ConnectorDeclarationError",
         "ConnectorNotRegisteredError",
         "UnresolvedValueError",
-        "SchemaError",
         "SchemaConfigurationError",
         "TransformationError",
         # Secret resolution (missing/denied/malformed credentials, placeholder
@@ -477,12 +473,7 @@ _HANDSHAKE_TRANSPORT_PHRASES = (
 # A live driver
 # exception in the chain therefore comes from the source worker, so routing those
 # names to the destination would mislabel source read failures.
-_DESTINATION_NAMES = frozenset(
-    {
-        "WriteError",
-        "CreateTableError",
-    }
-)
+_DESTINATION_NAMES = frozenset({"CreateTableError"})
 _DESTINATION_PHRASES = (
     "failed to connect to grpc destination",
     "write to destination",

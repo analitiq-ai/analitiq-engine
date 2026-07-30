@@ -3,11 +3,6 @@
 
 from src.engine.exceptions import (
     ConfigurationError,
-    ConnectorError,
-    PipelineValidationError,
-    StageConfigurationError,
-    StreamConfigurationError,
-    StreamExecutionError,
     StreamProcessingError,
     TransformationError,
 )
@@ -85,30 +80,6 @@ class TestTransformationError:
         assert str(error) == expected
 
 
-class TestConnectorError:
-    """Test ConnectorError exception."""
-
-    def test_inheritance(self):
-        """Test ConnectorError inheritance."""
-        error = ConnectorError("Connector failed")
-
-        assert isinstance(error, StreamProcessingError)
-        assert isinstance(error, ConnectorError)
-
-    def test_with_context(self):
-        """Test ConnectorError with context."""
-        original = ConnectionError("Connection refused")
-        error = ConnectorError(
-            "Database connection failed", stream_id="db_stream", original_error=original
-        )
-
-        expected = (
-            "Stream db_stream: Database connection failed "
-            "(caused by: Connection refused)"
-        )
-        assert str(error) == expected
-
-
 class TestConfigurationError:
     """Test ConfigurationError exception."""
 
@@ -151,156 +122,6 @@ class TestConfigurationError:
         assert error.validation_errors == validation_errors
 
 
-class TestStreamConfigurationError:
-    """Test StreamConfigurationError exception."""
-
-    def test_inheritance(self):
-        """Test StreamConfigurationError inheritance."""
-        error = StreamConfigurationError("Stream config error")
-
-        assert isinstance(error, ConfigurationError)
-        assert isinstance(error, StreamConfigurationError)
-
-    def test_with_stream_id(self):
-        """Test stream configuration error with stream ID."""
-        error = StreamConfigurationError(
-            "Invalid stream configuration", stream_id="stream_456"
-        )
-
-        assert str(error) == "Invalid stream configuration"
-        assert error.stream_id == "stream_456"
-
-    def test_with_all_fields(self):
-        """Test stream configuration error with all fields."""
-        validation_errors = ["Missing required field"]
-        error = StreamConfigurationError(
-            "Stream validation failed",
-            stream_id="stream_789",
-            field_path="stream.source.config",
-            validation_errors=validation_errors,
-        )
-
-        assert str(error) == "Stream validation failed"
-        assert error.stream_id == "stream_789"
-        assert error.field_path == "stream.source.config"
-        assert error.validation_errors == validation_errors
-
-
-class TestPipelineValidationError:
-    """Test PipelineValidationError exception."""
-
-    def test_inheritance(self):
-        """Test PipelineValidationError inheritance."""
-        error = PipelineValidationError("Pipeline validation failed")
-
-        assert isinstance(error, ConfigurationError)
-        assert isinstance(error, PipelineValidationError)
-
-    def test_basic_error(self):
-        """Test basic pipeline validation error."""
-        error = PipelineValidationError("Validation failed")
-
-        assert str(error) == "Validation failed"
-        assert error.errors == {}
-
-    def test_with_errors_dict(self):
-        """Test pipeline validation error with errors dictionary."""
-        errors = {
-            "source": ["Missing host", "Invalid port"],
-            "destination": ["Missing credentials"],
-        }
-        error = PipelineValidationError("Multiple validation errors", errors=errors)
-
-        assert str(error) == "Multiple validation errors"
-        assert error.errors == errors
-
-
-class TestStreamExecutionError:
-    """Test StreamExecutionError exception."""
-
-    def test_inheritance(self):
-        """Test StreamExecutionError inheritance."""
-        error = StreamExecutionError("Execution failed")
-
-        assert isinstance(error, StreamProcessingError)
-        assert isinstance(error, StreamExecutionError)
-
-    def test_with_stage(self):
-        """Test stream execution error with stage."""
-        error = StreamExecutionError(
-            "Processing failed", stream_id="exec_stream", stage="transform"
-        )
-
-        assert str(error) == "Stream exec_stream: Processing failed [Stage: transform]"
-        assert error.stage == "transform"
-
-    def test_with_batch_id(self):
-        """Test stream execution error with batch ID."""
-        error = StreamExecutionError(
-            "Batch processing failed", stream_id="batch_stream", batch_id=42
-        )
-
-        assert str(error) == "Stream batch_stream: Batch processing failed [Batch: 42]"
-        assert error.batch_id == 42
-
-    def test_with_all_fields(self):
-        """Test stream execution error with all fields."""
-        original = RuntimeError("Underlying error")
-        error = StreamExecutionError(
-            "Execution failed",
-            stream_id="full_stream",
-            stage="load",
-            batch_id=123,
-            original_error=original,
-        )
-
-        expected = (
-            "Stream full_stream: Execution failed (caused by: Underlying error) "
-            "[Stage: load] [Batch: 123]"
-        )
-        assert str(error) == expected
-        assert error.stage == "load"
-        assert error.batch_id == 123
-        assert error.original_error is original
-
-    def test_batch_id_zero(self):
-        """Test stream execution error with batch ID zero."""
-        error = StreamExecutionError("First batch failed", batch_id=0)
-
-        assert str(error) == "First batch failed [Batch: 0]"
-        assert error.batch_id == 0
-
-
-class TestStageConfigurationError:
-    """Test StageConfigurationError exception."""
-
-    def test_inheritance(self):
-        """Test StageConfigurationError inheritance."""
-        error = StageConfigurationError("Stage config error", "extract")
-
-        assert isinstance(error, ConfigurationError)
-        assert isinstance(error, StageConfigurationError)
-
-    def test_with_stage_name(self):
-        """Test stage configuration error with stage name."""
-        error = StageConfigurationError(
-            "Invalid stage configuration", stage_name="transform"
-        )
-
-        assert str(error) == "Invalid stage configuration"
-        assert error.stage_name == "transform"
-
-    def test_with_stream_id(self):
-        """Test stage configuration error with stream ID."""
-        error = StageConfigurationError(
-            "Stage validation failed", stage_name="load", stream_id="stage_stream"
-        )
-
-        assert str(error) == "Stage validation failed"
-        assert error.stage_name == "load"
-        assert error.stream_id == "stage_stream"
-
-
 class TestExceptionInteroperability:
     """Test how exceptions work together and with Python's exception system."""
 
@@ -319,9 +140,9 @@ class TestExceptionInteroperability:
 
     def test_exception_isinstance_checks(self):
         """Test isinstance checks work correctly."""
-        error = StreamExecutionError("Test", stage="transform")
+        error = TransformationError("Test")
 
-        assert isinstance(error, StreamExecutionError)
+        assert isinstance(error, TransformationError)
         assert isinstance(error, StreamProcessingError)
         assert isinstance(error, Exception)
         assert not isinstance(error, ConfigurationError)
@@ -329,20 +150,16 @@ class TestExceptionInteroperability:
     def test_exception_attributes_preserved(self):
         """Test that exception attributes are preserved when caught."""
         original = RuntimeError("Runtime issue")
-        error = StreamExecutionError(
-            "Execution failed",
+        error = TransformationError(
+            "Transformation failed",
             stream_id="test_stream",
-            stage="extract",
-            batch_id=99,
             original_error=original,
         )
 
         try:
             raise error
-        except StreamExecutionError as caught:
+        except TransformationError as caught:
             assert caught.stream_id == "test_stream"
-            assert caught.stage == "extract"
-            assert caught.batch_id == 99
             assert caught.original_error is original
 
     def test_exception_repr(self):
