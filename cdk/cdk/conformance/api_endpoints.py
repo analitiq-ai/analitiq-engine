@@ -43,9 +43,9 @@ from cdk.type_map import TypeMapper
 
 from .declared_connection import (
     RESOLVE_FAILURES,
+    STAND_IN,
     declared_connection,
     guaranteed_connection,
-    is_stand_in,
     page_probe,
     request_probe,
     stand_in_for,
@@ -59,6 +59,7 @@ if TYPE_CHECKING:
 REQUEST_CHECK = "api-request-expressions"
 PAGINATION_CHECK = "api-pagination"
 RECORDS_CHECK = "api-response-records"
+QUERY_CHECK = "api-query-bindings"
 
 #: Authored paging values the contract types as ``Any``, so a value that is
 #: not a positive integer reaches the engine and fails the read there.
@@ -174,17 +175,19 @@ def check_api_request_expressions(target: ConformanceTarget) -> list[Violation]:
         # The body binds against the per-page param table build_request
         # receives, so the probe seeds what the runtime guarantees is in it
         # and nothing else: the resolved defaults above, plus the params the
-        # pagination and replication loops fill. A param the user may omit
-        # stays absent, exactly as _build_base_params leaves it -- seeding it
-        # would certify a body that binds None at runtime. Each stand-in
-        # carries the param's declared type, since a strict expression around
-        # it is type-sensitive.
+        # pagination loop fills. A param the user may omit stays absent,
+        # exactly as _build_base_params leaves it -- seeding it would certify
+        # a body that binds None at runtime. Replication-controlled params are
+        # NOT guaranteed either: a full-refresh stream never writes one, and
+        # an incremental stream's first run has no stored cursor to write.
+        # Each stand-in carries the param's declared type, since a strict
+        # expression around it is type-sensitive.
         values.update(
             {
                 name: stand_in_for(decl)
                 for name, decl in declared.items()
                 if isinstance(decl, Mapping)
-                and decl.get("controlled_by")
+                and decl.get("controlled_by") == "pagination"
                 and name not in values
             }
         )
@@ -288,6 +291,41 @@ def _pagination_passes(pagination: Mapping[str, Any]) -> list[_PagingPass]:
     ]
 
 
+def check_api_query_bindings(target: ConformanceTarget) -> list[Violation]:
+    """Certify that no read renames a param through ``request.query``.
+
+    The contract lets a request map query keys to params
+    (``request.query.<key>: {"from_param": <name>}``). The CDK's API path
+    does not materialize that map: it sends every non-body param under the
+    param's own name. A binding whose key matches the param it names is
+    therefore a no-op and harmless; any other is a request the engine will
+    not send -- and it fails silently, the provider simply never seeing the
+    key the connector meant to send.
+    """
+    violations: list[Violation] = []
+    for label, read in read_operations(target):
+        request = read.get("request")
+        query = request.get("query") if isinstance(request, Mapping) else None
+        if not isinstance(query, Mapping):
+            continue
+        for key, binding in query.items():
+            bound = binding.get("from_param") if isinstance(binding, Mapping) else None
+            if bound == key:
+                continue
+            violations.append(
+                Violation(
+                    QUERY_CHECK,
+                    f"endpoint {label!r}: request.query declares {key!r} as "
+                    f"{binding!r}, but the CDK's API path does not "
+                    f"materialize the query map -- it sends every non-body "
+                    f"param under the param's own name. The provider never "
+                    f"sees {key!r}, and the request goes out anyway. Name the "
+                    f"param what the provider expects instead.",
+                )
+            )
+    return violations
+
+
 def check_api_pagination(target: ConformanceTarget) -> list[Violation]:
     """Certify that each read's paging strategy resolves when the loop reads it."""
     violations: list[Violation] = []
@@ -369,8 +407,10 @@ def _next_url_violations(
             value = resolver.resolve_for_request(value)
         except RESOLVE_FAILURES:
             return []  # the resolve pass reports this with its own message
-        if value is None or is_stand_in(value):
+        if value is None:
             return []
+    # A string stand-in is a URL as far as this can tell; any other declared
+    # type never becomes one, so the type decides rather than the stand-in.
     if isinstance(value, str):
         return []
     return [
@@ -444,7 +484,10 @@ def _page_value_violations(
             except RESOLVE_FAILURES:
                 # The resolve pass above reports this with its own message.
                 continue
-            if value is None or is_stand_in(value):
+            # Only the string stand-in is unknowable -- a string-typed
+            # input may legitimately hold "50". Every other declared type
+            # resolves to a value whose fitness for a step IS knowable.
+            if value is None or value == STAND_IN:
                 continue
         try:
             positive_page_value(value, context=location)
@@ -475,8 +518,16 @@ def check_api_response_records(target: ConformanceTarget) -> list[Violation]:
         ref = records.get("ref") if isinstance(records, Mapping) else None
         schema = response.get("schema")
         if not isinstance(ref, str) or not isinstance(schema, Mapping):
-            # Structure the published contract requires; analitiq-validate
-            # reports its absence with the offending JSON pointer.
+            violations.append(
+                Violation(
+                    RECORDS_CHECK,
+                    f"endpoint {label!r}: the read declares no "
+                    f"response.records.ref and response.schema pair, which "
+                    f"every read needs to emit a record. Skipping the checks "
+                    f"that depend on it would report a stream nothing can "
+                    f"read as assessed.",
+                )
+            )
             continue
         try:
             record_schema = records_items_schema(ref, schema)

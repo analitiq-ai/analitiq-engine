@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Container, Mapping
 from typing import TYPE_CHECKING, Any
+from urllib.parse import SplitResult, urlsplit
 
 from cdk.transport_factory import (
     HTTP_TRANSPORT_TYPE,
@@ -33,6 +34,7 @@ from .api_endpoints import read_operations
 from .declared_connection import (
     CREDENTIAL_PREFIXES,
     RESOLVE_FAILURES,
+    STAND_IN,
     AskedPath,
     connect_probe,
     declared_connection,
@@ -137,6 +139,67 @@ def _rate_limit_violations(ref: str, resolved: Mapping[str, Any]) -> list[Violat
         for field in ("max_requests", "time_window_seconds")
         if isinstance(value := limit.get(field), int) and value <= 0
     ]
+
+
+def check_link_origin(target: ConformanceTarget) -> list[Violation]:
+    """Certify that no authored link continuation leaves the connection's origin.
+
+    The link loop parses each resolved ``next_url`` and refuses to follow
+    one that changes scheme, host or port — it would send the connection's
+    headers, credentials included, to another host. An authored absolute
+    URL is knowable offline, so it is judged here rather than on the
+    customer's second page.
+    """
+    selected = selected_transport(target)
+    if selected is None:
+        return []
+    _ref, block = selected
+    resolver, _asked = connect_probe(
+        target.definition, declared_connection(target.definition)
+    )
+    try:
+        origin = urlsplit(resolve_http_spec(block, resolver=resolver)["base_url"])
+    except RESOLVE_FAILURES:
+        return []  # check_api_transport reports the transport itself
+
+    violations: list[Violation] = []
+    for label, read in read_operations(target):
+        authored = (
+            (read.get("pagination") or {}).get("link", {}).get("next_url")
+            if isinstance(read.get("pagination"), Mapping)
+            else None
+        )
+        url = authored.get("literal") if isinstance(authored, Mapping) else None
+        if not isinstance(url, str) or STAND_IN in url:
+            continue
+        target_url = urlsplit(url)
+        if not target_url.scheme and not target_url.netloc:
+            continue  # relative: resolved against the origin, so same origin
+        if _same_origin(origin, target_url):
+            continue
+        violations.append(
+            Violation(
+                CHECK,
+                f"endpoint {label!r}: link.next_url is {url!r}, which leaves "
+                f"the connection's origin {origin.scheme}://{origin.netloc}. "
+                f"The loop refuses to follow it rather than send the "
+                f"connection's headers to another host, so the read fails "
+                f"the moment a second page is due.",
+            )
+        )
+    return violations
+
+
+def _same_origin(base: SplitResult, target: SplitResult) -> bool:
+    """Whether two split URLs share scheme, host and effective port."""
+    default_ports = {"http": 80, "https": 443}
+    base_scheme, target_scheme = base.scheme.lower(), target.scheme.lower()
+    return (
+        base_scheme == target_scheme
+        and (base.hostname or "").lower() == (target.hostname or "").lower()
+        and (base.port or default_ports.get(base_scheme))
+        == (target.port or default_ports.get(target_scheme))
+    )
 
 
 def probe_transports(
@@ -272,6 +335,7 @@ def check_api_transport(target: ConformanceTarget) -> list[Violation]:
     )
     violations.extend(transport_violations)
     violations.extend(check_read_transport_selection(target))
+    violations.extend(check_link_origin(target))
     return violations
 
 

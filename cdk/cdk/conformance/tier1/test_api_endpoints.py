@@ -14,6 +14,7 @@ import pytest
 
 from cdk.conformance.api_endpoints import (
     check_api_pagination,
+    check_api_query_bindings,
     check_api_request_expressions,
     check_api_response_records,
 )
@@ -67,5 +68,15 @@ def test_records_ref_addresses_the_declared_response_schema(
     """The records ref walks to a record schema the response declares."""
     _require_endpoints(conformance_target)
     violations = check_api_response_records(conformance_target)
+    if violations:
+        pytest.fail(violation_report(violations))
+
+
+def test_query_bindings_are_ones_the_read_sends(
+    conformance_target: ConformanceTarget,
+) -> None:
+    """No read renames a param through a query map the engine ignores."""
+    _require_endpoints(conformance_target)
+    violations = check_api_query_bindings(conformance_target)
     if violations:
         pytest.fail(violation_report(violations))

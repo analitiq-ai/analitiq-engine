@@ -100,7 +100,15 @@ with no connector code installed:
   `build_request` receives, so the probe supplies exactly what the runtime
   guarantees is in it — the resolved defaults plus the pagination- and
   replication-controlled params — each carrying its declared type, since a
-  strict expression around one is type-sensitive.
+  strict expression around one is type-sensitive. Replication-controlled
+  params are not among them: a full-refresh stream never writes one, and an
+  incremental stream's first run has no stored cursor to write.
+- **A read sends the query keys it declares.** The contract lets
+  `request.query` map a query key to a param; the CDK's API path does not
+  materialize that map, sending every non-body param under the param's own
+  name. A binding whose key matches the param it names is a harmless no-op;
+  any other is a key the provider never sees, on a request that goes out
+  anyway.
 - **Paging resolves when the loop reads it, and survives what it must.**
   Two facts decide each field. *When*: `limit.default` and
   `page.increment_by` are resolved once, before the first request, so they
@@ -114,7 +122,9 @@ with no connector code installed:
   makes the predicate false) is certified against the widest connection.
   An authored page size or step must be a positive integer, whether written
   bare or as a `{"literal": …}` node; `link.next_url` must resolve to a
-  string, since the loop replays it as a URL; and `keyset.order_by_field`
+  string — an input declared any non-string type never becomes one — and
+  must stay on the connection's origin, since the loop refuses to send the
+  connection's headers to another host; and `keyset.order_by_field`
   must name a field of the record the response schema declares, since the
   loop reads it from each page's last record before yielding the page.
 - **The records ref addresses the declared schema, and the schema builds.**

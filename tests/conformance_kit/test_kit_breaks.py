@@ -19,6 +19,7 @@ import pytest
 from cdk.conformance import (
     check_api_auth,
     check_api_pagination,
+    check_api_query_bindings,
     check_api_request_expressions,
     check_api_response_records,
     check_api_transport,
@@ -1205,6 +1206,27 @@ class TestApiTransportBreaks:
         merged = merged_transports(connector)["api"]["headers"]
         assert merged == {"ref": "kept", "Accept": "override"}
 
+    def test_an_off_origin_literal_next_url_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """The loop refuses to send the connection's headers to another host.
+
+        Same-origin passes, so this is about the destination, not about
+        link paging.
+        """
+        link = {
+            "type": "link",
+            "link": {"next_url": {"literal": "https://evil.example.com/p2"}},
+            "stop_when": {"empty": {"ref": "response.body.records"}},
+        }
+        doctored = _api_target(api_target, read={"pagination": link})
+        report = _messages(check_api_transport(doctored))
+        assert "leaves the connection's origin" in report
+
+        link["link"]["next_url"] = {"literal": "https://api.example.invalid/x/p2"}
+        same = _api_target(api_target, read={"pagination": link})
+        assert check_api_transport(same) == []
+
     def test_an_optional_input_behind_a_strict_transport_field_fails(
         self, api_target: ConformanceTarget
     ) -> None:
@@ -1462,6 +1484,92 @@ class TestApiEndpointBreaks:
         }
         doctored = _api_target(api_target, read={"params": params, "request": request})
         assert check_api_request_expressions(doctored) == []
+
+    def test_a_query_binding_the_engine_ignores_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """A renaming query binding is a key the provider never sees.
+
+        The engine sends every non-body param under its own name, so a
+        binding whose key equals the param it names is a harmless no-op
+        and anything else is silently dropped.
+        """
+        request = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["request"]
+        )
+        request["query"]["api_limit"] = {"from_param": "per_page"}
+        doctored = _api_target(api_target, read={"request": request})
+        report = _messages(check_api_query_bindings(doctored))
+        assert "api_limit" in report
+
+    def test_a_read_with_no_records_ref_fails_rather_than_skipping(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """Skipping would report an unreadable stream as assessed."""
+        response = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["response"]
+        )
+        del response["records"]
+        doctored = _api_target(api_target, read={"response": response})
+        report = _messages(check_api_response_records(doctored))
+        assert "response.records.ref" in report
+
+    def test_a_replication_param_in_a_strict_body_is_not_seeded(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """The runtime does not guarantee a replication param either.
+
+        A full-refresh stream never writes one, and an incremental
+        stream's first run has no stored cursor to write.
+        """
+        params = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["params"]
+        )
+        params["since"] = {
+            "in": "query",
+            "type": "string",
+            "required": False,
+            "controlled_by": "replication",
+        }
+        request = {
+            "method": "POST",
+            "path": "/items",
+            "body": {
+                "s": {"function": "base64_encode", "input": {"from_param": "since"}}
+            },
+        }
+        doctored = _api_target(api_target, read={"params": params, "request": request})
+        report = _messages(check_api_request_expressions(doctored))
+        assert "got NoneType" in report
+
+    def test_a_next_url_from_a_non_string_input_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """A stand-in's declared type decides, rather than being unknowable.
+
+        An integer-typed input never becomes a URL, so the continuation is
+        rejected without a live connection.
+        """
+        contract = copy.deepcopy(api_target.definition["connection_contract"])
+        contract["inputs"]["page_url"] = {
+            "source": "user",
+            "phase": "pre_auth",
+            "storage": "connection.parameters",
+            "type": "integer",
+            "required": True,
+        }
+        link = {
+            "type": "link",
+            "link": {"next_url": {"ref": "connection.parameters.page_url"}},
+            "stop_when": {"empty": {"ref": "response.body.records"}},
+        }
+        doctored = _api_target(
+            api_target,
+            definition={"connection_contract": contract},
+            read={"pagination": link},
+        )
+        report = _messages(check_api_pagination(doctored))
+        assert "link.next_url resolves to int" in report
 
     def test_a_record_field_the_read_type_map_cannot_map_fails(
         self, api_target: ConformanceTarget

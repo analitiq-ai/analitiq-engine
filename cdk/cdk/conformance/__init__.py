@@ -48,6 +48,7 @@ wrappers over these functions.
 
 from .api_endpoints import (
     check_api_pagination,
+    check_api_query_bindings,
     check_api_request_expressions,
     check_api_response_records,
 )
@@ -65,6 +66,7 @@ __all__ = [
     "Violation",
     "check_api_auth",
     "check_api_pagination",
+    "check_api_query_bindings",
     "check_api_request_expressions",
     "check_api_response_records",
     "check_api_transport",
