@@ -57,8 +57,9 @@ class PipelineMetricsRecord(BaseModel):
         default=0, ge=0, description="Number of records that failed processing"
     )
     # Required, unlike its sibling counts: a dropped record is unrecoverable
-    # (no dead-letter entry), so an emission path that omits the count would
-    # report zero drops and hide real data loss.
+    # (no dead-letter entry), so a default of 0 would let an emission path that
+    # forgets the count report "no drops" for a run that lost data. Required
+    # makes that omission a type error at the call site instead.
     records_skipped: int = Field(
         ...,
         ge=0,
