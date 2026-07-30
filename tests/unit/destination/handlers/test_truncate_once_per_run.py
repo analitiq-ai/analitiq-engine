@@ -834,6 +834,7 @@ class TestZeroBatchTruncate:
         emptying statement through the transport backend when the engine
         sends the synthetic batch — no stage cycle, nothing landed."""
         handler = GenericSQLConnector()
+        handler.dialect = handler.dialect_class()
         handler._connected = True
         handler._adbc_only = True
         contract = MagicMock()

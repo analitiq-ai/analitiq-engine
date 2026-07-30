@@ -90,6 +90,7 @@ class TestSqlVerdicts:
 
     def _handler(self, *, adbc_only: bool, **state_kwargs) -> GenericSQLConnector:
         handler = GenericSQLConnector()
+        handler.dialect = handler.dialect_class()
         handler._adbc_only = adbc_only
         handler._streams["s1"] = SqlStreamState(
             address=TableAddress(table="t"),

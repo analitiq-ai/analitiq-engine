@@ -128,6 +128,18 @@ class _FixtureBacktickConnector(GenericSQLConnector):
     dialect_class = _FixtureBacktickDialect
 
 
+def _bound_handler(cls=GenericSQLConnector):
+    """A handler carrying its dialect, as ``connect()`` leaves it.
+
+    The facade builds its dialect from the runtime's declaration and holds
+    none before that (issue #427), so a test driving facade internals with
+    no runtime installs the undeclared dialect the same class would build.
+    """
+    handler = cls()
+    handler.dialect = cls.dialect_class()
+    return handler
+
+
 # Use bare PEP-249 class names so the classifier (which matches on
 # ``type(exc).__name__``) sees the same string driver modules raise.
 class ProgrammingError(Exception):
@@ -205,12 +217,12 @@ class TestUnsupportedHooksAreFatal:
                 source="<test>",
             ),
         )
-        h = GenericSQLConnector()  # carries the ANSI-neutral base dialect
+        dialect = SqlDialect()  # the ANSI-neutral base
         with pytest.raises(CreateTableError) as exc:
             build_create_table_sql(
-                h.dialect,
+                dialect,
                 read_only,
-                h.dialect.table_address("t", schema="public"),
+                dialect.table_address("t", schema="public"),
                 [ColumnDef("id", "Int64")],
                 [],
             )
@@ -219,9 +231,8 @@ class TestUnsupportedHooksAreFatal:
     def test_base_dialect_lacks_stage_table_sql(self):
         from cdk.sql.exceptions import UnsupportedDialectOperationError
 
-        h = GenericSQLConnector()
         with pytest.raises(UnsupportedDialectOperationError, match="stage_table_sql"):
-            h.dialect.stage_table_sql(
+            SqlDialect().stage_table_sql(
                 TableAddress(table="stage"),
                 TableAddress(table="target"),
                 temp=False,
@@ -260,36 +271,28 @@ class TestDialectQuoting:
     branch in the connector itself."""
 
     def test_backtick_dialect_quotes_with_backticks(self):
-        h = _FixtureBacktickConnector()
-        assert h.dialect.quote_ident("id") == "`id`"
-        address = h.dialect.table_address("t", schema="ds")
-        assert h.dialect.quote_table(address) == "`ds`.`t`"
+        d = _FixtureBacktickConnector.dialect_class()
+        assert d.quote_ident("id") == "`id`"
+        assert d.quote_table(d.table_address("t", schema="ds")) == "`ds`.`t`"
 
     def test_ansi_dialect_quotes_with_double_quotes(self):
-        h = GenericSQLConnector()  # ANSI base
-        assert h.dialect.quote_ident("id") == '"id"'
+        assert GenericSQLConnector.dialect_class().quote_ident("id") == '"id"'
 
     def test_folding_dialect_qualified_normalizes_all_components(self):
         # The folding fixture upper-cases every component before quoting —
         # schema AND table fold through the same normalize_ident rule.
-        h = _FixtureConnector()
+        d = _FixtureConnector.dialect_class()
+        assert d.quote_table(d.table_address("t", schema="public")) == '"PUBLIC"."T"'
         assert (
-            h.dialect.quote_table(h.dialect.table_address("t", schema="public"))
-            == '"PUBLIC"."T"'
-        )
-        assert (
-            h.dialect.quote_table(h.dialect.table_address("t", schema="analytics"))
-            == '"ANALYTICS"."T"'
+            d.quote_table(d.table_address("t", schema="analytics")) == '"ANALYTICS"."T"'
         )
 
     def test_double_quote_escaping_in_ansi_dialect(self):
-        h = GenericSQLConnector()
-        assert h.dialect.quote_ident('we"ird') == '"we""ird"'
+        assert GenericSQLConnector.dialect_class().quote_ident('we"ird') == '"we""ird"'
 
     def test_backtick_dialect_rejects_backtick_in_identifier(self):
-        h = _FixtureBacktickConnector()
         with pytest.raises(ValueError, match="backtick"):
-            h.dialect.quote_ident("we`ird")
+            _FixtureBacktickConnector.dialect_class().quote_ident("we`ird")
 
 
 class TestSupportsUpsert:
@@ -371,7 +374,7 @@ class TestAdbcDdlBuilders:
             def to_arrow_type(self, native: str) -> str:
                 return {"BIGINT": "Int64", "TEXT": "Utf8"}[native]
 
-        h = _FixtureConnector()
+        h = _bound_handler(_FixtureConnector)
         state = _StreamState(
             address=h.dialect.table_address("orders", schema="analytics"),
             endpoint_document={
@@ -411,7 +414,7 @@ class TestAdbcDdlBuilders:
                     native
                 ]
 
-        h = _FixtureConnector()
+        h = _bound_handler(_FixtureConnector)
         state = _StreamState(
             address=h.dialect.table_address("orders", schema="analytics"),
             endpoint_document={
@@ -438,11 +441,11 @@ class TestAdbcDdlBuilders:
 
     def test_pk_clause_not_enforced_variant(self):
         # The backtick fixture sets pk_not_enforced; the bare fixture doesn't.
-        bq = _FixtureBacktickConnector()
-        assert "NOT ENFORCED" in bq.dialect.pk_clause(["id"])
+        bq = _FixtureBacktickConnector.dialect_class()
+        assert "NOT ENFORCED" in bq.pk_clause(["id"])
 
-        snow = _FixtureConnector()
-        assert "NOT ENFORCED" not in snow.dialect.pk_clause(["id"])
+        snow = _FixtureConnector.dialect_class()
+        assert "NOT ENFORCED" not in snow.pk_clause(["id"])
 
     def test_keyless_insert_ddl_includes_record_hash_as_primary_key(self):
         """``_record_hash`` must appear as NOT NULL PRIMARY KEY in the generated
@@ -460,7 +463,7 @@ class TestAdbcDdlBuilders:
             def to_arrow_type(self, native: str) -> str:
                 return {"TEXT": "Utf8"}[native]
 
-        h = _FixtureConnector()
+        h = _bound_handler(_FixtureConnector)
         h._adbc_only = True
         state = _StreamState(
             address=h.dialect.table_address("events", schema="public"),
@@ -506,7 +509,7 @@ class TestDisconnectClosesBackend:
 
         handler = GenericSQLConnector()
         handler._connected = True
-        backend = AdbcBackend(handler.dialect)
+        backend = AdbcBackend(SqlDialect())
         adbc_conn = MagicMock()
         backend._conn = adbc_conn
         handler._backend = backend
@@ -532,7 +535,7 @@ class TestDisconnectClosesBackend:
 
         handler = GenericSQLConnector()
         handler._connected = True
-        backend = AdbcBackend(handler.dialect)
+        backend = AdbcBackend(SqlDialect())
         adbc_conn = MagicMock()
         adbc_conn.close.side_effect = RuntimeError("already closed")
         backend._conn = adbc_conn

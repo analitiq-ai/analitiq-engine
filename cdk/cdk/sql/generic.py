@@ -288,7 +288,14 @@ class GenericSQLConnector(BaseDestinationHandler):
 
     def __init__(self) -> None:
         """Initialize the database handler."""
-        self.dialect: SqlDialect = self.dialect_class()
+        # The dialect this connector renders through, built from the
+        # runtime's declaration by ``_bind_capabilities`` on every entry
+        # that takes one. Deliberately unset until then: a dialect
+        # constructed here would carry no declaration and no runtime
+        # exists to give it one, so reading it before a binding is a
+        # defect that fails at the read instead of answering gates off a
+        # declaration the connector never made (issue #427).
+        self.dialect: SqlDialect
         # The connector's declared sql_capabilities (issue #390), parsed
         # from the runtime when one binds. None = undeclared: every
         # consumer refuses a needed-but-undeclared fact loudly instead of
@@ -508,24 +515,29 @@ class GenericSQLConnector(BaseDestinationHandler):
         self._error_map = error_map_for(runtime)
 
     def _dialect_renders_merge_statement(self) -> bool:
-        """Whether the active dialect implements the merge-form statement hook.
+        """Whether this connector's dialect renders the merge-form statement.
 
         A declared-vs-implemented consistency check, not a capability
         guess: the fact that the system CAN upsert is the declaration's
         (``sql_capabilities.merge_form``); whether this connector's dialect
         renders that form is an implementation fact checked at handshake so
         the disagreement fails before DDL, not on the first batch.
+
+        Read off ``dialect_class`` rather than the bound instance: which
+        hooks a dialect implements is a class fact, so the advertised
+        write modes answer the same before and after a runtime binds.
         """
-        return dialect_overrides(type(self.dialect), "merge_statement_sql")
+        return dialect_overrides(self.dialect_class, "merge_statement_sql")
 
     def _dialect_renders_stage_table(self) -> bool:
-        """Whether the active dialect implements the stage DDL hook.
+        """Whether this connector's dialect renders the stage DDL.
 
         Every SQLAlchemy-path write lands in a stage table, so a
         write-role connector without ``stage_table_sql`` cannot write at
         all — checked at handshake, alongside the declared stage shape.
+        Read off ``dialect_class`` for the same reason as the merge hook.
         """
-        return dialect_overrides(type(self.dialect), "stage_table_sql")
+        return dialect_overrides(self.dialect_class, "stage_table_sql")
 
     def _stage_ready(self) -> bool:
         """Whether the stage cycle can run for this connector (any transport).
@@ -664,6 +676,21 @@ class GenericSQLConnector(BaseDestinationHandler):
             runtime: ConnectionRuntime with enriched config
         """
         self._runtime = runtime
+        # Tear the previous connection down before anything of this
+        # runtime's is bound. connect() replaces the dialect, the declared
+        # capabilities and the error map further down, so a connect() that
+        # raises after that point would otherwise leave the new runtime's
+        # declaration rendering against the still-live previous transport.
+        # Dropping the transport state first makes that handler
+        # unwritable-through instead: _reject_if_not_ready and
+        # health_check refuse until a connect() completes, the way
+        # SQLAlchemy invalidates a connection whose connect failed rather
+        # than half-keeping it.
+        self._connected = False
+        self._adbc_only = False
+        self._engine = None
+        self._sync_engine = None
+        self._backend = None
         # Build this runtime's dialect before the transport, in the order
         # the source entry (read_batches) already uses: the factory hands
         # the dialect to hooks that fire later — verify_tls_state on every
@@ -681,13 +708,6 @@ class GenericSQLConnector(BaseDestinationHandler):
             logger.error("Database destination connection failed: %s", e)
             raise ConnectionError(f"Database connection failed: {e}") from e
         self._driver = runtime.driver or ""
-        # Reset prior-connection state so a long-lived handler that
-        # reconnects across runtimes (e.g. tests) doesn't carry the
-        # previous mode forward.
-        self._adbc_only = False
-        self._engine = None
-        self._sync_engine = None
-        self._backend = None
         # The write backend executes StageWritePlans over the runtime's
         # transport. Created after the capability binding so it reads the
         # declared bulk-load fact off the dialect.

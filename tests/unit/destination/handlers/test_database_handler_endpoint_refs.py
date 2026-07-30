@@ -83,7 +83,8 @@ _DECLARED_CAPS = SqlCapabilities.from_declaration(
 def _stage_capable(handler: GenericSQLConnector) -> GenericSQLConnector:
     """Give *handler* the declared capabilities + rendering dialect a
     migrated write-role connector carries after connect()."""
-    handler.dialect = _StageRenderingDialect(_DECLARED_CAPS)
+    handler.dialect_class = _StageRenderingDialect
+    handler.dialect = handler.dialect_class(_DECLARED_CAPS)
     handler._capabilities = _DECLARED_CAPS
     return handler
 
@@ -528,6 +529,7 @@ class TestEnsureTablesEngineNoneRaises:
         from cdk.adbc_registry import AdbcConfigurationError
 
         handler = GenericSQLConnector()
+        handler.dialect = handler.dialect_class()
         assert handler._engine is None
         state = _StreamState(
             address=TableAddress(table="events", schema="public"),
@@ -803,6 +805,7 @@ class TestDDLLockSerialization:
         from cdk.sql import generic as generic_module
 
         handler = GenericSQLConnector()
+        handler.dialect = handler.dialect_class()
 
         # DDL rendering is irrelevant to the lock; stub it out so the
         # read-only test mapper (no write rules) doesn't raise before the

@@ -16,9 +16,11 @@ already carries its connector's declaration.
 from __future__ import annotations
 
 import ast
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pyarrow as pa
 import pytest
 
 import cdk
@@ -121,6 +123,18 @@ class TestOneBindingSite:
         with pytest.raises(SqlCapabilitiesError, match="connector 'demo'"):
             SqlDialect.for_runtime(runtime)
 
+    def test_a_for_runtime_override_is_refused_where_it_is_written(self):
+        # The third route around the binding site: an override replaces the
+        # parse itself, so the facade would render through a dialect that
+        # never went through it. The sanctioned connector surface is
+        # dialect_class plus the rendering hooks.
+        with pytest.raises(TypeError, match="for_runtime"):
+
+            class _SelfBindingDialect(SqlDialect):
+                @classmethod
+                def for_runtime(cls, runtime):
+                    return cls()
+
 
 def _connectable_runtime():
     """A runtime the facade's ``connect()`` accepts, declaring full catalog."""
@@ -132,6 +146,40 @@ def _connectable_runtime():
     runtime.is_sync_sqlalchemy = False
     runtime.driver = "postgresql"
     return runtime
+
+
+class _RequiredDeclarationDialect(SqlDialect):
+    """A package dialect whose constructor demands the declaration.
+
+    The shape the class-definition guard admits: nothing may build this
+    dialect without a declaration to hand it.
+    """
+
+    name = "strict"
+
+    def __init__(self, capabilities: SqlCapabilities | None) -> None:
+        super().__init__(capabilities)
+
+
+class _RequiredDeclarationConnector(GenericSQLConnector):
+    dialect_class = _RequiredDeclarationDialect
+
+
+async def _write_a_batch(connector: GenericSQLConnector):
+    """Push a batch at *connector* and return its result (never raises).
+
+    The write gate is the externally visible answer to "can this handler
+    still be written through": it names which guard refused.
+    """
+    return await connector.write_batch(
+        run_id="r1",
+        stream_id="s1",
+        batch_seq=1,
+        record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+        record_ids=["1"],
+        cursor=None,
+        emitted_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
 
 
 def _route(rows_by_view):
@@ -210,3 +258,61 @@ class TestEveryConsumerPathCarriesTheDeclaration:
         handed = materialize.await_args.kwargs["sql_dialect"]
         assert handed is connector.dialect
         assert handed.capabilities.catalog == "full"
+
+    @pytest.mark.asyncio
+    async def test_a_failed_connect_leaves_no_handler_to_write_through(self):
+        # connect() replaces the dialect before it acquires the transport,
+        # so a materialization that raises must not leave the new runtime's
+        # declaration rendering against the previous runtime's live
+        # connection. The handler tears down instead: the write gate that
+        # let a batch past before now refuses it.
+        connector = GenericSQLConnector()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()):
+            await connector.connect(_connectable_runtime())
+        assert (await _write_a_batch(connector)).failure_summary == (
+            "Schema not configured"
+        )
+
+        failing = AsyncMock(side_effect=OSError("host unreachable"))
+        with patch("cdk.sql.generic.materialize_runtime", new=failing):
+            with pytest.raises(ConnectionError):
+                await connector.connect(_connectable_runtime())
+        assert (await _write_a_batch(connector)).failure_summary == (
+            "Handler not connected"
+        )
+
+
+class TestNoDialectBeforeADeclaration:
+    """The facade holds no dialect until a runtime's declaration builds one.
+
+    Constructing one at ``__init__`` would manufacture exactly what the
+    ticket says must be unrepresentable — a dialect with no declaration
+    behind it — before any runtime exists to declare anything."""
+
+    def test_a_connector_carries_no_dialect_before_one_is_bound(self):
+        connector = GenericSQLConnector()
+        with pytest.raises(AttributeError, match="dialect"):
+            connector.dialect  # noqa: B018
+
+    @pytest.mark.asyncio
+    async def test_a_dialect_that_requires_the_declaration_works_end_to_end(self):
+        # The class-definition guard admits a constructor that takes the
+        # declaration as a required parameter, so every path that builds
+        # this connector's dialect must supply one.
+        connector = _RequiredDeclarationConnector()
+        runtime = FakeAdbcRuntime(
+            "strict",
+            responder=_route({"tables": [{"table_name": "orders"}]}),
+            declared_sql_capabilities=caps_block(catalog="read"),
+        )
+        assert await connector.list_tables(runtime, "ds", catalog="proj") == ["orders"]
+        assert connector.dialect.capabilities.catalog == "read"
+
+    def test_the_advertised_write_modes_answer_before_a_runtime_binds(self):
+        # GetCapabilities reads these off the handler; which hooks a dialect
+        # implements is a class fact, so they answer without a dialect
+        # instance rather than raising.
+        connector = GenericSQLConnector()
+        assert connector.supports_insert is False
+        assert connector.supports_upsert is False
+        assert connector.supports_truncate is False

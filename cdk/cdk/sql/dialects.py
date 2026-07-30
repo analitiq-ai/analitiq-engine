@@ -155,15 +155,18 @@ class SqlDialect:
         """Refuse a subclass that could settle its own declaration.
 
         The read-only :attr:`capabilities` property closes assignment on an
-        instance; these close the two class-definition routes around it. A
+        instance; these close the class-definition routes around it. A
         class-body ``capabilities`` shadows the property outright, so what
         :meth:`for_runtime` parsed would be written to ``_capabilities`` and
         never read again — the dialect would answer every gate with a fact
-        its ``connector.json`` never declared. A constructor that does not
-        take the declaration cannot be handed one at all, by
-        :meth:`for_runtime` or by the conformance kit. Both raise where the
-        class is defined, so a connector package sees the rule it broke
-        instead of a bare ``TypeError`` at connect.
+        its ``connector.json`` never declared. An overridden
+        :meth:`for_runtime` replaces the parse itself, so the dialect the
+        facade renders through would never have been through the one
+        binding site. A constructor that does not take the declaration
+        cannot be handed one at all, by :meth:`for_runtime` or by the
+        conformance kit. All three raise where the class is defined, so a
+        connector package sees the rule it broke instead of a bare
+        ``TypeError`` at connect.
         """
         super().__init_subclass__(**kwargs)
         if "capabilities" in vars(cls):
@@ -173,6 +176,16 @@ class SqlDialect:
                 f"construction. What a system can do is declared data in "
                 f"connector.json, never a dialect class attribute: remove it "
                 f"and declare sql_capabilities."
+            )
+        if "for_runtime" in vars(cls):
+            raise TypeError(
+                f"{cls.__name__} overrides 'for_runtime', the one place a "
+                f"runtime's declared sql_capabilities becomes a dialect. An "
+                f"override would let a connector hand the facade a dialect "
+                f"that never went through that parse. Remove it: a connector "
+                f"package's surface is dialect_class plus the sanctioned "
+                f"rendering hooks, and what a system can do is declared in "
+                f"connector.json."
             )
         try:
             inspect.signature(cls.__init__).bind(None, None)

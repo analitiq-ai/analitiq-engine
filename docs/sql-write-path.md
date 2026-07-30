@@ -334,10 +334,15 @@ Properties:
   into it later (TLS verification on every new DBAPI connection).
   `SqlDialect.capabilities` is read-only, so no consumer can establish — or
   re-establish — what the system can do on a dialect it was handed, and a
-  dialect subclass that sets `capabilities` in its class body or whose
-  constructor cannot accept the declaration is refused where the class is
-  defined. A connector dialect that needs its own `__init__` takes
-  `capabilities` and forwards it to `super().__init__()`.
+  dialect subclass is refused where the class is defined when it sets
+  `capabilities` in its class body, overrides `for_runtime`, or has a
+  constructor that cannot accept the declaration. A connector dialect that
+  needs its own `__init__` takes `capabilities` and forwards it to
+  `super().__init__()`. The facade carries no dialect until one is bound, so
+  no dialect without a declaration behind it is ever handed to a consumer.
+  A `connect()` that fails leaves the handler with no transport at all — it
+  refuses every write until a later `connect()` completes, rather than
+  serving the new declaration over the previous connection.
 - Validated offline by the published validator like every other contract
   surface, and visible to any consumer of the connector definition.
 - `write_unit` sits at the connector level because it is not a SQL fact —

@@ -183,6 +183,9 @@ class _RenderingConnector(GenericSQLConnector):
 
 def _upsert_handler(cls=GenericSQLConnector):
     handler = cls()
+    # The dialect connect() would have built; the declaration each test
+    # exercises is assigned onto _capabilities separately below.
+    handler.dialect = cls.dialect_class()
     handler._connected = True
     handler._engine = MagicMock()
     handler._runtime = MagicMock()

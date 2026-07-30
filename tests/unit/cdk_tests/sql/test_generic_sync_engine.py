@@ -341,7 +341,7 @@ class TestSyncEngineWritePath:
             handler = GenericSQLConnector()
             handler._connected = True
             handler._sync_engine = engine
-            backend = SqlAlchemyBackend(handler.dialect)
+            backend = SqlAlchemyBackend(SqlDialect())
             backend._sync_engine = engine
             handler._backend = backend
             assert await handler.health_check() is True
