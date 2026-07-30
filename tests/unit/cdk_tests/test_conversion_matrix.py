@@ -23,7 +23,6 @@ import pytest
 from cdk.schema_contract import SchemaContract
 from cdk.type_map.arrow import arrow_family, parse_arrow_type
 from cdk.type_map.conversions import (
-    ARROW_FAMILIES,
     CONVERSION_MATRIX_VERSION,
     build_conversion_grid,
     build_conversion_matrix,
@@ -32,6 +31,7 @@ from cdk.type_map.conversions import (
     render_conversion_matrix,
 )
 from cdk.type_map.exceptions import InvalidTypeMapError
+from cdk.type_map.grammar import ARROW_FAMILIES
 from src.engine.data_transformer import _FUNCTION_CATALOG, compile_transform
 from src.engine.exceptions import TransformationError
 
