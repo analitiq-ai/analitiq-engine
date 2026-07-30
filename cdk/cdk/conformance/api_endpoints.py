@@ -31,7 +31,6 @@ from typing import TYPE_CHECKING, Any
 
 from cdk.api_paging import PageValueError, positive_page_value
 from cdk.api_response import (
-    RecordTypeError,
     ResponseSchemaError,
     records_items_schema,
     resolve_record_arrow_types,
@@ -420,7 +419,9 @@ def check_api_response_records(target: ConformanceTarget) -> list[Violation]:
             # ones the walk left alone because the field annotated its own.
             # An unparseable arrow_type raises there, before any request.
             SchemaContract(resolved)
-        except (RecordTypeError, ValueError, TypeError, KeyError) as err:
+        # RecordTypeError is a ValueError, so the walk's own failure and
+        # SchemaContract's arrive through the same arm.
+        except (ValueError, TypeError, KeyError) as err:
             violations.append(
                 Violation(
                     RECORDS_CHECK,
