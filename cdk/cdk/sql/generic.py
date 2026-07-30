@@ -805,14 +805,17 @@ class GenericSQLConnector(BaseDestinationHandler):
         self._backend = None
         return cancelled
 
-    async def _close_runtime(self, runtime: ConnectionRuntime) -> BaseException | None:
+    @staticmethod
+    async def _close_runtime(runtime: ConnectionRuntime) -> BaseException | None:
         """Release what a runtime acquired, whatever it does on the way.
 
-        The only place a runtime is released. For SQLAlchemy this disposes
-        the engine and its pool, so a reconnect that skipped it would leave
-        the previous engine's pooled connections alive for the life of the
-        process. Returns a ``CancelledError`` for the caller to re-raise
-        once it has finished its own releases.
+        The only place a runtime is released. Takes the runtime rather than
+        reading ``self._runtime``: a reconnect must close the *previous*
+        one, which the handler no longer points at by then. For SQLAlchemy
+        this disposes the engine and its pool, so a reconnect that skipped
+        it would leave the previous engine's pooled connections alive for
+        the life of the process. Returns a ``CancelledError`` for the
+        caller to re-raise once it has finished its own releases.
         """
         try:
             await runtime.close()
