@@ -88,38 +88,7 @@ class TestConfigurationError:
         error = ConfigurationError("Invalid configuration")
 
         assert str(error) == "Invalid configuration"
-        assert error.field_path is None
-        assert error.validation_errors == []
-
-    def test_with_field_path(self):
-        """Test configuration error with field path."""
-        error = ConfigurationError("Invalid value", field_path="pipeline.source.config")
-
-        assert str(error) == "Invalid value"
-        assert error.field_path == "pipeline.source.config"
-
-    def test_with_validation_errors(self):
-        """Test configuration error with validation errors."""
-        validation_errors = ["Field 'host' is required", "Port must be positive"]
-        error = ConfigurationError(
-            "Validation failed", validation_errors=validation_errors
-        )
-
-        assert str(error) == "Validation failed"
-        assert error.validation_errors == validation_errors
-
-    def test_with_all_fields(self):
-        """Test configuration error with all fields."""
-        validation_errors = ["Required field missing"]
-        error = ConfigurationError(
-            "Configuration invalid",
-            field_path="source.database",
-            validation_errors=validation_errors,
-        )
-
-        assert str(error) == "Configuration invalid"
-        assert error.field_path == "source.database"
-        assert error.validation_errors == validation_errors
+        assert isinstance(error, Exception)
 
 
 class TestExceptionInteroperability:

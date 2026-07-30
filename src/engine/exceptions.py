@@ -44,14 +44,4 @@ class TransformationError(StreamProcessingError):
 
 
 class ConfigurationError(Exception):
-    """Base exception for pipeline configuration errors."""
-
-    def __init__(
-        self,
-        message: str,
-        field_path: str | None = None,
-        validation_errors: list[str] | None = None,
-    ):
-        self.field_path = field_path
-        self.validation_errors = validation_errors or []
-        super().__init__(message)
+    """Exception for pipeline configuration errors."""
