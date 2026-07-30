@@ -4,17 +4,20 @@
 direct ADBC DBAPI connection (issue #389, spec sql-write-path). It owns
 everything transport-mechanical the facade must never touch: the cached
 connection, its locks, reopen/poison handling after failures, the
-session-schema invariant probe (issue #377), and the stage-cycle commit
-shape. It holds no write-mode logic — which statement runs is the plan's,
-decided by the facade.
+session-schema invariant probe (issue #377), and this transport's landing
+mechanisms. It holds no write-mode logic — which statement runs is the
+plan's, decided by the facade — and no step order of its own: the cycle is
+:class:`~cdk.sql.stage_cycle.StageCycle`, shared with the SQLAlchemy
+transport.
 
 Landing into the stage is by this family's declared mechanism
 (``sql_capabilities.bulk_load.adbc``): ``"adbc_ingest"`` uses
 ``cursor.adbc_ingest`` (Arrow straight through — the sanctioned home of
 what used to be an ADBC-private code path), any other declared mechanism
-consults the dialect's ``bulk_land`` hook (executemany fallback when
-declined, logged INFO), and an undeclared family lands via executemany
-``INSERT``. Stage contents are identical whichever mechanism lands them.
+is offered to the dialect's ``bulk_land`` hook, and an undeclared family
+lands via executemany ``INSERT``. Those are mechanisms only: what to do
+with a decline, and when to verify what landed, is the cycle's one rule.
+Stage contents are identical whichever mechanism lands them.
 
 PEP-249 reports ``threadsafety = 1`` for every ADBC driver we ship —
 "threads may share the module, but not connections" — so one operation
@@ -31,7 +34,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from cdk.adbc_registry import AdbcConfigurationError
@@ -42,14 +45,18 @@ from ._adbc_utils import (
     _is_fatal_adbc_error,
     _reclassify_as_fatal,
 )
-from .backend import (
-    StageWritePlan,
-    TransportBackend,
-    iter_landing_chunks,
-    stage_leftover_note,
-)
+from .backend import StageWritePlan, TransportBackend, iter_landing_chunks
 from .capabilities import undeclared_capability_error
 from .dialects import SqlDialect, TableAddress
+from .stage_cycle import (
+    LIVENESS_PROBE_SQL,
+    BulkLandOutcome,
+    StageCycle,
+    offer_bulk_land,
+    render_column_probe_sql,
+    render_landing_insert_sql,
+    render_row_count_sql,
+)
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -62,12 +69,14 @@ logger = logging.getLogger(__name__)
 class AdbcBackend(TransportBackend):
     """Stage-then-merge over a cached ADBC DBAPI connection.
 
-    Every operation is poison-aware: a failure closes the cached handle
-    (a possibly-dead connection must not serve the next batch) and the
-    next operation reopens through the runtime, so writes are
-    self-healing. Deterministic PEP-249 failure classes are reclassified
-    as :class:`AdbcConfigurationError` at this boundary so the facade's
-    ack ladder marks them fatal instead of retrying forever — except a
+    Every operation outside the stage cycle is poison-aware: a failure
+    closes the cached handle (a possibly-dead connection must not serve
+    the next batch) and the next operation reopens through the runtime,
+    so writes are self-healing. Inside the cycle, discarding the handle
+    is the cycle's own path-scoped rule, satisfied here by the same
+    poison. Deterministic PEP-249 failure classes are reclassified as
+    :class:`AdbcConfigurationError` at this boundary so the facade's ack
+    ladder marks them fatal instead of retrying forever — except a
     write-cycle failure claimed by the connector's declared ``error_map``
     (issue #401), which propagates raw so the ladder derives the declared
     verdict instead.
@@ -75,6 +84,7 @@ class AdbcBackend(TransportBackend):
 
     def __init__(self, dialect: SqlDialect) -> None:
         self._dialect = dialect
+        self._cycle = StageCycle(dialect)
         self._runtime: ConnectionRuntime | None = None
         # Cached ADBC DBAPI connection, opened eagerly in connect() so a
         # bad credential fails there, not on the first batch. Nulled on
@@ -172,11 +182,12 @@ class AdbcBackend(TransportBackend):
     async def target_columns(self, target: TableAddress) -> tuple[str, ...]:
         """Probe *target*'s column names via a zero-row SELECT.
 
-        ``SELECT * … WHERE 1=0`` + ``cursor.description`` is portable
-        across ADBC drivers and doubles as a post-DDL readiness check:
-        a target that IF-NOT-EXISTS skipped but is not selectable (or
-        lacks an engine-managed column) surfaces at handshake, not on
-        the first batch.
+        The shared zero-row probe + ``cursor.description`` is portable
+        across ADBC drivers (this transport has no reflection layer) and
+        doubles as a post-DDL readiness check: a target that
+        IF-NOT-EXISTS skipped but is not selectable (or lacks an
+        engine-managed column) surfaces at handshake, not on the first
+        batch.
         """
         return await asyncio.to_thread(self._target_columns_sync, target)
 
@@ -223,178 +234,23 @@ class AdbcBackend(TransportBackend):
     # ---- sync bodies (worker thread, op lock) --------------------------
 
     def _execute_write_sync(self, plan: StageWritePlan, batch: pa.RecordBatch) -> None:
+        """Hand the shared cycle this transport's connection, under the lock."""
         with self._op_lock:
             conn = self._require_conn_sync()
-            if self._bulk_load == "adbc_ingest":
-                # The issue-#377 invariant guard runs before any stage
-                # DDL: a bare-name ingest on a session-default system
-                # must find the session schema equal to the stage's
-                # schema, and a mismatch refuses before anything is
-                # created rather than after.
-                try:
-                    self._check_session_schema_sync(
-                        conn, plan.stage, self._dialect.adbc_ingest_kwargs(plan.stage)
-                    )
-                except Exception as exc:
-                    self._poison_sync()
-                    self._reraise_driver_error(exc, write_cycle=True)
-            if plan.transactional:
-                self._run_transactional_cycle(conn, plan, batch)
-            else:
-                self._run_stepwise_cycle(conn, plan, batch)
-
-    def _run_transactional_cycle(
-        self, conn: Any, plan: StageWritePlan, batch: pa.RecordBatch
-    ) -> None:
-        """Every step in one transaction: an interrupted batch leaves nothing.
-
-        The drop joins the transaction, so no pre-flight drop is needed —
-        a failed prior attempt rolled its stage back with it. On failure
-        the handle is poisoned (closing it discards the open
-        transaction server-side) and the next operation reopens.
-        """
-        try:
-            cursor = conn.cursor()
+            stage_conn = _AdbcStageConnection(
+                conn,
+                dialect=self._dialect,
+                runtime=self._runtime,
+                bulk_load=self._bulk_load,
+                check_session_schema=self._check_session_schema_sync,
+                discard=self._poison_sync,
+            )
             try:
-                cursor.execute(plan.create_stage_sql)
-                self._land(conn, cursor, plan, batch)
-                if plan.truncate_sql is not None:
-                    cursor.execute(plan.truncate_sql)
-                cursor.execute(plan.mode_sql)
-                cursor.execute(plan.drop_stage_sql)
-                conn.commit()
-            finally:
-                _close_cursor_quietly(cursor)
-        except Exception as exc:
-            self._poison_sync()
-            self._reraise_driver_error(exc, write_cycle=True)
+                self._cycle.run(stage_conn, plan, batch)
+            except Exception as exc:
+                self._reraise_driver_error(exc, write_cycle=True)
 
-    def _run_stepwise_cycle(
-        self, conn: Any, plan: StageWritePlan, batch: pa.RecordBatch
-    ) -> None:
-        """Per-step commits with the ADR §6 self-healing and poisoning rules.
-
-        Pre-flight ``DROP TABLE IF EXISTS`` clears this same batch's
-        leftover stage from a prior attempt (deterministic names make
-        retries self-healing); a failed cycle ends with a best-effort
-        drop and the batch's own error; a committed mode statement is
-        followed by the twice-tried drop with the honest orphan log.
-        """
-        try:
-            cursor = conn.cursor()
-            try:
-                cursor.execute(plan.drop_stage_sql)
-                conn.commit()
-                cursor.execute(plan.create_stage_sql)
-                conn.commit()
-                self._land(conn, cursor, plan, batch)
-                conn.commit()
-                if plan.truncate_sql is not None:
-                    # Committed as its own step: a failure before the
-                    # mode statement heals on retry — the same
-                    # first-batch plan re-runs the emptying statement.
-                    cursor.execute(plan.truncate_sql)
-                    conn.commit()
-                cursor.execute(plan.mode_sql)
-                conn.commit()
-            finally:
-                _close_cursor_quietly(cursor)
-        except Exception as exc:
-            # Failure path: best-effort drop, then the batch fails with
-            # its own error. The handle is poisoned either way — a
-            # failed step means a possibly-dead connection the next
-            # batch must not inherit.
-            self._drop_stage_after_failure(conn, plan)
-            self._poison_sync()
-            self._reraise_driver_error(exc, write_cycle=True)
-        self._drop_stage_after_success(conn, plan)
-
-    def _land(
-        self, conn: Any, cursor: Any, plan: StageWritePlan, batch: pa.RecordBatch
-    ) -> None:
-        """Land *batch* into the stage by the declared mechanism.
-
-        ``adbc_ingest`` is this backend's own declared mechanism — Arrow
-        goes straight to the driver, targeted by the dialect's ingest
-        kwargs. Any other declared mechanism is the dialect's
-        ``bulk_land`` hook (a pure speed slot; declined falls back to
-        executemany with an INFO log — a speed downgrade is visible,
-        never silent). Undeclared lands via executemany ``INSERT``.
-        """
-        if self._bulk_load == "adbc_ingest":
-            cursor.adbc_ingest(
-                plan.stage.table,
-                batch,
-                mode="append",
-                **self._dialect.adbc_ingest_kwargs(plan.stage),
-            )
-            return
-        if self._bulk_load != "none":
-            if self._runtime is None:
-                raise RuntimeError(
-                    "AdbcBackend.execute_write() called before connect()"
-                )
-            if self._dialect.bulk_land(conn, plan.stage, batch, runtime=self._runtime):
-                self._verify_bulk_land(cursor, plan, batch.num_rows)
-                return
-            logger.info(
-                "dialect %s declined the declared bulk land for %s; landing "
-                "via executemany",
-                self._dialect.name,
-                self._dialect.quote_table(plan.stage),
-            )
-            self._executemany_land(cursor, plan, batch)
-            # A decline must mean "landed nothing": untrusted connector
-            # code touched the stage before declining, so the fallback's
-            # result is verified like a claimed land — a partial landing
-            # under the False return would otherwise silently duplicate
-            # rows in the stage.
-            self._verify_bulk_land(cursor, plan, batch.num_rows)
-            return
-        self._executemany_land(cursor, plan, batch)
-
-    def _executemany_land(
-        self, cursor: Any, plan: StageWritePlan, batch: pa.RecordBatch
-    ) -> None:
-        """Land via executemany ``INSERT`` in plan column order (the default).
-
-        Chunked by the plan's ``rows_per_statement`` so no statement exceeds
-        the connector's declared bind-parameter cap (issue #401); an
-        undeclared cap lands the whole batch in one statement.
-        """
-        cols = ", ".join(self._dialect.quote_ident(c) for c in plan.columns)
-        placeholders = ", ".join("?" for _ in plan.columns)
-        # Dialect-quoted identifiers only; values bind via qmark params.
-        sql = (
-            f"INSERT INTO {self._dialect.quote_table(plan.stage)} "  # nosec B608
-            f"({cols}) VALUES ({placeholders})"
-        )
-        rows = [tuple(row[c] for c in plan.columns) for row in batch.to_pylist()]
-        for chunk in iter_landing_chunks(rows, plan.rows_per_statement):
-            cursor.executemany(sql, list(chunk))
-
-    def _verify_bulk_land(
-        self, cursor: Any, plan: StageWritePlan, expected_rows: int
-    ) -> None:
-        """Refuse a stage whose row count is not the batch's after bulk_land ran.
-
-        ``bulk_land`` is untrusted connector code; one cheap aggregate
-        closes the gap where its claim — "landed" on ``True``, "landed
-        nothing" on a decline — would otherwise go unverified before the
-        mode statement runs.
-        """
-        # Dialect-quoted identifiers only; no user values.
-        stage_ref = self._dialect.quote_table(plan.stage)
-        cursor.execute(f"SELECT COUNT(*) FROM {stage_ref}")  # nosec B608
-        row = cursor.fetchone()
-        count = row[0] if row else None
-        if count != expected_rows:
-            raise AdbcConfigurationError(
-                f"dialect {self._dialect.name!r} bulk_land ran for "
-                f"{plan.stage} but the stage holds {count} rows, "
-                f"expected {expected_rows}; the declared bulk mechanism did "
-                f"not land this batch cleanly — fix the connector."
-            )
+    # ---- the ingest-mode precondition ----------------------------------
 
     def _check_session_schema_sync(
         self,
@@ -415,6 +271,10 @@ class AdbcBackend(TransportBackend):
         declared ``per_statement`` system whose dialect failed to
         target the statement. A temp-scope stage carries no schema and
         never reaches the probe.
+
+        The guard is a precondition of *this transport's* ingest mode,
+        not a cycle step, so it runs here, immediately before the only
+        bare-name statement of the cycle.
 
         The ``session_default`` probe runs
         :meth:`SqlDialect.adbc_session_schema_sql` once per connection
@@ -465,112 +325,7 @@ class AdbcBackend(TransportBackend):
                 f"with the stream's target schema."
             )
 
-    def _drop_stage_after_failure(self, conn: Any, plan: StageWritePlan) -> None:
-        """Best-effort stage drop after a failed cycle step (stepwise path).
-
-        Never raises: the batch must fail with the step's own error, not
-        with whatever the cleanup ran into. The rollback clears an
-        aborted transaction that would otherwise fail the drop on its
-        transaction state; a failed rollback means the drop was never
-        attempted (and the stage may not even exist if the create step
-        was what failed).
-        """
-        try:
-            conn.rollback()
-        except Exception:
-            logger.warning(
-                "rollback after a failed batch also failed; the stage drop "
-                "for %s was not attempted — %s",
-                self._dialect.quote_table(plan.stage),
-                stage_leftover_note(plan),
-                exc_info=True,
-            )
-            return
-        try:
-            cursor = conn.cursor()
-            try:
-                cursor.execute(plan.drop_stage_sql)
-                conn.commit()
-            finally:
-                _close_cursor_quietly(cursor)
-        except Exception:
-            logger.warning(
-                "stage table %s could not be dropped after a failed batch; %s",
-                self._dialect.quote_table(plan.stage),
-                stage_leftover_note(plan),
-                exc_info=True,
-            )
-
-    def _drop_stage_after_success(self, conn: Any, plan: StageWritePlan) -> None:
-        """Drop the stage after a committed mode statement (stepwise path).
-
-        Attempted twice; when both fail the connection is poisoned (a
-        failed DROP means a possibly-dead connection the next batch must
-        not inherit) and the log tells the truth: for real scope the
-        named stage table is orphaned until dropped manually or expired;
-        a temp-scope stage dies with the discarded session.
-        """
-        first_exc = self._try_drop_sync(conn, plan)
-        if first_exc is None:
-            return
-        # INFO, not DEBUG, with the cause: a connection failing its first
-        # DROP on every batch needs a footprint at the default log level
-        # before it escalates to an orphan, and the cause (lock vs network
-        # vs permissions) is the actionable part.
-        logger.info(
-            "post-merge drop of stage %s failed (attempt 1/2); retrying",
-            self._dialect.quote_table(plan.stage),
-            exc_info=first_exc,
-        )
-        try:
-            conn.rollback()
-        except Exception:
-            logger.warning(
-                "rollback before the stage-drop retry for %s failed",
-                self._dialect.quote_table(plan.stage),
-                exc_info=True,
-            )
-        second_exc = self._try_drop_sync(conn, plan)
-        if second_exc is None:
-            logger.info(
-                "post-merge drop of stage %s succeeded on the second attempt",
-                self._dialect.quote_table(plan.stage),
-            )
-            return
-        if plan.scope == "real":
-            orphan_note = (
-                "it is orphaned — a full copy of this batch — until dropped "
-                "manually or removed by a table-expiration policy"
-            )
-        else:
-            orphan_note = "the session-temp stage dies with the discarded connection"
-        # The honest orphan record comes before the poison: a failing
-        # close must never erase the only log naming the leftover table.
-        # The batch stays acked either way — the mode statement committed.
-        logger.warning(
-            "stage table %s could not be dropped after a successful mode "
-            "statement (two attempts). The batch is acked and never "
-            "retried, so no automatic cleanup reaches this table: %s. The "
-            "connection is discarded so the next batch does not inherit it",
-            self._dialect.quote_table(plan.stage),
-            orphan_note,
-            exc_info=second_exc,
-        )
-        self._poison_sync()
-
-    @staticmethod
-    def _try_drop_sync(conn: Any, plan: StageWritePlan) -> Exception | None:
-        """One drop attempt, returning the failure instead of raising."""
-        try:
-            cursor = conn.cursor()
-            try:
-                cursor.execute(plan.drop_stage_sql)
-                conn.commit()
-            finally:
-                _close_cursor_quietly(cursor)
-        except Exception as exc:
-            return exc
-        return None
+    # ---- non-cycle operations ------------------------------------------
 
     def _run_ddl_sync(self, statements: list[str]) -> None:
         with self._op_lock:
@@ -588,10 +343,7 @@ class AdbcBackend(TransportBackend):
                 self._reraise_driver_error(exc, write_cycle=False)
 
     def _target_columns_sync(self, target: TableAddress) -> tuple[str, ...]:
-        # Dialect-quoted identifiers only; no user values.
-        sql = (
-            f"SELECT * FROM {self._dialect.quote_table(target)} WHERE 1=0"  # nosec B608
-        )
+        sql = render_column_probe_sql(self._dialect, target)
         with self._op_lock:
             conn = self._require_conn_sync()
             try:
@@ -624,7 +376,7 @@ class AdbcBackend(TransportBackend):
             try:
                 cursor = conn.cursor()
                 try:
-                    cursor.execute("SELECT 1")
+                    cursor.execute(LIVENESS_PROBE_SQL)
                     cursor.fetchone()
                 finally:
                     _close_cursor_quietly(cursor)
@@ -675,3 +427,128 @@ class AdbcBackend(TransportBackend):
                     "potential server-side resource leak",
                     exc_info=True,
                 )
+
+
+class _AdbcStageConnection:
+    """One cached ADBC connection, as the stage cycle's steps.
+
+    ADBC DBAPI connections carry no transaction object: a statement runs
+    on a fresh cursor and :meth:`commit` delimits the unit, which is what
+    lets the same cycle body express both the one-transaction and the
+    per-step-commit shape.
+
+    It owns this transport's landing outright and holds no handle back
+    into the backend. Two things outlive one cycle and therefore stay the
+    backend's — the session-schema probe cache, and the cached handle a
+    discard drops — so each arrives as a named function to call, not as
+    the backend itself.
+    """
+
+    def __init__(
+        self,
+        conn: Any,
+        *,
+        dialect: SqlDialect,
+        runtime: ConnectionRuntime | None,
+        bulk_load: str,
+        check_session_schema: Callable[[Any, TableAddress, Mapping[str, Any]], None],
+        discard: Callable[[], None],
+    ) -> None:
+        self._conn = conn
+        self._dialect = dialect
+        self._runtime = runtime
+        self._bulk_load = bulk_load
+        self._check_session_schema = check_session_schema
+        self._discard = discard
+
+    def run_statement(self, sql: str, *, commit: bool) -> None:
+        """Execute *sql* on its own cursor, committing when asked."""
+        cursor = self._conn.cursor()
+        try:
+            cursor.execute(sql)
+        finally:
+            _close_cursor_quietly(cursor)
+        if commit:
+            self.commit()
+
+    def offer_bulk_land(
+        self, plan: StageWritePlan, batch: pa.RecordBatch
+    ) -> BulkLandOutcome:
+        """Offer *batch* to the connector's declared bulk mechanism.
+
+        ``adbc_ingest`` is the CDK's own landing rather than connector
+        code, so it never reaches the hook: it is what :meth:`land_batch`
+        does, and this reports the family as undeclared.
+        """
+        return offer_bulk_land(
+            self._dialect,
+            self._conn,
+            plan,
+            batch,
+            runtime=self._runtime,
+            declared=self._bulk_load not in ("none", "adbc_ingest"),
+        )
+
+    def land_batch(self, plan: StageWritePlan, batch: pa.RecordBatch) -> None:
+        """Land *batch* by this transport's own mechanism.
+
+        ``adbc_ingest`` sends Arrow straight to the driver, targeted by
+        the dialect's ingest kwargs and guarded by the issue-#377
+        session-schema invariant that bare-name ingest depends on.
+        Everything else lands via executemany ``INSERT`` in plan column
+        order, chunked by the plan's ``rows_per_statement`` so no
+        statement exceeds the connector's declared bind-parameter cap
+        (issue #401); an undeclared cap lands the whole batch in one
+        statement.
+        """
+        if self._bulk_load == "adbc_ingest":
+            self._ingest(plan, batch)
+            return
+        sql = render_landing_insert_sql(self._dialect, plan.stage, plan.columns)
+        rows = [tuple(row[c] for c in plan.columns) for row in batch.to_pylist()]
+        cursor = self._conn.cursor()
+        try:
+            for chunk in iter_landing_chunks(rows, plan.rows_per_statement):
+                cursor.executemany(sql, list(chunk))
+        finally:
+            _close_cursor_quietly(cursor)
+
+    def _ingest(self, plan: StageWritePlan, batch: pa.RecordBatch) -> None:
+        ingest_kwargs = self._dialect.adbc_ingest_kwargs(plan.stage)
+        self._check_session_schema(self._conn, plan.stage, ingest_kwargs)
+        cursor = self._conn.cursor()
+        try:
+            cursor.adbc_ingest(plan.stage.table, batch, mode="append", **ingest_kwargs)
+        finally:
+            _close_cursor_quietly(cursor)
+
+    def stage_row_count(self, plan: StageWritePlan) -> int:
+        """Read what the stage actually holds, for the cycle to verify."""
+        cursor = self._conn.cursor()
+        try:
+            cursor.execute(render_row_count_sql(self._dialect, plan.stage))
+            row = cursor.fetchone()
+        finally:
+            _close_cursor_quietly(cursor)
+        if row is None or row[0] is None:
+            # An aggregate always returns one row; nothing back is a
+            # driver defect, and guessing a count here would let an
+            # unverified stage ack a full batch.
+            raise AdbcConfigurationError(
+                f"ADBC driver returned no row for the row-count probe of "
+                f"stage {plan.stage}; cannot verify what the declared bulk "
+                f"mechanism landed"
+            )
+        return int(row[0])
+
+    def commit(self) -> None:
+        """Commit the statements run since the last commit or rollback."""
+        self._conn.commit()
+
+    def rollback(self) -> None:
+        """Discard the statements run since the last commit or rollback."""
+        self._conn.rollback()
+
+    def invalidate(self) -> None:
+        """Close and drop the cached handle; the next operation reopens."""
+        self._discard()

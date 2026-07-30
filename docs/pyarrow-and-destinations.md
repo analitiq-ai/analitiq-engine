@@ -148,12 +148,11 @@ transport_type: "adbc"        → AdbcBackend (the same stage-then-merge
 `GenericSQLConnector` is the facade and single semantic owner (write
 modes, truncate gating, identity and duplicate rules, refusals, retry
 verdicts, timeouts). It builds a `StageWritePlan` per batch and
-delegates execution to the runtime-selected `TransportBackend`
-(`cdk/cdk/sql/backend.py`, `cdk/cdk/sql/adbc_backend.py`) — the two
-SQLAlchemy flavours run one shared sync-`Connection` cycle body (the
-async engine enters it via `run_sync`), and the ADBC backend executes
-the identical plans, so write semantics cannot fork between
-transports; all paths share the cast/schema-contract logic.
+delegates execution to the runtime-selected `TransportBackend` — the two
+SQLAlchemy flavours run one shared sync-`Connection` body (the async
+engine enters it via `run_sync`), and the ADBC backend executes the
+identical plans through the same `StageCycle`, so write semantics cannot
+fork between transports; all paths share the cast/schema-contract logic.
 
 ### ADBC coverage (production-ready, 2026)
 
