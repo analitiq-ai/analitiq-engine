@@ -1135,6 +1135,7 @@ class StreamProcessor:
                 end_time=end_time,
                 records_processed=self.metrics.records_processed,
                 records_failed=self.metrics.records_failed,
+                records_skipped=self.metrics.records_skipped,
                 batches_processed=self.metrics.batches_processed,
                 status=status,
                 error_code=error_code,

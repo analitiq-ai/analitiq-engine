@@ -1049,6 +1049,7 @@ def test_metrics_record_failure_carries_safe_fields():
         pipeline_id="p1",
         start_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
         end_time=datetime(2026, 1, 1, 0, 0, 5, tzinfo=timezone.utc),
+        records_skipped=0,
         status="failed",
         error_code=code,
         error_message=message,
@@ -1077,6 +1078,7 @@ def test_metrics_record_success_leaves_error_fields_none():
         start_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
         end_time=datetime(2026, 1, 1, 0, 0, 5, tzinfo=timezone.utc),
         records_processed=10,
+        records_skipped=0,
         status="success",
     )
     assert rec.status == "success"
