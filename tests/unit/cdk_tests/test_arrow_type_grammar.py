@@ -35,7 +35,6 @@ from unittest.mock import patch
 import pyarrow as pa
 import pytest
 
-import cdk.type_map.arrow as arrow_module
 from cdk.conformance.roundtrip import probe_canonicals
 from cdk.type_map.arrow import arrow_family, parse_arrow_type
 from cdk.type_map.conversions import build_conversion_grid, classify_conversion
@@ -61,6 +60,17 @@ _SCALAR_FAMILIES = {
 _STRUCTURAL_FAMILIES = {
     name: spec for name, spec in ARROW_FAMILIES.items() if spec.sub_schema is not None
 }
+
+
+def _arrow_module():
+    """The live ``cdk.type_map.arrow`` module.
+
+    Fetched on each use rather than bound to a second import name: the
+    table-derived globals below (``_FACTORIES``, ``_FAMILY_PROBES``) are
+    rebuilt by ``importlib.reload``, so a name bound at import time would go
+    stale the first time a test adds a family.
+    """
+    return importlib.import_module("cdk.type_map.arrow")
 
 
 def _one_rule_mapper() -> TypeMapper:
@@ -122,7 +132,7 @@ class TestFamilySetConformance:
             assert (spec.builder is None) == (spec.sub_schema is not None), name
         # The resolved factory table is the one the parser calls, so it is the
         # one that must cover every family declaring a builder.
-        assert set(arrow_module._FACTORIES) == {
+        assert set(_arrow_module()._FACTORIES) == {
             name for name, spec in ARROW_FAMILIES.items() if spec.builder is not None
         }
 
@@ -260,7 +270,7 @@ class TestFamilyProbes:
             for name, spec in ARROW_FAMILIES.items()
             for probe in spec.probes
         ]
-        assert list(arrow_module._FAMILY_PROBES) == declared
+        assert list(_arrow_module()._FAMILY_PROBES) == declared
 
     def test_type_outside_the_vocabulary_fails_loud(self) -> None:
         with pytest.raises(InvalidTypeMapError, match="no conversion-matrix family"):
@@ -278,10 +288,10 @@ def _family_added(name: str, spec: ArrowFamily) -> Iterator[None]:
     """
     try:
         with patch.dict(ARROW_FAMILIES, {name: spec}):
-            importlib.reload(arrow_module)
+            importlib.reload(_arrow_module())
             yield
     finally:
-        importlib.reload(arrow_module)
+        importlib.reload(_arrow_module())
 
 
 class TestOneTableFeedsEverySurface:
