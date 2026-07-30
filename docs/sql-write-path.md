@@ -324,6 +324,14 @@ Properties:
   so the facade and backends consume declared capabilities from the runtime
   in the process where writes execute — never a guessed default because the
   definition file was out of reach.
+- **The declaration becomes a dialect once, at construction.**
+  `SqlDialect.for_runtime(runtime)` is the only place a runtime's declared
+  block is parsed and attached; the facade calls it on every entry that
+  takes a runtime (connect, the source read, each control-plane method) and
+  hands the resulting dialect to the standalone helpers, which read it and
+  never bind anything themselves. `SqlDialect.capabilities` is read-only, so
+  no consumer can establish — or re-establish — what the system can do on a
+  dialect it was handed.
 - Validated offline by the published validator like every other contract
   surface, and visible to any consumer of the connector definition.
 - `write_unit` sits at the connector level because it is not a SQL fact —

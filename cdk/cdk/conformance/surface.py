@@ -32,13 +32,16 @@ if TYPE_CHECKING:
 
 CHECK = "override-surface"
 
-#: Public ``SqlDialect`` attributes the framework owns: ``capabilities``
-#: is bound by the facade at connect time, and ``table_address`` is the
-#: bind-once address factory whose catalog gate must not be bypassed by
-#: a subclass. Everything else public on the base is the sanctioned
-#: extension surface (the class docstring calls it "the complete
-#: extension surface", and the ADR pins it).
-FRAMEWORK_OWNED_DIALECT_ATTRS = frozenset({"capabilities", "table_address"})
+#: Public ``SqlDialect`` attributes the framework owns: ``for_runtime``
+#: is the one place a declaration becomes a dialect and ``capabilities``
+#: is what it settles, and ``table_address`` is the bind-once address
+#: factory whose catalog gate must not be bypassed by a subclass.
+#: Everything else public on the base is the sanctioned extension surface
+#: (the class docstring calls it "the complete extension surface", and
+#: the ADR pins it).
+FRAMEWORK_OWNED_DIALECT_ATTRS = frozenset(
+    {"capabilities", "for_runtime", "table_address"}
+)
 
 #: The one attribute a connector class may define (ADR section 4: "the
 #: connector class is ``dialect_class = XDialect`` and nothing else").

@@ -129,8 +129,7 @@ class _SaHarness:
     name = "sqlalchemy"
 
     def __init__(self, caps: SqlCapabilities):
-        self.dialect = _SqliteParityDialect()
-        self.dialect.capabilities = caps
+        self.dialect = _SqliteParityDialect(caps)
         self._engine = create_engine(
             "sqlite://",
             connect_args={"check_same_thread": False, "isolation_level": None},
@@ -179,8 +178,7 @@ class _AdbcHarness:
     name = "adbc"
 
     def __init__(self, caps: SqlCapabilities):
-        self.dialect = _SqliteParityDialect()
-        self.dialect.capabilities = caps
+        self.dialect = _SqliteParityDialect(caps)
         self._uri = f"file:parity_{uuid4().hex}?mode=memory&cache=shared"
         # The anchor keeps the shared in-memory database alive across the
         # backend's poison/reopen cycles and serves the assertions.

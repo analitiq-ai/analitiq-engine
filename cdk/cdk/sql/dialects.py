@@ -49,9 +49,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self
 
-from .capabilities import SqlCapabilities, undeclared_capability_error
+from .capabilities import (
+    SqlCapabilities,
+    parse_declared_capabilities,
+    undeclared_capability_error,
+)
 from .exceptions import CatalogAddressingError, UnsupportedDialectOperationError
 
 if TYPE_CHECKING:
@@ -134,14 +138,49 @@ class SqlDialect:
     #: less overrides, one that allows more may raise it to keep longer
     #: readable name tails.
     max_identifier_length: int = 63
-    #: The connector's declared ``sql_capabilities`` (issue #390), attached
-    #: by the facade when a runtime binds (``GenericSQLConnector``). The
-    #: dialect class renders SQL; whether the system HAS a shape — catalog
-    #: addressability, merge form, session-targeting regime, bulk mechanism,
-    #: stage shape — is declared data in ``connector.json``, never a class
-    #: boolean. ``None`` means undeclared: any gate that needs a fact
-    #: refuses loudly instead of guessing.
-    capabilities: SqlCapabilities | None = None
+
+    def __init__(self, capabilities: SqlCapabilities | None = None) -> None:
+        """Construct a dialect that carries *capabilities* for its lifetime.
+
+        The declaration is settled here and nowhere else: :attr:`capabilities`
+        is read-only, so no consumer can establish (or re-establish) what the
+        system can do on a dialect it was handed. ``None`` is the undeclared
+        connector — a legitimate state every gate refuses loudly on, never a
+        "not bound yet" one.
+        """
+        self._capabilities = capabilities
+
+    @classmethod
+    def for_runtime(cls, runtime: Any) -> Self:
+        """Build the dialect a *runtime*'s connector declares — the one binding site.
+
+        Every path that turns a declaration into a dialect goes through
+        here: the facade (``GenericSQLConnector``) on connect and on the
+        runtime-taking source entry, and from there the standalone
+        control-plane helpers (``create_table``, ``list_schemas`` /
+        ``list_tables`` / ``list_columns``), which read the declaration off
+        the dialect they are handed. Reads the runtime's
+        ``declared_sql_capabilities`` strictly: a runtime object without
+        the attribute is a wiring defect, not an undeclared connector.
+        """
+        return cls(
+            parse_declared_capabilities(
+                runtime.declared_sql_capabilities,
+                source=f"connector {runtime.connector_id!r}",
+            )
+        )
+
+    @property
+    def capabilities(self) -> SqlCapabilities | None:
+        """The connector's declared ``sql_capabilities`` (issue #390).
+
+        The dialect class renders SQL; whether the system HAS a shape —
+        catalog addressability, merge form, session-targeting regime, bulk
+        mechanism, stage shape — is declared data in ``connector.json``,
+        never a class boolean. ``None`` means undeclared: any gate that
+        needs a fact refuses loudly instead of guessing.
+        """
+        return self._capabilities
 
     # ---- identifiers -------------------------------------------------------
     def quote_ident(self, name: str) -> str:

@@ -729,7 +729,7 @@ class TestAdbcWriteBatchPlansTheSharedPrimitive:
         h = _FixtureConnector()
         h._connected = True
         h._adbc_only = True
-        h.dialect.capabilities = _caps()
+        h.dialect = _FixtureAdbcDialect(_caps())
         h._capabilities = h.dialect.capabilities
         contract = MagicMock()
         contract.cast_arrow_batch.side_effect = lambda b: b
@@ -837,7 +837,7 @@ class TestKeylessInsertNeedsNoMergeForm:
         h = _FixtureConnector()
         h._connected = True
         h._adbc_only = True
-        h.dialect.capabilities = _caps(merge_form="none")
+        h.dialect = _FixtureAdbcDialect(_caps(merge_form="none"))
         h._capabilities = h.dialect.capabilities
         contract = MagicMock()
         contract.cast_arrow_batch.side_effect = lambda b: b

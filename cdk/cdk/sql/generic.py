@@ -73,11 +73,7 @@ from ._adbc_utils import _is_fatal_adbc_error
 from .adbc_backend import AdbcBackend
 from .adbc_reader import open_adbc_reader
 from .backend import SqlAlchemyBackend, TransportBackend
-from .capabilities import (
-    SqlCapabilities,
-    bind_dialect_capabilities,
-    undeclared_capability_error,
-)
+from .capabilities import SqlCapabilities, undeclared_capability_error
 from .ddl import build_create_table_sql
 from .ddl import create_table as _sql_create_table
 from .dialects import SqlDialect, TableAddress, dialect_overrides
@@ -494,20 +490,21 @@ class GenericSQLConnector(BaseDestinationHandler):
         return True
 
     def _bind_capabilities(self, runtime: ConnectionRuntime) -> None:
-        """Parse the runtime's declared ``sql_capabilities`` and attach them.
+        """Replace the dialect with one built for *runtime*'s declaration.
 
-        The facade side of the one binding rule
-        (:func:`~cdk.sql.capabilities.bind_dialect_capabilities`): the
-        facade keeps the parsed block for write-path gates, and the
-        dialect gets the same object for its address-construction catalog
-        gate. Runs on ``connect()``, on ``read_batches`` (the
-        runtime-taking source entry), and on every control-plane entry
-        that takes a runtime directly; the standalone helpers bind
-        themselves through the same function. The declared error taxonomy
-        (issue #401) binds at the same point so both declarations always
-        describe the same connector.
+        The one place a declaration becomes a dialect
+        (:meth:`SqlDialect.for_runtime`): the new dialect carries the
+        parsed block for its address-construction catalog gate, and the
+        facade keeps the same object for its write-path gates. Runs on
+        ``connect()``, on ``read_batches`` (the runtime-taking source
+        entry), and on every control-plane entry that takes a runtime
+        directly — which is why the standalone helpers those entries
+        delegate to never bind anything themselves. The declared error
+        taxonomy (issue #401) binds at the same point so both
+        declarations always describe the same connector.
         """
-        self._capabilities = bind_dialect_capabilities(self.dialect, runtime)
+        self.dialect = self.dialect_class.for_runtime(runtime)
+        self._capabilities = self.dialect.capabilities
         self._error_map = error_map_for(runtime)
 
     def _dialect_renders_merge_statement(self) -> bool:

@@ -94,12 +94,15 @@ class ConformanceTarget:
 
     @cached_property
     def dialect(self) -> SqlDialect | None:
-        """A fresh dialect instance from the connector class, capabilities bound.
+        """A dialect instance from the connector class, carrying its declaration.
 
         ``None`` when no class resolved or the class carries no dialect.
-        The declared capabilities are attached exactly as the facade
-        attaches them on connect, so every gate the dialect owns (the
-        catalog door) sees the connector's real declaration.
+        The kit has the parsed declaration already, so it constructs the
+        dialect with it directly rather than through
+        :meth:`SqlDialect.for_runtime` (there is no runtime here); the
+        result is the same object shape the facade builds, so every gate
+        the dialect owns (the catalog door) sees the connector's real
+        declaration.
         """
         cls = self.connector_class
         if cls is None:
@@ -114,9 +117,7 @@ class ConformanceTarget:
                 f"{cls.__name__}.dialect_class is {dialect_class!r}, not a "
                 f"SqlDialect subclass"
             )
-        dialect = dialect_class()
-        dialect.capabilities = self.declared_capabilities
-        return dialect
+        return dialect_class(self.declared_capabilities)
 
 
 def _load_definition(definition_dir: Path) -> dict[str, Any]:

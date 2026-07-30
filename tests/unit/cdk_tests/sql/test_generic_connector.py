@@ -25,6 +25,8 @@ from cdk.secrets.exceptions import PlaceholderExpansionError
 from cdk.sql.exceptions import ReadError
 from cdk.sql.generic import GenericSQLConnector
 
+from .conftest import caps_block
+
 
 class _FakeRuntime:
     """Minimal materialized runtime for the read path."""
@@ -684,6 +686,7 @@ class TestControlPlaneDelegators:
     async def test_discovery_and_create_table_delegate(self):
         connector = GenericSQLConnector()
         runtime = _FakeRuntime(is_adbc=True)
+        runtime.declared_sql_capabilities = caps_block(catalog="read")
         with patch(
             "cdk.sql.generic._sql_list_schemas", new=AsyncMock(return_value=["s"])
         ) as ls, patch(
@@ -698,15 +701,21 @@ class TestControlPlaneDelegators:
             assert await connector.list_columns(runtime, "public", "orders") == ([], [])
             await connector.create_table(runtime, "public", "orders", [], [])
 
-        # Each delegator forwards the connector instance's own dialect object
-        # as the required keyword (identity, not ANY) and the catalog scope
-        # symmetrically (empty = session catalog).
-        dialect = connector.dialect
-        ls.assert_awaited_once_with(runtime, dialect=dialect, catalog="")
-        lt.assert_awaited_once_with(runtime, "public", dialect=dialect, catalog="")
+        # Each delegator forwards the dialect it built for this runtime as
+        # the required keyword (identity, not ANY) and the catalog scope
+        # symmetrically (empty = session catalog). Every one of them already
+        # carries the runtime's declaration — no helper binds anything.
+        forwarded = [
+            call.kwargs["dialect"]
+            for call in (ls.await_args, lt.await_args, lc.await_args, ct.await_args)
+        ]
+        assert [d.capabilities.catalog for d in forwarded] == ["read"] * 4
+        assert forwarded[-1] is connector.dialect
+        ls.assert_awaited_once_with(runtime, dialect=forwarded[0], catalog="")
+        lt.assert_awaited_once_with(runtime, "public", dialect=forwarded[1], catalog="")
         lc.assert_awaited_once_with(
-            runtime, "public", "orders", dialect=dialect, catalog=""
+            runtime, "public", "orders", dialect=forwarded[2], catalog=""
         )
         ct.assert_awaited_once_with(
-            runtime, "public", "orders", [], [], dialect=dialect, catalog=""
+            runtime, "public", "orders", [], [], dialect=forwarded[3], catalog=""
         )

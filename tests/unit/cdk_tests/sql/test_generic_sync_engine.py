@@ -132,8 +132,7 @@ def _wire_backend(
 ) -> None:
     """Wire dialect, declared capabilities, and a backend with the
     reflected target — what connect() + configure_schema() produce."""
-    handler.dialect = _SqliteStageDialect()
-    handler.dialect.capabilities = caps
+    handler.dialect = _SqliteStageDialect(caps)
     handler._capabilities = caps
     backend = SqlAlchemyBackend(handler.dialect)
     backend._sync_engine = engine
@@ -621,7 +620,8 @@ class TestFatalClassification:
 class _BulkLandingDialect(_SqliteStageDialect):
     """A dialect whose bulk mechanism actually lands the batch."""
 
-    def __init__(self) -> None:
+    def __init__(self, capabilities=None) -> None:
+        super().__init__(capabilities)
         self.bulk_calls = 0
 
     def bulk_land(self, conn, stage, batch, *, runtime):
@@ -663,8 +663,7 @@ class TestBulkLandFallback:
         engine = _sqlite_sync_engine()
         try:
             handler = _connected_handler(engine)
-            dialect = _BulkLandingDialect()
-            dialect.capabilities = handler.dialect.capabilities
+            dialect = _BulkLandingDialect(handler.dialect.capabilities)
             handler.dialect = dialect
             backend = handler._backend
             backend._dialect = dialect
@@ -686,8 +685,7 @@ class TestBulkLandFallback:
         engine = _sqlite_sync_engine()
         try:
             handler = _connected_handler(engine)
-            dialect = _BulkLandingDialect()
-            dialect.capabilities = handler.dialect.capabilities
+            dialect = _BulkLandingDialect(handler.dialect.capabilities)
             handler.dialect = dialect
             handler._backend._dialect = dialect
             assert handler._backend._bulk_declared is False
@@ -712,8 +710,7 @@ class TestBulkLandFallback:
                 def bulk_land(self, conn, stage, batch, *, runtime):
                     return True  # landed nothing
 
-            dialect = _LyingDialect()
-            dialect.capabilities = handler.dialect.capabilities
+            dialect = _LyingDialect(handler.dialect.capabilities)
             handler.dialect = dialect
             backend = handler._backend
             backend._dialect = dialect
@@ -799,7 +796,6 @@ class TestDedicatedStageSchemaPreDdl:
                 return [f"CREATE SCHEMA IF NOT EXISTS {self.quote_ident(schema_name)}"]
 
         handler = GenericSQLConnector()
-        handler.dialect = _PreDdlDialect()
         caps = SqlCapabilities.from_declaration(
             {
                 "catalog": "none",
@@ -815,7 +811,7 @@ class TestDedicatedStageSchemaPreDdl:
             },
             source="<test>",
         )
-        handler.dialect.capabilities = caps
+        handler.dialect = _PreDdlDialect(caps)
         handler._capabilities = caps
 
         ran: list[str] = []
@@ -1134,8 +1130,7 @@ class TestAsyncEngineParity:
         handler = GenericSQLConnector()
         handler._connected = True
         handler._engine = engine
-        handler.dialect = _SqliteStageDialect()
-        handler.dialect.capabilities = caps
+        handler.dialect = _SqliteStageDialect(caps)
         handler._capabilities = caps
         backend = SqlAlchemyBackend(handler.dialect)
         backend._engine = engine

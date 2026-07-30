@@ -23,7 +23,6 @@ from typing import Any
 from ..contract import ColumnDef
 from ..type_map.exceptions import InvalidTypeMapError, UnmappedTypeError
 from ..types import EndpointScope
-from .capabilities import bind_dialect_capabilities
 from .dialects import SqlDialect, TableAddress
 from .exceptions import CatalogAddressingError, CreateTableError
 from .execution import execute_ddl
@@ -138,7 +137,10 @@ async def create_table(
     """Build and execute ``CREATE TABLE`` DDL over *runtime*'s transport.
 
     *dialect* is the connector's dialect strategy (per-system dialects live
-    in the connector packages). Uses the connection-scoped write type-map
+    in the connector packages), already carrying its declared capabilities
+    (:meth:`SqlDialect.for_runtime` settles them at construction), so the
+    catalog gate below reads the same declaration the facade reads. Uses
+    the connection-scoped write type-map
     (``runtime.type_mapper_for(scope=CONNECTION)`` — connection write rules
     over the connector's) unless an explicit *type_mapper* is supplied. The
     ``catalog``/``schema``/``table`` intent resolves through
@@ -148,11 +150,6 @@ async def create_table(
     the declared ``sql_capabilities.catalog`` to be ``full`` (``read``
     covers discovery and reads only).
     """
-    # Standalone entry point: bind the runtime's declared capabilities to
-    # the dialect (the same rule the facade applies), so a declaring
-    # connector's catalog gate behaves identically however the CDK is
-    # driven.
-    bind_dialect_capabilities(dialect, runtime)
     mapper = (
         type_mapper
         if type_mapper is not None

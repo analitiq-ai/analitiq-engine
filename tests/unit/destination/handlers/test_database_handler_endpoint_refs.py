@@ -83,8 +83,7 @@ _DECLARED_CAPS = SqlCapabilities.from_declaration(
 def _stage_capable(handler: GenericSQLConnector) -> GenericSQLConnector:
     """Give *handler* the declared capabilities + rendering dialect a
     migrated write-role connector carries after connect()."""
-    handler.dialect = _StageRenderingDialect()
-    handler.dialect.capabilities = _DECLARED_CAPS
+    handler.dialect = _StageRenderingDialect(_DECLARED_CAPS)
     handler._capabilities = _DECLARED_CAPS
     return handler
 
