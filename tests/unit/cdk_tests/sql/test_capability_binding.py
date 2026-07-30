@@ -78,12 +78,38 @@ class TestOneBindingSite:
         # it outright, so for_runtime's parse would land on _capabilities and
         # never be read again — the dialect would answer gates with a fact
         # its connector.json never declared.
-        with pytest.raises(TypeError, match="class body"):
+        with pytest.raises(TypeError, match="declares 'capabilities'"):
 
             class _SelfDeclaringDialect(SqlDialect):
                 capabilities = SqlCapabilities.from_declaration(
                     caps_block(catalog="full")
                 )
+
+    def test_a_capability_inherited_from_a_mixin_is_refused(self):
+        # Same shadow, reached the other way: a base ahead of SqlDialect in
+        # the MRO leaves the subclass body empty but resolves identically at
+        # every call site, so the guard reads what the MRO produces rather
+        # than what this class happens to write down.
+        class _SharedCaps:
+            capabilities = SqlCapabilities.from_declaration(caps_block(catalog="full"))
+
+        with pytest.raises(TypeError, match="declares 'capabilities'"):
+
+            class _MixedInDialect(_SharedCaps, SqlDialect):
+                pass
+
+    def test_a_for_runtime_inherited_from_a_mixin_is_refused(self):
+        # The override reached through a mixin bypasses the one binding site
+        # exactly as a class-body override does.
+        class _SharedFactory:
+            @classmethod
+            def for_runtime(cls, runtime):
+                return cls()
+
+        with pytest.raises(TypeError, match="overrides 'for_runtime'"):
+
+            class _MixedInFactoryDialect(_SharedFactory, SqlDialect):
+                pass
 
     def test_a_constructor_that_drops_the_declaration_is_refused(self):
         # A dialect the CDK cannot hand a declaration to is named where it is
@@ -281,6 +307,43 @@ class TestEveryConsumerPathCarriesTheDeclaration:
         assert (await _write_a_batch(connector)).failure_summary == (
             "Handler not connected"
         )
+
+    @pytest.mark.asyncio
+    async def test_a_reconnect_closes_the_previous_backend(self):
+        # The handler holds the only reference to its backend, so dropping
+        # the field without closing would strand an ADBC backend's cached
+        # DBAPI connection open for the life of the process. Closing is the
+        # teardown, not nulling.
+        connector = GenericSQLConnector()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()):
+            await connector.connect(_connectable_runtime())
+        first = connector._backend
+        assert first is not None
+        first.disconnect = AsyncMock()
+
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()):
+            await connector.connect(_connectable_runtime())
+
+        first.disconnect.assert_awaited_once()
+        assert connector._backend is not first
+
+    @pytest.mark.asyncio
+    async def test_a_failing_backend_close_does_not_stop_the_reconnect(self):
+        # A backend that cannot be closed is logged and the connect
+        # proceeds: refusing to reconnect because the dead connection would
+        # not shut down cleanly would strand the handler entirely.
+        connector = GenericSQLConnector()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()):
+            await connector.connect(_connectable_runtime())
+        first = connector._backend
+        assert first is not None
+        first.disconnect = AsyncMock(side_effect=OSError("already dead"))
+
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()):
+            await connector.connect(_connectable_runtime())
+
+        assert connector._backend is not None
+        assert connector._backend is not first
 
 
 class TestNoDialectBeforeADeclaration:

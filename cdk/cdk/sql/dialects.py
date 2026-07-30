@@ -169,17 +169,31 @@ class SqlDialect:
         ``TypeError`` at connect.
         """
         super().__init_subclass__(**kwargs)
-        if "capabilities" in vars(cls):
+        # Compared against what SqlDialect defines, not looked for in
+        # vars(cls): a mixin ahead of SqlDialect in the MRO
+        # (``class D(Shared, SqlDialect)``) shadows just as effectively as a
+        # class body does, resolves the same way at every call site, and
+        # leaves the subclass body empty. getattr_static reads the attribute
+        # the MRO will actually produce without invoking the property.
+        if (
+            inspect.getattr_static(cls, "capabilities", None)
+            is not vars(SqlDialect)["capabilities"]
+        ):
             raise TypeError(
-                f"{cls.__name__} sets 'capabilities' in its class body, which "
-                f"shadows the declaration SqlDialect.for_runtime settles at "
-                f"construction. What a system can do is declared data in "
-                f"connector.json, never a dialect class attribute: remove it "
-                f"and declare sql_capabilities."
+                f"{cls.__name__} declares 'capabilities' -- in its own body "
+                f"or through a base ahead of SqlDialect -- which shadows the "
+                f"declaration SqlDialect.for_runtime settles at construction. "
+                f"What a system can do is declared data in connector.json, "
+                f"never a dialect class attribute: remove it and declare "
+                f"sql_capabilities."
             )
-        if "for_runtime" in vars(cls):
+        if (
+            inspect.getattr_static(cls, "for_runtime", None)
+            is not vars(SqlDialect)["for_runtime"]
+        ):
             raise TypeError(
-                f"{cls.__name__} overrides 'for_runtime', the one place a "
+                f"{cls.__name__} overrides 'for_runtime' -- in its own body "
+                f"or through a base ahead of SqlDialect -- the one place a "
                 f"runtime's declared sql_capabilities becomes a dialect. An "
                 f"override would let a connector hand the facade a dialect "
                 f"that never went through that parse. Remove it: a connector "

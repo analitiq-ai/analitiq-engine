@@ -690,7 +690,11 @@ class GenericSQLConnector(BaseDestinationHandler):
         self._adbc_only = False
         self._engine = None
         self._sync_engine = None
-        self._backend = None
+        # Closed, not merely dropped: this is the sole reference to the
+        # previous backend, so nulling it would leave an ADBC connection
+        # open for the life of the process. A close failure is logged
+        # inside; it must not stop this connect from proceeding.
+        await self._close_backend()
         # Build this runtime's dialect before the transport, in the order
         # the source entry (read_batches) already uses: the factory hands
         # the dialect to hooks that fire later — verify_tls_state on every
@@ -756,6 +760,36 @@ class GenericSQLConnector(BaseDestinationHandler):
         )
         self._connected = True
 
+    async def _close_backend(self) -> BaseException | None:
+        """Close the transport backend and drop it, whatever it does on the way.
+
+        The only place a backend is released. Nulling the field without this
+        would strand an ADBC backend's cached DBAPI connection open for the
+        life of the process, since the backend holds the sole reference to
+        it. Returns a ``CancelledError`` for the caller to re-raise once it
+        has finished its own releases, rather than raising here and skipping
+        them.
+        """
+        if self._backend is None:
+            return None
+        cancelled: BaseException | None = None
+        try:
+            await self._backend.disconnect()
+        except asyncio.CancelledError as exc:
+            logger.error(
+                "transport backend close cancelled; "
+                "server-side resources may remain allocated"
+            )
+            cancelled = exc
+        except Exception:
+            logger.error(
+                "Failed to close transport backend; "
+                "server-side resources may remain allocated",
+                exc_info=True,
+            )
+        self._backend = None
+        return cancelled
+
     async def disconnect(self) -> None:
         """Close database connection.
 
@@ -765,23 +799,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         ``CancelledError`` is re-raised after both releases so the
         caller's cancellation is honored.
         """
-        cancelled: BaseException | None = None
-        if self._backend is not None:
-            try:
-                await self._backend.disconnect()
-            except asyncio.CancelledError as exc:
-                logger.error(
-                    "transport backend close cancelled during disconnect; "
-                    "server-side resources may remain allocated"
-                )
-                cancelled = exc
-            except Exception:
-                logger.error(
-                    "Failed to close transport backend during disconnect; "
-                    "server-side resources may remain allocated",
-                    exc_info=True,
-                )
-            self._backend = None
+        cancelled: BaseException | None = await self._close_backend()
         if self._runtime:
             try:
                 await self._runtime.close()
