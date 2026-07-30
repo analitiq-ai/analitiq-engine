@@ -337,15 +337,17 @@ class TestConformanceExemplarsAreGated:
             builder="decimal128",
             probes=("is_decimal128",),
         )
-        with _family_added("Decimal64", added):
-            with pytest.raises(RuntimeError, match="_INT_PARAM_EXEMPLARS"):
-                probe_canonicals(_one_rule_mapper())
+        with _family_added("Decimal64", added), pytest.raises(
+            RuntimeError, match="_INT_PARAM_EXEMPLARS"
+        ):
+            probe_canonicals(_one_rule_mapper())
 
     def test_structural_family_without_an_exemplar_fails_loud(self) -> None:
         added = ArrowFamily("nested", probes=("is_map",), sub_schema="entries")
-        with _family_added("MapMarker", added):
-            with pytest.raises(RuntimeError, match="_STRUCTURAL_MATCH_EXEMPLARS"):
-                probe_canonicals(_one_rule_mapper())
+        with _family_added("MapMarker", added), pytest.raises(
+            RuntimeError, match="_STRUCTURAL_MATCH_EXEMPLARS"
+        ):
+            probe_canonicals(_one_rule_mapper())
 
 
 class TestTableBindingFailsLoud:
@@ -375,27 +377,28 @@ class TestTableBindingFailsLoud:
     def test_absent_pyarrow_binding_fails_at_import(
         self, spec: ArrowFamily, named: str
     ) -> None:
-        with pytest.raises(InvalidTypeMapError, match=re.escape(named)):
-            with _family_added("Fake", spec):
-                pass
+        with pytest.raises(InvalidTypeMapError, match=re.escape(named)), _family_added(
+            "Fake", spec
+        ):
+            pass
 
     def test_scalar_family_naming_no_factory_fails_when_parsed(self) -> None:
         # Only a structural family may omit its builder; a scalar one that does
         # is unbuildable, and the parser says so instead of calling ``None``.
-        with _family_added("Fake", ArrowFamily("string")):
-            with pytest.raises(
-                InvalidTypeMapError, match="declares no pyarrow factory"
-            ):
-                parse_arrow_type("Fake")
+        with _family_added("Fake", ArrowFamily("string")), pytest.raises(
+            InvalidTypeMapError, match="declares no pyarrow factory"
+        ):
+            parse_arrow_type("Fake")
 
     def test_factory_that_builds_no_datatype_fails_when_parsed(self) -> None:
         # pa.scalar resolves and accepts the bound parameter, but returns a
         # Scalar: the family would otherwise be declared, parsed and handed
         # downstream as something that is not a type at all.
         added = ArrowFamily("int", params=(IntParam("value", 0),), builder="scalar")
-        with _family_added("Fake", added):
-            with pytest.raises(InvalidTypeMapError, match="did not build a DataType"):
-                parse_arrow_type("Fake(1)")
+        with _family_added("Fake", added), pytest.raises(
+            InvalidTypeMapError, match="did not build a DataType"
+        ):
+            parse_arrow_type("Fake(1)")
 
 
 class TestUnitSpellings:
