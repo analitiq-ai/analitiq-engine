@@ -39,6 +39,7 @@ every read after one page.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -50,9 +51,24 @@ from cdk.resolver import ResolutionContext, Resolver
 
 from .fakes import NoSecretsResolver
 
-#: The value every stand-in scope entry carries. A string so it survives
-#: template substitution (which refuses non-scalars) and DSN encoding.
+#: The value a string-typed stand-in scope entry carries.
 STAND_IN = "conformance-stand-in"
+
+#: The stand-in each declared input type resolves to. The type vocabulary is
+#: the contract's (``ConnectionContractInput.type``), and the shape matters:
+#: the resolver's own rules are type-sensitive, so a probe standing every
+#: value in as a string would disagree with runtime in both directions — a
+#: template refuses a non-scalar the string sails through, and a function
+#: input that legitimately takes an object is handed a string.
+_STAND_IN_BY_TYPE: Mapping[str, Any] = {
+    "string": STAND_IN,
+    "integer": 1,
+    "number": 1.0,
+    "boolean": True,
+    "array": [STAND_IN],
+    "object": {"key": STAND_IN},
+}
+
 
 #: The connection id the stand-in connection is built under.
 STAND_IN_CONNECTION_ID = "conformance-declared-connection"
@@ -126,6 +142,28 @@ class AskedPath:
 def _has_prefix(path: str, prefixes: tuple[str, ...]) -> bool:
     """Whether *path* is one of *prefixes* or sits under one."""
     return any(path == prefix or path.startswith(f"{prefix}.") for prefix in prefixes)
+
+
+def stand_in_for(spec: Mapping[str, Any]) -> Any:
+    """Return the stand-in value for a declared entry's type.
+
+    An entry declaring no type — or one outside the contract's vocabulary —
+    stands in as a string: the widest thing the resolver accepts anywhere.
+    """
+    declared = spec.get("type")
+    if not isinstance(declared, str):
+        return STAND_IN
+    return deepcopy(_STAND_IN_BY_TYPE.get(declared, STAND_IN))
+
+
+def is_stand_in(value: Any) -> bool:
+    """Whether *value* is one a probe supplied rather than one authored.
+
+    Used where a check can only judge an authored constant: a value the
+    connection supplied is whatever the user configured, and the probe's
+    stand-in says nothing about it.
+    """
+    return any(value == candidate for candidate in _STAND_IN_BY_TYPE.values())
 
 
 class _RecordingContext(ResolutionContext):
@@ -253,7 +291,7 @@ def _connection(
     }
     for block, name, spec in _declared_entries(definition):
         if carries(spec):
-            blocks[block][name] = STAND_IN
+            blocks[block][name] = stand_in_for(spec)
     return {
         "connection_id": STAND_IN_CONNECTION_ID,
         "name": STAND_IN,
@@ -319,6 +357,7 @@ def connect_probe(
 
 def request_probe(
     definition: Mapping[str, Any],
+    connection: Mapping[str, Any] | None = None,
     *,
     batch_size: int = 1000,
     opaque: tuple[str, ...] = _REQUEST_OPAQUE,
@@ -341,7 +380,7 @@ def request_probe(
     """
     raw_config = {
         key: value
-        for key, value in declared_connection(definition).items()
+        for key, value in (connection or declared_connection(definition)).items()
         if key != "secret_refs"
     }
     runtime = ConnectionRuntime(
@@ -362,7 +401,10 @@ def request_probe(
 
 
 def page_probe(
-    definition: Mapping[str, Any], *, batch_size: int = 1000
+    definition: Mapping[str, Any],
+    connection: Mapping[str, Any] | None = None,
+    *,
+    batch_size: int = 1000,
 ) -> tuple[Resolver, list[AskedPath]]:
     """Return a page-phase resolver over the declared connection, and its record.
 
@@ -372,7 +414,7 @@ def page_probe(
     here and only here — it does not exist until a page comes back.
     """
     resolver, asked = request_probe(
-        definition, batch_size=batch_size, opaque=_PAGE_OPAQUE
+        definition, connection, batch_size=batch_size, opaque=_PAGE_OPAQUE
     )
     return resolver.with_response(page_response_scope(STAND_IN, [{}])), asked
 

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from cdk.api_paging import PageValueError, positive_page_value
@@ -37,11 +38,15 @@ from cdk.api_response import (
 )
 from cdk.request_binding import bind_param_refs, resolve_param_defaults
 from cdk.resolver import Resolver
+from cdk.schema_contract import SchemaContract
 from cdk.type_map import TypeMapper
 
 from .declared_connection import (
     RESOLVE_FAILURES,
     STAND_IN,
+    declared_connection,
+    guaranteed_connection,
+    is_stand_in,
     page_probe,
     request_probe,
     unsatisfied,
@@ -56,24 +61,45 @@ PAGINATION_CHECK = "api-pagination"
 RECORDS_CHECK = "api-response-records"
 
 #: Authored paging values the contract types as ``Any``, so a value that is
-#: not a positive integer reaches the engine and fails the read there — and
-#: the phase the loop reads each in, since that decides which scopes its
-#: expression may address.
-#:
+#: not a positive integer reaches the engine and fails the read there.
 #: ``limit.default`` sets the effective page size and ``page.increment_by``
-#: the page-number step; both are resolved ONCE, before the first request,
-#: when no response exists. ``offset.increment_by`` is resolved per page,
-#: which is what lets it step by ``response.record_count``.
-_PAGE_VALUES: tuple[tuple[str, tuple[str, ...], bool], ...] = (
-    ("limit.default", ("limit", "default"), True),
-    ("page.increment_by", ("page", "increment_by"), True),
-    ("offset.increment_by", ("offset", "increment_by"), False),
+#: the page-number step; ``offset.increment_by`` steps the offset.
+_PAGE_VALUES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("limit.default", ("limit", "default")),
+    ("page.increment_by", ("page", "increment_by")),
+    ("offset.increment_by", ("offset", "increment_by")),
 )
 
-#: The same pre-page fields, as the container/field pairs that split the
-#: block into its two resolution phases.
-_PRE_PAGE_FIELDS = frozenset(path for _loc, path, pre in _PAGE_VALUES if pre)
-_PRE_PAGE_CONTAINERS = frozenset(key for key, _name in _PRE_PAGE_FIELDS)
+#: The paging fields the loop resolves ONCE, before the first request, so
+#: nothing under ``response`` exists for them yet. Everything else resolves
+#: per page — which is what lets ``offset.increment_by`` step by
+#: ``response.record_count``.
+_PRE_PAGE_FIELDS = frozenset({("limit", "default"), ("page", "increment_by")})
+
+#: The paging fields whose non-resolution is not survivable. The engine
+#: parses a step through ``_positive_step``, which rejects ``None``, and it
+#: ends the loop the moment a cursor or link resolves to nothing — so a
+#: read whose continuation depends on a value the user may leave blank
+#: either fails outright or silently returns one page. Everything else in
+#: the block is survivable: an unresolved ``limit.default`` falls back to
+#: the engine's batch size with a warning, and a ``stop_when`` operand that
+#: does not resolve makes the predicate false.
+#:
+#: Certified against the narrowest connection the contract admits, for the
+#: same reason a strict http field is.
+_CONTINUATION_FIELDS = frozenset(
+    {
+        ("offset", "increment_by"),
+        ("page", "increment_by"),
+        ("cursor", "next_cursor"),
+        ("link", "next_url"),
+    }
+)
+
+#: Every field that leaves the survivable per-page slice, and the containers
+#: holding them, derived so the two tables above stay the only statement.
+_SPLIT_FIELDS = _PRE_PAGE_FIELDS | _CONTINUATION_FIELDS
+_SPLIT_CONTAINERS = frozenset(key for key, _name in _SPLIT_FIELDS)
 
 
 def read_operations(target: ConformanceTarget) -> list[tuple[str, Mapping[str, Any]]]:
@@ -184,95 +210,126 @@ def check_api_request_expressions(target: ConformanceTarget) -> list[Violation]:
     return violations
 
 
-def _pagination_phases(
-    pagination: Mapping[str, Any]
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Split a pagination block into what resolves before, and per, a page.
+@dataclass(frozen=True)
+class _PagingPass:
+    """One (fields, phase, strictness) slice of a pagination block."""
 
-    The loop reads the block in two moments. The effective page size and
-    the page-number step are resolved ONCE, before the first request, so
-    nothing under ``response`` exists for them yet. Everything else --
-    ``stop_when``, ``next_cursor``, ``next_url``, ``offset.increment_by``
-    -- is resolved per page against that page's response.
+    block: dict[str, Any]
+    pre_page: bool
+    continuation: bool
+
+    @property
+    def when(self) -> str:
+        """When the paging loop evaluates this slice."""
+        return "before the first request" if self.pre_page else "against every page"
+
+    @property
+    def scopes(self) -> str:
+        """What the slice may address, and what happens when it cannot."""
+        available = (
+            "the request-time scopes alone, since no page exists yet"
+            if self.pre_page
+            else "response.body and response.record_count on top of the "
+            "request-time scopes"
+        )
+        consequence = (
+            "The engine rejects a step it cannot parse and ends the loop the "
+            "moment a cursor or link resolves to nothing, so this either fails "
+            "the read or silently returns one page."
+            if self.continuation
+            else "An unresolved value here is survivable -- the page size falls "
+            "back to the engine's batch size, a stop_when operand makes the "
+            "predicate false -- but it is not what the connector declared."
+        )
+        return f"It resolves against {available}. {consequence}"
+
+
+def _pagination_passes(pagination: Mapping[str, Any]) -> list[_PagingPass]:
+    """Split a pagination block by when the loop reads each field, and how hard.
+
+    Four slices, because two independent facts decide what a field may
+    address and what its non-resolution costs: the phase it is read in
+    (:data:`_PRE_PAGE_FIELDS`) and whether the read survives it not
+    resolving (:data:`_CONTINUATION_FIELDS`).
     """
-    pre_page: dict[str, Any] = {}
-    for location, path, is_pre_page in _PAGE_VALUES:
-        value = _dig(pagination, path) if is_pre_page else None
-        if value is not None:
-            pre_page[location] = value
+    slices: dict[tuple[bool, bool], dict[str, Any]] = {}
 
-    per_page: dict[str, Any] = {}
+    def slot(pre_page: bool, continuation: bool) -> dict[str, Any]:
+        return slices.setdefault((pre_page, continuation), {})
+
     for key, value in pagination.items():
-        if key not in _PRE_PAGE_CONTAINERS:
-            per_page[key] = value
-        elif isinstance(value, Mapping):
-            per_page[key] = {
-                name: field
-                for name, field in value.items()
-                if (key, name) not in _PRE_PAGE_FIELDS
-            }
-    return pre_page, per_page
+        if key not in _SPLIT_CONTAINERS or not isinstance(value, Mapping):
+            slot(False, False)[key] = value
+            continue
+        for name, field in value.items():
+            pair = (key, name)
+            if pair in _SPLIT_FIELDS:
+                slot(pair in _PRE_PAGE_FIELDS, pair in _CONTINUATION_FIELDS)[
+                    f"{key}.{name}"
+                ] = field
+            else:
+                slot(False, False).setdefault(key, {})[name] = field
+
+    return [
+        _PagingPass(block=block, pre_page=pre_page, continuation=continuation)
+        for (pre_page, continuation), block in slices.items()
+        if block
+    ]
 
 
 def check_api_pagination(target: ConformanceTarget) -> list[Violation]:
     """Certify that each read's paging strategy resolves when the loop reads it."""
     violations: list[Violation] = []
+    declared = declared_connection(target.definition)
+    guaranteed = guaranteed_connection(target.definition)
     for label, read in read_operations(target):
         pagination = read.get("pagination")
         if not isinstance(pagination, Mapping):
             continue
 
-        pre_page, per_page = _pagination_phases(pagination)
-        request_resolver, request_asked = request_probe(target.definition)
-        page_resolver, page_asked = page_probe(target.definition)
+        for paging_pass in _pagination_passes(pagination):
+            # A continuation resolves against the narrowest connection the
+            # contract admits: a user may leave an optional input blank, and
+            # the loop cannot survive the value going missing.
+            connection = guaranteed if paging_pass.continuation else declared
+            probe = request_probe if paging_pass.pre_page else page_probe
+            resolver, asked = probe(target.definition, connection)
 
-        # One deep resolve per phase reaches every expression that phase
-        # evaluates -- including stop_when's operands -- without this module
-        # restating the predicate grammar. Non-expression structure passes
-        # through.
-        for block, resolver, when in (
-            (pre_page, request_resolver, "before the first request"),
-            (per_page, page_resolver, "against every page"),
-        ):
+            # One deep resolve per slice reaches every expression it holds --
+            # including stop_when's operands -- without this module restating
+            # the predicate grammar. Non-expression structure passes through.
             try:
-                resolver.resolve_for_request(block)
+                resolver.resolve_for_request(paging_pass.block)
             except RESOLVE_FAILURES as err:
                 violations.append(
                     Violation(
                         PAGINATION_CHECK,
                         f"endpoint {label!r}: the pagination block holds an "
                         f"expression the resolver refuses: {err}. The paging "
-                        f"loop evaluates it {when}, so the read fails there.",
+                        f"loop evaluates it {paging_pass.when}, so the read "
+                        f"fails there.",
                     )
                 )
 
-        violations.extend(
-            _page_value_violations(label, pagination, request_resolver, page_resolver)
-        )
-        violations.extend(
-            Violation(
-                PAGINATION_CHECK,
-                f"endpoint {label!r}: the paging strategy reads {entry.path!r} "
-                f"before its first request, when no page exists ({entry.detail}). "
-                f"The effective page size and the page-number step are resolved "
-                f"once, from the request-time scopes alone -- only the per-page "
-                f"expressions (stop_when, next_cursor, next_url, "
-                f"offset.increment_by) see a response.",
+            violations.extend(
+                Violation(
+                    PAGINATION_CHECK,
+                    f"endpoint {label!r}: the paging strategy reads "
+                    f"{entry.path!r} {paging_pass.when} ({entry.detail}). "
+                    f"{paging_pass.scopes}",
+                )
+                for entry in unsatisfied(asked)
             )
-            for entry in unsatisfied(request_asked)
-        )
+
+        # Over the widest connection: this judges an AUTHORED constant, and a
+        # value the connection supplies is whatever the user configured.
         violations.extend(
-            Violation(
-                PAGINATION_CHECK,
-                f"endpoint {label!r}: the paging strategy reads {entry.path!r}, "
-                f"which a page does not carry ({entry.detail}). A page resolves "
-                f"against response.body (the parsed payload) and "
-                f"response.record_count, plus the request-time scopes. A "
-                f"stop_when operand that never resolves makes the predicate "
-                f"false on every page, and a next_cursor or next_url that never "
-                f"resolves stops the read after one.",
+            _page_value_violations(
+                label,
+                pagination,
+                request_probe(target.definition, declared)[0],
+                page_probe(target.definition, declared)[0],
             )
-            for entry in unsatisfied(page_asked)
         )
     return violations
 
@@ -292,18 +349,18 @@ def _page_value_violations(
     stand-in, which no positivity claim can be made about.
     """
     violations: list[Violation] = []
-    for location, path, is_pre_page in _PAGE_VALUES:
+    for location, path in _PAGE_VALUES:
         value = _dig(pagination, path)
         if value is None:
             continue
         if Resolver.is_expression_node(value):
-            resolver = request_resolver if is_pre_page else page_resolver
+            resolver = request_resolver if path in _PRE_PAGE_FIELDS else page_resolver
             try:
                 value = resolver.resolve_for_request(value)
             except RESOLVE_FAILURES:
                 # The resolve pass above reports this with its own message.
                 continue
-            if value is None or value == STAND_IN:
+            if value is None or is_stand_in(value):
                 continue
         try:
             positive_page_value(value, context=location)
@@ -356,18 +413,23 @@ def check_api_response_records(target: ConformanceTarget) -> list[Violation]:
             # On the walk's own copy: the engine annotates the schema it is
             # about to build a batch from, and a check must not leave the
             # target's documents mutated for whatever runs next.
-            resolve_record_arrow_types(
-                deepcopy(record_schema), _mapper_accessor(mapper)
-            )
-        except RecordTypeError as err:
+            resolved = deepcopy(record_schema)
+            resolve_record_arrow_types(resolved, _mapper_accessor(mapper))
+            # The engine hands that same annotated schema straight to
+            # SchemaContract, which parses every Arrow type -- including the
+            # ones the walk left alone because the field annotated its own.
+            # An unparseable arrow_type raises there, before any request.
+            SchemaContract(resolved)
+        except (RecordTypeError, ValueError, TypeError, KeyError) as err:
             violations.append(
                 Violation(
                     RECORDS_CHECK,
                     f"endpoint {label!r}: {err}. The engine resolves every "
-                    f"record field's Arrow type through the read type map "
-                    f"before it sends a request, so this read fails on every "
-                    f"run -- add the rule, or annotate the field with an "
-                    f"explicit arrow_type.",
+                    f"record field's Arrow type through the read type map and "
+                    f"builds the record schema from the result, both before it "
+                    f"sends a request -- so this read fails on every run. Add "
+                    f"the missing type-map rule, or fix the field's declared "
+                    f"arrow_type.",
                 )
             )
     return violations

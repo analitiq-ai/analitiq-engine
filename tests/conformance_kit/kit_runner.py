@@ -49,6 +49,10 @@ def run_kit_suite(
         suite,
         "-q",
         "--no-header",
+        # Skip REASONS, not just the count: the acceptance tests assert that
+        # every skip in a green run is a check scoped to another connector
+        # kind, and the aggregate line cannot say which.
+        "-rs",
         "-p",
         "no:cacheprovider",
     ]

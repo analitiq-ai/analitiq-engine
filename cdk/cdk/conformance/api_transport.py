@@ -113,6 +113,32 @@ def check_read_transport_selection(target: ConformanceTarget) -> list[Violation]
     return violations
 
 
+def _rate_limit_violations(ref: str, resolved: Mapping[str, Any]) -> list[Violation]:
+    """Report a resolved rate limit the build phase will refuse.
+
+    Resolving an http spec and building the transport from it are two
+    phases, and only the second constructs the ``RateLimiter`` — whose
+    window and request count must both be positive. A spec that resolves
+    cleanly and then fails to build is a connection nobody can open, so
+    the resolve-only probe is not on its own evidence that the transport
+    materializes.
+    """
+    limit = resolved.get("rate_limit")
+    if not isinstance(limit, Mapping):
+        return []
+    return [
+        Violation(
+            CHECK,
+            f"transport {ref!r}: rate_limit.{field} resolves to {value!r}, "
+            f"but the engine builds this transport's rate limiter from it "
+            f"and requires a positive value. The spec resolves and the "
+            f"connection still fails to open.",
+        )
+        for field in ("max_requests", "time_window_seconds")
+        if isinstance(value := limit.get(field), int) and value <= 0
+    ]
+
+
 def probe_transports(
     target: ConformanceTarget,
     raw_config: Mapping[str, Any],
@@ -135,7 +161,7 @@ def probe_transports(
         if refs is not None and ref not in refs:
             continue
         try:
-            resolve_http_spec(block, resolver=resolver)
+            resolved = resolve_http_spec(block, resolver=resolver)
         except RESOLVE_FAILURES as err:
             violations.append(
                 Violation(
@@ -146,6 +172,8 @@ def probe_transports(
                     f"on this connector can be opened.",
                 )
             )
+        else:
+            violations.extend(_rate_limit_violations(ref, resolved))
     optional = optional_paths(target.definition)
     for entry in unsatisfied(asked):
         if entry.path in optional:

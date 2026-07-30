@@ -63,21 +63,26 @@ api registry repos ship no `.py` file — so its checks audit the
 definition against what that path can execute from it. Every one applies
 with no connector code installed:
 
-- **The transport materializes.** Every declared `transport_ref` resolves
-  through the CDK's own http resolve phase, against the connection the
-  connector's `connection_contract` promises; `default_transport` names a
-  declared transport *of type `http`* (the API path materializes the
-  connection from the default and reads its session and base URL, so
-  another http transport elsewhere does not save a non-http default), and
-  every `transport_type` is one the CDK registers. A `${secrets.api_key}`
-  header with no input declaring `storage: secrets` under that name is a
-  connection that can never be built. So is one reading an input the
-  contract declares *optional with no default* — a user may leave it
-  blank, and an http field resolves strictly. And no read may name a
-  `transport_ref` other than the default: the contract allows the
-  selection, the CDK's API path does not make it (it opens one connection
-  at connect time), so such a read would go out on the wrong origin and
-  still succeed.
+- **The transport materializes.** Every declared transport resolves through
+  the CDK's own http resolve phase, against the connection the connector's
+  `connection_contract` promises, and every `transport_type` is one the CDK
+  registers. A `${secrets.api_key}` header with no input declaring
+  `storage: secrets` under that name is a connection that can never be
+  built. So is one reading an input the contract declares *optional with no
+  default* — a user may leave it blank, and an http field resolves
+  strictly. Stand-in values carry the input's declared type, so the
+  resolver's type-sensitive rules apply: an object-typed input substituted
+  into a URL template is refused here exactly as it would be at connect.
+  And resolving is not the last word — a resolved `rate_limit` must hold
+  positive values, since the rate limiter is constructed in the later build
+  phase and refuses anything else.
+- **The transport a read opens is the one it declares.** The API path
+  materializes one connection at connect time from `default_transport`,
+  which must therefore name a declared transport of type `http` — another
+  http transport elsewhere does not save a non-http default. And no read
+  may name a `transport_ref` other than that one: the contract allows the
+  selection, the CDK's API path does not make it, so such a read would go
+  out on the wrong origin with the wrong headers and still succeed.
 - **The declared auth reaches the wire.** The only auth behaviour the CDK
   executes is resolving credential material into the request the transport
   opens (`authorize` / `token_exchange` / `refresh` are the control
@@ -92,22 +97,27 @@ with no connector code installed:
   resolution runs, nor `response`, which does not exist yet. An
   unresolvable expression omits its param or field, so the request silently
   goes out without it.
-- **Paging resolves when the loop reads it.** Two phases, because the loop
-  reads the block in two moments. `limit.default` and `page.increment_by`
-  are resolved once, *before* the first request, so they see the
-  request-time scopes and no response. Everything else — `stop_when`'s
-  operands, `next_cursor`, `next_url`, `offset.increment_by` — is resolved
-  per page, against `response.body` and `response.record_count` on top of
-  those. An authored page size or step must be a positive integer, whether
-  written bare or as a `{"literal": …}` node. A `stop_when` on
-  `response.headers` never holds; a `next_cursor` that never resolves ends
-  the read after one page.
-- **The records ref addresses the declared schema, and the schema maps.**
+- **Paging resolves when the loop reads it, and survives what it must.**
+  Two facts decide each field. *When*: `limit.default` and
+  `page.increment_by` are resolved once, before the first request, so they
+  see the request-time scopes and no response; everything else resolves per
+  page, against `response.body` and `response.record_count` on top of
+  those. *How hard*: a continuation — `next_cursor`, `next_url`, either
+  `increment_by` — is certified against the connection the contract
+  *guarantees*, because the engine rejects a step it cannot parse and ends
+  the loop the moment a cursor resolves to nothing. The survivable rest
+  (`limit.default` falls back to the batch size, a `stop_when` operand
+  makes the predicate false) is certified against the widest connection.
+  An authored page size or step must be a positive integer, whether written
+  bare or as a `{"literal": …}` node.
+- **The records ref addresses the declared schema, and the schema builds.**
   The engine builds the Arrow schema it emits by walking `response.schema`
-  along `response.records.ref` and then resolving every record field's
-  `arrow_type` through `type-map-read.json`. A ref naming a field the
-  schema does not declare, or a field whose JSON `type`/`format` has no
-  rule in the read map, fails the read before its first request.
+  along `response.records.ref`, resolving every record field's `arrow_type`
+  through `type-map-read.json`, and constructing the record schema from the
+  result. A ref naming a field the schema does not declare, a field whose
+  JSON `type`/`format` has no rule in the read map, and a hand-annotated
+  `arrow_type` that does not parse all fail the read before its first
+  request.
 
 **Tier 2 — live tests** (`cdk.conformance.tier2`, the connector's
 system as a CI service container): all three write modes end-to-end

@@ -1148,6 +1148,41 @@ class TestApiTransportBreaks:
         )
         assert check_api_transport(naming_the_default) == []
 
+    def test_a_non_positive_rate_limit_window_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """Resolving a spec is not evidence the transport builds from it.
+
+        `resolve_http_spec` accepts the window; `RateLimiter` refuses it.
+        A resolve-only probe would call this connection materializable and
+        every connect would still fail. (`max_requests` is `ge=1` on the
+        published contract, so the validator already gates that half; the
+        window is typed `Any` to admit a value expression.)
+        """
+        transports = copy.deepcopy(api_target.definition["transports"])
+        transports["api"]["rate_limit"] = {
+            "max_requests": 60,
+            "time_window_seconds": 0,
+        }
+        doctored = _api_target(api_target, definition={"transports": transports})
+        report = _messages(check_api_transport(doctored))
+        assert "rate_limit.time_window_seconds" in report
+
+    def test_an_object_typed_input_in_a_url_template_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """Stand-ins carry the declared type, so type-sensitive rules apply.
+
+        Template substitution takes scalars only. A probe standing every
+        value in as a string would let an object-typed input through here
+        and fail a function input that legitimately takes one.
+        """
+        contract = copy.deepcopy(api_target.definition["connection_contract"])
+        contract["inputs"]["account_id"]["type"] = "object"
+        doctored = _api_target(api_target, definition={"connection_contract": contract})
+        report = _messages(check_api_transport(doctored))
+        assert "only scalars" in report
+
     def test_an_optional_input_behind_a_strict_transport_field_fails(
         self, api_target: ConformanceTarget
     ) -> None:
@@ -1240,7 +1275,7 @@ class TestApiEndpointBreaks:
         doctored = _api_target(api_target, read={"pagination": pagination})
         report = _messages(check_api_pagination(doctored))
         assert "response.record_count" in report
-        assert "before its first request" in report
+        assert "before the first request" in report
 
     def test_a_non_positive_page_size_expression_literal_fails(
         self, api_target: ConformanceTarget
@@ -1265,6 +1300,64 @@ class TestApiEndpointBreaks:
         doctored = _api_target(api_target, read={"params": params})
         report = _messages(check_api_request_expressions(doctored))
         assert "response.body.since" in report
+
+    def test_a_continuation_reading_an_optional_input_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """A continuation cannot survive a value the user may leave blank.
+
+        The engine rejects a step it cannot parse and ends the loop the
+        moment a cursor resolves to nothing, so a continuation is certified
+        against the guaranteed connection. Making the same input required
+        clears it — the survivable parts of the block still probe the
+        widest connection.
+        """
+        contract = copy.deepcopy(api_target.definition["connection_contract"])
+        contract["inputs"]["page_step"] = {
+            "source": "user",
+            "phase": "pre_auth",
+            "storage": "connection.parameters",
+            "type": "integer",
+            "required": False,
+        }
+        pagination = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["pagination"]
+        )
+        pagination["offset"]["increment_by"] = {
+            "ref": "connection.parameters.page_step"
+        }
+        doctored = _api_target(
+            api_target,
+            definition={"connection_contract": contract},
+            read={"pagination": pagination},
+        )
+        report = _messages(check_api_pagination(doctored))
+        assert "connection.parameters.page_step" in report
+
+        contract["inputs"]["page_step"]["required"] = True
+        required = _api_target(
+            api_target,
+            definition={"connection_contract": contract},
+            read={"pagination": pagination},
+        )
+        assert check_api_pagination(required) == []
+
+    def test_an_unparseable_explicit_arrow_type_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """A hand-annotated field skips the type map and still has to parse.
+
+        The engine builds the record schema from the annotated result, so
+        `SchemaContract` rejects the field before any request is sent.
+        """
+        response = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["response"]
+        )
+        record = response["schema"]["properties"]["records"]["items"]["properties"]
+        record["id"]["arrow_type"] = "Blurb"
+        doctored = _api_target(api_target, read={"response": response})
+        report = _messages(check_api_response_records(doctored))
+        assert "Blurb" in report
 
     def test_a_record_field_the_read_type_map_cannot_map_fails(
         self, api_target: ConformanceTarget
