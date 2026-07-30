@@ -66,32 +66,44 @@ with no connector code installed:
 - **The transport materializes.** Every declared `transport_ref` resolves
   through the CDK's own http resolve phase, against the connection the
   connector's `connection_contract` promises; `default_transport` names a
-  declared transport, and every `transport_type` is one the CDK
-  registers. A `${secrets.api_key}` header with no input declaring
-  `storage: secrets` under that name is a connection that can never be
-  built.
+  declared transport *of type `http`* (the API path materializes the
+  connection from the default and reads its session and base URL, so
+  another http transport elsewhere does not save a non-http default), and
+  every `transport_type` is one the CDK registers. A `${secrets.api_key}`
+  header with no input declaring `storage: secrets` under that name is a
+  connection that can never be built. So is one reading an input the
+  contract declares *optional with no default* — a user may leave it
+  blank, and an http field resolves strictly.
 - **The declared auth reaches the wire.** The only auth behaviour the CDK
   executes is resolving credential material into the request the transport
   opens (`authorize` / `token_exchange` / `refresh` are the control
-  plane's). So `type: "none"` while reading a secret, and any other type
-  while reading none, are both reported: the second means every request
-  goes out unauthenticated.
+  plane's). Checked on the default transport alone: a credential resolved
+  into an auth-operation or discovery transport authenticates none of the
+  requests a read sends. So `type: "none"` while reading a secret, and any
+  other type while the default transport reads none, are both reported.
 - **Request expressions resolve at request time.** Declared param defaults
   and the request body resolve against the request-phase scopes —
   `connection.parameters` / `selections` / `discovered` and `runtime`, and
   deliberately *not* secrets, which never cross to where per-request
-  resolution runs. An unresolvable expression omits its param or field, so
-  the request silently goes out without it.
-- **Paging resolves against a page.** The strategy's `stop_when` operands,
-  `next_cursor`, `next_url` and `increment_by` resolve against the scope a
-  page carries (`response.body`, `response.record_count`, plus the
-  request-time scopes), and an authored page size or step literal is a
-  positive integer. A `stop_when` on `response.headers` never holds; a
-  `next_cursor` that never resolves ends the read after one page.
-- **The records ref addresses the declared schema.** The engine builds the
-  Arrow schema it emits by walking `response.schema` along
-  `response.records.ref`; a ref naming a field the schema does not declare
-  fails the read on its first page.
+  resolution runs, nor `response`, which does not exist yet. An
+  unresolvable expression omits its param or field, so the request silently
+  goes out without it.
+- **Paging resolves when the loop reads it.** Two phases, because the loop
+  reads the block in two moments. `limit.default` and `page.increment_by`
+  are resolved once, *before* the first request, so they see the
+  request-time scopes and no response. Everything else — `stop_when`'s
+  operands, `next_cursor`, `next_url`, `offset.increment_by` — is resolved
+  per page, against `response.body` and `response.record_count` on top of
+  those. An authored page size or step must be a positive integer, whether
+  written bare or as a `{"literal": …}` node. A `stop_when` on
+  `response.headers` never holds; a `next_cursor` that never resolves ends
+  the read after one page.
+- **The records ref addresses the declared schema, and the schema maps.**
+  The engine builds the Arrow schema it emits by walking `response.schema`
+  along `response.records.ref` and then resolving every record field's
+  `arrow_type` through `type-map-read.json`. A ref naming a field the
+  schema does not declare, or a field whose JSON `type`/`format` has no
+  rule in the read map, fails the read before its first request.
 
 **Tier 2 — live tests** (`cdk.conformance.tier2`, the connector's
 system as a CI service container): all three write modes end-to-end

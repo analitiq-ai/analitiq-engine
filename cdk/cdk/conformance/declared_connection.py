@@ -70,15 +70,23 @@ _STORAGE_BLOCKS: Mapping[str, str] = {
 }
 
 #: Prefixes whose contents no connection contract can promise, per phase.
+#: Opaque means "this phase carries it, and no declaration enumerates its
+#: keys" — never "unreachable here but tolerated", which would mark a path
+#: satisfied at a phase whose scopes do not carry it at all.
+#:
+#: ``auth`` and ``connection.auth_state`` are what the control plane's auth
+#: flow produced for a live connection (an OAuth access token); a connector
+#: legitimately reads them at connect time and no declaration describes
+#: their keys. Neither is in scope at request time, so neither is listed
+#: there.
 #:
 #: ``response.body`` is the provider's payload — its shape lives in the
-#: endpoint's response schema, not in any scope the kit can enumerate.
-#: ``auth`` and ``connection.auth_state`` are what the control plane's auth
-#: flow produced for a live connection (an OAuth access token); a
-#: connector legitimately reads them at connect time and no declaration
-#: describes their keys.
-_CONNECT_OPAQUE: tuple[str, ...] = ("auth", "connection.auth_state", "response.body")
-_REQUEST_OPAQUE: tuple[str, ...] = ("response.body",)
+#: endpoint's response schema, not in any scope the kit can enumerate — and
+#: it exists only once a page has come back, so it is opaque at the page
+#: phase and nowhere else.
+_CONNECT_OPAQUE: tuple[str, ...] = ("auth", "connection.auth_state")
+_REQUEST_OPAQUE: tuple[str, ...] = ()
+_PAGE_OPAQUE: tuple[str, ...] = ("response.body",)
 
 #: Scope prefixes that carry credential material. What makes a declared
 #: auth type more than a label: unless the connection's transport reads
@@ -189,28 +197,87 @@ class _StandInSecretsResolver(SecretsResolver):
         """Nothing to release."""
 
 
-def declared_connection(definition: Mapping[str, Any]) -> dict[str, Any]:
+def _declared_entries(
+    definition: Mapping[str, Any],
+) -> list[tuple[str, str, Mapping[str, Any]]]:
+    """Every contract entry as ``(block, name, spec)``, storage resolved.
+
+    Entries whose ``storage`` names nothing the CDK reads are dropped: they
+    land in no connection block at runtime either, so every expression
+    addressing one is reported unsatisfied — which is what such a
+    definition does.
+    """
+    contract = definition.get("connection_contract")
+    contract = contract if isinstance(contract, Mapping) else {}
+    entries: list[tuple[str, str, Mapping[str, Any]]] = []
+    for group in ("inputs", "post_auth_outputs"):
+        declared = contract.get(group)
+        if not isinstance(declared, Mapping):
+            continue
+        for name, spec in declared.items():
+            if not isinstance(spec, Mapping):
+                continue
+            storage = spec.get("storage")
+            block = _STORAGE_BLOCKS.get(storage) if isinstance(storage, str) else None
+            if block is not None:
+                entries.append((block, str(name), spec))
+    return entries
+
+
+def _guaranteed(spec: Mapping[str, Any]) -> bool:
+    """Whether every connection built from this contract carries the entry.
+
+    ``required: true`` is the contract's promise that resolution produces a
+    value, and a ``default`` supplies one when the user leaves the field
+    blank. An optional entry with neither is genuinely absent from
+    connections that skip it.
+
+    A post-auth output declares no ``required``: it is produced by the auth
+    flow the connector's own auth type runs, so a connection that reached
+    the active state carries it.
+    """
+    if "required" not in spec:
+        return True
+    return bool(spec.get("required")) or spec.get("default") is not None
+
+
+def optional_paths(definition: Mapping[str, Any]) -> set[str]:
+    """Dotted paths a connection may legitimately not carry.
+
+    Declared, so the contract knows the name — but optional and without a
+    default, so a user can leave it unset. What separates "this connector
+    never declared that" from "this connector declared it as skippable".
+    """
+    storage_of = {block: storage for storage, block in _STORAGE_BLOCKS.items()}
+    return {
+        f"{storage_of[block]}.{name}"
+        for block, name, spec in _declared_entries(definition)
+        if not _guaranteed(spec)
+    }
+
+
+def declared_connection(
+    definition: Mapping[str, Any], *, include_optional: bool = True
+) -> dict[str, Any]:
     """Build the connection a connector's ``connection_contract`` promises.
 
     Every declared input and post-auth output becomes a stand-in value in
     the connection block its ``storage`` names — so a value expression
     resolves exactly when the contract promises what it addresses, and
     fails to resolve exactly when it does not.
+
+    ``include_optional=False`` builds the *narrowest* connection the
+    contract still admits: only the entries every connection carries. A
+    field the CDK resolves strictly — an http ``base_url``, a header —
+    must resolve against that one, or it fails to connect for the users
+    who left the optional value blank.
     """
-    contract = definition.get("connection_contract")
-    contract = contract if isinstance(contract, Mapping) else {}
     blocks: dict[str, dict[str, Any]] = {
         block: {} for block in dict.fromkeys(_STORAGE_BLOCKS.values())
     }
-    for group in ("inputs", "post_auth_outputs"):
-        declared = contract.get(group)
-        if not isinstance(declared, Mapping):
-            continue
-        for name, spec in declared.items():
-            storage = spec.get("storage") if isinstance(spec, Mapping) else None
-            block = _STORAGE_BLOCKS.get(storage) if isinstance(storage, str) else None
-            if block is not None:
-                blocks[block][str(name)] = STAND_IN
+    for block, name, spec in _declared_entries(definition):
+        if include_optional or _guaranteed(spec):
+            blocks[block][name] = STAND_IN
     return {
         "connection_id": STAND_IN_CONNECTION_ID,
         "name": STAND_IN,
@@ -224,14 +291,16 @@ def declared_connection(definition: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def connect_probe(definition: Mapping[str, Any]) -> tuple[Resolver, list[AskedPath]]:
+def connect_probe(
+    definition: Mapping[str, Any], *, include_optional: bool = True
+) -> tuple[Resolver, list[AskedPath]]:
     """Return a connect-phase resolver over the declared connection, and its record.
 
     The scopes come from the CDK's own connect-phase assembly, so what the
     kit certifies and what the engine resolves a transport against cannot
     be different scope sets.
     """
-    raw_config = declared_connection(definition)
+    raw_config = declared_connection(definition, include_optional=include_optional)
     asked: list[AskedPath] = []
     scopes = transport_resolution_context(
         raw_config=raw_config,
@@ -244,7 +313,10 @@ def connect_probe(definition: Mapping[str, Any]) -> tuple[Resolver, list[AskedPa
 
 
 def request_probe(
-    definition: Mapping[str, Any], *, batch_size: int = 1000
+    definition: Mapping[str, Any],
+    *,
+    batch_size: int = 1000,
+    opaque: tuple[str, ...] = _REQUEST_OPAQUE,
 ) -> tuple[Resolver, list[AskedPath]]:
     """Return a request-phase resolver over the declared connection, and its record.
 
@@ -265,7 +337,7 @@ def request_probe(
     context = _RecordingContext(
         runtime.request_resolver(runtime_values={"batch_size": batch_size}).context,
         asked,
-        _REQUEST_OPAQUE,
+        opaque,
     )
     return Resolver(context, functions=DEFAULT_FUNCTIONS), asked
 
@@ -277,9 +349,12 @@ def page_probe(
 
     The request scopes plus the ``response`` scope a paging loop builds.
     One stand-in record, so ``response.record_count`` resolves to the
-    positive integer a real page carries.
+    positive integer a real page carries. The provider's payload is opaque
+    here and only here — it does not exist until a page comes back.
     """
-    resolver, asked = request_probe(definition, batch_size=batch_size)
+    resolver, asked = request_probe(
+        definition, batch_size=batch_size, opaque=_PAGE_OPAQUE
+    )
     return resolver.with_response(page_response_scope(STAND_IN, [{}])), asked
 
 

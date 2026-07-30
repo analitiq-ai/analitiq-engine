@@ -34,6 +34,7 @@ from .declared_connection import (
     CREDENTIAL_PREFIXES,
     AskedPath,
     connect_probe,
+    optional_paths,
     unsatisfied,
 )
 from .violations import Violation
@@ -54,16 +55,41 @@ def _http_transports(target: ConformanceTarget) -> dict[str, Mapping[str, Any]]:
     }
 
 
-def probe_transports(
+def selected_transport(
     target: ConformanceTarget,
+) -> tuple[str, Mapping[str, Any]] | None:
+    """Return the transport the CDK's API path actually opens, or ``None``.
+
+    ``APIConnector.connect`` materializes the runtime with no
+    ``transport_ref``, so every request a read sends goes out on
+    ``default_transport`` and on nothing else. The other declared
+    transports belong to auth operations and resource discovery, which the
+    control plane runs — so they are what the API path *can* build, not
+    what it *uses*.
+    """
+    ref = target.definition.get("default_transport")
+    block = target.declared_transports().get(ref) if isinstance(ref, str) else None
+    if block is None or block.get("transport_type") != HTTP_TRANSPORT_TYPE:
+        return None
+    return str(ref), block
+
+
+def probe_transports(
+    target: ConformanceTarget, *, include_optional: bool = True
 ) -> tuple[list[Violation], list[AskedPath]]:
     """Resolve every http transport, returning its failures and asked paths.
 
     One walk serving both checks here: the transport check reports the
-    failures, the auth check reads the paths to decide whether any
-    credential reached the request.
+    failures, the auth check reads the paths to decide whether a
+    credential reached the request it opens.
+
+    ``include_optional=False`` resolves against the narrowest connection
+    the contract admits — the entries every connection carries — which is
+    what an http field that resolves strictly has to survive.
     """
-    resolver, asked = connect_probe(target.definition)
+    resolver, asked = connect_probe(
+        target.definition, include_optional=include_optional
+    )
     violations: list[Violation] = []
     for ref, block in _http_transports(target).items():
         try:
@@ -78,7 +104,21 @@ def probe_transports(
                     f"on this connector can be opened.",
                 )
             )
+    optional = optional_paths(target.definition)
     for entry in unsatisfied(asked):
+        if entry.path in optional:
+            violations.append(
+                Violation(
+                    CHECK,
+                    f"a declared transport reads {entry.path!r}, which "
+                    f"connection_contract declares optional and gives no "
+                    f"default — so a user can leave it blank and a connection "
+                    f"without it is valid. A transport resolves strictly: the "
+                    f"connect fails outright for those users. Make the input "
+                    f"required, give it a default, or stop reading it here.",
+                )
+            )
+            continue
         violations.append(
             Violation(
                 CHECK,
@@ -116,6 +156,18 @@ def check_api_transport(target: ConformanceTarget) -> list[Violation]:
                 f"names no transport_ref falls back to it and fails.",
             )
         )
+    elif declared[default_ref].get("transport_type") != HTTP_TRANSPORT_TYPE:
+        violations.append(
+            Violation(
+                CHECK,
+                f"default_transport {default_ref!r} is of type "
+                f"{declared[default_ref].get('transport_type')!r}, not "
+                f"{HTTP_TRANSPORT_TYPE!r}. The API path materializes the "
+                f"connection from the default transport and reads its session "
+                f"and base_url, so every read on this connector fails at "
+                f"connect however many other http transports it declares.",
+            )
+        )
 
     registered = registered_transport_kinds()
     for ref, block in declared.items():
@@ -142,7 +194,10 @@ def check_api_transport(target: ConformanceTarget) -> list[Violation]:
         )
         return violations
 
-    transport_violations, _asked = probe_transports(target)
+    # Against the narrowest connection the contract admits, so an http field
+    # reading an entry a user may leave blank is reported rather than
+    # papered over by a stand-in the contract never promised.
+    transport_violations, _asked = probe_transports(target, include_optional=False)
     violations.extend(transport_violations)
     return violations
 
@@ -177,21 +232,33 @@ def check_api_auth(target: ConformanceTarget) -> list[Violation]:
             )
         ]
 
-    if not _http_transports(target):
+    selected = selected_transport(target)
+    if selected is None:
         # Reported by check_api_transport with the actionable message;
         # failing again here would only bury it.
         return []
 
-    _violations, asked = probe_transports(target)
+    # Only the transport the API path opens. A credential resolved into a
+    # transport nothing selects — an auth-operation block the control plane
+    # drives, a discovery origin — authenticates none of the requests a read
+    # sends, so counting it would pass a connector that reads unauthenticated.
+    ref, block = selected
+    resolver, asked = connect_probe(target.definition)
+    try:
+        resolve_http_spec(block, resolver=resolver)
+    except (TransportSpecError, KeyError, TypeError, ValueError):
+        # The failure itself is check_api_transport's to report; what it
+        # recorded on the way there is still the credential evidence.
+        pass
     credentials = sorted({entry.path for entry in asked if entry.is_credential})
 
     if auth_type == "none" and credentials:
         return [
             Violation(
                 AUTH_CHECK,
-                f"auth declares type 'none' but a declared transport reads "
-                f"credential material {credentials}; a connection with no "
-                f"auth flow never carries those values. Declare the auth "
+                f"auth declares type 'none' but the default transport {ref!r} "
+                f"reads credential material {credentials}; a connection with "
+                f"no auth flow never carries those values. Declare the auth "
                 f"type this connector actually uses, or drop the reference.",
             )
         ]
@@ -199,8 +266,9 @@ def check_api_auth(target: ConformanceTarget) -> list[Violation]:
         return [
             Violation(
                 AUTH_CHECK,
-                f"auth declares type {auth_type!r} but no declared transport "
-                f"reads any credential material (nothing under "
+                f"auth declares type {auth_type!r} but the default transport "
+                f"{ref!r} — the one every read opens — reads no credential "
+                f"material (nothing under "
                 f"{list(CREDENTIAL_PREFIXES)}); every request this connector "
                 f"opens would go out unauthenticated. Resolve the credential "
                 f"into the transport's headers, base_url, or query — an "

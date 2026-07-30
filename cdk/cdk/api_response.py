@@ -1,5 +1,10 @@
 """Walk a read endpoint's response schema to the record it declares.
 
+And resolve that record's Arrow types from the connector's read type map,
+which is the second half of the same question: the ref has to reach a
+record schema, and every field of that schema has to name an Arrow type
+the engine can build a batch from.
+
 ``operations.read.response.records.ref`` names where the records live in
 the provider's payload, and ``operations.read.response.schema`` declares
 that payload's shape. The two are authored separately, so they can
@@ -15,8 +20,10 @@ pair offline before the connector ships.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
+
+from cdk.type_map import TypeMapper, UnmappedTypeError
 
 #: The only prefix a records ref may carry. The response scope name is the
 #: resolver's; ``body`` is the provider payload the connector parsed.
@@ -25,6 +32,10 @@ RECORDS_REF_ROOT = "response.body"
 
 class ResponseSchemaError(ValueError):
     """A records ref does not address a record schema in the declared response."""
+
+
+class RecordTypeError(ValueError):
+    """A record field's JSON type has no rule in the read type map."""
 
 
 def records_items_schema(
@@ -70,3 +81,70 @@ def records_items_schema(
             f"(no 'properties' under the addressed items)"
         )
     return dict(items)
+
+
+def resolve_record_arrow_types(
+    record_schema: dict[str, Any], get_mapper: Callable[[], TypeMapper]
+) -> None:
+    """Fill each record field's ``arrow_type`` from the read type map, in place.
+
+    API endpoints declare per-field JSON ``type``/``format`` and ship a
+    ``type-map-read.json`` mapping those to Arrow types — the same read type
+    map the database source path consumes. A field that already declares
+    ``arrow_type`` keeps it, so hand-annotated connectors stay valid and the
+    mapper is consulted only when a field needs it; *get_mapper* is called
+    lazily for that reason, since an endpoint that annotates every field
+    needs no map at all.
+
+    An unmapped JSON type raises :class:`RecordTypeError` naming the field:
+    the engine cannot build a batch from a field it has no Arrow type for,
+    so the read fails before its first request.
+    """
+    for name, field in (record_schema.get("properties") or {}).items():
+        if isinstance(field, dict):
+            _resolve_field_arrow_type(field, name, get_mapper)
+
+
+def _resolve_field_arrow_type(
+    field: dict[str, Any], name: str, get_mapper: Callable[[], TypeMapper]
+) -> None:
+    """Fill ``field['arrow_type']`` from the type map if absent, then recurse.
+
+    Recursion is gated to the resolved ``arrow_type`` exactly as
+    ``SchemaContract.resolve_arrow_type`` does: it descends into
+    ``properties`` only for ``Object`` and into ``items`` only for ``List``,
+    and treats everything else (including a ``Json`` blob that keeps
+    ``properties``/``items`` for documentation, and every scalar) as a leaf.
+    A nested child authored with only JSON ``type``/``format`` under a real
+    ``Object``/``List`` must be resolved here too, or the schema build
+    fails; but descending into a ``Json`` blob's documentary children would
+    wrongly fail a read on a child type the schema build never consults.
+    Recursion runs even when a container already carries an ``arrow_type``,
+    because a hand-annotated ``Object``/``List`` can still hold children
+    that do not.
+    """
+    if not field.get("arrow_type"):
+        json_type = field.get("type")
+        if isinstance(json_type, list):
+            json_type = next((t for t in json_type if t != "null"), None)
+        if isinstance(json_type, str):
+            fmt = field.get("format")
+            native = f"{json_type}:{fmt}" if isinstance(fmt, str) and fmt else json_type
+            try:
+                field["arrow_type"] = get_mapper().to_arrow_type(native)
+            except UnmappedTypeError as err:
+                raise RecordTypeError(
+                    f"field {name!r}: JSON type {native!r} has no rule in "
+                    f"the endpoint's read type-map"
+                ) from err
+    arrow_type = field.get("arrow_type")
+    if arrow_type == "Object":
+        nested = field.get("properties")
+        if isinstance(nested, dict):
+            for child_name, child in nested.items():
+                if isinstance(child, dict):
+                    _resolve_field_arrow_type(child, f"{name}.{child_name}", get_mapper)
+    elif arrow_type == "List":
+        items = field.get("items")
+        if isinstance(items, dict):
+            _resolve_field_arrow_type(items, f"{name}[]", get_mapper)

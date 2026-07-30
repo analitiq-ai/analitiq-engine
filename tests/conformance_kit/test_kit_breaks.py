@@ -1073,6 +1073,71 @@ class TestApiTransportBreaks:
         report = _messages(check_api_auth(doctored))
         assert "unauthenticated" in report
 
+    def test_a_non_http_default_transport_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """Every read opens the default; another http transport does not save it.
+
+        A registered non-http kind clears the registry loop, and the
+        declares-an-http-transport check clears too, so nothing but this
+        catches a connector that cannot connect at all.
+        """
+        transports = copy.deepcopy(api_target.definition["transports"])
+        transports["db"] = {"transport_type": "adbc", "driver": "postgresql"}
+        doctored = _api_target(
+            api_target,
+            definition={"transports": transports, "default_transport": "db"},
+        )
+        report = _messages(check_api_transport(doctored))
+        assert "default_transport 'db'" in report and "'adbc'" in report
+
+    def test_a_credential_on_an_unselected_transport_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """Only the transport a read opens authenticates that read.
+
+        A credential resolved into an auth-operation or discovery transport
+        is real, and reaches nothing the API path sends.
+        """
+        transports = copy.deepcopy(api_target.definition["transports"])
+        transports["side"] = copy.deepcopy(transports["api"])
+        del transports["api"]["headers"]["Authorization"]
+        doctored = _api_target(api_target, definition={"transports": transports})
+        report = _messages(check_api_auth(doctored))
+        assert "unauthenticated" in report
+
+    def test_a_transport_reading_a_response_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """No response exists at connect, so the scope is not merely opaque."""
+        transports = copy.deepcopy(api_target.definition["transports"])
+        transports["api"]["headers"]["X-Page"] = {"ref": "response.body.next"}
+        doctored = _api_target(api_target, definition={"transports": transports})
+        report = _messages(check_api_transport(doctored))
+        assert "response.body.next" in report
+
+    def test_an_optional_input_behind_a_strict_transport_field_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """A user may leave it blank, and base_url resolves strictly.
+
+        A default makes it guaranteed again, so the same definition passes
+        once the contract promises a value — which is the actionable fix
+        the message names.
+        """
+        contract = copy.deepcopy(api_target.definition["connection_contract"])
+        contract["inputs"]["account_id"]["required"] = False
+        doctored = _api_target(api_target, definition={"connection_contract": contract})
+        report = _messages(check_api_transport(doctored))
+        assert "connection.parameters.account_id" in report
+        assert "optional" in report
+
+        contract["inputs"]["account_id"]["default"] = "acme"
+        with_default = _api_target(
+            api_target, definition={"connection_contract": contract}
+        )
+        assert check_api_transport(with_default) == []
+
 
 class TestApiEndpointBreaks:
     """The three passes of a read, each against the scopes it actually has."""
@@ -1127,6 +1192,72 @@ class TestApiEndpointBreaks:
         doctored = _api_target(api_target, read={"pagination": pagination})
         report = _messages(check_api_pagination(doctored))
         assert "limit.default" in report and "positive" in report
+
+    def test_a_pre_page_value_reading_a_response_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """The effective page size is resolved before any page comes back.
+
+        Probing the whole block against a page would call this satisfied,
+        which is why the two phases are resolved separately.
+        """
+        pagination = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["pagination"]
+        )
+        pagination["limit"]["default"] = {"ref": "response.record_count"}
+        doctored = _api_target(api_target, read={"pagination": pagination})
+        report = _messages(check_api_pagination(doctored))
+        assert "response.record_count" in report
+        assert "before its first request" in report
+
+    def test_a_non_positive_page_size_expression_literal_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """A literal node is as knowable as a bare scalar, and as rejected."""
+        pagination = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["pagination"]
+        )
+        pagination["limit"]["default"] = {"literal": 0}
+        doctored = _api_target(api_target, read={"pagination": pagination})
+        report = _messages(check_api_pagination(doctored))
+        assert "limit.default" in report and "positive" in report
+
+    def test_a_param_default_reading_a_response_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """A request is built before any response exists."""
+        params = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["params"]
+        )
+        params["updated_since"]["default"] = {"ref": "response.body.since"}
+        doctored = _api_target(api_target, read={"params": params})
+        report = _messages(check_api_request_expressions(doctored))
+        assert "response.body.since" in report
+
+    def test_a_record_field_the_read_type_map_cannot_map_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """The engine resolves every field's Arrow type before it requests."""
+        response = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["response"]
+        )
+        record = response["schema"]["properties"]["records"]["items"]["properties"]
+        record["ratio"] = {"type": "quaternion"}
+        doctored = _api_target(api_target, read={"response": response})
+        report = _messages(check_api_response_records(doctored))
+        assert "ratio" in report and "quaternion" in report
+
+    def test_the_type_map_check_leaves_the_document_unmutated(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """Arrow-type resolution annotates in place; the check must not.
+
+        A mutated target would hand whatever runs next a document the
+        connector never shipped.
+        """
+        before = copy.deepcopy(api_target.endpoints)
+        assert check_api_response_records(api_target) == []
+        assert api_target.endpoints == before
 
     def test_a_records_ref_the_schema_does_not_declare_fails(
         self, api_target: ConformanceTarget
