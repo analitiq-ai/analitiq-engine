@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 from cdk.api_paging import PageValueError, positive_page_value
 from cdk.api_response import (
     ResponseSchemaError,
+    record_field_exists,
     records_items_schema,
     resolve_record_arrow_types,
 )
@@ -42,12 +43,12 @@ from cdk.type_map import TypeMapper
 
 from .declared_connection import (
     RESOLVE_FAILURES,
-    STAND_IN,
     declared_connection,
     guaranteed_connection,
     is_stand_in,
     page_probe,
     request_probe,
+    stand_in_for,
     unsatisfied,
 )
 from .violations import Violation
@@ -170,12 +171,23 @@ def check_api_request_expressions(target: ConformanceTarget) -> list[Violation]:
                 )
             )
 
-        # The body binds against the FULL per-page param table, not just the
-        # defaults: the pagination and replication loops have filled their
-        # params by the time build_request runs. Standing them in keeps a
-        # body that legitimately reads a controlled param from binding None
-        # and being reported as a defect it is not.
-        values.update({name: STAND_IN for name in declared if name not in values})
+        # The body binds against the per-page param table build_request
+        # receives, so the probe seeds what the runtime guarantees is in it
+        # and nothing else: the resolved defaults above, plus the params the
+        # pagination and replication loops fill. A param the user may omit
+        # stays absent, exactly as _build_base_params leaves it -- seeding it
+        # would certify a body that binds None at runtime. Each stand-in
+        # carries the param's declared type, since a strict expression around
+        # it is type-sensitive.
+        values.update(
+            {
+                name: stand_in_for(decl)
+                for name, decl in declared.items()
+                if isinstance(decl, Mapping)
+                and decl.get("controlled_by")
+                and name not in values
+            }
+        )
 
         request = read.get("request")
         body = request.get("body") if isinstance(request, Mapping) else None
@@ -330,7 +342,80 @@ def check_api_pagination(target: ConformanceTarget) -> list[Violation]:
                 page_probe(target.definition, declared)[0],
             )
         )
+        violations.extend(
+            _next_url_violations(
+                label, pagination, page_probe(target.definition, guaranteed)[0]
+            )
+        )
+        violations.extend(_keyset_violations(label, read, pagination))
     return violations
+
+
+def _next_url_violations(
+    label: str, pagination: Mapping[str, Any], resolver: Resolver
+) -> list[Violation]:
+    """Report a link continuation that cannot resolve to a URL string.
+
+    The link loop replays the resolved ``next_url`` verbatim and refuses
+    anything that is not a string, so an authored constant of another type
+    fails the read the moment a second page is due.
+    """
+    authored = _dig(pagination, ("link", "next_url"))
+    if authored is None:
+        return []
+    value = authored
+    if Resolver.is_expression_node(value):
+        try:
+            value = resolver.resolve_for_request(value)
+        except RESOLVE_FAILURES:
+            return []  # the resolve pass reports this with its own message
+        if value is None or is_stand_in(value):
+            return []
+    if isinstance(value, str):
+        return []
+    return [
+        Violation(
+            PAGINATION_CHECK,
+            f"endpoint {label!r}: link.next_url resolves to "
+            f"{type(value).__name__}, and the loop replays it as a URL. The "
+            f"read fails the moment a second page is due.",
+        )
+    ]
+
+
+def _keyset_violations(
+    label: str, read: Mapping[str, Any], pagination: Mapping[str, Any]
+) -> list[Violation]:
+    """Report a keyset ordering field the declared record does not carry.
+
+    The keyset loop takes the ordering value from each page's last record
+    before yielding it, and fails when the field is absent — so a schema
+    that does not declare it fails every full page.
+    """
+    field = _dig(pagination, ("keyset", "order_by_field"))
+    if not isinstance(field, str):
+        return []
+    response = read.get("response")
+    records = response.get("records") if isinstance(response, Mapping) else None
+    ref = records.get("ref") if isinstance(records, Mapping) else None
+    schema = response.get("schema") if isinstance(response, Mapping) else None
+    if not isinstance(ref, str) or not isinstance(schema, Mapping):
+        return []
+    try:
+        record_schema = records_items_schema(ref, schema)
+    except ResponseSchemaError:
+        return []  # check_api_response_records reports the ref itself
+    if record_field_exists(record_schema, field):
+        return []
+    return [
+        Violation(
+            PAGINATION_CHECK,
+            f"endpoint {label!r}: keyset.order_by_field {field!r} is not a "
+            f"field of the record the response schema declares at {ref!r}. "
+            f"The loop reads it from each page's last record before yielding "
+            f"the page, so every full page fails.",
+        )
+    ]
 
 
 def _page_value_violations(

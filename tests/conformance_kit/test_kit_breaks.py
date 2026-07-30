@@ -34,6 +34,7 @@ from cdk.conformance.tier1 import test_rendering as kit_rendering
 from cdk.sql.capabilities import SqlCapabilities
 from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.generic import GenericSQLConnector
+from cdk.transport_factory import merged_transports
 from cdk.type_map.loader import build_type_mapper
 
 from .kit_runner import API_REFERENCE_DIR, REFERENCE_CLASS, REFERENCE_DIR
@@ -1183,6 +1184,27 @@ class TestApiTransportBreaks:
         report = _messages(check_api_transport(doctored))
         assert "only scalars" in report
 
+    def test_a_header_named_like_a_marker_still_merges(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """A headers map is a container, not a value expression.
+
+        Only a header VALUE is a leaf that replaces wholesale. Deciding
+        per node instead would classify a map holding a header literally
+        named `ref` as an expression and drop the rest of the defaults.
+        """
+        connector = {
+            "transport_defaults": {
+                "transport_type": "http",
+                "headers": {"ref": "kept", "Accept": "default"},
+            },
+            "transports": {
+                "api": {"base_url": "https://x", "headers": {"Accept": "override"}}
+            },
+        }
+        merged = merged_transports(connector)["api"]["headers"]
+        assert merged == {"ref": "kept", "Accept": "override"}
+
     def test_an_optional_input_behind_a_strict_transport_field_fails(
         self, api_target: ConformanceTarget
     ) -> None:
@@ -1358,6 +1380,88 @@ class TestApiEndpointBreaks:
         doctored = _api_target(api_target, read={"response": response})
         report = _messages(check_api_response_records(doctored))
         assert "Blurb" in report
+
+    def test_a_link_next_url_that_is_not_a_string_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """The link loop replays the resolved value as a URL, or fails."""
+        doctored = _api_target(
+            api_target,
+            read={
+                "pagination": {
+                    "type": "link",
+                    "link": {"next_url": {"literal": 7}},
+                    "stop_when": {"empty": {"ref": "response.body.records"}},
+                }
+            },
+        )
+        report = _messages(check_api_pagination(doctored))
+        assert "link.next_url" in report and "int" in report
+
+    def test_a_keyset_ordering_field_the_record_lacks_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """The loop reads it from each page's last record before yielding.
+
+        A field the record schema declares clears the check, so this is
+        about the pair disagreeing, not about keyset paging itself.
+        """
+        keyset = {
+            "type": "keyset",
+            "keyset": {"param": "after", "order_by_field": "nope"},
+            "stop_when": {"empty": {"ref": "response.body.records"}},
+        }
+        doctored = _api_target(api_target, read={"pagination": keyset})
+        report = _messages(check_api_pagination(doctored))
+        assert "order_by_field 'nope'" in report
+
+        keyset["keyset"]["order_by_field"] = "updated_at"
+        declared = _api_target(api_target, read={"pagination": keyset})
+        assert check_api_pagination(declared) == []
+
+    def test_a_body_binding_a_controlled_param_keeps_its_declared_type(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """The stand-in is typed, so a type-sensitive expression sees it.
+
+        `offset` is declared `integer` and the pagination loop fills it, so
+        `build_request` binds an int and `base64_encode` raises. A string
+        stand-in would have bound a str and passed.
+        """
+        request = {
+            "method": "POST",
+            "path": "/items",
+            "body": {
+                "cursor": {
+                    "function": "base64_encode",
+                    "input": {"from_param": "offset"},
+                }
+            },
+        }
+        doctored = _api_target(api_target, read={"request": request})
+        report = _messages(check_api_request_expressions(doctored))
+        assert "base64_encode" in report and "got int" in report
+
+    def test_a_body_reading_an_uncontrolled_param_is_not_seeded(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """Only what the runtime guarantees at that phase is stood in.
+
+        A param whose default resolves is already in the table; one the
+        user may omit is left absent, exactly as `_build_base_params`
+        leaves it. Seeding it would certify a body that binds None.
+        """
+        params = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["params"]
+        )
+        params["q"] = {"in": "query", "type": "string", "required": False}
+        request = {
+            "method": "POST",
+            "path": "/items",
+            "body": {"q": {"from_param": "q"}},
+        }
+        doctored = _api_target(api_target, read={"params": params, "request": request})
+        assert check_api_request_expressions(doctored) == []
 
     def test_a_record_field_the_read_type_map_cannot_map_fails(
         self, api_target: ConformanceTarget

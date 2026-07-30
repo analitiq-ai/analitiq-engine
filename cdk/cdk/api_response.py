@@ -148,3 +148,20 @@ def _resolve_field_arrow_type(
         items = field.get("items")
         if isinstance(items, dict):
             _resolve_field_arrow_type(items, f"{name}[]", get_mapper)
+
+
+def record_field_exists(record_schema: Mapping[str, Any], dotted_path: str) -> bool:
+    """Whether *dotted_path* names a field the record schema declares.
+
+    Each segment is a key under ``properties``, descending through nested
+    objects. What the engine walks on the record *data*; asking the same
+    question of the declared shape is how a keyset ordering field can be
+    checked before a page comes back.
+    """
+    node: Any = record_schema
+    for segment in dotted_path.split("."):
+        properties = node.get("properties") if isinstance(node, Mapping) else None
+        if not isinstance(properties, Mapping) or segment not in properties:
+            return False
+        node = properties[segment]
+    return True

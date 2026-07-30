@@ -260,27 +260,30 @@ def ca_ssl_context(ca_pem: str, *, check_hostname: bool) -> _ssl.SSLContext:
 # ---------------------------------------------------------------------------
 
 
-def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
-    """Merge *override* onto *base*, treating value expressions as values.
+#: Transport fields whose entries are *values*, not sub-objects to merge
+#: into. ``headers`` maps a header name to a literal or a value expression;
+#: an expression is a value even though it is written as an object, so a
+#: per-entry override replaces it whole. Merging one into another splices
+#: two nodes together — a ``{"function": ...}`` header overriding a
+#: ``{"template": ...}`` default comes out carrying both markers, which the
+#: resolver refuses (and where the markers agree, silently carries the
+#: wrong operands).
+#:
+#: Keyed by field rather than decided per node: a header legitimately named
+#: ``ref`` would make its whole map look like an expression node.
+_VALUE_ENTRY_FIELDS = frozenset({"headers"})
 
-    Object-valued transport fields (``headers``, ``rate_limit``) merge
-    key by key. A value expression is a *value* even though it is written
-    as an object, so it replaces wholesale: merging one into another
-    would splice two nodes together — a ``{"function": ...}`` header
-    overriding a ``{"template": ...}`` default would come out carrying
-    both markers, which the resolver refuses (and, where the markers
-    happen to agree, would silently carry the wrong operands).
-    """
+
+def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
+    """Merge *override* onto *base*; object-valued fields merge per entry."""
     out: dict[str, Any] = {k: copy.deepcopy(v) for k, v in base.items()}
     for k, v in override.items():
-        mergeable = (
-            k in out
-            and isinstance(out[k], dict)
-            and isinstance(v, Mapping)
-            and not Resolver.is_expression_node(out[k])
-            and not Resolver.is_expression_node(v)
-        )
-        out[k] = _deep_merge(out[k], v) if mergeable else copy.deepcopy(v)
+        if not (k in out and isinstance(out[k], dict) and isinstance(v, Mapping)):
+            out[k] = copy.deepcopy(v)
+        elif k in _VALUE_ENTRY_FIELDS:
+            out[k] = {**out[k], **copy.deepcopy(dict(v))}
+        else:
+            out[k] = _deep_merge(out[k], v)
     return out
 
 

@@ -96,7 +96,11 @@ with no connector code installed:
   deliberately *not* secrets, which never cross to where per-request
   resolution runs, nor `response`, which does not exist yet. An
   unresolvable expression omits its param or field, so the request silently
-  goes out without it.
+  goes out without it. A request body binds against the param table
+  `build_request` receives, so the probe supplies exactly what the runtime
+  guarantees is in it — the resolved defaults plus the pagination- and
+  replication-controlled params — each carrying its declared type, since a
+  strict expression around one is type-sensitive.
 - **Paging resolves when the loop reads it, and survives what it must.**
   Two facts decide each field. *When*: `limit.default` and
   `page.increment_by` are resolved once, before the first request, so they
@@ -109,7 +113,10 @@ with no connector code installed:
   (`limit.default` falls back to the batch size, a `stop_when` operand
   makes the predicate false) is certified against the widest connection.
   An authored page size or step must be a positive integer, whether written
-  bare or as a `{"literal": …}` node.
+  bare or as a `{"literal": …}` node; `link.next_url` must resolve to a
+  string, since the loop replays it as a URL; and `keyset.order_by_field`
+  must name a field of the record the response schema declares, since the
+  loop reads it from each page's last record before yielding the page.
 - **The records ref addresses the declared schema, and the schema builds.**
   The engine builds the Arrow schema it emits by walking `response.schema`
   along `response.records.ref`, resolving every record field's `arrow_type`
