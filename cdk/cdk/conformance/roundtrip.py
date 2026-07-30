@@ -73,7 +73,13 @@ _INT_PARAM_EXEMPLARS: dict[str, tuple[tuple[int, ...], ...]] = {
 #: write-rule reachability check, never as round-trip probes: nested
 #: types legitimately store as a document column (``List<...> -> JSONB``)
 #: whose read-back is ``Json``, so probing them through the convergence
-#: rule would flag correct authoring.
+#: rule would flag correct authoring. Hand-written rather than derived
+#: from the grammar: these are argument-bearing spellings whose heads
+#: include native shapes a write rule may match (``Struct``, ``Map``,
+#: ``LargeList``) and which the family table cannot supply. Every
+#: structural family in the grammar must still be covered by one —
+#: :func:`_grammar_exemplars` refuses to run otherwise, so a new one can
+#: never silently drop out of the check.
 _STRUCTURAL_MATCH_EXEMPLARS: tuple[str, ...] = (
     "List<Int64>",
     "LargeList<Utf8>",
@@ -83,13 +89,28 @@ _STRUCTURAL_MATCH_EXEMPLARS: tuple[str, ...] = (
 )
 
 
+def _structural_exemplar_families() -> frozenset[str]:
+    """Return the grammar families :data:`_STRUCTURAL_MATCH_EXEMPLARS` covers."""
+    return frozenset(
+        _canonical_family(spelling) for spelling in _STRUCTURAL_MATCH_EXEMPLARS
+    )
+
+
 def _grammar_exemplars() -> list[str]:
     """Concrete canonical spellings covering every grammar family."""
     exemplars: list[str] = []
+    structural_covered = _structural_exemplar_families()
     for family, spec in ARROW_FAMILIES.items():
         if spec.sub_schema is not None:
             # Structural families have no parenthesised spelling; they are
             # probed through _STRUCTURAL_MATCH_EXEMPLARS instead.
+            if family not in structural_covered:
+                raise RuntimeError(
+                    f"conformance kit defect: grammar family {family!r} has "
+                    f"no match exemplar; add one to "
+                    f"_STRUCTURAL_MATCH_EXEMPLARS so the family cannot "
+                    f"silently drop out of the write-rule reachability check"
+                )
             continue
         if family == "Null":
             # No system stores a null-typed column; write maps do not

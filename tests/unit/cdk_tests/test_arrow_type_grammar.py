@@ -45,6 +45,7 @@ from cdk.type_map.grammar import (
     ARROW_TYPE_GRAMMAR_PATH,
     GRAMMAR_VERSION,
     ArrowFamily,
+    IntParam,
     build_arrow_type_grammar,
     load_published_grammar,
     render_arrow_type_grammar,
@@ -60,6 +61,21 @@ _SCALAR_FAMILIES = {
 _STRUCTURAL_FAMILIES = {
     name: spec for name, spec in ARROW_FAMILIES.items() if spec.sub_schema is not None
 }
+
+
+def _one_rule_mapper() -> TypeMapper:
+    """The smallest mapper the conformance probe set can be built for."""
+    return TypeMapper(
+        "acceptance",
+        parse_rules(
+            [{"match": "exact", "native": "TEXT", "canonical": "Utf8"}],
+            source="test",
+        ),
+        parse_write_rules(
+            [{"match": "exact", "canonical": "Utf8", "native": "TEXT"}],
+            source="test",
+        ),
+    )
 
 
 class TestPublishedArtifactDrift:
@@ -284,17 +300,7 @@ class TestOneTableFeedsEverySurface:
             builder="month_day_nano_interval",
             probes=("is_interval",),
         )
-        mapper = TypeMapper(
-            "acceptance",
-            parse_rules(
-                [{"match": "exact", "native": "TEXT", "canonical": "Utf8"}],
-                source="test",
-            ),
-            parse_write_rules(
-                [{"match": "exact", "canonical": "Utf8", "native": "TEXT"}],
-                source="test",
-            ),
-        )
+        mapper = _one_rule_mapper()
         with _family_added("Interval", added):
             # The published grammar document.
             assert build_arrow_type_grammar()["families"]["Interval"] == {"params": []}
@@ -311,6 +317,85 @@ class TestOneTableFeedsEverySurface:
             # The conformance kit's canonical probe set.
             assert "Interval" in probe_canonicals(mapper)
         assert "Interval" not in ARROW_FAMILIES
+
+
+class TestConformanceExemplarsAreGated:
+    """No family can silently drop out of the conformance probe set.
+
+    Two families of canonical spelling cannot be derived from the table: the
+    integer-parameterized ones need representative argument tuples, and the
+    structural ones need argument-bearing spellings whose heads are native
+    shapes the table never names. Both exemplar sets are therefore
+    hand-written, and both are gated, so a family added to the table fails
+    loud here instead of quietly going unprobed.
+    """
+
+    def test_int_param_family_without_an_exemplar_fails_loud(self) -> None:
+        added = ArrowFamily(
+            "decimal",
+            params=(IntParam("precision", 1, 38),),
+            builder="decimal128",
+            probes=("is_decimal128",),
+        )
+        with _family_added("Decimal64", added):
+            with pytest.raises(RuntimeError, match="_INT_PARAM_EXEMPLARS"):
+                probe_canonicals(_one_rule_mapper())
+
+    def test_structural_family_without_an_exemplar_fails_loud(self) -> None:
+        added = ArrowFamily("nested", probes=("is_map",), sub_schema="entries")
+        with _family_added("MapMarker", added):
+            with pytest.raises(RuntimeError, match="_STRUCTURAL_MATCH_EXEMPLARS"):
+                probe_canonicals(_one_rule_mapper())
+
+
+class TestTableBindingFailsLoud:
+    """A defective pyarrow binding in the table raises the engine's error.
+
+    The table names its factories and predicates as strings so it stays
+    importable without pyarrow, which means a name that does not resolve is a
+    defect only this side of the boundary can catch. Each guard is exercised
+    through the surface it protects — the import that resolves the bindings,
+    and the parser that calls the factory — with a deliberately broken entry
+    in the table, since a correct table can never reach any of them.
+    """
+
+    @pytest.mark.parametrize(
+        ("spec", "named"),
+        [
+            (ArrowFamily("int", builder="no_such_factory"), "pyarrow.no_such_factory"),
+            # __version__ resolves but is a string; naming it as the factory is
+            # the same table defect as naming nothing that exists at all.
+            (ArrowFamily("int", builder="__version__"), "pyarrow.__version__"),
+            (
+                ArrowFamily("int", builder="int64", probes=("no_such_probe",)),
+                "pyarrow.types.no_such_probe",
+            ),
+        ],
+    )
+    def test_absent_pyarrow_binding_fails_at_import(
+        self, spec: ArrowFamily, named: str
+    ) -> None:
+        with pytest.raises(InvalidTypeMapError, match=re.escape(named)):
+            with _family_added("Fake", spec):
+                pass
+
+    def test_scalar_family_naming_no_factory_fails_when_parsed(self) -> None:
+        # Only a structural family may omit its builder; a scalar one that does
+        # is unbuildable, and the parser says so instead of calling ``None``.
+        with _family_added("Fake", ArrowFamily("string")):
+            with pytest.raises(
+                InvalidTypeMapError, match="declares no pyarrow factory"
+            ):
+                parse_arrow_type("Fake")
+
+    def test_factory_that_builds_no_datatype_fails_when_parsed(self) -> None:
+        # pa.scalar resolves and accepts the bound parameter, but returns a
+        # Scalar: the family would otherwise be declared, parsed and handed
+        # downstream as something that is not a type at all.
+        added = ArrowFamily("int", params=(IntParam("value", 0),), builder="scalar")
+        with _family_added("Fake", added):
+            with pytest.raises(InvalidTypeMapError, match="did not build a DataType"):
+                parse_arrow_type("Fake(1)")
 
 
 class TestUnitSpellings:
