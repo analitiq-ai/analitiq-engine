@@ -26,8 +26,8 @@ normalized probe is flagged as dead — a provable authoring defect. A
 regex that simply matches no probe is left alone: a finite probe set
 cannot prove a partial-family rule unreachable.
 
-Exemplars are generated from the published canonical grammar
-(:data:`~cdk.type_map.grammar.ARROW_TYPE_GRAMMAR`) plus the concrete
+Exemplars are generated from the published canonical vocabulary
+(:data:`~cdk.type_map.grammar.ARROW_FAMILIES`) plus the concrete
 canonicals named by the connector's own rules, so the probe set covers
 exactly the vocabulary the contract defines and can never drift from it.
 """
@@ -40,8 +40,7 @@ from typing import TYPE_CHECKING, Any
 from cdk.sql.dialects import SqlDialect
 from cdk.type_map.exceptions import InvalidTypeMapError, UnmappedTypeError
 from cdk.type_map.grammar import (
-    ARROW_TYPE_GRAMMAR,
-    STRUCTURAL_FAMILIES,
+    ARROW_FAMILIES,
     UNIT_LONG_TO_SHORT,
     IntParam,
     TimezoneParam,
@@ -87,11 +86,16 @@ _STRUCTURAL_MATCH_EXEMPLARS: tuple[str, ...] = (
 def _grammar_exemplars() -> list[str]:
     """Concrete canonical spellings covering every grammar family."""
     exemplars: list[str] = []
-    for family, params in ARROW_TYPE_GRAMMAR.items():
+    for family, spec in ARROW_FAMILIES.items():
+        if spec.sub_schema is not None:
+            # Structural families have no parenthesised spelling; they are
+            # probed through _STRUCTURAL_MATCH_EXEMPLARS instead.
+            continue
         if family == "Null":
             # No system stores a null-typed column; write maps do not
             # cover it and probing it would be noise.
             continue
+        params = spec.params
         if not params:
             exemplars.append(family)
             continue
@@ -126,8 +130,7 @@ def _canonical_family(spelling: str) -> str:
 
 def _in_published_grammar(spelling: str) -> bool:
     """Whether a canonical literal's family exists in the published grammar."""
-    family = _canonical_family(spelling)
-    return family in ARROW_TYPE_GRAMMAR or family in STRUCTURAL_FAMILIES
+    return _canonical_family(spelling) in ARROW_FAMILIES
 
 
 def _foreign_literal_violations(mapper: TypeMapper) -> list[Violation]:

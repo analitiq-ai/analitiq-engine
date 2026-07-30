@@ -17,7 +17,13 @@ import pyarrow as pa
 
 from .conversions import Conversion, classify_conversion
 from .exceptions import InvalidTypeMapError
-from .grammar import STRUCTURAL_FAMILIES, UNIT_LONG_TO_SHORT, bind_parameters
+from .grammar import (
+    ARROW_FAMILIES,
+    UNIT_LONG_TO_SHORT,
+    ArrowFamily,
+    UnitParam,
+    bind_parameters,
+)
 
 _PARAM_SPLIT: Final[Pattern[str]] = re.compile(r"\s*,\s*")
 
@@ -44,49 +50,63 @@ def _parse_head(canonical: str) -> tuple[str, tuple[str, ...], bool]:
     return head.strip(), args, True
 
 
-# Family -> pyarrow factory over the values bind_parameters resolved. Keyed on
-# the same family set as the grammar table; the conformance test pins the two
-# key sets equal so a family cannot be declared without being buildable.
-_FACTORIES: Final[dict[str, Callable[[Mapping[str, Any]], pa.DataType]]] = {
-    "Null": lambda v: pa.null(),
-    "Boolean": lambda v: pa.bool_(),
-    "Int8": lambda v: pa.int8(),
-    "Int16": lambda v: pa.int16(),
-    "Int32": lambda v: pa.int32(),
-    "Int64": lambda v: pa.int64(),
-    "UInt8": lambda v: pa.uint8(),
-    "UInt16": lambda v: pa.uint16(),
-    "UInt32": lambda v: pa.uint32(),
-    "UInt64": lambda v: pa.uint64(),
-    "Float16": lambda v: pa.float16(),
-    "Float32": lambda v: pa.float32(),
-    "Float64": lambda v: pa.float64(),
-    "Utf8": lambda v: pa.string(),
-    "LargeUtf8": lambda v: pa.large_string(),
-    "Binary": lambda v: pa.binary(),
-    "LargeBinary": lambda v: pa.large_binary(),
-    "Date32": lambda v: pa.date32(),
-    "Date64": lambda v: pa.date64(),
-    "Time32": lambda v: pa.time32(UNIT_LONG_TO_SHORT[v["unit"]]),
-    "Time64": lambda v: pa.time64(UNIT_LONG_TO_SHORT[v["unit"]]),
-    "Duration": lambda v: pa.duration(UNIT_LONG_TO_SHORT[v["unit"]]),
-    "Timestamp": lambda v: pa.timestamp(UNIT_LONG_TO_SHORT[v["unit"]], tz=v["tz"]),
-    "Decimal128": lambda v: pa.decimal128(v["precision"], v["scale"]),
-    "Decimal256": lambda v: pa.decimal256(v["precision"], v["scale"]),
-    "FixedSizeBinary": lambda v: pa.binary(v["byte_width"]),
-    # Opaque JSON blob — shape not declared. Carried over the wire as a
-    # JSON-encoded string; destinations json.loads it back to a dict/list at
-    # the write boundary.
-    "Json": lambda v: pa.large_string(),
-}
+def _pyarrow_attribute(module: Any, name: str, family: str) -> Callable[..., Any]:
+    """Resolve a pyarrow callable the family table names, or fail loud.
+
+    The vocabulary table stays importable without pyarrow by naming its
+    factories and predicates as strings; a name this pyarrow build does not
+    provide is a defect in the table, and surfacing it here beats a family
+    that silently builds nothing or matches no live column.
+    """
+    attribute = getattr(module, name, None)
+    if not callable(attribute):
+        raise InvalidTypeMapError(
+            f"arrow_type family {family!r} names {module.__name__}.{name}, "
+            f"which this pyarrow build does not provide"
+        )
+    resolved: Callable[..., Any] = attribute
+    return resolved
+
+
+def _build_arrow_type(
+    family: str, spec: ArrowFamily, values: Mapping[str, Any]
+) -> pa.DataType:
+    """Build the pyarrow type for *family* from its bound parameter values.
+
+    The declared parameters are passed to the declared factory positionally, in
+    declaration order — the order every pyarrow factory takes them in
+    (``time32(unit)``, ``timestamp(unit, tz)``, ``decimal128(precision,
+    scale)``) — with units translated to the short codes pyarrow expects.
+    """
+    if spec.builder is None:
+        raise InvalidTypeMapError(
+            f"arrow_type family {family!r} declares no pyarrow factory"
+        )
+    factory = _pyarrow_attribute(pa, spec.builder, family)
+    args = [
+        (
+            UNIT_LONG_TO_SHORT[values[param.name]]
+            if isinstance(param, UnitParam)
+            else values[param.name]
+        )
+        for param in spec.params
+    ]
+    built = factory(*args)
+    if not isinstance(built, pa.DataType):
+        raise InvalidTypeMapError(
+            f"arrow_type family {family!r} names pyarrow.{spec.builder}, "
+            f"which did not build a DataType"
+        )
+    return built
 
 
 def parse_arrow_type(canonical: str) -> pa.DataType:
     """Parse an Arrow type string into a PyArrow ``DataType``.
 
-    The parameter grammar — allowed units, integer ranges, the timezone forms
-    — comes from :data:`cdk.type_map.grammar.ARROW_TYPE_GRAMMAR`, the same
-    table the published ``arrow_type_grammar.json`` renders from. Raises
+    The family vocabulary and its parameter grammar — allowed units, integer
+    ranges, the timezone forms — come from
+    :data:`cdk.type_map.grammar.ARROW_FAMILIES`, the same table the published
+    ``arrow_type_grammar.json`` renders from. Raises
     :class:`InvalidTypeMapError` for malformed input, unsupported families, or
     any parameter the grammar rejects (including an invalid timezone, which
     fails here at author time rather than at cast time inside a running
@@ -99,18 +119,19 @@ def parse_arrow_type(canonical: str) -> pa.DataType:
     :class:`SchemaContract` walker has access to.
     """
     head, args, has_parens = _parse_head(canonical)
-    if head in STRUCTURAL_FAMILIES:
+    spec = ARROW_FAMILIES.get(head)
+    if spec is None:
+        raise InvalidTypeMapError(
+            f"arrow_type family {head!r} (from {canonical!r}) is not supported"
+        )
+    if spec.sub_schema is not None:
         raise InvalidTypeMapError(
             f"arrow_type {head!r} describes a nested type and cannot be "
             f"parsed in isolation; SchemaContract reads the property's "
             f"'properties' (Object) or 'items' (List) sub-schema to build it"
         )
-    factory = _FACTORIES.get(head)
-    if factory is None:
-        raise InvalidTypeMapError(
-            f"arrow_type family {head!r} (from {canonical!r}) is not supported"
-        )
-    return factory(bind_parameters(head, args, has_parens=has_parens))
+    values = bind_parameters(head, args, has_parens=has_parens)
+    return _build_arrow_type(head, spec, values)
 
 
 def resolve_arrow_type(spec: Mapping[str, Any], where: str = "field") -> pa.DataType:
@@ -150,53 +171,19 @@ def resolve_arrow_type(spec: Mapping[str, Any], where: str = "field") -> pa.Data
     return parse_arrow_type(arrow_type)
 
 
-# Ordered (predicate, family) probes mapping a live DataType back to its
-# conversion-matrix family. Probes are mutually exclusive and first-match-wins.
-# Width/parameter detail is intentionally dropped: a DataType collapses to the
-# family head conversions.classify_conversion keys its policy on (int32 ->
-# "Int32", timestamp[us, tz=UTC] -> "Timestamp"). Kept in step with the family
-# heads parse_arrow_type produces; list and large_list both fold to "List", the
-# single nested-list family the contract emits.
-_FAMILY_PROBES: Final[tuple[tuple[Callable[[pa.DataType], bool], str], ...]] = (
-    (pa.types.is_null, "Null"),
-    (pa.types.is_boolean, "Boolean"),
-    (pa.types.is_int8, "Int8"),
-    (pa.types.is_int16, "Int16"),
-    (pa.types.is_int32, "Int32"),
-    (pa.types.is_int64, "Int64"),
-    (pa.types.is_uint8, "UInt8"),
-    (pa.types.is_uint16, "UInt16"),
-    (pa.types.is_uint32, "UInt32"),
-    (pa.types.is_uint64, "UInt64"),
-    (pa.types.is_float16, "Float16"),
-    (pa.types.is_float32, "Float32"),
-    (pa.types.is_float64, "Float64"),
-    (pa.types.is_string, "Utf8"),
-    (pa.types.is_large_string, "LargeUtf8"),
-    (pa.types.is_fixed_size_binary, "FixedSizeBinary"),
-    (pa.types.is_large_binary, "LargeBinary"),
-    (pa.types.is_binary, "Binary"),
-    (pa.types.is_date32, "Date32"),
-    (pa.types.is_date64, "Date64"),
-    (pa.types.is_time32, "Time32"),
-    (pa.types.is_time64, "Time64"),
-    (pa.types.is_timestamp, "Timestamp"),
-    (pa.types.is_duration, "Duration"),
-    (pa.types.is_decimal128, "Decimal128"),
-    (pa.types.is_decimal256, "Decimal256"),
-    (pa.types.is_struct, "Object"),
-    (pa.types.is_list, "List"),
-    (pa.types.is_large_list, "List"),
-)
-
-
 def arrow_family(dtype: pa.DataType) -> str:
     """Return the conversion-matrix family name for a PyArrow ``DataType``.
 
-    The inverse of the family head :func:`parse_arrow_type` consumes. An
-    unrecognised type raises :class:`InvalidTypeMapError` rather than resolve to
-    a silent default -- conversions classified against an unknown family would
-    be meaningless.
+    The inverse of the family head :func:`parse_arrow_type` consumes: the
+    probes each family declares in :data:`cdk.type_map.grammar.ARROW_FAMILIES`
+    are ``pyarrow.types`` predicates on the type id, so they are mutually
+    exclusive and the table order does not decide the answer. Width and
+    parameter detail is intentionally dropped -- a DataType collapses to the
+    family head :func:`~cdk.type_map.conversions.classify_conversion` keys its
+    policy on (``int32`` -> ``"Int32"``, ``timestamp[us, tz=UTC]`` ->
+    ``"Timestamp"``). An unrecognised type raises
+    :class:`InvalidTypeMapError` rather than resolve to a silent default --
+    conversions classified against an unknown family would be meaningless.
     """
     if pa.types.is_dictionary(dtype):
         # A dictionary-encoded column (some ADBC drivers return these for
@@ -204,9 +191,10 @@ def arrow_family(dtype: pa.DataType) -> str:
         # pc.cast transparently decodes it. Classify by the decoded value type
         # so dict<_, Utf8> is treated exactly like Utf8 rather than rejected.
         return arrow_family(dtype.value_type)
-    for probe, family in _FAMILY_PROBES:
-        if probe(dtype):
-            return family
+    for family, spec in ARROW_FAMILIES.items():
+        for probe in spec.probes:
+            if _pyarrow_attribute(pa.types, probe, family)(dtype):
+                return family
     raise InvalidTypeMapError(
         f"arrow type {dtype!r} has no conversion-matrix family; it is outside "
         f"the published arrow_type vocabulary"

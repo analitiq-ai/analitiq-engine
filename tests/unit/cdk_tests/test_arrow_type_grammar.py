@@ -1,18 +1,23 @@
-"""Conformance tests for the published arrow_type parameter grammar.
+"""Conformance tests for the published arrow_type family vocabulary.
 
-The grammar table (:mod:`cdk.type_map.grammar`) is the single source the
-parser binds against and the published ``arrow_type_grammar.json`` renders
-from. These tests pin the chain so it cannot silently rot:
+The family table (:data:`cdk.type_map.grammar.ARROW_FAMILIES`) is the single
+source the parser binds against, the conversion policy classifies from, the
+live-type probes derive from, and the published ``arrow_type_grammar.json``
+renders from. These tests pin the chain so it cannot silently rot:
 
 1. the committed published artifact equals what the table generates (drift
    guard);
-2. the grammar's family set equals the conversion grid's ``ARROW_FAMILIES``,
-   so the two published artifacts cannot diverge from each other;
+2. every surface derives its family set from the one table — including a
+   family added to the table, which must be visible everywhere with no second
+   edit;
 3. every published claim is exercised against the real parser — allowed
    spellings parse, everything outside the grammar fails loud with the
    engine's typed error (including the ranges pyarrow enforces, so a pyarrow
    upgrade that shifts a bound fails CI instead of silently changing the
-   contract).
+   contract);
+4. the pyarrow bindings the table names — the factory that builds a family and
+   the predicates that recognise it in a live batch — round-trip, so a wrong
+   or missing binding fails here rather than misclassifying a column.
 
 Positive parses of the remaining unit spellings (Time64 short forms, the
 other Timestamp units) live in ``tests/unit/engine/test_type_map.py``; that
@@ -22,23 +27,35 @@ suite and this one together cover the published surface.
 from __future__ import annotations
 
 import re
+from unittest.mock import patch
 
 import pyarrow as pa
 import pytest
 
-from cdk.type_map.arrow import _FACTORIES, parse_arrow_type
-from cdk.type_map.conversions import ARROW_FAMILIES
+from cdk.conformance.roundtrip import probe_canonicals
+from cdk.type_map.arrow import arrow_family, parse_arrow_type
+from cdk.type_map.conversions import build_conversion_grid, classify_conversion
 from cdk.type_map.exceptions import InvalidTypeMapError
 from cdk.type_map.grammar import (
-    ARROW_TYPE_GRAMMAR,
+    ARROW_FAMILIES,
     ARROW_TYPE_GRAMMAR_PATH,
     GRAMMAR_VERSION,
-    STRUCTURAL_FAMILIES,
+    ArrowFamily,
     build_arrow_type_grammar,
     load_published_grammar,
     render_arrow_type_grammar,
     unit_families,
 )
+from cdk.type_map.mapper import TypeMapper
+from cdk.type_map.rules import parse_rules, parse_write_rules
+
+# The two halves of the one table, as every consumer splits it.
+_SCALAR_FAMILIES = {
+    name: spec for name, spec in ARROW_FAMILIES.items() if spec.sub_schema is None
+}
+_STRUCTURAL_FAMILIES = {
+    name: spec for name, spec in ARROW_FAMILIES.items() if spec.sub_schema is not None
+}
 
 
 class TestPublishedArtifactDrift:
@@ -66,14 +83,23 @@ class TestPublishedArtifactDrift:
 
 
 class TestFamilySetConformance:
-    """One vocabulary: grammar, grid axes, and parser factories agree."""
+    """One vocabulary: both published artifacts render the same table."""
 
-    def test_grammar_families_equal_grid_axes(self) -> None:
-        grammar_families = set(ARROW_TYPE_GRAMMAR) | set(STRUCTURAL_FAMILIES)
-        assert grammar_families == set(ARROW_FAMILIES)
+    def test_published_grammar_covers_every_family(self) -> None:
+        assert set(load_published_grammar()["families"]) == set(ARROW_FAMILIES)
 
-    def test_every_scalar_family_has_a_factory(self) -> None:
-        assert set(_FACTORIES) == set(ARROW_TYPE_GRAMMAR)
+    def test_conversion_grid_axes_equal_the_family_table(self) -> None:
+        grid = build_conversion_grid()
+        assert set(grid) == set(ARROW_FAMILIES)
+        for source, row in grid.items():
+            assert set(row) == set(ARROW_FAMILIES), source
+
+    def test_a_family_is_buildable_exactly_when_it_is_not_structural(self) -> None:
+        # A structural family's shape comes from its sub-schema, so it has no
+        # factory; every scalar family must name one or it could be declared
+        # without being buildable.
+        for name, spec in ARROW_FAMILIES.items():
+            assert (spec.builder is None) == (spec.sub_schema is not None), name
 
     def test_rules_unit_vocabulary_derives_from_grammar(self) -> None:
         from cdk.type_map import rules
@@ -123,16 +149,136 @@ class TestEveryFamilyParses:
     """Every scalar family has a parsing example; structural markers reject."""
 
     def test_example_set_is_complete(self) -> None:
-        assert set(_CANONICAL_EXAMPLE) == set(ARROW_TYPE_GRAMMAR)
+        assert set(_CANONICAL_EXAMPLE) == set(_SCALAR_FAMILIES)
 
     @pytest.mark.parametrize("canonical", sorted(_CANONICAL_EXAMPLE.values()))
     def test_example_parses(self, canonical: str) -> None:
         assert isinstance(parse_arrow_type(canonical), pa.DataType)
 
-    @pytest.mark.parametrize("family", sorted(STRUCTURAL_FAMILIES))
+    @pytest.mark.parametrize("family", sorted(_STRUCTURAL_FAMILIES))
     def test_structural_marker_rejected_with_sub_schema_hint(self, family: str) -> None:
         with pytest.raises(InvalidTypeMapError, match="nested type"):
             parse_arrow_type(family)
+
+
+# The one family with no probe: a live Json column *is* a large_string, so it
+# classifies as LargeUtf8. Named here so the exemption stays deliberate.
+_UNPROBED_FAMILIES = {"Json"}
+
+
+class TestFamilyProbes:
+    """The live-type probes the table names are real, complete, and exclusive.
+
+    ``arrow_family`` is the inverse of ``parse_arrow_type``: it decides which
+    conversion policy a batch column is judged by. A stale probe silently
+    misclassifies, so each of these pins it against the type the same table's
+    factory builds.
+    """
+
+    def test_only_the_documented_family_has_no_probe(self) -> None:
+        unprobed = {name for name, spec in ARROW_FAMILIES.items() if not spec.probes}
+        assert unprobed == _UNPROBED_FAMILIES
+
+    @pytest.mark.parametrize(
+        ("family", "canonical"),
+        sorted(
+            (family, canonical)
+            for family, canonical in _CANONICAL_EXAMPLE.items()
+            if family not in _UNPROBED_FAMILIES
+        ),
+    )
+    def test_family_recognises_the_type_its_own_factory_builds(
+        self, family: str, canonical: str
+    ) -> None:
+        assert arrow_family(parse_arrow_type(canonical)) == family
+
+    def test_json_classifies_as_large_utf8(self) -> None:
+        # Json is carried on the wire as a JSON-encoded large_string, so the
+        # runtime boundaries must judge it by the LargeUtf8 policy; the "Json"
+        # row exists only so the published grid can say a declared Json column
+        # cannot be retyped.
+        assert arrow_family(parse_arrow_type("Json")) == "LargeUtf8"
+
+    @pytest.mark.parametrize(
+        ("dtype", "family"),
+        [
+            (pa.struct([pa.field("x", pa.int64())]), "Object"),
+            (pa.list_(pa.int64()), "List"),
+            (pa.large_list(pa.int64()), "List"),
+        ],
+    )
+    def test_structural_families_are_probed(
+        self, dtype: pa.DataType, family: str
+    ) -> None:
+        assert arrow_family(dtype) == family
+
+    def test_probes_are_mutually_exclusive(self) -> None:
+        # The probes are pyarrow.types predicates on the type id, so no live
+        # type may satisfy two families: if one ever did, the answer would
+        # depend on the table's ordering rather than on the vocabulary.
+        built = [parse_arrow_type(c) for c in _CANONICAL_EXAMPLE.values()]
+        built += [pa.struct([pa.field("x", pa.int64())]), pa.list_(pa.int64())]
+        for dtype in built:
+            matched = [
+                name
+                for name, spec in ARROW_FAMILIES.items()
+                if any(getattr(pa.types, probe)(dtype) for probe in spec.probes)
+            ]
+            assert len(matched) <= 1, (dtype, matched)
+
+    def test_every_probe_name_exists_on_pyarrow_types(self) -> None:
+        for name, spec in ARROW_FAMILIES.items():
+            for probe in spec.probes:
+                assert callable(getattr(pa.types, probe, None)), (name, probe)
+
+    def test_type_outside_the_vocabulary_fails_loud(self) -> None:
+        with pytest.raises(InvalidTypeMapError, match="no conversion-matrix family"):
+            arrow_family(pa.month_day_nano_interval())
+
+
+class TestOneTableFeedsEverySurface:
+    """A family added to the table alone is visible on every surface.
+
+    The vocabulary used to be re-declared four times (the parameter grammar,
+    the conversion kinds, the pyarrow factories, the live-type probes), so
+    adding a family meant four edits and forgetting one was silent. This adds
+    a family to the one table and reads it back off every surface without
+    touching anything else.
+    """
+
+    def test_added_family_reaches_every_surface(self) -> None:
+        added = ArrowFamily(
+            "duration",
+            builder="month_day_nano_interval",
+            probes=("is_interval",),
+        )
+        mapper = TypeMapper(
+            "acceptance",
+            parse_rules(
+                [{"match": "exact", "native": "TEXT", "canonical": "Utf8"}],
+                source="test",
+            ),
+            parse_write_rules(
+                [{"match": "exact", "canonical": "Utf8", "native": "TEXT"}],
+                source="test",
+            ),
+        )
+        with patch.dict(ARROW_FAMILIES, {"Interval": added}):
+            # The published grammar document.
+            assert build_arrow_type_grammar()["families"]["Interval"] == {"params": []}
+            # The conversion grid: a new axis, classified by its declared kind.
+            grid = build_conversion_grid()
+            assert set(grid) == set(ARROW_FAMILIES)
+            assert grid["Interval"]["Interval"]["mode"] == "identity"
+            assert classify_conversion("Null", "Interval").mode == "auto"
+            assert classify_conversion("Interval", "Utf8").fn == "to_string"
+            # The parser and its inverse.
+            built = parse_arrow_type("Interval")
+            assert built == pa.month_day_nano_interval()
+            assert arrow_family(built) == "Interval"
+            # The conformance kit's canonical probe set.
+            assert "Interval" in probe_canonicals(mapper)
+        assert "Interval" not in ARROW_FAMILIES
 
 
 class TestUnitSpellings:
@@ -298,7 +444,7 @@ class TestPublishedDocumentShape:
 
     def test_scalar_families_carry_params(self) -> None:
         families = load_published_grammar()["families"]
-        for family in ARROW_TYPE_GRAMMAR:
+        for family in _SCALAR_FAMILIES:
             assert "params" in families[family], family
 
     def test_structural_families_carry_sub_schema_key(self) -> None:
