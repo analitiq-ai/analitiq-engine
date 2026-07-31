@@ -416,7 +416,7 @@ class TestEndToEndConfigFlow:
     """Complete flow tests from constructed configs to Engine."""
 
     def test_api_connection_config_has_required_fields(self):
-        """APIConnector.connect() receives a runtime with host and parameters."""
+        """The api connector's connect() gets a runtime with host and parameters."""
         resolved_connections = _api_to_api_resolved_connections()
         runtime = resolved_connections[WISE_CONNECTION_ID]
         config = runtime.raw_config

@@ -20,7 +20,9 @@ from src.models.resolved import (
     RuntimeConfig,
     _contract_literals,
     _variant_literals,
+    with_effective_safety_window,
 )
+from src.models.state import ReplicationConfig as StateReplicationConfig
 
 
 class TestBatchingConfig:
@@ -375,3 +377,42 @@ class TestParseReplication:
         # omits it (a malformed block must not pass silently).
         with pytest.raises(ValueError, match="method"):
             _parse_replication({"replication": {"cursor_field": "updated_at"}})
+
+
+class TestEffectiveSafetyWindow:
+    """The engine fills the safety window before a config crosses the boundary.
+
+    It is operational policy a connector never declares, so a connector
+    treats an absent value as a wiring defect rather than inventing a
+    default -- which is how the number came to exist in three places.
+    """
+
+    def test_an_incremental_stream_gets_the_engines_default(self):
+        filled = with_effective_safety_window(
+            {"replication": {"method": "incremental", "cursor_field": "updated_at"}}
+        )
+        assert filled["replication"]["safety_window_seconds"] == (
+            StateReplicationConfig.safety_window_seconds
+        )
+
+    def test_an_authored_window_is_left_alone(self):
+        filled = with_effective_safety_window(
+            {"replication": {"method": "incremental", "safety_window_seconds": 900}}
+        )
+        assert filled["replication"]["safety_window_seconds"] == 900
+
+    def test_a_full_refresh_stream_gets_nothing(self):
+        source = {"replication": {"method": "full_refresh"}}
+        assert with_effective_safety_window(source) == source
+
+    def test_a_stream_with_no_replication_block_is_untouched(self):
+        source = {"endpoint_ref": {"scope": "connector"}}
+        assert with_effective_safety_window(source) is source
+
+    def test_the_caller_s_dict_is_not_mutated(self):
+        # The raw stream_source travels to more than one consumer; filling
+        # in place would edit what the engine's own typed view was built
+        # from.
+        source = {"replication": {"method": "incremental"}}
+        with_effective_safety_window(source)
+        assert "safety_window_seconds" not in source["replication"]

@@ -12,7 +12,6 @@ connector classes execute: in the worker, by
 
 from cdk.sql.generic import GenericSQLConnector
 
-from .api import ApiDestinationHandler
 from .file import FileDestinationHandler
 from .stream import StreamDestinationHandler
 
@@ -20,5 +19,4 @@ __all__ = [
     "GenericSQLConnector",
     "StreamDestinationHandler",
     "FileDestinationHandler",
-    "ApiDestinationHandler",
 ]

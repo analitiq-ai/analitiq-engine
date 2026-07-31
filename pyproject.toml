@@ -278,7 +278,9 @@ markers = [
 asyncio_mode = "auto"
 
 [tool.coverage.run]
-source = ["src"]
+# Both trees: the connector families live in cdk/, so measuring src/ alone
+# would report a move out of the engine as a coverage improvement.
+source = ["src", "cdk"]
 omit = [
     "*/src/models/*",
     "*/examples/*",

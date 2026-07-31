@@ -159,6 +159,20 @@ class TestPageSizeBinding:
         )
         assert session.calls[0]["params"]["limit"] == 5
 
+    async def test_without_a_limit_block_no_page_size_is_sent(self) -> None:
+        # The engine binds what the document declares. Guessing a page-size
+        # param would send a name the provider never described.
+        pagination = {key: value for key, value in _OFFSET.items() if key != "limit"}
+        session = FakeSession(
+            [FakeResponse(body=_rows(1)), FakeResponse(body=_rows(0))]
+        )
+        await _read(
+            session,
+            endpoint_document(pagination=pagination, params=_PAGINATION_PARAMS),
+            batch_size=10,
+        )
+        assert "limit" not in session.calls[0]["params"]
+
     async def test_a_page_size_that_is_not_a_positive_integer_fails_first(self) -> None:
         pagination = {
             **_OFFSET,

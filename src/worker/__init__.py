@@ -21,22 +21,24 @@ def build_worker_registries() -> tuple[ConnectorRegistry, ConnectorRegistry]:
     """Seed the kind defaults and discover installed connector packages."""
     # Imports are local so importing src.worker stays cheap for the shells
     # (they only need the spawn helpers, not the handler graph).
+    from cdk.api import GenericAPIConnector
     from cdk.sql.generic import GenericSQLConnector
     from src.destination.connectors import (
-        ApiDestinationHandler,
         FileDestinationHandler,
         StreamDestinationHandler,
     )
-    from src.source.connectors.api import APIConnector
 
+    # ``database`` and ``api`` seed the same class in both registries: one
+    # connector serves read and write for those kinds, so a role-specific
+    # answer here would be a place for the two directions to drift.
     return build_registries(
         source_builtins={
             "database": GenericSQLConnector,
-            "api": APIConnector,
+            "api": GenericAPIConnector,
         },
         destination_builtins={
             "database": GenericSQLConnector,
-            "api": ApiDestinationHandler,
+            "api": GenericAPIConnector,
             "stdout": StreamDestinationHandler,
             "file": FileDestinationHandler,
             "s3": FileDestinationHandler,

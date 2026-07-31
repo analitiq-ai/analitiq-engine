@@ -42,6 +42,53 @@ class TestReadParamTable:
         )
         assert table.values == {"profile": 42}
 
+    def test_a_function_form_default_resolves(self) -> None:
+        # The whole expression grammar is in scope for a default, not just
+        # literal/ref/template -- a function form once fell through and the
+        # raw expression dict went on the wire.
+        import base64
+
+        table = ParamTable.for_read(
+            {
+                "auth": {
+                    "in": "query",
+                    "type": "string",
+                    "required": True,
+                    "default": {
+                        "function": "base64_encode",
+                        "input": {"ref": "connection.parameters.token"},
+                    },
+                }
+            },
+            Resolver(
+                ResolutionContext(connection={"parameters": {"token": "tok-123"}}),
+                functions=DEFAULT_FUNCTIONS,
+            ),
+        )
+        assert table.values == {"auth": base64.b64encode(b"tok-123").decode("ascii")}
+
+    def test_a_template_default_with_a_missing_placeholder_stays_partial(self) -> None:
+        # Templates resolve leniently: the absent placeholder renders empty
+        # and the partially-resolved value still goes out, which is not the
+        # same rule as a bare ref omitting its param.
+        table = ParamTable.for_read(
+            {
+                "scope": {
+                    "in": "query",
+                    "type": "string",
+                    "required": False,
+                    "default": {
+                        "template": (
+                            "${connection.parameters.org}/"
+                            "${connection.parameters.gone}"
+                        )
+                    },
+                }
+            },
+            Resolver(ResolutionContext(connection={"parameters": {"org": "acme"}})),
+        )
+        assert table.values == {"scope": "acme/"}
+
     def test_a_controlled_param_is_left_to_its_loop(self) -> None:
         # A resolved default would be overwritten on the first page anyway
         # -- or survive as a stale value the loop never touched.

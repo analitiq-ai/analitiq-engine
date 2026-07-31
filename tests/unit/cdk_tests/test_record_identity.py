@@ -82,7 +82,7 @@ class TestTheDigestIsStable:
 
 class TestTheCallSitesShareIt:
     def test_the_engine_and_the_api_agree_on_a_whole_record(self) -> None:
-        from src.destination.connectors.api import _content_idempotency_key
+        from cdk.api.write_plan import content_idempotency_key
         from src.grpc.client import generate_record_id
 
         record = {
@@ -92,7 +92,7 @@ class TestTheCallSitesShareIt:
         }
         # No primary key declared, so the engine hashes the whole record too:
         # the two must not disagree about the same bytes.
-        assert generate_record_id(record) == _content_idempotency_key(record)
+        assert generate_record_id(record) == content_idempotency_key(record)
         assert generate_record_id(record) == record_digest(record)
 
     def test_a_declared_key_narrows_the_basis_deliberately(self) -> None:

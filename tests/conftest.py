@@ -10,7 +10,6 @@ import pytest
 from dotenv import load_dotenv
 
 from tests.fixtures.api import (
-    mock_api_connector,
     mock_http_responses,
     sample_api_config,
     sample_api_response,
@@ -33,7 +32,6 @@ from tests.fixtures.pipeline_config_prep import (
 
 # Fixtures imported above are re-exported for pytest discovery, not used here.
 __all__ = [
-    "mock_api_connector",
     "mock_http_responses",
     "sample_api_config",
     "sample_api_response",

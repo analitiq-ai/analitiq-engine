@@ -80,6 +80,20 @@ class TestWalkPath:
     def test_any_miss_answers_none(self, path: list[str]) -> None:
         assert walk_path({"a": {"b": {"c": 3}}}, path) is None
 
+    @pytest.mark.parametrize("data", [{"a": 1}, "scalar", None])
+    def test_an_empty_path_is_the_value_itself(self, data: Any) -> None:
+        assert walk_path(data, []) is data
+
+    @pytest.mark.parametrize("value", [0, False, "", [1, 2, 3], None])
+    def test_a_falsy_terminal_value_is_still_the_answer(self, value: Any) -> None:
+        # A key present with a falsy value is not a miss. Reading it as one
+        # would make ``{"has_more": false}`` and an absent key the same fact.
+        assert walk_path({"a": value}, ["a"]) == value
+
+    @pytest.mark.parametrize("data", [{"a": "string"}, "not-a-dict", None])
+    def test_walking_into_a_non_object_answers_none(self, data: Any) -> None:
+        assert walk_path(data, ["a", "b"]) is None
+
 
 class TestPageScope:
     def test_it_carries_the_body_and_the_record_count(self) -> None:

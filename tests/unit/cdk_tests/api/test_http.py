@@ -104,6 +104,11 @@ class TestSerialisation:
         # for a serialiser rather than for the provider.
         assert encode_body({"amount": Decimal("1.50")}) == b'{"amount":"1.50"}'
 
+    def test_bytes_go_as_base64(self) -> None:
+        # JSON has no byte string; base64 is the convention, and stringifying
+        # the repr would put "b'\\x00'" on the wire.
+        assert encode_body({"blob": b"\x00\x01"}) == b'{"blob":"AAE="}'
+
     def test_the_decode_keeps_fractional_tokens_exact(self) -> None:
         parsed = loads_preserving_decimals('{"amount": 1.50}')
         assert parsed["amount"] == Decimal("1.50")

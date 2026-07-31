@@ -25,10 +25,11 @@ The registry is populated two ways:
   broken connector cannot take the engine down at startup.
 
 Source and destination connectors are tracked in **separate** registries
-(separate entry-point groups) because for some kinds the source and
-destination are different classes (``api`` -> APIConnector vs
-ApiDestinationHandler) while a unified SQL connector serves both roles for
-``database``.
+(separate entry-point groups) because a connector package states the two
+roles separately: a package may advertise itself for reading only, for
+writing only, or for both, and which class serves a role is the package's
+answer to give. A kind whose generic connector serves both roles seeds the
+same class into both registries.
 """
 
 from __future__ import annotations
