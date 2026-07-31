@@ -10,13 +10,11 @@ import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
 import aiohttp
 import orjson
-import pyarrow as pa
 from aiohttp_retry import ExponentialRetry, RetryClient
 from analitiq.contracts.endpoints import (
     ApiEndpointDoc,
@@ -26,7 +24,12 @@ from analitiq.contracts.endpoints import (
 )
 from pydantic import ValidationError
 
-from cdk.base_handler import BaseDestinationHandler, BatchWriteResult, reject_batch
+from cdk.base_handler import (
+    BaseDestinationHandler,
+    BatchRejected,
+    BatchWriteResult,
+    LandingBatch,
+)
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.declarations import DECLARED_WRITE_VERDICTS, ErrorMap, error_map_for
 from cdk.json_utils import decode_json_fields
@@ -777,102 +780,89 @@ class ApiDestinationHandler(BaseDestinationHandler):
         )
         return True
 
-    async def write_batch(
+    def not_ready_reason(self, stream_id: str) -> str | None:
+        """Report what an API write is still missing: a session, a configured stream."""
+        if not self._session or not self._connected:
+            return "Handler not connected"
+        if self._streams.get(stream_id) is None:
+            return "Schema not configured"
+        return None
+
+    async def land(self, batch: LandingBatch) -> int:
+        """Send the batch's records to the endpoint.
+
+        Records stay row-oriented: Arrow-native Python types (``datetime`` /
+        ``Decimal`` / ``date`` / ``time``) survive into the dicts and
+        ``orjson`` handles them at the serialisation boundary, so pre-casting
+        in Arrow space would be a second pass for no gain. ``emitted_at`` is
+        part of the contract for time-partitioned sinks and has no meaning
+        here.
+        """
+        state = self._streams[batch.stream_id]
+        records = batch.records
+        decode_json_fields(records, state.json_fields)
+        if state.max_records is None:
+            (
+                written,
+                failed_ids,
+                failure_detail,
+                failure_category,
+            ) = await self._write_single_mode(state, records, batch.record_ids)
+        else:
+            (
+                written,
+                failed_ids,
+                failure_detail,
+                failure_category,
+            ) = await self._write_chunked_mode(state, records, batch.record_ids)
+        logger.info(
+            "API wrote batch %s: %s/%s records",
+            batch.batch_seq,
+            written,
+            len(records),
+        )
+        total = len(records)
+        if written == total and not failed_ids:
+            return written
+        # A shortfall is fatal, never retryable: the records that did land
+        # are already written, so retrying the whole batch would duplicate
+        # them. The count and the failed ids ride the refusal so the engine
+        # dead-letters exactly what did not land.
+        failed_count = len(failed_ids) or (total - written)
+        summary = f"{failed_count}/{total} records failed to write to API"
+        if failure_detail:
+            summary = f"{summary}; first failure: {failure_detail}"
+        raise BatchRejected(
+            summary,
+            category=failure_category,
+            records_written=written,
+            failed_record_ids=tuple(failed_ids),
+        )
+
+    def unexpected_write_failure(
         self,
+        error: Exception,
+        *,
         run_id: str,
         stream_id: str,
         batch_seq: int,
-        record_batch: pa.RecordBatch,
-        record_ids: list[str],
-        cursor: Cursor,
-        emitted_at: datetime,
     ) -> BatchWriteResult:
-        """Write an Arrow record batch to the API.
-
-        HTTP request bodies are dict-shaped, so the batch is materialized
-        once at this boundary. ``emitted_at`` is part of the write_batch
-        contract for time-partitioned sinks and has no meaning for an API
-        destination, so it is unused here.
-        """
-        if not self._session or not self._connected:
-            return reject_batch(
-                logger,
-                "Handler not connected",
-                run_id=run_id,
-                stream_id=stream_id,
-                batch_seq=batch_seq,
-            )
-
-        state = self._streams.get(stream_id)
-        if state is None:
-            return reject_batch(
-                logger,
-                "Schema not configured",
-                run_id=run_id,
-                stream_id=stream_id,
-                batch_seq=batch_seq,
-            )
-
-        # Materialise once, stay row-oriented. Arrow-native Python types
-        # (``datetime`` / ``Decimal`` / ``date`` / ``time``) survive into
-        # the records dict — ``orjson`` handles them at the serialisation
-        # boundary (natively for datetime/date/time, via the default-hook
-        # for Decimal/bytes). Pre-casting in Arrow space would be a
-        # second pass for no gain.
-        records = record_batch.to_pylist()
-
-        if not records:
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_SUCCESS,
-                records_written=0,
-                committed_cursor=cursor,
-            )
-
-        try:
-            decode_json_fields(records, state.json_fields)
-            if state.max_records is None:
-                (
-                    written,
-                    failed_ids,
-                    failure_detail,
-                    failure_category,
-                ) = await self._write_single_mode(state, records, record_ids)
-            else:
-                (
-                    written,
-                    failed_ids,
-                    failure_detail,
-                    failure_category,
-                ) = await self._write_chunked_mode(state, records, record_ids)
-
-            logger.info(
-                f"API wrote batch {batch_seq}: {written}/{len(records)} records"
-            )
-            return self._build_write_result(
-                written=written,
-                failed_record_ids=failed_ids,
-                total=len(records),
-                cursor=cursor,
-                failure_detail=failure_detail,
-                failure_category=failure_category,
-            )
-
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            status, failure_category = _http_verdict(e, self._error_map)
-            logger.error("Transport error writing to API: %s", e, exc_info=True)
+        """Let the declared error map judge a transport failure first."""
+        if isinstance(error, (aiohttp.ClientError, asyncio.TimeoutError)):
+            status, failure_category = _http_verdict(error, self._error_map)
+            logger.error("Transport error writing to API: %s", error, exc_info=True)
             return BatchWriteResult(
                 status=status,
                 records_written=0,
-                failure_summary=f"{type(e).__name__}: {e}",
+                failure_summary=f"{type(error).__name__}: {error}",
                 failure_category=failure_category,
             )
-        except Exception as e:
-            logger.error("Fatal error writing to API: %s", e, exc_info=True)
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
-                records_written=0,
-                failure_summary=f"{type(e).__name__}: {e}",
-            )
+        logger.error("Fatal error writing to API: %s", error, exc_info=True)
+        return BatchWriteResult(
+            status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+            records_written=0,
+            failure_summary=f"{type(error).__name__}: {error}",
+        )
 
     def _resolve_write_params(self, state: _StreamState) -> dict[str, Any]:
         """Resolve declared write-param defaults into a value table.

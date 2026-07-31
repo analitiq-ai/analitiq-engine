@@ -683,7 +683,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         # raises after that point would otherwise leave the new runtime's
         # declaration rendering against the still-live previous transport.
         # Dropping the transport state first makes that handler
-        # unwritable-through instead: _reject_if_not_ready and
+        # unwritable-through instead: not_ready_reason and
         # health_check refuse until a connect() completes, the way
         # SQLAlchemy invalidates a connection whose connect failed rather
         # than half-keeping it.
@@ -1361,43 +1361,22 @@ class GenericSQLConnector(BaseDestinationHandler):
                 ]
         return statements
 
-    def _reject_if_not_ready(
-        self, run_id: str, stream_id: str, batch_seq: int
-    ) -> BatchWriteResult | None:
-        """Return a rejection for a batch this handler cannot write, else None.
+    def not_ready_reason(self, stream_id: str) -> str | None:
+        """Why this handler cannot write to *stream_id* right now, else None.
 
-        ``None`` means ``self._streams[stream_id]`` exists and is writable
-        on the active transport.
+        ``None`` means ``self._streams[stream_id]`` exists and is writable on
+        the active transport. The reasons are the base contract's, so a SQL
+        rejection reads identically to a file or API one.
         """
         if not self._connected:
-            return reject_batch(
-                logger,
-                "Handler not connected",
-                run_id=run_id,
-                stream_id=stream_id,
-                batch_seq=batch_seq,
-            )
+            return "Handler not connected"
         if self._backend is None:
-            return reject_batch(
-                logger,
-                "Handler not connected: no transport write backend",
-                run_id=run_id,
-                stream_id=stream_id,
-                batch_seq=batch_seq,
-            )
-
-        state = self._streams.get(stream_id)
-        if state is None:
-            # Stream presence implies configure_schema completed: the
-            # state is only registered after DDL and (on the SQLAlchemy
-            # path) target reflection succeeded.
-            return reject_batch(
-                logger,
-                "Schema not configured",
-                run_id=run_id,
-                stream_id=stream_id,
-                batch_seq=batch_seq,
-            )
+            return "Handler not connected: no transport write backend"
+        if self._streams.get(stream_id) is None:
+            # Stream presence implies configure_schema completed: the state
+            # is only registered after DDL and (on the SQLAlchemy path)
+            # target reflection succeeded.
+            return "Schema not configured"
         return None
 
     def _timeout_failure(
@@ -1496,10 +1475,16 @@ class GenericSQLConnector(BaseDestinationHandler):
         time-partitioned sinks; a relational target has no output path, so
         it is unused here.
         """
-        rejection = self._reject_if_not_ready(run_id, stream_id, batch_seq)
-        if rejection is not None:
-            return rejection
-        # _reject_if_not_ready proved the stream is configured.
+        reason = self.not_ready_reason(stream_id)
+        if reason is not None:
+            return reject_batch(
+                logger,
+                reason,
+                run_id=run_id,
+                stream_id=stream_id,
+                batch_seq=batch_seq,
+            )
+        # not_ready_reason proved the stream is configured.
         state = self._streams[stream_id]
 
         try:
