@@ -771,6 +771,13 @@ class APIConnector(BaseConnector):
         meaningless request, and a non-numeric value is an authoring
         defect; all fail deterministically before any request.
         """
+        if isinstance(value, bool):
+            # bool is an int in Python, so True would otherwise pass every
+            # check below and silently mean "one record per page". The
+            # contract refuses a bare `true` outright but cannot reach the
+            # `{literal: true}` spelling, which arrives here; the same
+            # authored intent must be refused either way it is spelled.
+            raise ReadError(f"pagination {context} must be an integer, got {value!r}")
         try:
             step = int(value)
         except (TypeError, ValueError) as err:

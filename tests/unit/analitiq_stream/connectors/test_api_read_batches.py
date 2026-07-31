@@ -1097,6 +1097,12 @@ class TestReadBatchesEffectivePageSize:
             pytest.param({"literal": 2.9}, "must be an integer", id="fractional"),
             pytest.param({"literal": 0}, "must be positive", id="zero"),
             pytest.param({"literal": -3}, "must be positive", id="negative"),
+            # bool is an int in Python, so an unguarded check reads True as
+            # page size 1 and silently requests one record per page. The
+            # contract refuses a bare `true`; it cannot reach this spelling,
+            # so the engine has to refuse the same intent itself.
+            pytest.param({"literal": True}, "must be an integer", id="boolean-true"),
+            pytest.param({"literal": False}, "must be an integer", id="boolean-false"),
             # An unknown function name is an authoring error the resolver
             # raises on; it must surface as a deterministic ReadError (like
             # every other pagination expression), not a raw resolver
