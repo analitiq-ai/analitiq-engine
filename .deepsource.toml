@@ -29,3 +29,20 @@ name = "python"
 
   [analyzers.meta]
   runtime_version = "3.x.x"
+
+# The branch-protection rule on `main` requires a status from the Docker,
+# Shell and Secrets analyzers as well as Python. DeepSource only reports a
+# status for an analyzer that is enabled here, so with Python alone those
+# three contexts stayed "Expected" forever and every merge needed an admin
+# override. They are enabled rather than dropped from the rule: the repo
+# ships a Dockerfile the runtime image is built from and three shell scripts
+# the image and the proto regeneration run, so all three have something real
+# to analyse.
+[[analyzers]]
+name = "docker"
+
+[[analyzers]]
+name = "shell"
+
+[[analyzers]]
+name = "secrets"
