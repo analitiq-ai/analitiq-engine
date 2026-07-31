@@ -7,10 +7,12 @@ nothing in this file touches HTTP.
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 import pytest
 
+from cdk.api import page_loop as page_loop_module
 from cdk.api.page_loop import Page, PageLoop, PageRequest
 
 pytestmark = pytest.mark.unit
@@ -53,7 +55,7 @@ def _rows(n: int) -> list[dict[str, Any]]:
 
 
 async def _drain(loop: PageLoop) -> list[list[dict[str, Any]]]:
-    return [records async for records in loop.__aiter__()]
+    return [records async for records in loop]
 
 
 class TestStopping:
@@ -123,7 +125,7 @@ class TestLoopOrder:
 
         fetch = _ScriptedFetch([Page(_rows(1)), Page(_rows(1))])
         loop = PageLoop(_Recording(2), fetch=fetch, stop_when=lambda page: False)
-        async for _records in loop.__aiter__():
+        async for _records in loop:
             seen.append("yield")
         assert seen == ["advance", "yield", "advance", "yield"]
 
@@ -141,7 +143,7 @@ class TestLoopOrder:
         loop = PageLoop(_Stuck(9), fetch=fetch, stop_when=lambda page: False)
         yielded: list[Any] = []
         with pytest.raises(ValueError, match="order_by_field"):
-            async for records in loop.__aiter__():
+            async for records in loop:
                 yielded.append(records)
         assert yielded == []
 
@@ -164,11 +166,6 @@ class TestTheLoopKnowsNoTransport:
     def test_the_module_imports_no_http_client(self) -> None:
         # `fetch` is injected precisely so the loop stays testable without a
         # server and reusable by the conformance kit, which runs no I/O.
-        import cdk.api.page_loop as module
-
-        source = module.__doc__ or ""
+        source = inspect.getsource(page_loop_module)
         assert "aiohttp" not in source
-        import inspect
-
-        assert "aiohttp" not in inspect.getsource(module)
-        assert "import requests" not in inspect.getsource(module)
+        assert "import requests" not in source

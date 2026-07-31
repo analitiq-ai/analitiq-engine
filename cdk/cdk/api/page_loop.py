@@ -121,7 +121,18 @@ class PageLoop:
         # running against a document that could not have validated.
         self._stop_when = stop_when
 
-    async def __aiter__(self) -> AsyncIterator[list[dict[str, Any]]]:
+    def __aiter__(self) -> AsyncIterator[list[dict[str, Any]]]:
+        """Return the traversal.
+
+        A plain method, not an ``async def``: the protocol asks ``__aiter__``
+        for the iterator itself, and only the body that walks the pages is
+        asynchronous. Writing both as one ``async def`` happens to work --
+        calling an async generator function returns its generator without
+        awaiting -- but it makes ``async for`` depend on that coincidence.
+        """
+        return self._pages()
+
+    async def _pages(self) -> AsyncIterator[list[dict[str, Any]]]:
         """Yield each page's records until one of the three rules fires."""
         request: PageRequest | None = self._strategy.first()
         while request is not None:

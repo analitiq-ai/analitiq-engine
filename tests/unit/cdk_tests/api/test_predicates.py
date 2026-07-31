@@ -8,12 +8,19 @@ these tests pin the semantics that must survive the move, not the mechanism.
 
 from __future__ import annotations
 
+import inspect
 from decimal import Decimal
 from typing import Any
 
 import pytest
 
-from cdk.api.predicates import UnknownPredicate, evaluate_predicate
+from cdk.api import predicates as predicates_module
+from cdk.api.predicates import (
+    _COMPARISONS,
+    _PRESENCE,
+    UnknownPredicate,
+    evaluate_predicate,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -153,8 +160,6 @@ class TestEveryContractOperatorIsCovered:
         return aliases
 
     def test_the_dispatch_covers_the_whole_union(self) -> None:
-        from cdk.api.predicates import _COMPARISONS, _PRESENCE
-
         covered = set(_COMPARISONS) | set(_PRESENCE) | {"and", "or", "not"}
         missing = self._contract_operators() - covered
         assert not missing, (
@@ -163,8 +168,6 @@ class TestEveryContractOperatorIsCovered:
         )
 
     def test_every_covered_operator_is_one_the_contract_declares(self) -> None:
-        from cdk.api.predicates import _COMPARISONS, _PRESENCE
-
         covered = set(_COMPARISONS) | set(_PRESENCE) | {"and", "or", "not"}
         invented = covered - self._contract_operators()
         assert not invented, f"operators the contract does not declare: {invented}"
@@ -174,10 +177,6 @@ class TestTheModuleStaysCdkClean:
     def test_it_imports_no_contract_models(self) -> None:
         # The whole point of reading the operator off the node: selecting a
         # branch by isinstance would drag in all seventeen predicate models.
-        import inspect
-
-        import cdk.api.predicates as module
-
-        source = inspect.getsource(module)
+        source = inspect.getsource(predicates_module)
         assert "analitiq.contracts" not in source
         assert "Predicate" not in source.replace("UnknownPredicate", "")

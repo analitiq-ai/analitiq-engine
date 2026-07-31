@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
@@ -83,6 +84,20 @@ __all__ = ["GenericAPIConnector"]
 #: authoring or data defects, and each becomes a read error naming what
 #: was being resolved.
 _RESOLUTION_FAILURES = (ValueError, KeyError, TransportSpecError)
+
+
+@dataclass(frozen=True)
+class _ReadPlan:
+    """What one read needs, settled before its first request goes out.
+
+    The three things the drain reads: the loop to walk, the contract that
+    turns each page into Arrow, and the field whose last value advances the
+    checkpoint (``None`` for a full refresh).
+    """
+
+    loop: PageLoop
+    schema: SchemaContract
+    cursor_field: str | None
 
 
 class GenericAPIConnector(BaseDestinationHandler):
@@ -245,7 +260,7 @@ class GenericAPIConnector(BaseDestinationHandler):
         finally:
             await self.disconnect()
 
-    async def _read_pages(
+    async def _plan_read(
         self,
         config: dict[str, Any],
         *,
@@ -253,8 +268,14 @@ class GenericAPIConnector(BaseDestinationHandler):
         stream_name: str,
         partition: dict[str, Any],
         batch_size: int,
-    ) -> AsyncIterator[pa.RecordBatch]:
-        """Drive the page loop and yield each page as an Arrow batch."""
+    ) -> _ReadPlan:
+        """Settle everything one read needs before its first request.
+
+        Separate from the draining because the two fail differently: every
+        authoring defect in here is deterministic and costs nothing to
+        raise, while a failure once records are flowing has already handed
+        the engine batches it may have committed.
+        """
         runtime = self._runtime
         if runtime is None or self.base_url is None or self._http is None:
             raise ReadError("read attempted before connect() materialized the runtime")
@@ -346,15 +367,40 @@ class GenericAPIConnector(BaseDestinationHandler):
             # would classify as worth retrying.
             raise ReadError(f"pagination could not be set up: {err}") from err
 
-        loop = PageLoop(
-            strategy,
-            fetch=self._fetcher(
-                self._http, builder, method=method, records_ref=records_ref
+        return _ReadPlan(
+            loop=PageLoop(
+                strategy,
+                fetch=self._fetcher(
+                    self._http, builder, method=method, records_ref=records_ref
+                ),
+                stop_when=self._stop_condition(
+                    (pagination or {}).get("stop_when"), resolver
+                ),
             ),
-            stop_when=self._stop_condition(
-                (pagination or {}).get("stop_when"), resolver
-            ),
+            schema=schema_contract,
+            cursor_field=cursor_field,
         )
+
+    async def _read_pages(
+        self,
+        config: dict[str, Any],
+        *,
+        checkpoint: CheckpointStore,
+        stream_name: str,
+        partition: dict[str, Any],
+        batch_size: int,
+    ) -> AsyncIterator[pa.RecordBatch]:
+        """Drain the planned page loop, yielding each page as an Arrow batch."""
+        plan = await self._plan_read(
+            config,
+            checkpoint=checkpoint,
+            stream_name=stream_name,
+            partition=partition,
+            batch_size=batch_size,
+        )
+        loop = plan.loop
+        schema_contract = plan.schema
+        cursor_field = plan.cursor_field
 
         batch_count = 0
         try:
