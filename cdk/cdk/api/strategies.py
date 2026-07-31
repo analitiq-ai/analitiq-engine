@@ -335,7 +335,10 @@ class _Single:
     def first(self) -> PageRequest:
         return PageRequest(self._url, dict(self._base))
 
-    def advance(self, page: Page) -> PageRequest | None:
+    # skipcq: PYL-R0201 - a PaginationStrategy method, not a utility. Having
+    # nowhere to go is this scheme's answer to the same question the other
+    # four answer with state, and PageLoop holds all five through one shape.
+    def advance(self, page: Page) -> PageRequest | None:  # skipcq: PYL-R0201
         return None
 
 
