@@ -301,7 +301,7 @@ def _walk_chain(exc: BaseException) -> list[BaseException]:
 # Extract context (issue #401): declared error category -> the concrete
 # source ErrorCode. ``transient`` and ``write_rejected`` claim no source
 # code — they speak to retryability, not to which published code names the
-# terminal cause — so they fall through to the text heuristics below.
+# terminal cause — so they take the extract stage's own default.
 _DECLARED_SOURCE_CODES: dict[str, ErrorCode | None] = {
     "auth": ErrorCode.SOURCE_AUTH_FAILED,
     "unreachable": ErrorCode.SOURCE_UNREACHABLE,
@@ -313,7 +313,7 @@ _DECLARED_SOURCE_CODES: dict[str, ErrorCode | None] = {
 
 # Totality, enforced at import (same instinct as _CODE_PRIORITY): a future
 # vocabulary member must take an explicit position here, never silently
-# fall through to text matching.
+# reach the stage default as though nothing was declared.
 _undeclared_source = set(ERROR_CATEGORY_VALUES) - set(_DECLARED_SOURCE_CODES)
 if _undeclared_source:
     raise RuntimeError(

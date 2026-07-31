@@ -155,10 +155,10 @@ class WorkerReadable:
                         )
                         if declared_code is not None:
                             # A retryable failure that exhausts retries
-                            # still reports the declared code (e.g. a
-                            # declared rate_limited 403 must not read as
-                            # auth via the text split). tag_failure is
-                            # no-overwrite, so retry machinery is
+                            # still reports the declared code: a declared
+                            # rate_limited 403 reports RATE_LIMITED rather
+                            # than the extract stage's default. tag_failure
+                            # is no-overwrite, so retry machinery is
                             # unaffected and only terminal classification
                             # consumes it.
                             tag_failure(

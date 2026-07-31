@@ -185,8 +185,8 @@ class BatchWriteResult:
     ``failure_summary`` (issue #351): the site that builds a failure result
     knows the caught exception type, so it declares the category here
     instead of the engine re-deriving it from summary text seven hops
-    later. Read only on failure results; UNSPECIFIED means the engine
-    falls back to summary matching.
+    later. Read only on failure results; UNSPECIFIED means the pipeline
+    stage that raised names the code instead, never the summary text.
     """
 
     # `int` as well as the enum, deliberately. proto3 enums are open, so a

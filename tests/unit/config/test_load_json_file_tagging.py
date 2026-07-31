@@ -12,6 +12,7 @@ something they cannot act on, while the real outage stays hidden.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,10 @@ def test_a_readable_document_parses(tmp_path: Path) -> None:
     assert load_json_file(path) == {"pipeline_id": "p1"}
 
 
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root reads a 0o000 file, so the permission failure cannot be staged",
+)
 def test_an_unreadable_file_is_infra_not_bad_config(tmp_path: Path) -> None:
     path = tmp_path / "locked.json"
     path.write_text("{}")
