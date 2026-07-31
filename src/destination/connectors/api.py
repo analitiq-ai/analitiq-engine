@@ -839,6 +839,27 @@ class ApiDestinationHandler(BaseDestinationHandler):
             failed_record_ids=tuple(failed_ids),
         )
 
+    def os_error_failure(
+        self,
+        error: OSError,
+        *,
+        run_id: str,
+        stream_id: str,
+        batch_seq: int,
+    ) -> BatchWriteResult:
+        """Judge an HTTP transport failure, not a filesystem one.
+
+        aiohttp's connection errors derive from ``OSError`` and
+        ``asyncio.TimeoutError`` *is* the builtin ``TimeoutError``, so the
+        base's errno table would otherwise swallow exactly the failures the
+        connector's declared exception map exists to classify -- retrying a
+        declared config defect to exhaustion, and dead-lettering a batch on
+        a mid-request disconnect that carries EPIPE.
+        """
+        return self.unexpected_write_failure(
+            error, run_id=run_id, stream_id=stream_id, batch_seq=batch_seq
+        )
+
     def unexpected_write_failure(
         self,
         error: Exception,

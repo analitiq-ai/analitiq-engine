@@ -520,13 +520,8 @@ class BaseDestinationHandler(ABC):
                 failure_category=rejected.category,
             )
         except OSError as error:
-            return os_error_verdict(
-                self._logger,
-                error,
-                run_id=run_id,
-                stream_id=stream_id,
-                batch_seq=batch_seq,
-                what="batch",
+            return self.os_error_failure(
+                error, run_id=run_id, stream_id=stream_id, batch_seq=batch_seq
             )
         except Exception as error:  # noqa: BLE001 - mapped to a verdict below
             return self.unexpected_write_failure(
@@ -591,6 +586,38 @@ class BaseDestinationHandler(ABC):
                 f"a destination handler must provide one"
             )
 
+    #: What this sink writes, for the I/O failure log line. A file sink
+    #: writes a "batch"; stdout writes "to stdout".
+    write_target: str = "batch"
+
+    def os_error_failure(
+        self,
+        error: OSError,
+        *,
+        run_id: str,
+        stream_id: str,
+        batch_seq: int,
+    ) -> BatchWriteResult:
+        """Judge an ``OSError`` raised while landing a batch.
+
+        A hook rather than a fixed branch because ``OSError`` is a wider net
+        than it looks: ``asyncio.TimeoutError`` is a builtin ``TimeoutError``
+        on Python 3.11, and aiohttp's connection failures derive from
+        ``OSError`` too. A sink whose transport raises those must judge them
+        by its own declared taxonomy, not by an errno table written for file
+        descriptors -- catching them here would retry a declared config
+        defect to exhaustion and turn a mid-request disconnect into a
+        dead-lettered batch.
+        """
+        return os_error_verdict(
+            self._logger,
+            error,
+            run_id=run_id,
+            stream_id=stream_id,
+            batch_seq=batch_seq,
+            what=self.write_target,
+        )
+
     def unexpected_write_failure(
         self,
         error: Exception,
@@ -636,7 +663,7 @@ class BaseDestinationHandler(ABC):
         pass
 
     @property
-    def declared_capabilities(self) -> Any | None:
+    def forwarded_capabilities(self) -> Any | None:
         """A capability declaration this handler forwards rather than makes.
 
         A handler that proxies to a connector worker already holds the
@@ -663,7 +690,7 @@ class BaseDestinationHandler(ABC):
 
     def _declared(self, name: str, fallback: bool) -> bool:
         """Read one advertised flag, falling back when nothing is declared."""
-        declared = self.declared_capabilities
+        declared = self.forwarded_capabilities
         if declared is None:
             return False if self.forwards_capabilities else fallback
         return bool(getattr(declared, name, False))
@@ -675,7 +702,7 @@ class BaseDestinationHandler(ABC):
         they are read by membership -- the one place that knows the list is
         the list itself (issue #388).
         """
-        declared = self.declared_capabilities
+        declared = self.forwarded_capabilities
         if declared is None:
             return False if self.forwards_capabilities else fallback
         return mode in getattr(declared, "supported_write_modes", ())
@@ -738,7 +765,7 @@ class BaseDestinationHandler(ABC):
 
     def _declared_size(self, name: str, fallback: int) -> int:
         """Read an advertised size, ignoring an unset (zero) declaration."""
-        declared = self.declared_capabilities
+        declared = self.forwarded_capabilities
         if declared is None:
             return fallback
         value = getattr(declared, name, 0)

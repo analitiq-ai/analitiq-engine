@@ -459,7 +459,7 @@ class WorkerProxyHandler(BaseDestinationHandler):
         return "unknown"
 
     @property
-    def declared_capabilities(self) -> Any | None:
+    def forwarded_capabilities(self) -> Any | None:
         """The worker's own GetCapabilitiesResponse, forwarded whole.
 
         The shell already holds the response it fetched at connect, so it

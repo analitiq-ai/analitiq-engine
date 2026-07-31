@@ -459,7 +459,7 @@ batch.
 ### Forwarded capabilities
 
 A handler that relays another process's advertisement (the destination shell's
-worker proxy) returns it from `declared_capabilities` and declares
+worker proxy) returns it from `forwarded_capabilities` and declares
 `forwards_capabilities`. Every capability below then reads off that one
 object. Such a handler advertises nothing until it has something to relay: the
 neutral defaults would have it claim, before it has reached its worker,

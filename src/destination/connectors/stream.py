@@ -129,6 +129,9 @@ class StreamDestinationHandler(BaseDestinationHandler):
         )
         return True
 
+    #: Names stdout in the I/O failure log line, as it did before.
+    write_target = "to stdout"
+
     def not_ready_reason(self, stream_id: str) -> str | None:
         """Report what stdout is still missing: a live handler and its formatter."""
         _ = stream_id
