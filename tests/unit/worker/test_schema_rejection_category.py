@@ -15,18 +15,20 @@ survived only as reason text a phrase list matched.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from cdk.types import FailureCategory, RetrySemantics, RetryVerdict
 from src.destination.server import DestinationServicer
+from src.grpc.client import DestinationGRPCClient
 from src.grpc.generated.analitiq.v1 import SchemaAck, SchemaMessage
 from src.state.error_classification import (
     ErrorCode,
     SchemaHandshakeOutcome,
     classify_handshake_failure,
 )
+from src.worker import proxy as proxy_module
 from src.worker.proxy import _forwarded_schema_category
 
 pytestmark = pytest.mark.unit
@@ -117,10 +119,6 @@ class TestTheProxyRecordsItForTheServicer:
     computed. The servicer reads it off the handler by attribute."""
 
     async def _open_against(self, monkeypatch, worker_client) -> object:
-        from unittest.mock import AsyncMock, MagicMock
-
-        from src.worker import proxy as proxy_module
-
         handler = proxy_module.WorkerProxyHandler(
             connectors_dir=Path("/nonexistent"),
             connections_dir=Path("/nonexistent"),
@@ -138,8 +136,6 @@ class TestTheProxyRecordsItForTheServicer:
     async def test_a_worker_that_never_answered_is_recorded_not_ready(
         self, monkeypatch
     ) -> None:
-        from unittest.mock import AsyncMock
-
         client = _StubClient(SchemaHandshakeOutcome.TRANSPORT_FAILURE)
         client.start_stream = AsyncMock(return_value=False)
         client.schema_rejection_message = "destination closed stream"
@@ -153,8 +149,6 @@ class TestTheProxyRecordsItForTheServicer:
     async def test_a_worker_that_refused_is_recorded_as_a_config_defect(
         self, monkeypatch
     ) -> None:
-        from unittest.mock import AsyncMock
-
         client = _StubClient(SchemaHandshakeOutcome.REJECTED)
         client.start_stream = AsyncMock(return_value=False)
         client.schema_rejection_message = "unsupported write mode"
@@ -168,10 +162,6 @@ class TestTheProxyRecordsItForTheServicer:
     async def test_a_worker_channel_that_never_opened_is_not_ready(
         self, monkeypatch
     ) -> None:
-        from unittest.mock import AsyncMock, MagicMock
-
-        from src.worker import proxy as proxy_module
-
         handler = proxy_module.WorkerProxyHandler(
             connectors_dir=Path("/nonexistent"),
             connections_dir=Path("/nonexistent"),
@@ -191,11 +181,6 @@ class TestTheEngineReadsItBackOffTheAck:
     """The last hop: what the destination declared reaches the raise site."""
 
     async def _reject_with(self, declared: int):
-        from unittest.mock import AsyncMock, MagicMock
-
-        from src.grpc.client import DestinationGRPCClient
-        from src.grpc.generated.analitiq.v1 import SchemaAck
-
         client = DestinationGRPCClient()
         client._connected = True
         client._stub = MagicMock()
