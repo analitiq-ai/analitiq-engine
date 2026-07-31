@@ -29,10 +29,20 @@ __all__ = ["Page", "PageLoop", "PageRequest", "PaginationStrategy"]
 
 @dataclass(frozen=True)
 class PageRequest:
-    """One request the loop should issue."""
+    """One request the loop should issue.
+
+    ``sends_declared_body`` is how a scheme says whether the endpoint's
+    declared request body goes with this request. A continuation URL the
+    provider handed us replaces the whole request -- its own query is
+    already in the URL, and re-sending the declared body would fight the
+    link rather than follow it. Empty ``params`` cannot express that on its
+    own: a body is built from the param table, not from the query, so a
+    request carrying no params can still carry a body.
+    """
 
     url: str
     params: dict[str, Any] = field(default_factory=dict)
+    sends_declared_body: bool = True
 
 
 @dataclass(frozen=True)

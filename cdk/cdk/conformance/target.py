@@ -96,7 +96,12 @@ class ConformanceTarget:
     def dialect(self) -> SqlDialect | None:
         """A dialect instance from the connector class, carrying its declaration.
 
-        ``None`` when no class resolved or the class carries no dialect.
+        ``None`` when no class resolved, when the target is not a database,
+        or when the class carries no dialect. This is the SQL dialect
+        specifically, and every check that asks for one is a SQL check --
+        an api connector carries an :class:`ApiDialect`, which answers a
+        different set of questions and is audited by the api checks.
+
         The kit has the parsed declaration already, so it constructs the
         dialect with it directly rather than through
         :meth:`SqlDialect.for_runtime` (there is no runtime here); the
@@ -105,7 +110,7 @@ class ConformanceTarget:
         declaration.
         """
         cls = self.connector_class
-        if cls is None:
+        if cls is None or not self.is_database:
             return None
         dialect_class = getattr(cls, "dialect_class", None)
         if dialect_class is None:

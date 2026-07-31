@@ -306,7 +306,10 @@ class _Link:
         # loop yields, so a link that leaves the connection's origin fails
         # rather than sending the connection's headers to another host.
         self._current = self._follow(self._current, target)
-        return PageRequest(self._current, {})
+        # No params and no body: the contract's link rule is that the
+        # resolved URL replaces the entire request, which is also what makes
+        # the declared limit first-request-only.
+        return PageRequest(self._current, {}, sends_declared_body=False)
 
 
 class _Single:

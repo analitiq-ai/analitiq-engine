@@ -398,10 +398,8 @@ class TestDecimalPrecision:
         batches = await _read(session, document)
         assert batches[0].column("amount").to_pylist() == [Decimal("1.50")]
 
-    async def test_a_fractional_body_value_goes_as_its_exact_string(self) -> None:
-        # The read path used to narrow body decimals to float, defeating
-        # the lossless parse that exists so a keyset key survives.
-        document = endpoint_document(
+    def _keyset_body_document(self) -> dict[str, Any]:
+        return endpoint_document(
             request={
                 "method": "POST",
                 "path": "/items",
@@ -421,6 +419,10 @@ class TestDecimalPrecision:
                 "stop_when": {"empty": {"ref": "response.body.records"}},
             },
         )
+
+    async def test_a_keyset_key_goes_back_as_the_number_it_arrived_as(self) -> None:
+        # The lossless parse makes it a Decimal; a body schema typing the
+        # key as a number rejects a quoted string, so it goes as a number.
         session = FakeSession(
             [
                 # Raw text, so the trailing zero reaches the decoder the way
@@ -429,8 +431,22 @@ class TestDecimalPrecision:
                 FakeResponse(body=_rows(0)),
             ]
         )
-        await _read(session, document)
-        assert session.calls[1]["data"] == b'{"after":"1.50"}'
+        await _read(session, self._keyset_body_document())
+        assert session.calls[1]["data"] == b'{"after":1.5}'
+
+    async def test_a_key_float_cannot_hold_is_refused_rather_than_rounded(self) -> None:
+        # Rounding a continuation token silently moves the position the
+        # next page resumes from, so records are skipped or repeated with
+        # nothing to show for it. JSON has no wider number.
+        session = FakeSession(
+            [
+                FakeResponse(
+                    text='{"records": [{"id": 1, "amount": 1.2345678901234567890}]}'
+                )
+            ]
+        )
+        with pytest.raises(ReadError, match="without losing digits"):
+            await _read(session, self._keyset_body_document())
 
 
 @pytest.mark.asyncio
@@ -452,3 +468,96 @@ class TestLifecycle:
                 pass
         assert session.closed is True
         assert connector._connected is False
+
+
+@pytest.mark.asyncio
+class TestAFollowedLinkReplacesTheWholeRequest:
+    """The contract's link rule, which the params half alone does not express.
+
+    A next URL carries the provider's own query and is meant to be followed
+    verbatim. Suppressing only the params still rebuilds the declared body,
+    which either re-sends a filter the link already applied or fails on a
+    body whose expressions no longer resolve.
+    """
+
+    def _document(self) -> dict[str, Any]:
+        return endpoint_document(
+            pagination={
+                "type": "link",
+                "link": {"next_url": {"ref": "response.body.next"}},
+                "stop_when": {"missing": {"ref": "response.body.next"}},
+            },
+            params={
+                "since": {
+                    "in": "body",
+                    "type": "string",
+                    "required": False,
+                    "default": "2024-01-01",
+                }
+            },
+            request={
+                "method": "POST",
+                "path": "/items",
+                "body": {"filter": {"from_param": "since"}},
+            },
+        )
+
+    async def test_the_first_request_carries_the_declared_body(self) -> None:
+        session = FakeSession([FakeResponse(body=_rows(0))])
+        await _read(session, self._document())
+        assert session.calls[0]["data"] == b'{"filter":"2024-01-01"}'
+
+    async def test_a_followed_page_carries_no_body(self) -> None:
+        session = FakeSession(
+            [
+                FakeResponse(body={**_rows(1), "next": "?page=2"}),
+                FakeResponse(body=_rows(0)),
+            ]
+        )
+        await _read(session, self._document())
+        assert session.calls[1]["data"] is None
+        assert session.calls[1]["params"] == {}
+
+
+@pytest.mark.asyncio
+class TestAPaginationValueKeepsItsJsonType:
+    async def test_a_decimal_token_goes_into_a_body_as_a_number(self) -> None:
+        # The lossless response parse turns a fractional token into a
+        # Decimal. In a body it must go back as the number the provider
+        # sent -- a body schema typing the field as a number rejects a
+        # quoted string, and the whole stream dies after page one.
+        document = endpoint_document(
+            pagination={
+                "type": "cursor",
+                "cursor": {
+                    "param": "after",
+                    "next_cursor": {"ref": "response.body.next"},
+                },
+                "stop_when": {"missing": {"ref": "response.body.next"}},
+            },
+            params={
+                "after": {
+                    "in": "body",
+                    "type": "number",
+                    "required": False,
+                    "controlled_by": "pagination",
+                }
+            },
+            request={
+                "method": "POST",
+                "path": "/items",
+                "body": {"after": {"from_param": "after"}},
+            },
+        )
+        session = FakeSession(
+            [
+                # Raw text: the token has to reach the lossless decoder as a
+                # JSON number, which is where the Decimal comes from.
+                FakeResponse(
+                    text='{"records": [{"id": 1, "name": "a"}], "next": 12.5}'
+                ),
+                FakeResponse(body=_rows(0)),
+            ]
+        )
+        await _read(session, document)
+        assert session.calls[1]["data"] == b'{"after":12.5}'

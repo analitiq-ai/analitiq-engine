@@ -433,10 +433,15 @@ class GenericAPIConnector(BaseDestinationHandler):
         """Build the loop's fetch: one request, one page."""
 
         async def fetch(request: PageRequest) -> Page:
-            try:
-                query, body = builder.for_page(request.params)
-            except ValueError as err:
-                raise ReadError(f"request body could not be built: {err}") from err
+            if request.sends_declared_body:
+                try:
+                    query, body = builder.for_page(request.params)
+                except ValueError as err:
+                    raise ReadError(f"request body could not be built: {err}") from err
+            else:
+                # A provider-supplied continuation carries its own query in
+                # the URL and takes no declared body, so nothing is rebuilt.
+                query, body = dict(request.params), None
             signed = SignedRequest(
                 method=method,
                 url=request.url,

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 
 from ..request_binding import (
@@ -112,6 +113,38 @@ def _require_body(body: Any, endpoint: str) -> Any:
     return body
 
 
+def _body_number(name: str, value: Any, endpoint: str) -> Any:
+    """Return a page param as the JSON number the provider sent it as.
+
+    A page param's ``Decimal`` only ever comes from the lossless parse of a
+    number the provider itself put in a response -- a keyset key, a cursor
+    token. It goes back as a number, because a body schema typing that
+    field as a number rejects a quoted string and the read dies after the
+    first page.
+
+    Refusing the values float cannot hold is the other half of the same
+    rule. Rounding a continuation token silently is worse than not sending
+    it: the provider answers a position slightly off the one the last page
+    ended at, so records are skipped or repeated and nothing reports it.
+    JSON has no wider number, so this is the transport's real ceiling and
+    the author has to hear about it.
+
+    Record data is a different population and keeps its exact decimal
+    string (see ``encode_body``) -- that precision is the source column's,
+    not a round trip of a number the provider chose.
+    """
+    if not isinstance(value, Decimal):
+        return value
+    narrowed = float(value)
+    if Decimal(str(narrowed)) != value:
+        raise ValueError(
+            f"pagination value {name!r} for endpoint {endpoint!r} is "
+            f"{value}, which cannot go into a JSON body without losing "
+            f"digits; a continuation token has to survive the round trip"
+        )
+    return narrowed
+
+
 class RequestBuilder:
     """Turns one page's param table into the query and body actually sent."""
 
@@ -144,7 +177,13 @@ class RequestBuilder:
         }
         if self._raw_body is None:
             return query, None
-        bound = bind_param_refs(self._raw_body, dict(page_params))
+        bound = bind_param_refs(
+            self._raw_body,
+            {
+                name: _body_number(name, value, self._endpoint)
+                for name, value in page_params.items()
+            },
+        )
         return query, _require_body(
             self._resolver.resolve_for_request(bound), self._endpoint
         )

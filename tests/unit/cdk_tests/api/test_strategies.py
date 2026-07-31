@@ -235,7 +235,9 @@ class TestLink:
         )
         assert s.first().params == {"limit": 50}
         nxt = s.advance(Page(_rows(2), payload={"next": "https://api/x?page=2"}))
-        assert nxt == PageRequest("https://api/x?page=2", {})
+        # The declared body goes the same way as the declared params: the
+        # resolved URL replaces the whole request, not half of it.
+        assert nxt == PageRequest("https://api/x?page=2", {}, sends_declared_body=False)
 
     @pytest.mark.parametrize("target", [None, ""])
     def test_an_absent_link_ends_the_traversal(self, target: Any) -> None:
