@@ -17,6 +17,7 @@ import pyarrow as pa
 import pytest
 
 from cdk.types import FailureCategory
+from src.engine.batch_policy import ErrorStrategy
 from src.engine.engine import StreamingEngine
 from src.engine.exceptions import StreamProcessingError
 from src.engine.stream_processor import StreamProcessor
@@ -85,7 +86,7 @@ def _make_processor(
         buffer_size=100,
         max_retries=max_retries,
         retry_delay=retry_delay,
-        error_strategy=error_strategy,
+        error_strategy=ErrorStrategy(error_strategy),
     )
     processor.grpc_client = grpc_client
     processor.stream_dlq = stream_dlq
@@ -520,15 +521,17 @@ class TestEngineFatalFailureHandling:
         )
 
     @pytest.mark.asyncio
-    async def test_load_stage_already_committed_persists_cursor_without_counting(
+    async def test_load_stage_already_committed_checkpoints_nothing(
         self,
         mock_grpc_client: AsyncMock,
         sample_stream_config: dict[str, Any],
         temp_dir: str,
     ):
-        """An ALREADY_COMMITTED ack (idempotent same-run replay) must record
-        the watermark exactly as SUCCESS would, forward the batch downstream,
-        and must NOT count the records as new progress."""
+        """An ALREADY_COMMITTED ack (idempotent same-run replay) forwards the
+        batch downstream but advances neither the checkpoint nor the record
+        counters: the checkpoint is an artifact of a commit THIS run
+        confirmed, and this run confirmed none (issue #428, decision 1.2).
+        Any cursor riding such an ack is ignored."""
         from src.grpc.cursor import encode_cursor
         from src.state.dead_letter_queue import DeadLetterQueue
 
@@ -560,8 +563,8 @@ class TestEngineFatalFailureHandling:
 
         await processor._load_stage(input_queue, output_queue)
 
-        # Watermark recorded identically to the SUCCESS path.
-        state_manager.save_stream_checkpoint.assert_called_once()
+        # No checkpoint: only a SUCCESS ack advances the watermark.
+        state_manager.save_stream_checkpoint.assert_not_called()
         # Batch forwarded downstream, then the end marker.
         assert await output_queue.get() is test_batch
         assert await output_queue.get() is None
@@ -873,48 +876,25 @@ class TestEngineFatalFailureHandling:
         assert emitted["stream"]["records_skipped"] == 1
 
     @pytest.mark.asyncio
-    async def test_load_stage_unhandled_strategy_raises(
+    async def test_unhandled_strategy_is_refused_at_construction(
         self,
         mock_grpc_client: AsyncMock,
         sample_stream_config: dict[str, Any],
         temp_dir: str,
     ):
         """A strategy outside {fail, dlq, skip} must fail loud, never silently
-        complete a failed batch (defense-in-depth; config-prep validates first)."""
+        complete a failed batch. The typed enum moves that from a defensive
+        branch at the bottom of the reaction ladder to the boundary: the
+        processor cannot be built with one (issue #428)."""
         from src.state.dead_letter_queue import DeadLetterQueue
 
-        input_queue = asyncio.Queue()
-        output_queue = asyncio.Queue()
-
-        test_batch = pa.RecordBatch.from_pylist([{"id": 1}])
-        await input_queue.put(test_batch)
-        await input_queue.put(None)
-
-        retryable_result = MockBatchResult(
-            success=False,
-            status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
-            records_written=0,
-            committed_cursor=None,
-            failed_record_ids=[],
-            failure_summary="Connection timeout",
-        )
-        mock_grpc_client.send_batch = AsyncMock(return_value=retryable_result)
-
-        # ErrorHandlingConfig validates the strategy enum at construction, so a
-        # bogus value can only reach the processor if that typed boundary were
-        # bypassed. Set it straight on the processor to prove the exhaustion
-        # handler's defensive `else: raise` still fails loud rather than
-        # silently completing.
-        processor = _make_processor(
-            dict(sample_stream_config),
-            mock_grpc_client,
-            DeadLetterQueue(f"{temp_dir}/dlq"),
-            error_strategy="bogus",
-            retry_delay=0.01,
-        )
-
-        with pytest.raises(StreamProcessingError, match="Unhandled error strategy"):
-            await processor._load_stage(input_queue, output_queue)
+        with pytest.raises(ValueError, match="bogus"):
+            _make_processor(
+                dict(sample_stream_config),
+                mock_grpc_client,
+                DeadLetterQueue(f"{temp_dir}/dlq"),
+                error_strategy="bogus",
+            )
 
     @pytest.mark.asyncio
     async def test_metrics_updated_on_fatal_failure(
@@ -1121,7 +1101,7 @@ class TestEngineStreamFailurePropagation:
         faked. Asserting INTERNAL (from the declared NOT_READY) rather than
         the default DESTINATION_WRITE_FAILED proves the classified code
         actually traveled the chain."""
-        engine.error_strategy = "dlq"
+        engine.error_strategy = ErrorStrategy.DLQ
         engine.max_retries = 0
         engine.retry_delay = 0
 

@@ -94,8 +94,10 @@ class BaseDestinationHandler(ABC):
       keys -- MERGE on conflict_keys, or the synthetic _record_hash for a
       keyless insert; a file handler content-addresses each batch file so
       a replay overwrites the same bytes)
-    - A handler that detects a prior commit may return ALREADY_COMMITTED with
-      the stored cursor; a sink that writes idempotently returns SUCCESS
+    - A handler that detects a prior commit may return ALREADY_COMMITTED; a
+      sink that writes idempotently returns SUCCESS. The engine advances the
+      checkpoint only from a SUCCESS ack, so a cursor on any other status is
+      ignored
     - All writes within a batch must be atomic (all-or-nothing)
     """
 
@@ -261,7 +263,7 @@ class BaseDestinationHandler(ABC):
           for a keyless insert), never the batch's position
         - Write records atomically (all-or-nothing), store the cursor, and
           return SUCCESS; a handler that detects a prior commit may instead
-          return ALREADY_COMMITTED with the stored cursor
+          return ALREADY_COMMITTED, which advances no checkpoint
         - On failure: return RETRYABLE_FAILURE or FATAL_FAILURE
 
         Args:

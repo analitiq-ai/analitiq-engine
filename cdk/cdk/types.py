@@ -148,10 +148,7 @@ class SchemaSpec:
     ack_timeout_seconds: int
 
 
-# Statuses that count as a successful (committed) batch. Public: the
-# worker proxy uses it to police the same invariant on acks crossing the
-# process boundary, so ``BatchWriteResult.success`` and the proxy cannot
-# drift.
+# Statuses that count as a successful (committed) batch.
 SUCCESS_STATUSES = frozenset(
     {AckStatus.ACK_STATUS_SUCCESS, AckStatus.ACK_STATUS_ALREADY_COMMITTED}
 )
@@ -169,7 +166,12 @@ class BatchWriteResult:
     A failure result must not carry a ``committed_cursor``: the engine
     persists the cursor as the stream checkpoint, so a cursor on a failed
     batch would advance the checkpoint past records that were never
-    written. ``__post_init__`` rejects the combination at construction.
+    written. The rule is not enforced here -- raising inside a connector's
+    own result object aborts the stream and loses the verdict with it.
+    The engine reads the combination off the ack and answers it with a
+    connector-contract-violation verdict naming the connector, which is
+    what makes a defective connector visible instead of silently repaired
+    (issue #428, decision 1.2).
 
     ``failure_category`` is the machine-readable channel beside
     ``failure_summary`` (issue #351): the site that builds a failure result
@@ -190,12 +192,6 @@ class BatchWriteResult:
         if self.records_written < 0:
             raise ValueError(
                 f"records_written must be non-negative, got {self.records_written}"
-            )
-        if self.committed_cursor is not None and not self.success:
-            raise ValueError(
-                f"committed_cursor must be None on a failure result "
-                f"(status={self.status!r}); a failed batch must never "
-                f"advance the checkpoint"
             )
         # Accept any iterable but store a tuple, so the frozen result is
         # immutable all the way down (a list binding would still allow

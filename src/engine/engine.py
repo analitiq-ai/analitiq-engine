@@ -10,6 +10,7 @@ from ..models.metrics import PipelineMetrics
 from ..models.resolved import RuntimeConfig
 from ..state.error_classification import ErrorCode, dominant_error_code
 from ..state.state_manager import StateManager
+from .batch_policy import ErrorStrategy
 from .exceptions import ConfigurationError, StreamProcessingError
 from .stream_processor import StreamProcessor
 
@@ -43,7 +44,10 @@ class StreamingEngine:
         self.buffer_size = runtime.buffer_size
         self.max_retries = runtime.error_handling.max_retries
         self.retry_delay = runtime.error_handling.retry_delay_seconds
-        self.error_strategy = runtime.error_handling.strategy
+        # Typed once, here: the config boundary already validated the string
+        # against the contract's vocabulary, and everything downstream reads
+        # the enum rather than comparing strings.
+        self.error_strategy = ErrorStrategy(runtime.error_handling.strategy)
 
         # Pipeline-wide state management
         self.sharded_state_manager = StateManager(pipeline_id, "./state")

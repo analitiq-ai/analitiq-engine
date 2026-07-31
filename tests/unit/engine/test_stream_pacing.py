@@ -11,6 +11,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from src.engine.batch_policy import ErrorStrategy
 from src.engine.engine import StreamingEngine
 from src.engine.stream_processor import StreamProcessor
 
@@ -94,7 +95,7 @@ class TestProcessStreamForwardsTheGate:
         engine.buffer_size = 1
         engine.max_retries = 1
         engine.retry_delay = 0.0
-        engine.error_strategy = "fail"
+        engine.error_strategy = ErrorStrategy.FAIL
         engine._partial_error_codes = []
 
         captured: dict = {}

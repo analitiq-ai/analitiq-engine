@@ -27,6 +27,7 @@ from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.generic import GenericSQLConnector
 from cdk.sql.generic import _StreamState as SqlStreamState
 from cdk.sql.sqlalchemy_backend import SqlAlchemyBackend
+from src.engine.batch_policy import ErrorStrategy
 from src.engine.stream_processor import StreamProcessor, _FullRefreshCheckpoint
 
 # A fixed, timezone-aware emit instant for write_batch/send_batch calls; the
@@ -56,7 +57,7 @@ def _make_processor(
         buffer_size=10,
         max_retries=max_retries,
         retry_delay=0,
-        error_strategy=error_strategy,
+        error_strategy=ErrorStrategy(error_strategy),
     )
     processor.run_id = "run-1"
     return processor
@@ -693,12 +694,14 @@ class TestZeroBatchTruncate:
     @pytest.mark.asyncio
     async def test_outer_scope_retryable_exhausted_raises(self):
         """When RETRYABLE_FAILURE persists beyond max_retries the stream
-        fails loud — stale data must not survive silently."""
+        fails loud — stale data must not survive silently. The synthetic
+        batch is batch 1 of a full refresh, so the first-batch guard fails
+        the stream whatever the error strategy decided."""
         from src.engine.exceptions import StreamProcessingError
         from src.grpc.generated.analitiq.v1 import AckStatus
 
         processor = self._run_processor(max_retries=0)
-        with pytest.raises(StreamProcessingError, match="zero-batch truncate"):
+        with pytest.raises(StreamProcessingError, match="truncate_insert stream"):
             await self._invoke_run(processor, [AckStatus.ACK_STATUS_RETRYABLE_FAILURE])
 
     @pytest.mark.asyncio
@@ -708,7 +711,7 @@ class TestZeroBatchTruncate:
         from src.grpc.generated.analitiq.v1 import AckStatus
 
         processor = self._run_processor()
-        with pytest.raises(StreamProcessingError, match="zero-batch truncate"):
+        with pytest.raises(StreamProcessingError, match="fatal failure"):
             await self._invoke_run(processor, [AckStatus.ACK_STATUS_FATAL_FAILURE])
 
     @pytest.mark.asyncio

@@ -480,10 +480,10 @@ _DESTINATION_PHRASES = (
     "destination write",
     "load stage",
     # Wrappers StreamProcessor raises around a destination ack failure
-    # (_handle_send_outcome / _handle_exhausted_batch / the synthetic
-    # truncate); the wrapper text itself is the destination signal.
+    # (one per BatchPolicy failure kind, _failure_message); the wrapper text
+    # itself is the destination signal.
     "fatal failure",
-    "retries:",
+    "attempts:",
     "unknown ack status",
 )
 
