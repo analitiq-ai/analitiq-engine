@@ -13,7 +13,7 @@ import pytest
 
 from cdk.types import FailureCategory
 from src.grpc.client import DestinationGRPCClient
-from src.grpc.generated.analitiq.v1 import AckStatus, BatchAck
+from src.grpc.generated.analitiq.v1 import AckStatus, BatchAck, Cursor
 from src.grpc.generated.analitiq.v1 import FailureCategory as WireFailureCategory
 
 pytestmark = pytest.mark.unit
@@ -95,3 +95,40 @@ class TestSchemaMessageAckBudget:
             {"write_mode": "upsert", "schema_version": 1, "ack_timeout_seconds": 300},
         )
         assert schema_msg.ack_timeout_seconds == 30
+
+
+class TestUnrecognizedAckStatus:
+    """A status this build cannot name must not abort the RPC.
+
+    proto3 enums are open, so a newer or untrusted peer can send a value
+    with no name here. Naming it is only ever for a diagnostic string, so
+    an unnameable value degrades to its number -- the same treatment
+    ``failure_category`` already gets (raised on PR #445).
+    """
+
+    def test_unnameable_status_is_reported_as_its_number(self):
+        from src.grpc.client import _ack_status_name
+
+        assert _ack_status_name(99) == "unrecognized status 99"
+
+    def test_known_status_keeps_its_name(self):
+        from src.grpc.client import _ack_status_name
+
+        assert (
+            _ack_status_name(AckStatus.ACK_STATUS_FATAL_FAILURE)
+            == "ACK_STATUS_FATAL_FAILURE"
+        )
+
+    def test_contract_violation_on_an_unnameable_status_returns_a_result(self):
+        # The contract-violation branch (a cursor on a failed ack) runs before
+        # the unknown-status path, so it is where an unnameable status first
+        # reaches a name lookup. It must still return a bounded BatchResult
+        # for BatchPolicy rather than raising out of the RPC.
+        ack = BatchAck(committed_cursor=Cursor(token=b"\x01"))
+        ack.status = 99
+        result = DestinationGRPCClient()._process_ack(ack)
+
+        assert result.success is False
+        assert result.status is AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.committed_cursor is None
+        assert "unrecognized status 99" in result.failure_summary

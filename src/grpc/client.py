@@ -93,6 +93,21 @@ class BatchResult:
     failure_category: FailureCategory = FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
 
 
+def _ack_status_name(status: int) -> str:
+    """Name an ``AckStatus`` off the wire, tolerating one this build cannot name.
+
+    proto3 enums are open, so a newer or untrusted peer can send a value this
+    build has no name for and ``AckStatus.Name`` raises on it. A diagnostic
+    string must never be the thing that aborts an RPC the caller could have
+    handled, so an unnameable value is reported as its number. Same reasoning
+    as the bounds-check on ``failure_category`` below.
+    """
+    try:
+        return str(AckStatus.Name(status))
+    except ValueError:
+        return f"unrecognized status {status}"
+
+
 def _transport_failure(summary: str) -> BatchResult:
     """Build the verdict for a send that reached no ack.
 
@@ -596,6 +611,12 @@ class DestinationGRPCClient:
             if isinstance(response, BatchAck):
                 return self._process_ack(response)
 
+            # Protocol confusion, not a lost message: the peer is mid-stream
+            # with something the engine cannot place, so a late ACK for this
+            # send could still arrive and be consumed as the retry's. Tear
+            # down first, like the sentinel path above, so the retry starts
+            # from a fresh handshake rather than the confused stream.
+            await self._teardown_stream()
             return _transport_failure(
                 f"Unexpected response type {type(response)} instead of an ACK "
                 f"for batch {batch_seq}"
@@ -938,7 +959,7 @@ class DestinationGRPCClient:
             summary = (
                 f"connector contract violation from {self.address}: batch "
                 f"{ack.batch_seq} of stream {ack.stream_id} was acked "
-                f"{AckStatus.Name(ack.status)} with a committed_cursor; a "
+                f"{_ack_status_name(ack.status)} with a committed_cursor; a "
                 f"failed batch must never advance the checkpoint"
             )
             logger.error(summary)
