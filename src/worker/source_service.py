@@ -20,12 +20,8 @@ import pyarrow as pa
 import grpc
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.declarations import DECLARED_READ_DETERMINISTIC, ErrorMap, error_map_for
-from cdk.exceptions import TransportSpecError
-from cdk.sql.exceptions import (
-    ReadError,
-    TlsVerificationError,
-    UnsupportedDialectOperationError,
-)
+from cdk.exceptions import ReadError, TransportSpecError
+from cdk.sql.exceptions import TlsVerificationError, UnsupportedDialectOperationError
 from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
 from src.grpc.generated.analitiq.v1 import (
     CursorSave,

@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pyarrow as pa
 import pytest
 
-from cdk.sql.exceptions import ReadError
+from cdk.exceptions import ReadError
 from src.grpc import DEFAULT_MAX_MESSAGE_SIZE
 from src.grpc.generated.analitiq.v1.source_service_pb2 import (
     CursorSave,

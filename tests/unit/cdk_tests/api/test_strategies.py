@@ -8,6 +8,7 @@ contract model.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -32,8 +33,24 @@ def _scripted(pages: list[Page]):
     return fetch
 
 
-def _build(block, *, resolve=lambda expr, page: expr, base=None):
-    return build_strategy(block, url="/things", base_params=base or {}, resolve=resolve)
+def _follow(current: str, target: str) -> str:
+    """Follow a link verbatim.
+
+    The real follower refuses a target that leaves the connection's origin,
+    which needs a connection; the strategy only has to hand it the current
+    page and the declared target.
+    """
+    return target
+
+
+def _build(block, *, resolve=lambda expr, page: expr, base=None, follow=_follow):
+    return build_strategy(
+        block,
+        url="/things",
+        base_params=base or {},
+        resolve=resolve,
+        follow_url=follow,
+    )
 
 
 class TestOffset:
@@ -79,10 +96,11 @@ class TestOffset:
         assert s.advance(Page(_rows(10))).params == {"skip": 10}
         assert s.advance(Page(_rows(25))).params == {"skip": 35}
 
-    @pytest.mark.parametrize("step", [0, -1, True, False, "10", None])
+    @pytest.mark.parametrize("step", [0, -1, True, False, 2.5, "ten", None])
     def test_a_step_that_would_not_advance_is_refused(self, step: Any) -> None:
-        # A zero or negative step re-requests the same page forever, and a
-        # bool would read as 1 because bool is an int.
+        # A zero or negative step re-requests the same page forever, a bool
+        # would read as 1 because bool is an int, and a fractional step is a
+        # different intent than any whole one.
         s = _build(
             {
                 "type": "offset",
@@ -91,6 +109,20 @@ class TestOffset:
         )
         with pytest.raises(ValueError, match="offset.increment_by"):
             s.advance(Page(_rows(1)))
+
+    @pytest.mark.parametrize("step", ["10", 10.0, Decimal("10")])
+    def test_a_step_whose_integer_value_is_exact_is_accepted(self, step: Any) -> None:
+        # The step can arrive from a response body whose typing the author
+        # does not control: the lossless JSON parse turns 10.0 into
+        # Decimal("10"), and a provider reporting its page size as a string
+        # is not declaring something else.
+        s = _build(
+            {
+                "type": "offset",
+                "offset": {"param": "skip", "initial": 0, "increment_by": step},
+            }
+        )
+        assert s.advance(Page(_rows(1))).params == {"skip": 10}
 
 
 class TestPage:

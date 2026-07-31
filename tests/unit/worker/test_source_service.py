@@ -15,8 +15,7 @@ from unittest.mock import MagicMock
 import pyarrow as pa
 import pytest
 
-from cdk.exceptions import TransportSpecError
-from cdk.sql.exceptions import ReadError
+from cdk.exceptions import ReadError, TransportSpecError
 from cdk.type_map import UnmappedTypeError
 from src.grpc.generated.analitiq.v1.source_service_pb2 import ReadRequest
 from src.source.connectors.base import ReadError as ApiReadError

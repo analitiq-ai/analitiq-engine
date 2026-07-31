@@ -24,13 +24,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pyarrow as pa
 import pytest
 
+from cdk.exceptions import ReadError
 from cdk.sql.capabilities import SqlCapabilities
 from cdk.sql.dialects import SqlDialect, TableAddress
-from cdk.sql.exceptions import (
-    CatalogAddressingError,
-    ReadError,
-    SchemaConfigurationError,
-)
+from cdk.sql.exceptions import CatalogAddressingError, SchemaConfigurationError
 from cdk.sql.generic import GenericSQLConnector
 from cdk.types import SchemaSpec, WriteMode
 
