@@ -117,7 +117,11 @@ class TestTheDocumentMustDeclareWhatItBinds:
             replication={
                 "supported_methods": ["full_refresh", "incremental"],
                 "cursor_mappings": [
-                    {"cursor_field": "updated", "param": "undeclared", "operator": "gte"}
+                    {
+                        "cursor_field": "updated",
+                        "param": "undeclared",
+                        "operator": "gte",
+                    }
                 ],
             }
         )

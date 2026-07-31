@@ -141,7 +141,11 @@ class TestOneRequestPerRecord:
                     "native_type": "integer",
                     "arrow_type": "Int64",
                 },
-                "tag": {"type": "string", "native_type": "string", "arrow_type": "Utf8"},
+                "tag": {
+                    "type": "string",
+                    "native_type": "string",
+                    "arrow_type": "Utf8",
+                },
             },
             body={
                 "item": {"from_input": "record.id"},

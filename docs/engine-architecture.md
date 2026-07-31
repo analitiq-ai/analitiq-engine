@@ -39,20 +39,17 @@ cdk/cdk/                     # Connector Development Kit (shared by source + des
 ├── registry.py              # ConnectorRegistry + build_registries(...)
 ├── secrets/                 # Secret resolvers
 ├── query_builder.py         # WHERE / SELECT rendering
-└── sql/                     # GenericSQLConnector + dialects / DDL / discovery / execution
-    └── generic.py           # GenericSQLConnector (source reads + destination writes)
+├── sql/                     # GenericSQLConnector + dialects / DDL / discovery / execution
+│   └── generic.py           # GenericSQLConnector (source reads + destination writes)
+└── api/                     # GenericAPIConnector + page loop / strategies / HTTP / verdicts
+    └── generic.py           # GenericAPIConnector (source reads + destination writes)
 
 src/
 ├── shared/                  # Engine-local helpers
-│   ├── dict_path.py
-│   ├── http_utils.py
 │   └── run_id.py
 │
-├── source/                  # Source side
-│   └── connectors/              # BaseConnector, APIConnector (DB source lives in the CDK)
-│
 ├── destination/             # Destination side (see destination-config.md)
-│   ├── connectors/              # API / File / Stream handlers + destination_registry / get_handler
+│   ├── connectors/              # File / Stream handlers
 │   ├── formatters/              # JSONL / CSV / Parquet
 │   ├── storage/                 # Local file storage
 │   └── server.py                # gRPC server
@@ -370,21 +367,24 @@ provided by `cdk/cdk/resolver.py`; the `function` registry is in
 
 ## Source Connector Layer
 
-`BaseConnector` lives in `src/source/connectors/base.py`. The only
-engine-side concrete implementation is `APIConnector`
-(`src/source/connectors/api.py`) — it handles cursor / offset / page /
-time-window pagination, incremental replication with safety windows and
-tie-breaker deduplication, rate limiting, and retry / backoff via
-state-layer helpers.
+The engine ships no source connector. Both families live in the CDK, and
+each is one class serving read and write:
 
-Database sources and destinations are unified in the CDK as
-`GenericSQLConnector` (`cdk/cdk/sql/generic.py`), a single class that
-implements four capability Protocols from `cdk/cdk/contract.py`
-(`Readable` / `Writable` / `Discoverable` / `TableCreator`) and serves
-both SQLAlchemy and ADBC transports. The standalone `DatabaseConnector`
-and the per-dialect `src/source/drivers/` classes no longer exist. See
-[`connector-module-architecture.md`](connector-module-architecture.md)
-for the full CDK contract.
+- `GenericSQLConnector` (`cdk/cdk/sql/generic.py`) implements four
+  capability Protocols from `cdk/cdk/contract.py` (`Readable` / `Writable`
+  / `Discoverable` / `TableCreator`) and serves both the SQLAlchemy and
+  ADBC transports.
+- `GenericAPIConnector` (`cdk/cdk/api/generic.py`) owns one HTTP round
+  trip, one classification of what a response status means, incremental
+  replication over the engine-supplied safety window, and the five paging
+  schemes the endpoint contract declares. Those five run on one loop
+  (`cdk/cdk/api/page_loop.py`) with one adapter per scheme — see
+  [ADR 0002](adr/0002-one-stop-rule-for-every-paging-scheme.md).
+
+The one attribute either class exposes for a connector package to override
+is its dialect (`SqlDialect`, `ApiDialect`): pure translation, no I/O. See
+[`connector-module-architecture.md`](connector-module-architecture.md) for
+the full CDK contract.
 
 ## Connector Registries
 
@@ -392,17 +392,17 @@ Connector classes are resolved through `ConnectorRegistry`
 (`cdk/cdk/registry.py`), constructed by `build_registries(...)`. There
 is no `HandlerRegistry`.
 
-- The **source** registry is built inside the spawned worker subprocess
-  (`build_worker_registries` in `src/worker/__init__.py`); the engine
-  process holds only the `WorkerReadable` client and never loads
-  connector code.
-- The **destination** side builds its registry in
-  `src/destination/connectors/__init__.py`, exporting
-  `destination_registry` and the `get_handler(connector_type)` helper.
-  Built-ins map `database -> GenericSQLConnector`, `api`, `file` / `s3`,
-  and `stdout`. Externally installed connector packages register
-  themselves through the `analitiq.destination_connectors` entry-point
-  group.
+Both registries are built in one place: `build_worker_registries` in
+`src/worker/__init__.py`, inside the spawned worker subprocess, because
+that is where connector classes execute. The engine process holds only the
+`WorkerReadable` client and never loads connector code.
+
+The built-ins are the generic kind defaults — `database` and `api` seed
+`GenericSQLConnector` and `GenericAPIConnector` into both registries, and
+`file` / `s3` / `stdout` seed the engine-local destination handlers.
+Externally installed connector packages add themselves through the
+`analitiq.source_connectors` and `analitiq.destination_connectors`
+entry-point groups.
 
 ## Structured Logging
 
