@@ -18,12 +18,15 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
 import pytest
 from analitiq.contracts.endpoint_identity import derive_db_endpoint_id
 
 from cdk.declarations import ConnectorDeclarationError
 from cdk.types import EndpointScope
 from src.config.schema_validator import BundleValidationError, ContractValidationError
+from src.engine.exceptions import TransformationError
+from src.engine.mapping import MappingDocument, compile_mapping
 from src.engine.pipeline_config_prep import PipelineConfigPrep, _split_stream_ref
 
 # ---------------------------------------------------------------------------
@@ -409,6 +412,100 @@ class TestCreateConfigHappyPath:
                 v, ConnectionRuntime
             ), f"to_source_config() must not embed ConnectionRuntime; got {type(v)}"
         json.dumps(source_config)  # raises if not serialisable
+
+
+# ---------------------------------------------------------------------------
+# The mapping crosses the config boundary typed
+# ---------------------------------------------------------------------------
+
+
+class TestStreamMappingReachesTheTransform:
+    """A stream's `mapping` arrives as a compiled-ready document, not a dict.
+
+    This is the seam the all-null nested read lived in: contract validation
+    accepted the token-array path, and the transform read it, but the config
+    layer in between rewrote paths. The document below is authorable — every
+    node is in the published stream grammar (`get`, `pipe`, `fn: to_string`) —
+    so it passes `validate_artifact("stream", ...)` on the way through.
+    """
+
+    def _write_mapping(self, root: Path, mapping: dict[str, Any]) -> None:
+        stream_file = root / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json"
+        document = json.loads(stream_file.read_text())
+        document["mapping"] = mapping
+        _write_json(stream_file, document)
+
+    def test_nested_get_inside_pipe_survives_config_prep(
+        self, pipeline_tree: Path
+    ) -> None:
+        self._write_mapping(
+            pipeline_tree,
+            {
+                "assignments": [
+                    {
+                        "target": {
+                            "path": "city",
+                            "arrow_type": "Utf8",
+                            "nullable": False,
+                        },
+                        "value": {
+                            "kind": "expression",
+                            "expression": {
+                                "op": "pipe",
+                                "args": [
+                                    {"op": "get", "path": ["address", "city"]},
+                                    {"op": "fn", "name": "to_string"},
+                                ],
+                            },
+                        },
+                        "validate": {"rules": [{"type": "not_null", "field": "city"}]},
+                    },
+                ],
+            },
+        )
+
+        prep = PipelineConfigPrep()
+        _, stream_configs, _, _, _ = prep.create_config()
+
+        mapping = stream_configs[0].mapping
+        assert isinstance(mapping, MappingDocument)
+
+        batch = pa.record_batch(
+            [pa.array([{"city": "Berlin"}, {"city": "Kyiv"}])], names=["address"]
+        )
+        out = compile_mapping(mapping).run(batch)
+        assert out.to_pylist() == [{"city": "Berlin"}, {"city": "Kyiv"}]
+
+    def test_a_mapping_the_transform_cannot_run_fails_at_config_prep(
+        self, pipeline_tree: Path
+    ) -> None:
+        """The document is read at the boundary, not first used mid-run.
+
+        A rule naming another column passes contract validation -- `field` is
+        just a non-empty string there -- so the engine's own read is what
+        refuses it, and it does so before the run starts.
+        """
+        self._write_mapping(
+            pipeline_tree,
+            {
+                "assignments": [
+                    {
+                        "target": {"path": "city", "arrow_type": "Utf8"},
+                        "value": {
+                            "kind": "expression",
+                            "expression": {"op": "get", "path": ["city"]},
+                        },
+                        "validate": {
+                            "rules": [{"type": "not_null", "field": "elsewhere"}]
+                        },
+                    },
+                ],
+            },
+        )
+
+        prep = PipelineConfigPrep()
+        with pytest.raises(TransformationError, match="cannot select another column"):
+            prep.create_config()
 
 
 # ---------------------------------------------------------------------------

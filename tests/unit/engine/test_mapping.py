@@ -20,6 +20,7 @@ import pytest
 import src
 from src.engine.exceptions import TransformationError
 from src.engine.mapping import (
+    _EXPR_NODE_KEYS,
     _FUNCTION_CATALOG,
     MappingDocument,
     build_output_schema,
@@ -193,6 +194,59 @@ class TestDocumentIsClosed:
             _compile(
                 [_assignment("s", "Utf8", _expr(_get("s")), generic_type="string")]
             )
+
+    def test_missing_target_arrow_type_is_named(self):
+        with pytest.raises(
+            TransformationError, match=r"assignments\.0\.target\.arrow_type"
+        ):
+            _compile([{"target": {"path": "s"}, "value": _expr(_get("s"))}])
+
+    def test_non_object_target_is_refused_by_type_not_by_attribute_error(self):
+        """The read boundary reports every bad shape as a named field failure.
+
+        A scalar ``target`` is the one shape that used to reach the dotted-path
+        pre-check as a string and escape as a raw ``AttributeError``.
+        """
+        with pytest.raises(TransformationError, match=r"assignments\.0\.target"):
+            _compile([{"target": "id", "value": _expr(_get("s"))}])
+
+    @pytest.mark.parametrize(
+        "node",
+        [
+            {"op": "get", "path": ["n"], "default": 99},
+            {"op": "const", "value": 1, "cast": "Int64"},
+            {"op": "coalesce", "args": [_get("a")], "strict": True},
+        ],
+        ids=["get", "const", "coalesce"],
+    )
+    def test_unknown_expression_key_is_named(self, node):
+        """Closure reaches inside the AST, which is not a contract model."""
+        with pytest.raises(TransformationError, match=r"unknown key\(s\).*"):
+            _compile([_assignment("v", "Int64", _expr(node))])
+
+    def test_unknown_key_on_a_pipe_fn_stage_is_named(self):
+        node = {
+            "op": "pipe",
+            "args": [_get("v"), {"op": "fn", "name": "to_string", "unknown": 1}],
+        }
+        with pytest.raises(
+            TransformationError, match=r"unknown key\(s\) \['unknown'\]"
+        ):
+            _compile([_assignment("v", "Utf8", _expr(node))])
+
+    def test_every_op_the_compiler_knows_is_closed(self):
+        """The key table covers exactly the ops the compiler dispatches on.
+
+        A new op added to the match without a row here would compile with its
+        keys unchecked -- the gap this closes.
+        """
+        for op in _EXPR_NODE_KEYS:
+            with pytest.raises(TransformationError, match=r"unknown key\(s\)"):
+                _compile([_assignment("v", "Utf8", _expr({"op": op, "bogus_key": 1}))])
+
+    def test_a_non_object_expression_node_is_refused(self):
+        with pytest.raises(TransformationError, match="must be an object"):
+            _compile([_assignment("v", "Utf8", _expr({"op": "not", "args": ["x"]}))])
 
 
 def _splits_on_a_dot(tree: ast.AST) -> list[int]:
@@ -699,6 +753,73 @@ class TestFailLoudSemantics:
                     )
                 ],
             )
+
+
+class TestValidationRules:
+    """A rule's wire shape: which column it guards and where its parameter lives."""
+
+    def _validated(self, rules, arrow_type="Int64"):
+        return [
+            _assignment(
+                "v",
+                arrow_type,
+                _expr(_get("v")),
+                validate={"rules": rules},
+            )
+        ]
+
+    def test_rule_naming_another_column_is_refused(self):
+        """The rule's `field` restates the assignment's target; it cannot pick.
+
+        Applying such a rule to the target regardless would validate a column
+        the author did not name, silently.
+        """
+        with pytest.raises(TransformationError, match="cannot select another column"):
+            _compile(self._validated([_rule("not_null", field="some_other_column")]))
+
+    def test_range_bounds_come_from_the_rule_value_object(self):
+        rules = [_rule("range", value={"min": 1, "max": 5})]
+        assert _run([{"v": 1}, {"v": 5}], self._validated(rules)) == [
+            {"v": 1},
+            {"v": 5},
+        ]
+        with pytest.raises(TransformationError, match=r"fail rule 'range'"):
+            _run([{"v": 3}, {"v": 6}], self._validated(rules))
+
+    def test_range_accepts_a_one_sided_bound(self):
+        with pytest.raises(TransformationError, match=r"fail rule 'range'"):
+            _run([{"v": 9}], self._validated([_rule("range", value={"min": 10})]))
+        assert _run(
+            [{"v": 9}], self._validated([_rule("range", value={"max": 10})])
+        ) == [{"v": 9}]
+
+    @pytest.mark.parametrize("value", [[1, 5], {"lo": 1, "hi": 5}, "1..5"])
+    def test_range_without_a_min_max_object_is_refused(self, value):
+        """Bounds live inside `value`; any other spelling fails loud, not silently
+        as an unbounded rule that passes every row."""
+        with pytest.raises(TransformationError, match="needs a value object"):
+            _run([{"v": 3}], self._validated([_rule("range", value=value)]))
+
+    def test_error_handling_block_is_accepted_and_inert(self):
+        """Failure handling is decided per batch and per stream.
+
+        The contract carries a per-assignment override; the engine has no grain
+        to apply it at, so it is accepted and the batch still fails loud.
+        """
+        assignments = [
+            _assignment(
+                "v",
+                "Int64",
+                _expr(_get("v")),
+                validate={
+                    "rules": [_rule("not_null")],
+                    "error_handling": {"strategy": "skip", "max_retries": 3},
+                },
+            )
+        ]
+        assert _run([{"v": 1}], assignments) == [{"v": 1}]
+        with pytest.raises(TransformationError, match="not_null"):
+            _run([{"v": None}], assignments)
 
 
 class TestCompiledReuseAndConsts:

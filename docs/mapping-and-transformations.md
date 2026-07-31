@@ -27,7 +27,9 @@ data never leaves Arrow.
 The mapping document is **closed**: a key the engine does not compile is
 rejected by name rather than dropped, so a document written against a
 different contract pin fails with the offending field in the message instead
-of silently losing a column.
+of silently losing a column. This reaches inside the expression AST — every
+node is closed over the keys its `op` declares, so a stray key on a `get` or
+an `fn` stage fails the same way a stray key on the assignment does.
 
 ## Paths Are Token Arrays
 
@@ -249,6 +251,11 @@ behaviour.
 }
 ```
 
+A rule's `field` names the mapped output column it guards, and the block it
+sits in already fixes that column: `validate` is per-assignment, so a rule's
+`field` must be the assignment's own `target.path`. A rule naming any other
+column is refused by name — it does not select a different column to validate.
+
 Implemented rule types, each compiled to a vectorized boolean mask over the
 batch. A null value is exempt from every rule except `not_null`:
 
@@ -266,6 +273,13 @@ whole batch fails with a `TransformationError` naming the column and the
 offending rows. The transform does not route individual records — it surfaces
 the failure, and the stream-level `error_strategy` decides retry vs DLQ vs skip
 for the failed batch (see [`engine-architecture.md`](engine-architecture.md)).
+
+Because failure handling is decided per batch and per stream, the optional
+`validate.error_handling` block the stream contract carries is control-plane
+metadata here: the engine accepts it and applies the pipeline's
+`runtime.error_handling` regardless. An assignment-scoped retry or strategy
+override has no grain to act at, since one failing row already fails the whole
+batch.
 
 ## Type Conversion
 

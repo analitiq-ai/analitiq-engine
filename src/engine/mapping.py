@@ -15,13 +15,22 @@ anywhere on that route: a dotted string is a path plus an unstated splitting
 convention, and when one module split it and another expected tokens, a nested
 read silently produced an all-null column instead of failing.
 
-:class:`MappingDocument` is closed (``extra="forbid"``) at every level, so a
-field the contract carries cannot go missing between the document and the
-transform: it is either compiled or it is rejected by name. This is a
-deliberate departure from a forward-compatible protocol that tolerates unknown
-keys -- affordable only because the engine and the contract models are pinned
-in lockstep, and worth it because a dropped field is silent while a named
-rejection is readable.
+:class:`MappingDocument` is closed (``extra="forbid"``) at every level, and the
+expression AST -- the one sub-tree that is not a contract model, because the
+engine compiles a wider op set than the contract publishes -- is closed op by
+op at compile time (:data:`_EXPR_NODE_KEYS`). So a field the contract carries
+cannot go missing between the document and the transform: it is either compiled
+or it is rejected by name. This is a deliberate departure from a
+forward-compatible protocol that tolerates unknown keys -- affordable only
+because the engine and the contract models are pinned in lockstep, and worth it
+because a dropped field is silent while a named rejection is readable.
+
+One contract field is deliberately not acted on: ``validate.error_handling``.
+Failure handling is a pipeline-runtime setting (strategy, retries, delay) the
+engine applies to a whole batch, and a validation failure fails the whole batch
+by design, so an assignment-scoped override has no grain to act at. It is
+carried for the control plane and named as inert in
+``mapping-and-transformations.md`` rather than silently absorbed.
 
 Type conversion has one authority. When an assignment's evaluated value lands in
 a column of a different Arrow type than the target declares, the conversion is
@@ -84,7 +93,9 @@ class ExpressionValue(StrictModel):
     publishes the ``get``/``pipe``/``fn`` nodes an authoring UI can offer,
     while the engine compiles a larger op set (see :func:`_compile_expr`). The
     AST therefore stays an untyped mapping here and is validated -- op by op,
-    arity and all -- at compile time, where the vocabulary is defined.
+    arity, and every key the node carries -- at compile time, where the
+    vocabulary is defined. Widening the type does not open the document: a key
+    no op declares is refused there by name, exactly as it is at this level.
     """
 
     kind: Literal["expression"]
@@ -110,6 +121,9 @@ class MappingAssignment(StrictModel):
     # a second engine-side spelling of the same shapes.
     target: AssignmentTarget
     value: AssignmentValue
+    # `Validation.error_handling` rides along unused: see the module docstring
+    # -- the engine handles failures per batch, so there is no assignment-scoped
+    # grain for it to change.
     validation: Validation | None = Field(default=None, alias="validate")
 
     @model_validator(mode="before")
@@ -123,7 +137,11 @@ class MappingAssignment(StrictModel):
         cannot guess from the pattern.
         """
         if isinstance(data, Mapping):
-            path = (data.get("target") or {}).get("path")
+            target = data.get("target")
+            # A non-object `target` is the contract's error to report, by type;
+            # reading `.path` off it here would escape this model as a raw
+            # AttributeError instead of a named field failure.
+            path = target.get("path") if isinstance(target, Mapping) else None
             if isinstance(path, str) and "." in path:
                 raise ValueError(
                     f"target.path {path!r} has more than one segment; a target "
@@ -132,6 +150,27 @@ class MappingAssignment(StrictModel):
                     f"plus 'properties' (or 'List' plus 'items')"
                 )
         return data
+
+    @model_validator(mode="after")
+    def _rules_name_this_assignment_target(self) -> MappingAssignment:
+        """Refuse a validation rule that names a field other than this target.
+
+        A rule's ``field`` restates the mapped output column it guards, and the
+        block the rule sits in already fixes that column: ``validate`` is
+        per-assignment, and the transform applies its rules to the value this
+        assignment builds. A rule naming a different column is two answers to
+        one question -- so it is refused by name rather than quietly enforced
+        against the target.
+        """
+        for rule in self.validation.rules if self.validation else ():
+            if rule.field != self.target.path:
+                raise ValueError(
+                    f"validation rule {rule.type!r} names field {rule.field!r}, "
+                    f"but rules in this block validate the assignment's own "
+                    f"target {self.target.path!r}; a rule cannot select "
+                    f"another column"
+                )
+        return self
 
 
 class MappingDocument(StrictModel):
@@ -339,9 +378,58 @@ def _compile_const(const_value: Any, field: pa.Field, is_json: bool) -> _ExprFn:
 # batch so the (static) AST walk happens once at compile time, not per batch.
 
 
-def _compile_expr(expr: dict[str, Any]) -> _ExprFn:
-    """Compile one expression AST node into a vectorized column builder."""
+# Every key an AST node of each op may carry. Most ops take only `args`; `get`,
+# `const` and `fn` carry their own payload. This table is what closes the
+# expression sub-tree: it is the one part of the document pydantic does not
+# check (the engine's op set is wider than the contract's published
+# get/pipe/fn), so an unknown key is rejected here, alongside the op vocabulary
+# and the arity, instead of being dropped on the way to the compiler.
+_ARGS_ONLY_OPS: Final[tuple[str, ...]] = (
+    "pipe",
+    "if",
+    "eq",
+    "neq",
+    "gt",
+    "gte",
+    "lt",
+    "lte",
+    "and",
+    "or",
+    "not",
+    "concat",
+    "coalesce",
+)
+_EXPR_NODE_KEYS: Final[dict[str, frozenset[str]]] = {
+    "get": frozenset({"op", "path"}),
+    "const": frozenset({"op", "value"}),
+    "fn": frozenset({"op", "name", "version", "args"}),
+    **{op: frozenset({"op", "args"}) for op in _ARGS_ONLY_OPS},
+}
+
+
+def _expect_node(expr: Any) -> str:
+    """Return an AST node's ``op``, refusing an unknown op or an unknown key."""
+    if not isinstance(expr, Mapping):
+        raise TransformationError(
+            f"expression node must be an object with an 'op', got "
+            f"{type(expr).__name__}: {expr!r}"
+        )
     op = expr.get("op")
+    if not isinstance(op, str) or op not in _EXPR_NODE_KEYS:
+        raise TransformationError(f"Unknown expression op: {op!r}")
+    allowed = _EXPR_NODE_KEYS[op]
+    unknown = sorted(set(expr) - allowed)
+    if unknown:
+        raise TransformationError(
+            f"{op} expression carries unknown key(s) {unknown}; a {op} node "
+            f"takes {sorted(allowed)}"
+        )
+    return op
+
+
+def _compile_expr(expr: Any) -> _ExprFn:
+    """Compile one expression AST node into a vectorized column builder."""
+    op = _expect_node(expr)
 
     match op:
         case "get":
@@ -436,15 +524,16 @@ def _compile_expr(expr: dict[str, Any]) -> _ExprFn:
             return lambda batch: _coalesce([p(batch) for p in parts])
 
         case _:
-            raise TransformationError(f"Unknown expression op: {op!r}")
+            # Reached only if `_EXPR_NODE_KEYS` grows an op and this match does
+            # not: an op the engine cannot compile must fail, never pass.
+            raise TransformationError(f"expression op {op!r} has no compiler")
 
 
-def _compile_fn(node: dict[str, Any]) -> Callable[[pa.Array], pa.Array]:
+def _compile_fn(node: Any) -> Callable[[pa.Array], pa.Array]:
     """Compile a ``fn`` AST node (a pipe stage) into a vectorized column function."""
-    if node.get("op") != "fn":
-        raise TransformationError(
-            f"Expected fn op in pipe stage, got: {node.get('op')!r}"
-        )
+    op = _expect_node(node)
+    if op != "fn":
+        raise TransformationError(f"Expected fn op in pipe stage, got: {op!r}")
     name = node.get("name")
     version = node.get("version", 1)
     args = node.get("args") or []
@@ -786,6 +875,10 @@ def _run_validation(
     exempt from every rule except ``not_null`` (mirroring the per-record
     ``if value is not None`` guard). A malformed rule (bad regex, type mismatch)
     fails loud with a :class:`TransformationError`.
+
+    Rules run against *field* -- the assignment's own target column. A rule's
+    ``field`` is not consulted here because ``MappingAssignment`` has already
+    refused any rule naming a different column, so the two cannot disagree.
     """
     errors: list[str] = []
     present = pc.is_valid(value)
