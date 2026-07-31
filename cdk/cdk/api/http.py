@@ -263,8 +263,15 @@ class HttpSender:
         """Close the retry client (and with it the session it wraps)."""
         await self._client.close()
 
-    async def send(self, request: SignedRequest) -> Any:
-        """Issue one request and return the decoded, unwrapped payload.
+    async def send(self, request: SignedRequest, *, unwrap_page: bool) -> Any:
+        """Issue one request and return the decoded payload.
+
+        ``unwrap_page`` says whether the dialect's page unwrap applies.
+        Only a read has pages: the hook exists to reach into a read
+        envelope, and a write response is a different shape the same
+        dialect was never written for. Running it on one would raise after
+        the provider had already accepted the record, turning an accepted
+        batch into a reported failure.
 
         Success is any status below 400, both roles. A read endpoint
         answering 201/202/204/206 is a legitimate provider, and failing a
@@ -313,7 +320,7 @@ class HttpSender:
                     ),
                     declared_category=category,
                 )
-        return self._dialect.unwrap_page(payload)
+        return self._dialect.unwrap_page(payload) if unwrap_page else payload
 
     async def probe(self, url: str) -> int:
         """Return the status of a bare GET, for a liveness check.

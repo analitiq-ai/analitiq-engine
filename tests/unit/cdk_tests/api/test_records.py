@@ -99,3 +99,19 @@ class TestPageScope:
     def test_it_carries_the_body_and_the_record_count(self) -> None:
         page = Page(records=[{"id": 1}, {"id": 2}], payload={"records": "..."})
         assert page_scope(page) == {"body": {"records": "..."}, "record_count": 2}
+
+
+class TestASuccessWithNoBody:
+    def test_an_absent_body_is_an_empty_page_not_a_defect(self) -> None:
+        # A 204 decodes to None. That is the provider saying "nothing here",
+        # which ends the traversal; failing the stream on it contradicts the
+        # sender's own no-content handling.
+        assert extract_records(None, "response.body") == []
+        assert extract_records(None, "response.body.items") == []
+
+    def test_a_body_that_is_there_and_holds_no_records_still_fails(self) -> None:
+        # The distinction being kept: answering zero records for a body that
+        # exists would end a traversal at page one and report a truncated
+        # read as a complete one.
+        with pytest.raises(ReadError, match="carries no records"):
+            extract_records("not a page", "response.body")

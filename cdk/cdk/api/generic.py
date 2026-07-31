@@ -542,7 +542,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                 body=None if body is None else encode_body(body),
             )
             try:
-                payload = await sender.send(signed)
+                payload = await sender.send(signed, unwrap_page=True)
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
                 status, category = failure_facts(err, error_map=self._error_map)
                 raise read_verdict(
@@ -1022,5 +1022,6 @@ class GenericAPIConnector(BaseDestinationHandler):
                 params={},
                 headers=dict(extra_headers or {}),
                 body=encode_body(data),
-            )
+            ),
+            unwrap_page=False,
         )

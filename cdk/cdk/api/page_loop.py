@@ -139,11 +139,16 @@ class PageLoop:
             page = await self._fetch(request)
             if not page.records:
                 return
-            # Advance before yielding, structurally: the caller may commit
-            # the records it receives, so a page this scheme cannot advance
-            # from has to fail while the failure still costs nothing.
-            following = self._strategy.advance(page)
+            # Both decisions are made before the caller sees the records.
+            # The caller may commit what it receives, so a page this loop
+            # cannot evaluate or cannot advance from has to fail while the
+            # failure still costs nothing.
+            #
+            # Stopping is decided first, and a stopping page is never
+            # advanced from: the last page is exactly where a continuation
+            # value is legitimately absent -- no next link, no cursor to
+            # follow -- and asking for one there would fail a read that had
+            # just been told it was complete.
+            following = None if self._stop_when(page) else self._strategy.advance(page)
             yield page.records
-            if self._stop_when(page):
-                return
             request = following

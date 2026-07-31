@@ -145,7 +145,7 @@ class TestSend:
         session = FakeSession([FakeResponse(body={"records": [{"id": 1}]})])
         sender = _sender(session)
         payload = await sender.send(
-            SignedRequest(method="GET", url=f"{BASE_URL}/items")
+            SignedRequest(method="GET", url=f"{BASE_URL}/items"), unwrap_page=True
         )
         assert payload == {"records": [{"id": 1}]}
 
@@ -155,14 +155,14 @@ class TestSend:
         # whole stream on it is the engine second-guessing HTTP.
         session = FakeSession([FakeResponse(status=status, body={"records": []})])
         assert await _sender(session).send(
-            SignedRequest(method="GET", url=f"{BASE_URL}/items")
+            SignedRequest(method="GET", url=f"{BASE_URL}/items"), unwrap_page=True
         ) == {"records": []}
 
     async def test_an_empty_body_decodes_to_nothing_rather_than_raising(self) -> None:
         session = FakeSession([FakeResponse(status=204, text="")])
         assert (
             await _sender(session).send(
-                SignedRequest(method="GET", url=f"{BASE_URL}/items")
+                SignedRequest(method="GET", url=f"{BASE_URL}/items"), unwrap_page=True
             )
             is None
         )
@@ -171,7 +171,7 @@ class TestSend:
         session = FakeSession([FakeResponse(status=404, body={"error": "nope"})])
         with pytest.raises(ApiResponseError) as caught:
             await _sender(session).send(
-                SignedRequest(method="GET", url=f"{BASE_URL}/items")
+                SignedRequest(method="GET", url=f"{BASE_URL}/items"), unwrap_page=True
             )
         assert caught.value.status == 404
 
@@ -181,7 +181,7 @@ class TestSend:
         session = FakeSession([FakeResponse(status=400, text="<html>no</html>")])
         with pytest.raises(ApiResponseError) as caught:
             await _sender(session).send(
-                SignedRequest(method="GET", url=f"{BASE_URL}/items")
+                SignedRequest(method="GET", url=f"{BASE_URL}/items"), unwrap_page=True
             )
         assert caught.value.status == 400
         assert "<html>no</html>" in str(caught.value)
@@ -190,7 +190,7 @@ class TestSend:
         session = FakeSession([FakeResponse(status=200, text="<html>hi</html>")])
         with pytest.raises(aiohttp.ClientPayloadError, match="non-JSON body"):
             await _sender(session).send(
-                SignedRequest(method="GET", url=f"{BASE_URL}/items")
+                SignedRequest(method="GET", url=f"{BASE_URL}/items"), unwrap_page=True
             )
 
     async def test_the_declared_map_classifies_at_the_raise_site(self) -> None:
@@ -201,7 +201,9 @@ class TestSend:
         session = FakeSession([FakeResponse(status=404, body={})])
         sender = _sender(session, dialect=ApiDialect.for_runtime(Runtime()))
         with pytest.raises(ApiResponseError) as caught:
-            await sender.send(SignedRequest(method="GET", url=f"{BASE_URL}/items"))
+            await sender.send(
+                SignedRequest(method="GET", url=f"{BASE_URL}/items"), unwrap_page=True
+            )
         assert caught.value.declared_category == "config"
 
     async def test_a_dialect_can_fail_a_success_status(self) -> None:
@@ -216,7 +218,7 @@ class TestSend:
         session = FakeSession([FakeResponse(status=200, body={"error": "slow down"})])
         with pytest.raises(ApiResponseError) as caught:
             await _sender(session, dialect=Provider()).send(
-                SignedRequest(method="GET", url=f"{BASE_URL}/items")
+                SignedRequest(method="GET", url=f"{BASE_URL}/items"), unwrap_page=True
             )
         assert caught.value.declared_category == "rate_limited"
 
@@ -227,7 +229,7 @@ class TestSend:
 
         session = FakeSession([FakeResponse(body={"result": {"records": [{"id": 1}]}})])
         payload = await _sender(session, dialect=Provider()).send(
-            SignedRequest(method="GET", url=f"{BASE_URL}/items")
+            SignedRequest(method="GET", url=f"{BASE_URL}/items"), unwrap_page=True
         )
         assert payload == {"records": [{"id": 1}]}
 
@@ -248,7 +250,8 @@ class TestSend:
         await _sender(session, dialect=Provider()).send(
             SignedRequest(
                 method="POST", url=f"{BASE_URL}/items", body=encode_body({"a": 1})
-            )
+            ),
+            unwrap_page=True,
         )
         headers = session.calls[0]["headers"]
         assert headers["X-Signature"] == "POST:7"
@@ -262,7 +265,8 @@ class TestSend:
         await _sender(session).send(
             SignedRequest(
                 method="GET", url=f"{BASE_URL}/items", params={"since": Decimal("1.50")}
-            )
+            ),
+            unwrap_page=True,
         )
         assert session.calls[0]["params"] == {"since": "1.50"}
 
@@ -272,7 +276,7 @@ class TestSend:
         )
         sender = _sender(session, retry_statuses={503}, max_retries=2)
         assert await sender.send(
-            SignedRequest(method="GET", url=f"{BASE_URL}/items")
+            SignedRequest(method="GET", url=f"{BASE_URL}/items"), unwrap_page=True
         ) == {"ok": True}
         assert len(session.calls) == 2
 
@@ -280,10 +284,41 @@ class TestSend:
         session = FakeSession([FakeResponse(status=400, body={})])
         sender = _sender(session, retry_statuses={503}, max_retries=3)
         with pytest.raises(ApiResponseError):
-            await sender.send(SignedRequest(method="GET", url=f"{BASE_URL}/items"))
+            await sender.send(
+                SignedRequest(method="GET", url=f"{BASE_URL}/items"), unwrap_page=True
+            )
         assert len(session.calls) == 1
 
     async def test_probe_answers_the_status_itself(self) -> None:
         # A health check judges the status; 404 means the API answered.
         session = FakeSession([FakeResponse(status=404, body={})])
         assert await _sender(session).probe(BASE_URL) == 404
+
+
+@pytest.mark.asyncio
+class TestOnlyAReadHasPages:
+    """The page unwrap is a read concept and must not run on a write.
+
+    Both roles share this sender. A dialect that reaches into a read
+    envelope was never written for a write response, so running it there
+    raises after the provider has already accepted the record -- turning an
+    accepted batch into a reported failure.
+    """
+
+    class _Enveloped(ApiDialect):
+        def unwrap_page(self, body: Any) -> Any:
+            return body["result"]
+
+    async def test_a_read_gets_the_envelope_unwrapped(self) -> None:
+        session = FakeSession([FakeResponse(body={"result": {"records": []}})])
+        payload = await _sender(session, dialect=self._Enveloped()).send(
+            SignedRequest(method="GET", url=f"{BASE_URL}/items"), unwrap_page=True
+        )
+        assert payload == {"records": []}
+
+    async def test_a_write_response_is_returned_as_it_came(self) -> None:
+        session = FakeSession([FakeResponse(body={"id": 7})])
+        payload = await _sender(session, dialect=self._Enveloped()).send(
+            SignedRequest(method="POST", url=f"{BASE_URL}/items"), unwrap_page=False
+        )
+        assert payload == {"id": 7}

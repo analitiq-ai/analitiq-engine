@@ -169,3 +169,58 @@ class TestTheLoopKnowsNoTransport:
         source = inspect.getsource(page_loop_module)
         assert "aiohttp" not in source
         assert "import requests" not in source
+
+
+@pytest.mark.asyncio
+class TestNothingIsDecidedAfterTheCallerHasTheRecords:
+    """The caller may commit what it is handed, so both decisions come first.
+
+    Advancing was already ordered this way. Evaluating the author's stop
+    condition was not, which left the one deterministic check that can fail
+    a page running after that page had been forwarded.
+    """
+
+    class _Exploding:
+        def first(self) -> PageRequest:
+            return PageRequest(url="/things")
+
+        def advance(self, page: Page) -> PageRequest | None:
+            raise ValueError("no continuation on this page")
+
+    async def test_a_raising_stop_condition_fails_before_the_yield(self) -> None:
+        loop = PageLoop(
+            _Counting(pages=3),
+            fetch=_ScriptedFetch([Page(_rows(2))]),
+            stop_when=_raises,
+        )
+        seen: list[list[dict[str, Any]]] = []
+        with pytest.raises(ValueError, match="stop condition"):
+            async for records in loop:
+                seen.append(records)
+        assert seen == [], "the page reached the caller before the read failed"
+
+    async def test_a_stopping_page_is_never_advanced_from(self) -> None:
+        # The last page is exactly where a continuation value is legitimately
+        # absent -- no next link, no cursor. Asking for one there fails a read
+        # that was just told it was complete.
+        strategy = self._Exploding()
+        loop = PageLoop(
+            strategy,
+            fetch=_ScriptedFetch([Page(_rows(2))]),
+            stop_when=lambda page: True,
+        )
+        assert await _drain(loop) == [_rows(2)]
+
+    async def test_a_continuing_page_is_still_advanced_from(self) -> None:
+        strategy = _Counting(pages=2)
+        loop = PageLoop(
+            strategy,
+            fetch=_ScriptedFetch([Page(_rows(1)), Page(_rows(1))]),
+            stop_when=lambda page: False,
+        )
+        await _drain(loop)
+        assert strategy.advanced == 2
+
+
+def _raises(page: Page) -> bool:
+    raise ValueError("stop condition could not be evaluated")

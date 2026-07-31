@@ -62,8 +62,11 @@ pytest = { version = ">=7.0", optional = true }
 # cdk.sql.adbc_reader, type_map.parse_arrow_type, GenericSQLConnector read/write).
 arrow = ["pyarrow"]
 # HTTP transport for API connectors (cdk.transport_factory http builder) and
-# the generic API connector (cdk.api).
-api = ["aiohttp", "aiohttp-retry", "orjson", "python-dateutil"]
+# the generic API connector (cdk.api). pyarrow rides along because
+# GenericAPIConnector reads into Arrow batches and inherits the Arrow-based
+# destination handler -- `analitiq-cdk[api]` is what cdk.api's import error
+# tells the user to install, so it has to be enough to import it.
+api = ["aiohttp", "aiohttp-retry", "orjson", "python-dateutil", "pyarrow"]
 # s3:// secret refs (SchemeSecretsResolver s3 scheme). Lazy boto3 import, so the
 # CDK core stays dependency-light and cloud-free unless a connection uses it.
 s3 = ["boto3"]

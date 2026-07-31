@@ -80,6 +80,12 @@ def extract_records(payload: Any, ref: str) -> list[dict[str, Any]]:
     reads correctly today, and one bad item is not a reason to fail a
     stream. The count is logged so the loss is visible.
     """
+    if payload is None:
+        # A success with no body at all -- a 204, or an empty 200. The
+        # provider said "nothing here", which is an empty page and ends the
+        # traversal; only a body that IS there and holds something other
+        # than records is the defect below.
+        return []
     path = split_records_ref(ref)
     found = payload if not path else walk_path(payload, path)
     if isinstance(found, list):

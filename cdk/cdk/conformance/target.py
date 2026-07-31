@@ -284,7 +284,20 @@ def _generic_class_for(kind: str) -> type | None:
     if kind == "database":
         return GenericSQLConnector
     if kind == "api":
-        from cdk.api import GenericAPIConnector
+        try:
+            from cdk.api import GenericAPIConnector
+        except ImportError as err:
+            # The conformance extra deliberately does not pull the HTTP
+            # transport -- a database connector's suite must not fail to
+            # start over one it never touches. So an api connector's run
+            # says which extra it needs, rather than dying on an import
+            # trace or, worse, resolving no class and reporting the suite
+            # as inapplicable.
+            raise ConformanceSetupError(
+                "running the conformance suite against a kind 'api' connector "
+                "needs the API transport; install analitiq-cdk[api] alongside "
+                f"analitiq-cdk[conformance] ({err})"
+            ) from err
 
         return GenericAPIConnector
     return None

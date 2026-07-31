@@ -1041,3 +1041,29 @@ class TestAnApiTargetSkipsTheSqlChecks:
         )
         with pytest.raises(ConformanceSetupError, match="not a SqlDialect"):
             _ = target.dialect
+
+
+class TestAnApiTargetWithoutTheApiExtra:
+    def test_it_names_the_extra_instead_of_dying_on_the_import(self) -> None:
+        # The conformance extra deliberately does not pull the HTTP
+        # transport, so a database connector's suite does not fail to start
+        # over one it never touches. An api connector's run has to say what
+        # it needs rather than resolve no class and report itself
+        # inapplicable.
+        import builtins
+
+        from cdk.conformance.target import _generic_class_for
+
+        real_import = builtins.__import__
+
+        def refuse(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name == "cdk.api":
+                raise ImportError("No module named 'aiohttp'")
+            return real_import(name, *args, **kwargs)
+
+        builtins.__import__ = refuse
+        try:
+            with pytest.raises(ConformanceSetupError, match=r"analitiq-cdk\[api\]"):
+                _generic_class_for("api")
+        finally:
+            builtins.__import__ = real_import
