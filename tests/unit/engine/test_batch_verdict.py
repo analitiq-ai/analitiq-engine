@@ -146,8 +146,13 @@ class TestRetryIgnoresDeclaredSemantics:
         """No semantics argument: the decision is structural, not a branch
         someone could re-add a condition to."""
         parameters = set(inspect.signature(BatchPolicy.__init__).parameters)
-        assert parameters == {"self", "max_retries", "retry_delay", "error_strategy",
-                              "sleep"}
+        assert parameters == {
+            "self",
+            "max_retries",
+            "retry_delay",
+            "error_strategy",
+            "sleep",
+        }
 
     @pytest.mark.asyncio
     async def test_the_retry_budget_is_the_stream_s_alone(self):
@@ -189,9 +194,7 @@ class TestCursorRidesTheSuccessVariant:
         assert isinstance(disposition, Committed)
         assert disposition.cursor == cursor
 
-    @pytest.mark.parametrize(
-        "variant", [AlreadyCommitted, DeadLetter, Skipped, Failed]
-    )
+    @pytest.mark.parametrize("variant", [AlreadyCommitted, DeadLetter, Skipped, Failed])
     def test_no_other_variant_has_anywhere_to_put_one(self, variant):
         """The sum type is the enforcement: a cursor on a failure is not
         dropped at runtime, it is unrepresentable."""
@@ -289,10 +292,7 @@ class TestOneLoopOneVerdict:
         assert isinstance(disposition, expected)
         assert disposition.report.kind is FailureKind.RETRIES_EXHAUSTED
         assert disposition.report.summary == "connection reset by peer"
-        assert (
-            disposition.report.category
-            is FailureCategory.FAILURE_CATEGORY_NOT_READY
-        )
+        assert disposition.report.category is FailureCategory.FAILURE_CATEGORY_NOT_READY
         assert len(calls) == 2
 
     @pytest.mark.asyncio
@@ -338,8 +338,7 @@ class TestOneLoopOneVerdict:
         assert isinstance(disposition, Failed)
         assert disposition.report.kind is FailureKind.UNKNOWN_STATUS
         assert (
-            disposition.report.category
-            is FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+            disposition.report.category is FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
         )
         assert "unknown ACK status" in disposition.report.summary
 

@@ -905,10 +905,23 @@ class StreamProcessor:
                 stage=FailureStage.DESTINATION_LOAD,
             )
             raise
-        logger.info(
-            "Stream %s: synthetic truncate batch committed",
-            self.stream_name,
-        )
+        if isinstance(disposition, Committed):
+            logger.info(
+                "Stream %s: synthetic truncate batch committed",
+                self.stream_name,
+            )
+        else:
+            # Only Committed and AlreadyCommitted reach here (batch_seq 1 of a
+            # truncate_insert stream fails the stream on every other verdict),
+            # and a replay ack confirms no commit by THIS run (decision 1.2).
+            # Saying "committed" here would tell an operator diagnosing a full
+            # refresh that the truncate happened when it may not have.
+            logger.info(
+                "Stream %s: synthetic truncate batch already committed by an "
+                "earlier attempt (idempotent replay); this run truncated "
+                "nothing",
+                self.stream_name,
+            )
 
     async def _checkpoint_stage(self, input_queue: asyncio.Queue[Any]) -> None:
         """Checkpoint processing progress with state management."""

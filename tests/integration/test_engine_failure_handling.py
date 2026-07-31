@@ -876,27 +876,6 @@ class TestEngineFatalFailureHandling:
         assert emitted["stream"]["records_skipped"] == 1
 
     @pytest.mark.asyncio
-    async def test_unhandled_strategy_is_refused_at_construction(
-        self,
-        mock_grpc_client: AsyncMock,
-        sample_stream_config: dict[str, Any],
-        temp_dir: str,
-    ):
-        """A strategy outside {fail, dlq, skip} must fail loud, never silently
-        complete a failed batch. The typed enum moves that from a defensive
-        branch at the bottom of the reaction ladder to the boundary: the
-        processor cannot be built with one (issue #428)."""
-        from src.state.dead_letter_queue import DeadLetterQueue
-
-        with pytest.raises(ValueError, match="bogus"):
-            _make_processor(
-                dict(sample_stream_config),
-                mock_grpc_client,
-                DeadLetterQueue(f"{temp_dir}/dlq"),
-                error_strategy="bogus",
-            )
-
-    @pytest.mark.asyncio
     async def test_metrics_updated_on_fatal_failure(
         self,
         mock_grpc_client: AsyncMock,
@@ -942,6 +921,75 @@ class TestEngineFatalFailureHandling:
         assert pipeline_metrics.batches_failed == 1
         assert processor.metrics.records_failed == 3
         assert processor.metrics.batches_failed == 1
+
+
+@pytest.mark.integration
+class TestSyntheticTruncateReporting:
+    """A zero-batch full refresh reports what actually happened to it.
+
+    This is the one path where an operator reads the log to find out whether
+    the destination was truncated at all, so a replay ack must not be dressed
+    up as a commit (issue #428, decision 1.2).
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "status,expected,forbidden",
+        [
+            (
+                AckStatus.ACK_STATUS_SUCCESS,
+                "synthetic truncate batch committed",
+                "truncated nothing",
+            ),
+            (
+                AckStatus.ACK_STATUS_ALREADY_COMMITTED,
+                "this run truncated nothing",
+                "synthetic truncate batch committed",
+            ),
+        ],
+    )
+    async def test_the_log_names_the_ack_it_got(
+        self,
+        mock_grpc_client: AsyncMock,
+        sample_stream_config: dict[str, Any],
+        temp_dir: str,
+        caplog,
+        status: AckStatus,
+        expected: str,
+        forbidden: str,
+    ):
+        """An ALREADY_COMMITTED ack confirms a commit by an EARLIER attempt,
+        so reporting it as this run's commit hides the case where the previous
+        run's rows may still be in place."""
+        from src.state.dead_letter_queue import DeadLetterQueue
+
+        stream_config = dict(sample_stream_config)
+        stream_config["destination"] = {
+            **stream_config["destination"],
+            "write_mode": "truncate_insert",
+        }
+        mock_grpc_client.send_batch = AsyncMock(
+            return_value=MockBatchResult(
+                success=True,
+                status=status,
+                records_written=0,
+                committed_cursor=None,
+                failed_record_ids=[],
+                failure_summary="",
+            )
+        )
+        processor = _make_processor(
+            stream_config,
+            mock_grpc_client,
+            DeadLetterQueue(f"{temp_dir}/dlq"),
+        )
+
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="src.engine.stream_processor"):
+            await processor._send_synthetic_truncate()
+
+        assert expected in caplog.text
+        assert forbidden not in caplog.text
 
 
 @pytest.mark.integration

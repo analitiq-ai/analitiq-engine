@@ -31,7 +31,9 @@ class AckStatus(IntEnum):
     ACK_STATUS_SUCCESS = 1  # All records written, cursor advanced
     ACK_STATUS_ALREADY_COMMITTED = 2  # Idempotent replay, batch already committed
     ACK_STATUS_RETRYABLE_FAILURE = 3  # No commit occurred, safe to retry whole batch
-    ACK_STATUS_FATAL_FAILURE = 4  # No commit occurred, do not retry, send to DLQ
+    # No commit occurred, do not retry: the stream fails whatever the error
+    # strategy, and only `dlq` writes the batch out on the way (issue #428).
+    ACK_STATUS_FATAL_FAILURE = 4
 
 
 class FailureCategory(IntEnum):

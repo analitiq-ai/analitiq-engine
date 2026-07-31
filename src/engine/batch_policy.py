@@ -227,6 +227,4 @@ class BatchPolicy:
         # A verdict the connector rendered (or an ack the engine cannot
         # read) is not made good by continuing: the stream stops whatever
         # the strategy, and only dlq preserves the rows on the way out.
-        return Failed(
-            report, dead_letter=self._error_strategy is ErrorStrategy.DLQ
-        )
+        return Failed(report, dead_letter=self._error_strategy is ErrorStrategy.DLQ)
