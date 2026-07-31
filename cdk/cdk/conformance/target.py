@@ -31,6 +31,7 @@ from cdk.type_map.loader import build_type_mapper, read_raw_type_maps
 from cdk.type_map.mapper import TypeMapper
 
 CONNECTOR_DEFINITION_FILENAME = "connector.json"
+ENDPOINT_DIRECTORY_NAME = "endpoints"
 
 
 class ConformanceSetupError(Exception):
@@ -50,6 +51,12 @@ class ConformanceTarget:
     package's own entry-point class when one is installed, else the
     CDK's generic fallback for ``kind: database`` (the thin path), else
     ``None`` for kinds whose generic classes live outside the CDK.
+
+    ``endpoints`` holds the connector's public endpoint documents keyed by
+    file stem, empty for a connector that ships none. They are read as
+    plain JSON: their structure is validated by ``analitiq-validate``
+    against the published contract, and the checks here assert what the
+    CDK can execute from a structurally valid document.
     """
 
     root: Path
@@ -60,6 +67,7 @@ class ConformanceTarget:
     declared_capabilities: SqlCapabilities | None
     type_mapper: TypeMapper | None
     connector_class: type | None
+    endpoints: dict[str, dict[str, Any]]
 
     def declared_transports(self) -> dict[str, dict[str, Any]]:
         """Return transport blocks with ``transport_defaults`` merged.
@@ -120,27 +128,51 @@ class ConformanceTarget:
         return dialect_class(self.declared_capabilities)
 
 
-def _load_definition(definition_dir: Path) -> dict[str, Any]:
-    """Read and parse ``connector.json`` from *definition_dir*."""
-    path = definition_dir / CONNECTOR_DEFINITION_FILENAME
+def _load_json_object(path: Path, label: str) -> dict[str, Any]:
+    """Read *path* as a JSON object, fail-loud on anything else.
+
+    One reader for every document the target is assembled from, so
+    tightening how the suite reads one cannot leave the others behind.
+    *label* names the document in the error the author sees.
+    """
     try:
         raw = path.read_text()
     except OSError as err:
-        raise ConformanceSetupError(
-            f"cannot read connector definition {path}: {err}"
-        ) from err
+        raise ConformanceSetupError(f"cannot read {label} {path}: {err}") from err
     try:
         document = json.loads(raw)
     except json.JSONDecodeError as err:
-        raise ConformanceSetupError(
-            f"connector definition {path} is not valid JSON: {err}"
-        ) from err
+        raise ConformanceSetupError(f"{label} {path} is not valid JSON: {err}") from err
     if not isinstance(document, dict):
         raise ConformanceSetupError(
-            f"connector definition {path} must be a JSON object, got "
-            f"{type(document).__name__}"
+            f"{label} {path} must be a JSON object, got {type(document).__name__}"
         )
     return document
+
+
+def _load_definition(definition_dir: Path) -> dict[str, Any]:
+    """Read and parse ``connector.json`` from *definition_dir*."""
+    return _load_json_object(
+        definition_dir / CONNECTOR_DEFINITION_FILENAME, "connector definition"
+    )
+
+
+def _load_endpoints(definition_dir: Path) -> dict[str, dict[str, Any]]:
+    """Read every endpoint document under ``<definition_dir>/endpoints``.
+
+    Fail-loud on a file that does not parse or is not a JSON object: an
+    unreadable endpoint is not an absent one, and silently dropping it
+    would turn a broken document into a connector with fewer endpoints to
+    check. Absence of the directory itself is fine — a connector may ship
+    none.
+    """
+    endpoint_dir = definition_dir / ENDPOINT_DIRECTORY_NAME
+    if not endpoint_dir.is_dir():
+        return {}
+    return {
+        path.stem: _load_json_object(path, "endpoint document")
+        for path in sorted(endpoint_dir.glob("*.json"))
+    }
 
 
 def _resolve_definition_dir(root: Path) -> Path:
@@ -347,4 +379,5 @@ def load_target(
         declared_capabilities=capabilities,
         type_mapper=_load_type_mapper(definition_dir, connector_id),
         connector_class=_resolve_connector_class(connector_id, kind, class_path),
+        endpoints=_load_endpoints(definition_dir),
     )

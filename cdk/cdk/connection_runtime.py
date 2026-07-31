@@ -92,6 +92,48 @@ def _derive_dialect(connector_definition: Mapping[str, Any] | None) -> str | Non
     return driver.split("+", 1)[0]
 
 
+def transport_resolution_context(
+    *,
+    raw_config: Mapping[str, Any],
+    connector_definition: Mapping[str, Any] | None,
+    secrets: Mapping[str, Any],
+    connection_id: str,
+) -> ResolutionContext:
+    """Assemble the scopes a transport's value expressions resolve against.
+
+    The connect-phase half of the connector's resolution vocabulary: the
+    connector definition, the connection's stored blocks, the resolved
+    secrets, and the connection's auth material. Its request-phase
+    counterpart is :meth:`ConnectionRuntime.request_resolver`, whose scope
+    set is deliberately narrower (no secrets, connector-side).
+
+    A module-level function rather than a method so the same assembly is
+    reachable without a live connection — the conformance kit certifies a
+    connector's declared transports against the scopes *this* function
+    populates, so what the kit checks and what the engine resolves cannot
+    be different scope sets.
+    """
+    connection_scope = {
+        "parameters": dict(raw_config.get("parameters") or {}),
+        "selections": dict(raw_config.get("selections") or {}),
+        "discovered": dict(raw_config.get("discovered") or {}),
+        "secret_refs": dict(raw_config.get("secret_refs") or {}),
+        "auth_state": dict(raw_config.get("auth_state") or {}),
+        # Top-level fields that connector value expressions may reference
+        # directly (e.g. ``connection.name`` for logging decorators).
+        # Address fields live in transports.
+        "name": raw_config.get("name"),
+        "status": raw_config.get("status"),
+    }
+    return ResolutionContext(
+        connector=dict(connector_definition or {}),
+        connection=connection_scope,
+        secrets=dict(secrets),
+        auth=dict(raw_config.get("auth") or {}),
+        runtime={"connection_id": connection_id},
+    )
+
+
 class _PreResolvedSecretsResolver(SecretsResolver):
     """Placeholder resolver for worker-side runtimes built from a payload.
 
@@ -941,24 +983,11 @@ class ConnectionRuntime:
         self, secrets: Mapping[str, Any]
     ) -> ResolutionContext:
         """Assemble a typed :class:`ResolutionContext` from the connection JSON."""
-        connection_scope = {
-            "parameters": dict(self._raw_config.get("parameters") or {}),
-            "selections": dict(self._raw_config.get("selections") or {}),
-            "discovered": dict(self._raw_config.get("discovered") or {}),
-            "secret_refs": dict(self._raw_config.get("secret_refs") or {}),
-            "auth_state": dict(self._raw_config.get("auth_state") or {}),
-            # Top-level fields that connector value expressions may
-            # reference directly (e.g. ``connection.name`` for logging
-            # decorators). Address fields live in transports.
-            "name": self._raw_config.get("name"),
-            "status": self._raw_config.get("status"),
-        }
-        return ResolutionContext(
-            connector=self._connector_definition or {},
-            connection=connection_scope,
-            secrets=dict(secrets),
-            auth=dict(self._raw_config.get("auth") or {}),
-            runtime={"connection_id": self._connection_id},
+        return transport_resolution_context(
+            raw_config=self._raw_config,
+            connector_definition=self._connector_definition,
+            secrets=secrets,
+            connection_id=self._connection_id,
         )
 
     def _merge_secrets_into_config(self, secrets: Mapping[str, Any]) -> dict[str, Any]:

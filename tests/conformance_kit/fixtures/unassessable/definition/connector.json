@@ -1,0 +1,18 @@
+{
+  "$schema": "https://schemas.analitiq.ai/connector/latest.json",
+  "kind": "stdout",
+  "connector_id": "conformance-unassessable-reference",
+  "display_name": "Conformance Reference (unassessed kind)",
+  "description": "A well-formed connector of a kind the suite carries no checks for, used to pin that such a run fails instead of passing on skips.",
+  "version": "0.0.1",
+  "default_transport": "out",
+  "transports": {
+    "out": {
+      "transport_type": "stdout"
+    }
+  },
+  "auth": {
+    "type": "none"
+  },
+  "connection_contract": {}
+}

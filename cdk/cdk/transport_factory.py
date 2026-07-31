@@ -260,13 +260,30 @@ def ca_ssl_context(ca_pem: str, *, check_hostname: bool) -> _ssl.SSLContext:
 # ---------------------------------------------------------------------------
 
 
+#: Transport fields whose entries are *values*, not sub-objects to merge
+#: into. ``headers`` maps a header name to a literal or a value expression;
+#: an expression is a value even though it is written as an object, so a
+#: per-entry override replaces it whole. Merging one into another splices
+#: two nodes together — a ``{"function": ...}`` header overriding a
+#: ``{"template": ...}`` default comes out carrying both markers, which the
+#: resolver refuses (and where the markers agree, silently carries the
+#: wrong operands).
+#:
+#: Keyed by field rather than decided per node: a header legitimately named
+#: ``ref`` would make its whole map look like an expression node.
+_VALUE_ENTRY_FIELDS = frozenset({"headers"})
+
+
 def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
+    """Merge *override* onto *base*; object-valued fields merge per entry."""
     out: dict[str, Any] = {k: copy.deepcopy(v) for k, v in base.items()}
     for k, v in override.items():
-        if k in out and isinstance(out[k], dict) and isinstance(v, Mapping):
-            out[k] = _deep_merge(out[k], v)
-        else:
+        if not (k in out and isinstance(out[k], dict) and isinstance(v, Mapping)):
             out[k] = copy.deepcopy(v)
+        elif k in _VALUE_ENTRY_FIELDS:
+            out[k] = {**out[k], **copy.deepcopy(dict(v))}
+        else:
+            out[k] = _deep_merge(out[k], v)
     return out
 
 
@@ -885,6 +902,12 @@ def _ping_adbc(conn: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
+#: The ``transport_type`` an API connector declares to reach the HTTP
+#: transport. Named once here, used by the registration below and by anything
+#: that has to recognise an http block without matching a literal.
+HTTP_TRANSPORT_TYPE = "http"
+
+
 @dataclass(frozen=True)
 class HttpTransport:
     """Materialized HTTP transport ready for ``aiohttp`` requests."""
@@ -940,7 +963,7 @@ def resolve_http_spec(spec: Mapping[str, Any], *, resolver: Resolver) -> dict[st
             }
 
     return {
-        "transport_type": "http",
+        "transport_type": HTTP_TRANSPORT_TYPE,
         "base_url": base_url,
         "headers": headers,
         "timeout_seconds": float(timeout_seconds),
@@ -1075,7 +1098,9 @@ register_transport_kind(
     "adbc", resolve_spec=resolve_adbc_spec, build_from_spec=build_adbc_from_spec
 )
 register_transport_kind(
-    "http", resolve_spec=resolve_http_spec, build_from_spec=build_http_from_spec
+    HTTP_TRANSPORT_TYPE,
+    resolve_spec=resolve_http_spec,
+    build_from_spec=build_http_from_spec,
 )
 
 

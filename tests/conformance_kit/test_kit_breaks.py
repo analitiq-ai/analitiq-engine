@@ -8,6 +8,7 @@ asserts the kit fails with a message naming the offending member.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import shutil
 from collections.abc import Sequence
@@ -16,6 +17,12 @@ from typing import Any
 import pytest
 
 from cdk.conformance import (
+    check_api_auth,
+    check_api_pagination,
+    check_api_query_bindings,
+    check_api_request_expressions,
+    check_api_response_records,
+    check_api_transport,
     check_declaration_consistency,
     check_override_surface,
     check_type_map_grammar,
@@ -28,15 +35,21 @@ from cdk.conformance.tier1 import test_rendering as kit_rendering
 from cdk.sql.capabilities import SqlCapabilities
 from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.generic import GenericSQLConnector
+from cdk.transport_factory import merged_transports
 from cdk.type_map.loader import build_type_mapper
 
-from .kit_runner import REFERENCE_CLASS, REFERENCE_DIR
+from .kit_runner import API_REFERENCE_DIR, REFERENCE_CLASS, REFERENCE_DIR
 from .reference_connector import ReferenceConnector, ReferencePostgresDialect
 
 
 @pytest.fixture()
 def reference_target() -> ConformanceTarget:
     return load_target(REFERENCE_DIR, class_path=REFERENCE_CLASS)
+
+
+@pytest.fixture()
+def api_target() -> ConformanceTarget:
+    return load_target(API_REFERENCE_DIR)
 
 
 def _with_connector(
@@ -989,3 +1002,608 @@ def _caps_with(target: ConformanceTarget, **facts: Any) -> SqlCapabilities:
     caps = target.declared_capabilities
     assert caps is not None
     return dataclasses.replace(caps, **facts)
+
+
+def _api_target(
+    api_target: ConformanceTarget,
+    *,
+    definition: dict[str, Any] | None = None,
+    read: dict[str, Any] | None = None,
+) -> ConformanceTarget:
+    """The API reference with its definition or its read operation doctored.
+
+    ``read`` is merged into the ``items`` endpoint's read operation, so a
+    break names only what it changes and the rest of the document stays
+    the one the reference earns its checks with.
+    """
+    doctored = copy.deepcopy(api_target.definition)
+    doctored.update(definition or {})
+    endpoints = copy.deepcopy(api_target.endpoints)
+    if read:
+        endpoints["items"]["operations"]["read"].update(read)
+    return dataclasses.replace(api_target, definition=doctored, endpoints=endpoints)
+
+
+class TestApiTransportBreaks:
+    """The connection an API definition promises, against what it reads."""
+
+    def test_a_transport_reading_an_undeclared_secret_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """No input declares it, so no connection ever carries it."""
+        transports = copy.deepcopy(api_target.definition["transports"])
+        transports["api"]["headers"]["Authorization"] = {
+            "template": "Bearer ${secrets.absent_token}"
+        }
+        doctored = _api_target(api_target, definition={"transports": transports})
+        report = _messages(check_api_transport(doctored))
+        assert "secrets.absent_token" in report
+
+    def test_default_transport_naming_nothing_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """A read that names no transport_ref falls back to it."""
+        doctored = _api_target(api_target, definition={"default_transport": "absent"})
+        report = _messages(check_api_transport(doctored))
+        assert "default_transport" in report and "'absent'" in report
+
+    def test_an_unregistered_transport_type_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """The CDK materializes only the transport kinds it registers."""
+        transports = copy.deepcopy(api_target.definition["transports"])
+        transports["api"]["transport_type"] = "graphql"
+        doctored = _api_target(api_target, definition={"transports": transports})
+        report = _messages(check_api_transport(doctored))
+        assert "graphql" in report
+
+    def test_auth_none_while_reading_a_secret_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """A connection with no auth flow never carries credential material."""
+        doctored = _api_target(api_target, definition={"auth": {"type": "none"}})
+        report = _messages(check_api_auth(doctored))
+        assert "secrets.api_token" in report
+
+    def test_a_declared_auth_type_carrying_no_credential_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """Declaring api_key while sending nothing authenticates nothing."""
+        transports = copy.deepcopy(api_target.definition["transports"])
+        del transports["api"]["headers"]["Authorization"]
+        doctored = _api_target(api_target, definition={"transports": transports})
+        report = _messages(check_api_auth(doctored))
+        assert "unauthenticated" in report
+
+    def test_a_non_http_default_transport_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """Every read opens the default; another http transport does not save it.
+
+        A registered non-http kind clears the registry loop, and the
+        declares-an-http-transport check clears too, so nothing but this
+        catches a connector that cannot connect at all.
+        """
+        transports = copy.deepcopy(api_target.definition["transports"])
+        transports["db"] = {"transport_type": "adbc", "driver": "postgresql"}
+        doctored = _api_target(
+            api_target,
+            definition={"transports": transports, "default_transport": "db"},
+        )
+        report = _messages(check_api_transport(doctored))
+        assert "default_transport 'db'" in report and "'adbc'" in report
+
+    def test_a_credential_on_an_unselected_transport_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """Only the transport a read opens authenticates that read.
+
+        A credential resolved into an auth-operation or discovery transport
+        is real, and reaches nothing the API path sends.
+        """
+        transports = copy.deepcopy(api_target.definition["transports"])
+        transports["side"] = copy.deepcopy(transports["api"])
+        del transports["api"]["headers"]["Authorization"]
+        doctored = _api_target(api_target, definition={"transports": transports})
+        report = _messages(check_api_auth(doctored))
+        assert "unauthenticated" in report
+
+    def test_a_transport_reading_a_response_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """No response exists at connect, so the scope is not merely opaque."""
+        transports = copy.deepcopy(api_target.definition["transports"])
+        transports["api"]["headers"]["X-Page"] = {"ref": "response.body.next"}
+        doctored = _api_target(api_target, definition={"transports": transports})
+        report = _messages(check_api_transport(doctored))
+        assert "response.body.next" in report
+
+    def test_a_read_naming_a_non_default_transport_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """The contract allows the selection the CDK's API path does not make.
+
+        `operations.read.request.transport_ref` is contract-valid and
+        unimplemented: the API path opens one connection at connect time.
+        A read naming another transport still succeeds — against the wrong
+        origin — so silence here would certify a connector whose every read
+        reaches the wrong host. Naming the default explicitly is fine.
+        """
+        transports = copy.deepcopy(api_target.definition["transports"])
+        transports["eu"] = {
+            "transport_type": "http",
+            "base_url": "https://eu.example.invalid",
+        }
+        request = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["request"]
+        )
+        request["transport_ref"] = "eu"
+        doctored = _api_target(
+            api_target, definition={"transports": transports}, read={"request": request}
+        )
+        report = _messages(check_api_transport(doctored))
+        assert "transport_ref 'eu'" in report and "default_transport" in report
+
+        request["transport_ref"] = api_target.definition["default_transport"]
+        naming_the_default = _api_target(
+            api_target, definition={"transports": transports}, read={"request": request}
+        )
+        assert check_api_transport(naming_the_default) == []
+
+    def test_a_non_positive_rate_limit_window_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """Resolving a spec is not evidence the transport builds from it.
+
+        `resolve_http_spec` accepts the window; `RateLimiter` refuses it.
+        A resolve-only probe would call this connection materializable and
+        every connect would still fail. (`max_requests` is `ge=1` on the
+        published contract, so the validator already gates that half; the
+        window is typed `Any` to admit a value expression.)
+        """
+        transports = copy.deepcopy(api_target.definition["transports"])
+        transports["api"]["rate_limit"] = {
+            "max_requests": 60,
+            "time_window_seconds": 0,
+        }
+        doctored = _api_target(api_target, definition={"transports": transports})
+        report = _messages(check_api_transport(doctored))
+        assert "rate_limit.time_window_seconds" in report
+
+    def test_an_object_typed_input_in_a_url_template_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """Stand-ins carry the declared type, so type-sensitive rules apply.
+
+        Template substitution takes scalars only. A probe standing every
+        value in as a string would let an object-typed input through here
+        and fail a function input that legitimately takes one.
+        """
+        contract = copy.deepcopy(api_target.definition["connection_contract"])
+        contract["inputs"]["account_id"]["type"] = "object"
+        doctored = _api_target(api_target, definition={"connection_contract": contract})
+        report = _messages(check_api_transport(doctored))
+        assert "only scalars" in report
+
+    def test_a_header_named_like_a_marker_still_merges(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """A headers map is a container, not a value expression.
+
+        Only a header VALUE is a leaf that replaces wholesale. Deciding
+        per node instead would classify a map holding a header literally
+        named `ref` as an expression and drop the rest of the defaults.
+        """
+        connector = {
+            "transport_defaults": {
+                "transport_type": "http",
+                "headers": {"ref": "kept", "Accept": "default"},
+            },
+            "transports": {
+                "api": {"base_url": "https://x", "headers": {"Accept": "override"}}
+            },
+        }
+        merged = merged_transports(connector)["api"]["headers"]
+        assert merged == {"ref": "kept", "Accept": "override"}
+
+    def test_an_off_origin_literal_next_url_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """The loop refuses to send the connection's headers to another host.
+
+        Same-origin passes, so this is about the destination, not about
+        link paging.
+        """
+        link = {
+            "type": "link",
+            "link": {"next_url": {"literal": "https://evil.example.com/p2"}},
+            "stop_when": {"empty": {"ref": "response.body.records"}},
+        }
+        doctored = _api_target(api_target, read={"pagination": link})
+        report = _messages(check_api_transport(doctored))
+        assert "leaves the connection's origin" in report
+
+        link["link"]["next_url"] = {"literal": "https://api.example.invalid/x/p2"}
+        same = _api_target(api_target, read={"pagination": link})
+        assert check_api_transport(same) == []
+
+    def test_an_optional_input_behind_a_strict_transport_field_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """A user may leave it blank, and base_url resolves strictly.
+
+        A default makes it guaranteed again, so the same definition passes
+        once the contract promises a value — which is the actionable fix
+        the message names.
+        """
+        contract = copy.deepcopy(api_target.definition["connection_contract"])
+        contract["inputs"]["account_id"]["required"] = False
+        doctored = _api_target(api_target, definition={"connection_contract": contract})
+        report = _messages(check_api_transport(doctored))
+        assert "connection.parameters.account_id" in report
+        assert "optional" in report
+
+        contract["inputs"]["account_id"]["default"] = "acme"
+        with_default = _api_target(
+            api_target, definition={"connection_contract": contract}
+        )
+        assert check_api_transport(with_default) == []
+
+
+class TestApiEndpointBreaks:
+    """The three passes of a read, each against the scopes it actually has."""
+
+    def test_a_param_default_reading_a_secret_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """Secrets are not in request scope, so the param is dropped silently."""
+        params = copy.deepcopy(api_target.endpoints["items"]["operations"]["read"])
+        params["params"]["updated_since"]["default"] = {"ref": "secrets.api_token"}
+        doctored = _api_target(api_target, read={"params": params["params"]})
+        report = _messages(check_api_request_expressions(doctored))
+        assert "secrets.api_token" in report
+
+    def test_a_request_body_reading_a_secret_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """The body resolves in the same phase the params do."""
+        doctored = _api_target(
+            api_target,
+            read={
+                "request": {
+                    "method": "POST",
+                    "path": "/items",
+                    "body": {"token": {"ref": "secrets.api_token"}},
+                }
+            },
+        )
+        report = _messages(check_api_request_expressions(doctored))
+        assert "secrets.api_token" in report
+
+    def test_stop_when_on_a_scope_no_page_carries_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """An operand that never resolves makes the predicate never hold."""
+        pagination = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["pagination"]
+        )
+        pagination["stop_when"] = {"empty": {"ref": "response.headers.next"}}
+        doctored = _api_target(api_target, read={"pagination": pagination})
+        report = _messages(check_api_pagination(doctored))
+        assert "response.headers.next" in report
+
+    def test_a_non_positive_page_size_literal_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """The loop parses the authored literal before the first request."""
+        pagination = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["pagination"]
+        )
+        pagination["limit"]["default"] = 0
+        doctored = _api_target(api_target, read={"pagination": pagination})
+        report = _messages(check_api_pagination(doctored))
+        assert "limit.default" in report and "positive" in report
+
+    def test_a_pre_page_value_reading_a_response_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """The effective page size is resolved before any page comes back.
+
+        Probing the whole block against a page would call this satisfied,
+        which is why the two phases are resolved separately.
+        """
+        pagination = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["pagination"]
+        )
+        pagination["limit"]["default"] = {"ref": "response.record_count"}
+        doctored = _api_target(api_target, read={"pagination": pagination})
+        report = _messages(check_api_pagination(doctored))
+        assert "response.record_count" in report
+        assert "before the first request" in report
+
+    def test_a_non_positive_page_size_expression_literal_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """A literal node is as knowable as a bare scalar, and as rejected."""
+        pagination = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["pagination"]
+        )
+        pagination["limit"]["default"] = {"literal": 0}
+        doctored = _api_target(api_target, read={"pagination": pagination})
+        report = _messages(check_api_pagination(doctored))
+        assert "limit.default" in report and "positive" in report
+
+    def test_a_param_default_reading_a_response_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """A request is built before any response exists."""
+        params = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["params"]
+        )
+        params["updated_since"]["default"] = {"ref": "response.body.since"}
+        doctored = _api_target(api_target, read={"params": params})
+        report = _messages(check_api_request_expressions(doctored))
+        assert "response.body.since" in report
+
+    def test_a_continuation_reading_an_optional_input_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """A continuation cannot survive a value the user may leave blank.
+
+        The engine rejects a step it cannot parse and ends the loop the
+        moment a cursor resolves to nothing, so a continuation is certified
+        against the guaranteed connection. Making the same input required
+        clears it — the survivable parts of the block still probe the
+        widest connection.
+        """
+        contract = copy.deepcopy(api_target.definition["connection_contract"])
+        contract["inputs"]["page_step"] = {
+            "source": "user",
+            "phase": "pre_auth",
+            "storage": "connection.parameters",
+            "type": "integer",
+            "required": False,
+        }
+        pagination = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["pagination"]
+        )
+        pagination["offset"]["increment_by"] = {
+            "ref": "connection.parameters.page_step"
+        }
+        doctored = _api_target(
+            api_target,
+            definition={"connection_contract": contract},
+            read={"pagination": pagination},
+        )
+        report = _messages(check_api_pagination(doctored))
+        assert "connection.parameters.page_step" in report
+
+        contract["inputs"]["page_step"]["required"] = True
+        required = _api_target(
+            api_target,
+            definition={"connection_contract": contract},
+            read={"pagination": pagination},
+        )
+        assert check_api_pagination(required) == []
+
+    def test_an_unparseable_explicit_arrow_type_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """A hand-annotated field skips the type map and still has to parse.
+
+        The engine builds the record schema from the annotated result, so
+        `SchemaContract` rejects the field before any request is sent.
+        """
+        response = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["response"]
+        )
+        record = response["schema"]["properties"]["records"]["items"]["properties"]
+        record["id"]["arrow_type"] = "Blurb"
+        doctored = _api_target(api_target, read={"response": response})
+        report = _messages(check_api_response_records(doctored))
+        assert "Blurb" in report
+
+    def test_a_link_next_url_that_is_not_a_string_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """The link loop replays the resolved value as a URL, or fails."""
+        doctored = _api_target(
+            api_target,
+            read={
+                "pagination": {
+                    "type": "link",
+                    "link": {"next_url": {"literal": 7}},
+                    "stop_when": {"empty": {"ref": "response.body.records"}},
+                }
+            },
+        )
+        report = _messages(check_api_pagination(doctored))
+        assert "link.next_url" in report and "int" in report
+
+    def test_a_keyset_ordering_field_the_record_lacks_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """The loop reads it from each page's last record before yielding.
+
+        A field the record schema declares clears the check, so this is
+        about the pair disagreeing, not about keyset paging itself.
+        """
+        keyset = {
+            "type": "keyset",
+            "keyset": {"param": "after", "order_by_field": "nope"},
+            "stop_when": {"empty": {"ref": "response.body.records"}},
+        }
+        doctored = _api_target(api_target, read={"pagination": keyset})
+        report = _messages(check_api_pagination(doctored))
+        assert "order_by_field 'nope'" in report
+
+        keyset["keyset"]["order_by_field"] = "updated_at"
+        declared = _api_target(api_target, read={"pagination": keyset})
+        assert check_api_pagination(declared) == []
+
+    def test_a_body_binding_a_controlled_param_keeps_its_declared_type(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """The stand-in is typed, so a type-sensitive expression sees it.
+
+        `offset` is declared `integer` and the pagination loop fills it, so
+        `build_request` binds an int and `base64_encode` raises. A string
+        stand-in would have bound a str and passed.
+        """
+        request = {
+            "method": "POST",
+            "path": "/items",
+            "body": {
+                "cursor": {
+                    "function": "base64_encode",
+                    "input": {"from_param": "offset"},
+                }
+            },
+        }
+        doctored = _api_target(api_target, read={"request": request})
+        report = _messages(check_api_request_expressions(doctored))
+        assert "base64_encode" in report and "got int" in report
+
+    def test_a_body_reading_an_uncontrolled_param_is_not_seeded(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """Only what the runtime guarantees at that phase is stood in.
+
+        A param whose default resolves is already in the table; one the
+        user may omit is left absent, exactly as `_build_base_params`
+        leaves it. Seeding it would certify a body that binds None.
+        """
+        params = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["params"]
+        )
+        params["q"] = {"in": "query", "type": "string", "required": False}
+        request = {
+            "method": "POST",
+            "path": "/items",
+            "body": {"q": {"from_param": "q"}},
+        }
+        doctored = _api_target(api_target, read={"params": params, "request": request})
+        assert check_api_request_expressions(doctored) == []
+
+    def test_a_query_binding_the_engine_ignores_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """A renaming query binding is a key the provider never sees.
+
+        The engine sends every non-body param under its own name, so a
+        binding whose key equals the param it names is a harmless no-op
+        and anything else is silently dropped.
+        """
+        request = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["request"]
+        )
+        request["query"]["api_limit"] = {"from_param": "per_page"}
+        doctored = _api_target(api_target, read={"request": request})
+        report = _messages(check_api_query_bindings(doctored))
+        assert "api_limit" in report
+
+    def test_a_read_with_no_records_ref_fails_rather_than_skipping(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """Skipping would report an unreadable stream as assessed."""
+        response = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["response"]
+        )
+        del response["records"]
+        doctored = _api_target(api_target, read={"response": response})
+        report = _messages(check_api_response_records(doctored))
+        assert "response.records.ref" in report
+
+    def test_a_replication_param_in_a_strict_body_is_not_seeded(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """The runtime does not guarantee a replication param either.
+
+        A full-refresh stream never writes one, and an incremental
+        stream's first run has no stored cursor to write.
+        """
+        params = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["params"]
+        )
+        params["since"] = {
+            "in": "query",
+            "type": "string",
+            "required": False,
+            "controlled_by": "replication",
+        }
+        request = {
+            "method": "POST",
+            "path": "/items",
+            "body": {
+                "s": {"function": "base64_encode", "input": {"from_param": "since"}}
+            },
+        }
+        doctored = _api_target(api_target, read={"params": params, "request": request})
+        report = _messages(check_api_request_expressions(doctored))
+        assert "got NoneType" in report
+
+    def test_a_next_url_from_a_non_string_input_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """A stand-in's declared type decides, rather than being unknowable.
+
+        An integer-typed input never becomes a URL, so the continuation is
+        rejected without a live connection.
+        """
+        contract = copy.deepcopy(api_target.definition["connection_contract"])
+        contract["inputs"]["page_url"] = {
+            "source": "user",
+            "phase": "pre_auth",
+            "storage": "connection.parameters",
+            "type": "integer",
+            "required": True,
+        }
+        link = {
+            "type": "link",
+            "link": {"next_url": {"ref": "connection.parameters.page_url"}},
+            "stop_when": {"empty": {"ref": "response.body.records"}},
+        }
+        doctored = _api_target(
+            api_target,
+            definition={"connection_contract": contract},
+            read={"pagination": link},
+        )
+        report = _messages(check_api_pagination(doctored))
+        assert "link.next_url resolves to int" in report
+
+    def test_a_record_field_the_read_type_map_cannot_map_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """The engine resolves every field's Arrow type before it requests."""
+        response = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["response"]
+        )
+        record = response["schema"]["properties"]["records"]["items"]["properties"]
+        record["ratio"] = {"type": "quaternion"}
+        doctored = _api_target(api_target, read={"response": response})
+        report = _messages(check_api_response_records(doctored))
+        assert "ratio" in report and "quaternion" in report
+
+    def test_the_type_map_check_leaves_the_document_unmutated(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """Arrow-type resolution annotates in place; the check must not.
+
+        A mutated target would hand whatever runs next a document the
+        connector never shipped.
+        """
+        before = copy.deepcopy(api_target.endpoints)
+        assert check_api_response_records(api_target) == []
+        assert api_target.endpoints == before
+
+    def test_a_records_ref_the_schema_does_not_declare_fails(
+        self, api_target: ConformanceTarget
+    ) -> None:
+        """The read builds its Arrow schema by walking this ref."""
+        response = copy.deepcopy(
+            api_target.endpoints["items"]["operations"]["read"]["response"]
+        )
+        response["records"] = {"ref": "response.body.data"}
+        doctored = _api_target(api_target, read={"response": response})
+        report = _messages(check_api_response_records(doctored))
+        assert "response.body.data" in report and "records" in report

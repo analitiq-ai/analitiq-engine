@@ -10,6 +10,7 @@ that require a database / HTTP endpoint are not exercised here.
 
 from __future__ import annotations
 
+import base64
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -18,6 +19,7 @@ from cdk.exceptions import TransportSpecError
 from cdk.resolver import ResolutionContext
 from cdk.transport_factory import (
     build_transport,
+    merged_transports,
     register_transport_kind,
     registered_transport_kinds,
     resolve_adbc_spec,
@@ -90,6 +92,53 @@ class TestResolveTransportSpec:
         ctx = ResolutionContext(connector=connector)
         spec = resolve_transport_spec(connector, context=ctx)
         assert spec["headers"]["Authorization"] == "Basic specific"
+
+    def test_a_value_expression_header_replaces_the_default_wholesale(self):
+        """A value expression is a value, not an object to merge into.
+
+        Deep-merging one expression node into another splices their
+        markers together — here a function node onto a template node,
+        which the resolver refuses outright; where the markers happen to
+        agree it is worse, carrying the default's operands under the
+        override's marker.
+        """
+        connector = {
+            "connector_id": "demo",
+            "default_transport": "auth",
+            "transport_defaults": {
+                "transport_type": "http",
+                "headers": {
+                    "Authorization": {"template": "Bearer ${connection.parameters.tok}"}
+                },
+            },
+            "transports": {
+                "auth": {
+                    "base_url": "https://auth.example.com",
+                    "headers": {
+                        "Authorization": {
+                            "function": "basic_auth",
+                            "input": {
+                                "username": {"literal": "id"},
+                                "password": {"literal": "secret"},
+                            },
+                        }
+                    },
+                }
+            },
+        }
+        merged = merged_transports(connector)["auth"]
+        assert merged["headers"]["Authorization"] == {
+            "function": "basic_auth",
+            "input": {
+                "username": {"literal": "id"},
+                "password": {"literal": "secret"},
+            },
+        }
+        ctx = ResolutionContext(connector=connector)
+        spec = resolve_transport_spec(connector, context=ctx)
+        assert (
+            spec["headers"]["Authorization"] == base64.b64encode(b"id:secret").decode()
+        )
 
     def test_unknown_transport_ref_rejected(self):
         connector = {

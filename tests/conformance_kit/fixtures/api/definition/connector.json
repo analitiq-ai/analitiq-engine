@@ -1,18 +1,48 @@
 {
+  "$schema": "https://schemas.analitiq.ai/connector/latest.json",
   "kind": "api",
   "connector_id": "conformance-api-reference",
-  "display_name": "Conformance Reference (HTTP API-shaped)",
-  "description": "Reference connector for the kit's own acceptance tests: a well-formed kind 'api' definition carrying no database surface, used to pin that a run the suite cannot assess fails instead of passing on skips.",
+  "display_name": "Conformance Reference (HTTP API)",
+  "description": "Reference connector for the kit's own acceptance tests: a well-formed kind 'api' definition whose transport, auth and endpoint document earn every API check the suite carries.",
   "version": "0.0.1",
   "default_transport": "api",
   "transports": {
     "api": {
       "transport_type": "http",
-      "base_url": "https://api.example.invalid",
+      "base_url": {
+        "template": "https://api.example.invalid/${connection.parameters.account_id}"
+      },
       "headers": {
-        "Accept": "application/json"
+        "Accept": "application/json",
+        "Authorization": { "template": "Bearer ${secrets.api_token}" }
       },
       "timeout_seconds": 30
     }
+  },
+  "auth": {
+    "type": "api_key"
+  },
+  "connection_contract": {
+    "inputs": {
+      "account_id": {
+        "source": "user",
+        "phase": "pre_auth",
+        "storage": "connection.parameters",
+        "type": "string",
+        "required": true
+      },
+      "api_token": {
+        "source": "user",
+        "phase": "pre_auth",
+        "storage": "secrets",
+        "type": "string",
+        "required": true,
+        "secret": true
+      }
+    },
+    "required_for_activation": [
+      "connection.parameters.account_id",
+      "secrets.api_token"
+    ]
   }
 }

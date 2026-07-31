@@ -1,0 +1,10 @@
+[
+  { "match": "exact", "native": "BOOLEAN", "canonical": "Boolean" },
+  { "match": "exact", "native": "INTEGER", "canonical": "Int64" },
+  { "match": "exact", "native": "NUMBER", "canonical": "Float64" },
+  { "match": "exact", "native": "STRING:DATE-TIME", "canonical": "Timestamp(MICROSECOND, UTC)" },
+  { "match": "exact", "native": "STRING:DATE", "canonical": "Date32" },
+  { "match": "regex", "native": "^STRING(:.+)?$", "canonical": "Utf8" },
+  { "match": "exact", "native": "OBJECT", "canonical": "Json" },
+  { "match": "exact", "native": "ARRAY", "canonical": "Json" }
+]
