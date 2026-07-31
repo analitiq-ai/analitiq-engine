@@ -183,7 +183,13 @@ class BatchWriteResult:
     falls back to summary matching.
     """
 
-    status: AckStatus
+    # `int` as well as the enum, deliberately. proto3 enums are open, so a
+    # newer or untrusted connector can ack with a value this build has no
+    # member for. Narrowing it here would raise at the boundary and abort
+    # the stream; carried through, it reaches the one place that classifies
+    # a status and is answered by the policy's unknown-status verdict
+    # (issue #428, decision 1.3). Known values still arrive as the enum.
+    status: AckStatus | int
     records_written: int
     committed_cursor: Cursor | None = None
     failed_record_ids: tuple[str, ...] = ()

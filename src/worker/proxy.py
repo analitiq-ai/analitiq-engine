@@ -46,6 +46,27 @@ _WRITE_MODE_NAMES = {
 }
 
 
+def _known_ack_status(status: int) -> AckStatus | int:
+    """Narrow a wire status to :class:`AckStatus`, or leave it as it came.
+
+    This hop reads an untrusted connector process, and proto3 enums are
+    open: a newer or defective worker can ack with a value this build has
+    no member for. Constructing the closed enum from it would raise here
+    and the engine would see a retryable transport failure -- a wrong
+    verdict, and one that hides the real one, since the policy already
+    answers an unrecognised status with a bounded terminal disposition.
+    """
+    try:
+        return AckStatus(int(status))
+    except ValueError:
+        logger.warning(
+            "connector acked with an unrecognized status %s; forwarding it "
+            "for the policy's unknown-status verdict",
+            status,
+        )
+        return int(status)
+
+
 class WorkerProxyHandler(BaseDestinationHandler):
     """Forwards the destination handler contract to a connector worker."""
 
@@ -316,7 +337,12 @@ class WorkerProxyHandler(BaseDestinationHandler):
         # This hop re-derives nothing; a second opinion is how the two hops
         # came to disagree about the same event.
         return BatchWriteResult(
-            status=AckStatus(int(result.status)),
+            # Narrowed to the enum only when this build knows the value.
+            # proto3 enums are open, so a connector can ack with one it does
+            # not; AckStatus(99) would raise here and the engine would see a
+            # retryable transport failure instead of the bounded
+            # unknown-status verdict the policy already has for it.
+            status=_known_ack_status(result.status),
             records_written=result.records_written,
             committed_cursor=(
                 Cursor(token=result.committed_cursor.token)
