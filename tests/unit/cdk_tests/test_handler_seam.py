@@ -198,7 +198,8 @@ class TestTheBatchIsMaterialisedOnce:
             cursor=Cursor(),
             emitted_at=_EMITTED_AT,
         )
-        assert batch.records is batch.records
+        first = batch.records
+        assert batch.records is first  # the same list, not a second conversion
 
 
 class TestASinkMustBeAbleToWrite:
@@ -209,37 +210,48 @@ class TestASinkMustBeAbleToWrite:
         with pytest.raises(TypeError, match="neither land"):
 
             class _Useless(BaseDestinationHandler):
+                """Every lifecycle member, and no way to write a batch."""
+
                 async def connect(self, runtime: Any) -> None:
-                    ...
+                    """No connection to make."""
 
                 async def disconnect(self) -> None:
-                    ...
+                    """No connection to drop."""
 
                 async def configure_schema(self, spec: SchemaSpec) -> bool:
+                    """Accept every schema."""
                     return True
 
                 async def health_check(self) -> bool:
+                    """Always healthy."""
                     return True
 
                 @property
                 def connector_type(self) -> str:
+                    """Name this sink."""
                     return "useless"
+
+            assert _Useless  # unreachable: the class body raised
 
     def test_overriding_write_batch_alone_is_allowed(self) -> None:
         # The base is the common shape, not a cage: a sink whose framing
         # genuinely differs replaces the whole method.
 
         class _Framed(BaseDestinationHandler):
+            """A sink whose framing differs, so it replaces write_batch."""
+
             async def connect(self, runtime: Any) -> None:
-                ...
+                """No connection to make."""
 
             async def disconnect(self) -> None:
-                ...
+                """No connection to drop."""
 
             async def configure_schema(self, spec: SchemaSpec) -> bool:
+                """Accept every schema."""
                 return True
 
             async def health_check(self) -> bool:
+                """Always healthy."""
                 return True
 
             @property

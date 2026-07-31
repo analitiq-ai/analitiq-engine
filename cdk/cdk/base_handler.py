@@ -413,7 +413,11 @@ class BaseDestinationHandler(ABC):
             ),
         )
 
-    def not_ready_reason(self, stream_id: str) -> str | None:
+    # skipcq: PYL-R0201 - an overridable hook, not a utility. Every real
+    # sink answers from its own instance state; the base's neutral answer
+    # reads no attribute, and making one implementation of a hook static
+    # would hide that it is an override.
+    def not_ready_reason(self, stream_id: str) -> str | None:  # skipcq: PYL-R0201
         """Why this handler cannot take a batch for *stream_id* right now.
 
         Returns ``None`` when it can. Every sink asked the same question
@@ -474,7 +478,7 @@ class BaseDestinationHandler(ABC):
         Returns:
             BatchWriteResult with status, records written, and cursor
         """
-        reason = self.not_ready_reason(stream_id)
+        reason = self.not_ready_reason(stream_id)  # skipcq: PYL-E1128
         if reason is not None:
             return reject_batch(
                 self._logger,
@@ -533,7 +537,11 @@ class BaseDestinationHandler(ABC):
             committed_cursor=cursor,
         )
 
-    async def land_empty(self, batch: "LandingBatch") -> BatchWriteResult:
+    # skipcq: PYL-R0201 - an overridable hook (the SQL sink's override
+    # reads instance state to truncate); the neutral answer needs none.
+    async def land_empty(
+        self, batch: "LandingBatch"
+    ) -> BatchWriteResult:  # skipcq: PYL-R0201
         """Answer a batch that carried no records.
 
         Success with the cursor, for every sink that has nothing to do. A

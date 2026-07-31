@@ -8,9 +8,20 @@ import logging
 import sys
 from typing import Any
 
-from cdk.base_handler import BaseDestinationHandler, BatchWriteResult, LandingBatch
+from cdk.base_handler import (
+    BaseDestinationHandler,
+    BatchRejected,
+    BatchWriteResult,
+    LandingBatch,
+)
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.types import AckStatus, RetrySemantics, RetryVerdict, SchemaSpec
+from cdk.types import (
+    AckStatus,
+    FailureCategory,
+    RetrySemantics,
+    RetryVerdict,
+    SchemaSpec,
+)
 
 from ..formatters import get_formatter
 from ..formatters.base import BaseFormatter
@@ -147,8 +158,15 @@ class StreamDestinationHandler(BaseDestinationHandler):
         ``emitted_at`` is part of the contract for time-partitioned sinks;
         stdout has no output path, so it goes unread here.
         """
-        assert self._formatter is not None  # not_ready_reason checked it
-        data = self._formatter.serialize_batch(batch.records)
+        formatter = self._formatter
+        if formatter is None:
+            # not_ready_reason proved it was present; losing it between
+            # that check and here is a defect, not a bad batch.
+            raise BatchRejected(
+                "stdout handler lost its formatter mid-batch",
+                category=FailureCategory.FAILURE_CATEGORY_INTERNAL,
+            )
+        data = formatter.serialize_batch(batch.records)
         sys.stdout.buffer.write(data)
         sys.stdout.buffer.flush()
         logger.debug(

@@ -17,7 +17,13 @@ from cdk.base_handler import (
     LandingBatch,
 )
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.types import AckStatus, RetrySemantics, RetryVerdict, SchemaSpec
+from cdk.types import (
+    AckStatus,
+    FailureCategory,
+    RetrySemantics,
+    RetryVerdict,
+    SchemaSpec,
+)
 
 from ..formatters import get_formatter
 from ..formatters.base import BaseFormatter
@@ -266,7 +272,14 @@ class FileDestinationHandler(BaseDestinationHandler):
         per-batch instant -- so a retried batch overwrites the same file
         instead of landing in a new partition (issue #353).
         """
-        assert self._storage is not None and self._formatter is not None
+        storage, formatter = self._storage, self._formatter
+        if storage is None or formatter is None:
+            # not_ready_reason proved both were present; losing one
+            # between that check and here is a defect, not a bad batch.
+            raise BatchRejected(
+                "file handler lost its storage or formatter mid-batch",
+                category=FailureCategory.FAILURE_CATEGORY_INTERNAL,
+            )
 
         # A time-partitioned layout depends entirely on emitted_at being a
         # real, replay-stable UTC instant. It crosses the process boundary
@@ -291,32 +304,32 @@ class FileDestinationHandler(BaseDestinationHandler):
         # new file (issue #319), while identical content overwrites the same
         # file with the same bytes -- the write itself is the replay dedup,
         # with no batch-level commit ledger (issue #306).
-        data = self._formatter.serialize_batch(batch.records)
+        data = formatter.serialize_batch(batch.records)
         if not data:
             # A non-empty records list that serialized to empty bytes is a
             # formatter contract violation; writing a zero-byte file and
             # committing records_written=N would silently drop all N rows
             # (issue #322).
             raise BatchRejected(
-                f"{type(self._formatter).__name__}.serialize_batch() returned "
+                f"{type(formatter).__name__}.serialize_batch() returned "
                 f"empty bytes for {len(batch.records)} records"
             )
 
         content_hash = hashlib.sha256(data).hexdigest()[:16]
         base_path = self._config.get("path", "") or self._config.get("prefix", "")
-        file_path = self._storage.build_path(
+        file_path = storage.build_path(
             base_path=base_path,
             stream_id=batch.stream_id,
             batch_seq=batch.batch_seq,
             content_hash=content_hash,
-            extension=self._formatter.file_extension,
+            extension=formatter.file_extension,
             timestamp=batch.emitted_at,
             partition_template=self._path_template,
         )
-        written_path = await self._storage.write_file(
+        written_path = await storage.write_file(
             path=file_path,
             data=data,
-            content_type=self._formatter.content_type,
+            content_type=formatter.content_type,
         )
         logger.info(
             "Wrote batch %s: %s records, %s bytes to %s",

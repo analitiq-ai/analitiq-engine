@@ -107,6 +107,58 @@ class TestTheCallSitesShareIt:
         assert generate_record_id(record, ["id"]) != record_digest(record)
 
 
+def _scannable_sources() -> list[Path]:
+    """Every source file a row-identity digest could hide in."""
+    return [
+        path
+        for root in _SOURCE_ROOTS
+        for path in sorted(root.rglob("*.py"))
+        if path != _OWNER and "generated" not in path.parts
+    ]
+
+
+def _scopes(tree: ast.Module) -> list[tuple[str, list[ast.AST]]]:
+    """Each module and function paired with the nodes it owns directly.
+
+    Nested functions are their own scope, so a canonicalisation in one and a
+    hash in a sibling are not read as the two halves of one idiom.
+    """
+    out: list[tuple[str, list[ast.AST]]] = []
+    for scope in ast.walk(tree):
+        if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)):
+            continue
+        owned = [
+            node
+            for node in ast.walk(scope)
+            if node is scope
+            or not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        out.append((getattr(scope, "name", "<module>"), owned))
+    return out
+
+
+def _canonicalises(nodes: list[ast.AST]) -> bool:
+    """Whether these nodes serialise something with a stable key order."""
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "dumps"
+        and any(kw.arg == "sort_keys" for kw in node.keywords)
+        for node in nodes
+    )
+
+
+def _hashes(nodes: list[ast.AST]) -> bool:
+    """Whether these nodes feed something to hashlib."""
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "hashlib"
+        for node in nodes
+    )
+
+
 class TestNoRivalImplementation:
     """The scan the behavioural tests cannot do.
 
@@ -119,42 +171,16 @@ class TestNoRivalImplementation:
         # legitimate and common: `sort_keys` also pretty-prints generated
         # artifacts and builds the cursor key, and hashing also
         # content-addresses batch files and names stage tables.
-        offenders: list[str] = []
-        for root in _SOURCE_ROOTS:
-            for path in sorted(root.rglob("*.py")):
-                if path == _OWNER or "generated" in path.parts:
-                    continue
-                tree = ast.parse(path.read_text())
-                for scope in ast.walk(tree):
-                    if not isinstance(
-                        scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)
-                    ):
-                        continue
-                    body = [
-                        n
-                        for n in ast.walk(scope)
-                        if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                        or n is scope
-                    ]
-                    canonical = any(
-                        isinstance(n, ast.Call)
-                        and isinstance(n.func, ast.Attribute)
-                        and n.func.attr == "dumps"
-                        and any(kw.arg == "sort_keys" for kw in n.keywords)
-                        for n in body
-                    )
-                    hashed = any(
-                        isinstance(n, ast.Call)
-                        and isinstance(n.func, ast.Attribute)
-                        and isinstance(n.func.value, ast.Name)
-                        and n.func.value.id == "hashlib"
-                        for n in body
-                    )
-                    if canonical and hashed:
-                        where = getattr(scope, "name", "<module>")
-                        offenders.append(f"{path}:{where}")
+        offenders = [
+            f"{path}:{name}"
+            for path in _scannable_sources()
+            for name, scope in _scopes(ast.parse(path.read_text()))
+            if _canonicalises(scope) and _hashes(scope)
+        ]
         assert not offenders, (
             "a row-identity canonicalisation exists outside "
             f"{_OWNER}; it must call record_digest instead:\n  "
             + "\n  ".join(offenders)
         )
+        # A scan over nothing proves nothing.
+        assert _scannable_sources(), "the scan found no sources to read"
