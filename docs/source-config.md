@@ -99,7 +99,7 @@ pipelines with `status: "active"` are executable.
     "engine": { "vcpu": 1, "memory": 8192 },
     "runtime": {
       "buffer_size": 5000,
-      "batching": { "batch_size": 200, "max_concurrent_batches": 3 },
+      "batching": { "batch_size": 200 },
       "logging": { "log_level": "INFO", "metrics_enabled": true },
       "error_handling": { "strategy": "dlq", "max_retries": 3, "retry_delay_seconds": 5 }
     }

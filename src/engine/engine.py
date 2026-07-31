@@ -40,7 +40,6 @@ class StreamingEngine:
         # error_strategy and retry_delay stay plain attributes so a test can
         # vary one knob without rebuilding the frozen config.
         self.batch_size = runtime.batching.batch_size
-        self.max_concurrent_batches = runtime.batching.max_concurrent_batches
         self.buffer_size = runtime.buffer_size
         self.max_retries = runtime.error_handling.max_retries
         self.retry_delay = runtime.error_handling.retry_delay_seconds

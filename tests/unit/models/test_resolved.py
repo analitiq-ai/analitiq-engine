@@ -26,17 +26,11 @@ class TestBatchingConfig:
     def test_defaults(self):
         cfg = BatchingConfig()
         assert cfg.batch_size == 1000
-        assert cfg.max_concurrent_batches == 3
 
     @pytest.mark.parametrize("batch_size", [0, -1])
     def test_rejects_non_positive_batch_size(self, batch_size):
         with pytest.raises(ValueError, match="batch_size must be positive"):
             BatchingConfig(batch_size=batch_size)
-
-    @pytest.mark.parametrize("value", [0, -5])
-    def test_rejects_non_positive_concurrency(self, value):
-        with pytest.raises(ValueError, match="max_concurrent_batches must be positive"):
-            BatchingConfig(max_concurrent_batches=value)
 
 
 class TestContractLiterals:
@@ -232,12 +226,12 @@ class TestParseRuntimeConfig:
     def test_partial_block_merges_with_defaults(self):
         cfg = _parse_runtime_config({"batching": {"batch_size": 50}})
         assert cfg.batching.batch_size == 50
-        assert cfg.batching.max_concurrent_batches == 3  # default preserved
+        assert cfg.buffer_size == 5000  # untouched keys keep their defaults
 
     def test_full_block_is_typed(self):
         cfg = _parse_runtime_config(
             {
-                "batching": {"batch_size": 200, "max_concurrent_batches": 4},
+                "batching": {"batch_size": 200},
                 "error_handling": {
                     "strategy": "dlq",
                     "max_retries": 5,
@@ -246,7 +240,7 @@ class TestParseRuntimeConfig:
                 "buffer_size": 1234,
             }
         )
-        assert cfg.batching.max_concurrent_batches == 4
+        assert cfg.batching.batch_size == 200
         assert cfg.error_handling.strategy == "dlq"
         assert cfg.error_handling.max_retries == 5
         assert cfg.buffer_size == 1234
@@ -256,6 +250,16 @@ class TestParseRuntimeConfig:
         # is rejected by the contract (authority) before the engine type.
         with pytest.raises(ValueError, match="strategy"):
             _parse_runtime_config({"error_handling": {"strategy": "nope"}})
+
+    def test_retired_batching_key_is_rejected_not_ignored(self):
+        # max_concurrent_batches was dropped from the contract (issue #436).
+        # A pipeline still declaring it must fail here rather than have the key
+        # silently dropped: the author asked for something the engine no longer
+        # offers, and a silent drop reads as if the request was honoured.
+        with pytest.raises(ValueError, match="max_concurrent_batches"):
+            _parse_runtime_config(
+                {"batching": {"batch_size": 200, "max_concurrent_batches": 4}}
+            )
 
     def test_out_of_range_max_retries_fails_loud(self):
         # The contract caps max_retries (le=5); the parser enforces it.

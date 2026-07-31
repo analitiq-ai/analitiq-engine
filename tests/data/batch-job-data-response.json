@@ -40,8 +40,7 @@
       "runtime": {
         "buffer_size": 5000,
         "batching": {
-          "batch_size": 100,
-          "max_concurrent_batches": 3
+          "batch_size": 100
         },
         "logging": {
           "log_level": "INFO",

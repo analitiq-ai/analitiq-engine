@@ -153,7 +153,7 @@ def engine(temp_dir, tmp_project_root):
     return StreamingEngine(
         pipeline_id="test-pipeline",
         runtime=RuntimeConfig(
-            batching=BatchingConfig(batch_size=10, max_concurrent_batches=2),
+            batching=BatchingConfig(batch_size=10),
             buffer_size=100,
         ),
         dlq_path=temp_dir,
@@ -987,7 +987,7 @@ class TestEngineStreamFailurePropagation:
             "destination": {"connector_type": "api"},
             "runtime": {
                 "buffer_size": 100,
-                "batching": {"batch_size": 10, "max_concurrent_batches": 1},
+                "batching": {"batch_size": 10},
                 "logging": {"log_level": "DEBUG", "metrics_enabled": False},
                 "error_handling": {
                     "strategy": "dlq",
@@ -1046,7 +1046,7 @@ class TestEngineStreamFailurePropagation:
             "destination": {"connector_type": "api"},
             "runtime": {
                 "buffer_size": 100,
-                "batching": {"batch_size": 10, "max_concurrent_batches": 1},
+                "batching": {"batch_size": 10},
                 "logging": {"log_level": "DEBUG", "metrics_enabled": False},
                 "error_handling": {
                     "strategy": "dlq",

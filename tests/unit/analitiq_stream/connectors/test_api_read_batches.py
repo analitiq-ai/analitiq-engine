@@ -40,6 +40,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pyarrow as pa
 import pytest
+from analitiq.contracts.endpoints import PageSize
+from pydantic import ValidationError as PydanticValidationError
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.secrets import InMemorySecretsResolver
@@ -1087,18 +1089,20 @@ class TestReadBatchesEffectivePageSize:
     @pytest.mark.parametrize(
         "default, match",
         [
-            pytest.param("not-a-size", "must be an integer", id="non-numeric"),
+            pytest.param(
+                {"literal": "not-a-size"}, "must be an integer", id="non-numeric"
+            ),
             # int() would silently truncate a fractional value to a page
             # size the author never declared; malformed data fails loud.
-            pytest.param(2.9, "must be an integer", id="fractional"),
-            pytest.param(0, "must be positive", id="zero"),
-            pytest.param(-3, "must be positive", id="negative"),
-            # Conflicting expression markers are an authoring error the
-            # resolver raises on; it must surface as a deterministic
-            # ReadError (like every other pagination expression), not a
-            # raw resolver exception the worker classifies as retryable.
+            pytest.param({"literal": 2.9}, "must be an integer", id="fractional"),
+            pytest.param({"literal": 0}, "must be positive", id="zero"),
+            pytest.param({"literal": -3}, "must be positive", id="negative"),
+            # An unknown function name is an authoring error the resolver
+            # raises on; it must surface as a deterministic ReadError (like
+            # every other pagination expression), not a raw resolver
+            # exception the worker classifies as retryable.
             pytest.param(
-                {"ref": "runtime.batch_size", "literal": 5},
+                {"function": "no_such_function", "input": {"literal": 5}},
                 "failed to resolve",
                 id="authoring-error",
             ),
@@ -1107,7 +1111,15 @@ class TestReadBatchesEffectivePageSize:
     async def test_invalid_default_raises_before_any_request(self, default, match):
         """A default that resolves to a non-positive or non-numeric page
         size — or fails to resolve at all — is an authoring defect and
-        fails before any request."""
+        fails before any request.
+
+        Every case is spelled as an expression, because that is the whole
+        of what reaches this guard: the contract bounds the bare-integer
+        spelling itself (see
+        :meth:`test_contract_refuses_an_out_of_range_bare_default`) but
+        leaves the expression branch unbounded, so a statically known
+        ``{literal: 0}`` still arrives here.
+        """
         session = _FakeSession([])
         runtime = _runtime_with_session(session)
         connector = APIConnector("test")
@@ -1132,6 +1144,30 @@ class TestReadBatchesEffectivePageSize:
                 batch_size=2,
             )
         assert session.calls == []
+
+    @pytest.mark.parametrize(
+        "default",
+        [
+            pytest.param(0, id="zero"),
+            pytest.param(-3, id="negative"),
+            pytest.param(2.9, id="fractional"),
+            pytest.param("not-a-size", id="non-numeric"),
+            # Strict: the published JSON Schema says `type: integer` and
+            # rejects both, so the models must too.
+            pytest.param("50", id="numeric-string"),
+            pytest.param(True, id="boolean"),
+        ],
+    )
+    def test_contract_refuses_an_out_of_range_bare_default(self, default):
+        """A bare-integer ``limit.default`` is bounded by the contract itself.
+
+        This is the boundary the engine no longer has to police: a page size
+        the author wrote down as a plain scalar never reaches the read at
+        all. Asserted against the contract model rather than the connector so
+        it stays a statement about the document, not about one code path.
+        """
+        with pytest.raises(PydanticValidationError):
+            PageSize.model_validate({"param": "limit", "default": default})
 
 
 # ---------------------------------------------------------------------------

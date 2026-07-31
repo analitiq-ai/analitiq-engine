@@ -201,18 +201,10 @@ class BatchingConfig:
     """
 
     batch_size: int = field(default_factory=settings.default_batch_size)
-    max_concurrent_batches: int = field(
-        default_factory=settings.default_max_concurrent_batches
-    )
 
     def __post_init__(self) -> None:
         if self.batch_size <= 0:
             raise ValueError(f"batch_size must be positive, got {self.batch_size}")
-        if self.max_concurrent_batches <= 0:
-            raise ValueError(
-                "max_concurrent_batches must be positive, got "
-                f"{self.max_concurrent_batches}"
-            )
 
 
 # The published pipeline contract's error-handling strategy enum, read from the

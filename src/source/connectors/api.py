@@ -74,7 +74,7 @@ from ...models.state import ReplicationConfig
 from ...shared.dict_path import walk_path
 from ...shared.http_utils import join_url
 from .base import BaseConnector, ConnectorConnectionError, ReadError, TransientReadError
-from .response_expr import evaluate_predicate, resolve_response_expr
+from .response_expr import evaluate_predicate, resolve_contract_expr
 
 logger = logging.getLogger(__name__)
 
@@ -707,7 +707,7 @@ class APIConnector(BaseConnector):
     ) -> Any:
         """Resolve a response-scope value expression, failing deterministically."""
         try:
-            return resolve_response_expr(expr, page_resolver)
+            return resolve_contract_expr(expr, page_resolver)
         except (ValueError, KeyError, TransportSpecError) as err:
             raise ReadError(f"pagination {context} failed to resolve: {err}") from err
 
@@ -808,11 +808,17 @@ class APIConnector(BaseConnector):
         partial render fails the positive-int parse rather than falling
         back.) A resolved value that is not a positive integer is an
         authoring defect and fails loud before any request.
+
+        The contract bounds ``limit.default`` at ``> 0`` in its bare-integer
+        spelling only, so a document reaching here can still declare a
+        statically non-positive page size as an expression (``{literal: 0}``)
+        — and an expression resolving from data can produce anything. The
+        positive-int check below is what covers both.
         """
         size = batch_size
         if limit is not None and limit.default is not None:
             try:
-                resolved = resolver.resolve_for_request(limit.default)
+                resolved = resolve_contract_expr(limit.default, resolver)
             except (ValueError, KeyError, TransportSpecError) as err:
                 raise ReadError(
                     f"pagination limit.default failed to resolve: {err}"

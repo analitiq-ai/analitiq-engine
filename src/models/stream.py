@@ -25,6 +25,7 @@ class WriteMode(str, Enum):
 
     INSERT = "insert"
     UPSERT = "upsert"
+    TRUNCATE_INSERT = "truncate_insert"
 
 
 # ---------------------------------------------------------------------------

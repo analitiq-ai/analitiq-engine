@@ -10,14 +10,10 @@ from src.models.resolved import BatchingConfig, RuntimeConfig
 from src.source.connectors.base import BaseConnector
 
 
-def _runtime(
-    *, batch_size: int, max_concurrent_batches: int, buffer_size: int
-) -> RuntimeConfig:
+def _runtime(*, batch_size: int, buffer_size: int) -> RuntimeConfig:
     """Build a RuntimeConfig from the loose tuning values a test cares about."""
     return RuntimeConfig(
-        batching=BatchingConfig(
-            batch_size=batch_size, max_concurrent_batches=max_concurrent_batches
-        ),
+        batching=BatchingConfig(batch_size=batch_size),
         buffer_size=buffer_size,
     )
 
@@ -92,7 +88,7 @@ class TestStreamingEngine:
         """Create a StreamingEngine instance."""
         return StreamingEngine(
             pipeline_id="test-pipeline",
-            runtime=_runtime(batch_size=10, max_concurrent_batches=2, buffer_size=100),
+            runtime=_runtime(batch_size=10, buffer_size=100),
             dlq_path=temp_dir,
         )
 
@@ -106,7 +102,6 @@ class TestStreamingEngine:
         """Test proper initialization of StreamingEngine."""
         assert engine.pipeline_id == "test-pipeline"
         assert engine.batch_size == 10
-        assert engine.max_concurrent_batches == 2
         assert engine.buffer_size == 100
         assert engine.metrics is not None
 
@@ -132,7 +127,7 @@ class TestStreamingEngine:
             "destination": {"connection_id": "test-dst"},
             "runtime": {
                 "buffer_size": 100,
-                "batching": {"batch_size": 10, "max_concurrent_batches": 1},
+                "batching": {"batch_size": 10},
                 "logging": {"log_level": "DEBUG", "metrics_enabled": False},
                 "error_handling": {
                     "strategy": "dlq",
@@ -215,7 +210,7 @@ class TestEngineMetrics:
         """Create a StreamingEngine instance."""
         return StreamingEngine(
             pipeline_id="metrics-test",
-            runtime=_runtime(batch_size=5, max_concurrent_batches=2, buffer_size=100),
+            runtime=_runtime(batch_size=5, buffer_size=100),
             dlq_path=temp_dir,
         )
 
@@ -252,7 +247,7 @@ class TestEngineStateManager:
         """Create a StreamingEngine instance."""
         return StreamingEngine(
             pipeline_id="state-test",
-            runtime=_runtime(batch_size=10, max_concurrent_batches=2, buffer_size=100),
+            runtime=_runtime(batch_size=10, buffer_size=100),
             dlq_path=temp_dir,
         )
 
@@ -288,12 +283,11 @@ class TestEngineConfiguration:
         """Test engine with custom parameters."""
         engine = StreamingEngine(
             pipeline_id="custom-config",
-            runtime=_runtime(batch_size=50, max_concurrent_batches=5, buffer_size=500),
+            runtime=_runtime(batch_size=50, buffer_size=500),
             dlq_path=temp_dir,
         )
 
         assert engine.batch_size == 50
-        assert engine.max_concurrent_batches == 5
         assert engine.buffer_size == 500
 
     def test_engine_default_values(self, temp_dir, tmp_project_root):
@@ -303,19 +297,15 @@ class TestEngineConfiguration:
         )
 
         assert engine.batch_size == 1000  # ANALITIQ_BATCH_SIZE default
-        assert engine.max_concurrent_batches == 3  # ANALITIQ_MAX_CONCURRENT_BATCHES
         assert engine.buffer_size == 5000  # ANALITIQ_BUFFER_SIZE default
 
     def test_engine_with_custom_config_params(self, temp_dir, tmp_project_root):
         """Test engine with explicit config parameters."""
         engine = StreamingEngine(
             pipeline_id="with-config",
-            runtime=_runtime(
-                batch_size=200, max_concurrent_batches=4, buffer_size=2000
-            ),
+            runtime=_runtime(batch_size=200, buffer_size=2000),
             dlq_path=temp_dir,
         )
 
         assert engine.batch_size == 200
-        assert engine.max_concurrent_batches == 4
         assert engine.buffer_size == 2000
