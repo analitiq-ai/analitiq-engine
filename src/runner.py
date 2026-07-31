@@ -81,19 +81,15 @@ def _build_config_dict(
         )
         dest_config = _build_destination_config(dest)
 
-        mapping = stream.mapping or {}
-        mapping_config = {
-            "assignments": [
-                _translate_assignment(a) for a in (mapping.get("assignments") or [])
-            ]
-        }
-
         streams[stream.stream_id] = {
             "name": stream.stream_id,
             "stream_version": stream.stream_version,
             "source": source_config,
             "destination": dest_config,
-            "mapping": mapping_config,
+            # The typed mapping travels whole. There is no translation step:
+            # the contract's spelling of a path, a value kind and a target IS
+            # the engine's, so nothing here can drop or reshape a field.
+            "mapping": stream.mapping,
         }
 
     return {
@@ -154,60 +150,6 @@ def _build_destination_config(destination: ResolvedDestination) -> dict[str, Any
     ``PipelineConfigPrep``.
     """
     return {"write_mode": destination.write.get("mode", "upsert")}
-
-
-def _translate_assignment(assignment: dict[str, Any]) -> dict[str, Any]:
-    """Translate a contract-shaped assignment to the transformer's shape.
-
-    Contract shape (expression):
-        {"target": {"path": "id", "arrow_type": "Int64"},
-         "value": {"expression": {"op": "get", "path": "id"}}}
-
-    Transformer shape (expression):
-        {"target": {"path": ["id"], "arrow_type": "Int64"},
-         "value": {"kind": "expr", "expr": {"op": "get", "path": ["id"]}}}
-
-    Contract shape (constant):
-        {"target": {"path": "x"},
-         "value": {"constant": {"value": 42, "arrow_type": "Int32"}}}
-
-    Transformer shape (constant):
-        {"target": {"path": ["x"]},
-         "value": {"kind": "const",
-                   "const": {"value": 42, "arrow_type": "Int32"}}}
-
-    Any other ``value`` shape is passed through unchanged.
-    """
-    raw_target = assignment.get("target") or {}
-    raw_value = assignment.get("value") or {}
-
-    target_path_raw = raw_target.get("path", "")
-    if isinstance(target_path_raw, str):
-        target_path = [seg for seg in target_path_raw.split(".") if seg]
-    elif isinstance(target_path_raw, list):
-        target_path = list(target_path_raw)
-    else:
-        target_path = []
-
-    target = dict(raw_target)
-    target["path"] = target_path
-
-    value: dict[str, Any]
-    if "expression" in raw_value:
-        expression = dict(raw_value["expression"])
-        expr_path = expression.get("path")
-        if isinstance(expr_path, str):
-            expression["path"] = [seg for seg in expr_path.split(".") if seg]
-        value = {"kind": "expr", "expr": expression}
-    elif "constant" in raw_value:
-        value = {"kind": "const", "const": dict(raw_value["constant"] or {})}
-    else:
-        value = dict(raw_value)
-
-    out: dict[str, Any] = {"target": target, "value": value}
-    if "validate" in assignment:
-        out["validate"] = assignment["validate"]
-    return out
 
 
 # ---------------------------------------------------------------------------

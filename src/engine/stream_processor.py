@@ -47,8 +47,8 @@ from ..state.error_classification import (
 )
 from ..state.metrics_storage import create_metrics_record, emit_metrics_log
 from ..state.state_manager import StateManager
-from .data_transformer import compile_transform
 from .exceptions import StreamProcessingError
+from .mapping import CompiledTransform, MappingDocument, compile_mapping
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +125,7 @@ class StreamProcessor:
         *,
         stream_id: str,
         stream_config: dict[str, Any],
+        mapping: MappingDocument,
         pipeline_config: dict[str, Any],
         pipeline_id: str,
         state_manager: StateManager,
@@ -151,6 +152,13 @@ class StreamProcessor:
         # an unversioned or minimally-built config stays runnable.
         self.stream_version = stream_config.get("stream_version", 1)
         self.stream_config = stream_config
+        # The assignments are static, so the transform is compiled here, once,
+        # into vectorized Arrow compute -- and a mapping the engine cannot
+        # compile fails before a single batch is read. A stream with no
+        # assignments has no transform: batches pass through untouched.
+        self.transform: CompiledTransform | None = (
+            compile_mapping(mapping) if mapping.assignments else None
+        )
         self.pipeline_config = pipeline_config
         self.pipeline_id = pipeline_id
         self.state_manager = state_manager
@@ -499,11 +507,6 @@ class StreamProcessor:
         """Transform data with field mappings and validation."""
         logger.debug("Starting transform stage for stream %s", self.stream_name)
 
-        assignments = (self.stream_config.get("mapping") or {}).get("assignments") or []
-        # The assignments are static, so the transform is compiled once here into
-        # vectorized Arrow compute and applied to every batch -- the data never
-        # leaves Arrow (no per-record Python, no to_pylist/from_pylist).
-        compiled = compile_transform(assignments) if assignments else None
         batch_count = 0
         try:
             while True:
@@ -511,10 +514,10 @@ class StreamProcessor:
                 if batch is None:
                     break
 
-                if compiled is None:
+                if self.transform is None:
                     transformed_batch = batch
                 else:
-                    transformed_batch = compiled.run(batch)
+                    transformed_batch = self.transform.run(batch)
 
                 await output_queue.put(transformed_batch)
                 batch_count += 1

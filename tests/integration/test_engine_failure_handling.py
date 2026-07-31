@@ -19,6 +19,7 @@ import pytest
 from cdk.types import FailureCategory
 from src.engine.engine import StreamingEngine
 from src.engine.exceptions import StreamProcessingError
+from src.engine.mapping import MappingDocument
 from src.engine.stream_processor import StreamProcessor
 from src.grpc.generated.analitiq.v1 import AckStatus
 from src.models.metrics import PipelineMetrics
@@ -75,6 +76,7 @@ def _make_processor(
     processor = StreamProcessor(
         stream_id="test-stream-001",
         stream_config=stream_config,
+        mapping=MappingDocument(),
         pipeline_config={"pipeline_id": "test-pipeline", "name": "Test Pipeline"},
         pipeline_id="test-pipeline",
         state_manager=state_manager if state_manager is not None else MagicMock(),
@@ -199,6 +201,7 @@ def sample_stream_config():
             "connector_type": "api",
             "host": "https://dest.example.com",
         },
+        "mapping": MappingDocument(),
     }
 
 

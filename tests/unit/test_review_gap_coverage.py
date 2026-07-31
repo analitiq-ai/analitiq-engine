@@ -321,8 +321,8 @@ class TestIsoTimestampStrictRaise:
         # indistinguishable from valid data (issue #138).
         import pyarrow as pa
 
-        from src.engine.data_transformer import _FUNCTION_CATALOG
         from src.engine.exceptions import TransformationError
+        from src.engine.mapping import _FUNCTION_CATALOG
 
         with pytest.raises(TransformationError, match="iso_to_datetime"):
             _FUNCTION_CATALOG["iso_to_datetime"][1](pa.array(["not-a-timestamp"]))
@@ -330,7 +330,7 @@ class TestIsoTimestampStrictRaise:
     def test_iso_to_datetime_parses_valid_input_and_passes_null(self):
         import pyarrow as pa
 
-        from src.engine.data_transformer import _FUNCTION_CATALOG
+        from src.engine.mapping import _FUNCTION_CATALOG
 
         out = _FUNCTION_CATALOG["iso_to_datetime"][1](
             pa.array(["2026-05-12T10:30:00Z", None])
@@ -343,8 +343,8 @@ class TestIsoTimestampStrictRaise:
     def test_iso_to_date_raises_on_unparseable(self):
         import pyarrow as pa
 
-        from src.engine.data_transformer import _FUNCTION_CATALOG
         from src.engine.exceptions import TransformationError
+        from src.engine.mapping import _FUNCTION_CATALOG
 
         with pytest.raises(TransformationError, match="iso_to_date"):
             _FUNCTION_CATALOG["iso_to_date"][1](pa.array(["not-a-date"]))
@@ -352,7 +352,7 @@ class TestIsoTimestampStrictRaise:
     def test_iso_to_date_parses_valid_input_and_passes_null(self):
         import pyarrow as pa
 
-        from src.engine.data_transformer import _FUNCTION_CATALOG
+        from src.engine.mapping import _FUNCTION_CATALOG
 
         out = _FUNCTION_CATALOG["iso_to_date"][1](
             pa.array(["2026-05-12T10:30:00", "2026-05-12", None])

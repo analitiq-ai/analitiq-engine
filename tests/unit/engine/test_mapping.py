@@ -1,26 +1,30 @@
-"""Behavior coverage for the vectorized, Arrow-native transform.
+"""Behavior coverage for the mapping module: one document, one transform.
 
-The per-record evaluator (``DataTransformer``/``AssignmentTransformer``) was
-replaced by a single vectorized path: ``compile_transform(assignments)`` builds
-a ``CompiledTransform`` once and ``.run(batch)`` applies it to a
-``pa.RecordBatch`` synchronously, raising ``TransformationError`` on any
-failure. These tests assert that contract: every expression op, the full
-function catalog, the conversion matrix gating, fail-loud batch-wide semantics,
-and the static (compile-time) arity checks.
+A mapping document is read once by ``MappingDocument.parse`` and compiled once
+by ``compile_mapping`` into a ``CompiledTransform``; ``.run(batch)`` applies it
+to a ``pa.RecordBatch`` synchronously, raising ``TransformationError`` on any
+failure. These tests assert that contract: the token-array path grammar, the
+single-segment target rule, the required value ``kind``, the closed document,
+every expression op, the full function catalog, the conversion-matrix gating,
+fail-loud batch-wide semantics, and the static (compile-time) arity checks.
 """
 
+import ast
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 
 import pyarrow as pa
 import pytest
 
-from src.engine.data_transformer import (
-    _FUNCTION_CATALOG,
-    build_output_schema,
-    compile_transform,
-)
+import src
 from src.engine.exceptions import TransformationError
+from src.engine.mapping import (
+    _FUNCTION_CATALOG,
+    MappingDocument,
+    build_output_schema,
+    compile_mapping,
+)
 
 # --------------------------------------------------------------------------- #
 # Local builders -- keep each test reading as the mapping shape the engine sees #
@@ -34,12 +38,12 @@ def _get(path):
 
 def _expr(node):
     """Wrap an expression AST node as an assignment ``value`` block."""
-    return {"kind": "expr", "expr": node}
+    return {"kind": "expression", "expression": node}
 
 
-def _const(value):
-    """A ``const`` value block (materialised at the target type)."""
-    return {"kind": "const", "const": {"value": value}}
+def _const(value, arrow_type="Utf8"):
+    """A constant value block (materialised at the target type)."""
+    return {"kind": "constant", "constant": {"value": value, "arrow_type": arrow_type}}
 
 
 def _const_node(value):
@@ -47,8 +51,13 @@ def _const_node(value):
     return {"op": "const", "value": value}
 
 
+def _rule(rule_type, field="v", **extra):
+    """A validation rule in the contract's spelling."""
+    return {"type": rule_type, "field": field, **extra}
+
+
 def _target(name, arrow_type, nullable=True, **extra):
-    t = {"path": [name], "arrow_type": arrow_type, "nullable": nullable}
+    t = {"path": name, "arrow_type": arrow_type, "nullable": nullable}
     t.update(extra)
     return t
 
@@ -60,6 +69,16 @@ def _assignment(name, arrow_type, value, nullable=True, validate=None, **target_
     return a
 
 
+def _document(assignments):
+    """Read a list of assignments as a mapping document."""
+    return MappingDocument.parse({"assignments": assignments})
+
+
+def _compile(assignments):
+    """Read and compile *assignments* -- the whole document-to-transform route."""
+    return compile_mapping(_document(assignments))
+
+
 def _run(records, assignments):
     """Compile *assignments* and run them over *records*, returning pylist rows.
 
@@ -67,7 +86,177 @@ def _run(records, assignments):
     source Arrow type build the batch explicitly instead.
     """
     batch = pa.RecordBatch.from_pylist(records)
-    return compile_transform(assignments).run(batch).to_pylist()
+    return _compile(assignments).run(batch).to_pylist()
+
+
+class TestTokenArrayPaths:
+    """A source path is an array of tokens from the document to the batch read.
+
+    The whole point of the array: there is no split step, so a `get` cannot
+    behave differently depending on how deep in the AST it sits. A dotted
+    string used to reach the reader unsplit from inside a `pipe`, where
+    ``path[0]`` was the first LETTER of the field name and the column came out
+    silently all-null.
+    """
+
+    def test_nested_get_inside_pipe_reads_the_nested_field(self):
+        batch = pa.record_batch(
+            [pa.array([{"city": "  Berlin "}, {"city": " Kyiv"}])], names=["address"]
+        )
+        node = {
+            "op": "pipe",
+            "args": [_get(["address", "city"]), {"op": "fn", "name": "trim"}],
+        }
+        out = _compile([_assignment("city", "Utf8", _expr(node))]).run(batch)
+        assert out.to_pylist() == [{"city": "Berlin"}, {"city": "Kyiv"}]
+
+    @pytest.mark.parametrize(
+        "node",
+        [
+            {"op": "get", "path": "address.city"},
+            {
+                "op": "pipe",
+                "args": [
+                    {"op": "get", "path": "address.city"},
+                    {"op": "fn", "name": "trim"},
+                ],
+            },
+        ],
+        ids=["at the root", "nested in a pipe"],
+    )
+    def test_a_dotted_string_path_is_refused_not_split(self, node):
+        with pytest.raises(TransformationError, match="array of field-name tokens"):
+            _compile([_assignment("city", "Utf8", _expr(node))])
+
+    def test_a_single_token_reads_a_field_whose_name_contains_a_dot(self):
+        batch = pa.record_batch([pa.array(["v"])], names=["a.b"])
+        out = _compile([_assignment("x", "Utf8", _expr(_get(["a.b"])))]).run(batch)
+        assert out.to_pylist() == [{"x": "v"}]
+
+
+class TestTargetIsOneSegment:
+    """A target names one field on the destination record root."""
+
+    def test_dotted_target_is_refused_with_the_reason(self):
+        with pytest.raises(TransformationError, match="more than one segment"):
+            _compile([_assignment("address.city", "Utf8", _expr(_get("city")))])
+
+    def test_nesting_is_declared_with_object_plus_properties(self):
+        schema = build_output_schema(
+            _document(
+                [
+                    _assignment(
+                        "address",
+                        "Object",
+                        _expr(_get("address")),
+                        properties={"city": {"arrow_type": "Utf8"}},
+                    )
+                ]
+            ).assignments
+        )
+        assert pa.types.is_struct(schema.field("address").type)
+
+
+class TestValueKindIsExplicit:
+    """``kind`` discriminates the value union and has no default."""
+
+    def test_missing_kind_is_refused(self):
+        with pytest.raises(TransformationError, match="discriminator 'kind'"):
+            _compile([_assignment("s", "Utf8", {"expression": _get("s")})])
+
+    def test_unknown_kind_names_the_expected_tags(self):
+        with pytest.raises(TransformationError, match="'expression', 'constant'"):
+            _compile([_assignment("s", "Utf8", {"kind": "expr", "expr": _get("s")})])
+
+
+class TestDocumentIsClosed:
+    """An unknown field is rejected by name, never dropped on the way in."""
+
+    def test_unknown_mapping_field_is_named(self):
+        with pytest.raises(TransformationError, match=r"\bdefaults\b"):
+            compile_mapping(
+                MappingDocument.parse(
+                    {"assignments": [], "defaults": {"on_error": "dlq"}}
+                )
+            )
+
+    def test_unknown_assignment_field_is_named(self):
+        assignment = _assignment("s", "Utf8", _expr(_get("s")))
+        assignment["on_error"] = "dlq"
+        with pytest.raises(TransformationError, match=r"assignments\.0\.on_error"):
+            _compile([assignment])
+
+    def test_unknown_target_field_is_named(self):
+        with pytest.raises(
+            TransformationError, match=r"assignments\.0\.target\.generic_type"
+        ):
+            _compile(
+                [_assignment("s", "Utf8", _expr(_get("s")), generic_type="string")]
+            )
+
+
+def _splits_on_a_dot(tree: ast.AST) -> list[int]:
+    """Line numbers of every ``<something>.split(".")`` call in *tree*."""
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "split"
+        and len(node.args) == 1
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == "."
+    ]
+
+
+class TestNoModuleSplitsAPath:
+    """No module on the mapping route turns a string into path segments.
+
+    Structural rather than behavioural because the defect was structural: one
+    commit taught the translator to split a dotted path, and a later one taught
+    the reader to expect tokens. Each was self-consistent; together they made a
+    nested read return nulls. A test that only exercises the reader cannot see
+    a second module re-introducing the split upstream.
+    """
+
+    # The modules a mapping document travels through. Listed rather than
+    # inferred because `runner.py` -- the one that introduced the split --
+    # carries the document without importing the module that defines it.
+    ROUTE = (
+        "engine/mapping.py",
+        "engine/pipeline_config_prep.py",
+        "engine/stream_processor.py",
+        "models/resolved.py",
+        "runner.py",
+    )
+
+    @staticmethod
+    def _modules() -> dict[str, ast.AST]:
+        """The named route, plus anything that imports the mapping module."""
+        root = Path(src.__file__).parent
+        sources = {
+            path.relative_to(root).as_posix(): path.read_text(encoding="utf-8")
+            for path in sorted(root.rglob("*.py"))
+        }
+        selected = {
+            name: text
+            for name, text in sources.items()
+            if name in TestNoModuleSplitsAPath.ROUTE or "engine.mapping" in text
+        }
+        missing = set(TestNoModuleSplitsAPath.ROUTE) - set(selected)
+        assert not missing, f"the mapping route moved: {sorted(missing)}"
+        return {name: ast.parse(text) for name, text in selected.items()}
+
+    def test_no_module_splits_a_path_on_a_dot(self):
+        offenders = {
+            name: lines
+            for name, tree in self._modules().items()
+            if (lines := _splits_on_a_dot(tree))
+        }
+        assert not offenders, (
+            f"a path is an array of tokens; these modules split a string "
+            f"instead: {offenders}"
+        )
 
 
 class TestExpressionOps:
@@ -81,9 +270,9 @@ class TestExpressionOps:
         batch = pa.record_batch(
             [pa.array([{"inner": "v1"}, {"inner": "v2"}])], names=["outer"]
         )
-        out = compile_transform(
-            [_assignment("x", "Utf8", _expr(_get(["outer", "inner"])))]
-        ).run(batch)
+        out = _compile([_assignment("x", "Utf8", _expr(_get(["outer", "inner"])))]).run(
+            batch
+        )
         assert out.to_pylist() == [{"x": "v1"}, {"x": "v2"}]
 
     def test_const_value_kind_broadcasts_literal(self):
@@ -195,13 +384,13 @@ class TestExpressionOps:
         # Typed-intermediates divergence is to fail the batch, never to carry
         # a mixed-type value forward.
         node = {"op": "coalesce", "args": [_get("a"), _const_node("fallback")]}
-        compiled = compile_transform([_assignment("v", "Utf8", _expr(node))])
+        compiled = _compile([_assignment("v", "Utf8", _expr(node))])
         with pytest.raises(TransformationError, match="coalesce expression failed"):
             compiled.run(pa.RecordBatch.from_pylist([{"a": 1}, {"a": None}]))
 
     def test_unknown_op_raises_at_compile(self):
         with pytest.raises(TransformationError, match="Unknown expression op"):
-            compile_transform(
+            _compile(
                 [_assignment("o", "Utf8", _expr({"op": "frobnicate", "args": []}))]
             )
 
@@ -210,14 +399,14 @@ class TestExpressionOps:
         not a static one: the operand types are only known once the columns are
         built."""
         node = {"op": "gt", "args": [_const_node(5), _const_node("not-a-number")]}
-        compiled = compile_transform([_assignment("o", "Boolean", _expr(node))])
+        compiled = _compile([_assignment("o", "Boolean", _expr(node))])
         with pytest.raises(TransformationError, match="gt expression cannot compare"):
             compiled.run(pa.RecordBatch.from_pylist([{"x": 0}]))
 
 
 class TestExpressionArityIsStatic:
     """Wrong operator arity is a config defect caught at compile time -- before
-    any batch is seen -- because the AST is walked once in ``compile_transform``.
+    any batch is seen -- because the AST is walked once in ``compile_mapping``.
     """
 
     @pytest.mark.parametrize("op", ["eq", "neq", "gt", "gte", "lt", "lte"])
@@ -226,32 +415,28 @@ class TestExpressionArityIsStatic:
         with pytest.raises(
             TransformationError, match=f"{op} expression requires 2 args"
         ):
-            compile_transform([_assignment("o", "Boolean", _expr(node))])
+            _compile([_assignment("o", "Boolean", _expr(node))])
 
     def test_if_requires_three_args(self):
         node = {"op": "if", "args": [_const_node(True)]}
         with pytest.raises(TransformationError, match="if expression requires 3 args"):
-            compile_transform([_assignment("o", "Utf8", _expr(node))])
+            _compile([_assignment("o", "Utf8", _expr(node))])
 
     def test_not_requires_one_arg(self):
         node = {"op": "not", "args": []}
         with pytest.raises(TransformationError, match="not expression requires 1 args"):
-            compile_transform([_assignment("o", "Boolean", _expr(node))])
+            _compile([_assignment("o", "Boolean", _expr(node))])
 
     @pytest.mark.parametrize("op", ["and", "or", "concat", "coalesce", "pipe"])
     def test_variadic_ops_require_at_least_one_arg(self, op):
         node = {"op": op, "args": []}
         with pytest.raises(TransformationError, match="at least 1 arg"):
-            compile_transform([_assignment("o", "Utf8", _expr(node))])
+            _compile([_assignment("o", "Utf8", _expr(node))])
 
     @pytest.mark.parametrize("op", ["and", "or"])
     def test_missing_args_key_is_treated_as_empty(self, op):
         with pytest.raises(TransformationError, match="at least 1 arg"):
-            compile_transform([_assignment("o", "Boolean", _expr({"op": op}))])
-
-    def test_unknown_value_kind_raises_at_compile(self):
-        with pytest.raises(TransformationError, match="unknown value kind"):
-            compile_transform([_assignment("o", "Utf8", {"kind": "mystery"})])
+            _compile([_assignment("o", "Boolean", _expr({"op": op}))])
 
 
 class TestFunctionCatalog:
@@ -402,17 +587,17 @@ class TestFunctionVersionDispatch:
     def test_unregistered_version_raises_naming_registered_versions(self):
         node = {"op": "fn", "name": "trim", "version": 99, "args": []}
         with pytest.raises(TransformationError, match=r"version 99.*\[1\]"):
-            compile_transform([_assignment("o", "Utf8", self._pipe(node))])
+            _compile([_assignment("o", "Utf8", self._pipe(node))])
 
     def test_unknown_function_raises(self):
         node = {"op": "fn", "name": "nonexistent_fn", "version": 1, "args": []}
         with pytest.raises(TransformationError, match="Unknown function"):
-            compile_transform([_assignment("o", "Utf8", self._pipe(node))])
+            _compile([_assignment("o", "Utf8", self._pipe(node))])
 
     def test_non_fn_op_in_pipe_stage_raises(self):
         node = _expr({"op": "pipe", "args": [_const_node("x"), _get("y")]})
         with pytest.raises(TransformationError, match="Expected fn op"):
-            compile_transform([_assignment("o", "Utf8", node)])
+            _compile([_assignment("o", "Utf8", node)])
 
 
 class TestConversionMatrix:
@@ -426,9 +611,7 @@ class TestConversionMatrix:
 
     def test_auto_widening_int32_to_int64(self):
         batch = pa.record_batch([pa.array([1, 2], pa.int32())], names=["a"])
-        out = compile_transform([_assignment("a", "Int64", _expr(_get("a")))]).run(
-            batch
-        )
+        out = _compile([_assignment("a", "Int64", _expr(_get("a")))]).run(batch)
         assert out.to_pylist() == [{"a": 1}, {"a": 2}]
         assert out.schema.field("a").type == pa.int64()
 
@@ -452,7 +635,7 @@ class TestConversionMatrix:
 
     def test_narrowing_overflow_is_rejected(self):
         batch = pa.record_batch([pa.array([300], pa.int64())], names=["a"])
-        compiled = compile_transform([_assignment("a", "Int8", _expr(_get("a")))])
+        compiled = _compile([_assignment("a", "Int8", _expr(_get("a")))])
         with pytest.raises(TransformationError):
             compiled.run(batch)
 
@@ -465,7 +648,7 @@ class TestConversionMatrix:
         assignment = _assignment(
             "created_at", "Timestamp(MICROSECOND, UTC)", _expr(_get("created"))
         )
-        out = compile_transform([assignment]).run(batch)
+        out = _compile([assignment]).run(batch)
         assert out.schema.field("created_at").type == pa.timestamp("us", tz="UTC")
 
 
@@ -486,8 +669,8 @@ class TestFailLoudSemantics:
         assert out == [{"m": None}]
 
     def test_validate_not_null_one_bad_row_fails_whole_batch(self):
-        """A single failing row fails the entire batch even with on_error dlq:
-        the transform has no per-row routing."""
+        """A single failing row fails the entire batch: the transform has no
+        per-row routing."""
         with pytest.raises(TransformationError, match="not_null"):
             _run(
                 [{"a": "v"}, {"a": None}],
@@ -496,7 +679,7 @@ class TestFailLoudSemantics:
                         "a",
                         "Utf8",
                         _expr(_get("a")),
-                        validate={"rules": [{"type": "not_null"}], "on_error": "dlq"},
+                        validate={"rules": [_rule("not_null", field="a")]},
                     )
                 ],
             )
@@ -510,7 +693,9 @@ class TestFailLoudSemantics:
                         "a",
                         "Utf8",
                         _expr(_get("a")),
-                        validate={"rules": [{"type": "pattern", "value": "[a-z]+"}]},
+                        validate={
+                            "rules": [_rule("pattern", field="a", value="[a-z]+")]
+                        },
                     )
                 ],
             )
@@ -525,7 +710,7 @@ class TestCompiledReuseAndConsts:
             _assignment("kind", "Utf8", _const("txn")),
             _assignment("missing", "Utf8", _expr(_get("absent"))),
         ]
-        compiled = compile_transform(assignments)
+        compiled = _compile(assignments)
         for values in ([1.0, 2.0, 3.0], [4.0], []):
             batch = pa.record_batch([pa.array(values, pa.float64())], names=["v"])
             out = compiled.run(batch)
@@ -544,7 +729,7 @@ class TestCompiledReuseAndConsts:
             _assignment("active", "Boolean", _const(True)),
             _assignment("note", "Utf8", _const(None)),
         ]
-        out = compile_transform(assignments).run(batch)
+        out = _compile(assignments).run(batch)
         assert out.column("price").to_pylist() == [Decimal("1.23"), Decimal("4.56")]
         assert out.column("active").to_pylist() == [True, True]
         assert out.column("note").null_count == 2
@@ -558,16 +743,14 @@ class TestCompiledReuseAndConsts:
 
 
 class TestBuildOutputSchema:
-    def test_missing_arrow_type_raises(self):
-        with pytest.raises(TransformationError, match="missing target.arrow_type"):
-            build_output_schema([{"target": {"path": ["o"]}, "value": _const(1)}])
-
     def test_scalar_schema_carries_nullability(self):
         schema = build_output_schema(
-            [
-                _assignment("a", "Int64", _expr(_get("a")), nullable=False),
-                _assignment("b", "Utf8", _expr(_get("b")), nullable=True),
-            ]
+            _document(
+                [
+                    _assignment("a", "Int64", _expr(_get("a")), nullable=False),
+                    _assignment("b", "Utf8", _expr(_get("b")), nullable=True),
+                ]
+            ).assignments
         )
         assert schema.field("a").type == pa.int64()
         assert not schema.field("a").nullable
@@ -687,7 +870,9 @@ class TestPerRecordParity:
                     "b",
                     "Boolean",
                     _expr(_get("b")),
-                    validate={"rules": [{"type": "pattern", "value": "True|False"}]},
+                    validate={
+                        "rules": [_rule("pattern", field="b", value="True|False")]
+                    },
                 )
             ],
         )

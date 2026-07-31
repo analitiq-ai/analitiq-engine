@@ -278,6 +278,10 @@ class StreamingEngine:
         processor = StreamProcessor(
             stream_id=stream_id,
             stream_config=stream_config,
+            # A required key: the runner puts every stream's typed mapping here,
+            # so a stream that arrived without one is a translation defect and
+            # must not be silently run as a passthrough.
+            mapping=stream_config["mapping"],
             pipeline_config=pipeline_config,
             pipeline_id=self.pipeline_id,
             state_manager=self.state_manager,

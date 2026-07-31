@@ -1,16 +1,17 @@
 """End-to-end transformation integration tests.
 
-Ported to the vectorized transform: a stream's assignments are compiled once
-with ``compile_transform`` and applied to a ``pa.RecordBatch`` with ``.run``.
-Every target declares its ``arrow_type``; the source batch is built from the
-record dict and the transformed columns are compared to the expected values.
+A stream's mapping document is read once by ``MappingDocument.parse``,
+compiled once by ``compile_mapping``, and applied to a ``pa.RecordBatch`` with
+``.run``. Every target declares its ``arrow_type``; the source batch is built
+from the record dict and the transformed columns are compared to the expected
+values.
 """
 
 import pyarrow as pa
 import pytest
 
-from src.engine.data_transformer import compile_transform
 from src.engine.exceptions import TransformationError
+from src.engine.mapping import MappingDocument, compile_mapping
 
 
 def _get(path):
@@ -27,8 +28,12 @@ def _pipe(source_path, fn_name):
     }
 
 
+def _compile(assignments):
+    return compile_mapping(MappingDocument.parse({"assignments": assignments}))
+
+
 def _target(name, arrow_type, nullable=True, **extra):
-    t = {"path": [name], "arrow_type": arrow_type, "nullable": nullable}
+    t = {"path": name, "arrow_type": arrow_type, "nullable": nullable}
     t.update(extra)
     return t
 
@@ -36,14 +41,19 @@ def _target(name, arrow_type, nullable=True, **extra):
 def _expr_assignment(name, arrow_type, expr, nullable=True, **target_extra):
     return {
         "target": _target(name, arrow_type, nullable, **target_extra),
-        "value": {"kind": "expr", "expr": expr},
+        "value": {"kind": "expression", "expression": expr},
     }
 
 
 def _const_assignment(name, arrow_type, value, nullable=True, **target_extra):
+    # A container target and its literal declare the same shape, so the extra
+    # keys (properties/items) go to both.
     return {
         "target": _target(name, arrow_type, nullable, **target_extra),
-        "value": {"kind": "const", "const": {"value": value}},
+        "value": {
+            "kind": "constant",
+            "constant": {"value": value, "arrow_type": arrow_type, **target_extra},
+        },
     }
 
 
@@ -77,7 +87,7 @@ class TestSecurityIntegration:
         a float amount and int purpose pass through their identity types, and
         the const string / nested-object / status fields broadcast per row."""
         batch = pa.RecordBatch.from_pylist([sample_wise_record])
-        out = compile_transform(_sevdesk_non_date_assignments()).run(batch).to_pylist()
+        out = _compile(_sevdesk_non_date_assignments()).run(batch).to_pylist()
 
         assert len(out) == 1
         t = out[0]
@@ -97,7 +107,7 @@ class TestSecurityIntegration:
             *_sevdesk_non_date_assignments(),
         ]
         batch = pa.RecordBatch.from_pylist([sample_wise_record])
-        out = compile_transform(assignments).run(batch).to_pylist()
+        out = _compile(assignments).run(batch).to_pylist()
 
         t = out[0]
         assert t["valueDate"] == "2025-08-16"
@@ -121,7 +131,7 @@ class TestSecurityIntegration:
             _expr_assignment("record_id", "Int64", _get("id")),
             _expr_assignment("payload", "Utf8", _get("data")),
         ]
-        out = compile_transform(assignments).run(batch).to_pylist()
+        out = _compile(assignments).run(batch).to_pylist()
 
         assert len(out) == 4
         for i, record in enumerate(out):
@@ -137,4 +147,4 @@ class TestSecurityIntegration:
             *_sevdesk_non_date_assignments(),
         ]
         with pytest.raises(TransformationError, match="not nullable"):
-            compile_transform(assignments).run(batch)
+            _compile(assignments).run(batch)

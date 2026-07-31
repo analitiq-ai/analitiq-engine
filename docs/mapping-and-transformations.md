@@ -1,81 +1,91 @@
 # Field Mapping, Transformations & Validation
 
-**Scope:** this doc owns the assignment syntax, the expression AST, the
-validation rules, and the function catalog (`_FUNCTION_CATALOG` in
-`src/engine/data_transformer.py`). For Arrow type-system and
-schema-contract internals see
+**Scope:** this doc owns the assignment syntax, the path grammar, the
+expression AST, the validation rules, and the function catalog. For Arrow
+type-system and schema-contract internals see
 [`pyarrow-and-destinations.md`](pyarrow-and-destinations.md).
 
 Streams declare their record-shape transformation under `mapping` in
 `pipelines/{id}/streams/{stream_id}.json`. The implementation lives in
-`src/engine/data_transformer.py`: the assignments are compiled once by
-`compile_transform` into vectorized `pyarrow.compute` and applied to each Arrow
-batch.
+`src/engine/mapping.py`: the document is read once by `MappingDocument`,
+compiled once by `compile_mapping` into vectorized `pyarrow.compute`, and
+applied to each Arrow batch.
 
 ## Overview
 
 Each target field is built by exactly one **assignment**:
 
 ```
-Target Field (path + type)  ←  Value (const | expr AST)  ←  Optional validation
+Target Field (path + arrow_type)  ←  Value (constant | expression AST)  ←  Optional validation
 ```
 
 Expressions are a **structured AST** (JSON), not source strings. End
 users edit assignments through a UI; the engine compiles the AST once per
 stream and evaluates it as vectorized Arrow compute over each batch -- the
-data never leaves Arrow. Stream-level `source_to_generic` and
-`generic_to_destination` blocks describe canonical typing for the
-destination's schema contract and are independent of the assignment AST.
+data never leaves Arrow.
+
+The mapping document is **closed**: a key the engine does not compile is
+rejected by name rather than dropped, so a document written against a
+different contract pin fails with the offending field in the message instead
+of silently losing a column.
+
+## Paths Are Token Arrays
+
+A source path is an ordered array of field-name tokens, outermost first, and
+nothing splits a string anywhere along the route from the document to the
+batch read:
+
+- `["address", "city"]` reads `city` nested under `address`.
+- `["address.city"]` reads one top-level field whose name contains a dot.
+
+A **target** path is different: it is a single segment naming one field on the
+destination record root. Nesting under that field is declared with
+`arrow_type: "Object"` plus `properties` (or `"List"` plus `items`), which is
+also what builds the Arrow struct. A dotted target path is a compile error.
 
 ## Stream `mapping` Shape
 
 ```json
 {
   "mapping": {
-    "source_schema_id": "wise.transfers.v1",
-    "target_schema_id": "postgres.public_wise_transfers.v1",
     "assignments": [
       {
-        "value": { "kind": "expr", "expr": { "op": "get", "path": ["created"] } },
-        "target": { "type": "datetime", "nullable": true, "path": ["created"] }
+        "value": {
+          "kind": "expression",
+          "expression": { "op": "get", "path": ["created"] }
+        },
+        "target": {
+          "path": "created",
+          "arrow_type": "Timestamp(MICROSECOND, UTC)",
+          "nullable": true
+        }
       }
-    ],
-    "defaults": { "on_error": "dlq" },
-
-    "source_to_generic": {
-      "created": { "generic_type": "datetime" }
-    },
-    "generic_to_destination": {
-      "my-postgres": {
-        "created": { "destination_type": "datetime", "nullable": true }
-      }
-    }
+    ]
   }
 }
 ```
 
-- `assignments[]` is an ordered list, evaluated top to bottom. Each
-  assignment compiles to a closure typed `Callable[[pa.RecordBatch],
-  pa.Array]` (`_ExprFn` in `src/engine/data_transformer.py`), so the only
-  input any assignment can read is the **source batch** — no in-progress
-  result is threaded through evaluation at all, and earlier assignments
-  are therefore **not** visible to later ones. Treat every assignment as
-  a pure function of the source record.
-- `source_to_generic` / `generic_to_destination` are consumed by the
-  destination's `SchemaContract` for vectorized Arrow casting (see
-  `cdk/cdk/schema_contract.py`; details in
-  [`pyarrow-and-destinations.md`](pyarrow-and-destinations.md)).
-- `defaults.on_error` provides a stream-level default for assignments
-  that do not override `validate.on_error`.
+`assignments[]` is an ordered list, evaluated top to bottom. Each assignment
+compiles to a closure typed `Callable[[pa.RecordBatch], pa.Array]`, so the
+only input any assignment can read is the **source batch** — no in-progress
+result is threaded through evaluation at all, and earlier assignments are
+therefore **not** visible to later ones. Treat every assignment as a pure
+function of the source record.
 
 ## Assignments
+
+`value.kind` is required and discriminates the two value shapes; there is no
+default.
 
 ### Direct field copy
 
 ```json
 {
-  "value": { "kind": "expr", "expr": { "op": "get", "path": ["targetValue"] } },
-  "target": { "path": ["amount"], "type": "decimal", "nullable": false }
+  "value": {
+    "kind": "expression",
+    "expression": { "op": "get", "path": ["targetValue"] }
+  },
+  "target": { "path": "amount", "arrow_type": "Decimal128(12, 2)", "nullable": false }
 }
 ```
 
@@ -83,23 +93,41 @@ destination's schema contract and are independent of the assignment AST.
 
 ```json
 {
-  "value": { "kind": "const", "const": { "type": "string", "value": "100" } },
-  "target": { "path": ["status"], "type": "string", "nullable": false }
+  "value": {
+    "kind": "constant",
+    "constant": { "arrow_type": "Utf8", "value": "100" }
+  },
+  "target": { "path": "status", "arrow_type": "Utf8", "nullable": false }
 }
 ```
+
+The column is built at the **target**'s `arrow_type`; the constant's own
+`arrow_type` declares the literal's JSON kind for authoring tools.
 
 ### Nested object constant
 
 ```json
 {
   "value": {
-    "kind": "const",
-    "const": {
-      "type": "object",
-      "value": { "id": "5936402", "objectName": "CheckAccount" }
+    "kind": "constant",
+    "constant": {
+      "arrow_type": "Object",
+      "value": { "id": "5936402", "objectName": "CheckAccount" },
+      "properties": {
+        "id": { "arrow_type": "Utf8" },
+        "objectName": { "arrow_type": "Utf8" }
+      }
     }
   },
-  "target": { "path": ["checkAccount"], "type": "object", "nullable": false }
+  "target": {
+    "path": "checkAccount",
+    "arrow_type": "Object",
+    "nullable": false,
+    "properties": {
+      "id": { "arrow_type": "Utf8" },
+      "objectName": { "arrow_type": "Utf8" }
+    }
+  }
 }
 ```
 
@@ -108,8 +136,8 @@ destination's schema contract and are independent of the assignment AST.
 ```json
 {
   "value": {
-    "kind": "expr",
-    "expr": {
+    "kind": "expression",
+    "expression": {
       "op": "pipe",
       "args": [
         { "op": "get", "path": ["email"] },
@@ -118,7 +146,7 @@ destination's schema contract and are independent of the assignment AST.
       ]
     }
   },
-  "target": { "path": ["email"], "type": "string", "nullable": true }
+  "target": { "path": "email", "arrow_type": "Utf8", "nullable": true }
 }
 ```
 
@@ -127,8 +155,8 @@ destination's schema contract and are independent of the assignment AST.
 ```json
 {
   "value": {
-    "kind": "expr",
-    "expr": {
+    "kind": "expression",
+    "expression": {
       "op": "if",
       "args": [
         { "op": "eq", "args": [
@@ -140,14 +168,13 @@ destination's schema contract and are independent of the assignment AST.
       ]
     }
   },
-  "target": { "path": ["status"], "type": "string", "nullable": false }
+  "target": { "path": "status", "arrow_type": "Utf8", "nullable": false }
 }
 ```
 
 ## Expression AST
 
-Implemented `op` values (compiled by `_compile_expr` in
-`data_transformer.py`):
+Implemented `op` values:
 
 | `op` | Description |
 |------|-------------|
@@ -173,7 +200,7 @@ not feed still fails the batch.
 
 ### Vectorized evaluation: known divergences
 
-The transform is a single Arrow-native path (`compile_transform`); each op is a
+The transform is a single Arrow-native path (`compile_mapping`); each op is a
 `pyarrow.compute` kernel applied to a whole column. This is deliberately steered
 back to the former per-record behavior at the edges (null equality, string
 truthiness, boolean/ISO handling), but a few differences are inherent to typed,
@@ -194,7 +221,7 @@ vectorized evaluation and are accepted:
 
 ## Function Catalog
 
-Built-in functions (`_FUNCTION_CATALOG` in `data_transformer.py`):
+Built-in functions:
 
 | Name | Version | Purpose |
 |------|---------|---------|
@@ -216,33 +243,29 @@ behaviour.
 ```json
 "validate": {
   "rules": [
-    { "type": "not_null", "message": "id must be present" },
-    { "type": "min_length", "value": 1 }
-  ],
-  "on_error": "dlq"
+    { "type": "not_null", "field": "id", "message": "id must be present" },
+    { "type": "min_length", "field": "id", "value": 1 }
+  ]
 }
 ```
 
-Implemented rule types (`_run_validation` in `data_transformer.py`), each
-compiled to a vectorized boolean mask over the batch. A null value is exempt
-from every rule except `not_null`:
+Implemented rule types, each compiled to a vectorized boolean mask over the
+batch. A null value is exempt from every rule except `not_null`:
 
-| `type` | Required keys | Notes |
-|--------|---------------|-------|
-| `not_null` (alias `required`) | — | Fails where the value is null |
-| `min_length` | `value` | Unicode length of the value as a string |
-| `max_length` | `value` | Same |
-| `pattern` | `value` | Anchored regex match (`^(?:pattern)`) against the value as a string |
-| `range` | `min` and/or `max` | Numeric comparison |
-| `in_list` | `value` | Value must be in the supplied list |
+| `type` | `value` | Notes |
+|--------|---------|-------|
+| `not_null` (alias `required`) | omitted | Fails where the value is null |
+| `min_length` | number | Unicode length of the value as a string |
+| `max_length` | number | Same |
+| `pattern` | string | Anchored regex match (`^(?:pattern)`) against the value as a string |
+| `range` | object with `min` and/or `max` | Numeric comparison |
+| `in_list` | array | Value must be in the supplied list |
 
 Validation is **batch-wide and fail-loud**: if any row fails any rule, the
 whole batch fails with a `TransformationError` naming the column and the
 offending rows. The transform does not route individual records — it surfaces
 the failure, and the stream-level `error_strategy` decides retry vs DLQ vs skip
 for the failed batch (see [`engine-architecture.md`](engine-architecture.md)).
-The `validate.on_error` and stream `defaults.on_error` fields are carried in the
-stream contract for the authoring UI and control plane.
 
 ## Type Conversion
 

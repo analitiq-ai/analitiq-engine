@@ -67,6 +67,7 @@ from src.config.schema_validator import ContractValidationError, EndpointDocumen
 from src.config.schema_validator import validate as validate_artifact
 from src.config.schema_validator import validate_bundle
 from src.config.utils import load_json_file
+from src.engine.mapping import MappingDocument
 from src.models.resolved import (
     BatchingConfig,
     ErrorHandlingConfig,
@@ -842,7 +843,7 @@ class PipelineConfigPrep:
             tags=document.get("tags") or [],
             source=resolved_source,
             destinations=resolved_destinations,
-            mapping=document.get("mapping") or {"assignments": []},
+            mapping=MappingDocument.parse(document.get("mapping") or {}),
         )
 
     # ------------------------------------------------------------------
