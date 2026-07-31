@@ -427,106 +427,137 @@ def _expect_node(expr: Any) -> str:
     return op
 
 
+def _variadic(expr: Any, op: str) -> list[_ExprFn]:
+    """Compile a variadic node's args, refusing an empty list.
+
+    Four ops take one-or-more args and each used to spell this refusal
+    itself, so the message drifted with the op name in front of it.
+    """
+    args = expr.get("args") or []
+    if not args:
+        raise TransformationError(f"{op} expression requires at least 1 arg, got 0")
+    return [_compile_expr(a) for a in args]
+
+
+def _compile_get(expr: Any, _op: str) -> _ExprFn:
+    path = _expect_token_path(expr.get("path"))
+    return lambda batch: _get_path(batch, path)
+
+
+def _compile_const_node(expr: Any, _op: str) -> _ExprFn:
+    value = expr.get("value")
+    return lambda batch: pa.array([value] * batch.num_rows)
+
+
+def _compile_pipe(expr: Any, op: str) -> _ExprFn:
+    args = expr.get("args") or []
+    if not args:
+        raise TransformationError(f"{op} expression requires at least 1 arg, got 0")
+    seed = _compile_expr(args[0])
+    stages = [_compile_fn(node) for node in args[1:]]
+
+    def run_pipe(batch: pa.RecordBatch) -> pa.Array:
+        value = seed(batch)
+        for stage in stages:
+            value = stage(value)
+        return value
+
+    return run_pipe
+
+
+def _compile_bare_fn(expr: Any, _op: str) -> _ExprFn:
+    # A top-level fn (e.g. ``now()``) with no pipe seed: the per-record
+    # evaluator applied it to a ``None`` input, so here it runs over an
+    # all-null column. Zero-input functions like ``now`` ignore it.
+    fn = _compile_fn(expr)
+    return lambda batch: fn(pa.nulls(batch.num_rows))
+
+
+def _compile_if(expr: Any, op: str) -> _ExprFn:
+    cond, then_, else_ = (_compile_expr(a) for a in _expect_args(expr, op, 3))
+    return lambda batch: _if_else(cond(batch), then_(batch), else_(batch))
+
+
+def _compile_eq(expr: Any, op: str) -> _ExprFn:
+    left, right = (_compile_expr(a) for a in _expect_args(expr, op, 2))
+    return lambda batch: _equal(left(batch), right(batch))
+
+
+def _compile_neq(expr: Any, op: str) -> _ExprFn:
+    left, right = (_compile_expr(a) for a in _expect_args(expr, op, 2))
+    return lambda batch: pc.invert(_equal(left(batch), right(batch)))
+
+
+#: The ordering kernels, keyed by the op that selects them.
+_ORDER_KERNELS: Final[dict[str, Callable[..., Any]]] = {
+    "gt": pc.greater,
+    "gte": pc.greater_equal,
+    "lt": pc.less,
+    "lte": pc.less_equal,
+}
+
+
+def _compile_order(expr: Any, op: str) -> _ExprFn:
+    left, right = (_compile_expr(a) for a in _expect_args(expr, op, 2))
+    kernel = _ORDER_KERNELS[op]
+    return lambda batch: _compare(kernel, left(batch), right(batch), op)
+
+
+def _compile_bool_reduce(expr: Any, op: str) -> _ExprFn:
+    operands = _variadic(expr, op)
+    reduce = pc.and_ if op == "and" else pc.or_
+    return lambda batch: _bool_reduce(reduce, [o(batch) for o in operands])
+
+
+def _compile_not(expr: Any, op: str) -> _ExprFn:
+    inner = _compile_expr(_expect_args(expr, op, 1)[0])
+    return lambda batch: pc.invert(_truthy(inner(batch)))
+
+
+def _compile_concat(expr: Any, op: str) -> _ExprFn:
+    parts = _variadic(expr, op)
+    return lambda batch: _concat([p(batch) for p in parts])
+
+
+def _compile_coalesce(expr: Any, op: str) -> _ExprFn:
+    parts = _variadic(expr, op)
+    return lambda batch: _coalesce([p(batch) for p in parts])
+
+
+#: One compiler per op. Keyed rather than branched so the set of compilable
+#: ops is a value the drift guard below can compare against the grammar --
+#: an op added to `_EXPR_NODE_KEYS` without a compiler fails at import, not
+#: on the batch that first carries it.
+_EXPR_COMPILERS: Final[dict[str, Callable[[Any, str], _ExprFn]]] = {
+    "get": _compile_get,
+    "const": _compile_const_node,
+    "pipe": _compile_pipe,
+    "fn": _compile_bare_fn,
+    "if": _compile_if,
+    "eq": _compile_eq,
+    "neq": _compile_neq,
+    "gt": _compile_order,
+    "gte": _compile_order,
+    "lt": _compile_order,
+    "lte": _compile_order,
+    "and": _compile_bool_reduce,
+    "or": _compile_bool_reduce,
+    "not": _compile_not,
+    "concat": _compile_concat,
+    "coalesce": _compile_coalesce,
+}
+
+if set(_EXPR_COMPILERS) != set(_EXPR_NODE_KEYS):
+    raise AssertionError(
+        "every grammar op needs a compiler and vice versa; unmatched: "
+        f"{sorted(set(_EXPR_COMPILERS) ^ set(_EXPR_NODE_KEYS))}"
+    )
+
+
 def _compile_expr(expr: Any) -> _ExprFn:
     """Compile one expression AST node into a vectorized column builder."""
     op = _expect_node(expr)
-
-    match op:
-        case "get":
-            path = _expect_token_path(expr.get("path"))
-            return lambda batch: _get_path(batch, path)
-
-        case "const":
-            value = expr.get("value")
-            return lambda batch: pa.array([value] * batch.num_rows)
-
-        case "pipe":
-            args = expr.get("args") or []
-            if not args:
-                raise TransformationError(
-                    f"pipe expression requires at least 1 arg, got {len(args)}"
-                )
-            seed = _compile_expr(args[0])
-            fns = [_compile_fn(node) for node in args[1:]]
-
-            def run_pipe(batch: pa.RecordBatch) -> pa.Array:
-                value = seed(batch)
-                for fn in fns:
-                    value = fn(value)
-                return value
-
-            return run_pipe
-
-        case "fn":
-            # A top-level fn (e.g. ``now()``) with no pipe seed: the per-record
-            # evaluator applied it to a ``None`` input, so here it runs over an
-            # all-null column. Zero-input functions like ``now`` ignore it.
-            fn = _compile_fn(expr)
-            return lambda batch: fn(pa.nulls(batch.num_rows))
-
-        case "if":
-            args = _expect_args(expr, op, 3)
-            cond, then_, else_ = (_compile_expr(a) for a in args)
-            return lambda batch: _if_else(cond(batch), then_(batch), else_(batch))
-
-        case "eq":
-            args = _expect_args(expr, op, 2)
-            left, right = (_compile_expr(a) for a in args)
-            return lambda batch: _equal(left(batch), right(batch))
-
-        case "neq":
-            args = _expect_args(expr, op, 2)
-            left, right = (_compile_expr(a) for a in args)
-            return lambda batch: pc.invert(_equal(left(batch), right(batch)))
-
-        case "gt" | "gte" | "lt" | "lte":
-            args = _expect_args(expr, op, 2)
-            left, right = (_compile_expr(a) for a in args)
-            kernel = {
-                "gt": pc.greater,
-                "gte": pc.greater_equal,
-                "lt": pc.less,
-                "lte": pc.less_equal,
-            }[op]
-            return lambda batch: _compare(kernel, left(batch), right(batch), op)
-
-        case "and" | "or":
-            args = expr.get("args") or []
-            if not args:
-                raise TransformationError(
-                    f"{op} expression requires at least 1 arg, got 0"
-                )
-            operands = [_compile_expr(a) for a in args]
-            reduce = pc.and_ if op == "and" else pc.or_
-            return lambda batch: _bool_reduce(reduce, [o(batch) for o in operands])
-
-        case "not":
-            args = _expect_args(expr, op, 1)
-            inner = _compile_expr(args[0])
-            return lambda batch: pc.invert(_truthy(inner(batch)))
-
-        case "concat":
-            args = expr.get("args") or []
-            if not args:
-                raise TransformationError(
-                    "concat expression requires at least 1 arg, got 0"
-                )
-            parts = [_compile_expr(a) for a in args]
-            return lambda batch: _concat([p(batch) for p in parts])
-
-        case "coalesce":
-            args = expr.get("args") or []
-            if not args:
-                raise TransformationError(
-                    "coalesce expression requires at least 1 arg, got 0"
-                )
-            parts = [_compile_expr(a) for a in args]
-            return lambda batch: _coalesce([p(batch) for p in parts])
-
-        case _:
-            # Reached only if `_EXPR_NODE_KEYS` grows an op and this match does
-            # not: an op the engine cannot compile must fail, never pass.
-            raise TransformationError(f"expression op {op!r} has no compiler")
+    return _EXPR_COMPILERS[op](expr, op)
 
 
 def _compile_fn(node: Any) -> Callable[[pa.Array], pa.Array]:
