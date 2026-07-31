@@ -7,11 +7,11 @@ Locks the surface the public run-status endpoint depends on:
 - The boundary that knows the cause says so. A ``FailureTag`` stamped at the
   raise site drives ``classify_exception`` verbatim, and an exception that
   arrives untagged is an engine defect reported as INTERNAL -- never a code
-  reverse-engineered from the exception's type or message (#429, decision 6.1).
+  reverse-engineered from the exception's type or message.
 - A declared category outranks the stage default, and is range-checked rather
-  than trusted (#429, decision 6.3).
-- ``FailureCategory`` and ``ErrorCode`` stay separate vocabularies (#429,
-  decision 6.2).
+  than trusted.
+- ``FailureCategory`` and ``ErrorCode`` stay separate vocabularies, so a
+  connector can never name a customer-facing outcome.
 - ``customer_message`` / ``error_message`` carry no exception text.
 - ``build_error_detail`` emits only allowlisted-safe tokens (stage labels, error
   codes, exception class names) -- never message text, so nothing to scrub.
@@ -61,12 +61,12 @@ def _make(name: str, base: type = Exception, message: str = "") -> BaseException
 
 
 # --------------------------------------------------------------------------- #
-# Decision 6.1 -- every boundary tags, and an untagged failure is INTERNAL
+# Every boundary tags, and an untagged failure is INTERNAL
 # --------------------------------------------------------------------------- #
 
 
 def test_untagged_exception_is_internal_whatever_it_says():
-    # The heart of 6.1. Each message below used to classify as a different
+    # The heart of it. Each message below used to classify as a different
     # code by phrase; with the tables gone they are all one thing: a failure
     # that got past every boundary without being tagged.
     for message in (
@@ -129,7 +129,7 @@ def test_tag_survives_wrapping_via_original_error():
 
 def test_tag_failure_does_not_overwrite_an_existing_chain_tag():
     # The no-overwrite invariant is enforced in tag_failure itself, so an outer
-    # stage boundary calling it unconditionally (6.1) cannot clobber a precise
+    # stage boundary calling it unconditionally cannot clobber a precise
     # inner tag -- which is what makes unconditional tagging safe.
     inner = tag_failure(
         RuntimeError("worker config error"),
@@ -194,7 +194,7 @@ def test_self_referential_chain_does_not_hang():
 
 
 # --------------------------------------------------------------------------- #
-# Decision 6.1 -- structural: no tables survive, and every boundary tags
+# Structural: no tables survive, and every boundary tags
 # --------------------------------------------------------------------------- #
 #
 # Justified by history: six commits authored the phrase table, and one of them
@@ -263,7 +263,7 @@ def test_module_matches_no_text():
 
 
 def test_every_failure_stage_has_a_tagging_boundary():
-    # 6.1 requires all four boundaries to tag. A stage nothing tags is a hole
+    # All four boundaries must tag. A stage nothing tags is a hole
     # through which failures reach the runner untagged and read as INTERNAL.
     sources = "\n".join(
         path.read_text() for path in Path("src").rglob("*.py") if path.is_file()
@@ -275,7 +275,7 @@ def test_every_failure_stage_has_a_tagging_boundary():
 
 
 # --------------------------------------------------------------------------- #
-# Decision 6.2 -- FailureCategory and ErrorCode stay separate vocabularies
+# FailureCategory and ErrorCode stay separate vocabularies
 # --------------------------------------------------------------------------- #
 
 
@@ -318,7 +318,7 @@ def test_not_ready_and_write_rejected_stay_distinct():
 
 
 # --------------------------------------------------------------------------- #
-# Decision 6.3 -- a declaration is signal, not trust
+# A declaration is signal, not trust
 # --------------------------------------------------------------------------- #
 
 
@@ -345,7 +345,7 @@ def test_classify_destination_failure_reads_declared_category(category, expected
 
 
 def test_undeclared_destination_failure_resolves_from_the_stage():
-    # 6.3's other half: UNSPECIFIED resolves from the raising stage, never
+    # The other half: UNSPECIFIED resolves from the raising stage, never
     # from the summary. Each summary below used to steer the verdict by
     # phrase; now only the stage speaks.
     for summary in (
@@ -464,7 +464,7 @@ def test_destination_http_code_never_read_as_source_auth():
 
 
 # --------------------------------------------------------------------------- #
-# Decision 6.4 -- INTERNAL is expressible on the wire
+# INTERNAL is expressible on the wire
 # --------------------------------------------------------------------------- #
 
 
@@ -480,7 +480,7 @@ def test_internal_category_exists_on_both_sides_of_the_wire():
 def test_internal_verdict_crosses_the_wire_intact():
     # Without a wire member, an engine-side INTERNAL verdict would have to be
     # sent as WRITE_REJECTED or UNSPECIFIED -- impersonating a user-owned
-    # failure, which is the gap 6.2's split exists to prevent.
+    # failure, which is the gap the two-vocabulary split exists to prevent.
     from src.grpc.generated.analitiq.v1 import BatchAck, SchemaAck
 
     ack = BatchAck(failure_category=FailureCategory.FAILURE_CATEGORY_INTERNAL)
@@ -600,7 +600,7 @@ def test_error_detail_includes_stage_and_code_for_tagged():
 
 
 def test_error_detail_keeps_the_side_an_internal_code_does_not_name():
-    # The cost of 6.1's INTERNAL default is that the code stops naming the
+    # The cost of the INTERNAL default is that the code stops naming the
     # side. The stage label carries it instead, so an undeclared source
     # failure is still triageable.
     exc = tag_failure(

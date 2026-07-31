@@ -127,8 +127,8 @@ class WorkerReadable:
                         # site; its declared category (issue #401) names
                         # the published source code directly — no engine
                         # re-derivation. transient/write_rejected (and an
-                        # empty field) name no code and fall to the
-                        # text-split/tag flow below.
+                        # empty field) name no code, so the failure takes
+                        # the stage default the extract boundary tags.
                         declared_code = (
                             source_code_for_declared_category(err.declared_category)
                             if err.declared_category

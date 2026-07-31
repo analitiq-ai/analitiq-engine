@@ -434,8 +434,9 @@ Properties:
   typed errors; the write ack ladder resolves its typed engine errors
   (type-map, dialect, TLS — engine contracts a driver map must not
   re-route) → declared map → class-name heuristic; the ADBC boundary and
-  both HTTP sites resolve declared map → built-in heuristic. The
-  engine-side classifiers log when a text heuristic decided.
+  both HTTP sites resolve declared map → built-in heuristic. These are
+  CDK-side, at the boundary that caught the driver error; the engine's own
+  classification reads no exception type or text at all.
 - **`limits` consumption.** The executemany stage landing chunks rows by
   `floor(max_bind_params / column_count)` (`StageWritePlan.rows_per_statement`,
   applied identically by both transport backends); stage-name rendering and

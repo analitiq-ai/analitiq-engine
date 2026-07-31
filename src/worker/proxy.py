@@ -69,18 +69,51 @@ def _known_ack_status(status: int) -> AckStatus | int:
         return int(status)
 
 
+#: Who owns a worker's failed handshake, by what the shell observed. The
+#: shell sits between the engine and an untrusted worker process, so it is
+#: the only party that can tell these apart -- and each means something
+#: different to the customer (issue #429). A worker that never answered
+#: establishes nothing about their configuration (NOT_READY); one that
+#: answered with something that is not a SchemaAck is a defective worker or
+#: a protocol bug, which nobody but us owns (INTERNAL).
+_HANDSHAKE_OWNERS = {
+    SchemaHandshakeOutcome.TRANSPORT_FAILURE: (
+        FailureCategory.FAILURE_CATEGORY_NOT_READY
+    ),
+    SchemaHandshakeOutcome.PROTOCOL_VIOLATION: (
+        FailureCategory.FAILURE_CATEGORY_INTERNAL
+    ),
+}
+
+# Totality, enforced at import: this runs while a handshake is already
+# failing, so an unmapped outcome must not be the thing that raises there.
+_unowned = (
+    set(SchemaHandshakeOutcome)
+    - {SchemaHandshakeOutcome.ACCEPTED, SchemaHandshakeOutcome.REJECTED}
+    - set(_HANDSHAKE_OWNERS)
+)
+if _unowned:
+    raise RuntimeError(
+        f"_HANDSHAKE_OWNERS must own every non-rejection outcome; "
+        f"missing: {sorted(o.value for o in _unowned)}"
+    )
+
+
 def _forwarded_schema_category(client: DestinationGRPCClient) -> FailureCategory:
     """Return who owns a worker's failed handshake, for the engine-facing ack.
 
-    The shell sits between the engine and an untrusted worker process, so it
-    is the only party that can tell "the worker refused this schema" from
-    "the worker never answered". A worker that answered keeps its own
-    declaration when it made one, and otherwise owns the refusal as a config
-    defect. A worker that did not answer establishes nothing about the
-    customer's configuration, which is exactly NOT_READY (issue #429).
+    A worker that answered keeps its own declaration when it made one, and
+    otherwise owns the refusal as a config defect -- it was reachable and
+    said no. Anything else is read off :data:`_HANDSHAKE_OWNERS`.
     """
-    if client.schema_handshake_outcome is not SchemaHandshakeOutcome.REJECTED:
-        return FailureCategory.FAILURE_CATEGORY_NOT_READY
+    outcome = client.schema_handshake_outcome
+    if outcome is SchemaHandshakeOutcome.ACCEPTED:
+        raise ValueError(
+            "_forwarded_schema_category needs a failed handshake; the "
+            "worker accepted this schema"
+        )
+    if outcome is not SchemaHandshakeOutcome.REJECTED:
+        return _HANDSHAKE_OWNERS[outcome]
     declared = client.schema_failure_category
     if declared is FailureCategory.FAILURE_CATEGORY_UNSPECIFIED:
         return FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
