@@ -18,7 +18,7 @@ import pytest
 
 from cdk.types import FailureCategory
 from src.engine.engine import StreamingEngine
-from src.engine.exceptions import StreamProcessingError
+from src.engine.exceptions import StreamProcessingError, TransformationError
 from src.engine.mapping import MappingDocument
 from src.engine.stream_processor import StreamProcessor
 from src.grpc.generated.analitiq.v1 import AckStatus
@@ -71,12 +71,13 @@ def _make_processor(
     retry_delay: float = 0.01,
     pipeline_metrics: PipelineMetrics | None = None,
     state_manager: Any | None = None,
+    mapping: MappingDocument | None = None,
 ) -> StreamProcessor:
     """Build a StreamProcessor wired to mocks, as run() would have wired it."""
     processor = StreamProcessor(
         stream_id="test-stream-001",
         stream_config=stream_config,
-        mapping=MappingDocument(),
+        mapping=mapping if mapping is not None else MappingDocument(),
         pipeline_config={"pipeline_id": "test-pipeline", "name": "Test Pipeline"},
         pipeline_id="test-pipeline",
         state_manager=state_manager if state_manager is not None else MagicMock(),
@@ -1375,3 +1376,77 @@ class TestRunnerPartialRunReporting:
             if record.levelno == logging.WARNING
         ]
         assert any("Could not read engine counters" in w for w in warnings)
+
+
+@pytest.mark.integration
+class TestMappingCompileFailureIsReported:
+    """A mapping the engine cannot compile still emits its stream record.
+
+    Compiling during construction put the failure outside ``run()``'s
+    try/finally, so the stream was counted failed at the pipeline level
+    while the per-stream record -- the one place an operator would look
+    for the reason -- was never emitted (raised on PR #444).
+    """
+
+    @pytest.mark.asyncio
+    async def test_uncompilable_mapping_emits_a_stream_metrics_record(
+        self,
+        caplog,
+        monkeypatch,
+        mock_grpc_client: AsyncMock,
+        sample_stream_config: dict[str, Any],
+        temp_dir: str,
+    ):
+        from src.state.dead_letter_queue import DeadLetterQueue
+
+        monkeypatch.setenv("METRICS_ENABLED", "true")
+
+        # An unknown function name: the document parses (the catalog is not a
+        # document-level fact), and compile_mapping is what refuses it.
+        mapping = MappingDocument.model_validate(
+            {
+                "assignments": [
+                    {
+                        "target": {
+                            "path": "id",
+                            "arrow_type": "Utf8",
+                            "nullable": True,
+                        },
+                        "value": {
+                            "kind": "expression",
+                            "expression": {
+                                "op": "pipe",
+                                "args": [
+                                    {"op": "get", "path": ["id"]},
+                                    {
+                                        "op": "fn",
+                                        "name": "nonexistent_fn",
+                                        "version": 1,
+                                        "args": [],
+                                    },
+                                ],
+                            },
+                        },
+                    }
+                ]
+            }
+        )
+        # Through the constructor, which is where the defect lived: compiling
+        # there raised before run()'s try/finally could emit anything.
+        processor = _make_processor(
+            dict(sample_stream_config),
+            mock_grpc_client,
+            DeadLetterQueue(f"{temp_dir}/dlq"),
+            mapping=mapping,
+        )
+
+        with caplog.at_level(logging.INFO, logger="src.state.log_emitter"):
+            with pytest.raises(TransformationError, match="Unknown function"):
+                await processor.run()
+
+        emitted = _emitted_metrics_payloads(caplog)
+        assert "stream" in emitted, (
+            "a mapping that fails to compile must still emit its stream "
+            "metrics record; it is the only report of why the stream failed"
+        )
+        assert emitted["stream"]["status"] != "success"

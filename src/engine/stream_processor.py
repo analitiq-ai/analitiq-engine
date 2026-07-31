@@ -152,13 +152,13 @@ class StreamProcessor:
         # an unversioned or minimally-built config stays runnable.
         self.stream_version = stream_config.get("stream_version", 1)
         self.stream_config = stream_config
-        # The assignments are static, so the transform is compiled here, once,
-        # into vectorized Arrow compute -- and a mapping the engine cannot
-        # compile fails before a single batch is read. A stream with no
-        # assignments has no transform: batches pass through untouched.
-        self.transform: CompiledTransform | None = (
-            compile_mapping(mapping) if mapping.assignments else None
-        )
+        # Held, not compiled: compiling here would raise during construction,
+        # outside run()'s try/finally, so a mapping the engine cannot compile
+        # would fail the stream without emitting its metrics record -- the one
+        # place an operator would look for the reason. run() compiles it once,
+        # still before a single batch is read.
+        self.mapping = mapping
+        self.transform: CompiledTransform | None = None
         self.pipeline_config = pipeline_config
         self.pipeline_id = pipeline_id
         self.state_manager = state_manager
@@ -207,6 +207,15 @@ class StreamProcessor:
         error_detail: str | None = None
 
         try:
+            # The assignments are static, so this compiles once into
+            # vectorized Arrow compute and a mapping the engine cannot compile
+            # fails before a single batch is read. Inside the try so that
+            # failure is classified and emitted like any other stream failure.
+            # A stream with no assignments has no transform: batches pass
+            # through untouched.
+            if self.mapping.assignments:
+                self.transform = compile_mapping(self.mapping)
+
             source_cfg = self.stream_config["source"]
             destination_cfg = self.stream_config["destination"]
 
