@@ -422,6 +422,49 @@ are in
 | New formatter (e.g. Avro) | New class in `src/destination/formatters/` |
 | Brand-new handler family | Subclass `BaseDestinationHandler` and `destination_registry.register(...)` |
 
+### What a new handler implements
+
+`BaseDestinationHandler.write_batch` is the shared preamble: the readiness
+guard, the empty-batch success that still advances the cursor, one
+materialisation of the Arrow batch, and the mapping from a raised failure to
+an ack. A handler supplies only the parts that differ from every other sink:
+
+| Member | Purpose |
+|--------|---------|
+| `land(batch)` | Put the records in the sink; return how many landed. Called only for a ready handler and a non-empty batch. |
+| `not_ready_reason(stream_id)` | Why a batch cannot be taken right now, or `None`. A rejection here attempted nothing, so it acks `NOT_READY`. |
+| `land_empty(batch)` | Override only for a per-batch side effect that must happen even with no records — a full refresh whose truncate is keyed to the first batch. |
+| `unexpected_write_failure(error, …)` | Override to consult a declared error map before the default fatal verdict. |
+| `connect` / `disconnect` / `configure_schema` / `health_check` / `connector_type` | The lifecycle, unchanged. |
+
+`land` receives a `LandingBatch`. It carries the batch both ways round —
+`records` for sinks that write dicts, `record_batch` for sinks that stay
+Arrow-native — and `records` materialises lazily, so an Arrow-native sink is
+not taxed for a representation it never reads.
+
+To refuse a batch, raise `BatchRejected` with the reason and, when the sink
+knows it, a `FailureCategory`. It is fatal and destination-owned by default;
+a sink that means something else says so. A sink that lands rows one request
+at a time passes `records_written` and `failed_record_ids` so the engine
+dead-letters exactly what did not land instead of retrying rows that did.
+
+An `OSError` needs no handling: one errno table judges every sink that writes
+through a file descriptor, so a full volume is fatal and an unlisted errno is
+retryable, identically for files and stdout.
+
+`land` and `write_batch` are alternatives — implement one. A handler that
+implements neither is refused when its class is defined, not at its first
+batch.
+
+### Forwarded capabilities
+
+A handler that relays another process's advertisement (the destination shell's
+worker proxy) returns it from `declared_capabilities` and declares
+`forwards_capabilities`. Every capability below then reads off that one
+object. Such a handler advertises nothing until it has something to relay: the
+neutral defaults would have it claim, before it has reached its worker,
+capabilities the worker may not have.
+
 ## See Also
 
 - [`source-config.md`](source-config.md) — source-side config and pipeline layout
