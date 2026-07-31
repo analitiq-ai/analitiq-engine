@@ -1,15 +1,17 @@
-"""Unit tests for customer-safe pipeline error classification (issues #258, #264).
+"""Unit tests for customer-safe pipeline error classification.
+
+Issues #258, #264, #351, #401, #429.
 
 Locks the surface the public run-status endpoint depends on:
 
-- Structured-first: a ``FailureTag`` stamped at the raise site drives
-  ``classify_exception`` deterministically and outranks any conflicting text.
-- ``classify_source_extract`` makes the one residual source-only split
-  (auth/unreachable/rate), and ``classify_handshake_failure`` the destination
-  transport-vs-config split, for opaque text the engine controls.
-- The name/phrase heuristics still classify an *untagged* exception (the
-  defensive fallback) across the real engine/CDK hierarchy and the gRPC worker
-  boundary.
+- The boundary that knows the cause says so. A ``FailureTag`` stamped at the
+  raise site drives ``classify_exception`` verbatim, and an exception that
+  arrives untagged is an engine defect reported as INTERNAL -- never a code
+  reverse-engineered from the exception's type or message.
+- A declared category outranks the stage default, and is range-checked rather
+  than trusted.
+- ``FailureCategory`` and ``ErrorCode`` stay separate vocabularies, so a
+  connector can never name a customer-facing outcome.
 - ``customer_message`` / ``error_message`` carry no exception text.
 - ``build_error_detail`` emits only allowlisted-safe tokens (stage labels, error
   codes, exception class names) -- never message text, so nothing to scrub.
@@ -17,7 +19,10 @@ Locks the surface the public run-status endpoint depends on:
 
 from __future__ import annotations
 
+import ast
 import json
+import logging
+from pathlib import Path
 
 import pytest
 
@@ -26,39 +31,79 @@ from src.state.error_classification import (
     ErrorCode,
     FailureStage,
     FailureTag,
+    SchemaHandshakeOutcome,
     build_error_detail,
+    classify_destination_failure,
     classify_exception,
     classify_for_metrics,
     classify_handshake_failure,
-    classify_source_extract,
+    code_for_declared_category,
     customer_message,
+    default_code_for_stage,
     detail_for_code,
-    is_local_io_error,
+    dominant_error_code,
     read_failure_tag,
     tag_failure,
 )
 
 pytestmark = pytest.mark.unit
 
+_MODULE_PATH = Path("src/state/error_classification.py")
+
 
 def _make(name: str, base: type = Exception, message: str = "") -> BaseException:
     """Build an instance of a dynamically named exception class.
 
-    Driver errors (PEP-249 ``IntegrityError`` etc.) and the worker-boundary
-    re-raises are matched by class name, so a synthetic class with the right
-    name exercises the same path as the real one without importing every driver.
+    Nothing classifies by class name any more; the synthetic classes exist so a
+    test can assert that a *suggestive* name or message changes nothing.
     """
     return type(name, (base,), {})(message)
 
 
 # --------------------------------------------------------------------------- #
-# Structured tags: the primary, deterministic path (issue #264)
+# Every boundary tags, and an untagged failure is INTERNAL
 # --------------------------------------------------------------------------- #
 
 
-def test_tag_outranks_conflicting_text():
-    # The message would classify SOURCE_UNREACHABLE by phrase, but a stage tag is
-    # authoritative: the engine knew it was a destination-load failure.
+def test_untagged_exception_is_internal_whatever_it_says():
+    # The heart of it. Each message below used to classify as a different
+    # code by phrase; with the tables gone they are all one thing: a failure
+    # that got past every boundary without being tagged.
+    for message in (
+        "password authentication failed for user 'analitiq'",
+        "could not connect to server: Connection refused",
+        "429 too many requests",
+        "duplicate key value violates unique constraint",
+        "request returned 401",
+    ):
+        assert classify_exception(RuntimeError(message)) is ErrorCode.INTERNAL
+    assert classify_exception(ConnectionRefusedError("refused")) is ErrorCode.INTERNAL
+    assert classify_exception(_make("UnmappedTypeError")) is ErrorCode.INTERNAL
+
+
+def test_untagged_exception_is_logged_as_a_missing_boundary(caplog):
+    # An untagged failure is a defect to fix, not a routine fallback, so it is
+    # logged at ERROR rather than swallowed into a plausible code.
+    with caplog.at_level(logging.ERROR, logger="src.state.error_classification"):
+        classify_exception(RuntimeError("gremlins"))
+    assert any("missing its boundary tag" in r.message for r in caplog.records)
+
+
+def test_every_stage_names_a_code():
+    assert default_code_for_stage(FailureStage.CONFIG) is ErrorCode.CONFIG_INVALID
+    assert default_code_for_stage(FailureStage.SOURCE_EXTRACT) is ErrorCode.INTERNAL
+    assert default_code_for_stage(FailureStage.TRANSFORM) is ErrorCode.CONFIG_INVALID
+    assert (
+        default_code_for_stage(FailureStage.DESTINATION_LOAD)
+        is ErrorCode.DESTINATION_WRITE_FAILED
+    )
+    # Totality: the boundaries all tag through this table, so a stage with no
+    # default would raise inside the failure-reporting path.
+    for stage in tuple(FailureStage):
+        assert isinstance(default_code_for_stage(stage), ErrorCode)
+
+
+def test_tag_is_used_verbatim_whatever_the_text_says():
     exc = _make("RuntimeError", message="connection refused")
     tag_failure(
         exc,
@@ -84,7 +129,8 @@ def test_tag_survives_wrapping_via_original_error():
 
 def test_tag_failure_does_not_overwrite_an_existing_chain_tag():
     # The no-overwrite invariant is enforced in tag_failure itself, so an outer
-    # stage boundary calling it cannot clobber a precise inner tag.
+    # stage boundary calling it unconditionally cannot clobber a precise
+    # inner tag -- which is what makes unconditional tagging safe.
     inner = tag_failure(
         RuntimeError("worker config error"),
         code=ErrorCode.CONFIG_INVALID,
@@ -141,85 +187,155 @@ def test_code_priority_ranks_every_error_code():
     assert set(_CODE_PRIORITY) == set(ErrorCode)
 
 
+def test_self_referential_chain_does_not_hang():
+    exc = RuntimeError("loop")
+    exc.__cause__ = exc  # pathological; must not spin
+    assert classify_exception(exc) is ErrorCode.INTERNAL
+
+
 # --------------------------------------------------------------------------- #
-# classify_source_extract: the source-only fine split (issue #264)
+# Structural: no tables survive, and every boundary tags
+# --------------------------------------------------------------------------- #
+#
+# Justified by history: six commits authored the phrase table, and one of them
+# was titled "replace heuristic classification" while 104 entries survived it.
+# A behavioural test cannot catch a table that is reintroduced beside the
+# structured path, because both would agree on the cases anyone thought to
+# write down.
+
+
+def _module_ast() -> ast.Module:
+    return ast.parse(_MODULE_PATH.read_text())
+
+
+def test_no_phrase_or_class_name_table_exists():
+    tree = _module_ast()
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        value = node.value
+        # A "table" is any literal collection of three or more strings: the
+        # shape both _CONFIG_PHRASES (a tuple) and _CONFIG_NAMES (a
+        # frozenset(...) call over a set literal) had.
+        literals = []
+        if isinstance(value, (ast.Tuple, ast.Set, ast.List)):
+            literals = value.elts
+        elif (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "frozenset"
+        ):
+            for arg in value.args:
+                if isinstance(arg, (ast.Set, ast.Tuple, ast.List)):
+                    literals = arg.elts
+        strings = [
+            e
+            for e in literals
+            if isinstance(e, ast.Constant) and isinstance(e.value, str)
+        ]
+        if len(strings) >= 3:
+            offenders.append(ast.unparse(node.targets[0]))
+    assert not offenders, f"string tables are back in {_MODULE_PATH}: {offenders}"
+
+
+def test_module_matches_no_text():
+    tree = _module_ast()
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    } | {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    assert "re" not in imported, "regex matching is back in the classifier"
+    lowered = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "lower"
+    ]
+    assert not lowered, "case-folding a message means text matching is back"
+
+
+def test_every_failure_stage_has_a_tagging_boundary():
+    # All four boundaries must tag. A stage nothing tags is a hole
+    # through which failures reach the runner untagged and read as INTERNAL.
+    sources = "\n".join(
+        path.read_text() for path in Path("src").rglob("*.py") if path.is_file()
+    )
+    for stage in tuple(FailureStage):
+        assert (
+            f"stage=FailureStage.{stage.name}" in sources
+        ), f"no raise site tags {stage.name}"
+
+
+# --------------------------------------------------------------------------- #
+# FailureCategory and ErrorCode stay separate vocabularies
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize(
-    "message,expected",
-    [
-        (
-            "password authentication failed for user 'analitiq'",
+def test_the_two_vocabularies_are_not_merged():
+    # A connector declares a FailureCategory; the customer is told an
+    # ErrorCode. Half of ErrorCode is source-side and a destination handler
+    # must never be able to declare any of it, so the sets must not converge.
+    category_names = {c.name for c in FailureCategory}
+    code_names = {c.name for c in ErrorCode}
+    assert not (category_names & code_names)
+    # The mapping is many-to-one and engine-owned: NOT_READY and INTERNAL both
+    # land on INTERNAL, and no declarable category reaches a source code.
+    declared_codes = {
+        code_for_declared_category(c)
+        for c in FailureCategory
+        if c is not FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+    }
+    assert not (
+        declared_codes
+        & {
             ErrorCode.SOURCE_AUTH_FAILED,
-        ),
-        ("request returned 401", ErrorCode.SOURCE_AUTH_FAILED),
-        ("upstream rate limit; 429 too many requests", ErrorCode.RATE_LIMITED),
-        (
-            "could not connect to server: Connection refused",
             ErrorCode.SOURCE_UNREACHABLE,
-        ),
-        ("some opaque driver failure", ErrorCode.INTERNAL),
-    ],
-)
-def test_classify_source_extract_splits(message, expected):
-    assert classify_source_extract(_make("RuntimeError", message=message)) is expected
-
-
-def test_classify_source_extract_routes_config():
-    # A deterministic source-config error / type-map miss is a config defect (the
-    # engine validates no data schema).
-    assert (
-        classify_source_extract(
-            _make("SecretNotFoundError", message="missing ${password}")
-        )
-        is ErrorCode.CONFIG_INVALID
-    )
-    assert (
-        classify_source_extract(
-            _make("UnmappedTypeError", message="no forward rule for geography")
-        )
-        is ErrorCode.CONFIG_INVALID
+            ErrorCode.RATE_LIMITED,
+        }
     )
 
 
-def test_classify_source_extract_local_io_is_internal_not_auth():
-    # A builtin local filesystem error from the engine's own checkpoint/state I/O
-    # carries "[Errno 13] Permission denied" -- it must stay INTERNAL, never be
-    # read as source auth by the "permission denied" phrase.
+def test_not_ready_and_write_rejected_stay_distinct():
+    # They drive different dispositions: NOT_READY means nothing was
+    # attempted. Merging the vocabularies would lose the distinction, since
+    # ErrorCode has no counterpart for it.
     assert (
-        classify_source_extract(
-            PermissionError("[Errno 13] Permission denied: '/app/state'")
-        )
+        code_for_declared_category(FailureCategory.FAILURE_CATEGORY_NOT_READY)
         is ErrorCode.INTERNAL
     )
-    # A real source DB permission failure (not a builtin OSError) still routes to auth.
     assert (
-        classify_source_extract(
-            _make("OperationalError", message="FATAL: permission denied for database")
-        )
-        is ErrorCode.SOURCE_AUTH_FAILED
+        code_for_declared_category(FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED)
+        is ErrorCode.DESTINATION_WRITE_FAILED
     )
+
+
+# --------------------------------------------------------------------------- #
+# A declaration is signal, not trust
+# --------------------------------------------------------------------------- #
 
 
 @pytest.mark.parametrize(
     "category,expected",
     [
-        # The declared category is authoritative (issue #351): the destination
-        # stamped it where the failure happened, so no text is consulted.
         (FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT, ErrorCode.CONFIG_INVALID),
         (
             FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED,
             ErrorCode.DESTINATION_WRITE_FAILED,
         ),
-        # NOT_READY: nothing was attempted -- an orchestration fault, not a
-        # destination rejection; INTERNAL is the interim mapping from #351.
         (FailureCategory.FAILURE_CATEGORY_NOT_READY, ErrorCode.INTERNAL),
+        (FailureCategory.FAILURE_CATEGORY_INTERNAL, ErrorCode.INTERNAL),
     ],
 )
 def test_classify_destination_failure_reads_declared_category(category, expected):
     from src.engine.exceptions import StreamProcessingError
-    from src.state.error_classification import classify_destination_failure
 
     exc = StreamProcessingError(
         "Batch 3 failed after 4 attempts: opaque driver text",
@@ -228,18 +344,49 @@ def test_classify_destination_failure_reads_declared_category(category, expected
     assert classify_destination_failure(exc) is expected
 
 
+def test_undeclared_destination_failure_resolves_from_the_stage():
+    # The other half: UNSPECIFIED resolves from the raising stage, never
+    # from the summary. Each summary below used to steer the verdict by
+    # phrase; now only the stage speaks.
+    for summary in (
+        "Batch 3 fatal failure: SchemaConfigurationError: unsupported write mode",
+        "Batch 3 fatal failure: duplicate key value violates unique constraint",
+        "Batch 3 failed after 4 attempts: connection reset by peer",
+        "Batch 3 fatal failure: type-map: no reverse rule",
+    ):
+        assert (
+            classify_destination_failure(
+                _make("StreamProcessingError", message=summary)
+            )
+            is ErrorCode.DESTINATION_WRITE_FAILED
+        )
+    assert (
+        default_code_for_stage(FailureStage.DESTINATION_LOAD)
+        is ErrorCode.DESTINATION_WRITE_FAILED
+    )
+
+
+def test_an_unreadable_declaration_degrades_to_unspecified(caplog):
+    # proto3 enums are open, so an untrusted connector can declare a value
+    # this build has no member for. It degrades instead of raising, and the
+    # stage default answers -- the declaration never becomes a code.
+    from src.grpc.client import _known_failure_category
+
+    with caplog.at_level(logging.WARNING, logger="src.grpc.client"):
+        degraded = _known_failure_category(99, "batch 7")
+    assert degraded is FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+    assert any("degrading to UNSPECIFIED" in r.message for r in caplog.records)
+    assert code_for_declared_category(degraded) is None
+
+
 def test_code_for_declared_category_mirrors_classification():
     # The non-raising dlq/skip partial-run path maps a declared category via
     # this helper; it must agree with what classify_destination_failure would
     # return for the same declaration, or the reported code would depend on
     # the error strategy (#351).
     from src.engine.exceptions import StreamProcessingError
-    from src.state.error_classification import (
-        classify_destination_failure,
-        code_for_declared_category,
-    )
 
-    for category in FailureCategory:
+    for category in tuple(FailureCategory):
         code = code_for_declared_category(category)
         if category is FailureCategory.FAILURE_CATEGORY_UNSPECIFIED:
             assert code is None
@@ -248,30 +395,10 @@ def test_code_for_declared_category_mirrors_classification():
         assert code is classify_destination_failure(exc)
 
 
-def test_dominant_error_code_prefers_actionable_cause():
-    from src.state.error_classification import dominant_error_code
-
-    assert dominant_error_code([]) is None
-    # The same rule an ExceptionGroup resolves with: config outranks a write
-    # failure, and both outrank an unclassifiable INTERNAL leaf.
-    assert (
-        dominant_error_code([ErrorCode.INTERNAL, ErrorCode.DESTINATION_WRITE_FAILED])
-        is ErrorCode.DESTINATION_WRITE_FAILED
-    )
-    assert (
-        dominant_error_code(
-            [ErrorCode.DESTINATION_WRITE_FAILED, ErrorCode.CONFIG_INVALID]
-        )
-        is ErrorCode.CONFIG_INVALID
-    )
-
-
 def test_declared_category_outranks_conflicting_text():
     # The near-miss from issue #351: a readiness-guard summary phrased as
-    # "Handler could not connect" would phrase-match SOURCE_UNREACHABLE
-    # vocabulary. The declared category makes the wording irrelevant.
+    # "Handler could not connect" would once phrase-match source vocabulary.
     from src.engine.exceptions import StreamProcessingError
-    from src.state.error_classification import classify_destination_failure
 
     exc = StreamProcessingError(
         "Batch 3 failed after 4 attempts: Handler could not connect",
@@ -281,10 +408,7 @@ def test_declared_category_outranks_conflicting_text():
 
 
 def test_declared_category_survives_wrapping():
-    # The category rides the chain like a FailureTag: a wrapped or aggregated
-    # failure still surfaces the leaf's declared category.
     from src.engine.exceptions import StreamProcessingError
-    from src.state.error_classification import classify_destination_failure
 
     inner = StreamProcessingError(
         "Batch 1 fatal failure: type-map: no reverse rule",
@@ -295,12 +419,7 @@ def test_declared_category_survives_wrapping():
 
 
 def test_aggregated_categories_resolve_to_dominant_not_traversal_order():
-    # A group with several declared categories must resolve by the
-    # read_failure_tag dominance rule (a config defect outranks not-ready),
-    # not by whichever leaf _walk_chain happens to visit first -- so the
-    # verdict is order-independent.
     from src.engine.exceptions import StreamProcessingError
-    from src.state.error_classification import classify_destination_failure
 
     not_ready = StreamProcessingError(
         "Batch 2 failed after 4 attempts: Handler not connected",
@@ -315,74 +434,24 @@ def test_aggregated_categories_resolve_to_dominant_not_traversal_order():
         assert classify_destination_failure(group) is ErrorCode.CONFIG_INVALID
 
 
-@pytest.mark.parametrize(
-    "summary,expected",
-    [
-        # Undeclared (UNSPECIFIED) failures fall back to the name/phrase rules:
-        # our own controlled class names still recover a config defect...
-        (
-            "Batch 3 fatal failure: SchemaConfigurationError: unsupported write mode",
-            ErrorCode.CONFIG_INVALID,
-        ),
-        # ...but the deleted fatal-ack prefixes no longer classify by text --
-        # cdk/sql/generic.py declares CONFIG_DEFECT on the ack instead (#351).
-        (
-            "Batch 3 fatal failure: type-map: no reverse rule",
-            ErrorCode.DESTINATION_WRITE_FAILED,
-        ),
-        # A genuine write failure (constraint / permission / transport) stays
-        # a write failure.
-        (
-            "Batch 3 fatal failure: duplicate key value violates unique constraint",
-            ErrorCode.DESTINATION_WRITE_FAILED,
-        ),
-        (
-            "Batch 3 fatal failure: permission denied for table orders",
-            ErrorCode.DESTINATION_WRITE_FAILED,
-        ),
-        (
-            "Batch 3 failed after 4 attempts: connection reset by peer",
-            ErrorCode.DESTINATION_WRITE_FAILED,
-        ),
-    ],
-)
-def test_classify_destination_failure_fallback_for_undeclared(summary, expected):
-    from src.state.error_classification import classify_destination_failure
-
+def test_dominant_error_code_prefers_actionable_cause():
+    assert dominant_error_code([]) is None
     assert (
-        classify_destination_failure(_make("StreamProcessingError", message=summary))
-        is expected
-    )
-
-
-def test_classify_destination_failure_local_io_is_internal():
-    # The load stage's try also runs engine-owned local I/O (checkpoint save, DLQ
-    # write, batch-commit journal, metrics). A builtin filesystem error there is
-    # infra -> INTERNAL, not a destination write rejection -- including a bare
-    # OSError (a full / read-only volume: ENOSPC/EROFS has no dedicated subclass).
-    from src.state.error_classification import classify_destination_failure
-
-    assert (
-        classify_destination_failure(
-            PermissionError("[Errno 13] Permission denied: '/app/state'")
-        )
-        is ErrorCode.INTERNAL
-    )
-    assert (
-        classify_destination_failure(OSError("[Errno 28] No space left on device"))
-        is ErrorCode.INTERNAL
-    )
-    # A network OSError to the destination is a real write failure, not local I/O.
-    assert (
-        classify_destination_failure(ConnectionRefusedError("connection refused"))
+        dominant_error_code([ErrorCode.INTERNAL, ErrorCode.DESTINATION_WRITE_FAILED])
         is ErrorCode.DESTINATION_WRITE_FAILED
+    )
+    assert (
+        dominant_error_code(
+            [ErrorCode.DESTINATION_WRITE_FAILED, ErrorCode.CONFIG_INVALID]
+        )
+        is ErrorCode.CONFIG_INVALID
     )
 
 
 def test_destination_http_code_never_read_as_source_auth():
-    # The cross-stage tail: a destination-load failure whose cause text carries a
-    # "401" must classify DESTINATION_WRITE_FAILED, because the stage is tagged at
-    # the raise site -- the source split never runs on it.
+    # The cross-stage tail: a destination-load failure whose cause text carries
+    # a "401" classifies from its stage tag, so the source codes are
+    # unreachable from it by construction.
     exc = _make(
         "RuntimeError", message="POST https://api.dest/v1 -> 401 from destination"
     )
@@ -394,514 +463,89 @@ def test_destination_http_code_never_read_as_source_auth():
     assert classify_exception(exc) is ErrorCode.DESTINATION_WRITE_FAILED
 
 
-@pytest.mark.parametrize(
-    "reason,expected",
-    [
-        (
-            "destination did not acknowledge the schema within 30s",
-            ErrorCode.DESTINATION_WRITE_FAILED,
-        ),
-        (
-            "destination closed stream before sending schema ACK",
-            ErrorCode.DESTINATION_WRITE_FAILED,
-        ),
-        (
-            "destination worker channel did not connect",
-            ErrorCode.DESTINATION_WRITE_FAILED,
-        ),
-        ("SchemaConfigurationError: unsupported write mode", ErrorCode.CONFIG_INVALID),
-        ("Schema configuration failed", ErrorCode.CONFIG_INVALID),
-        (None, ErrorCode.CONFIG_INVALID),
-    ],
-)
-def test_classify_handshake_failure_splits_transport_vs_config(reason, expected):
-    # The engine calls this at the handshake raise site so the tag is definite;
-    # the same transport-phrase set backs the untagged fallback.
-    assert classify_handshake_failure(reason) is expected
-
-
 # --------------------------------------------------------------------------- #
-# CONFIG_INVALID -- real exception classes, to lock the name contract
+# INTERNAL is expressible on the wire
 # --------------------------------------------------------------------------- #
 
 
-def test_config_real_exceptions_classify_config_invalid():
-    from cdk.exceptions import TransportSpecError
-    from cdk.secrets.exceptions import PlaceholderExpansionError, SecretNotFoundError
-    from cdk.type_map import InvalidTypeMapError
-    from src.config.exceptions import (
-        ConfigNotFoundError,
-        ConfigValidationError,
-        ConnectorNotFoundError,
+def test_internal_category_exists_on_both_sides_of_the_wire():
+    from src.grpc.generated.analitiq.v1 import stream_pb2
+
+    assert (
+        stream_pb2.FailureCategory.Value("FAILURE_CATEGORY_INTERNAL")
+        == FailureCategory.FAILURE_CATEGORY_INTERNAL.value
     )
-    from src.engine.exceptions import ConfigurationError
 
-    exceptions = [
-        ConfigValidationError("invalid", field="streams"),
-        ConfigNotFoundError("/x/pipeline.json"),
-        ConnectorNotFoundError("postgres"),
-        ConfigurationError("bad config"),
-        TransportSpecError("malformed transport spec"),
-        SecretNotFoundError("conn-1"),
-        PlaceholderExpansionError("password", "conn-1"),
-        InvalidTypeMapError("type map is broken"),
-    ]
-    for exc in exceptions:
-        assert classify_exception(exc) is ErrorCode.CONFIG_INVALID, exc
+
+def test_internal_verdict_crosses_the_wire_intact():
+    # Without a wire member, an engine-side INTERNAL verdict would have to be
+    # sent as WRITE_REJECTED or UNSPECIFIED -- impersonating a user-owned
+    # failure, which is the gap the two-vocabulary split exists to prevent.
+    from src.grpc.generated.analitiq.v1 import BatchAck, SchemaAck
+
+    ack = BatchAck(failure_category=FailureCategory.FAILURE_CATEGORY_INTERNAL)
+    assert (
+        BatchAck.FromString(ack.SerializeToString()).failure_category
+        == FailureCategory.FAILURE_CATEGORY_INTERNAL
+    )
+    schema_ack = SchemaAck(
+        accepted=False, failure_category=FailureCategory.FAILURE_CATEGORY_INTERNAL
+    )
+    assert (
+        SchemaAck.FromString(schema_ack.SerializeToString()).failure_category
+        == FailureCategory.FAILURE_CATEGORY_INTERNAL
+    )
+
+
+def test_internal_category_is_not_folded_into_a_user_owned_code():
+    assert (
+        code_for_declared_category(FailureCategory.FAILURE_CATEGORY_INTERNAL)
+        is ErrorCode.INTERNAL
+    )
 
 
 # --------------------------------------------------------------------------- #
-# Each category
+# The destination handshake classifies from its outcome, not its wording
 # --------------------------------------------------------------------------- #
 
 
 @pytest.mark.parametrize(
-    "message",
+    "outcome,expected",
     [
-        "password authentication failed for user 'analitiq'",
-        "401 Unauthorized",
-        "permission denied",
+        (SchemaHandshakeOutcome.REJECTED, ErrorCode.CONFIG_INVALID),
+        (SchemaHandshakeOutcome.TRANSPORT_FAILURE, ErrorCode.DESTINATION_WRITE_FAILED),
+        (SchemaHandshakeOutcome.PROTOCOL_VIOLATION, ErrorCode.INTERNAL),
     ],
 )
-def test_source_auth_failed_by_message(message):
+def test_handshake_outcome_names_the_code(outcome, expected):
     assert (
-        classify_exception(_make("RuntimeError", message=message))
-        is ErrorCode.SOURCE_AUTH_FAILED
-    )
-
-
-def test_secret_resolution_failures_are_config_invalid():
-    # Secret-store resolution failures (missing / access-denied / malformed
-    # credentials, placeholder expansion) are config/setup -- not source-system
-    # auth, which the engine only ever sees as driver/HTTP text.
-    from cdk.secrets.exceptions import (
-        PlaceholderExpansionError,
-        SecretAccessDeniedError,
-        SecretNotFoundError,
-        SecretResolutionError,
-    )
-
-    for exc in [
-        SecretResolutionError("malformed credentials.json"),
-        SecretNotFoundError("conn-1"),
-        SecretAccessDeniedError("conn-1"),
-        PlaceholderExpansionError("password", "conn-1"),
-    ]:
-        assert classify_exception(exc) is ErrorCode.CONFIG_INVALID, exc
-    # Across the worker boundary it survives only as an "error_type:" prefix.
-    boundary = _make(
-        "RuntimeError",
-        message="SecretResolutionError: bad file (worker src-worker:pg:s1)",
-    )
-    assert classify_exception(boundary) is ErrorCode.CONFIG_INVALID
-
-
-@pytest.mark.parametrize(
-    "message",
-    [
-        "TransientReadError: 429 Too Many Requests (worker src)",
-        "upstream returned rate limit; retry later",
-        "throttled by the API",
-    ],
-)
-def test_rate_limited(message):
-    assert (
-        classify_exception(_make("RuntimeError", message=message))
-        is ErrorCode.RATE_LIMITED
-    )
-
-
-@pytest.mark.parametrize(
-    "message",
-    [
-        "could not connect to server: Connection refused",
-        "could not translate host name 'db' to address",
-        "connection timed out",
-    ],
-)
-def test_source_unreachable_by_message(message):
-    assert (
-        classify_exception(_make("RuntimeError", message=message))
-        is ErrorCode.SOURCE_UNREACHABLE
-    )
-
-
-def test_source_unreachable_by_builtin_type():
-    assert (
-        classify_exception(ConnectionRefusedError("refused"))
-        is ErrorCode.SOURCE_UNREACHABLE
-    )
-
-
-# There is no schema validation in the engine, so type-map / mapping / schema-
-# configuration failures are configuration defects, not a data-vs-schema
-# mismatch -- they classify as CONFIG_INVALID.
-@pytest.mark.parametrize(
-    "name,message",
-    [
-        (
-            "UnmappedTypeError",
-            "No forward type-map rule for 'geography' in connector 'postgres'",
-        ),
-        ("TransformationError", "cannot convert value to Int64"),
-        ("SchemaConfigurationError", "unsupported proto write mode"),
-        # Declared-capability refusals (issue #390): authoring defects in or
-        # against the connector's sql_capabilities block.
-        (
-            "SqlCapabilitiesError",
-            "connector declares no sql_capabilities.merge_form",
-        ),
-        (
-            "CatalogAddressingError",
-            "connector declares sql_capabilities.catalog 'none'",
-        ),
-        # Connector-level declared-fact refusals (issue #401): a malformed
-        # error_map / concurrency block in the connector definition.
-        (
-            "ConnectorDeclarationError",
-            "error_map.sqlstate in connector 'demo' declares malformed "
-            "identifier 'XYZ!'",
-        ),
-    ],
-)
-def test_type_and_mapping_defects_are_config_invalid(name, message):
-    assert classify_exception(_make(name, message=message)) is ErrorCode.CONFIG_INVALID
-
-
-@pytest.mark.parametrize(
-    "name,message",
-    [
-        (
-            "StreamProcessingError",
-            "Failed to connect to gRPC destination for stream orders",
-        ),
-        # Load-stage wrappers from the engine around a destination ack failure: the
-        # destination summary alone (e.g. "permission denied") would look like auth,
-        # so the wrapper text must route it to the destination bucket.
-        (
-            "StreamProcessingError",
-            "Batch 3 fatal failure: permission denied for table orders",
-        ),
-        (
-            "StreamProcessingError",
-            "Batch 3 failed after 4 attempts: connection reset by peer",
-        ),
-        (
-            "StreamProcessingError",
-            "Batch 3 fatal failure: duplicate key value violates unique constraint",
-        ),
-        ("StreamProcessingError", "Batch 3 unknown ACK status: 7"),
-    ],
-)
-def test_destination_write_failed(name, message):
-    assert (
-        classify_exception(_make(name, message=message))
-        is ErrorCode.DESTINATION_WRITE_FAILED
-    )
-
-
-@pytest.mark.parametrize(
-    "summary,expected",
-    [
-        # A destination batch write that fails with a CONFIG-typed cause (a
-        # controlled class name forwarded in the fatal-ack summary) is a config
-        # defect, not a write failure.
-        ("UnmappedTypeError: no rule for 'geography'", ErrorCode.CONFIG_INVALID),
-        ("SchemaConfigurationError: unsupported write mode", ErrorCode.CONFIG_INVALID),
-        # The old fatal-ack prose prefixes no longer classify by text: the
-        # sites that produce them declare FAILURE_CATEGORY_CONFIG_DEFECT on
-        # the ack instead, and the tagged path uses that (issue #351). An
-        # untagged exception carrying only the prose falls to the load-stage
-        # default.
-        ("type-map: no reverse rule", ErrorCode.DESTINATION_WRITE_FAILED),
-        ("dialect: upsert not supported", ErrorCode.DESTINATION_WRITE_FAILED),
-        ("write-config: invalid conflict key", ErrorCode.DESTINATION_WRITE_FAILED),
-        ("adbc: missing driver package", ErrorCode.DESTINATION_WRITE_FAILED),
-        # A genuine write failure (constraint / permission on the destination) stays
-        # a write failure.
-        (
-            "duplicate key value violates unique constraint",
-            ErrorCode.DESTINATION_WRITE_FAILED,
-        ),
-        ("permission denied for table orders", ErrorCode.DESTINATION_WRITE_FAILED),
-    ],
-)
-def test_destination_write_config_cause_is_config(summary, expected):
-    msg = f"Batch 3 fatal failure: {summary}"
-    assert classify_exception(_make("StreamProcessingError", message=msg)) is expected
-
-
-@pytest.mark.parametrize(
-    "message,expected",
-    [
-        # A source-worker ReadError marked deterministic is a contract/config defect.
-        (
-            "ReadError: offset pagination requires offset.param "
-            "(worker src-worker:api:s1, deterministic)",
-            ErrorCode.CONFIG_INVALID,
-        ),
-        # ...unless it carries an auth/rate signal, which wins first.
-        (
-            "ReadError: 403 Forbidden (worker src-worker:api:s1, deterministic)",
-            ErrorCode.SOURCE_AUTH_FAILED,
-        ),
-        # A non-deterministic (retryable) worker error stays INTERNAL, not config.
-        ("RuntimeError: transient blip (worker src-worker:api:s1)", ErrorCode.INTERNAL),
-    ],
-)
-def test_deterministic_source_read_error_is_config(message, expected):
-    assert (
-        classify_exception(_make("ReadError", base=RuntimeError, message=message))
+        classify_handshake_failure(
+            outcome, declared=FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+        )
         is expected
     )
 
 
-def test_partial_stream_group_classifies_dominant_cause():
-    # A partial run keeps ALL failed-stream exceptions; classification picks the
-    # dominant across them (config/auth outrank an unclassifiable internal leaf).
-    group = ExceptionGroup(
-        "Partial stream failures",
-        [
-            _make(
-                "StreamProcessingError",
-                message="Stream processing failed: weird internal thing",
-            ),
-            _make(
-                "StreamProcessingError",
-                message="Stream processing failed: password authentication failed",
-            ),
-        ],
-    )
-    assert classify_exception(group) is ErrorCode.SOURCE_AUTH_FAILED
-
-
-@pytest.mark.parametrize(
-    "message,expected",
-    [
-        # PEP-249 driver names are transport-ambiguous; a live driver exception in
-        # the chain comes from the SOURCE worker (the "src-worker" label), so it must
-        # not be routed to DESTINATION_WRITE_FAILED. It classifies by its message.
-        (
-            "ProgrammingError: permission denied for relation users "
-            "(worker src-worker:pg:s1)",
-            ErrorCode.SOURCE_AUTH_FAILED,
-        ),
-        (
-            "IntegrityError: null value in column (worker src-worker:pg:s1)",
-            ErrorCode.INTERNAL,
-        ),
-    ],
-)
-def test_source_driver_error_not_destination(message, expected):
-    assert classify_exception(_make("RuntimeError", message=message)) is expected
-
-
-def test_real_typemap_mro_routing():
-    # A type-map miss and a broken/missing type-map file are both configuration
-    # defects (no schema validation exists in the engine).
-    from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
-
-    unmapped = UnmappedTypeError("postgres", "forward", "geography")
-    assert classify_exception(unmapped) is ErrorCode.CONFIG_INVALID
+def test_handshake_declaration_outranks_the_outcome():
+    # A destination shell that could not reach its connector worker sends an
+    # ordinary rejection; only its NOT_READY declaration says the refusal was
+    # not the customer's configuration. This is the case the deleted
+    # transport-phrase list used to catch by matching forwarded reason text.
     assert (
-        classify_exception(InvalidTypeMapError("broken file"))
-        is ErrorCode.CONFIG_INVALID
-    )
-
-
-@pytest.mark.parametrize(
-    "error_type,expected",
-    [
-        ("SecretNotFoundError", ErrorCode.CONFIG_INVALID),
-        ("ConnectorNotRegisteredError", ErrorCode.CONFIG_INVALID),
-        ("SecretAccessDeniedError", ErrorCode.CONFIG_INVALID),
-        ("ConnectorDeclarationError", ErrorCode.CONFIG_INVALID),
-    ],
-)
-def test_worker_error_type_prefix_promoted_to_name(error_type, expected):
-    # The gRPC worker collapses the type to ReadError/RuntimeError but preserves
-    # the original class name as an "error_type:" prefix; the name-based rules
-    # must still fire off that prefix even with no matching message phrase.
-    msg = f"{error_type}: opaque detail (worker src, deterministic)"
-    assert (
-        classify_exception(_make("ReadError", base=RuntimeError, message=msg))
-        is expected
-    )
-
-
-def test_unknown_falls_back_to_internal():
-    assert (
-        classify_exception(_make("RuntimeError", message="something weird"))
-        is ErrorCode.INTERNAL
-    )
-    assert classify_exception(ValueError("nope")) is ErrorCode.INTERNAL
-
-
-def test_local_filesystem_error_is_internal_not_source_auth():
-    # A builtin PermissionError from creating local state/deadletter dirs is an
-    # engine/infra fault; its "[Errno 13] Permission denied" text must not be
-    # read as source auth.
-    assert (
-        classify_exception(
-            PermissionError("[Errno 13] Permission denied: '/app/state'")
+        classify_handshake_failure(
+            SchemaHandshakeOutcome.REJECTED,
+            declared=FailureCategory.FAILURE_CATEGORY_NOT_READY,
         )
         is ErrorCode.INTERNAL
     )
-    # A real source DB permission failure (not a builtin OSError) still routes to auth.
-    assert (
-        classify_exception(
-            _make("OperationalError", message="FATAL: permission denied for database")
+
+
+def test_handshake_classification_refuses_an_accepted_handshake():
+    with pytest.raises(ValueError):
+        classify_handshake_failure(
+            SchemaHandshakeOutcome.ACCEPTED,
+            declared=FailureCategory.FAILURE_CATEGORY_UNSPECIFIED,
         )
-        is ErrorCode.SOURCE_AUTH_FAILED
-    )
-
-
-@pytest.mark.parametrize(
-    "reason,expected",
-    [
-        # transport reasons -> the destination was unreachable mid-handshake. These
-        # cover the direct path and the worker-proxy path (the proxy forwards the
-        # inner reason text), so no proto change is needed to tell them apart.
-        (
-            "destination did not acknowledge the schema within 30s",
-            ErrorCode.DESTINATION_WRITE_FAILED,
-        ),
-        (
-            "stream reader/writer exited before schema ACK: boom",
-            ErrorCode.DESTINATION_WRITE_FAILED,
-        ),
-        (
-            "destination closed stream before sending schema ACK",
-            ErrorCode.DESTINATION_WRITE_FAILED,
-        ),
-        (
-            "destination worker channel did not connect",
-            ErrorCode.DESTINATION_WRITE_FAILED,
-        ),
-        # configuration reasons -> a destination config defect (configure_schema only
-        # builds the destination's own table; nothing is validated against a schema).
-        ("SchemaConfigurationError: unsupported write mode", ErrorCode.CONFIG_INVALID),
-        ("PlaceholderExpansionError: failed to expand 'pw'", ErrorCode.CONFIG_INVALID),
-        ("Schema configuration failed", ErrorCode.CONFIG_INVALID),
-    ],
-)
-def test_destination_handshake_failure_routing(reason, expected):
-    msg = f"Destination did not accept the stream for orders: {reason}"
-    assert classify_exception(_make("StreamProcessingError", message=msg)) is expected
-
-
-@pytest.mark.parametrize(
-    "message,expected",
-    [
-        # HTTP status codes are matched with word boundaries: standalone codes
-        # classify, but digits inside counts / IDs must not collide.
-        ("request returned 401", ErrorCode.SOURCE_AUTH_FAILED),
-        ("got HTTP 403 from source", ErrorCode.SOURCE_AUTH_FAILED),
-        ("received 429 from api", ErrorCode.RATE_LIMITED),
-        ("failed after 1429 records", ErrorCode.INTERNAL),
-        ("object 4035 not found", ErrorCode.INTERNAL),
-        ("bad id 24015 in row", ErrorCode.INTERNAL),
-        # A status code embedded in a URL path is not the response status.
-        ("GET https://api.example.com/users/403 -> status 404", ErrorCode.INTERNAL),
-        ("path /429/items failed with status 500", ErrorCode.INTERNAL),
-    ],
-)
-def test_http_status_codes_use_word_boundaries(message, expected):
-    assert classify_exception(_make("RuntimeError", message=message)) is expected
-
-
-# --------------------------------------------------------------------------- #
-# Chain handling: worker boundary, ExceptionGroup, cause/original_error, cycles
-# --------------------------------------------------------------------------- #
-
-
-def test_worker_boundary_prefix_drives_subcategory():
-    # Worker collapses the type to ReadError but keeps the original class name as
-    # an "error_type:" prefix; classification must read it from the message.
-    exc = _make(
-        "ReadError",
-        base=RuntimeError,
-        message="ConnectionError: connection refused (worker src, deterministic)",
-    )
-    assert classify_exception(exc) is ErrorCode.SOURCE_UNREACHABLE
-
-
-def test_exception_group_picks_dominant_cause():
-    group = ExceptionGroup(
-        "All streams failed",
-        [
-            _make("RuntimeError", message="some internal thing"),
-            _make("ConnectionError", message="connection refused"),
-        ],
-    )
-    # source-unreachable outranks the unclassifiable internal leaf
-    assert classify_exception(group) is ErrorCode.SOURCE_UNREACHABLE
-
-
-def test_exception_group_detail_enumerates_leaves_by_class_name():
-    # str(ExceptionGroup) is only the summary; build_error_detail must carry every
-    # per-stream leaf so the all-streams-failed case is actionable -- as safe
-    # class-name tokens, never the raw messages.
-    group = ExceptionGroup(
-        "All streams failed",
-        [
-            _make("ReadError", message="Stream s1: connection refused at upstream"),
-            _make(
-                "StreamProcessingError",
-                message="Stream s2: Batch 4 fatal failure: duplicate key",
-            ),
-        ],
-    )
-    _, _, detail = classify_for_metrics(group)
-    assert "ReadError" in detail
-    assert "StreamProcessingError" in detail
-    # The raw messages never enter the detail.
-    assert "connection refused at upstream" not in detail
-    assert "duplicate key" not in detail
-
-
-@pytest.mark.parametrize(
-    "exc,expected",
-    [
-        (
-            PermissionError("[Errno 13] Permission denied: '/app/connections/c.json'"),
-            True,
-        ),
-        (FileExistsError("exists"), True),
-        # A bare OSError (full / read-only volume) is local infra too.
-        (OSError("[Errno 28] No space left on device"), True),
-        # A network OSError is a remote fault, not local I/O.
-        (ConnectionRefusedError("refused"), False),
-        (RuntimeError("Could not find pipelines/manifest.json"), False),
-        (ValueError("manifest.json missing required key"), False),
-    ],
-)
-def test_is_local_io_error(exc, expected):
-    assert is_local_io_error(exc) is expected
-
-
-def test_original_error_attribute_is_followed():
-    from src.engine.exceptions import StreamProcessingError
-
-    wrapped = StreamProcessingError(
-        "Stream processing failed",
-        stream_id="s1",
-        original_error=_make("RuntimeError", message="password authentication failed"),
-    )
-    assert classify_exception(wrapped) is ErrorCode.SOURCE_AUTH_FAILED
-
-
-def test_cause_chain_is_followed():
-    inner = _make("ConnectionError", message="could not connect: connection refused")
-    outer = RuntimeError("stream failed")
-    outer.__cause__ = inner
-    assert classify_exception(outer) is ErrorCode.SOURCE_UNREACHABLE
-
-
-def test_self_referential_chain_does_not_hang():
-    exc = RuntimeError("loop")
-    exc.__cause__ = exc  # pathological; must not spin
-    assert classify_exception(exc) is ErrorCode.INTERNAL
 
 
 # --------------------------------------------------------------------------- #
@@ -924,19 +568,14 @@ def test_customer_message_is_safe_for_every_code():
 
 
 def test_error_detail_carries_no_message_text():
-    # The raw text holds a DSN with a password; the detail must contain only the
-    # class name -- nothing from the message, so nothing to scrub.
     exc = _make("RuntimeError", message="postgresql://app:s3cr3t@db.host:5432/prod")
     detail = build_error_detail(exc)
     assert detail == "RuntimeError"
     assert "s3cr3t" not in detail
-    assert "postgresql" not in detail  # scheme prefix is never promoted into detail
+    assert "postgresql" not in detail
 
 
 def test_error_detail_excludes_message_text_even_on_the_tagged_token_path():
-    # The tagged token is built by interpolation (stage/CODE:ClassName). A secret
-    # in the message must never reach it -- the higher-risk path, since the token
-    # format touches exception fields.
     exc = tag_failure(
         RuntimeError("Authorization: Bearer leaked-token-xyz dsn=postgres://u:p@h/db"),
         code=ErrorCode.DESTINATION_WRITE_FAILED,
@@ -960,6 +599,18 @@ def test_error_detail_includes_stage_and_code_for_tagged():
     )
 
 
+def test_error_detail_keeps_the_side_an_internal_code_does_not_name():
+    # The cost of the INTERNAL default is that the code stops naming the
+    # side. The stage label carries it instead, so an undeclared source
+    # failure is still triageable.
+    exc = tag_failure(
+        _make("ReadError", base=RuntimeError, message="opaque"),
+        code=default_code_for_stage(FailureStage.SOURCE_EXTRACT),
+        stage=FailureStage.SOURCE_EXTRACT,
+    )
+    assert build_error_detail(exc) == "source_extract/INTERNAL:ReadError"
+
+
 def test_error_detail_enumerates_mixed_tagged_and_untagged_group():
     group = ExceptionGroup(
         "All streams failed",
@@ -976,6 +627,26 @@ def test_error_detail_enumerates_mixed_tagged_and_untagged_group():
     detail = build_error_detail(group)
     assert "source_extract/SOURCE_UNREACHABLE:ReadError" in detail
     assert "ValueError" in detail
+
+
+def test_exception_group_detail_enumerates_leaves_by_class_name():
+    # str(ExceptionGroup) is only the summary; build_error_detail must carry
+    # every per-stream leaf -- as safe class-name tokens, never raw messages.
+    group = ExceptionGroup(
+        "All streams failed",
+        [
+            _make("ReadError", message="Stream s1: connection refused at upstream"),
+            _make(
+                "StreamProcessingError",
+                message="Stream s2: Batch 4 fatal failure: duplicate key",
+            ),
+        ],
+    )
+    _, _, detail = classify_for_metrics(group)
+    assert "ReadError" in detail
+    assert "StreamProcessingError" in detail
+    assert "connection refused at upstream" not in detail
+    assert "duplicate key" not in detail
 
 
 def test_error_detail_bounds_length():
@@ -996,20 +667,71 @@ def test_detail_for_code_is_structured_and_safe():
 
 
 # --------------------------------------------------------------------------- #
+# Chain handling: the tag rides wrappers, groups and cause chains
+# --------------------------------------------------------------------------- #
+
+
+def test_original_error_attribute_is_followed():
+    from src.engine.exceptions import StreamProcessingError
+
+    wrapped = StreamProcessingError(
+        "Stream processing failed",
+        stream_id="s1",
+        original_error=tag_failure(
+            _make("RuntimeError", message="opaque"),
+            code=ErrorCode.SOURCE_AUTH_FAILED,
+            stage=FailureStage.SOURCE_EXTRACT,
+        ),
+    )
+    assert classify_exception(wrapped) is ErrorCode.SOURCE_AUTH_FAILED
+
+
+def test_cause_chain_is_followed():
+    inner = tag_failure(
+        _make("ConnectionError", message="opaque"),
+        code=ErrorCode.SOURCE_UNREACHABLE,
+        stage=FailureStage.SOURCE_EXTRACT,
+    )
+    outer = RuntimeError("stream failed")
+    outer.__cause__ = inner
+    assert classify_exception(outer) is ErrorCode.SOURCE_UNREACHABLE
+
+
+def test_partial_stream_group_classifies_dominant_cause():
+    # A partial run keeps ALL failed-stream exceptions; classification picks
+    # the dominant tag across them.
+    group = ExceptionGroup(
+        "Partial stream failures",
+        [
+            _make("StreamProcessingError", message="weird internal thing"),
+            tag_failure(
+                _make("StreamProcessingError", message="opaque"),
+                code=ErrorCode.SOURCE_AUTH_FAILED,
+                stage=FailureStage.SOURCE_EXTRACT,
+            ),
+        ],
+    )
+    assert classify_exception(group) is ErrorCode.SOURCE_AUTH_FAILED
+
+
+# --------------------------------------------------------------------------- #
 # classify_for_metrics: the (code, customer_message, detail) triple
 # --------------------------------------------------------------------------- #
 
 
 def test_classify_for_metrics_returns_safe_triple():
-    exc = _make(
-        "RuntimeError",
-        message="password authentication failed; dsn=postgres://u:p@h/db",
+    exc = tag_failure(
+        _make(
+            "RuntimeError",
+            message="password authentication failed; dsn=postgres://u:p@h/db",
+        ),
+        code=ErrorCode.SOURCE_AUTH_FAILED,
+        stage=FailureStage.SOURCE_EXTRACT,
     )
     code, message, detail = classify_for_metrics(exc)
     assert code is ErrorCode.SOURCE_AUTH_FAILED
     assert message == customer_message(ErrorCode.SOURCE_AUTH_FAILED)
-    # detail is the class name only -- no message text, so no credentials.
-    assert detail == "RuntimeError"
+    assert detail == "source_extract/SOURCE_AUTH_FAILED:RuntimeError"
     assert "p@h" not in detail and ":p@" not in detail
 
 
@@ -1036,7 +758,11 @@ def test_metrics_record_failure_carries_safe_fields():
     from src.state.metrics_storage import create_metrics_record
 
     code, message, detail = classify_for_metrics(
-        _make("ConfigValidationError", message="bad pipeline.json")
+        tag_failure(
+            _make("ConfigValidationError", message="bad pipeline.json"),
+            code=ErrorCode.CONFIG_INVALID,
+            stage=FailureStage.CONFIG,
+        )
     )
     rec = create_metrics_record(
         run_id="r1",
@@ -1051,11 +777,11 @@ def test_metrics_record_failure_carries_safe_fields():
     )
     assert rec.error_code is ErrorCode.CONFIG_INVALID
     assert rec.error_message == customer_message(ErrorCode.CONFIG_INVALID)
-    # Structured, safe: the class name, not the raw "bad pipeline.json" message.
-    assert rec.error_detail == "ConfigValidationError"
+    # Structured, safe: stage, code and class name -- not "bad pipeline.json".
+    assert rec.error_detail == "config/CONFIG_INVALID:ConfigValidationError"
 
-    # The error_code must serialize as the plain enum string in the emitted line,
-    # exactly as emit_metrics_log -> json.dumps(..., default=str) would write it.
+    # The error_code must serialize as the plain enum string in the emitted
+    # line, exactly as emit_metrics_log -> json.dumps(..., default=str) would.
     emitted = json.dumps({"type": "pipeline", **rec.model_dump()}, default=str)
     assert '"error_code": "CONFIG_INVALID"' in emitted
     assert "ErrorCode." not in emitted

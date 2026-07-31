@@ -112,17 +112,21 @@ enum AckStatus {
 // failure_summary (which stays the human-readable "what went wrong").
 // The category answers "who owns the fix" so the engine maps it to a
 // customer-facing error code without parsing summary text (issue #351).
-// Engine-owned vocabulary: connectors are not asked to self-classify.
-// The CDK base classes, the engine-owned handlers, and the destination
-// servicer's own pre-schema rejection set it; a thick connector that
-// overrides write_batch leaves it UNSPECIFIED and the engine falls back
-// to summary matching. The value is range-checked off the wire (an
-// unrecognised integer degrades to UNSPECIFIED).
+// A connector may declare a category (issue #429). The declaration is
+// signal, not trust: the value is range-checked off the wire and an
+// unrecognised integer degrades to UNSPECIFIED. UNSPECIFIED resolves
+// from the pipeline stage that raised -- a destination-load failure
+// reads as a destination write failure -- never from summary text.
 enum FailureCategory {
-  FAILURE_CATEGORY_UNSPECIFIED = 0;    // Nothing declared; engine falls back to summary matching
+  FAILURE_CATEGORY_UNSPECIFIED = 0;    // Nothing declared; the raising stage names the code
   FAILURE_CATEGORY_CONFIG_DEFECT = 1;  // Deterministic, user-fixable configuration defect
   FAILURE_CATEGORY_WRITE_REJECTED = 2; // Write attempted and failed: constraint, permission, driver error
   FAILURE_CATEGORY_NOT_READY = 3;      // Nothing attempted: never connected / schema never configured
+  // The engine or the connector has a bug. Distinct from WRITE_REJECTED,
+  // which names a destination that answered: nobody owns an INTERNAL
+  // failure but us, and folding it into a user-owned category would make
+  // every internal fault impersonate a config or destination problem.
+  FAILURE_CATEGORY_INTERNAL = 4;
 }
 
 // Batch acknowledgment from destination to engine
@@ -194,5 +198,14 @@ message SchemaAck {
   // declared idempotency all factor in); the engine logs it at stream
   // start so operators know which streams can duplicate on a restart.
   RetrySemantics retry_semantics = 4;
+
+  // Why the handshake failed, set on a rejected ack (issue #429). The
+  // same vocabulary BatchAck carries, for the same reason: the side that
+  // caught the failure declares who owns the fix, so the engine does not
+  // read it back out of `message`. A destination shell that could not
+  // reach its connector worker declares NOT_READY; a handler that
+  // refused the schema declares CONFIG_DEFECT. UNSPECIFIED leaves the
+  // verdict to the engine's own view of the handshake.
+  FailureCategory failure_category = 6;
   string retry_semantics_reason = 5;
 }

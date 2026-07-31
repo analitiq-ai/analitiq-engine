@@ -19,6 +19,7 @@ import grpc
 from cdk.types import FailureCategory
 from grpc import aio as grpc_aio
 from src.config import settings
+from src.state.error_classification import SchemaHandshakeOutcome
 
 from . import DEFAULT_MAX_MESSAGE_SIZE
 from .cursor import Cursor
@@ -100,12 +101,38 @@ def _ack_status_name(status: int) -> str:
     build has no name for and ``AckStatus.Name`` raises on it. A diagnostic
     string must never be the thing that aborts an RPC the caller could have
     handled, so an unnameable value is reported as its number. Same reasoning
-    as the bounds-check on ``failure_category`` below.
+    as :func:`_known_failure_category`.
     """
     try:
         return str(AckStatus.Name(status))
     except ValueError:
         return f"unrecognized status {status}"
+
+
+def _known_failure_category(declared: int, context: str) -> FailureCategory:
+    """Return the declared category, or UNSPECIFIED if this build cannot read it.
+
+    The declaration is signal, not trust (issue #429): on the worker-proxy hop
+    the sender is the untrusted connector process, and proto3 enums are open,
+    so a newer or defective peer can declare a value this build has no member
+    for. An unrecognised integer degrades to UNSPECIFIED -- which resolves from
+    the raising stage instead -- rather than propagating or raising. The
+    category is advisory: unlike status, a bad value must never abort a stream.
+
+    Both acks that carry a category (batch and schema) range-check it here, so
+    a connector cannot get a different reading out of one wire message than the
+    other.
+    """
+    try:
+        return FailureCategory(declared)
+    except ValueError:
+        logger.warning(
+            "Unknown failure_category %r on the ack for %s; degrading to "
+            "UNSPECIFIED",
+            declared,
+            context,
+        )
+        return FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
 
 
 def _transport_failure(summary: str) -> BatchResult:
@@ -196,6 +223,21 @@ class DestinationGRPCClient:
         # reason (e.g. a statement-timeout cancel) instead of a generic
         # "Schema configuration failed".
         self._schema_rejection_message: str | None = None
+
+        # How the most recent handshake ended (issue #429), or None before
+        # any has run. The client is the only party that can tell a
+        # destination that refused the stream from one that never answered,
+        # so it records the fact rather than leaving the engine to read it
+        # back out of the rejection wording.
+        self._schema_handshake_outcome: SchemaHandshakeOutcome | None = None
+
+        # The category the destination declared on a rejected SchemaAck,
+        # UNSPECIFIED when it declared none. A destination shell that could
+        # not reach its connector worker declares NOT_READY here, which the
+        # engine would otherwise only see as forwarded reason text.
+        self._schema_failure_category: FailureCategory = (
+            FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+        )
 
         # Retry-safety verdict from the most recent accepted SchemaAck
         # (issue #286): (RetrySemantics wire value, reason), or None when
@@ -420,6 +462,8 @@ class DestinationGRPCClient:
         self._task_failure = None
         self._peer_closed_stream = False
         self._schema_rejection_message = None
+        self._schema_handshake_outcome = None
+        self._schema_failure_category = FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
         self._stream_retry_semantics = None
 
         # Create queues for bidirectional communication
@@ -458,6 +502,11 @@ class DestinationGRPCClient:
                 # across the await above, which the narrowing from the
                 # start-of-method reset would otherwise hide.
                 cause: BaseException | None = self._task_failure
+                # The stream died before the destination could answer, so
+                # nothing it thinks about the schema is known.
+                self._schema_handshake_outcome = (
+                    SchemaHandshakeOutcome.TRANSPORT_FAILURE
+                )
                 if cause is not None:
                     self._schema_rejection_message = (
                         f"stream reader/writer exited before schema ACK: {cause}"
@@ -476,20 +525,33 @@ class DestinationGRPCClient:
                 if response.accepted:
                     logger.info(f"Schema accepted for stream {stream_id}")
                     accepted = True
+                    self._schema_handshake_outcome = SchemaHandshakeOutcome.ACCEPTED
                     self._stream_retry_semantics = (
                         response.retry_semantics,
                         response.retry_semantics_reason,
                     )
                 else:
+                    # The destination was reachable and said no. Its declared
+                    # category, when it set one, outranks the outcome: only it
+                    # knows whether the refusal came from the handler or from a
+                    # worker the shell could not reach (issue #429).
+                    self._schema_handshake_outcome = SchemaHandshakeOutcome.REJECTED
+                    self._schema_failure_category = _known_failure_category(
+                        response.failure_category, stream_id
+                    )
                     self._schema_rejection_message = response.message
                     logger.error(f"Schema rejected: {response.message}")
             else:
+                self._schema_handshake_outcome = (
+                    SchemaHandshakeOutcome.PROTOCOL_VIOLATION
+                )
                 self._schema_rejection_message = (
                     f"unexpected response type before schema ACK: {type(response)}"
                 )
                 logger.error(self._schema_rejection_message)
 
         except asyncio.TimeoutError:
+            self._schema_handshake_outcome = SchemaHandshakeOutcome.TRANSPORT_FAILURE
             self._schema_rejection_message = (
                 f"destination did not acknowledge the schema within {self.timeout}s"
             )
@@ -509,9 +571,34 @@ class DestinationGRPCClient:
 
         The reason is a rejection message, an ack-wait timeout, or a stream
         failure before the ack. None when the most recent start_stream was
-        accepted (or none has run).
+        accepted (or none has run). Diagnostic only: the engine classifies
+        from :attr:`schema_handshake_outcome`, never from this text.
         """
         return self._schema_rejection_message
+
+    @property
+    def schema_handshake_outcome(self) -> SchemaHandshakeOutcome:
+        """Return how the last handshake ended (issue #429).
+
+        Raises if no handshake has run: every caller reads this off a
+        ``start_stream`` that already returned, so an unset outcome is a
+        caller defect and reporting a made-up one would hide it.
+        """
+        if self._schema_handshake_outcome is None:
+            raise RuntimeError(
+                "no schema handshake has run on this client; there is no "
+                "outcome to read"
+            )
+        return self._schema_handshake_outcome
+
+    @property
+    def schema_failure_category(self) -> FailureCategory:
+        """Return the category the destination declared on a rejected ack.
+
+        UNSPECIFIED when it declared none, when the value was unreadable, or
+        when the handshake did not reach an ack at all.
+        """
+        return self._schema_failure_category
 
     @property
     def stream_retry_semantics(self) -> tuple[int, str] | None:
@@ -972,21 +1059,9 @@ class DestinationGRPCClient:
                 failure_summary=summary,
             )
 
-        # Bounds-check the category off the wire: on the worker-proxy hop
-        # the sender is the untrusted connector process, so an unrecognised
-        # integer degrades to UNSPECIFIED (falling back to summary matching)
-        # instead of propagating (issue #351). The category is advisory --
-        # unlike status, a bad value must not abort the stream.
-        try:
-            failure_category = FailureCategory(ack.failure_category)
-        except ValueError:
-            logger.warning(
-                "Unknown failure_category %r on ack for batch %d; "
-                "degrading to UNSPECIFIED",
-                ack.failure_category,
-                ack.batch_seq,
-            )
-            failure_category = FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+        failure_category = _known_failure_category(
+            ack.failure_category, f"batch {ack.batch_seq}"
+        )
         if success:
             # A category paired with a success status is meaningless; zero it
             # so the field is only ever read off a failure result.

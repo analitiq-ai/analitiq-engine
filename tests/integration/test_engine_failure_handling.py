@@ -780,16 +780,19 @@ class TestEngineFatalFailureHandling:
         )
         assert processor.exhausted_failure_codes == [ErrorCode.INTERNAL]
 
-        # Undeclared acks take the same text fallback the raise path gets: a
-        # config-class summary keeps CONFIG_INVALID, opaque driver text takes
-        # the load-stage default.
-        processor = await _exhaust(
-            _retryable("SchemaConfigurationError: unsupported write mode")
-        )
-        assert processor.exhausted_failure_codes == [ErrorCode.CONFIG_INVALID]
-
-        processor = await _exhaust(_retryable("connection reset by peer"))
-        assert processor.exhausted_failure_codes == [ErrorCode.DESTINATION_WRITE_FAILED]
+        # An undeclared ack takes the load stage's default whatever its
+        # summary says. The first summary names a config-defect exception
+        # class and still reads as a write failure: the handler that raised
+        # it declares CONFIG_DEFECT on the ack when it means it, and the
+        # engine no longer recovers a category by reading the wording back.
+        for summary in (
+            "SchemaConfigurationError: unsupported write mode",
+            "connection reset by peer",
+        ):
+            processor = await _exhaust(_retryable(summary))
+            assert processor.exhausted_failure_codes == [
+                ErrorCode.DESTINATION_WRITE_FAILED
+            ]
 
     def test_get_partial_error_code_reports_dominant_partial_cause(
         self, engine: StreamingEngine
@@ -1109,8 +1112,18 @@ class TestEngineStreamFailurePropagation:
             nonlocal call_count
             call_count += 1
             if stream_config.get("name") == "failing-stream":
-                raise StreamProcessingError(
-                    "password authentication failed", stream_id=stream_id
+                # Tagged the way the extract boundary tags a real failure: a
+                # connector that declared `auth` for this driver error, whose
+                # category readable.py turned into a tag at the worker hop.
+                # An untagged raise here would classify INTERNAL, because no
+                # part of the engine reads "password authentication failed"
+                # out of the message any more.
+                raise tag_failure(
+                    StreamProcessingError(
+                        "password authentication failed", stream_id=stream_id
+                    ),
+                    code=ErrorCode.SOURCE_AUTH_FAILED,
+                    stage=FailureStage.SOURCE_EXTRACT,
                 )
             # Success for other streams
             return None
@@ -1479,3 +1492,39 @@ class TestMappingCompileFailureIsReported:
             "metrics record; it is the only report of why the stream failed"
         )
         assert emitted["stream"]["status"] != "success"
+        # An unknown function name is a defect in the customer's own mapping,
+        # so the record must send them there. Compiling runs before the
+        # transform stage's boundary exists, so without a tag at the compile
+        # site the failure reaches the runner untagged and reports INTERNAL --
+        # pointing the customer at us over their own config.
+        assert emitted["stream"]["error_code"] == ErrorCode.CONFIG_INVALID.value
+        assert emitted["stream"]["error_detail"].startswith("transform/CONFIG_INVALID:")
+
+    @pytest.mark.asyncio
+    async def test_a_compile_failure_reports_what_a_runtime_one_would(
+        self,
+        mock_grpc_client: AsyncMock,
+        sample_stream_config: dict[str, Any],
+        temp_dir: str,
+    ):
+        """Compiling a mapping and running one are the same concept.
+
+        A defect caught at compile time and the same class of defect caught
+        mid-batch are both the customer's mapping, so they must not report
+        different codes depending on when the engine noticed.
+        """
+        from src.state.error_classification import (
+            classify_exception,
+            default_code_for_stage,
+        )
+
+        assert (
+            default_code_for_stage(FailureStage.TRANSFORM) is ErrorCode.CONFIG_INVALID
+        )
+        # What the transform stage's own boundary produces mid-batch.
+        mid_batch = tag_failure(
+            TransformationError("cannot convert value to Int64"),
+            code=default_code_for_stage(FailureStage.TRANSFORM),
+            stage=FailureStage.TRANSFORM,
+        )
+        assert classify_exception(mid_batch) is ErrorCode.CONFIG_INVALID

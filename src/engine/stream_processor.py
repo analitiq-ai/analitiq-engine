@@ -39,8 +39,8 @@ from ..state.error_classification import (
     classify_destination_failure,
     classify_for_metrics,
     classify_handshake_failure,
-    classify_source_extract,
     customer_message,
+    default_code_for_stage,
     detail_for_code,
     dominant_error_code,
     tag_failure,
@@ -215,8 +215,24 @@ class StreamProcessor:
             # failure is classified and emitted like any other stream failure.
             # A stream with no assignments has no transform: batches pass
             # through untouched.
+            #
+            # Tagged here rather than left to the transform stage's own
+            # boundary: compiling runs before that stage exists, so an
+            # unknown function name in a customer's mapping would otherwise
+            # reach the runner untagged and report INTERNAL -- sending them
+            # to us over a defect in their own config. Compiling a mapping
+            # and running one are the same concept, so they report the same
+            # code.
             if self.mapping.assignments:
-                self.transform = compile_mapping(self.mapping)
+                try:
+                    self.transform = compile_mapping(self.mapping)
+                except Exception as compile_error:
+                    tag_failure(
+                        compile_error,
+                        code=default_code_for_stage(FailureStage.TRANSFORM),
+                        stage=FailureStage.TRANSFORM,
+                    )
+                    raise
 
             source_cfg = self.stream_config["source"]
             destination_cfg = self.stream_config["destination"]
@@ -356,11 +372,9 @@ class StreamProcessor:
             # The destination did not accept the stream. configure_schema
             # only prepares the destination's own table (no schema is
             # validated), so this is either a destination config defect or a
-            # transport failure. Tag it at the raise site from the concrete
-            # reason (engine/proxy-generated, including the inner reason
-            # forwarded across the worker proxy) so classification is
-            # structural: a transport reason -> DESTINATION_WRITE_FAILED, any
-            # other reason -> CONFIG_INVALID.
+            # transport failure -- and the client knows which, because it
+            # either received a SchemaAck or did not. Tag from that outcome,
+            # never from the rejection wording (issue #429).
             reason = client.schema_rejection_message
             detail = f": {reason}" if reason else ""
             raise tag_failure(
@@ -369,7 +383,10 @@ class StreamProcessor:
                     f"{self.stream_name}{detail}",
                     stream_id=self.stream_id,
                 ),
-                code=classify_handshake_failure(reason),
+                code=classify_handshake_failure(
+                    client.schema_handshake_outcome,
+                    declared=client.schema_failure_category,
+                ),
                 stage=FailureStage.DESTINATION_LOAD,
             )
         logger.info("Stream %s: gRPC stream started, schema accepted", self.stream_name)
@@ -500,14 +517,14 @@ class StreamProcessor:
             )
             await queue.put(None)  # Signal end even on error
             # Tag the failure source-extract so classification is deterministic
-            # and never confused with a destination/transform cause. The code
-            # within source (auth/unreachable/rate/config) is the one split a tag
-            # cannot make for an opaque driver error. tag_failure is no-overwrite,
-            # so a deeper tag -- e.g. the worker's deterministic-config signal
-            # from readable.py -- still wins over this coarser default.
+            # and never confused with a destination/transform cause. The stage
+            # names the code (issue #429); anything more precise -- a declared
+            # category, the worker's deterministic-config signal -- was tagged
+            # in readable.py at the failure's birth site, and tag_failure is
+            # no-overwrite, so that deeper verdict still wins.
             tag_failure(
                 e,
-                code=classify_source_extract(e),
+                code=default_code_for_stage(FailureStage.SOURCE_EXTRACT),
                 stage=FailureStage.SOURCE_EXTRACT,
             )
             raise
@@ -557,7 +574,11 @@ class StreamProcessor:
             # no data schema, so this is a configuration defect (CONFIG_INVALID),
             # not a data-vs-schema mismatch. tag_failure is no-overwrite, so a
             # deeper tag still wins.
-            tag_failure(e, code=ErrorCode.CONFIG_INVALID, stage=FailureStage.TRANSFORM)
+            tag_failure(
+                e,
+                code=default_code_for_stage(FailureStage.TRANSFORM),
+                stage=FailureStage.TRANSFORM,
+            )
             raise
 
     def _persist_committed_cursor(

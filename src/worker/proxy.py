@@ -26,6 +26,7 @@ from cdk.connection_runtime import ConnectionRuntime
 from cdk.types import (
     AckStatus,
     Cursor,
+    FailureCategory,
     RetrySemantics,
     RetryVerdict,
     SchemaSpec,
@@ -34,6 +35,7 @@ from cdk.types import (
 from src.destination.server import SHUTDOWN_REASON_SUCCESS
 from src.grpc.client import DestinationGRPCClient
 from src.grpc.generated.analitiq.v1 import Cursor as ProtoCursor
+from src.state.error_classification import SchemaHandshakeOutcome
 from src.worker.shell import build_bootstrap
 from src.worker.spawn import WorkerHandle, spawn_worker
 
@@ -67,6 +69,57 @@ def _known_ack_status(status: int) -> AckStatus | int:
         return int(status)
 
 
+#: Who owns a worker's failed handshake, by what the shell observed. The
+#: shell sits between the engine and an untrusted worker process, so it is
+#: the only party that can tell these apart -- and each means something
+#: different to the customer (issue #429). A worker that never answered
+#: establishes nothing about their configuration (NOT_READY); one that
+#: answered with something that is not a SchemaAck is a defective worker or
+#: a protocol bug, which nobody but us owns (INTERNAL).
+_HANDSHAKE_OWNERS = {
+    SchemaHandshakeOutcome.TRANSPORT_FAILURE: (
+        FailureCategory.FAILURE_CATEGORY_NOT_READY
+    ),
+    SchemaHandshakeOutcome.PROTOCOL_VIOLATION: (
+        FailureCategory.FAILURE_CATEGORY_INTERNAL
+    ),
+}
+
+# Totality, enforced at import: this runs while a handshake is already
+# failing, so an unmapped outcome must not be the thing that raises there.
+_unowned = (
+    set(SchemaHandshakeOutcome)
+    - {SchemaHandshakeOutcome.ACCEPTED, SchemaHandshakeOutcome.REJECTED}
+    - set(_HANDSHAKE_OWNERS)
+)
+if _unowned:
+    raise RuntimeError(
+        f"_HANDSHAKE_OWNERS must own every non-rejection outcome; "
+        f"missing: {sorted(o.value for o in _unowned)}"
+    )
+
+
+def _forwarded_schema_category(client: DestinationGRPCClient) -> FailureCategory:
+    """Return who owns a worker's failed handshake, for the engine-facing ack.
+
+    A worker that answered keeps its own declaration when it made one, and
+    otherwise owns the refusal as a config defect -- it was reachable and
+    said no. Anything else is read off :data:`_HANDSHAKE_OWNERS`.
+    """
+    outcome = client.schema_handshake_outcome
+    if outcome is SchemaHandshakeOutcome.ACCEPTED:
+        raise ValueError(
+            "_forwarded_schema_category needs a failed handshake; the "
+            "worker accepted this schema"
+        )
+    if outcome is not SchemaHandshakeOutcome.REJECTED:
+        return _HANDSHAKE_OWNERS[outcome]
+    declared = client.schema_failure_category
+    if declared is FailureCategory.FAILURE_CATEGORY_UNSPECIFIED:
+        return FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
+    return declared
+
+
 class WorkerProxyHandler(BaseDestinationHandler):
     """Forwards the destination handler contract to a connector worker."""
 
@@ -94,6 +147,14 @@ class WorkerProxyHandler(BaseDestinationHandler):
         # engine-facing ack carries the worker's real reason (issue #231)
         # instead of a generic "Schema configuration failed".
         self.last_schema_rejection: str | None = None
+        # Who owns that rejection, forwarded the same way (issue #429). A
+        # worker this shell could never reach is NOT_READY: nothing about the
+        # customer's configuration was established, and only this hop knows
+        # that. The engine reads the category off the SchemaAck rather than
+        # matching the reason text, so the distinction survives the hop.
+        self.last_schema_failure_category: FailureCategory = (
+            FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+        )
         # Terminal-run outcome, set by ``finalize_run`` (called from the shell
         # server's Shutdown handler) and forwarded to the worker at teardown so
         # the worker only prunes its idempotency ledger on a successful run.
@@ -209,9 +270,13 @@ class WorkerProxyHandler(BaseDestinationHandler):
 
     async def configure_schema(self, schema_spec: SchemaSpec) -> bool:
         self.last_schema_rejection = None
+        self.last_schema_failure_category = FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
         if self._handle is None:
             logger.error("%s: configure_schema before connect", self._label)
             self.last_schema_rejection = "destination worker not started"
+            self.last_schema_failure_category = (
+                FailureCategory.FAILURE_CATEGORY_NOT_READY
+            )
             return False
         stream_id = schema_spec.stream_id
         schema_config = {
@@ -283,6 +348,9 @@ class WorkerProxyHandler(BaseDestinationHandler):
         )
         if not await client.connect(max_connect_retries=3):
             self.last_schema_rejection = "destination worker channel did not connect"
+            self.last_schema_failure_category = (
+                FailureCategory.FAILURE_CATEGORY_NOT_READY
+            )
             return None
         accepted = await client.start_stream(
             run_id="",  # idempotency keys ride each forwarded batch
@@ -291,8 +359,13 @@ class WorkerProxyHandler(BaseDestinationHandler):
         )
         if not accepted:
             # Forward the worker's real rejection reason so the engine-facing
-            # ack is not the generic "Schema configuration failed" (issue #231).
+            # ack is not the generic "Schema configuration failed" (issue #231),
+            # and forward who owns it (issue #429). A worker that answered "no"
+            # names a config defect unless it declared otherwise; a worker that
+            # never answered leaves nothing established about the config, which
+            # is what NOT_READY says.
             self.last_schema_rejection = client.schema_rejection_message
+            self.last_schema_failure_category = _forwarded_schema_category(client)
             await client.disconnect()
             return None
         return client

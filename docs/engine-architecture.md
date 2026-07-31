@@ -270,17 +270,19 @@ Four structured signals cross process boundaries so the tag survives isolation:
   category; the engine maps it to the published code
   (`source_code_for_declared_category`) and tags both deterministic and
   retryable errors with it — a declared `rate_limited` 403 that exhausts
-  retries reports `RATE_LIMITED`, never the text split's reading of "403".
-- The destination-handshake reason (engine/proxy-generated, including the inner
-  reason forwarded across the worker proxy) is split transport-vs-config at the
-  raise site by `classify_handshake_failure`, so a proxied destination outage
-  classifies `DESTINATION_WRITE_FAILED` and a destination-config defect
-  `CONFIG_INVALID` — no schema-vs-transport guessing.
-- The batch ack's `FailureCategory` (`BatchAck` field 9): the
-  destination declares config-defect / write-rejected / not-ready where the
-  failure is caught, and `classify_destination_failure` maps the declared
+  retries reports `RATE_LIMITED`, and an undeclared one reports the extract
+  stage's own default rather than a reading of "403".
+- The destination handshake is classified from its outcome, not its wording.
+  The gRPC client records whether it received a `SchemaAck`, or the stream
+  died, or nothing came (`SchemaHandshakeOutcome`), because only it can tell
+  a destination that refused the stream from one that never answered;
+  `classify_handshake_failure` maps that outcome, and the category the
+  destination declared on the rejected ack outranks it.
+- The ack's `FailureCategory`, carried on both `BatchAck` and `SchemaAck`: the
+  side that caught the failure declares config-defect / write-rejected /
+  not-ready / internal, and `classify_destination_failure` maps the declared
   category directly (`CONFIG_INVALID` / `DESTINATION_WRITE_FAILED` /
-  `INTERNAL`) instead of substring-matching the `failure_summary` prose.
+  `INTERNAL`) instead of reading the `failure_summary` prose.
 
 A connector may declare its driver's failure taxonomy as data — the
 `error_map` block in `connector.json`: SQLSTATE classes and
@@ -300,27 +302,31 @@ re-derives a declared classification from exception chains or text, so a
 declaring connector gets deterministic classification for declared
 identifiers with zero connector Python.
 
-The name/phrase heuristics remain in three narrow roles only, each running
-strictly after the declared map and the structured signals, and each logs
-when it decided: the **source-extract fine split**
-(`classify_source_extract`), which picks auth-vs-unreachable-vs-rate for an
-opaque, undeclared source driver/HTTP error; the **destination-load
-fallback** (`classify_destination_failure`) for a batch failure whose ack
-declares no category — a thick connector's own ack, or a failure with no
-ack at all; and a defensive **fallback** (`classify_exception` over class
-names + message text, mirroring `cdk.sql._adbc_utils._is_fatal_adbc_error`)
-for any exception that reaches the runner with no tag. Because the source
-split runs *only* at the source boundary, a destination port (`host:401`)
-or path can never be misread as source auth.
+Engine-side classification reads no exception type and no message text at
+all — there is no phrase table and no class-name table. When nothing was
+declared, the code comes from the stage that raised
+(`default_code_for_stage`), and every stage boundary tags unconditionally so
+that default always exists.
 
-The `error_code` enum is the stable, audited contract. The one residual
-best-effort area is the source-extract fine split above, and only for a
-failure no declared fact claims — a partial map is the normal case, and a
-declared `transient`/`write_rejected` names no source code by design: such
-a failure's auth-vs-unreachable-vs-rate is inferred from its text and can
-fall to a neighbouring code or `INTERNAL`. It is never a secret leak (only
-class names and codes ever reach `error_detail`) and never a cross-stage
-error (the stage is always known from the tag).
+The stage defaults are asymmetric on purpose. A destination-load failure
+defaults to `DESTINATION_WRITE_FAILED` because the stage establishes the
+whole of that claim: the write did not happen. A source-extract failure
+defaults to `INTERNAL`, because each source code names a *mechanism* — the
+host did not answer, the credentials were refused, the quota ran out — and
+the stage observed none of them. A connector declaring an `error_map`
+supplies the mechanism; one that does not leaves a gap `INTERNAL` reports
+rather than papers over. The side is not lost either way: it rides the tag's
+stage label into `error_detail`, which reads
+`source_extract/INTERNAL:ReadError`.
+
+The `error_code` enum is the stable, audited contract. An exception that
+reaches the runner with no tag is a raise site missing its boundary — an
+engine defect, logged at ERROR and reported `INTERNAL`, so the hole is
+findable instead of absorbed into a plausible code. A verdict is never a
+secret leak (only class names and codes ever reach `error_detail`) and never
+a cross-stage error (the stage is always known from the tag). The two
+vocabularies behind this — what a peer declares versus what the customer is
+told — are separated in [ADR 0001](adr/0001-two-failure-vocabularies.md).
 
 ## ConnectionRuntime and Transports
 

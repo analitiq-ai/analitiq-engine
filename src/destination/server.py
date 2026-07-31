@@ -434,6 +434,21 @@ class DestinationServicer(DestinationServiceServicer):
                     or "Schema configuration failed"
                 )
             )
+            # A proxying handler also records *who owns* the rejection, not
+            # just its wording (issue #429): a worker it could not reach is
+            # NOT_READY, and only the ack's category can say so -- the engine
+            # must never read that back out of the message text. Handlers
+            # that declare nothing leave UNSPECIFIED, and the engine resolves
+            # it from the handshake outcome it observed itself.
+            ack_category = (
+                CdkFailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+                if accepted
+                else getattr(
+                    self.handler,
+                    "last_schema_failure_category",
+                    CdkFailureCategory.FAILURE_CATEGORY_UNSPECIFIED,
+                )
+            )
         except (UnmappedTypeError, InvalidTypeMapError) as e:
             logger.error(
                 "type-map error configuring stream %s: %s",
@@ -442,6 +457,7 @@ class DestinationServicer(DestinationServiceServicer):
             )
             accepted = False
             ack_message = f"type-map: {e}"
+            ack_category = CdkFailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
         except (
             AdbcConfigurationError,
             CreateTableError,
@@ -463,6 +479,7 @@ class DestinationServicer(DestinationServiceServicer):
             # with its table/column context. DDL *execution* failures raise
             # raw driver errors and still fail the RPC.
             accepted = False
+            ack_category = CdkFailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
             if isinstance(e.__cause__, (UnmappedTypeError, InvalidTypeMapError)):
                 # The DDL builder wraps a type-map error as CreateTableError
                 # (ddl.py); keep the "type-map: " signal the dedicated
@@ -485,6 +502,7 @@ class DestinationServicer(DestinationServiceServicer):
             )
             accepted = False
             ack_message = f"{type(e).__name__}: {e}"
+            ack_category = CdkFailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
 
         if accepted:
             # The handler decides the stream's retry safety (write mode,
@@ -504,6 +522,7 @@ class DestinationServicer(DestinationServiceServicer):
             stream_id=schema_msg.stream_id,
             accepted=False,
             message=ack_message,
+            failure_category=ack_category,
         )
 
     async def HealthCheck(
