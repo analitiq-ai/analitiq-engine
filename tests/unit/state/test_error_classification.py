@@ -1021,6 +1021,7 @@ def test_classify_for_metrics_prefers_tag():
     )
     code, message, detail = classify_for_metrics(exc)
     assert code is ErrorCode.CONFIG_INVALID
+    assert message == customer_message(ErrorCode.CONFIG_INVALID)
     assert detail == "config/CONFIG_INVALID:RuntimeError"
 
 
