@@ -48,7 +48,7 @@ On `StreamRecords` the engine sends a `StreamRequest` carrying either a `SchemaM
 | Message | Direction | Purpose |
 |---------|-----------|---------|
 | `SchemaMessage` | Engine -> Dest | Identifies the stream + write mode (once at stream start) |
-| `SchemaAck` | Dest -> Engine | Whether the schema was accepted, plus the stream's retry-safety verdict (`retry_semantics` + reason) |
+| `SchemaAck` | Dest -> Engine | Whether the schema was accepted, the stream's retry-safety verdict (`retry_semantics` + reason), and on a rejection the `failure_category` naming who owns it |
 | `RecordBatch` | Engine -> Dest | Arrow IPC payload + content-derived record ids + cursor |
 | `BatchAck` | Dest -> Engine | Status, records written, committed cursor |
 
@@ -116,10 +116,11 @@ enum AckStatus {
 }
 
 enum FailureCategory {
-  FAILURE_CATEGORY_UNSPECIFIED = 0;    // nothing declared; engine falls back to summary matching
+  FAILURE_CATEGORY_UNSPECIFIED = 0;    // nothing declared; the raising stage names the code
   FAILURE_CATEGORY_CONFIG_DEFECT = 1;  // deterministic, user-fixable configuration defect
   FAILURE_CATEGORY_WRITE_REJECTED = 2; // write attempted and failed: constraint, permission, driver error
   FAILURE_CATEGORY_NOT_READY = 3;      // nothing attempted: never connected / schema never configured
+  FAILURE_CATEGORY_INTERNAL = 4;       // the engine or the connector has a bug
 }
 
 message BatchAck {
@@ -135,7 +136,13 @@ message BatchAck {
 
 There is no `PARTIAL_SUCCESS` — batches are all-or-nothing (below).
 
-`failure_summary` answers *what went wrong* (human-readable, free text); `failure_category` answers *who owns the fix* (machine-readable), so the engine maps a failed batch to a customer-facing error code without parsing summary text. The vocabulary is engine-owned: connectors are not asked to self-classify. It is set by the config-defect and write-failure excepts in `cdk/sql/generic.py`, by every pre-flight guard via `reject_batch`, and by the destination servicer's own batch-before-schema rejection. A thick connector that overrides `write_batch` leaves it `UNSPECIFIED` and the engine falls back to matching the summary. The value is range-checked when read off the wire — an unrecognised integer degrades to `UNSPECIFIED` — and an in-range value is used as declared.
+`failure_summary` answers *what went wrong* (human-readable, free text); `failure_category` answers *who owns the fix* (machine-readable). The engine never parses the summary: nothing in the classification path reads an exception's message or type.
+
+Any sender may declare a category — the config-defect and write-failure excepts in `cdk/sql/generic.py`, every pre-flight guard via `reject_batch`, the destination servicer's own batch-before-schema rejection, and a thick connector that overrides `write_batch`. The declaration is signal, not trust: it is range-checked when read off the wire, and an unrecognised integer degrades to `UNSPECIFIED` rather than propagating or aborting the stream. An in-range value is used as declared.
+
+`UNSPECIFIED` resolves from the pipeline stage that raised, not from the summary. A destination-load failure reads as `DESTINATION_WRITE_FAILED`, because the load stage establishes exactly that much: the write did not happen. `SchemaAck` carries the same field for the same reason — a destination shell that could not reach its connector worker declares `NOT_READY`, which is the only way the engine can tell that refusal apart from one the customer's configuration caused.
+
+`FAILURE_CATEGORY_INTERNAL` exists so an engine or connector bug can say so on the wire. Without it every internal fault has to impersonate a user-owned failure, which is the confusion the split between this vocabulary and the customer-facing `ErrorCode` exists to prevent — see [ADR 0001](adr/0001-two-failure-vocabularies.md).
 
 ## Key Design Decisions
 

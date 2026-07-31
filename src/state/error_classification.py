@@ -17,32 +17,34 @@ one internal-only value:
   stage tags and exception *class names* only (never message text). This is the
   metrics record's internal-only ``error_detail`` field.
 
-How classification works (structured-first):
+How classification works (issue #429): the boundary that knows the cause
+says so, and nothing downstream guesses.
 
 The engine knows the failure's stage and side at the raise site -- the extract /
 transform / load stage boundaries, the destination handshake, the config phase.
 Each of those sites stamps the exception with a :class:`FailureTag` (a definite
-``(error_code, stage)``) via :func:`tag_failure`. :func:`classify_exception`
-reads those tags first and uses them verbatim: deterministic, no text matching,
-no cross-stage confusion (a destination HTTP error can never read as source
-auth, because the destination-load boundary tags it ``DESTINATION_WRITE_FAILED``
-outright). For an aggregated ``ExceptionGroup`` the highest-priority tag across
-the leaves wins.
+``(error_code, stage)``) via :func:`tag_failure`, unconditionally. There is no
+text matching anywhere in this module: no phrase table, no exception-class-name
+table. A failure that reaches :func:`classify_exception` with no tag is a
+*missing boundary* -- a findable engine defect -- and classifies as
+:attr:`ErrorCode.INTERNAL` rather than as a string somebody guessed at.
 
-The name/phrase heuristics below remain only as:
+Two things supply a code more precise than the stage's own default, and both
+are structured:
 
-1. The within-source-extract fine split. The source side genuinely cannot know
-   auth-vs-unreachable-vs-rate for an opaque driver error without inspecting it;
-   :func:`classify_source_extract` does that one narrow, *source-only* split when
-   the extract boundary tags a stream. There is no cross-stage ambiguity left,
-   because only the source boundary ever runs it.
-2. The destination-load fallback for an undeclared failure
-   (:func:`classify_destination_failure` when the batch ack carries no
-   ``FailureCategory`` -- a thick connector's own ack, or a failure with no
-   ack at all).
-3. A defensive fallback (:func:`classify_exception`) for any exception that
-   reaches the runner with no tag at all. It mirrors the existing name-based
-   pattern in ``cdk.sql._adbc_utils._is_fatal_adbc_error``.
+1. A declared category. The source worker declares an error category against
+   the connector's ``error_map`` at the failure's birth site
+   (:func:`source_code_for_declared_category`); a destination handler declares
+   a :class:`~cdk.types.FailureCategory` on the batch ack
+   (:func:`code_for_declared_category`). A declaration is signal, not trust:
+   an off-vocabulary value is logged and dropped, never promoted to a code.
+2. The raising stage itself, via :func:`default_code_for_stage`, when nothing
+   was declared.
+
+The two vocabularies are deliberately not merged. A declared category is what
+an untrusted peer says about one attempt; :class:`ErrorCode` is what the
+customer is told about the run. Merging them would let a connector name a
+customer-facing outcome (see ``docs/adr/0001-two-failure-vocabularies.md``).
 
 There is no data-vs-schema mismatch code: the engine performs no schema
 validation (the destination only configures its own table via DDL), so type-map
@@ -58,7 +60,6 @@ engine-side in the logs (``logger.exception``), not in the metrics record.
 from __future__ import annotations
 
 import logging
-import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
@@ -111,6 +112,43 @@ class FailureTag:
 
     code: ErrorCode
     stage: FailureStage
+
+
+# The code a stage names when nothing more precise was declared (issue #429).
+# Each stage knows which side of the pipeline broke, so it can always answer
+# -- that is what lets every boundary tag unconditionally and lets the phrase
+# tables go.
+#
+# SOURCE_EXTRACT is INTERNAL, not SOURCE_UNREACHABLE, and the asymmetry with
+# DESTINATION_LOAD is deliberate. "The write failed" is the whole of what a
+# destination-load failure claims, and the stage establishes it. Its source
+# counterparts each claim a *mechanism* -- the host did not answer, the
+# credentials were refused, the quota ran out -- and the stage establishes
+# none of them. A connector that declares its error_map supplies the
+# mechanism; one that does not leaves a gap that INTERNAL reports honestly
+# and a guess would paper over. The side is never lost: it rides the tag's
+# stage into error_detail as "source_extract/INTERNAL:ReadError".
+_STAGE_DEFAULT_CODE: dict[FailureStage, ErrorCode] = {
+    FailureStage.CONFIG: ErrorCode.CONFIG_INVALID,
+    FailureStage.SOURCE_EXTRACT: ErrorCode.INTERNAL,
+    FailureStage.TRANSFORM: ErrorCode.CONFIG_INVALID,
+    FailureStage.DESTINATION_LOAD: ErrorCode.DESTINATION_WRITE_FAILED,
+}
+
+# Totality, enforced at import (the same instinct as _CODE_PRIORITY below):
+# every boundary tags through this table, so a new FailureStage with no
+# default would raise inside the failure-reporting path.
+_stageless = set(FailureStage) - set(_STAGE_DEFAULT_CODE)
+if _stageless:
+    raise RuntimeError(
+        f"_STAGE_DEFAULT_CODE must give every FailureStage a default; "
+        f"missing: {sorted(s.value for s in _stageless)}"
+    )
+
+
+def default_code_for_stage(stage: FailureStage) -> ErrorCode:
+    """Return the code ``stage`` names when nothing was declared."""
+    return _STAGE_DEFAULT_CODE[stage]
 
 
 # Short, fixed, customer-facing message per code. These carry no exception text,
@@ -260,273 +298,6 @@ def _walk_chain(exc: BaseException) -> list[BaseException]:
     return out
 
 
-# The gRPC source worker re-raises across the boundary as
-# ``ReadError``/``RuntimeError`` with the original class name preserved as an
-# ``error_type:`` prefix (readable.py: f"{err.error_type}: {err.message} ...").
-# Promote that leading identifier into the name set so the name-based rules
-# (e.g. SecretNotFoundError -> CONFIG_INVALID) fire even though the live type is
-# only the wrapper. The captured token is a class name -- safe for error_detail.
-_ERROR_TYPE_PREFIX = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:")
-
-
-def _signature(exc: BaseException) -> tuple[set[str], str]:
-    """Collect the class names and message text across the whole chain.
-
-    Returns a set of every class name in every chained exception's MRO (plus any
-    worker ``error_type:`` prefix promoted from the message) and the lowercased
-    concatenation of their messages. Both feed the heuristic rules: types are
-    matched precisely by name; driver text and the worker prefix's tail are
-    matched in the message.
-    """
-    names: set[str] = set()
-    messages: list[str] = []
-    for member in _walk_chain(exc):
-        for klass in type(member).__mro__:
-            names.add(klass.__name__)
-        message = str(member)
-        prefix = _ERROR_TYPE_PREFIX.match(message)
-        if prefix:
-            names.add(prefix.group(1))
-        messages.append(message)
-    return names, " \n ".join(messages).lower()
-
-
-def is_local_io_error(exc: BaseException) -> bool:
-    """Return True if the chain carries a builtin local-filesystem error.
-
-    Lets the runner keep such a failure as the engine/infra fault it is
-    (``INTERNAL``) instead of the config-phase ``CONFIG_INVALID`` default -- e.g.
-    an unreadable manifest/connection JSON raises ``PermissionError`` during
-    config load, or a full/read-only volume raises a bare ``OSError``; both are
-    volume/permissions problems, not a bad config.
-    """
-    names, _ = _signature(exc)
-    return _is_local_filesystem_error(names)
-
-
-# --------------------------------------------------------------------------- #
-# Heuristic rules (source-extract fine split + untagged fallback)
-# --------------------------------------------------------------------------- #
-#
-# Each rule names the exception classes (matched anywhere in the chain's MRO)
-# and the message phrases that imply its code. These drive two things now:
-# ``classify_source_extract`` (the source-only auth/rate/unreachable split a tag
-# cannot make for an opaque driver error) and ``classify_exception``'s fallback
-# for an untagged exception. Order matters: config (setup defect, the root cause
-# when present) -> destination handshake (config vs transport) -> destination
-# write -> source auth -> rate -> source unreachable -> internal.
-
-# Config / contract / connector-definition / type-map / mapping defects. There
-# is no schema validation in the engine (the destination only configures its own
-# table via DDL), so type-map misses, mapping/transform errors, and destination
-# schema-configuration failures are all configuration defects, not a data-vs-
-# schema mismatch -- they live here. ``TypeMapError`` covers UnmappedTypeError /
-# InvalidTypeMapError / TypeMapNotFoundError.
-_CONFIG_NAMES = frozenset(
-    {
-        "ConfigError",
-        "ConfigNotFoundError",
-        "ConfigValidationError",
-        "ConnectorNotFoundError",
-        "EndpointNotFoundError",
-        "ConnectionConfigError",
-        "ContractValidationError",
-        "ConfigurationError",
-        "TransportSpecError",
-        "TypeMapError",
-        "InvalidTypeMapError",
-        "TypeMapNotFoundError",
-        "UnmappedTypeError",
-        "UnsupportedDialectOperationError",
-        "AdbcConfigurationError",
-        "CatalogAddressingError",
-        "SqlCapabilitiesError",
-        "ConnectorDeclarationError",
-        "ConnectorNotRegisteredError",
-        "UnresolvedValueError",
-        "SchemaConfigurationError",
-        "TransformationError",
-        # Secret resolution (missing/denied/malformed credentials, placeholder
-        # expansion) is config/setup, not source-system auth -- match the base so
-        # every subclass routes to CONFIG_INVALID.
-        "SecretResolutionError",
-        "SecretNotFoundError",
-        "SecretAccessDeniedError",
-        "PlaceholderExpansionError",
-    }
-)
-
-# Config-exception class names that survive only as text across a process
-# boundary (forwarded as "{TypeName}: ..." in a worker prefix, a destination
-# fatal-ack summary, or a handshake reason), where the live type is just the
-# wrapper and the name is mid-message. Matching them keeps a config defect
-# classified as CONFIG_INVALID wherever it surfaces. These are our own
-# controlled class names, not arbitrary driver text.
-_CONFIG_PHRASES = (
-    "secretresolutionerror",
-    "secretnotfounderror",
-    "secretaccessdeniederror",
-    "placeholderexpansionerror",
-    "unmappedtypeerror",
-    "invalidtypemaperror",
-    "typemapnotfounderror",
-    "transportspecerror",
-    "adbcconfigurationerror",
-    "catalogaddressingerror",
-    "sqlcapabilitieserror",
-    "connectordeclarationerror",
-    "unsupporteddialectoperationerror",
-    "schemaconfigurationerror",
-    "transformationerror",
-    "configvalidationerror",
-    "connectornotregisterederror",
-)
-
-# Source-system auth failures surface only as driver/HTTP text (this engine has
-# no typed source-auth exception; secret-store errors are config, see above).
-_AUTH_NAMES: frozenset[str] = frozenset()
-_AUTH_PHRASES = (
-    "authentication failed",
-    "password authentication failed",
-    "permission denied",
-    "access denied",
-    "access is denied",
-    "invalid credentials",
-    "login failed",
-    "unauthorized",
-    "not authorized",
-    "forbidden",
-)
-
-_RATE_PHRASES = (
-    "rate limit",
-    "rate-limit",
-    "ratelimit",
-    "too many requests",
-    "throttl",
-)
-
-# HTTP status codes: the digits must not be adjacent to a word char or "/", so a
-# code in a URL path ("/users/403"), an ID ("object 4035"), or a count ("1429
-# records") does not match -- only a standalone code ("status 401", "got 429")
-# does. The common textual companions (unauthorized / forbidden / too many
-# requests) are already covered by the phrase lists above.
-_HTTP_AUTH_STATUS = re.compile(r"(?<![\w/])40[13](?![\w/])")
-_HTTP_RATE_STATUS = re.compile(r"(?<![\w/])429(?![\w/])")
-
-# Matched against every class name in the exception chain's MRO.
-# ``ConnectorConnectionError`` is the source connectors' own class (it does not
-# derive from the builtin ``ConnectionError``), so it has to be named here in
-# its own right for an API connect failure to classify as unreachable.
-_UNREACHABLE_NAMES = frozenset(
-    {
-        "ConnectionError",
-        "ConnectorConnectionError",
-        "ConnectionRefusedError",
-        "ConnectionResetError",
-        "ConnectionAbortedError",
-        "TimeoutError",
-        "gaierror",
-    }
-)
-_UNREACHABLE_PHRASES = (
-    "connection refused",
-    "could not connect",
-    "failed to connect",
-    "could not translate host name",
-    "name or service not known",
-    "temporary failure in name resolution",
-    "getaddrinfo",
-    "no route to host",
-    "network is unreachable",
-    "connection reset",
-    "connection timed out",
-    "timed out",
-    "unreachable",
-    "host is down",
-)
-
-# The destination "schema" handshake (configure_schema) only prepares the
-# destination's own table via DDL -- it never validates data against a schema --
-# so a failed handshake is either a destination configuration defect or a
-# transport failure, not a schema mismatch. The engine raises one wording,
-# "Destination did not accept the stream ...", and forwards the concrete reason
-# (including the inner reason on the worker-proxy path). These transport reasons
-# (engine/proxy-generated, a controlled set) mean the destination was
-# unreachable mid-handshake -> DESTINATION_WRITE_FAILED; any other reason is a
-# configuration defect -> CONFIG_INVALID.
-_HANDSHAKE_MARKER = "did not accept the stream"
-_HANDSHAKE_TRANSPORT_PHRASES = (
-    "before schema ack",
-    "before sending schema ack",
-    "closed stream",
-    "did not acknowledge the schema",
-    "channel did not connect",
-    "did not connect",
-)
-
-# PEP-249 driver names (ProgrammingError / IntegrityError / NotSupportedError)
-# are deliberately NOT listed: they are transport-ambiguous. A destination write
-# failure never reaches the engine as a bare driver instance -- it crosses the
-# gRPC boundary as a failure_summary string wrapped by the StreamProcessor load
-# path (matched by the phrases below) or is recorded as the DLQ dominant cause.
-# A live driver
-# exception in the chain therefore comes from the source worker, so routing those
-# names to the destination would mislabel source read failures.
-_DESTINATION_NAMES = frozenset({"CreateTableError"})
-_DESTINATION_PHRASES = (
-    "failed to connect to grpc destination",
-    "write to destination",
-    "destination write",
-    "load stage",
-    # Wrappers StreamProcessor raises around a destination ack failure
-    # (one per BatchPolicy failure kind, _failure_message); the wrapper text
-    # itself is the destination signal.
-    "fatal failure",
-    "attempts:",
-    "unknown ack status",
-)
-
-# Builtin filesystem errors are a local engine/infra fault, never a source or
-# destination failure. They are matched by type so a local "[Errno 13]
-# Permission denied" from creating the state/deadletter directories is not read
-# as source auth by the "permission denied" phrase below.
-_LOCAL_IO_NAMES = frozenset(
-    {
-        "PermissionError",
-        "FileExistsError",
-        "IsADirectoryError",
-        "NotADirectoryError",
-        "InterruptedError",
-        "BlockingIOError",
-    }
-)
-
-
-def _is_local_filesystem_error(names: set[str]) -> bool:
-    """Return True for a builtin local-filesystem OSError, excluding network ones.
-
-    The named subclasses in :data:`_LOCAL_IO_NAMES` cover the common cases, but a
-    disk-full / read-only-volume failure (``ENOSPC`` / ``EROFS``) raises a bare
-    ``OSError`` with no dedicated subclass. Match that too -- but never a network
-    OSError, whose connection subclasses live in :data:`_UNREACHABLE_NAMES` and
-    mean a *remote* fault (source unreachable, or a destination write failure),
-    not a local-disk problem. Defined once so every classifier's local-I/O guard
-    treats engine/infra filesystem faults identically.
-    """
-    if names & _LOCAL_IO_NAMES:
-        return True
-    return "OSError" in names and not (names & _UNREACHABLE_NAMES)
-
-
-def _matches(
-    names: set[str], text: str, name_set: frozenset, phrases: tuple[str, ...]
-) -> bool:
-    if names & name_set:
-        return True
-    return any(phrase in text for phrase in phrases)
-
-
 # Extract context (issue #401): declared error category -> the concrete
 # source ErrorCode. ``transient`` and ``write_rejected`` claim no source
 # code — they speak to retryability, not to which published code names the
@@ -572,76 +343,73 @@ def source_code_for_declared_category(category: str) -> ErrorCode | None:
     return _DECLARED_SOURCE_CODES[category]
 
 
-def classify_source_extract(exc: BaseException) -> ErrorCode:
-    """Classify a source-extract failure into its concrete source code.
+class SchemaHandshakeOutcome(str, Enum):
+    """How a destination schema handshake ended.
 
-    Declared classification does not happen here: connector failures are
-    classified at their birth site (the worker, against the declared
-    ``error_map``) and cross the boundary as structured verdicts — the
-    deterministic flag and the declared category on the ``ReadError`` wire
-    message, which the extract path turns into a tag before this runs
-    (issue #401). An exception reaching this function unclaimed is
-    classified by the text split, and that fallback is logged.
-
-    The extract stage knows the failure is source-side, but auth-vs-unreachable-
-    vs-rate for an opaque driver/HTTP error is only legible from the error
-    itself. This is the one narrow, source-scoped text split; because only the
-    source boundary calls it, a destination port (``host:401``) or path can never
-    reach it, so the HTTP-code ambiguity that plagued whole-chain classification
-    is gone. A deterministic source-config error (a bad endpoint document, a
-    type-map miss) still resolves to CONFIG_INVALID; anything unrecognised stays
-    INTERNAL. A builtin local-filesystem error (checkpoint/cursor storage, worker
-    bootstrap) is an engine/infra fault and stays INTERNAL, never source auth.
+    The gRPC client sees the difference directly -- it either got a
+    ``SchemaAck``, or the stream died, or the ack never came -- so it
+    reports the outcome as a fact instead of the engine re-deriving one
+    from the rejection wording (issue #429). Each outcome names exactly
+    one thing that happened; :func:`classify_handshake_failure` owns the
+    mapping to a customer-facing code.
     """
-    names, text = _signature(exc)
-    if _is_local_filesystem_error(names):
-        # Guard before the "permission denied" auth phrase, exactly as
-        # classify_exception does: a local "[Errno 13] Permission denied" (or a
-        # bare OSError from a full/read-only volume) from the engine's own
-        # checkpoint/state I/O is infra, not source auth.
-        return ErrorCode.INTERNAL
-    code = _classify_source_extract_by_text(names, text)
-    logger.info(
-        "no declaration claimed the source failure; text heuristic " "classified it %s",
-        code.value,
+
+    ACCEPTED = "accepted"
+    # The destination answered with accepted=False: it was reachable and
+    # refused the stream.
+    REJECTED = "rejected"
+    # The stream died, or no ack arrived within the budget: the engine
+    # never learned what the destination thought.
+    TRANSPORT_FAILURE = "transport_failure"
+    # Something other than a SchemaAck came back first. Neither peer is at
+    # fault in a way the customer can act on.
+    PROTOCOL_VIOLATION = "protocol_violation"
+
+
+# What each handshake outcome means in customer-facing terms. configure_schema
+# only prepares the destination's own table via DDL -- it never validates data
+# -- so a destination that answers "no" is naming a configuration defect, while
+# one that never answers is a write-path failure.
+_HANDSHAKE_OUTCOME_CODES: dict[SchemaHandshakeOutcome, ErrorCode] = {
+    SchemaHandshakeOutcome.REJECTED: ErrorCode.CONFIG_INVALID,
+    SchemaHandshakeOutcome.TRANSPORT_FAILURE: ErrorCode.DESTINATION_WRITE_FAILED,
+    SchemaHandshakeOutcome.PROTOCOL_VIOLATION: ErrorCode.INTERNAL,
+}
+
+# Totality, enforced at import: every non-accepted outcome must name a code,
+# so a new outcome cannot reach the raise site with nothing to say.
+_uncoded_outcomes = (
+    set(SchemaHandshakeOutcome)
+    - {SchemaHandshakeOutcome.ACCEPTED}
+    - set(_HANDSHAKE_OUTCOME_CODES)
+)
+if _uncoded_outcomes:
+    raise RuntimeError(
+        f"_HANDSHAKE_OUTCOME_CODES must map every failing "
+        f"SchemaHandshakeOutcome; missing: "
+        f"{sorted(o.value for o in _uncoded_outcomes)}"
     )
-    return code
 
 
-def _classify_source_extract_by_text(names: set[str], text: str) -> ErrorCode:
-    """Run the demoted last-resort text split (issue #401 resolution order)."""
-    if _matches(names, text, _CONFIG_NAMES, _CONFIG_PHRASES):
-        return ErrorCode.CONFIG_INVALID
-    if _matches(names, text, _AUTH_NAMES, _AUTH_PHRASES) or _HTTP_AUTH_STATUS.search(
-        text
-    ):
-        return ErrorCode.SOURCE_AUTH_FAILED
-    if _matches(names, text, frozenset(), _RATE_PHRASES) or _HTTP_RATE_STATUS.search(
-        text
-    ):
-        return ErrorCode.RATE_LIMITED
-    if _matches(names, text, _UNREACHABLE_NAMES, _UNREACHABLE_PHRASES):
-        return ErrorCode.SOURCE_UNREACHABLE
-    return ErrorCode.INTERNAL
+def classify_handshake_failure(
+    outcome: SchemaHandshakeOutcome, *, declared: FailureCategory
+) -> ErrorCode:
+    """Return the code a failed destination handshake reports.
 
+    Two structured inputs, in the same order as everywhere else in this
+    module: what the destination declared on the rejected ack, then -- when
+    it declared nothing -- what the client observed. Neither is the
+    rejection text, because the same wording can come from a destination
+    that refused the stream and from one that died mid-handshake.
 
-def classify_handshake_failure(reason: str | None) -> ErrorCode:
-    """Classify a destination-handshake failure as transport vs config.
-
-    The destination handshake (configure_schema) only prepares the destination's
-    own table via DDL -- it never validates data -- so a failure is either a
-    transport problem (the destination was unreachable mid-handshake ->
-    DESTINATION_WRITE_FAILED) or a destination-config defect (-> CONFIG_INVALID).
-    ``reason`` is the engine/proxy-generated handshake reason (a controlled
-    string, including the inner reason forwarded across the worker proxy), not
-    arbitrary driver text. The engine calls this at the raise site so the tag is
-    definite; the same transport-phrase set backs the untagged fallback in
-    :func:`classify_exception`.
+    The declaration outranks the outcome because it is more specific: a
+    destination shell that could not reach its connector worker sends a
+    perfectly ordinary rejection, and only its NOT_READY declaration says
+    the refusal was not the customer's configuration.
     """
-    lowered = (reason or "").lower()
-    if any(phrase in lowered for phrase in _HANDSHAKE_TRANSPORT_PHRASES):
-        return ErrorCode.DESTINATION_WRITE_FAILED
-    return ErrorCode.CONFIG_INVALID
+    if outcome is SchemaHandshakeOutcome.ACCEPTED:
+        raise ValueError("classify_handshake_failure needs a failed handshake")
+    return code_for_declared_category(declared) or _HANDSHAKE_OUTCOME_CODES[outcome]
 
 
 # The engine-side meaning of each declared destination failure category
@@ -653,16 +421,18 @@ def classify_handshake_failure(reason: str | None) -> ErrorCode:
 # config defect, so it maps to INTERNAL -- the interim choice from issue #351
 # that avoids adding a member to the published ErrorCode contract (a dedicated
 # DESTINATION_NOT_READY code remains open, coordinated with the control
-# plane's error-code catalog).
+# plane's error-code catalog). INTERNAL says the engine or the connector has
+# a bug (issue #429); it is the one category whose name and code already agree.
 _CATEGORY_TO_CODE: dict[FailureCategory, ErrorCode] = {
     FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT: ErrorCode.CONFIG_INVALID,
     FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED: ErrorCode.DESTINATION_WRITE_FAILED,
     FailureCategory.FAILURE_CATEGORY_NOT_READY: ErrorCode.INTERNAL,
+    FailureCategory.FAILURE_CATEGORY_INTERNAL: ErrorCode.INTERNAL,
 }
 
 # Totality, enforced at import (same instinct as _CODE_PRIORITY above): every
 # declarable category must map to a code, so a future FailureCategory member
-# cannot silently fall through to text matching.
+# cannot silently reach the stage default as though nothing was declared.
 _unmapped = (
     set(FailureCategory)
     - {FailureCategory.FAILURE_CATEGORY_UNSPECIFIED}
@@ -678,8 +448,8 @@ if _unmapped:
 def code_for_declared_category(category: FailureCategory) -> ErrorCode | None:
     """Return the engine-side :class:`ErrorCode` for a declared category.
 
-    None for UNSPECIFIED -- nothing was declared, so classification falls back
-    to the name/phrase rules. The category -> code mapping read by
+    None for UNSPECIFIED -- nothing was declared, so the raising stage names
+    the code instead. The category -> code mapping read by
     :func:`classify_destination_failure`, public so the strategy-parity tests
     can pin it directly.
     """
@@ -728,94 +498,49 @@ def _read_failure_category(exc: BaseException) -> FailureCategory:
 def classify_destination_failure(exc: BaseException) -> ErrorCode:
     """Classify a destination-load failure as config-defect vs write-failure.
 
-    Structured-first, mirroring :func:`classify_exception`: the destination
-    declares the failure category on the batch ack at the site that caught the
-    exception (``BatchWriteResult.failure_category``, issue #351), and the
-    engine stamps it onto the exception it raises -- so when a category is
-    declared it is used verbatim, no text matching. Only an undeclared
-    (UNSPECIFIED) failure -- a thick connector's own ack, or a failure with no
-    ack at all -- falls back to the name/phrase rules, defaulting to
-    DESTINATION_WRITE_FAILED so a genuine write failure (constraint,
-    permission, transport) still routes there. Only the load boundary calls
-    it, so a source-side cause can never reach it.
+    The destination declares the failure category on the batch ack at the
+    site that caught the exception (``BatchWriteResult.failure_category``,
+    issue #351), and the engine stamps it onto the exception it raises. A
+    declared category is used verbatim; an undeclared (UNSPECIFIED) one --
+    a thick connector's own ack, or a failure with no ack at all --
+    resolves from the raising stage, which is DESTINATION_LOAD by
+    construction here (issue #429). Only the load boundary calls this, so
+    a source-side cause can never reach it.
+
+    The stage default is what makes an undeclared failure honest rather
+    than guessed: the load stage establishes that the write did not
+    happen, and that is exactly what DESTINATION_WRITE_FAILED claims.
     """
     declared = code_for_declared_category(_read_failure_category(exc))
     if declared is not None:
         return declared
-    names, text = _signature(exc)
-    if _is_local_filesystem_error(names):
-        # The load stage's try also runs engine-owned local I/O (checkpoint save,
-        # DLQ write, batch-commit journal, metrics emission); a builtin
-        # filesystem error there is an engine/infra fault, not a destination
-        # write rejection. This is the only classifier that defaults to a
-        # non-INTERNAL code, so the bare-OSError case (a full/read-only volume)
-        # matters most here -- _is_local_filesystem_error catches it while still
-        # letting a network OSError fall through to DESTINATION_WRITE_FAILED.
-        return ErrorCode.INTERNAL
-    code = (
-        ErrorCode.CONFIG_INVALID
-        if _matches(names, text, _CONFIG_NAMES, _CONFIG_PHRASES)
-        else ErrorCode.DESTINATION_WRITE_FAILED
-    )
     logger.info(
-        "no declared failure category on the destination failure; text "
-        "heuristic classified it %s",
-        code.value,
+        "no declared failure category on the destination failure (%s); "
+        "the load stage names the code",
+        type(exc).__name__,
     )
-    return code
+    return default_code_for_stage(FailureStage.DESTINATION_LOAD)
 
 
 def classify_exception(exc: BaseException) -> ErrorCode:
     """Classify a terminating pipeline exception into a customer-safe code.
 
-    Structured-first: if any stage stamped a :class:`FailureTag`, the dominant
-    tag's code is returned verbatim (deterministic, no text matching). Only an
-    exception that reaches here with no tag at all falls back to the name/phrase
-    heuristics, in priority order, defaulting to :attr:`ErrorCode.INTERNAL`.
+    If any stage stamped a :class:`FailureTag`, the dominant tag's code is
+    returned verbatim. An exception that reaches here with no tag at all
+    got past every boundary untagged, which is an engine defect rather
+    than a failure with an unrecognised shape -- so it is INTERNAL, and
+    the miss is logged loudly enough to find (issue #429). Nothing here
+    inspects the exception's type or message.
     """
     tag = read_failure_tag(exc)
     if tag is not None:
         return tag.code
 
-    # Untagged: the name/phrase heuristics are the last resort (issue #401
-    # resolution order — declared map, then stage tags, then text), and
-    # their use is logged so a silent heuristic verdict never masquerades
-    # as a structured one.
-    logger.info(
-        "no stage tag on the terminating exception (%s); falling back to "
-        "the name/phrase heuristics",
+    logger.error(
+        "no stage tag on the terminating exception (%s): a raise site is "
+        "missing its boundary tag; reporting INTERNAL",
         type(exc).__name__,
     )
-    names, text = _signature(exc)
-
-    if _is_local_filesystem_error(names):
-        return ErrorCode.INTERNAL
-    if _matches(names, text, _CONFIG_NAMES, _CONFIG_PHRASES):
-        return ErrorCode.CONFIG_INVALID
-    if _HANDSHAKE_MARKER in text:
-        # Destination handshake failure: a transport reason means the
-        # destination was unreachable; anything else is a config defect.
-        if any(phrase in text for phrase in _HANDSHAKE_TRANSPORT_PHRASES):
-            return ErrorCode.DESTINATION_WRITE_FAILED
-        return ErrorCode.CONFIG_INVALID
-    if _matches(names, text, _DESTINATION_NAMES, _DESTINATION_PHRASES):
-        return ErrorCode.DESTINATION_WRITE_FAILED
-    if _matches(names, text, _AUTH_NAMES, _AUTH_PHRASES) or _HTTP_AUTH_STATUS.search(
-        text
-    ):
-        return ErrorCode.SOURCE_AUTH_FAILED
-    if _matches(names, text, frozenset(), _RATE_PHRASES) or _HTTP_RATE_STATUS.search(
-        text
-    ):
-        return ErrorCode.RATE_LIMITED
-    if _matches(names, text, _UNREACHABLE_NAMES, _UNREACHABLE_PHRASES):
-        return ErrorCode.SOURCE_UNREACHABLE
-    if "ReadError" in names and "deterministic" in text:
-        # A source-worker ReadError marked deterministic is a contract/config
-        # defect (the worker reserves deterministic for non-transient
-        # contract/config failures, e.g. an invalid pagination contract). If it
-        # was not auth/rate/unreachable above, it is a configuration problem.
-        return ErrorCode.CONFIG_INVALID
     return ErrorCode.INTERNAL
 
 

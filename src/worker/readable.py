@@ -31,7 +31,6 @@ from src.grpc.generated.analitiq.v1.source_service_pb2_grpc import SourceService
 from src.state.error_classification import (
     ErrorCode,
     FailureStage,
-    classify_source_extract,
     source_code_for_declared_category,
     tag_failure,
 )
@@ -144,14 +143,10 @@ class WorkerReadable:
                             # signal that retrying cannot help -- a config/contract
                             # defect. Preserve it across the boundary as a tag so a
                             # deterministic source error classifies as CONFIG_INVALID
-                            # regardless of the collapsed wrapper's class name; the
-                            # engine otherwise only sees ReadError text. The original
-                            # connector class survives in the error_type prefix, so
-                            # the source classifier reads it; an opaque one floors to
-                            # CONFIG_INVALID (deterministic == a setup defect).
-                            code = declared_code or classify_source_extract(exc)
-                            if code is ErrorCode.INTERNAL:
-                                code = ErrorCode.CONFIG_INVALID
+                            # even when the connector declared no category: the flag
+                            # itself establishes a setup defect, and nothing here
+                            # reads the wrapper's class name or message (issue #429).
+                            code = declared_code or ErrorCode.CONFIG_INVALID
                             raise tag_failure(
                                 exc, code=code, stage=FailureStage.SOURCE_EXTRACT
                             )

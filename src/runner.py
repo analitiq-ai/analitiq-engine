@@ -33,9 +33,9 @@ from .state.error_classification import (
     FailureStage,
     classify_for_metrics,
     customer_message,
+    default_code_for_stage,
     detail_for_code,
     dominant_error_code,
-    is_local_io_error,
     tag_failure,
 )
 from .state.metrics_storage import save_pipeline_metrics
@@ -324,16 +324,19 @@ class PipelineRunner:
             # allowlisted-safe structured tokens (stage labels, error codes,
             # exception class names) via classify_for_metrics -- never raw
             # message text.
-            if not config_ready and not is_local_io_error(e):
+            if not config_ready:
                 # A failure before config_ready is config loading/parsing, which
                 # surfaces as builtin types (FileNotFoundError, ValueError, ...)
-                # the classifier cannot read -- the phase is the reliable signal.
-                # Tag it CONFIG_INVALID so classification and the structured
-                # detail are produced uniformly through classify_for_metrics. A
-                # builtin local-IO error during config load (an unreadable config
-                # file) is infra, not bad config, so it is left untagged and the
-                # classifier keeps it INTERNAL.
-                tag_failure(e, code=ErrorCode.CONFIG_INVALID, stage=FailureStage.CONFIG)
+                # carrying nothing a classifier could read -- the phase is the
+                # signal, so this boundary tags unconditionally (issue #429).
+                # An unreadable config file is infra rather than bad config, and
+                # load_json_file already tagged it INTERNAL at the read itself;
+                # tag_failure is no-overwrite, so that inner verdict stands.
+                tag_failure(
+                    e,
+                    code=default_code_for_stage(FailureStage.CONFIG),
+                    stage=FailureStage.CONFIG,
+                )
             error_code, error_message, error_detail = classify_for_metrics(e)
             logger.error(
                 f"Pipeline failed [{error_code.value}]: {error_detail}", exc_info=True

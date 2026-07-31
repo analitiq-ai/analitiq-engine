@@ -780,16 +780,19 @@ class TestEngineFatalFailureHandling:
         )
         assert processor.exhausted_failure_codes == [ErrorCode.INTERNAL]
 
-        # Undeclared acks take the same text fallback the raise path gets: a
-        # config-class summary keeps CONFIG_INVALID, opaque driver text takes
-        # the load-stage default.
-        processor = await _exhaust(
-            _retryable("SchemaConfigurationError: unsupported write mode")
-        )
-        assert processor.exhausted_failure_codes == [ErrorCode.CONFIG_INVALID]
-
-        processor = await _exhaust(_retryable("connection reset by peer"))
-        assert processor.exhausted_failure_codes == [ErrorCode.DESTINATION_WRITE_FAILED]
+        # An undeclared ack takes the load stage's default whatever its
+        # summary says. The first summary names a config-defect exception
+        # class and still reads as a write failure: the handler that raised
+        # it declares CONFIG_DEFECT on the ack when it means it, and the
+        # engine no longer recovers a category by reading the wording back.
+        for summary in (
+            "SchemaConfigurationError: unsupported write mode",
+            "connection reset by peer",
+        ):
+            processor = await _exhaust(_retryable(summary))
+            assert processor.exhausted_failure_codes == [
+                ErrorCode.DESTINATION_WRITE_FAILED
+            ]
 
     def test_get_partial_error_code_reports_dominant_partial_cause(
         self, engine: StreamingEngine
@@ -1109,8 +1112,18 @@ class TestEngineStreamFailurePropagation:
             nonlocal call_count
             call_count += 1
             if stream_config.get("name") == "failing-stream":
-                raise StreamProcessingError(
-                    "password authentication failed", stream_id=stream_id
+                # Tagged the way the extract boundary tags a real failure: a
+                # connector that declared `auth` for this driver error, whose
+                # category readable.py turned into a tag at the worker hop.
+                # An untagged raise here would classify INTERNAL, because no
+                # part of the engine reads "password authentication failed"
+                # out of the message any more.
+                raise tag_failure(
+                    StreamProcessingError(
+                        "password authentication failed", stream_id=stream_id
+                    ),
+                    code=ErrorCode.SOURCE_AUTH_FAILED,
+                    stage=FailureStage.SOURCE_EXTRACT,
                 )
             # Success for other streams
             return None

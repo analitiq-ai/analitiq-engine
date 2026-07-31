@@ -26,6 +26,7 @@ from cdk.connection_runtime import ConnectionRuntime
 from cdk.types import (
     AckStatus,
     Cursor,
+    FailureCategory,
     RetrySemantics,
     RetryVerdict,
     SchemaSpec,
@@ -34,6 +35,7 @@ from cdk.types import (
 from src.destination.server import SHUTDOWN_REASON_SUCCESS
 from src.grpc.client import DestinationGRPCClient
 from src.grpc.generated.analitiq.v1 import Cursor as ProtoCursor
+from src.state.error_classification import SchemaHandshakeOutcome
 from src.worker.shell import build_bootstrap
 from src.worker.spawn import WorkerHandle, spawn_worker
 
@@ -67,6 +69,24 @@ def _known_ack_status(status: int) -> AckStatus | int:
         return int(status)
 
 
+def _forwarded_schema_category(client: DestinationGRPCClient) -> FailureCategory:
+    """Return who owns a worker's failed handshake, for the engine-facing ack.
+
+    The shell sits between the engine and an untrusted worker process, so it
+    is the only party that can tell "the worker refused this schema" from
+    "the worker never answered". A worker that answered keeps its own
+    declaration when it made one, and otherwise owns the refusal as a config
+    defect. A worker that did not answer establishes nothing about the
+    customer's configuration, which is exactly NOT_READY (issue #429).
+    """
+    if client.schema_handshake_outcome is not SchemaHandshakeOutcome.REJECTED:
+        return FailureCategory.FAILURE_CATEGORY_NOT_READY
+    declared = client.schema_failure_category
+    if declared is FailureCategory.FAILURE_CATEGORY_UNSPECIFIED:
+        return FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
+    return declared
+
+
 class WorkerProxyHandler(BaseDestinationHandler):
     """Forwards the destination handler contract to a connector worker."""
 
@@ -94,6 +114,14 @@ class WorkerProxyHandler(BaseDestinationHandler):
         # engine-facing ack carries the worker's real reason (issue #231)
         # instead of a generic "Schema configuration failed".
         self.last_schema_rejection: str | None = None
+        # Who owns that rejection, forwarded the same way (issue #429). A
+        # worker this shell could never reach is NOT_READY: nothing about the
+        # customer's configuration was established, and only this hop knows
+        # that. The engine reads the category off the SchemaAck rather than
+        # matching the reason text, so the distinction survives the hop.
+        self.last_schema_failure_category: FailureCategory = (
+            FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+        )
         # Terminal-run outcome, set by ``finalize_run`` (called from the shell
         # server's Shutdown handler) and forwarded to the worker at teardown so
         # the worker only prunes its idempotency ledger on a successful run.
@@ -209,9 +237,13 @@ class WorkerProxyHandler(BaseDestinationHandler):
 
     async def configure_schema(self, schema_spec: SchemaSpec) -> bool:
         self.last_schema_rejection = None
+        self.last_schema_failure_category = FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
         if self._handle is None:
             logger.error("%s: configure_schema before connect", self._label)
             self.last_schema_rejection = "destination worker not started"
+            self.last_schema_failure_category = (
+                FailureCategory.FAILURE_CATEGORY_NOT_READY
+            )
             return False
         stream_id = schema_spec.stream_id
         schema_config = {
@@ -283,6 +315,9 @@ class WorkerProxyHandler(BaseDestinationHandler):
         )
         if not await client.connect(max_connect_retries=3):
             self.last_schema_rejection = "destination worker channel did not connect"
+            self.last_schema_failure_category = (
+                FailureCategory.FAILURE_CATEGORY_NOT_READY
+            )
             return None
         accepted = await client.start_stream(
             run_id="",  # idempotency keys ride each forwarded batch
@@ -291,8 +326,13 @@ class WorkerProxyHandler(BaseDestinationHandler):
         )
         if not accepted:
             # Forward the worker's real rejection reason so the engine-facing
-            # ack is not the generic "Schema configuration failed" (issue #231).
+            # ack is not the generic "Schema configuration failed" (issue #231),
+            # and forward who owns it (issue #429). A worker that answered "no"
+            # names a config defect unless it declared otherwise; a worker that
+            # never answered leaves nothing established about the config, which
+            # is what NOT_READY says.
             self.last_schema_rejection = client.schema_rejection_message
+            self.last_schema_failure_category = _forwarded_schema_category(client)
             await client.disconnect()
             return None
         return client

@@ -46,18 +46,24 @@ class FailureCategory(IntEnum):
     passes a value straight into a protobuf ``BatchAck`` without a lookup
     table.
 
-    Engine-owned vocabulary: connectors are not asked to self-classify.
-    The CDK base classes and engine-owned handler code set it; a thick
-    connector that overrides ``write_batch`` leaves it UNSPECIFIED and
-    the engine falls back to summary matching. Off the wire the value is
-    range-checked (an unrecognised integer degrades to UNSPECIFIED); an
-    in-range value is used as declared.
+    A connector may declare a category (issue #429). The declaration is
+    signal, not trust: off the wire the value is range-checked and an
+    unrecognised integer degrades to UNSPECIFIED, and UNSPECIFIED
+    resolves from the pipeline stage that raised -- never from summary
+    text. An in-range value is used as declared.
     """
 
-    FAILURE_CATEGORY_UNSPECIFIED = 0  # Nothing declared; engine matches summary text
+    FAILURE_CATEGORY_UNSPECIFIED = (
+        0  # Nothing declared; the raising stage names the code
+    )
     FAILURE_CATEGORY_CONFIG_DEFECT = 1  # Deterministic, user-fixable config defect
     FAILURE_CATEGORY_WRITE_REJECTED = 2  # Write attempted and failed at the destination
     FAILURE_CATEGORY_NOT_READY = 3  # Nothing attempted: not connected / not configured
+    # The engine or the connector has a bug. Kept distinct from
+    # WRITE_REJECTED, which names a destination that answered: without a
+    # member for "we broke it", every internal fault has to impersonate a
+    # user-owned failure.
+    FAILURE_CATEGORY_INTERNAL = 4
 
 
 class WriteMode(IntEnum):
