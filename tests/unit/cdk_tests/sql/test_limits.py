@@ -197,8 +197,7 @@ class TestDdlIdentifierCap:
         return _Mapper()
 
     def test_over_cap_column_refuses(self):
-        dialect = _StagingDialect()
-        dialect.capabilities = _caps(limits={"max_identifier_len": 8})
+        dialect = _StagingDialect(_caps(limits={"max_identifier_len": 8}))
         with pytest.raises(CreateTableError, match="max_identifier_len"):
             build_create_table_sql(
                 dialect,
@@ -209,8 +208,7 @@ class TestDdlIdentifierCap:
             )
 
     def test_over_cap_table_refuses(self):
-        dialect = _StagingDialect()
-        dialect.capabilities = _caps(limits={"max_identifier_len": 4})
+        dialect = _StagingDialect(_caps(limits={"max_identifier_len": 4}))
         with pytest.raises(CreateTableError, match="table identifier"):
             build_create_table_sql(
                 dialect,
@@ -221,8 +219,7 @@ class TestDdlIdentifierCap:
             )
 
     def test_undeclared_cap_keeps_current_behavior(self):
-        dialect = _StagingDialect()
-        dialect.capabilities = _caps()
+        dialect = _StagingDialect(_caps())
         ddl = build_create_table_sql(
             dialect,
             self._mapper(),
@@ -233,8 +230,7 @@ class TestDdlIdentifierCap:
         assert "CREATE TABLE" in ddl
 
     def test_budget_counts_bytes_not_characters(self):
-        dialect = _StagingDialect()
-        dialect.capabilities = _caps(limits={"max_identifier_len": 8})
+        dialect = _StagingDialect(_caps(limits={"max_identifier_len": 8}))
         # Six characters, twelve UTF-8 bytes.
         with pytest.raises(CreateTableError, match="bytes"):
             build_create_table_sql(

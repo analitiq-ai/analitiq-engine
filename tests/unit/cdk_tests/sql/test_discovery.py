@@ -159,8 +159,8 @@ class TestListTables:
     async def test_catalog_scope_reaches_the_query(self):
         # A connector declaring catalog addressing ('read' suffices for
         # discovery) scopes the FROM path and the binds to the requested
-        # catalog (issue #348 item 4). The declaration rides the runtime;
-        # list_tables binds it to the dialect itself.
+        # catalog (issue #348 item 4). The declaration rides the runtime
+        # into the dialect the control plane builds from it.
         class _CatalogDialect(SqlDialect):
             name = "cataloged"
 
@@ -170,7 +170,7 @@ class TestListTables:
             declared_sql_capabilities=caps_block(catalog="read"),
         )
         assert await list_tables(
-            runtime, "ds", dialect=_CatalogDialect(), catalog="proj"
+            runtime, "ds", dialect=_CatalogDialect.for_runtime(runtime), catalog="proj"
         ) == ["orders"]
         sql, params = runtime.connections[-1].executed[-1]
         assert '"proj".information_schema.tables' in sql

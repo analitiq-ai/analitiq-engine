@@ -73,11 +73,7 @@ from ._adbc_utils import _is_fatal_adbc_error
 from .adbc_backend import AdbcBackend
 from .adbc_reader import open_adbc_reader
 from .backend import TransportBackend
-from .capabilities import (
-    SqlCapabilities,
-    bind_dialect_capabilities,
-    undeclared_capability_error,
-)
+from .capabilities import SqlCapabilities, undeclared_capability_error
 from .ddl import build_create_table_sql
 from .ddl import create_table as _sql_create_table
 from .dialects import SqlDialect, TableAddress, dialect_overrides
@@ -293,7 +289,14 @@ class GenericSQLConnector(BaseDestinationHandler):
 
     def __init__(self) -> None:
         """Initialize the database handler."""
-        self.dialect: SqlDialect = self.dialect_class()
+        # The dialect this connector renders through, built from the
+        # runtime's declaration by ``_bind_capabilities`` on every entry
+        # that takes one. Deliberately unset until then: a dialect
+        # constructed here would carry no declaration and no runtime
+        # exists to give it one, so reading it before a binding is a
+        # defect that fails at the read instead of answering gates off a
+        # declaration the connector never made (issue #427).
+        self.dialect: SqlDialect
         # The connector's declared sql_capabilities (issue #390), parsed
         # from the runtime when one binds. None = undeclared: every
         # consumer refuses a needed-but-undeclared fact loudly instead of
@@ -495,41 +498,47 @@ class GenericSQLConnector(BaseDestinationHandler):
         return True
 
     def _bind_capabilities(self, runtime: ConnectionRuntime) -> None:
-        """Parse the runtime's declared ``sql_capabilities`` and attach them.
+        """Replace the dialect with one built for *runtime*'s declaration.
 
-        The facade side of the one binding rule
-        (:func:`~cdk.sql.capabilities.bind_dialect_capabilities`): the
-        facade keeps the parsed block for write-path gates, and the
-        dialect gets the same object for its address-construction catalog
-        gate. Runs on ``connect()``, on ``read_batches`` (the
-        runtime-taking source entry), and on every control-plane entry
-        that takes a runtime directly; the standalone helpers bind
-        themselves through the same function. The declared error taxonomy
-        (issue #401) binds at the same point so both declarations always
-        describe the same connector.
+        The one place a declaration becomes a dialect
+        (:meth:`SqlDialect.for_runtime`): the new dialect carries the
+        parsed block for its address-construction catalog gate, and the
+        facade keeps the same object for its write-path gates. Runs on
+        ``connect()``, on ``read_batches`` (the runtime-taking source
+        entry), and on every control-plane entry that takes a runtime
+        directly — which is why the standalone helpers those entries
+        delegate to never bind anything themselves. The declared error
+        taxonomy (issue #401) binds at the same point so both
+        declarations always describe the same connector.
         """
-        self._capabilities = bind_dialect_capabilities(self.dialect, runtime)
+        self.dialect = self.dialect_class.for_runtime(runtime)
+        self._capabilities = self.dialect.capabilities
         self._error_map = error_map_for(runtime)
 
     def _dialect_renders_merge_statement(self) -> bool:
-        """Whether the active dialect implements the merge-form statement hook.
+        """Whether this connector's dialect renders the merge-form statement.
 
         A declared-vs-implemented consistency check, not a capability
         guess: the fact that the system CAN upsert is the declaration's
         (``sql_capabilities.merge_form``); whether this connector's dialect
         renders that form is an implementation fact checked at handshake so
         the disagreement fails before DDL, not on the first batch.
+
+        Read off ``dialect_class`` rather than the bound instance: which
+        hooks a dialect implements is a class fact, so the advertised
+        write modes answer the same before and after a runtime binds.
         """
-        return dialect_overrides(type(self.dialect), "merge_statement_sql")
+        return dialect_overrides(self.dialect_class, "merge_statement_sql")
 
     def _dialect_renders_stage_table(self) -> bool:
-        """Whether the active dialect implements the stage DDL hook.
+        """Whether this connector's dialect renders the stage DDL.
 
         Every SQLAlchemy-path write lands in a stage table, so a
         write-role connector without ``stage_table_sql`` cannot write at
         all — checked at handshake, alongside the declared stage shape.
+        Read off ``dialect_class`` for the same reason as the merge hook.
         """
-        return dialect_overrides(type(self.dialect), "stage_table_sql")
+        return dialect_overrides(self.dialect_class, "stage_table_sql")
 
     def _stage_ready(self) -> bool:
         """Whether the stage cycle can run for this connector (any transport).
@@ -667,7 +676,49 @@ class GenericSQLConnector(BaseDestinationHandler):
         Args:
             runtime: ConnectionRuntime with enriched config
         """
+        previous_runtime = self._runtime
         self._runtime = runtime
+        # Tear the previous connection down before anything of this
+        # runtime's is bound. connect() replaces the dialect, the declared
+        # capabilities and the error map further down, so a connect() that
+        # raises after that point would otherwise leave the new runtime's
+        # declaration rendering against the still-live previous transport.
+        # Dropping the transport state first makes that handler
+        # unwritable-through instead: _reject_if_not_ready and
+        # health_check refuse until a connect() completes, the way
+        # SQLAlchemy invalidates a connection whose connect failed rather
+        # than half-keeping it.
+        self._connected = False
+        self._adbc_only = False
+        self._engine = None
+        self._sync_engine = None
+        # Closed, not merely dropped: this is the sole reference to the
+        # previous backend, so nulling it would leave an ADBC connection
+        # open for the life of the process. A close failure is logged
+        # inside; it must not stop this connect from proceeding.
+        cancelled = await self._close_backend()
+        # The runtime, not the backend, owns what materialize_runtime
+        # acquired -- for SQLAlchemy that is the engine whose close()
+        # disposes the pool. self._runtime already points at the new one, so
+        # releasing the previous one is this teardown's job; disconnect()
+        # would only ever reach the new runtime and the old engine and its
+        # pooled connections would outlive the handler.
+        if previous_runtime is not None and previous_runtime is not runtime:
+            cancelled = await self._close_runtime(previous_runtime) or cancelled
+        if cancelled is not None:
+            # The close was cancelled, so this connect() is already running
+            # inside a cancelled task. Going on to acquire a transport would
+            # hand a live connection back to a caller that stopped waiting.
+            raise cancelled
+        # Build this runtime's dialect before the transport, in the order
+        # the source entry (read_batches) already uses: the factory hands
+        # the dialect to hooks that fire later — verify_tls_state on every
+        # new DBAPI connection — so a dialect built here must already carry
+        # the declaration those hooks read. (A malformed block already
+        # failed on the trusted side at config load; this parse
+        # re-validates at the process boundary, before anything is
+        # acquired.)
+        self._bind_capabilities(runtime)
         try:
             await materialize_runtime(runtime, sql_dialect=self.dialect)
         except DETERMINISTIC_CONNECT_ERRORS:
@@ -675,41 +726,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         except Exception as e:
             logger.error("Database destination connection failed: %s", e)
             raise ConnectionError(f"Database connection failed: {e}") from e
-        # Bind the declared capability block only once the new runtime's
-        # transport is live, alongside the other per-connection state: a
-        # failed reconnect must not leave this runtime's declaration bound
-        # against the previous runtime's still-connected transport. (A
-        # malformed block already failed on the trusted side at config
-        # load; this parse re-validates at the process boundary.) Also
-        # attached to the dialect: its catalog gate (table_address /
-        # information_schema_ref) consults the declared fact at address
-        # construction.
-        try:
-            self._bind_capabilities(runtime)
-        except Exception:
-            # materialize() already acquired the runtime; the caller does
-            # not disconnect a handler whose connect() raised, so release
-            # the ref here to keep the lifecycle balanced (same rule as
-            # the ADBC eager-open failure below). The close is guarded so
-            # a failing release can never mask the binding error the
-            # operator actually needs.
-            try:
-                await runtime.close()
-            except Exception:
-                logger.warning(
-                    "runtime release after a failed capability bind also "
-                    "failed; the binding error below is the root cause",
-                    exc_info=True,
-                )
-            raise
         self._driver = runtime.driver or ""
-        # Reset prior-connection state so a long-lived handler that
-        # reconnects across runtimes (e.g. tests) doesn't carry the
-        # previous mode forward.
-        self._adbc_only = False
-        self._engine = None
-        self._sync_engine = None
-        self._backend = None
         # The write backend executes StageWritePlans over the runtime's
         # transport. Created after the capability binding so it reads the
         # declared bulk-load fact off the dialect.
@@ -758,6 +775,57 @@ class GenericSQLConnector(BaseDestinationHandler):
         )
         self._connected = True
 
+    async def _close_backend(self) -> BaseException | None:
+        """Close the transport backend and drop it, whatever it does on the way.
+
+        The only place a backend is released. Nulling the field without this
+        would strand an ADBC backend's cached DBAPI connection open for the
+        life of the process, since the backend holds the sole reference to
+        it. Returns a ``CancelledError`` for the caller to re-raise once it
+        has finished its own releases, rather than raising here and skipping
+        them.
+        """
+        if self._backend is None:
+            return None
+        cancelled: BaseException | None = None
+        try:
+            await self._backend.disconnect()
+        except asyncio.CancelledError as exc:
+            logger.error(
+                "transport backend close cancelled; "
+                "server-side resources may remain allocated"
+            )
+            cancelled = exc
+        except Exception:
+            logger.error(
+                "Failed to close transport backend; "
+                "server-side resources may remain allocated",
+                exc_info=True,
+            )
+        self._backend = None
+        return cancelled
+
+    @staticmethod
+    async def _close_runtime(runtime: ConnectionRuntime) -> BaseException | None:
+        """Release what a runtime acquired, whatever it does on the way.
+
+        The only place a runtime is released. Takes the runtime rather than
+        reading ``self._runtime``: a reconnect must close the *previous*
+        one, which the handler no longer points at by then. For SQLAlchemy
+        this disposes the engine and its pool, so a reconnect that skipped
+        it would leave the previous engine's pooled connections alive for
+        the life of the process. Returns a ``CancelledError`` for the
+        caller to re-raise once it has finished its own releases.
+        """
+        try:
+            await runtime.close()
+        except asyncio.CancelledError as exc:
+            logger.error("SQLAlchemy runtime close cancelled")
+            return exc
+        except Exception:
+            logger.error("Failed to close SQLAlchemy runtime", exc_info=True)
+        return None
+
     async def disconnect(self) -> None:
         """Close database connection.
 
@@ -767,34 +835,9 @@ class GenericSQLConnector(BaseDestinationHandler):
         ``CancelledError`` is re-raised after both releases so the
         caller's cancellation is honored.
         """
-        cancelled: BaseException | None = None
-        if self._backend is not None:
-            try:
-                await self._backend.disconnect()
-            except asyncio.CancelledError as exc:
-                logger.error(
-                    "transport backend close cancelled during disconnect; "
-                    "server-side resources may remain allocated"
-                )
-                cancelled = exc
-            except Exception:
-                logger.error(
-                    "Failed to close transport backend during disconnect; "
-                    "server-side resources may remain allocated",
-                    exc_info=True,
-                )
-            self._backend = None
+        cancelled: BaseException | None = await self._close_backend()
         if self._runtime:
-            try:
-                await self._runtime.close()
-            except asyncio.CancelledError as exc:
-                logger.error("SQLAlchemy runtime close cancelled during disconnect")
-                cancelled = exc
-            except Exception:
-                logger.error(
-                    "Failed to close SQLAlchemy runtime during disconnect",
-                    exc_info=True,
-                )
+            cancelled = await self._close_runtime(self._runtime) or cancelled
         self._connected = False
         logger.info("GenericSQLConnector disconnected")
         if cancelled is not None:

@@ -71,6 +71,7 @@ class TestWriteConflictKeysWiring:
         from cdk.type_map.rules import parse_rules
 
         handler = _rendering_connector_cls()()
+        handler.dialect = handler.dialect_class()
         handler._capabilities = _merge_capable_caps()
         handler._connected = True
         handler._engine = MagicMock()
@@ -132,6 +133,7 @@ class TestWriteConflictKeysWiring:
         from cdk.type_map.rules import parse_rules
 
         handler = _rendering_connector_cls()()
+        handler.dialect = handler.dialect_class()
         handler._capabilities = _merge_capable_caps()
         handler._connected = True
         handler._engine = MagicMock()

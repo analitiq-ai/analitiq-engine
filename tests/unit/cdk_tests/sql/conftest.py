@@ -224,6 +224,7 @@ class FakeAdbcRuntime:
         self.is_adbc = True
         self.is_sync_sqlalchemy = False
         self.declared_sql_capabilities = declared_sql_capabilities
+        self.declared_error_map = None
         self._mapper = mapper
         self._connection_mapper = connection_mapper
         self._responder = responder
@@ -332,6 +333,7 @@ class FakeSaRuntime:
         self.is_adbc = False
         self.is_sync_sqlalchemy = False
         self.declared_sql_capabilities = declared_sql_capabilities
+        self.declared_error_map = None
         self._mapper = mapper
         self._connection_mapper = connection_mapper
         self.engine = FakeAsyncEngine(rows=rows, fail=fail)

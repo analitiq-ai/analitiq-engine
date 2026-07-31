@@ -52,11 +52,14 @@ ENDPOINT_DOC = {
 }
 
 
+#: The full-catalog, merge-capable declaration the ADBC fixtures build with.
+FULL_CATALOG_CAPS = SqlCapabilities.from_declaration(caps_block(catalog="full"))
+
+
 class _CatalogAdbcDialect(SqlDialect):
-    """An ADBC dialect bound to a full-catalog, merge-capable declaration."""
+    """An ADBC dialect for a full-catalog, merge-capable connector."""
 
     name = "cataloged"
-    capabilities = SqlCapabilities.from_declaration(caps_block(catalog="full"))
 
     def render_column_type(self, canonical, type_mapper, *, params=None):
         return {
@@ -94,14 +97,20 @@ def _schema_spec() -> SchemaSpec:
     )
 
 
-def _handler(cls=GenericSQLConnector, *, adbc_only: bool):
+def _handler(
+    cls=GenericSQLConnector,
+    *,
+    adbc_only: bool,
+    caps: SqlCapabilities | None = None,
+):
     handler = cls()
     handler._connected = True
     handler._adbc_only = adbc_only
-    # Mirror _bind_capabilities: the facade and the dialect carry the same
-    # declaration object (the dialect fixture's class attribute stands in
-    # for a bound connector declaration; None for the undeclared base).
-    handler._capabilities = handler.dialect.capabilities
+    # Mirror _bind_capabilities: one dialect built with the declaration,
+    # and the facade keeping the same object (None for an undeclared
+    # connector).
+    handler.dialect = cls.dialect_class(caps)
+    handler._capabilities = caps
     if not adbc_only:
         handler._engine = MagicMock()
     # A recording transport backend: run_ddl captures the statement lists,
@@ -136,7 +145,7 @@ class TestConfigureSchemaGate:
         # Reflection-based DML cannot cross catalogs; a supporting dialect on
         # the SA transport still refuses rather than writing to whatever the
         # two-part reflected name resolves to.
-        handler = _handler(_CatalogConnector, adbc_only=False)
+        handler = _handler(_CatalogConnector, adbc_only=False, caps=FULL_CATALOG_CAPS)
         with pytest.raises(SchemaConfigurationError, match="SQLAlchemy write"):
             await handler.configure_schema(_schema_spec())
 
@@ -145,20 +154,18 @@ class TestConfigureSchemaGate:
         # 'read' declares discovery/read addressing only: the address door
         # passes, but an ADBC write/DDL target in another catalog needs
         # 'full' — refused before any DDL runs.
-        handler = _handler(_CatalogConnector, adbc_only=True)
         read_caps = SqlCapabilities.from_declaration(caps_block(catalog="read"))
-        handler._capabilities = read_caps
-        handler.dialect.capabilities = read_caps
+        handler = _handler(_CatalogConnector, adbc_only=True, caps=read_caps)
         with pytest.raises(SchemaConfigurationError, match="require 'full'"):
             await handler.configure_schema(_schema_spec())
         handler._backend.run_ddl.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_catalog_reaches_every_ddl_statement_on_adbc(self):
-        handler = _handler(_CatalogConnector, adbc_only=True)
-        # The fixture binds the dialect's full-catalog declaration onto the
-        # handler, so this success path exercises the write-side 'full'
-        # requirement, not a skipped gate.
+        handler = _handler(_CatalogConnector, adbc_only=True, caps=FULL_CATALOG_CAPS)
+        # The fixture builds the dialect with the full-catalog declaration
+        # and gives the facade the same object, so this success path
+        # exercises the write-side 'full' requirement, not a skipped gate.
         assert handler._capabilities is not None
         assert handler._capabilities.catalog == "full"
         assert await handler.configure_schema(_schema_spec()) is True
@@ -181,11 +188,14 @@ class TestConfigureSchemaGate:
         handler._backend.target_columns.assert_awaited_once_with(state.address)
 
 
+#: The catalog-free declaration the SQLAlchemy-path fixtures build with.
+STAGING_SA_CAPS = SqlCapabilities.from_declaration(caps_block())
+
+
 class _StagingSaDialect(SqlDialect):
     """A SQLAlchemy-path dialect that can run the stage cycle."""
 
     name = "staging-sa"
-    capabilities = SqlCapabilities.from_declaration(caps_block())
 
     def stage_table_sql(self, stage, target, *, temp):
         return (
@@ -204,7 +214,7 @@ class TestConfigureSchemaAddress:
         # A catalog-free SA stream with no declared schema resolves the
         # explicit "public" fallback into the stored address — not an
         # unqualified name the connection's search path would resolve.
-        handler = _handler(_StagingSaConnector, adbc_only=False)
+        handler = _handler(_StagingSaConnector, adbc_only=False, caps=STAGING_SA_CAPS)
         doc = dict(ENDPOINT_DOC)
         doc["database_object"] = {"name": "events"}
         handler.set_stream_endpoints({STREAM: doc})
@@ -392,7 +402,6 @@ class TestAdbcWriteSinks:
         from cdk.sql.adbc_backend import AdbcBackend
         from cdk.sql.write_plan import build_stage_write_plan
 
-        dialect = _CatalogAdbcDialect()
         caps = SqlCapabilities.from_declaration(
             caps_block(
                 catalog="full",
@@ -400,7 +409,7 @@ class TestAdbcWriteSinks:
                 stage_scope="real",
             )
         )
-        dialect.capabilities = caps
+        dialect = _CatalogAdbcDialect(caps)
         plan = build_stage_write_plan(
             dialect,
             caps,
@@ -457,42 +466,43 @@ class TestAdbcWriteSinks:
 
 
 class TestControlPlaneGate:
-    """The standalone helpers bind the runtime's declaration themselves
-    (the same rule the facade applies), so control-plane calls enforce
-    the declared catalog fact without any manual pre-binding."""
+    """A control-plane dialect is built from the runtime
+    (``SqlDialect.for_runtime``), so the standalone helpers enforce the
+    declared catalog fact off the dialect they are handed."""
 
     @pytest.mark.asyncio
     async def test_create_table_refuses_catalog_with_no_declaration(self):
         from cdk.contract import ColumnDef
         from cdk.sql.ddl import create_table
 
+        runtime = _FakeRuntime(is_adbc=True)
         with pytest.raises(CatalogAddressingError, match="sql_capabilities.catalog"):
             await create_table(
-                _FakeRuntime(is_adbc=True),
+                runtime,
                 "ds",
                 "t",
                 [ColumnDef("id", "Int64")],
                 [],
-                dialect=SqlDialect(),
+                dialect=SqlDialect.for_runtime(runtime),
                 catalog="proj",
             )
 
     @pytest.mark.asyncio
     async def test_create_table_refuses_catalog_on_read_only_declaration(self):
         # 'read' declares discovery/read addressing only; DDL across
-        # catalogs needs 'full'. The declaration comes from the runtime —
-        # the helper binds it, the caller never pre-binds the dialect.
+        # catalogs needs 'full'.
         from cdk.contract import ColumnDef
         from cdk.sql.ddl import create_table
 
+        runtime = _FakeRuntime(is_adbc=True, declared=caps_block(catalog="read"))
         with pytest.raises(CatalogAddressingError, match="requires 'full'"):
             await create_table(
-                _FakeRuntime(is_adbc=True, declared=caps_block(catalog="read")),
+                runtime,
                 "ds",
                 "t",
                 [ColumnDef("id", "Int64")],
                 [],
-                dialect=SqlDialect(),
+                dialect=SqlDialect.for_runtime(runtime),
                 catalog="proj",
             )
 
@@ -501,12 +511,11 @@ class TestControlPlaneGate:
         from cdk.sql.discovery import list_columns, list_schemas, list_tables
 
         runtime = _FakeRuntime(is_adbc=True)
+        dialect = SqlDialect.for_runtime(runtime)
         for call in (
-            lambda: list_schemas(runtime, dialect=SqlDialect(), catalog="proj"),
-            lambda: list_tables(runtime, "ds", dialect=SqlDialect(), catalog="proj"),
-            lambda: list_columns(
-                runtime, "ds", "t", dialect=SqlDialect(), catalog="proj"
-            ),
+            lambda: list_schemas(runtime, dialect=dialect, catalog="proj"),
+            lambda: list_tables(runtime, "ds", dialect=dialect, catalog="proj"),
+            lambda: list_columns(runtime, "ds", "t", dialect=dialect, catalog="proj"),
         ):
             with pytest.raises(CatalogAddressingError):
                 await call()

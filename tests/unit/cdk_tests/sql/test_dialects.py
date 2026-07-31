@@ -62,11 +62,11 @@ class _SystemSchemaDialect(SqlDialect):
 
 
 class _CatalogDialect(SqlDialect):
-    """A dialect bound to a connector declaring full catalog addressing (as
-    DuckDB or BigQuery would in their ``sql_capabilities``)."""
+    """A dialect for a connector declaring full catalog addressing (as
+    DuckDB or BigQuery would in their ``sql_capabilities``); constructed
+    with that declaration, the way the facade constructs one."""
 
     name = "cataloged"
-    capabilities = _FULL_CATALOG_CAPS
 
 
 # --- identifier quoting ------------------------------------------------------
@@ -109,12 +109,12 @@ class TestQuoting:
         )
 
     def test_three_part_name_with_catalog(self):
-        d = _CatalogDialect()
+        d = _CatalogDialect(_FULL_CATALOG_CAPS)
         address = d.table_address("orders", schema="ds", catalog="proj")
         assert d.quote_table(address) == '"proj"."ds"."orders"'
 
     def test_quote_schema_with_and_without_catalog(self):
-        d = _CatalogDialect()
+        d = _CatalogDialect(_FULL_CATALOG_CAPS)
         assert d.quote_schema(d.table_address("t", schema="ds")) == '"ds"'
         assert (
             d.quote_schema(d.table_address("t", schema="ds", catalog="proj"))
@@ -131,10 +131,7 @@ class TestTableAddress:
     def test_normalization_applies_to_every_component(self):
         # One rule, applied once, to catalog AND schema AND table — no
         # consumer can diverge afterwards (issue #348 item 3).
-        class _UpperCatalogDialect(_UpperNormalizingDialect):
-            capabilities = _FULL_CATALOG_CAPS
-
-        address = _UpperCatalogDialect().table_address(
+        address = _UpperNormalizingDialect(_FULL_CATALOG_CAPS).table_address(
             "orders", schema="public", catalog="analytics_db"
         )
         assert address == TableAddress(
@@ -156,15 +153,14 @@ class TestTableAddress:
         # ANSI SQL has no portable cross-catalog form; a declared 'none'
         # refuses a catalog before any SQL is composed instead of compiling
         # a statement the system would misread (issues #343 / #338).
-        class _NoCatalogDialect(SqlDialect):
-            capabilities = _NO_CATALOG_CAPS
-
         with pytest.raises(CatalogAddressingError, match="default catalog"):
-            _NoCatalogDialect().table_address("t", schema="s", catalog="other_db")
+            SqlDialect(_NO_CATALOG_CAPS).table_address(
+                "t", schema="s", catalog="other_db"
+            )
 
     def test_catalog_without_schema_fails_loud(self):
         with pytest.raises(CatalogAddressingError, match="requires an explicit schema"):
-            _CatalogDialect().table_address("t", catalog="proj")
+            _CatalogDialect(_FULL_CATALOG_CAPS).table_address("t", catalog="proj")
 
     def test_no_catalog_is_always_accepted(self):
         assert SqlDialect().table_address("t", schema="s") == TableAddress(
@@ -249,27 +245,31 @@ class TestCatalogScopedDiscoveryQueries:
     (issue #348 item 4 / issue #337)."""
 
     def test_schemas_query_scopes_to_catalog(self):
-        sql, params = _CatalogDialect().schemas_query("proj")
+        sql, params = _CatalogDialect(_FULL_CATALOG_CAPS).schemas_query("proj")
         assert '"proj".information_schema.schemata' in sql
         assert "catalog_name = ?" in sql
         assert params == ["proj"]
 
     def test_tables_query_scopes_to_catalog(self):
-        sql, params = _CatalogDialect().tables_query("ds", "proj")
+        sql, params = _CatalogDialect(_FULL_CATALOG_CAPS).tables_query("ds", "proj")
         assert '"proj".information_schema.tables' in sql
         assert "table_catalog = ?" in sql
         assert params == ["ds", "proj"]
         assert sql.count("?") == len(params)
 
     def test_columns_query_scopes_to_catalog(self):
-        sql, params = _CatalogDialect().columns_query("ds", "orders", "proj")
+        sql, params = _CatalogDialect(_FULL_CATALOG_CAPS).columns_query(
+            "ds", "orders", "proj"
+        )
         assert '"proj".information_schema.columns' in sql
         assert "table_catalog = ?" in sql
         assert params == ["ds", "orders", "proj"]
         assert sql.count("?") == len(params)
 
     def test_primary_keys_query_scopes_to_catalog(self):
-        sql, params = _CatalogDialect().primary_keys_query("ds", "orders", "proj")
+        sql, params = _CatalogDialect(_FULL_CATALOG_CAPS).primary_keys_query(
+            "ds", "orders", "proj"
+        )
         assert '"proj".information_schema.table_constraints' in sql
         assert '"proj".information_schema.key_column_usage' in sql
         assert "tc.table_catalog = ?" in sql
@@ -277,10 +277,9 @@ class TestCatalogScopedDiscoveryQueries:
         assert sql.count("?") == len(params)
 
     def test_catalog_params_are_normalized(self):
-        class _UpperCatalogDialect(_UpperNormalizingDialect):
-            capabilities = _FULL_CATALOG_CAPS
-
-        sql, params = _UpperCatalogDialect().tables_query("ds", "proj")
+        sql, params = _UpperNormalizingDialect(_FULL_CATALOG_CAPS).tables_query(
+            "ds", "proj"
+        )
         assert '"PROJ".information_schema.tables' in sql
         assert params == ["DS", "PROJ"]
 
@@ -300,7 +299,9 @@ class TestCatalogScopedDiscoveryQueries:
     def test_empty_catalog_keeps_the_plain_shape(self):
         # No catalog on a catalog-addressing dialect compiles the exact
         # session-local shape the base emits.
-        assert _CatalogDialect().tables_query("s") == SqlDialect().tables_query("s")
+        assert _CatalogDialect(_FULL_CATALOG_CAPS).tables_query(
+            "s"
+        ) == SqlDialect().tables_query("s")
 
 
 class TestInformationSchemaRef:
@@ -313,9 +314,9 @@ class TestInformationSchemaRef:
         )
 
     def test_catalog_prefix_on_addressing_dialect(self):
-        assert _CatalogDialect().information_schema_ref("tables", catalog="proj") == (
-            '"proj".information_schema.tables'
-        )
+        assert _CatalogDialect(_FULL_CATALOG_CAPS).information_schema_ref(
+            "tables", catalog="proj"
+        ) == ('"proj".information_schema.tables')
 
     def test_schema_scoped_override_receives_the_schema(self):
         # A dialect whose metadata views are schema-scoped (BigQuery's
@@ -329,7 +330,7 @@ class TestInformationSchemaRef:
                 view_ref = f"INFORMATION_SCHEMA.{view.upper()}"
                 return f"{prefix}.{view_ref}" if prefix else view_ref
 
-        sql, _ = _DatasetScopedDialect().tables_query("ds", "proj")
+        sql, _ = _DatasetScopedDialect(_FULL_CATALOG_CAPS).tables_query("ds", "proj")
         assert '"proj"."ds".INFORMATION_SCHEMA.TABLES' in sql
 
 
@@ -472,7 +473,7 @@ class TestAdbcIngestKwargs:
         assert d.adbc_ingest_kwargs(d.table_address("t")) == {}
 
     def test_catalog_targets_the_catalog_option(self):
-        d = _CatalogDialect()
+        d = _CatalogDialect(_FULL_CATALOG_CAPS)
         address = d.table_address("t", schema="ds", catalog="proj")
         assert d.adbc_ingest_kwargs(address) == {
             "db_schema_name": "ds",

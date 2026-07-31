@@ -149,8 +149,7 @@ def _sqlite_handler(engine, table: Table) -> GenericSQLConnector:
     handler = GenericSQLConnector()
     handler._connected = True
     handler._sync_engine = engine
-    handler.dialect = _SqliteStageDialect()
-    handler.dialect.capabilities = _SQLITE_CAPS
+    handler.dialect = _SqliteStageDialect(_SQLITE_CAPS)
     handler._capabilities = _SQLITE_CAPS
     backend = SqlAlchemyBackend(handler.dialect)
     backend._sync_engine = engine
@@ -354,8 +353,7 @@ class TestTruncateOnFirstBatchAdbc:
         handler = GenericSQLConnector()
         handler._connected = True
         handler._adbc_only = True
-        handler.dialect = _SqliteStageDialect()
-        handler.dialect.capabilities = _SQLITE_CAPS
+        handler.dialect = _SqliteStageDialect(_SQLITE_CAPS)
         handler._capabilities = _SQLITE_CAPS
         contract = MagicMock()
         contract.cast_arrow_batch = lambda b: b
@@ -836,6 +834,7 @@ class TestZeroBatchTruncate:
         emptying statement through the transport backend when the engine
         sends the synthetic batch — no stage cycle, nothing landed."""
         handler = GenericSQLConnector()
+        handler.dialect = handler.dialect_class()
         handler._connected = True
         handler._adbc_only = True
         contract = MagicMock()

@@ -52,7 +52,9 @@ class TestCapabilityProperties:
             def stage_table_sql(self, stage, target, *, temp):
                 return "CREATE TABLE ..."
 
-        handler.dialect = _StagingDialect()
+        # Which hooks the dialect implements is a class fact the connector
+        # carries through dialect_class, readable before any runtime binds.
+        handler.dialect_class = _StagingDialect
         handler._capabilities = SqlCapabilities.from_declaration(
             {
                 "catalog": "none",

@@ -248,13 +248,12 @@ class TestStepwiseCycle:
     drop; deterministic names make retries self-healing."""
 
     def _run(self, *, truncate_now=False, bulk_load="adbc_ingest"):
-        dialect = _StageDialect()
         caps = _caps(
             bulk_load={"adbc": bulk_load} if bulk_load != "none" else {},
             stage_scope="real",
             transactional_ddl=False,
         )
-        dialect.capabilities = caps
+        dialect = _StageDialect(caps)
         plan = _plan(
             dialect,
             caps,
@@ -284,9 +283,8 @@ class TestStepwiseCycle:
         assert conn.commits == 6
 
     def test_mode_failure_drops_stage_best_effort_and_poisons(self, caplog):
-        dialect = _StageDialect()
         caps = _caps(stage_scope="real", transactional_ddl=False)
-        dialect.capabilities = caps
+        dialect = _StageDialect(caps)
         plan = _plan(dialect, caps)
 
         def fail_mode(sql):
@@ -304,9 +302,8 @@ class TestStepwiseCycle:
         assert backend._conn is None
 
     def test_fatal_failure_is_reclassified(self):
-        dialect = _StageDialect()
         caps = _caps(stage_scope="real", transactional_ddl=False)
-        dialect.capabilities = caps
+        dialect = _StageDialect(caps)
         plan = _plan(dialect, caps)
 
         def fail_mode(sql):
@@ -318,9 +315,8 @@ class TestStepwiseCycle:
             _backend(dialect, conn)._execute_write_sync(plan, _batch())
 
     def test_failed_cleanup_drop_logs_the_honest_note(self, caplog):
-        dialect = _StageDialect()
         caps = _caps(stage_scope="real", transactional_ddl=False)
-        dialect.capabilities = caps
+        dialect = _StageDialect(caps)
         plan = _plan(dialect, caps)
         state = {"failed": False}
 
@@ -355,9 +351,8 @@ class TestTransactionalCycle:
     pre-flight drop, one commit, nothing left behind on failure."""
 
     def test_single_commit_and_no_preflight_drop(self):
-        dialect = _StageDialect()
         caps = _caps(stage_scope="temp", transactional_ddl=True)
-        dialect.capabilities = caps
+        dialect = _StageDialect(caps)
         plan = _plan(dialect, caps)
         conn = _FakeConn()
         _backend(dialect, conn)._execute_write_sync(plan, _batch())
@@ -371,9 +366,8 @@ class TestTransactionalCycle:
         # stepwise cleanup runs and no stage survives. A rejected row
         # says nothing about the connection, so the next batch reuses it
         # instead of paying for a reconnect.
-        dialect = _StageDialect()
         caps = _caps(stage_scope="temp", transactional_ddl=True)
-        dialect.capabilities = caps
+        dialect = _StageDialect(caps)
         plan = _plan(dialect, caps)
 
         def fail_mode(sql):
@@ -396,9 +390,8 @@ class TestTransactionalCycle:
         # is what keeps a connection-level failure from wedging every
         # later batch of the run on a dead handle. The evidence is the
         # rollback failing; a rejected batch rolls back cleanly.
-        dialect = _StageDialect()
         caps = _caps(stage_scope="temp", transactional_ddl=True)
-        dialect.capabilities = caps
+        dialect = _StageDialect(caps)
         plan = _plan(dialect, caps)
 
         def fail_mode(sql):
@@ -424,9 +417,8 @@ class TestTransactionalCycle:
 
 class TestLandingMechanisms:
     def test_declared_adbc_ingest_lands_arrow_with_targeting_kwargs(self):
-        dialect = _StageDialect()
         caps = _caps(bulk_load={"adbc": "adbc_ingest"}, stage_scope="real")
-        dialect.capabilities = caps
+        dialect = _StageDialect(caps)
         plan = _plan(dialect, caps)
         conn = _FakeConn()
         _backend(dialect, conn)._execute_write_sync(plan, _batch())
@@ -440,9 +432,8 @@ class TestLandingMechanisms:
         assert conn.executemany_params == []
 
     def test_undeclared_mechanism_lands_via_executemany(self):
-        dialect = _StageDialect()
         caps = _caps(bulk_load={}, stage_scope="real")
-        dialect.capabilities = caps
+        dialect = _StageDialect(caps)
         plan = _plan(dialect, caps)
         conn = _FakeConn()
         _backend(dialect, conn, bulk_load="none")._execute_write_sync(plan, _batch())
@@ -462,9 +453,8 @@ class TestLandingMechanisms:
                 calls.append((stage, batch.num_rows, runtime))
                 return True
 
-        dialect = _BulkDialect()
         caps = _caps(bulk_load={"adbc": "load_job"}, stage_scope="real")
-        dialect.capabilities = caps
+        dialect = _BulkDialect(caps)
         plan = _plan(dialect, caps)
         conn = _FakeConn(fetch_value=2)  # COUNT(*) matches the batch
         runtime = _FakeRuntime([])
@@ -483,9 +473,8 @@ class TestLandingMechanisms:
             def bulk_land(self, conn, stage, batch, *, runtime):
                 return True  # claims landed; the stage stays empty
 
-        dialect = _LyingBulkDialect()
         caps = _caps(bulk_load={"adbc": "load_job"}, stage_scope="real")
-        dialect.capabilities = caps
+        dialect = _LyingBulkDialect(caps)
         plan = _plan(dialect, caps)
         conn = _FakeConn(fetch_value=0)
         with pytest.raises(AdbcConfigurationError, match="did .*not land|not land"):
@@ -498,9 +487,8 @@ class TestLandingMechanisms:
             def bulk_land(self, conn, stage, batch, *, runtime):
                 return False
 
-        dialect = _DecliningBulkDialect()
         caps = _caps(bulk_load={"adbc": "load_job"}, stage_scope="real")
-        dialect.capabilities = caps
+        dialect = _DecliningBulkDialect(caps)
         plan = _plan(dialect, caps)
         # The fallback's stage is verified too, so the fake reports the
         # landed count.
@@ -524,9 +512,8 @@ class TestLandingMechanisms:
             def bulk_land(self, conn, stage, batch, *, runtime):
                 return False  # after having landed rows (simulated below)
 
-        dialect = _PartialThenDeclineDialect()
         caps = _caps(bulk_load={"adbc": "load_job"}, stage_scope="real")
-        dialect.capabilities = caps
+        dialect = _PartialThenDeclineDialect(caps)
         plan = _plan(dialect, caps)
         # Stage count after fallback = 3: one leaked row + the 2-row batch.
         conn = _FakeConn(fetch_value=3)
@@ -545,9 +532,8 @@ class TestSessionSchemaGuard:
     so nothing is ever ingested into the wrong schema."""
 
     def _setup(self, session_schema, *, dialect_cls=_SessionDefaultDialect, **caps_kw):
-        dialect = dialect_cls()
         caps = _caps(session_targeting="session_default", stage_scope="real", **caps_kw)
-        dialect.capabilities = caps
+        dialect = dialect_cls(caps)
         plan = _plan(dialect, caps)
         conn = _FakeConn(
             probe_sql=dialect.adbc_session_schema_sql(),
@@ -626,9 +612,8 @@ class TestSessionSchemaGuard:
             backend._execute_write_sync(plan, _batch())
 
     def test_targeting_dialect_never_probes(self):
-        dialect = _StageDialect()
         caps = _caps(stage_scope="real")
-        dialect.capabilities = caps
+        dialect = _StageDialect(caps)
         plan = _plan(dialect, caps)
         conn = _FakeConn(probe_sql=dialect.adbc_session_schema_sql())
         _backend(dialect, conn)._execute_write_sync(plan, _batch())
@@ -638,13 +623,12 @@ class TestSessionSchemaGuard:
     def test_temp_scope_stage_skips_the_probe(self):
         # A temp-scope stage carries no schema: the session default IS the
         # intent, so the guard stays out of the way on an opt-out dialect.
-        dialect = _SessionDefaultDialect()
         caps = _caps(
             session_targeting="session_default",
             stage_scope="temp",
             transactional_ddl=False,
         )
-        dialect.capabilities = caps
+        dialect = _SessionDefaultDialect(caps)
         plan = _plan(dialect, caps)
         assert plan.stage.schema == ""
         conn = _FakeConn(probe_sql=dialect.adbc_session_schema_sql())
@@ -653,10 +637,11 @@ class TestSessionSchemaGuard:
         assert len(conn.ingests) == 1
 
     def test_undeclared_session_targeting_refuses_bare_name(self):
-        dialect = _SessionDefaultDialect()
         caps = _caps(session_targeting="session_default", stage_scope="real")
-        plan = _plan(dialect, caps)
-        dialect.capabilities = None  # undeclared at the binding
+        # Undeclared at construction: the plan carries the shape, the
+        # dialect carries no declaration for the backend to consult.
+        dialect = _SessionDefaultDialect(None)
+        plan = _plan(_SessionDefaultDialect(caps), caps)
         conn = _FakeConn(probe_sql=dialect.adbc_session_schema_sql())
         with pytest.raises(
             AdbcConfigurationError, match="sql_capabilities.session_targeting"
@@ -666,9 +651,8 @@ class TestSessionSchemaGuard:
         assert conn.ingests == []
 
     def test_per_statement_declaration_with_bare_name_is_a_connector_defect(self):
-        dialect = _SessionDefaultDialect()  # returns no targeting kwargs
         caps = _caps(session_targeting="per_statement", stage_scope="real")
-        dialect.capabilities = caps
+        dialect = _SessionDefaultDialect(caps)  # returns no targeting kwargs
         plan = _plan(dialect, caps)
         conn = _FakeConn(probe_sql=dialect.adbc_session_schema_sql())
         with pytest.raises(AdbcConfigurationError, match="disagree"):
@@ -701,9 +685,8 @@ class TestSuccessPathDropRules:
     orphan log — the batch stays acked either way."""
 
     def _run(self, *, drop_failures=0, drop_error=None, commit_failures=0, caplog=None):
-        dialect = _StageDialect()
         caps = _caps(stage_scope="real", transactional_ddl=False)
-        dialect.capabilities = caps
+        dialect = _StageDialect(caps)
         plan = _plan(dialect, caps)
         state = {"mode_seen": False, "drop_failures": drop_failures}
 
@@ -799,9 +782,8 @@ class TestSuccessPathDropRules:
         assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
 
     def test_temp_scope_orphan_note_names_the_session(self, caplog):
-        dialect = _StageDialect()
         caps = _caps(stage_scope="temp", transactional_ddl=False)
-        dialect.capabilities = caps
+        dialect = _StageDialect(caps)
         plan = _plan(dialect, caps)
         state = {"mode_seen": False}
 
@@ -822,8 +804,7 @@ class TestSuccessPathDropRules:
 class TestConnectionLifecycle:
     @pytest.mark.asyncio
     async def test_connect_opens_eagerly_and_reads_the_bulk_declaration(self):
-        dialect = _StageDialect()
-        dialect.capabilities = _caps(bulk_load={"adbc": "adbc_ingest"})
+        dialect = _StageDialect(_caps(bulk_load={"adbc": "adbc_ingest"}))
         conn = _FakeConn()
         runtime = _FakeRuntime([conn])
         backend = AdbcBackend(dialect)
@@ -845,9 +826,8 @@ class TestConnectionLifecycle:
         assert not backend._session_schema_known
 
     def test_poisoned_connection_reopens_on_next_operation(self):
-        dialect = _StageDialect()
         caps = _caps(stage_scope="real", transactional_ddl=False)
-        dialect.capabilities = caps
+        dialect = _StageDialect(caps)
         plan = _plan(dialect, caps)
 
         first = _FakeConn(
@@ -961,9 +941,8 @@ class TestWholeCycleMutualExclusion:
     async def test_second_cycle_blocks_until_the_first_finishes(self):
         import threading as _threading
 
-        dialect = _StageDialect()
         caps = _caps(stage_scope="real", transactional_ddl=False)
-        dialect.capabilities = caps
+        dialect = _StageDialect(caps)
         plan = _plan(dialect, caps)
 
         release_first = _threading.Event()

@@ -24,8 +24,13 @@ in a customer pipeline (spec
   loud error, never a guessed default.
 - **The override surface is the sanctioned one.** The connector class
   carries `dialect_class` and nothing else; the dialect's public
-  namespace is exactly the public `SqlDialect` surface, with
-  base-compatible signatures. Overriding a private CDK internal fails
+  namespace is exactly the public `SqlDialect` surface, minus the
+  framework-owned members (`capabilities`, `for_runtime`,
+  `table_address`), with base-compatible signatures. The two that decide
+  the declaration — `capabilities` and `for_runtime` — are refused by
+  `SqlDialect` itself where the subclass is written, so the kit's finding
+  is a backstop for the rest, not the only thing standing between a
+  connector and its own binding site. Overriding a private CDK internal fails
   with the member named, and so does a public addition of the
   dialect's own — connector helpers live under a leading underscore,
   which is what keeps stale hooks from older write paths from riding

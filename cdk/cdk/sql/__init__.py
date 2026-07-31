@@ -32,7 +32,6 @@ from .capabilities import (
     SqlCapabilitiesError,
     SqlLimits,
     StageCapabilities,
-    bind_dialect_capabilities,
     parse_declared_capabilities,
     undeclared_capability_error,
 )
@@ -90,7 +89,6 @@ __all__ = [
     "SqlLimits",
     "StageCapabilities",
     "SqlCapabilitiesError",
-    "bind_dialect_capabilities",
     "parse_declared_capabilities",
     "undeclared_capability_error",
     "fetch_rows",
