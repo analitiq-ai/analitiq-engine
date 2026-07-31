@@ -1492,3 +1492,39 @@ class TestMappingCompileFailureIsReported:
             "metrics record; it is the only report of why the stream failed"
         )
         assert emitted["stream"]["status"] != "success"
+        # An unknown function name is a defect in the customer's own mapping,
+        # so the record must send them there. Compiling runs before the
+        # transform stage's boundary exists, so without a tag at the compile
+        # site the failure reaches the runner untagged and reports INTERNAL --
+        # pointing the customer at us over their own config.
+        assert emitted["stream"]["error_code"] == ErrorCode.CONFIG_INVALID.value
+        assert emitted["stream"]["error_detail"].startswith("transform/CONFIG_INVALID:")
+
+    @pytest.mark.asyncio
+    async def test_a_compile_failure_reports_what_a_runtime_one_would(
+        self,
+        mock_grpc_client: AsyncMock,
+        sample_stream_config: dict[str, Any],
+        temp_dir: str,
+    ):
+        """Compiling a mapping and running one are the same concept.
+
+        A defect caught at compile time and the same class of defect caught
+        mid-batch are both the customer's mapping, so they must not report
+        different codes depending on when the engine noticed.
+        """
+        from src.state.error_classification import (
+            classify_exception,
+            default_code_for_stage,
+        )
+
+        assert (
+            default_code_for_stage(FailureStage.TRANSFORM) is ErrorCode.CONFIG_INVALID
+        )
+        # What the transform stage's own boundary produces mid-batch.
+        mid_batch = tag_failure(
+            TransformationError("cannot convert value to Int64"),
+            code=default_code_for_stage(FailureStage.TRANSFORM),
+            stage=FailureStage.TRANSFORM,
+        )
+        assert classify_exception(mid_batch) is ErrorCode.CONFIG_INVALID

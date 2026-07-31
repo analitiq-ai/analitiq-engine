@@ -215,8 +215,24 @@ class StreamProcessor:
             # failure is classified and emitted like any other stream failure.
             # A stream with no assignments has no transform: batches pass
             # through untouched.
+            #
+            # Tagged here rather than left to the transform stage's own
+            # boundary: compiling runs before that stage exists, so an
+            # unknown function name in a customer's mapping would otherwise
+            # reach the runner untagged and report INTERNAL -- sending them
+            # to us over a defect in their own config. Compiling a mapping
+            # and running one are the same concept, so they report the same
+            # code.
             if self.mapping.assignments:
-                self.transform = compile_mapping(self.mapping)
+                try:
+                    self.transform = compile_mapping(self.mapping)
+                except Exception as compile_error:
+                    tag_failure(
+                        compile_error,
+                        code=default_code_for_stage(FailureStage.TRANSFORM),
+                        stage=FailureStage.TRANSFORM,
+                    )
+                    raise
 
             source_cfg = self.stream_config["source"]
             destination_cfg = self.stream_config["destination"]
