@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 from analitiq.contracts.endpoints import ApiEndpointDoc, DatabaseEndpointDoc
 
+from src.engine.mapping import MappingDocument
 from src.models.resolved import (
     BatchingConfig,
     ErrorHandlingConfig,
@@ -129,7 +130,7 @@ def _make_stream(
         tags=[],
         source=src,
         destinations=[dest],
-        mapping=mapping or {},
+        mapping=MappingDocument.parse(mapping or {}),
     )
 
 
@@ -325,20 +326,25 @@ class TestBuildConfigDict:
 
         assert set(result["streams"].keys()) == {"orders", "invoices"}
 
-    def test_mapping_assignments_translated(self):
+    def test_mapping_travels_whole_and_untranslated(self):
+        """The typed document reaches the engine as-is: the config dict carries
+        the same object, so no field can be dropped or respelled in transit."""
         assignment = {
             "target": {"path": "id", "arrow_type": "Int64", "nullable": False},
-            "value": {"expression": {"op": "get", "path": "id"}},
+            "value": {
+                "kind": "expression",
+                "expression": {"op": "get", "path": ["id"]},
+            },
         }
         pipeline = _make_pipeline()
         stream = _make_stream(mapping={"assignments": [assignment]})
 
         result = _build_config_dict(pipeline, [stream])
 
-        assignments = result["streams"]["orders"]["mapping"]["assignments"]
-        assert len(assignments) == 1
-        assert assignments[0]["target"]["path"] == ["id"]
-        assert assignments[0]["value"]["kind"] == "expr"
+        assert result["streams"]["orders"]["mapping"] is stream.mapping
+        [compiled_assignment] = stream.mapping.assignments
+        assert compiled_assignment.target.path == "id"
+        assert compiled_assignment.value.expression == {"op": "get", "path": ["id"]}
 
     def test_runtime_not_in_config_dict(self):
         pipeline = _make_pipeline(

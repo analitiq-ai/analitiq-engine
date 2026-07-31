@@ -1,17 +1,43 @@
-"""Vectorized, Arrow-native record transformation for the streaming engine.
+"""The stream mapping: one typed document, compiled to Arrow compute.
 
-A stream's ``mapping.assignments`` (per ``mapping-and-transformations.md``) are
-compiled once into a :class:`CompiledTransform` and then applied to each
-``pa.RecordBatch`` with ``pyarrow.compute`` -- the batch never leaves Arrow.
-There is a single transform path: every assignment, every expression op, and
-every function in the catalog is a vectorized column operation.
+This module owns the whole mapping vocabulary -- the path grammar, the
+expression AST, the function catalog, the validation rules and the output
+schema. A stream's mapping document (per ``mapping-and-transformations.md``)
+is parsed once into a :class:`MappingDocument`, compiled once by
+:func:`compile_mapping` into a :class:`CompiledTransform`, and then applied to
+each ``pa.RecordBatch`` with ``pyarrow.compute`` -- the batch never leaves
+Arrow. There is a single transform path: every assignment, every expression
+op, and every function in the catalog is a vectorized column operation.
+
+A source path is an ordered token array (``["a", "b"]``) from the contract
+document all the way to ``pc.struct_field``. Nothing splits a string on a dot
+anywhere on that route: a dotted string is a path plus an unstated splitting
+convention, and when one module split it and another expected tokens, a nested
+read silently produced an all-null column instead of failing.
+
+:class:`MappingDocument` is closed (``extra="forbid"``) at every level, and the
+expression AST -- the one sub-tree that is not a contract model, because the
+engine compiles a wider op set than the contract publishes -- is closed op by
+op at compile time (:data:`_EXPR_NODE_KEYS`). So a field the contract carries
+cannot go missing between the document and the transform: it is either compiled
+or it is rejected by name. This is a deliberate departure from a
+forward-compatible protocol that tolerates unknown keys -- affordable only
+because the engine and the contract models are pinned in lockstep, and worth it
+because a dropped field is silent while a named rejection is readable.
+
+One contract field is deliberately not acted on: ``validate.error_handling``.
+Failure handling is a pipeline-runtime setting (strategy, retries, delay) the
+engine applies to a whole batch, and a validation failure fails the whole batch
+by design, so an assignment-scoped override has no grain to act at. It is
+carried for the control plane and named as inert in
+``mapping-and-transformations.md`` rather than silently absorbed.
 
 Type conversion has one authority. When an assignment's evaluated value lands in
 a column of a different Arrow type than the target declares, the conversion is
 gated by the **conversion matrix** (:mod:`cdk.type_map.conversions`) and executed
 by the same ``pc.cast(safe=True)`` the destination uses -- so the transform and
 the destination cast of one column always agree (both parse ``"1" -> Int64``,
-both reject a lossy ``Float64 -> Int64``). A ``const`` literal is a Python value
+both reject a lossy ``Float64 -> Int64``). A ``constant`` is a Python value
 declared in the mapping, not a typed Arrow column, so it is materialised at the
 target type directly (``pa.array``) -- there is no source arrow_type to classify.
 Nested (``Object``/``List``) and ``Json`` targets are assembled structurally, not
@@ -26,13 +52,21 @@ The engine's ``error_strategy`` -- not this module -- decides retry vs DLQ.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Final
+from typing import Annotated, Any, Final, Literal
 
 import pyarrow as pa
 import pyarrow.compute as pc
+from analitiq.contracts.shared.common import StrictModel
+from analitiq.contracts.stream import (
+    AssignmentTarget,
+    ConstantAssignmentValue,
+    Validation,
+    ValidationRule,
+)
+from pydantic import Field, ValidationError, model_validator
 
 from cdk.type_map.arrow import (
     classify_arrow_conversion,
@@ -47,35 +81,152 @@ from .exceptions import TransformationError
 _ExprFn = Callable[[pa.RecordBatch], pa.Array]
 
 
-def build_output_schema(assignments: list[dict[str, Any]]) -> pa.Schema:
+# ---------------------------------------------------------------------------
+# The mapping document
+# ---------------------------------------------------------------------------
+
+
+class ExpressionValue(StrictModel):
+    """``{"kind": "expression", "expression": {...}}`` -- assign from a read.
+
+    Widens the contract's expression variant on one axis only: the contract
+    publishes the ``get``/``pipe``/``fn`` nodes an authoring UI can offer,
+    while the engine compiles a larger op set (see :func:`_compile_expr`). The
+    AST therefore stays an untyped mapping here and is validated -- op by op,
+    arity, and every key the node carries -- at compile time, where the
+    vocabulary is defined. Widening the type does not open the document: a key
+    no op declares is refused there by name, exactly as it is at this level.
+    """
+
+    kind: Literal["expression"]
+    expression: dict[str, Any]
+
+
+# The `kind` discriminator is required and has no default. A value block that
+# omitted it used to be read as an expression, so a constant the compiler could
+# not find became an unknown-op failure about the AST rather than a statement
+# about the missing discriminator.
+AssignmentValue = Annotated[
+    ExpressionValue | ConstantAssignmentValue,
+    Field(discriminator="kind"),
+]
+
+
+class MappingAssignment(StrictModel):
+    """One assignment: how to build, type and validate a single target field."""
+
+    # `target`, `constant` and `validate` are the contract's own models, so the
+    # target's single-segment path rule, the Arrow container-shape rules and
+    # the validation-rule grammar are enforced from one definition rather than
+    # a second engine-side spelling of the same shapes.
+    target: AssignmentTarget
+    value: AssignmentValue
+    # `Validation.error_handling` rides along unused: see the module docstring
+    # -- the engine handles failures per batch, so there is no assignment-scoped
+    # grain for it to change.
+    validation: Validation | None = Field(default=None, alias="validate")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_multi_segment_target(cls, data: Any) -> Any:
+        """Say plainly what a dotted target path is wrong about.
+
+        The contract already refuses it, by a published regex whose message is
+        the regex. The rule is not restated here -- only the reason, because a
+        dotted target is the one mapping mistake with a right answer the author
+        cannot guess from the pattern.
+        """
+        if isinstance(data, Mapping):
+            target = data.get("target")
+            # A non-object `target` is the contract's error to report, by type;
+            # reading `.path` off it here would escape this model as a raw
+            # AttributeError instead of a named field failure.
+            path = target.get("path") if isinstance(target, Mapping) else None
+            if isinstance(path, str) and "." in path:
+                raise ValueError(
+                    f"target.path {path!r} has more than one segment; a target "
+                    f"names one field on the destination record root, and "
+                    f"nesting beneath it is declared with arrow_type 'Object' "
+                    f"plus 'properties' (or 'List' plus 'items')"
+                )
+        return data
+
+    @model_validator(mode="after")
+    def _rules_name_this_assignment_target(self) -> MappingAssignment:
+        """Refuse a validation rule that names a field other than this target.
+
+        A rule's ``field`` restates the mapped output column it guards, and the
+        block the rule sits in already fixes that column: ``validate`` is
+        per-assignment, and the transform applies its rules to the value this
+        assignment builds. A rule naming a different column is two answers to
+        one question -- so it is refused by name rather than quietly enforced
+        against the target.
+        """
+        for rule in self.validation.rules if self.validation else ():
+            if rule.field != self.target.path:
+                raise ValueError(
+                    f"validation rule {rule.type!r} names field {rule.field!r}, "
+                    f"but rules in this block validate the assignment's own "
+                    f"target {self.target.path!r}; a rule cannot select "
+                    f"another column"
+                )
+        return self
+
+
+class MappingDocument(StrictModel):
+    """A stream's mapping, closed at every level."""
+
+    assignments: list[MappingAssignment] = Field(default_factory=list)
+
+    @classmethod
+    def parse(cls, document: Mapping[str, Any]) -> MappingDocument:
+        """Read a mapping document, rejecting anything the transform cannot run.
+
+        An unknown key, a missing ``kind``, a dotted target path or a malformed
+        Arrow declaration all fail here naming the field, so a document written
+        against a different contract pin is diagnosable from the message.
+        """
+        try:
+            return cls.model_validate(document)
+        except ValidationError as e:
+            raise TransformationError(
+                f"mapping document is invalid: {_field_errors(e)}"
+            ) from e
+
+
+def _field_errors(error: ValidationError) -> str:
+    """Render a pydantic failure as ``field: reason`` pairs, field first."""
+    return "; ".join(
+        f"{'.'.join(str(part) for part in err['loc']) or '<root>'}: {err['msg']}"
+        for err in error.errors()
+    )
+
+
+def build_output_schema(assignments: list[MappingAssignment]) -> pa.Schema:
     """Build the post-transform Arrow schema from a stream's assignments.
 
-    Object/List targets declare ``arrow_type: "Object"`` with a
-    ``target.properties`` map, or ``arrow_type: "List"`` with ``target.items`` --
-    :func:`resolve_arrow_type` handles the recursion.
+    A target names exactly one field on the destination record root. Nesting is
+    declared by ``arrow_type: "Object"`` with a ``target.properties`` map, or
+    ``arrow_type: "List"`` with ``target.items`` -- :func:`resolve_arrow_type`
+    handles the recursion.
     """
     fields: list[pa.Field] = []
     for index, assignment in enumerate(assignments):
-        target = assignment.get("target") or {}
-        target_name = _normalize_path(target.get("path"))
-        nullable = bool(target.get("nullable", True))
-
-        if not target.get("arrow_type"):
-            raise TransformationError(
-                f"assignment[{index}] target={target_name!r}: missing "
-                f"target.arrow_type; every assignment must declare an Arrow type"
-            )
+        target = assignment.target
+        where = f"assignment[{index}] target={target.path!r}"
         try:
             arrow_type = resolve_arrow_type(
-                target, where=f"assignment[{index}] target={target_name!r}"
+                target.model_dump(exclude_none=True), where=where
             )
         except InvalidTypeMapError as e:
+            # The contract's published type pattern and the CDK's type parser are
+            # maintained separately; where they disagree the mapping must name
+            # the assignment rather than let a CDK error escape untraced.
             raise TransformationError(
-                f"assignment[{index}] target={target_name!r}: cannot parse "
-                f"target.arrow_type={target.get('arrow_type')!r}: {e}"
+                f"{where}: cannot parse target.arrow_type={target.arrow_type!r}: {e}"
             ) from e
 
-        fields.append(pa.field(target_name, arrow_type, nullable=nullable))
+        fields.append(pa.field(target.path, arrow_type, nullable=target.nullable))
     return pa.schema(fields)
 
 
@@ -87,13 +238,13 @@ class _Step:
     build: _ExprFn
     is_const: bool
     is_json: bool
-    validate: dict[str, Any] | None
+    validate: Validation | None
 
 
 class CompiledTransform:
     """A stream's assignments compiled to vectorized column operations.
 
-    Built once per stream by :func:`compile_transform`; :meth:`run` applies it to
+    Built once per stream by :func:`compile_mapping`; :meth:`run` applies it to
     each batch with no per-record Python and no ``to_pylist``/``from_pylist``
     round-trip.
     """
@@ -141,8 +292,8 @@ class CompiledTransform:
     def _coerce(value: pa.Array, step: _Step) -> pa.Array:
         """Convert an evaluated value column to the target field type.
 
-        - A ``const`` is already built at the target type (or JSON-encoded for a
-          ``Json`` target); it passes through.
+        - A ``constant`` is already built at the target type (or JSON-encoded
+          for a ``Json`` target); it passes through.
         - A ``Json`` target is encoded structurally (string passthrough, or
           ``json.dumps`` of a struct/list column).
         - A nested (``struct``/``list``) target is assembled with a structural
@@ -162,52 +313,49 @@ class CompiledTransform:
         return _retype_column(value, field)
 
 
-def compile_transform(assignments: list[dict[str, Any]]) -> CompiledTransform:
-    """Compile a stream's assignments into a :class:`CompiledTransform`.
+def compile_mapping(document: MappingDocument) -> CompiledTransform:
+    """Compile a stream's mapping into a :class:`CompiledTransform`.
 
     Static work (schema building, expression compilation, validation setup)
     happens here once; the returned object is applied per batch. Raises
-    :class:`TransformationError` for a malformed assignment.
+    :class:`TransformationError` for an expression the AST vocabulary does not
+    define. Document-shape failures are raised earlier, by
+    :meth:`MappingDocument.parse`.
     """
+    assignments = document.assignments
     output_schema = build_output_schema(assignments)
     steps: list[_Step] = []
-    for index, (assignment, field) in enumerate(zip(assignments, output_schema)):
-        target = assignment.get("target") or {}
-        is_json = target.get("arrow_type") == "Json"
-        value_spec = assignment.get("value") or {}
-        build, is_const = _compile_value(value_spec, field, is_json, index)
-        validate = assignment.get("validate")
+    for assignment, field in zip(assignments, output_schema):
+        is_json = assignment.target.arrow_type == "Json"
+        build, is_const = _compile_value(assignment.value, field, is_json)
         steps.append(
             _Step(
                 field=field,
                 build=build,
                 is_const=is_const,
                 is_json=is_json,
-                validate=validate,
+                validate=assignment.validation,
             )
         )
     return CompiledTransform(output_schema, steps)
 
 
 def _compile_value(
-    value_spec: dict[str, Any], field: pa.Field, is_json: bool, index: int
+    value: AssignmentValue, field: pa.Field, is_json: bool
 ) -> tuple[_ExprFn, bool]:
     """Compile an assignment's ``value`` block into a column builder.
 
-    Returns ``(build_fn, is_const)``. A ``const`` builds a broadcast column at the
-    target type (JSON-encoded for a ``Json`` target); an ``expr`` compiles its AST
-    to vectorized compute that produces a column at its natural type.
+    Returns ``(build_fn, is_const)``. A constant builds a broadcast column at
+    the target type (JSON-encoded for a ``Json`` target); an expression
+    compiles its AST to vectorized compute that produces a column at its
+    natural type.
     """
-    kind = value_spec.get("kind", "expr")
-    if kind == "const":
-        const_value = (value_spec.get("const") or {}).get("value")
-        build = _compile_const(const_value, field, is_json)
-        return build, True
-    if kind == "expr":
-        return _compile_expr(value_spec.get("expr") or {}), False
-    raise TransformationError(
-        f"assignment[{index}] target={field.name!r}: unknown value kind {kind!r}"
-    )
+    if isinstance(value, ConstantAssignmentValue):
+        # The constant's own arrow_type declares the literal's JSON kind for
+        # authoring tools; the column is built at the TARGET type, which is the
+        # type the destination receives.
+        return _compile_const(value.constant.value, field, is_json), True
+    return _compile_expr(value.expression), False
 
 
 def _compile_const(const_value: Any, field: pa.Field, is_json: bool) -> _ExprFn:
@@ -230,112 +378,193 @@ def _compile_const(const_value: Any, field: pa.Field, is_json: bool) -> _ExprFn:
 # batch so the (static) AST walk happens once at compile time, not per batch.
 
 
-def _compile_expr(expr: dict[str, Any]) -> _ExprFn:
-    """Compile one expression AST node into a vectorized column builder."""
-    op = expr.get("op")
-
-    match op:
-        case "get":
-            path = expr.get("path") or []
-            return lambda batch: _get_path(batch, path)
-
-        case "const":
-            value = expr.get("value")
-            return lambda batch: pa.array([value] * batch.num_rows)
-
-        case "pipe":
-            args = expr.get("args") or []
-            if not args:
-                raise TransformationError(
-                    f"pipe expression requires at least 1 arg, got {len(args)}"
-                )
-            seed = _compile_expr(args[0])
-            fns = [_compile_fn(node) for node in args[1:]]
-
-            def run_pipe(batch: pa.RecordBatch) -> pa.Array:
-                value = seed(batch)
-                for fn in fns:
-                    value = fn(value)
-                return value
-
-            return run_pipe
-
-        case "fn":
-            # A top-level fn (e.g. ``now()``) with no pipe seed: the per-record
-            # evaluator applied it to a ``None`` input, so here it runs over an
-            # all-null column. Zero-input functions like ``now`` ignore it.
-            fn = _compile_fn(expr)
-            return lambda batch: fn(pa.nulls(batch.num_rows))
-
-        case "if":
-            args = _expect_args(expr, op, 3)
-            cond, then_, else_ = (_compile_expr(a) for a in args)
-            return lambda batch: _if_else(cond(batch), then_(batch), else_(batch))
-
-        case "eq":
-            args = _expect_args(expr, op, 2)
-            left, right = (_compile_expr(a) for a in args)
-            return lambda batch: _equal(left(batch), right(batch))
-
-        case "neq":
-            args = _expect_args(expr, op, 2)
-            left, right = (_compile_expr(a) for a in args)
-            return lambda batch: pc.invert(_equal(left(batch), right(batch)))
-
-        case "gt" | "gte" | "lt" | "lte":
-            args = _expect_args(expr, op, 2)
-            left, right = (_compile_expr(a) for a in args)
-            kernel = {
-                "gt": pc.greater,
-                "gte": pc.greater_equal,
-                "lt": pc.less,
-                "lte": pc.less_equal,
-            }[op]
-            return lambda batch: _compare(kernel, left(batch), right(batch), op)
-
-        case "and" | "or":
-            args = expr.get("args") or []
-            if not args:
-                raise TransformationError(
-                    f"{op} expression requires at least 1 arg, got 0"
-                )
-            operands = [_compile_expr(a) for a in args]
-            reduce = pc.and_ if op == "and" else pc.or_
-            return lambda batch: _bool_reduce(reduce, [o(batch) for o in operands])
-
-        case "not":
-            args = _expect_args(expr, op, 1)
-            inner = _compile_expr(args[0])
-            return lambda batch: pc.invert(_truthy(inner(batch)))
-
-        case "concat":
-            args = expr.get("args") or []
-            if not args:
-                raise TransformationError(
-                    "concat expression requires at least 1 arg, got 0"
-                )
-            parts = [_compile_expr(a) for a in args]
-            return lambda batch: _concat([p(batch) for p in parts])
-
-        case "coalesce":
-            args = expr.get("args") or []
-            if not args:
-                raise TransformationError(
-                    "coalesce expression requires at least 1 arg, got 0"
-                )
-            parts = [_compile_expr(a) for a in args]
-            return lambda batch: _coalesce([p(batch) for p in parts])
-
-        case _:
-            raise TransformationError(f"Unknown expression op: {op!r}")
+# Every key an AST node of each op may carry. Most ops take only `args`; `get`,
+# `const` and `fn` carry their own payload. This table is what closes the
+# expression sub-tree: it is the one part of the document pydantic does not
+# check (the engine's op set is wider than the contract's published
+# get/pipe/fn), so an unknown key is rejected here, alongside the op vocabulary
+# and the arity, instead of being dropped on the way to the compiler.
+_ARGS_ONLY_OPS: Final[tuple[str, ...]] = (
+    "pipe",
+    "if",
+    "eq",
+    "neq",
+    "gt",
+    "gte",
+    "lt",
+    "lte",
+    "and",
+    "or",
+    "not",
+    "concat",
+    "coalesce",
+)
+_EXPR_NODE_KEYS: Final[dict[str, frozenset[str]]] = {
+    "get": frozenset({"op", "path"}),
+    "const": frozenset({"op", "value"}),
+    "fn": frozenset({"op", "name", "version", "args"}),
+    **{op: frozenset({"op", "args"}) for op in _ARGS_ONLY_OPS},
+}
 
 
-def _compile_fn(node: dict[str, Any]) -> Callable[[pa.Array], pa.Array]:
-    """Compile a ``fn`` AST node (a pipe stage) into a vectorized column function."""
-    if node.get("op") != "fn":
+def _expect_node(expr: Any) -> str:
+    """Return an AST node's ``op``, refusing an unknown op or an unknown key."""
+    if not isinstance(expr, Mapping):
         raise TransformationError(
-            f"Expected fn op in pipe stage, got: {node.get('op')!r}"
+            f"expression node must be an object with an 'op', got "
+            f"{type(expr).__name__}: {expr!r}"
         )
+    op = expr.get("op")
+    if not isinstance(op, str) or op not in _EXPR_NODE_KEYS:
+        raise TransformationError(f"Unknown expression op: {op!r}")
+    allowed = _EXPR_NODE_KEYS[op]
+    unknown = sorted(set(expr) - allowed)
+    if unknown:
+        raise TransformationError(
+            f"{op} expression carries unknown key(s) {unknown}; a {op} node "
+            f"takes {sorted(allowed)}"
+        )
+    return op
+
+
+def _variadic(expr: Any, op: str) -> list[_ExprFn]:
+    """Compile a variadic node's args, refusing an empty list.
+
+    Four ops take one-or-more args and each used to spell this refusal
+    itself, so the message drifted with the op name in front of it.
+    """
+    args = expr.get("args") or []
+    if not args:
+        raise TransformationError(f"{op} expression requires at least 1 arg, got 0")
+    return [_compile_expr(a) for a in args]
+
+
+def _compile_get(expr: Any, _op: str) -> _ExprFn:
+    path = _expect_token_path(expr.get("path"))
+    return lambda batch: _get_path(batch, path)
+
+
+def _compile_const_node(expr: Any, _op: str) -> _ExprFn:
+    value = expr.get("value")
+    return lambda batch: pa.array([value] * batch.num_rows)
+
+
+def _compile_pipe(expr: Any, op: str) -> _ExprFn:
+    args = expr.get("args") or []
+    if not args:
+        raise TransformationError(f"{op} expression requires at least 1 arg, got 0")
+    seed = _compile_expr(args[0])
+    stages = [_compile_fn(node) for node in args[1:]]
+
+    def run_pipe(batch: pa.RecordBatch) -> pa.Array:
+        value = seed(batch)
+        for stage in stages:
+            value = stage(value)
+        return value
+
+    return run_pipe
+
+
+def _compile_bare_fn(expr: Any, _op: str) -> _ExprFn:
+    # A top-level fn (e.g. ``now()``) with no pipe seed: the per-record
+    # evaluator applied it to a ``None`` input, so here it runs over an
+    # all-null column. Zero-input functions like ``now`` ignore it.
+    fn = _compile_fn(expr)
+    return lambda batch: fn(pa.nulls(batch.num_rows))
+
+
+def _compile_if(expr: Any, op: str) -> _ExprFn:
+    cond, then_, else_ = (_compile_expr(a) for a in _expect_args(expr, op, 3))
+    return lambda batch: _if_else(cond(batch), then_(batch), else_(batch))
+
+
+def _compile_eq(expr: Any, op: str) -> _ExprFn:
+    left, right = (_compile_expr(a) for a in _expect_args(expr, op, 2))
+    return lambda batch: _equal(left(batch), right(batch))
+
+
+def _compile_neq(expr: Any, op: str) -> _ExprFn:
+    left, right = (_compile_expr(a) for a in _expect_args(expr, op, 2))
+    return lambda batch: pc.invert(_equal(left(batch), right(batch)))
+
+
+#: The ordering kernels, keyed by the op that selects them.
+_ORDER_KERNELS: Final[dict[str, Callable[..., Any]]] = {
+    "gt": pc.greater,
+    "gte": pc.greater_equal,
+    "lt": pc.less,
+    "lte": pc.less_equal,
+}
+
+
+def _compile_order(expr: Any, op: str) -> _ExprFn:
+    left, right = (_compile_expr(a) for a in _expect_args(expr, op, 2))
+    kernel = _ORDER_KERNELS[op]
+    return lambda batch: _compare(kernel, left(batch), right(batch), op)
+
+
+def _compile_bool_reduce(expr: Any, op: str) -> _ExprFn:
+    operands = _variadic(expr, op)
+    reduce = pc.and_ if op == "and" else pc.or_
+    return lambda batch: _bool_reduce(reduce, [o(batch) for o in operands])
+
+
+def _compile_not(expr: Any, op: str) -> _ExprFn:
+    inner = _compile_expr(_expect_args(expr, op, 1)[0])
+    return lambda batch: pc.invert(_truthy(inner(batch)))
+
+
+def _compile_concat(expr: Any, op: str) -> _ExprFn:
+    parts = _variadic(expr, op)
+    return lambda batch: _concat([p(batch) for p in parts])
+
+
+def _compile_coalesce(expr: Any, op: str) -> _ExprFn:
+    parts = _variadic(expr, op)
+    return lambda batch: _coalesce([p(batch) for p in parts])
+
+
+#: One compiler per op. Keyed rather than branched so the set of compilable
+#: ops is a value the drift guard below can compare against the grammar --
+#: an op added to `_EXPR_NODE_KEYS` without a compiler fails at import, not
+#: on the batch that first carries it.
+_EXPR_COMPILERS: Final[dict[str, Callable[[Any, str], _ExprFn]]] = {
+    "get": _compile_get,
+    "const": _compile_const_node,
+    "pipe": _compile_pipe,
+    "fn": _compile_bare_fn,
+    "if": _compile_if,
+    "eq": _compile_eq,
+    "neq": _compile_neq,
+    "gt": _compile_order,
+    "gte": _compile_order,
+    "lt": _compile_order,
+    "lte": _compile_order,
+    "and": _compile_bool_reduce,
+    "or": _compile_bool_reduce,
+    "not": _compile_not,
+    "concat": _compile_concat,
+    "coalesce": _compile_coalesce,
+}
+
+if set(_EXPR_COMPILERS) != set(_EXPR_NODE_KEYS):
+    raise AssertionError(
+        "every grammar op needs a compiler and vice versa; unmatched: "
+        f"{sorted(set(_EXPR_COMPILERS) ^ set(_EXPR_NODE_KEYS))}"
+    )
+
+
+def _compile_expr(expr: Any) -> _ExprFn:
+    """Compile one expression AST node into a vectorized column builder."""
+    op = _expect_node(expr)
+    return _EXPR_COMPILERS[op](expr, op)
+
+
+def _compile_fn(node: Any) -> Callable[[pa.Array], pa.Array]:
+    """Compile a ``fn`` AST node (a pipe stage) into a vectorized column function."""
+    op = _expect_node(node)
+    if op != "fn":
+        raise TransformationError(f"Expected fn op in pipe stage, got: {op!r}")
     name = node.get("name")
     version = node.get("version", 1)
     args = node.get("args") or []
@@ -669,7 +898,7 @@ _FUNCTION_CATALOG: dict[str, dict[int, Callable[..., pa.Array]]] = {
 
 
 def _run_validation(
-    value: pa.Array, validate: dict[str, Any], field: pa.Field
+    value: pa.Array, validation: Validation, field: pa.Field
 ) -> list[str]:
     """Return one error string per failing rule, or ``[]`` if every row passes.
 
@@ -677,23 +906,22 @@ def _run_validation(
     exempt from every rule except ``not_null`` (mirroring the per-record
     ``if value is not None`` guard). A malformed rule (bad regex, type mismatch)
     fails loud with a :class:`TransformationError`.
+
+    Rules run against *field* -- the assignment's own target column. A rule's
+    ``field`` is not consulted here because ``MappingAssignment`` has already
+    refused any rule naming a different column, so the two cannot disagree.
     """
     errors: list[str] = []
-    rules = validate.get("rules") or []
     present = pc.is_valid(value)
 
-    for rule in rules:
-        rule_type = rule.get("type")
-        mask = _rule_failure_mask(value, present, rule, rule_type, field)
-        if mask is None:
-            continue
+    for rule in validation.rules:
+        mask = _rule_failure_mask(value, present, rule, field)
         if pc.any(mask, min_count=0).as_py():
             rows = [i for i, failed in enumerate(mask.to_pylist()) if failed]
-            message = rule.get("message")
-            detail = f": {message}" if message else ""
+            detail = f": {rule.message}" if rule.message else ""
             errors.append(
                 f"column {field.name!r}: {len(rows)} row(s) fail rule "
-                f"{rule_type!r}{detail} (rows {rows[:5]})"
+                f"{rule.type!r}{detail} (rows {rows[:5]})"
             )
     return errors
 
@@ -701,60 +929,68 @@ def _run_validation(
 def _rule_failure_mask(
     value: pa.Array,
     present: pa.Array,
-    rule: dict[str, Any],
-    rule_type: str | None,
+    rule: ValidationRule,
     field: pa.Field,
-) -> pa.Array | None:
+) -> pa.Array:
     """Compute the boolean failure mask for one validation rule.
 
-    Returns ``None`` for an unrecognised rule type (ignored, as the per-record
-    validator did). Failures are ``present AND predicate`` so nulls never trip a
-    value rule.
+    Failures are ``present AND predicate`` so nulls never trip a value rule.
     """
 
     def failing(predicate: pa.Array) -> pa.Array:
         return pc.and_(present, pc.fill_null(predicate, False))
 
     try:
-        match rule_type:
+        match rule.type:
             case "not_null" | "required":
                 return pc.is_null(value)
             case "min_length":
                 length = pc.utf8_length(_string_form(value))
-                return failing(pc.less(length, rule.get("value", 0)))
+                return failing(pc.less(length, rule.value))
             case "max_length":
                 length = pc.utf8_length(_string_form(value))
-                return failing(pc.greater(length, rule.get("value", 0)))
+                return failing(pc.greater(length, rule.value))
             case "pattern":
-                pattern = rule.get("value", "")
                 matched = pc.match_substring_regex(
-                    _string_form(value), pattern=f"^(?:{pattern})"
+                    _string_form(value), pattern=f"^(?:{rule.value})"
                 )
                 return failing(pc.invert(matched))
             case "range":
-                return _range_failure_mask(value, present, rule)
+                return _range_failure_mask(value, present, rule, field)
             case "in_list":
-                allowed = rule.get("value", [])
-                return failing(pc.invert(pc.is_in(value, value_set=pa.array(allowed))))
-            case _:
-                return None
+                return failing(
+                    pc.invert(pc.is_in(value, value_set=pa.array(rule.value)))
+                )
     except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as e:
         raise TransformationError(
-            f"column {field.name!r}: validation rule {rule_type!r} is "
+            f"column {field.name!r}: validation rule {rule.type!r} is "
             f"invalid for a {value.type} column: {e}"
         ) from e
+    # Reached only if the contract's rule-type vocabulary grows and this match
+    # does not: a rule the engine cannot enforce must fail, never pass silently.
+    raise TransformationError(
+        f"column {field.name!r}: validation rule type {rule.type!r} has no "
+        f"engine implementation"
+    )
 
 
 def _range_failure_mask(
-    value: pa.Array, present: pa.Array, rule: dict[str, Any]
+    value: pa.Array, present: pa.Array, rule: ValidationRule, field: pa.Field
 ) -> pa.Array:
-    min_val = rule.get("min")
-    max_val = rule.get("max")
+    """Fail rows outside the bounds carried in the rule's ``value`` object."""
+    bounds = rule.value
+    if not isinstance(bounds, Mapping) or not {"min", "max"} & set(bounds):
+        raise TransformationError(
+            f"column {field.name!r}: validation rule 'range' needs a value "
+            f"object carrying 'min' and/or 'max'; got {bounds!r}"
+        )
     fail = pa.array([False] * len(value))
-    if min_val is not None:
-        fail = pc.or_(fail, pc.fill_null(pc.less(value, min_val), False))
-    if max_val is not None:
-        fail = pc.or_(fail, pc.fill_null(pc.greater(value, max_val), False))
+    minimum = bounds.get("min")
+    maximum = bounds.get("max")
+    if minimum is not None:
+        fail = pc.or_(fail, pc.fill_null(pc.less(value, minimum), False))
+    if maximum is not None:
+        fail = pc.or_(fail, pc.fill_null(pc.greater(value, maximum), False))
     return pc.and_(present, fail)
 
 
@@ -834,12 +1070,12 @@ def _cast_structural(column: pa.Array, field: pa.Field) -> pa.Array:
 
 
 def _build_const_array(values: list[Any], field: pa.Field) -> pa.Array:
-    """Materialise a ``const`` literal's Python *values* at the target type.
+    """Materialise a ``constant``'s Python *values* at the target type.
 
-    A const is a Python value declared in the mapping (not a typed source column),
-    so there is no source arrow_type to classify and ``pa.array`` constructs it at
-    the target type directly. Wraps pyarrow's conversion errors with the column
-    name so a bad constant fails the batch with a clear message.
+    A constant is a Python value declared in the mapping (not a typed source
+    column), so there is no source arrow_type to classify and ``pa.array``
+    constructs it at the target type directly. Wraps pyarrow's conversion errors
+    with the column name so a bad constant fails the batch with a clear message.
     """
     try:
         return pa.array(values, type=field.type)
@@ -853,9 +1089,9 @@ def _encode_json_column(value: pa.Array, field: pa.Field) -> pa.Array:
     """Encode a value column for a ``Json`` target (carried as a string column).
 
     A string column passes through (it is already a JSON-encoded value an API
-    source shipped, or a string const). A struct/list column is ``json.dumps``-ed
-    per row -- a column-level encode, not a per-record round-trip. The destination
-    decoder reverses this at the write boundary.
+    source shipped, or a string constant). A struct/list column is
+    ``json.dumps``-ed per row -- a column-level encode, not a per-record
+    round-trip. The destination decoder reverses this at the write boundary.
     """
     if pa.types.is_string(value.type) or pa.types.is_large_string(value.type):
         return pc.cast(value, field.type)
@@ -896,15 +1132,20 @@ def _expect_args(expr: dict[str, Any], op: str, count: int) -> list[dict[str, An
     return args
 
 
-def _normalize_path(path: Any) -> str:
-    if isinstance(path, str):
-        return path
-    if isinstance(path, list):
-        if len(path) != 1 or not isinstance(path[0], str):
-            raise TransformationError(
-                f"assignment path must be a single column name; got {path!r}"
-            )
-        return path[0]
-    raise TransformationError(
-        f"assignment path must be str or [str]; got {type(path).__name__}"
-    )
+def _expect_token_path(path: Any) -> list[str]:
+    """Accept a source path only as an ordered array of field-name tokens.
+
+    A string is refused rather than split. ``"a.b"`` names one field on some
+    sources and two on others, and the answer is the author's to give: ``["a",
+    "b"]`` is nested, ``["a.b"]`` is a single field whose name contains a dot.
+    """
+    if (
+        not isinstance(path, list)
+        or not path
+        or not all(isinstance(segment, str) and segment for segment in path)
+    ):
+        raise TransformationError(
+            f"get expression path must be a non-empty array of field-name "
+            f"tokens, outermost first (e.g. ['address', 'city']); got {path!r}"
+        )
+    return path

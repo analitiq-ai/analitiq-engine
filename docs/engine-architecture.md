@@ -61,7 +61,7 @@ src/
 │   ├── engine.py                # StreamingEngine (fans streams out, aggregates results)
 │   ├── stream_processor.py      # StreamProcessor (one stream: extract -> transform -> load -> checkpoint)
 │   ├── pipeline_config_prep.py  # Loads manifest/pipelines/streams/connections/connectors
-│   ├── data_transformer.py      # compile_transform (vectorized mapping AST -> Arrow compute)
+│   ├── mapping.py               # MappingDocument + compile_mapping (mapping AST -> Arrow compute)
 │   └── exceptions.py
 │
 ├── worker/                  # Sandboxed connector worker (spawned subprocess)
@@ -159,9 +159,11 @@ silently losing rows.
    concurrently. Each processor owns everything scoped to its stream —
    counters, the gRPC client, its dead letter queue — and runs four async
    stages — `_extract_stage -> _transform_stage -> _load_stage ->
-   _checkpoint_stage` — wired together with async queues. The transform
-   stage compiles the assignment AST once (`compile_transform`) and applies
-   it to each batch as vectorized Arrow compute.
+   _checkpoint_stage` — wired together with async queues. The processor
+   compiles the stream's typed mapping document once at construction
+   (`compile_mapping`), so a mapping the engine cannot run fails before any
+   batch is read; the transform stage then applies it to each batch as
+   vectorized Arrow compute.
 5. `_load_stage` streams batches over gRPC to the destination service
    with row-level, content-derived idempotency (protocol in
    [`grpc-streaming-architecture.md`](grpc-streaming-architecture.md)).

@@ -8,6 +8,7 @@ from analitiq.contracts.pipelines.config import ErrorHandling as ContractErrorHa
 from analitiq.contracts.stream import Replication
 from pydantic import BaseModel, Field, TypeAdapter, create_model
 
+from src.engine.mapping import MappingDocument
 from src.engine.pipeline_config_prep import _parse_replication, _parse_runtime_config
 from src.models.resolved import (
     BatchingConfig,
@@ -208,7 +209,7 @@ class TestResolvedModelGuards:
             tags=[],
             source=MagicMock(),
             destinations=[MagicMock()],
-            mapping={},
+            mapping=MappingDocument(),
         )
 
     def test_resolved_stream_rejects_empty_id(self):
