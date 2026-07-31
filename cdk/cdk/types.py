@@ -31,7 +31,9 @@ class AckStatus(IntEnum):
     ACK_STATUS_SUCCESS = 1  # All records written, cursor advanced
     ACK_STATUS_ALREADY_COMMITTED = 2  # Idempotent replay, batch already committed
     ACK_STATUS_RETRYABLE_FAILURE = 3  # No commit occurred, safe to retry whole batch
-    ACK_STATUS_FATAL_FAILURE = 4  # No commit occurred, do not retry, send to DLQ
+    # No commit occurred, do not retry: the stream fails whatever the error
+    # strategy, and only `dlq` writes the batch out on the way (issue #428).
+    ACK_STATUS_FATAL_FAILURE = 4
 
 
 class FailureCategory(IntEnum):
@@ -148,10 +150,7 @@ class SchemaSpec:
     ack_timeout_seconds: int
 
 
-# Statuses that count as a successful (committed) batch. Public: the
-# worker proxy uses it to police the same invariant on acks crossing the
-# process boundary, so ``BatchWriteResult.success`` and the proxy cannot
-# drift.
+# Statuses that count as a successful (committed) batch.
 SUCCESS_STATUSES = frozenset(
     {AckStatus.ACK_STATUS_SUCCESS, AckStatus.ACK_STATUS_ALREADY_COMMITTED}
 )
@@ -169,7 +168,12 @@ class BatchWriteResult:
     A failure result must not carry a ``committed_cursor``: the engine
     persists the cursor as the stream checkpoint, so a cursor on a failed
     batch would advance the checkpoint past records that were never
-    written. ``__post_init__`` rejects the combination at construction.
+    written. The rule is not enforced here -- raising inside a connector's
+    own result object aborts the stream and loses the verdict with it.
+    The engine reads the combination off the ack and answers it with a
+    connector-contract-violation verdict naming the connector, which is
+    what makes a defective connector visible instead of silently repaired
+    (issue #428, decision 1.2).
 
     ``failure_category`` is the machine-readable channel beside
     ``failure_summary`` (issue #351): the site that builds a failure result
@@ -179,7 +183,13 @@ class BatchWriteResult:
     falls back to summary matching.
     """
 
-    status: AckStatus
+    # `int` as well as the enum, deliberately. proto3 enums are open, so a
+    # newer or untrusted connector can ack with a value this build has no
+    # member for. Narrowing it here would raise at the boundary and abort
+    # the stream; carried through, it reaches the one place that classifies
+    # a status and is answered by the policy's unknown-status verdict
+    # (issue #428, decision 1.3). Known values still arrive as the enum.
+    status: AckStatus | int
     records_written: int
     committed_cursor: Cursor | None = None
     failed_record_ids: tuple[str, ...] = ()
@@ -190,12 +200,6 @@ class BatchWriteResult:
         if self.records_written < 0:
             raise ValueError(
                 f"records_written must be non-negative, got {self.records_written}"
-            )
-        if self.committed_cursor is not None and not self.success:
-            raise ValueError(
-                f"committed_cursor must be None on a failure result "
-                f"(status={self.status!r}); a failed batch must never "
-                f"advance the checkpoint"
             )
         # Accept any iterable but store a tuple, so the frozen result is
         # immutable all the way down (a list binding would still allow

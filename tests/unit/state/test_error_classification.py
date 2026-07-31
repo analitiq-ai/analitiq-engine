@@ -222,7 +222,7 @@ def test_classify_destination_failure_reads_declared_category(category, expected
     from src.state.error_classification import classify_destination_failure
 
     exc = StreamProcessingError(
-        "Batch 3 failed after 3 retries: opaque driver text",
+        "Batch 3 failed after 4 attempts: opaque driver text",
         failure_category=category,
     )
     assert classify_destination_failure(exc) is expected
@@ -274,7 +274,7 @@ def test_declared_category_outranks_conflicting_text():
     from src.state.error_classification import classify_destination_failure
 
     exc = StreamProcessingError(
-        "Batch 3 failed after 3 retries: Handler could not connect",
+        "Batch 3 failed after 4 attempts: Handler could not connect",
         failure_category=FailureCategory.FAILURE_CATEGORY_NOT_READY,
     )
     assert classify_destination_failure(exc) is ErrorCode.INTERNAL
@@ -303,7 +303,7 @@ def test_aggregated_categories_resolve_to_dominant_not_traversal_order():
     from src.state.error_classification import classify_destination_failure
 
     not_ready = StreamProcessingError(
-        "Batch 2 failed after 3 retries: Handler not connected",
+        "Batch 2 failed after 4 attempts: Handler not connected",
         failure_category=FailureCategory.FAILURE_CATEGORY_NOT_READY,
     )
     config_defect = StreamProcessingError(
@@ -341,7 +341,7 @@ def test_aggregated_categories_resolve_to_dominant_not_traversal_order():
             ErrorCode.DESTINATION_WRITE_FAILED,
         ),
         (
-            "Batch 3 failed after 3 retries: connection reset by peer",
+            "Batch 3 failed after 4 attempts: connection reset by peer",
             ErrorCode.DESTINATION_WRITE_FAILED,
         ),
     ],
@@ -584,7 +584,7 @@ def test_type_and_mapping_defects_are_config_invalid(name, message):
         ),
         (
             "StreamProcessingError",
-            "Batch 3 failed after 3 retries: connection reset by peer",
+            "Batch 3 failed after 4 attempts: connection reset by peer",
         ),
         (
             "StreamProcessingError",
@@ -1021,6 +1021,7 @@ def test_classify_for_metrics_prefers_tag():
     )
     code, message, detail = classify_for_metrics(exc)
     assert code is ErrorCode.CONFIG_INVALID
+    assert message == customer_message(ErrorCode.CONFIG_INVALID)
     assert detail == "config/CONFIG_INVALID:RuntimeError"
 
 

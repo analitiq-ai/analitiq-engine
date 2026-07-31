@@ -168,10 +168,12 @@ silently losing rows.
    with row-level, content-derived idempotency (protocol in
    [`grpc-streaming-architecture.md`](grpc-streaming-architecture.md)).
    Every send — including the synthetic empty batch that truncates a
-   zero-batch full refresh — goes through one shared send/ack/retry loop
-   (`_send_batch_acked`), so retry backoff and ack handling behave
-   identically everywhere; only the failure policy (fail/dlq/skip,
-   classification) differs per call site.
+   zero-batch full refresh — goes through the stream's `BatchPolicy`
+   (`src/engine/batch_policy.py`), which owns the send/ack/backoff-retry
+   loop and returns one terminal `Disposition` per batch. The processor
+   acts on that verdict (checkpoint, dead letter, counters); it never
+   re-derives it. See
+   [`grpc-streaming-architecture.md`](grpc-streaming-architecture.md#one-verdict-per-batch).
 6. Metrics snapshots are emitted to logs as `ANALITIQ_METRICS::{...}`
    lines (batch-level from the engine, pipeline-level from the runner)
    and final pipeline metrics are persisted via

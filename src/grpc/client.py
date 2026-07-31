@@ -86,16 +86,49 @@ class BatchResult:
     committed_cursor: Cursor | None
     failed_record_ids: list[str]
     failure_summary: str
-    # True when the stream/channel died before an ACK arrived — the
-    # destination never rendered a verdict on the batch. Callers that can
-    # restart the peer (the worker proxy) treat this as retryable; the
-    # cross-container engine path keeps its existing fatal handling.
-    transport_failure: bool = False
     # Machine-readable failure category from the ack (issue #351), already
     # bounds-checked by _process_ack. UNSPECIFIED on success results, on
     # synthesized transport failures (no verdict was rendered), and when
     # the sender declared nothing.
     failure_category: FailureCategory = FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+
+
+def _ack_status_name(status: int) -> str:
+    """Name an ``AckStatus`` off the wire, tolerating one this build cannot name.
+
+    proto3 enums are open, so a newer or untrusted peer can send a value this
+    build has no name for and ``AckStatus.Name`` raises on it. A diagnostic
+    string must never be the thing that aborts an RPC the caller could have
+    handled, so an unnameable value is reported as its number. Same reasoning
+    as the bounds-check on ``failure_category`` below.
+    """
+    try:
+        return str(AckStatus.Name(status))
+    except ValueError:
+        return f"unrecognized status {status}"
+
+
+def _transport_failure(summary: str) -> BatchResult:
+    """Build the verdict for a send that reached no ack.
+
+    The stream or channel died, or answered something this protocol has no
+    reading for, so the destination rendered no verdict on the batch. That
+    is *unknown*, not *failed*: fabricating a fatal verdict here throws away
+    a batch nobody rejected. Every such site answers RETRYABLE, decided once
+    here where the condition is detected rather than re-derived per hop
+    (issue #428, decision 1.1) -- retries stay bounded by ``max_retries``,
+    and a duplicate on resend is the accepted cost of never dropping a batch
+    the destination may well have taken.
+    """
+    logger.error(summary)
+    return BatchResult(
+        success=False,
+        status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
+        records_written=0,
+        committed_cursor=None,
+        failed_record_ids=[],
+        failure_summary=summary,
+    )
 
 
 class DestinationGRPCClient:
@@ -106,8 +139,12 @@ class DestinationGRPCClient:
     - Sends SCHEMA once at stream start
     - Sends RECORD batches with idempotency keys
     - Receives ACKs with committed cursor for checkpointing
-    - Handles retry for RETRYABLE_FAILURE
-    - Routes FATAL_FAILURE batches to DLQ
+    - Reports a send that reached no ACK as retryable, once, at the site
+      that detects it
+
+    It renders no verdict of its own beyond that: what a failing batch
+    costs the stream is :class:`src.engine.batch_policy.BatchPolicy`'s
+    decision, not the transport's.
     """
 
     def __init__(
@@ -516,20 +553,10 @@ class DestinationGRPCClient:
                 raise RuntimeError("Stream not active")
             rebuilt = await self._rebuild_stream()
             if not rebuilt:
-                summary = (
+                return _transport_failure(
                     f"Failed to rebuild stream before sending batch "
                     f"{batch_seq}; reporting retryable so the engine can "
                     f"back off and retry"
-                )
-                logger.error(summary)
-                return BatchResult(
-                    success=False,
-                    status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
-                    records_written=0,
-                    committed_cursor=None,
-                    failed_record_ids=[],
-                    failure_summary=summary,
-                    transport_failure=True,
                 )
 
         batch_msg = RecordBatch(
@@ -575,32 +602,24 @@ class DestinationGRPCClient:
                         f"Stream signaled failure before ACK for batch "
                         f"{batch_seq} without a recorded cause"
                     )
-                logger.error("Batch %d: %s", batch_seq, summary)
                 # The sentinel means the reader/writer tasks are already gone;
                 # tear down so _stream_active tells the truth and the next
                 # send_batch self-heals instead of writing into a dead stream.
                 await self._teardown_stream()
-                return BatchResult(
-                    success=False,
-                    status=AckStatus.ACK_STATUS_FATAL_FAILURE,
-                    records_written=0,
-                    committed_cursor=None,
-                    failed_record_ids=[],
-                    failure_summary=summary,
-                    transport_failure=True,
-                )
+                return _transport_failure(f"Batch {batch_seq}: {summary}")
 
             if isinstance(response, BatchAck):
                 return self._process_ack(response)
 
-            logger.error(f"Unexpected response type: {type(response)}")
-            return BatchResult(
-                success=False,
-                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
-                records_written=0,
-                committed_cursor=None,
-                failed_record_ids=[],
-                failure_summary="Unexpected response type",
+            # Protocol confusion, not a lost message: the peer is mid-stream
+            # with something the engine cannot place, so a late ACK for this
+            # send could still arrive and be consumed as the retry's. Tear
+            # down first, like the sentinel path above, so the retry starts
+            # from a fresh handshake rather than the confused stream.
+            await self._teardown_stream()
+            return _transport_failure(
+                f"Unexpected response type {type(response)} instead of an ACK "
+                f"for batch {batch_seq}"
             )
 
         except asyncio.TimeoutError:
@@ -632,20 +651,10 @@ class DestinationGRPCClient:
             else:
                 summary = f"Timeout waiting for ACK on batch {batch_seq}"
 
-            logger.error(summary)
             await self._teardown_stream()
-            # An ACK timeout means the destination rendered no verdict on the
-            # batch — retryable, not fatal. The teardown above leaves the stream
-            # inactive; the next send_batch self-heals via the cached params.
-            return BatchResult(
-                success=False,
-                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
-                records_written=0,
-                committed_cursor=None,
-                failed_record_ids=[],
-                failure_summary=summary,
-                transport_failure=True,
-            )
+            # The teardown above leaves the stream inactive; the next
+            # send_batch self-heals via the cached params.
+            return _transport_failure(summary)
 
     async def end_stream(self) -> None:
         """Signal end of stream and clean up."""
@@ -926,11 +935,42 @@ class DestinationGRPCClient:
         return sink.getvalue()
 
     def _process_ack(self, ack: BatchAck) -> BatchResult:
-        """Process BatchAck into BatchResult."""
+        """Turn one ack off the wire into the engine's view of the batch.
+
+        The single reading site for an ack on either hop (the engine's
+        channel to the destination, and the destination shell's channel to
+        its connector worker), so what an untrusted ack is allowed to say is
+        settled once.
+        """
         success = ack.status in (
             AckStatus.ACK_STATUS_SUCCESS,
             AckStatus.ACK_STATUS_ALREADY_COMMITTED,
         )
+
+        if ack.HasField("committed_cursor") and not success:
+            # A cursor is the engine's checkpoint: pairing one with a failure
+            # asks the engine to advance past records nobody wrote. Silently
+            # dropping it (what this hop used to do) repairs the symptom and
+            # leaves the connector defective and undetectable, so the ack
+            # becomes an explicit contract-violation verdict naming the peer
+            # that sent it (issue #428, decision 1.2). Fatal, not retryable:
+            # a connector that breaks the contract does not fix itself on
+            # the next attempt.
+            summary = (
+                f"connector contract violation from {self.address}: batch "
+                f"{ack.batch_seq} of stream {ack.stream_id} was acked "
+                f"{_ack_status_name(ack.status)} with a committed_cursor; a "
+                f"failed batch must never advance the checkpoint"
+            )
+            logger.error(summary)
+            return BatchResult(
+                success=False,
+                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+                records_written=0,
+                committed_cursor=None,
+                failed_record_ids=[],
+                failure_summary=summary,
+            )
 
         # Bounds-check the category off the wire: on the worker-proxy hop
         # the sender is the untrusted connector process, so an unrecognised
@@ -956,7 +996,12 @@ class DestinationGRPCClient:
             success=success,
             status=ack.status,
             records_written=ack.records_written,
-            committed_cursor=ack.committed_cursor if ack.committed_cursor else None,
+            # Presence, not truthiness: an unset proto message field reads
+            # back as a default instance, which is indistinguishable from an
+            # empty cursor the destination did send.
+            committed_cursor=(
+                ack.committed_cursor if ack.HasField("committed_cursor") else None
+            ),
             failed_record_ids=list(ack.failed_record_ids),
             failure_summary=ack.failure_summary,
             failure_category=failure_category,

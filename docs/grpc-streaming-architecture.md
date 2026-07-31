@@ -126,7 +126,7 @@ message BatchAck {
   string run_id = 1; string stream_id = 2; uint64 batch_seq = 3;
   AckStatus status = 4;
   uint32 records_written = 5;
-  Cursor committed_cursor = 6;        // returned on SUCCESS and ALREADY_COMMITTED
+  Cursor committed_cursor = 6;        // the checkpoint; read only off a SUCCESS ack
   repeated string failed_record_ids = 7;  // optional, may be incomplete
   string failure_summary = 8;
   FailureCategory failure_category = 9;   // machine-readable, set on failure acks
@@ -169,6 +169,8 @@ A destination that does not dedup itself is **at-least-once on a same-`RUN_ID` r
 
 Every handler reports its verdict per stream in the `SchemaAck` (`retry_semantics` + `retry_semantics_reason`, forwarded verbatim across the worker-proxy hop), and the engine logs it at stream start — the operator learns which streams may duplicate on a restart before any data moves.
 
+The declaration is reported, never consulted: the retry does not read it. Conditioning the retry on it would mean failing a batch on an at-least-once sink to avoid a duplicate — trading a possible duplicate for a certain data loss. The trade this section describes is the one the engine takes everywhere: on an exactly-once stream `ALREADY_COMMITTED` (or row-identity dedup) resolves a committed-before-crash batch on resend; on an at-least-once one the resend duplicates rather than drops. That is Kafka Connect with `enable.idempotence=false`, and Airbyte and Singer at every sink — no comparable tool fails a batch to avoid a duplicate.
+
 ### All-or-nothing batches
 
 A batch wholly succeeds or wholly fails. The cursor advances only on `SUCCESS`, there is no partial-rollback bookkeeping, and DLQ routing is per-batch. This is why `AckStatus` has no partial value.
@@ -177,8 +179,21 @@ A batch wholly succeeds or wholly fails. The cursor advances only on `SUCCESS`, 
 |---------|-----------|---------------|
 | ACK lost after write (replay), SQL destination | `SUCCESS` | Row identity dedups the rewrite; persist cursor, continue |
 | ACK lost after write (replay), file destination | `SUCCESS` | Same bytes hash to the same filename; the rewrite overwrites the same file; persist cursor, continue |
-| Connection drop / timeout / deadlock | `RETRYABLE_FAILURE` | Retry whole batch with backoff |
-| Constraint violation / type error | `FATAL_FAILURE` | Send whole batch to DLQ, continue |
+| Connection drop / timeout / deadlock, reported by the destination | `RETRYABLE_FAILURE` | Retry the whole batch with backoff up to `max_retries`, then the error strategy decides |
+| No ack at all: stream torn down, peer closed, ACK timed out, rebuild failed | `RETRYABLE_FAILURE`, synthesized by the client | Same. No connector verdict exists, so none is fabricated |
+| Constraint violation / type error | `FATAL_FAILURE` | The stream fails; under `dlq` the whole batch is written out first |
+
+### One verdict per batch
+
+The engine reaches exactly one answer for a batch, in one place: `src/engine/batch_policy.py`. A `BatchPolicy` is bound once per stream from `error_strategy` + `max_retries`, owns the whole send -> ack -> backoff-retry loop, and returns one terminal `Disposition` — `Committed(cursor)`, `AlreadyCommitted`, `DeadLetter(report)`, `Skipped(report)` or `Failed(report)`. `StreamProcessor` acts on that verdict; it does not re-derive it. Four rules hold it in place.
+
+**A transport failure is retryable on every path, decided where it is detected.** A send that reaches no ack — a torn-down stream, a closed peer, an ACK timeout, a failed rebuild — means *unknown*, not *failed*. `src/grpc/client.py` answers RETRYABLE at every such site and nothing downstream restates it. Before this, the same event was fatal on the direct engine path and retryable through the worker proxy, which remapped it. Retries stay bounded by `max_retries`; the duplicate a resend may cause is the accepted cost (see the at-least-once matrix above).
+
+**The retry does not consult `RetrySemantics`.** The per-stream declaration is an operator report, not a gate. `BatchPolicy`'s constructor takes no semantics argument.
+
+**The cursor rides the success variant.** `Committed` is the only disposition with a cursor field, so a failed batch cannot advance the checkpoint — the invariant is the type, not a rule policed at three hops. `ALREADY_COMMITTED` carries none either: the checkpoint is an artifact of a commit *this run* confirmed, and a replay confirmed none; the watermark advances on the next batch this run commits. An ack that pairs a cursor with a failure status is a connector defect, and the engine answers it with an explicit contract-violation verdict naming the peer that sent it rather than dropping the cursor and carrying on — silent repair is what leaves a broken connector undetectable. Singer persists STATE only after a durable write, Airbyte routes state through the destination, and Kafka Connect commits offsets only after the producer acks; all three make the checkpoint an artifact of a confirmed commit rather than a nullable field plus a rule.
+
+**One loop, one reaction ladder.** The policy executes the send, so there is no second call site to diverge from: the batch loop and the zero-batch synthetic truncate reach their verdict the same way and are acted on by the same ladder. `error_strategy` (this repo's `errors.tolerance`) belongs to the policy, not to the failure report: it maps a retry-exhausted batch to `DeadLetter` / `Skipped` / `Failed`. A `FATAL_FAILURE` verdict fails the stream whatever the strategy — `dlq` still writes the whole batch out on the way. This is Kafka Connect's `RetryWithToleranceOperator` taken one step further.
 
 ### Strict in-order processing
 
@@ -226,7 +241,28 @@ Engine                                    Destination
   |-- RecordBatch (seq=1) -------------------->|
   |                      [connection dropped mid-write -> rolled back]
   |<-- BatchAck (RETRYABLE_FAILURE) ----------|
-  | [backoff, retry same batch]               |
+  | [backoff, resend the same batch]          |
+  |-- RecordBatch (seq=1) -------------------->|
+  |<-- BatchAck (SUCCESS, committed_cursor) --|
+  | [persist committed_cursor to state]       |
+```
+
+### No ack at all
+```
+  |-- RecordBatch (seq=1) -------------------->|
+  |                      [worker crashed / stream torn down mid-write]
+  |            X  (no BatchAck)                |
+  | [client synthesizes RETRYABLE: no verdict  |
+  |  exists, so none is fabricated; the stream |
+  |  is rebuilt and the batch resent]          |
+```
+
+### Retries exhausted
+```
+  | [max_retries spent on RETRYABLE acks]      |
+  | [error strategy decides: dlq -> write the  |
+  |  batch out and continue; skip -> drop it   |
+  |  and continue; fail -> fail the stream]    |
 ```
 
 ### Fatal failure
@@ -234,7 +270,8 @@ Engine                                    Destination
   |-- RecordBatch (seq=1) -------------------->|
   |                      [constraint violation -> rolled back]
   |<-- BatchAck (FATAL_FAILURE, summary) -----|
-  | [send whole batch to DLQ, continue]       |
+  | [fail the stream; under dlq write the      |
+  |  whole batch out first]                    |
 ```
 
 ## Testing

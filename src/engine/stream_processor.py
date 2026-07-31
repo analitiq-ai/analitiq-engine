@@ -7,20 +7,20 @@ engine (``engine.py``) only orchestrates processors across streams.
 """
 
 import asyncio
+import functools
 import json
 import logging
 import os
-from collections.abc import Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from enum import Enum, auto
 from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
 
 from cdk.contract import Readable
-from cdk.types import CheckpointStore, FailureCategory
+from cdk.types import CheckpointStore
 
 from ..grpc.client import (
     BatchResult,
@@ -29,7 +29,7 @@ from ..grpc.client import (
     resolve_grpc_ack_timeout_seconds,
 )
 from ..grpc.cursor import compute_max_cursor, cursor_to_state_dict
-from ..grpc.generated.analitiq.v1 import AckStatus, Cursor, RetrySemantics
+from ..grpc.generated.analitiq.v1 import Cursor, RetrySemantics
 from ..models.metrics import PipelineMetrics
 from ..shared.run_id import get_or_generate_run_id
 from ..state.dead_letter_queue import DeadLetterQueue
@@ -47,6 +47,17 @@ from ..state.error_classification import (
 )
 from ..state.metrics_storage import create_metrics_record, emit_metrics_log
 from ..state.state_manager import StateManager
+from .batch_policy import (
+    AlreadyCommitted,
+    BatchPolicy,
+    Committed,
+    DeadLetter,
+    Disposition,
+    ErrorStrategy,
+    FailureKind,
+    FailureReport,
+    Skipped,
+)
 from .exceptions import StreamProcessingError
 from .mapping import CompiledTransform, MappingDocument, compile_mapping
 
@@ -83,24 +94,6 @@ class _FullRefreshCheckpoint:
         await self._inner.save_cursor(stream_name, partition, cursor)
 
 
-class _AckDisposition(Enum):
-    """Terminal outcome of sending one batch through the ack protocol."""
-
-    COMMITTED = auto()
-    ALREADY_COMMITTED = auto()
-    RETRIES_EXHAUSTED = auto()
-    FATAL = auto()
-    UNKNOWN_STATUS = auto()
-
-
-@dataclass(frozen=True)
-class _BatchSendOutcome:
-    """How one batch's send ended, and the ack that ended it."""
-
-    disposition: _AckDisposition
-    result: BatchResult
-
-
 @dataclass
 class StreamMetrics:
     """Typed per-stream counters feeding the stream's metrics record."""
@@ -116,8 +109,10 @@ class StreamProcessor:
     """Runs one stream's extract-transform-load-checkpoint pipeline.
 
     Owns everything scoped to a single stream: the typed counters, the
-    ack-protocol send loop shared by the batch loop and the zero-batch
-    synthetic truncate, and the completion classification.
+    stream's :class:`BatchPolicy`, and the completion classification. The
+    policy decides what a batch's ack costs the stream; this class acts on
+    that decision -- it holds the collaborators (dead letter queue, state
+    manager, metrics) a decision needs to be carried out.
     """
 
     def __init__(
@@ -136,7 +131,7 @@ class StreamProcessor:
         buffer_size: int,
         max_retries: int,
         retry_delay: float,
-        error_strategy: str,
+        error_strategy: ErrorStrategy,
         pacing_gate: asyncio.Semaphore | None = None,
     ) -> None:
         self.stream_id = stream_id
@@ -167,9 +162,16 @@ class StreamProcessor:
         self.dlq_root = dlq_root
         self.batch_size = batch_size
         self.buffer_size = buffer_size
+        # The client's own connect-retry budget; the batch retry budget is
+        # the policy's.
         self.max_retries = max_retries
-        self.retry_delay = retry_delay
-        self.error_strategy = error_strategy
+        # Bound once per stream: every batch of this stream, and the
+        # zero-batch synthetic truncate, reach their verdict through it.
+        self.batch_policy = BatchPolicy(
+            max_retries=max_retries,
+            retry_delay=retry_delay,
+            error_strategy=error_strategy,
+        )
 
         self.metrics = StreamMetrics()
         # stream_data starts the state run before any processor is built, so
@@ -563,8 +565,9 @@ class StreamProcessor:
     ) -> tuple[dict[str, Any], Any]:
         """Checkpoint the destination-acked watermark for one batch.
 
-        Shared by the SUCCESS and ALREADY_COMMITTED ack paths so the watermark
-        is recorded identically regardless of which one runs.
+        Reached from the ``Committed`` disposition alone: the checkpoint is
+        an artifact of a commit this run confirmed, and no other disposition
+        carries a cursor to write.
 
         Returns ``(cursor_data, hwm)`` for metrics emission. An empty/absent
         cursor (a batch that advanced no watermark — e.g. every row's cursor
@@ -667,21 +670,22 @@ class StreamProcessor:
                 # replayed batch across an hour/day boundary (issue #353).
                 emitted_at = datetime.now(timezone.utc)
 
-                outcome = await self._send_batch_acked(
-                    batch_seq=batch_seq,
-                    record_batch=batch,
-                    record_ids=record_ids,
-                    cursor=cursor,
-                    emitted_at=emitted_at,
-                    label=f"Batch {batch_seq}",
+                disposition = await self.batch_policy.run(
+                    self._bind_send(
+                        batch_seq=batch_seq,
+                        record_batch=batch,
+                        record_ids=record_ids,
+                        cursor=cursor,
+                        emitted_at=emitted_at,
+                    ),
+                    label=f"Stream {self.stream_name}: batch {batch_seq}",
                 )
-                await self._handle_send_outcome(
-                    outcome,
+                if await self._apply_disposition(
+                    disposition,
                     batch_seq=batch_seq,
-                    batch=batch,
                     record_dicts=record_dicts,
-                    output_queue=output_queue,
-                )
+                ):
+                    await output_queue.put(batch)
 
             # Record that the batch loop drained with zero batches on a
             # truncate_insert stream. A failed extract also propagates the
@@ -720,7 +724,7 @@ class StreamProcessor:
             )
             raise
 
-    async def _send_batch_acked(
+    def _bind_send(
         self,
         *,
         batch_seq: int,
@@ -728,215 +732,145 @@ class StreamProcessor:
         record_ids: list[str],
         cursor: Cursor | None,
         emitted_at: datetime,
-        label: str,
-    ) -> _BatchSendOutcome:
-        """Send one batch and drive the ack protocol to a terminal answer.
+    ) -> Callable[[], Awaitable[BatchResult]]:
+        """Bind one batch's send so the policy can re-issue it verbatim.
 
-        The single implementation of send -> ack -> backoff-retry, shared by
-        the batch loop and the zero-batch synthetic truncate so the same
-        situation always behaves the same way. Policy (error strategy, DLQ,
-        classification) stays with the callers.
-
-        ``emitted_at`` is stamped once by the caller and passed unchanged on
-        every retry here, so a replayed batch carries the same instant a
-        time-partitioned destination derives its output path from (issue
-        #353). Re-stamping per attempt would reintroduce the boundary drift.
+        Every argument is fixed here, before the first attempt, so a retry
+        cannot differ from the send it repeats. That is what holds the
+        once-stamped ``emitted_at`` steady across attempts: a re-stamp would
+        drift a replayed batch across a time-partitioned destination's
+        hour/day boundary (issue #353).
         """
         client = self.grpc_client
         assert client is not None  # created by run() before any send
-        retry_count = 0
-        while True:
-            result: BatchResult = await client.send_batch(
-                run_id=self.run_id,
-                stream_id=self.stream_id,
-                batch_seq=batch_seq,
-                record_batch=record_batch,
-                record_ids=record_ids,
-                cursor=cursor,
-                emitted_at=emitted_at,
-            )
-            if result.status == AckStatus.ACK_STATUS_SUCCESS:
-                return _BatchSendOutcome(_AckDisposition.COMMITTED, result)
-            if result.status == AckStatus.ACK_STATUS_ALREADY_COMMITTED:
-                return _BatchSendOutcome(_AckDisposition.ALREADY_COMMITTED, result)
-            if result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE:
-                retry_count += 1
-                if retry_count > self.max_retries:
-                    return _BatchSendOutcome(_AckDisposition.RETRIES_EXHAUSTED, result)
-                # Exponential backoff
-                delay = self.retry_delay * (2 ** (retry_count - 1))
-                logger.warning(
-                    "Stream %s: %s retryable failure, retry %s/%s after %.2fs: %s",
-                    self.stream_name,
-                    label,
-                    retry_count,
-                    self.max_retries,
-                    delay,
-                    result.failure_summary,
-                )
-                await asyncio.sleep(delay)
-                continue
-            if result.status == AckStatus.ACK_STATUS_FATAL_FAILURE:
-                return _BatchSendOutcome(_AckDisposition.FATAL, result)
-            return _BatchSendOutcome(_AckDisposition.UNKNOWN_STATUS, result)
+        return functools.partial(
+            client.send_batch,
+            run_id=self.run_id,
+            stream_id=self.stream_id,
+            batch_seq=batch_seq,
+            record_batch=record_batch,
+            record_ids=record_ids,
+            cursor=cursor,
+            emitted_at=emitted_at,
+        )
 
-    async def _handle_send_outcome(
+    async def _apply_disposition(
         self,
-        outcome: _BatchSendOutcome,
+        disposition: Disposition,
         *,
         batch_seq: int,
-        batch: pa.RecordBatch,
         record_dicts: list[dict[str, Any]],
-        output_queue: asyncio.Queue[Any],
-    ) -> None:
-        """React to a batch's final ack with the stream's failure policy.
+    ) -> bool:
+        """Carry out the policy's verdict for one batch.
 
-        The transport loop (``_send_batch_acked``) has already finished
-        retrying; this is where policy lives: cursor checkpointing and
-        metrics on commit, the error strategy on exhaustion, fail-loud on a
-        fatal or unknown ack.
+        The single reaction ladder, shared by the batch loop and the
+        zero-batch synthetic truncate. Returns True when the batch stands
+        and should flow to the next stage; returns False when it was
+        dropped and the stream continues without it; raises when the stream
+        must stop.
         """
-        result = outcome.result
-        if outcome.disposition is _AckDisposition.COMMITTED:
-            cursor_data, hwm = self._persist_committed_cursor(result.committed_cursor)
+        if isinstance(disposition, Committed):
+            cursor_data, hwm = self._persist_committed_cursor(disposition.cursor)
             logger.debug(
                 "Stream %s: Batch %s committed, %s records written",
                 self.stream_name,
                 batch_seq,
-                result.records_written,
+                disposition.records_written,
             )
             # Order matters: the Pydantic pipeline counter validates the
             # destination-reported count (rejects negatives) before the
             # unguarded stream counter takes it.
-            self.pipeline_metrics.increment_records_processed(result.records_written)
-            self.metrics.records_processed += result.records_written
-            self._emit_batch_metrics(batch_seq, result, cursor_data, hwm)
-            await output_queue.put(batch)
-            return
+            self.pipeline_metrics.increment_records_processed(
+                disposition.records_written
+            )
+            self.metrics.records_processed += disposition.records_written
+            self._emit_batch_metrics(
+                batch_seq, disposition.records_written, cursor_data, hwm
+            )
+            return True
 
-        if outcome.disposition is _AckDisposition.ALREADY_COMMITTED:
-            # Idempotent replay - batch was already processed
-            self._persist_committed_cursor(result.committed_cursor)
+        if isinstance(disposition, AlreadyCommitted):
+            # An earlier attempt committed this batch, so this run has no
+            # confirmed write to checkpoint from; the watermark advances on
+            # the next batch this run does commit.
             logger.info(
                 "Stream %s: Batch %s already committed (idempotent replay)",
                 self.stream_name,
                 batch_seq,
             )
-            await output_queue.put(batch)
-            return
+            return True
 
+        report = disposition.report
         record_count = len(record_dicts)
         self.pipeline_metrics.increment_records_failed(record_count)
         self.pipeline_metrics.increment_batches_failed()
         self.metrics.records_failed += record_count
         self.metrics.batches_failed += 1
 
-        if outcome.disposition is _AckDisposition.RETRIES_EXHAUSTED:
-            await self._handle_exhausted_batch(batch_seq, result, record_dicts)
-            return
+        failure = StreamProcessingError(
+            self._failure_message(batch_seq, report),
+            failure_category=report.category,
+        )
+        logger.error("Stream %s: %s", self.stream_name, failure)
 
-        if outcome.disposition is _AckDisposition.FATAL:
-            logger.error(
-                "Stream %s: Batch %s fatal failure: %s",
-                self.stream_name,
-                batch_seq,
-                result.failure_summary,
-            )
-            # Send entire batch to DLQ with record_ids for correlation
-            if self.error_strategy == "dlq":
-                await self._dlq_batch(record_dicts, result.failure_summary)
-            # Raise exception to mark stream as failed
-            raise StreamProcessingError(
-                f"Batch {batch_seq} fatal failure: {result.failure_summary}",
-                failure_category=result.failure_category,
-            )
+        if report.kind is FailureKind.RETRIES_EXHAUSTED:
+            # dlq/skip return without raising, so this batch's cause would
+            # die with this scope. Classify it exactly as the fail strategy's
+            # raise would -- declared category first, text fallback for an
+            # undeclared ack -- and stash the code for the partial-run
+            # classification, so the reported code cannot depend on the error
+            # strategy (issue #351).
+            self.exhausted_failure_codes.append(classify_destination_failure(failure))
+            if batch_seq == 1 and self._is_truncate_insert():
+                # The destination truncates on batch_seq 1 (issue #307).
+                # Dropping the first batch and continuing would let batch 2
+                # append onto the PREVIOUS refresh's rows -- stale data mixed
+                # into a partial snapshot. A full refresh that cannot start
+                # must fail the stream, whatever the strategy decided.
+                raise StreamProcessingError(
+                    f"Batch 1 of a truncate_insert stream failed after "
+                    f"{report.attempts} attempts; dropping it would append "
+                    f"the rest of the refresh onto the previous run's rows: "
+                    f"{report.summary}",
+                    failure_category=report.category,
+                )
 
-        # Unknown status - treat as fatal, and do not trust its advisory
-        # failure category (the raise below carries none).
-        logger.error(
-            "Stream %s: Batch %s unknown status: %s",
-            self.stream_name,
-            batch_seq,
-            result.status,
-        )
-        if self.error_strategy == "dlq":
-            await self._dlq_batch(record_dicts, f"Unknown ACK status: {result.status}")
-        raise StreamProcessingError(
-            f"Batch {batch_seq} unknown ACK status: {result.status}"
-        )
+        if isinstance(disposition, DeadLetter):
+            await self._dlq_batch(record_dicts, report.summary)
+            return False
 
-    async def _handle_exhausted_batch(
-        self,
-        batch_seq: int,
-        result: BatchResult,
-        record_dicts: list[dict[str, Any]],
-    ) -> None:
-        """Apply the error strategy to a batch that exhausted its retries.
-
-        Returns normally when the strategy drops the batch and the stream
-        should continue (dlq/skip); raises when the stream must stop.
-        """
-        logger.error(
-            "Stream %s: Batch %s failed after %s retries: %s",
-            self.stream_name,
-            batch_seq,
-            self.max_retries,
-            result.failure_summary,
-        )
-        # The dlq/skip strategies return without raising, so this batch's
-        # cause would die with this scope. Classify it exactly as the fail
-        # strategy's raise would -- declared category first, text fallback
-        # for an undeclared ack -- and stash the code for the partial-run
-        # classification, so the reported code cannot depend on the error
-        # strategy (issue #351).
-        exhausted_failure = StreamProcessingError(
-            f"Batch {batch_seq} failed after {self.max_retries} "
-            f"retries: {result.failure_summary}",
-            failure_category=result.failure_category,
-        )
-        self.exhausted_failure_codes.append(
-            classify_destination_failure(exhausted_failure)
-        )
-        if batch_seq == 1 and self._is_truncate_insert():
-            # The destination truncates on batch_seq 1 (issue #307).
-            # Dropping the first batch via dlq/skip and continuing would let
-            # batch 2 append onto the PREVIOUS refresh's rows — stale data
-            # mixed into a partial snapshot. A full refresh that cannot
-            # start must fail the stream, whatever the error strategy.
-            raise StreamProcessingError(
-                f"Batch 1 of a truncate_insert stream "
-                f"failed after {self.max_retries} retries; "
-                f"dropping it would append the rest of "
-                f"the refresh onto the previous run's "
-                f"rows: {result.failure_summary}",
-                failure_category=result.failure_category,
-            )
-        if self.error_strategy == "dlq":
-            await self._dlq_batch(record_dicts, result.failure_summary)
-        elif self.error_strategy == "fail":
-            raise exhausted_failure
-        elif self.error_strategy == "skip":
+        if isinstance(disposition, Skipped):
             # Skipped batches are dropped, NOT dead-lettered, so track them
             # separately from DLQ'd records (at both stream and pipeline
             # level) to keep the partial-run reporting honest.
-            record_count = len(record_dicts)
             self.metrics.records_skipped += record_count
             self.pipeline_metrics.increment_records_skipped(record_count)
             logger.warning(
-                "Stream %s: Batch %s skipped after %s retries; %s records dropped: %s",
+                "Stream %s: Batch %s skipped; %s records dropped: %s",
                 self.stream_name,
                 batch_seq,
-                self.max_retries,
                 record_count,
-                result.failure_summary,
+                report.summary,
             )
-        else:
-            # Strategy is contract-validated upstream to {fail, dlq, skip};
-            # an unhandled value must fail loud, never silently complete a
-            # failed batch.
-            raise StreamProcessingError(
-                f"Unhandled error strategy {self.error_strategy!r}"
+            return False
+
+        if disposition.dead_letter:
+            # Whole-batch DLQ before the stream stops: the rows are preserved
+            # for the operator, then the failure is raised.
+            await self._dlq_batch(record_dicts, report.summary)
+        raise failure
+
+    @staticmethod
+    def _failure_message(batch_seq: int, report: FailureReport) -> str:
+        """Name a failed batch the way the report's ending reads."""
+        if report.kind is FailureKind.RETRIES_EXHAUSTED:
+            return (
+                f"Batch {batch_seq} failed after {report.attempts} attempts: "
+                f"{report.summary}"
             )
+        if report.kind is FailureKind.FATAL:
+            return f"Batch {batch_seq} fatal failure: {report.summary}"
+        return f"Batch {batch_seq} {report.summary}"
 
     async def _dlq_batch(
         self, record_dicts: list[dict[str, Any]], failure_summary: str
@@ -959,48 +893,47 @@ class StreamProcessor:
             self.stream_name,
         )
         empty_batch = pa.record_batch([], schema=pa.schema([]))
-        outcome = await self._send_batch_acked(
-            batch_seq=1,
-            record_batch=empty_batch,
-            record_ids=[],
-            cursor=Cursor(token=b""),
-            emitted_at=datetime.now(timezone.utc),
-            label="synthetic truncate batch",
+        disposition = await self.batch_policy.run(
+            self._bind_send(
+                batch_seq=1,
+                record_batch=empty_batch,
+                record_ids=[],
+                cursor=Cursor(token=b""),
+                emitted_at=datetime.now(timezone.utc),
+            ),
+            label=f"Stream {self.stream_name}: synthetic truncate batch",
         )
-        if outcome.disposition is _AckDisposition.COMMITTED:
+        try:
+            await self._apply_disposition(disposition, batch_seq=1, record_dicts=[])
+        except Exception as e:
+            # This send runs outside the load stage, so the stage tag its
+            # except clause applies has to be applied here instead --
+            # otherwise a failed truncate reaches run() untagged and
+            # classifies as INTERNAL. tag_failure is no-overwrite, so a
+            # deeper tag still wins.
+            tag_failure(
+                e,
+                code=classify_destination_failure(e),
+                stage=FailureStage.DESTINATION_LOAD,
+            )
+            raise
+        if isinstance(disposition, Committed):
             logger.info(
                 "Stream %s: synthetic truncate batch committed",
                 self.stream_name,
             )
-            return
-        if outcome.disposition is _AckDisposition.ALREADY_COMMITTED:
+        else:
+            # Only Committed and AlreadyCommitted reach here (batch_seq 1 of a
+            # truncate_insert stream fails the stream on every other verdict),
+            # and a replay ack confirms no commit by THIS run (decision 1.2).
+            # Saying "committed" here would tell an operator diagnosing a full
+            # refresh that the truncate happened when it may not have.
             logger.info(
-                "Stream %s: synthetic truncate already committed "
-                "(idempotent replay)",
+                "Stream %s: synthetic truncate batch already committed by an "
+                "earlier attempt (idempotent replay); this run truncated "
+                "nothing",
                 self.stream_name,
             )
-            return
-        # An ack whose status the engine cannot interpret must not have its
-        # advisory category trusted -- the same rule as the unknown-status
-        # branch of the regular batch loop.
-        known_failure = outcome.disposition in (
-            _AckDisposition.RETRIES_EXHAUSTED,
-            _AckDisposition.FATAL,
-        )
-        truncate_failure = StreamProcessingError(
-            f"Stream {self.stream_name}: zero-batch truncate failed: "
-            f"{outcome.result.failure_summary}",
-            failure_category=(
-                outcome.result.failure_category
-                if known_failure
-                else FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
-            ),
-        )
-        raise tag_failure(
-            truncate_failure,
-            code=classify_destination_failure(truncate_failure),
-            stage=FailureStage.DESTINATION_LOAD,
-        )
 
     async def _checkpoint_stage(self, input_queue: asyncio.Queue[Any]) -> None:
         """Checkpoint processing progress with state management."""
@@ -1100,7 +1033,7 @@ class StreamProcessor:
     def _emit_batch_metrics(
         self,
         batch_seq: int,
-        result: BatchResult,
+        records_written: int,
         cursor_data: dict[str, Any],
         hwm: Any,
     ) -> None:
@@ -1114,7 +1047,7 @@ class StreamProcessor:
                 "pipeline_id": self.pipeline_id,
                 "stream_id": self.stream_id,
                 "batch_seq": batch_seq,
-                "records_written": result.records_written,
+                "records_written": records_written,
                 "cumulative_records_processed": (
                     self.pipeline_metrics.records_processed
                 ),

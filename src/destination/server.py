@@ -80,6 +80,39 @@ _STATEMENT_TIMEOUT_ACK_MARGIN_SECONDS = 5
 _STATEMENT_TIMEOUT_BUDGET_FRACTION = 0.5
 
 
+def build_batch_ack(
+    batch_msg: Any,
+    *,
+    status: AckStatus,
+    records_written: int = 0,
+    committed_cursor: Cursor | None = None,
+    failed_record_ids: tuple[str, ...] = (),
+    failure_summary: str = "",
+    failure_category: CdkFailureCategory = (
+        CdkFailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+    ),
+) -> BatchAck:
+    """Address one ack back to the batch it answers.
+
+    Every ack this servicer sends -- the handler's verdict and the two the
+    servicer renders itself -- identifies its batch the same way, so the
+    copy is written once here rather than at each yield site (issue #428).
+    CDK IntEnum values mirror the proto enums 1:1, so status and category
+    cross without a lookup table.
+    """
+    return BatchAck(
+        run_id=batch_msg.run_id,
+        stream_id=batch_msg.stream_id,
+        batch_seq=batch_msg.batch_seq,
+        status=status,
+        records_written=records_written,
+        committed_cursor=committed_cursor,
+        failed_record_ids=failed_record_ids,
+        failure_summary=failure_summary,
+        failure_category=failure_category,
+    )
+
+
 def derive_statement_timeout_seconds(ack_timeout_seconds: int) -> float:
     """Derive a per-statement budget strictly below the sender's ack timeout.
 
@@ -249,12 +282,9 @@ class DestinationServicer(DestinationServiceServicer):
                             batch_msg.batch_seq,
                         )
                         yield StreamResponse(
-                            ack=BatchAck(
-                                run_id=batch_msg.run_id,
-                                stream_id=batch_msg.stream_id,
-                                batch_seq=batch_msg.batch_seq,
+                            ack=build_batch_ack(
+                                batch_msg,
                                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
-                                records_written=0,
                                 failure_summary="Schema not configured",
                                 # Nothing was attempted: the batch arrived
                                 # before any schema handshake (issue #351).
@@ -296,12 +326,9 @@ class DestinationServicer(DestinationServiceServicer):
                             e,
                         )
                         yield StreamResponse(
-                            ack=BatchAck(
-                                run_id=batch_msg.run_id,
-                                stream_id=batch_msg.stream_id,
-                                batch_seq=batch_msg.batch_seq,
+                            ack=build_batch_ack(
+                                batch_msg,
                                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
-                                records_written=0,
                                 failure_summary=(
                                     "invalid emitted_at_unix_ms="
                                     f"{batch_msg.emitted_at_unix_ms}: {e}"
@@ -319,12 +346,9 @@ class DestinationServicer(DestinationServiceServicer):
                         emitted_at=emitted_at,
                     )
 
-                    # Build ACK response
                     yield StreamResponse(
-                        ack=BatchAck(
-                            run_id=batch_msg.run_id,
-                            stream_id=batch_msg.stream_id,
-                            batch_seq=batch_msg.batch_seq,
+                        ack=build_batch_ack(
+                            batch_msg,
                             status=result.status,
                             records_written=result.records_written,
                             # CDK-native Cursor -> wire Cursor (or omit when the
@@ -336,8 +360,6 @@ class DestinationServicer(DestinationServiceServicer):
                             ),
                             failed_record_ids=result.failed_record_ids,
                             failure_summary=result.failure_summary,
-                            # CDK IntEnum values mirror the proto enum 1:1,
-                            # so the category crosses without a lookup table.
                             failure_category=result.failure_category,
                         )
                     )

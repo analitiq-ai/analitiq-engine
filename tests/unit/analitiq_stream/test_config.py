@@ -318,20 +318,23 @@ class TestBatchWriteResultInvariant:
         "status",
         ["ACK_STATUS_RETRYABLE_FAILURE", "ACK_STATUS_FATAL_FAILURE"],
     )
-    def test_cursor_on_failure_raises(self, status):
-        """A failure result must not carry a cursor — the engine persists
-        the cursor as the checkpoint, so accepting one would advance the
-        checkpoint past a failed batch (#129)."""
+    def test_cursor_on_failure_is_not_policed_here(self, status):
+        """A failure result must not carry a cursor, but the CDK does not
+        raise over it: raising inside a connector's own result object aborts
+        the whole stream and takes the verdict with it. The engine catches
+        the combination where it reads the ack and answers with an explicit
+        connector-contract-violation verdict instead (#428, decision 1.2) --
+        see tests/unit/engine/test_batch_verdict.py."""
         from cdk.base_handler import BatchWriteResult
         from cdk.types import Cursor
         from src.grpc.generated.analitiq.v1 import AckStatus
 
-        with pytest.raises(ValueError, match="committed_cursor must be None"):
-            BatchWriteResult(
-                status=getattr(AckStatus, status),
-                records_written=0,
-                committed_cursor=Cursor(token=b"x"),
-            )
+        result = BatchWriteResult(
+            status=getattr(AckStatus, status),
+            records_written=0,
+            committed_cursor=Cursor(token=b"x"),
+        )
+        assert result.success is False
 
     @pytest.mark.unit
     @pytest.mark.parametrize(

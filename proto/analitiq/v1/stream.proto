@@ -102,7 +102,9 @@ enum AckStatus {
   ACK_STATUS_SUCCESS = 1;            // All records written, cursor advanced
   ACK_STATUS_ALREADY_COMMITTED = 2;  // Idempotent replay, batch already committed
   ACK_STATUS_RETRYABLE_FAILURE = 3;  // No commit occurred, safe to retry entire batch
-  ACK_STATUS_FATAL_FAILURE = 4;      // No commit occurred, do not retry, send to DLQ
+  // No commit occurred, do not retry: the stream fails whatever the error
+  // strategy, and only `dlq` writes the batch out on the way.
+  ACK_STATUS_FATAL_FAILURE = 4;
   // Note: No PARTIAL_SUCCESS - all-or-nothing per batch for simpler semantics
 }
 
@@ -135,7 +137,9 @@ message BatchAck {
   uint32 records_written = 5;
 
   // Committed cursor (engine persists this)
-  // Returned on SUCCESS and ALREADY_COMMITTED
+  // The checkpoint is an artifact of a commit this run confirmed, so the
+  // engine reads it only off a SUCCESS ack. A cursor paired with a failure
+  // status is a connector contract violation, not a cursor.
   Cursor committed_cursor = 6;
 
   // OPTIONAL diagnostic info for FATAL_FAILURE

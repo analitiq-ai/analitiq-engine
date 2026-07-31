@@ -24,7 +24,6 @@ import pyarrow as pa
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult, reject_batch
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.types import (
-    SUCCESS_STATUSES,
     AckStatus,
     Cursor,
     RetrySemantics,
@@ -45,6 +44,27 @@ _WRITE_MODE_NAMES = {
     WriteMode.WRITE_MODE_UPSERT: "upsert",
     WriteMode.WRITE_MODE_TRUNCATE_INSERT: "truncate_insert",
 }
+
+
+def _known_ack_status(status: int) -> AckStatus | int:
+    """Narrow a wire status to :class:`AckStatus`, or leave it as it came.
+
+    This hop reads an untrusted connector process, and proto3 enums are
+    open: a newer or defective worker can ack with a value this build has
+    no member for. Constructing the closed enum from it would raise here
+    and the engine would see a retryable transport failure -- a wrong
+    verdict, and one that hides the real one, since the policy already
+    answers an unrecognised status with a bounded terminal disposition.
+    """
+    try:
+        return AckStatus(int(status))
+    except ValueError:
+        logger.warning(
+            "connector acked with an unrecognized status %s; forwarding it "
+            "for the policy's unknown-status verdict",
+            status,
+        )
+        return int(status)
 
 
 class WorkerProxyHandler(BaseDestinationHandler):
@@ -311,48 +331,24 @@ class WorkerProxyHandler(BaseDestinationHandler):
             proto_cursor,
             emitted_at,
         )
-        committed = (
-            Cursor(token=result.committed_cursor.token)
-            if result.committed_cursor is not None
-            else None
-        )
-        status = AckStatus(int(result.status))
-        if result.transport_failure:
-            # The worker died (or its UDS stream closed) before an ACK —
-            # the connector never rendered a verdict. A worker crash is
-            # retryable by design: the idempotency table resolves a
-            # committed-before-crash batch on resend. Fatal is reserved
-            # for verdicts the connector actually returned. (An ACK timeout
-            # already reports retryable; this also remaps the reader/writer
-            # task-failure and peer-close transport failures, which still
-            # carry a fatal status.)
-            #
-            # No rebuild here: the cached client self-heals on the engine's
-            # next send_batch using the params it cached at start_stream, so
-            # the retryable ACK returns immediately without blocking on a
-            # rebuild inside this call.
-            status = AckStatus.ACK_STATUS_RETRYABLE_FAILURE
-        if committed is not None and status not in SUCCESS_STATUSES:
-            # The ack crossed an untrusted process boundary: a connector
-            # that pairs a failure status with a cursor violates the
-            # BatchWriteResult contract. Drop the cursor (a failed batch
-            # must never advance the checkpoint) but keep the connector's
-            # verdict and failure_summary — letting the constructor raise
-            # here would abort the whole stream and lose both.
-            logger.error(
-                "%s: worker sent committed_cursor on a failure ack "
-                "(stream_id=%s, batch_seq=%s, status=%r); dropping the "
-                "cursor to protect the checkpoint",
-                self._label,
-                stream_id,
-                batch_seq,
-                status,
-            )
-            committed = None
+        # Pure translation: the forwarding client already read the worker's
+        # ack -- a send that reached no ack is retryable there, and an ack
+        # pairing a cursor with a failure is refused there (issue #428).
+        # This hop re-derives nothing; a second opinion is how the two hops
+        # came to disagree about the same event.
         return BatchWriteResult(
-            status=status,
+            # Narrowed to the enum only when this build knows the value.
+            # proto3 enums are open, so a connector can ack with one it does
+            # not; AckStatus(99) would raise here and the engine would see a
+            # retryable transport failure instead of the bounded
+            # unknown-status verdict the policy already has for it.
+            status=_known_ack_status(result.status),
             records_written=result.records_written,
-            committed_cursor=committed,
+            committed_cursor=(
+                Cursor(token=result.committed_cursor.token)
+                if result.committed_cursor is not None
+                else None
+            ),
             failed_record_ids=tuple(result.failed_record_ids),
             failure_summary=result.failure_summary,
             # Already bounds-checked (and zeroed on success) by the client's
