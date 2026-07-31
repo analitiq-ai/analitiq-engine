@@ -271,7 +271,6 @@ tests.
 | `write.mode` | No | `insert`, `upsert`, or `truncate_insert` (default: `upsert`) |
 | `write.conflict_keys` | When `mode = upsert` | Single composite conflict-key set: a non-empty list of destination field names (e.g. `["id"]` or `["tenant_id", "id"]`) |
 | `execution.batch_size` | No | Per-destination batch-size override |
-| `execution.max_concurrent_batches` | No | Per-destination concurrency override |
 
 Database destination endpoint files live under
 `connections/{alias}/definition/endpoints/{name}.json` and describe the

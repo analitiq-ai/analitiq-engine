@@ -38,7 +38,6 @@ process-wide with the environment variable. New runtime overrides use the
 | Setting | `runtime` key | Env var | Default | Controls |
 |---|---|---|---|---|
 | Batch size | `batching.batch_size` | `ANALITIQ_BATCH_SIZE` | `1000` | Records read from the source and shipped per batch. |
-| Max concurrent batches | `batching.max_concurrent_batches` | `ANALITIQ_MAX_CONCURRENT_BATCHES` | `3` | Batches in flight per stream. |
 | Buffer size | `buffer_size` | `ANALITIQ_BUFFER_SIZE` | `5000` | Queue depth between the extract, transform, and load stages. |
 | Error strategy | `error_handling.strategy` | `ANALITIQ_ERROR_STRATEGY` | `fail` | What happens to a batch that exhausts its retries: `fail` (raise and stop the stream), `dlq` (write to the dead-letter queue and continue), or `skip` (drop the batch and continue). |
 | Max retries | `error_handling.max_retries` | `ANALITIQ_MAX_RETRIES` | `3` | Retry attempts on a retryable failure before the error strategy applies. |

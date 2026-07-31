@@ -62,8 +62,7 @@
     "runtime": {
       "buffer_size": 5000,
       "batching": {
-        "batch_size": 100,
-        "max_concurrent_batches": 5
+        "batch_size": 100
       },
       "logging": {"log_level": "INFO", "metrics_enabled": true},
       "error_handling": {"strategy": "dlq", "max_retries": 3, "retry_delay": 5}

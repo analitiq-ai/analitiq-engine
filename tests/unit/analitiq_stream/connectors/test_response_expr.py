@@ -16,7 +16,7 @@ from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.resolver import ResolutionContext, Resolver
 from src.source.connectors.response_expr import (
     evaluate_predicate,
-    resolve_response_expr,
+    resolve_contract_expr,
 )
 
 _PREDICATE = TypeAdapter(Predicate)
@@ -46,7 +46,7 @@ def _resolver(data: object, *, parameters: dict | None = None) -> Resolver:
 class TestResolveResponseExpr:
     def test_body_ref_returns_whole_body(self):
         """``response.body`` addresses the payload itself."""
-        assert resolve_response_expr(
+        assert resolve_contract_expr(
             _expr({"ref": "response.body"}), _resolver([1, 2])
         ) == [1, 2]
 
@@ -54,14 +54,14 @@ class TestResolveResponseExpr:
         """A dotted ref walks nested objects to the terminal value."""
         resolver = _resolver({"meta": {"next": "tok"}})
         assert (
-            resolve_response_expr(_expr({"ref": "response.body.meta.next"}), resolver)
+            resolve_contract_expr(_expr({"ref": "response.body.meta.next"}), resolver)
             == "tok"
         )
 
     def test_missing_path_resolves_to_none(self):
         """An absent path is ``None`` — the loop's stop signal, not an error."""
         assert (
-            resolve_response_expr(
+            resolve_contract_expr(
                 _expr({"ref": "response.body.next"}), _resolver({"a": 1})
             )
             is None
@@ -71,7 +71,7 @@ class TestResolveResponseExpr:
         """Every resolver scope is addressable — one resolution vocabulary."""
         resolver = _resolver({}, parameters={"token": "t-1"})
         assert (
-            resolve_response_expr(
+            resolve_contract_expr(
                 _expr({"ref": "connection.parameters.token"}), resolver
             )
             == "t-1"
@@ -86,21 +86,21 @@ class TestResolveResponseExpr:
         resolver is the last line of defence for a node reaching it that way.
         """
         with pytest.raises(KeyError, match="scope"):
-            resolve_response_expr({"ref": "bogus.path"}, _resolver({}))
+            resolve_contract_expr({"ref": "bogus.path"}, _resolver({}))
 
     def test_literal_passes_through(self):
         """A literal expression yields its value."""
-        assert resolve_response_expr(_expr({"literal": 5}), _resolver({})) == 5
+        assert resolve_contract_expr(_expr({"literal": 5}), _resolver({})) == 5
 
     def test_plain_scalar_passes_through(self):
         """Predicate operands may be plain scalars, not expression nodes."""
-        assert resolve_response_expr(10, _resolver({})) == 10
+        assert resolve_contract_expr(10, _resolver({})) == 10
 
     def test_template_interpolates_response_values(self):
         """Template expressions interpolate response-scope placeholders."""
         resolver = _resolver({"next_page": 3})
         assert (
-            resolve_response_expr(
+            resolve_contract_expr(
                 _expr({"template": "/items?page=${response.body.next_page}"}),
                 resolver,
             )
@@ -114,7 +114,7 @@ class TestResolveResponseExpr:
 
         resolver = _resolver({"next_score": Decimal("1234567890.12345678")})
         assert (
-            resolve_response_expr(
+            resolve_contract_expr(
                 _expr({"template": "after=${response.body.next_score}"}), resolver
             )
             == "after=1234567890.12345678"
@@ -125,7 +125,7 @@ class TestResolveResponseExpr:
         import base64
 
         resolver = _resolver({"token": "abc"})
-        assert resolve_response_expr(
+        assert resolve_contract_expr(
             _expr(
                 {
                     "function": "base64_encode",

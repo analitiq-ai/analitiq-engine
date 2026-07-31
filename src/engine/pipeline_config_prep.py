@@ -115,9 +115,7 @@ def _parse_runtime_config(raw: Mapping[str, Any]) -> RuntimeConfig:
     """
     contract = ContractRuntime.model_validate(dict(raw))
     return RuntimeConfig(
-        batching=BatchingConfig(
-            **_author_set(contract.batching, ("batch_size", "max_concurrent_batches"))
-        ),
+        batching=BatchingConfig(**_author_set(contract.batching, ("batch_size",))),
         error_handling=ErrorHandlingConfig(
             **_author_set(
                 contract.error_handling,

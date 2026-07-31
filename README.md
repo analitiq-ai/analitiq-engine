@@ -250,7 +250,6 @@ setting controls, its default, and how to override it - is in
 | `GRPC_PORT` | `50051` | gRPC listen port (destination mode) |
 | `DESTINATION_INDEX` | `0` | Which destination from the pipeline config |
 | `ANALITIQ_BATCH_SIZE` | `1000` | Records read and shipped per batch |
-| `ANALITIQ_MAX_CONCURRENT_BATCHES` | `3` | Batches in flight per stream |
 | `ANALITIQ_BUFFER_SIZE` | `5000` | Queue depth between pipeline stages |
 | `ANALITIQ_ERROR_STRATEGY` | `fail` | Exhausted-retry policy: `fail`, `dlq`, or `skip` |
 | `ANALITIQ_MAX_RETRIES` | `3` | Retry attempts before the error strategy applies |

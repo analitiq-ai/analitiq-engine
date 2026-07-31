@@ -13,11 +13,12 @@ resolution.
 
 Expression nodes arrive in two forms: parsed models where the contract
 types the field with the expression union (``cursor.next_cursor``,
-``link.next_url``), and raw nodes where it types the slot ``Any``
-(predicate operands). Both resolve identically; a value that addresses
-nothing resolves to ``None`` (the pagination loops' stop signal), while
-authoring defects (a typo'd scope, an unknown function) raise through the
-resolver's own error surface.
+``link.next_url``, ``limit.default``), and raw nodes where it types the
+slot ``Any`` (predicate operands). :func:`resolve_contract_expr` is the one
+place that reconciles the two, so every caller resolves both forms
+identically. A value that addresses nothing resolves to ``None`` (the
+pagination loops' stop signal), while authoring defects (a typo'd scope, an
+unknown function) raise through the resolver's own error surface.
 """
 
 from __future__ import annotations
@@ -55,14 +56,20 @@ _EXPRESSION_MODELS = (
 )
 
 
-def resolve_response_expr(expr: Any, resolver: Resolver) -> Any:
-    """Resolve a contract value expression through a response-scoped resolver.
+def resolve_contract_expr(expr: Any, resolver: Resolver) -> Any:
+    """Resolve a contract value expression through *resolver*.
 
-    ``resolver`` carries the page's parsed body in its ``response`` scope
-    (``Resolver.with_response({"body": data})``). Parsed expression models
-    are dumped back to their authored node shape; raw nodes and plain
-    operand values go through as-is — ``resolve_for_request`` owns the
-    grammar, including passing non-expression values through unchanged.
+    Parsed expression models are dumped back to their authored node shape;
+    raw nodes and plain operand values go through as-is —
+    ``resolve_for_request`` owns the grammar, including passing
+    non-expression values through unchanged. The CDK resolver reads authored
+    JSON, so every field the contract types with the expression union has to
+    come back through here; a model handed straight to the resolver is not an
+    expression node to it and would sail through as an opaque value.
+
+    Which scopes are in play is the caller's: page expressions pass a
+    response-scoped resolver (``Resolver.with_response({"body": data})``),
+    the page-size default passes the request-scoped one.
     """
     if isinstance(expr, _EXPRESSION_MODELS):
         expr = expr.model_dump(mode="json", by_alias=True, exclude_unset=True)
@@ -105,7 +112,7 @@ def evaluate_predicate(pred: Any, resolver: Resolver) -> bool:  # skipcq: PY-R10
     """Evaluate a contract stop-condition predicate against a page.
 
     Comparison operators resolve both operands through
-    :func:`resolve_response_expr`; an incomparable pair (e.g. ordering
+    :func:`resolve_contract_expr`; an incomparable pair (e.g. ordering
     ``None`` against a number) raises :class:`ValueError` naming the
     predicate rather than guessing a truth value.
     """
@@ -116,13 +123,13 @@ def evaluate_predicate(pred: Any, resolver: Resolver) -> bool:  # skipcq: PY-R10
     if isinstance(pred, PredicateNot):
         return not evaluate_predicate(pred.not_, resolver)
     if isinstance(pred, PredicateExists):
-        return resolve_response_expr(pred.exists, resolver) is not None
+        return resolve_contract_expr(pred.exists, resolver) is not None
     if isinstance(pred, PredicateMissing):
-        return resolve_response_expr(pred.missing, resolver) is None
+        return resolve_contract_expr(pred.missing, resolver) is None
     if isinstance(pred, PredicateEmpty):
-        return _is_empty(resolve_response_expr(pred.empty, resolver))
+        return _is_empty(resolve_contract_expr(pred.empty, resolver))
     if isinstance(pred, PredicateNotEmpty):
-        return not _is_empty(resolve_response_expr(pred.not_empty, resolver))
+        return not _is_empty(resolve_contract_expr(pred.not_empty, resolver))
 
     comparisons = (
         (PredicateEq, "eq", lambda a, b: a == b),
@@ -136,7 +143,7 @@ def evaluate_predicate(pred: Any, resolver: Resolver) -> bool:  # skipcq: PY-R10
         if isinstance(pred, cls):
             left, right = _normalized(
                 *(
-                    resolve_response_expr(operand, resolver)
+                    resolve_contract_expr(operand, resolver)
                     for operand in getattr(pred, op)
                 )
             )

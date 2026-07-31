@@ -3,7 +3,7 @@
 Every tunable default the engine ships with lives here, once. Two kinds of
 default are collected:
 
-* **Runtime tuning** (batch size, concurrency, buffer, error handling) -- the
+* **Runtime tuning** (batch size, buffer, error handling) -- the
   per-pipeline knobs. These are layered: a pipeline's ``runtime`` block wins,
   then the matching environment variable, then the built-in default returned
   here. The overlay happens in
@@ -57,11 +57,6 @@ def _float_env(name: str, fallback: float) -> float:
 def default_batch_size() -> int:
     """Return records read and shipped per batch (``ANALITIQ_BATCH_SIZE``)."""
     return _int_env("ANALITIQ_BATCH_SIZE", 1000)
-
-
-def default_max_concurrent_batches() -> int:
-    """In-flight batches per stream (``ANALITIQ_MAX_CONCURRENT_BATCHES``)."""
-    return _int_env("ANALITIQ_MAX_CONCURRENT_BATCHES", 3)
 
 
 def default_buffer_size() -> int:
