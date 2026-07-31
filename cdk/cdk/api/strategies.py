@@ -144,7 +144,7 @@ class _Offset:
     ) -> None:
         cursor = block["offset"]
         self._param = cursor["param"]
-        self._offset = int(cursor["initial"])
+        self._next_offset = int(cursor["initial"])
         # Resolved per page, deliberately: the contract lets offset declare
         # increment_by as a value expression, so a provider that reports its
         # own page size can drive the step.
@@ -154,14 +154,14 @@ class _Offset:
         self._resolve = resolve
 
     def first(self) -> PageRequest:
-        return PageRequest(self._url, {**self._base, self._param: self._offset})
+        return PageRequest(self._url, {**self._base, self._param: self._next_offset})
 
     def advance(self, page: Page) -> PageRequest | None:
         step = _positive_step(
             self._resolve(self._increment_by, page), context="offset.increment_by"
         )
-        self._offset += step
-        return PageRequest(self._url, {**self._base, self._param: self._offset})
+        self._next_offset += step
+        return PageRequest(self._url, {**self._base, self._param: self._next_offset})
 
 
 class _Page:
@@ -177,7 +177,7 @@ class _Page:
     ) -> None:
         cursor = block["page"]
         self._param = cursor["param"]
-        self._page = int(cursor["initial"])
+        self._page_number = int(cursor["initial"])
         # Resolved once, before the first request: the contract types page's
         # increment_by loosely and a page number advances by a fixed stride,
         # so re-resolving per page would invite a step that changes mid-read.
@@ -191,11 +191,11 @@ class _Page:
         self._url = url
 
     def first(self) -> PageRequest:
-        return PageRequest(self._url, {**self._base, self._param: self._page})
+        return PageRequest(self._url, {**self._base, self._param: self._page_number})
 
     def advance(self, page: Page) -> PageRequest | None:
-        self._page += self._step
-        return PageRequest(self._url, {**self._base, self._param: self._page})
+        self._page_number += self._step
+        return PageRequest(self._url, {**self._base, self._param: self._page_number})
 
 
 class _Cursor:

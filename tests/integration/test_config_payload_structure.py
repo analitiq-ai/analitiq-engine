@@ -275,14 +275,14 @@ class TestResolvedConnectionKeys:
         """Verify resolved connection keys are plain UUIDs for API-to-API."""
         resolved_connections = _api_to_api_resolved_connections()
 
-        for key in resolved_connections.keys():
+        for key in resolved_connections:
             assert ":" not in key, f"Connection key should be plain UUID, got: {key}"
             parts = key.split("-")
             assert len(parts) == 5, f"Connection key should be UUID format, got: {key}"
 
         resolved_endpoints = _api_to_api_resolved_endpoints()
 
-        for key in resolved_endpoints.keys():
+        for key in resolved_endpoints:
             assert not key.startswith(
                 "path:"
             ), f"Endpoint key should not have 'path:' prefix, got: {key}"

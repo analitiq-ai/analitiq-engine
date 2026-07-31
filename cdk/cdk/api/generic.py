@@ -59,7 +59,14 @@ from .http import (
     follow_url,
     join_url,
 )
-from .page_loop import Fetch, Page, PageLoop, PageRequest, StopCondition
+from .page_loop import (
+    Fetch,
+    Page,
+    PageLoop,
+    PageRequest,
+    PaginationStrategy,
+    StopCondition,
+)
 from .predicates import evaluate_predicate
 from .records import extract_records, page_scope
 from .replication import cursor_param_for, effective_start
@@ -98,6 +105,35 @@ class _ReadPlan:
     loop: PageLoop
     schema: SchemaContract
     cursor_field: str | None
+
+
+def _read_operation(
+    config: dict[str, Any],
+) -> tuple[str, dict[str, Any], dict[str, Any], Mapping[str, Any]]:
+    """Read the four things a read is addressed by, refusing a document without them.
+
+    All four are contract-required, so an absent one is a wiring defect
+    between the engine and this connector rather than an author's mistake --
+    which is why each names what is missing instead of defaulting.
+    """
+    doc = config.get("endpoint_document")
+    if not doc:
+        raise ReadError("source config is missing 'endpoint_document'")
+    endpoint_id = doc.get("endpoint_id", "<unnamed>")
+    read = (doc.get("operations") or {}).get("read")
+    if not read:
+        raise ReadError(
+            f"endpoint {endpoint_id!r}: operations.read is required to read "
+            f"this endpoint as a source"
+        )
+    stream_source = config.get("stream_source") or {}
+    endpoint_ref = stream_source.get("endpoint_ref")
+    if not endpoint_ref:
+        raise ReadError(
+            "stream_source is missing 'endpoint_ref'; the source contract "
+            "requires it to declare per-field types"
+        )
+    return endpoint_id, read, stream_source, endpoint_ref
 
 
 class GenericAPIConnector(BaseDestinationHandler):
@@ -284,23 +320,7 @@ class GenericAPIConnector(BaseDestinationHandler):
         if runtime is None or self.base_url is None or self._http is None:
             raise ReadError("read attempted before connect() materialized the runtime")
 
-        doc = config.get("endpoint_document")
-        if not doc:
-            raise ReadError("source config is missing 'endpoint_document'")
-        endpoint_id = doc.get("endpoint_id", "<unnamed>")
-        read = (doc.get("operations") or {}).get("read")
-        if not read:
-            raise ReadError(
-                f"endpoint {endpoint_id!r}: operations.read is required to read "
-                f"this endpoint as a source"
-            )
-        stream_source = config.get("stream_source") or {}
-        endpoint_ref = stream_source.get("endpoint_ref")
-        if not endpoint_ref:
-            raise ReadError(
-                "stream_source is missing 'endpoint_ref'; the source contract "
-                "requires it to declare per-field types"
-            )
+        endpoint_id, read, stream_source, endpoint_ref = _read_operation(config)
 
         items_schema = records_items_schema(endpoint_id, read["response"])
         apply_read_type_map(items_schema, endpoint_ref, runtime)
@@ -345,31 +365,14 @@ class GenericAPIConnector(BaseDestinationHandler):
             endpoint=request_block["path"],
         )
 
-        # The page size binds once, before the strategy is built: the loop
-        # has no page-size concept, so skipping this raises nothing and the
-        # provider simply serves its own default forever.
-        try:
-            page_size = resolve_page_size(
-                pagination, batch_size=batch_size, resolve=resolver.resolve_for_request
-            )
-            limit = (pagination or {}).get("limit") or {}
-            if limit.get("param"):
-                table.values[limit["param"]] = page_size
-
-            strategy = build_strategy(
-                pagination,
-                url=full_url,
-                base_params=table.values,
-                resolve=self._page_expression_resolver(resolver),
-                follow_url=partial(follow_url, origin=self.base_url),
-            )
-        except ValueError as err:
-            # An unknown scheme, a page size that cannot advance, a step
-            # that is not a whole number: authoring defects the loop cannot
-            # run at all. They are deterministic, so they must reach the
-            # worker as a read error rather than as a bare ValueError it
-            # would classify as worth retrying.
-            raise ReadError(f"pagination could not be set up: {err}") from err
+        strategy = self._build_strategy(
+            pagination,
+            table=table,
+            resolver=resolver,
+            url=full_url,
+            base_url=self.base_url,
+            batch_size=batch_size,
+        )
 
         return _ReadPlan(
             loop=PageLoop(
@@ -384,6 +387,45 @@ class GenericAPIConnector(BaseDestinationHandler):
             schema=schema_contract,
             cursor_field=cursor_field,
         )
+
+    def _build_strategy(
+        self,
+        pagination: dict[str, Any] | None,
+        *,
+        table: ParamTable,
+        resolver: Resolver,
+        url: str,
+        base_url: str,
+        batch_size: int,
+    ) -> PaginationStrategy:
+        """Build the paging adapter, binding the page size it walks with.
+
+        The page size binds here rather than in the loop: the loop has no
+        page-size concept, so a read that skipped this would raise nothing
+        and quietly take the provider's own default forever.
+        """
+        try:
+            page_size = resolve_page_size(
+                pagination, batch_size=batch_size, resolve=resolver.resolve_for_request
+            )
+            limit = (pagination or {}).get("limit") or {}
+            if limit.get("param"):
+                table.values[limit["param"]] = page_size
+
+            return build_strategy(
+                pagination,
+                url=url,
+                base_params=table.values,
+                resolve=self._page_expression_resolver(resolver),
+                follow_url=partial(follow_url, origin=base_url),
+            )
+        except ValueError as err:
+            # An unknown scheme, a page size that cannot advance, a step
+            # that is not a whole number: authoring defects the loop cannot
+            # run at all. They are deterministic, so they must reach the
+            # worker as a read error rather than as a bare ValueError it
+            # would classify as worth retrying.
+            raise ReadError(f"pagination could not be set up: {err}") from err
 
     async def _read_pages(
         self,
@@ -512,8 +554,8 @@ class GenericAPIConnector(BaseDestinationHandler):
 
         return fetch
 
+    @staticmethod
     async def _bind_incremental_filter(
-        self,
         params: dict[str, Any],
         declared_replication: Mapping[str, Any] | None,
         stream_replication: Mapping[str, Any],

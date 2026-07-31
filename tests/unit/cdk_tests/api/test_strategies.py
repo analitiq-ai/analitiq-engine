@@ -28,7 +28,13 @@ def _scripted(pages: list[Page]):
     sent = iter(pages)
 
     async def fetch(request: PageRequest) -> Page:
-        return next(sent)
+        # Named explicitly: a StopIteration raised inside a coroutine
+        # surfaces as an opaque RuntimeError, which reads as a loop bug
+        # rather than "the script ran out of pages".
+        try:
+            return next(sent)
+        except StopIteration:
+            raise AssertionError(f"unexpected extra request: {request}") from None
 
     return fetch
 
@@ -80,7 +86,12 @@ class TestOffset:
         sizes = iter([10, 25])
 
         def resolve(expr: Any, page: Page | None) -> Any:
-            return next(sizes) if expr == {"ref": "size"} else expr
+            if expr != {"ref": "size"}:
+                return expr
+            try:
+                return next(sizes)
+            except StopIteration:
+                raise AssertionError("resolved more page sizes than scripted") from None
 
         s = _build(
             {
