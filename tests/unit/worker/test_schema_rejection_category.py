@@ -15,10 +15,13 @@ survived only as reason text a phrase list matched.
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
-from cdk.types import FailureCategory
+from cdk.types import FailureCategory, RetrySemantics, RetryVerdict
+from src.destination.server import DestinationServicer
+from src.grpc.generated.analitiq.v1 import SchemaAck, SchemaMessage
 from src.state.error_classification import (
     ErrorCode,
     SchemaHandshakeOutcome,
@@ -255,78 +258,62 @@ class TestTheEngineReadsItBackOffTheAck:
         )
 
 
+class _StubHandler:
+    """The slice of the handler contract the schema handshake drives.
+
+    Declared once: the servicer calls the same three members whichever way
+    the handshake ends, and only the ending differs per test below.
+    """
+
+    last_schema_rejection: str | None = None
+
+    def set_statement_timeout(self, seconds: int) -> None:
+        """No SQL runs behind a stub, so there is no statement to bound."""
+
+    def retry_semantics(self, stream_id: str) -> RetryVerdict:
+        """Read only on an accepted handshake."""
+        return RetryVerdict(
+            semantics=RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE,
+            reason="dedups by primary key",
+        )
+
+
+async def _ack_from(handler: _StubHandler) -> SchemaAck:
+    return await DestinationServicer(handler, MagicMock())._handle_schema_message(
+        SchemaMessage(stream_id="s1", version=1, ack_timeout_seconds=30)
+    )
+
+
 class TestTheServicerPutsItOnTheEngineFacingAck:
     @pytest.mark.asyncio
     async def test_a_proxying_handlers_category_reaches_the_ack(self) -> None:
-        from unittest.mock import MagicMock
-
-        from src.destination.server import DestinationServicer
-        from src.grpc.generated.analitiq.v1 import SchemaMessage
-
-        class _RejectingProxy:
+        class _RejectingProxy(_StubHandler):
             last_schema_rejection = "destination worker channel did not connect"
             last_schema_failure_category = FailureCategory.FAILURE_CATEGORY_NOT_READY
-
-            def set_statement_timeout(self, seconds: int) -> None:
-                pass
 
             async def configure_schema(self, schema_spec: object) -> bool:
                 return False
 
-        servicer = DestinationServicer(_RejectingProxy(), MagicMock())
-        ack = await servicer._handle_schema_message(
-            SchemaMessage(stream_id="s1", version=1, ack_timeout_seconds=30)
-        )
+        ack = await _ack_from(_RejectingProxy())
         assert not ack.accepted
         assert ack.failure_category == FailureCategory.FAILURE_CATEGORY_NOT_READY
 
     @pytest.mark.asyncio
     async def test_a_deterministic_config_error_declares_config_defect(self) -> None:
-        from unittest.mock import MagicMock
-
-        from src.destination.server import DestinationServicer
-        from src.grpc.generated.analitiq.v1 import SchemaMessage
-
-        class _RaisingHandler:
-            last_schema_rejection = None
-
-            def set_statement_timeout(self, seconds: int) -> None:
-                pass
-
+        class _RaisingHandler(_StubHandler):
             async def configure_schema(self, schema_spec: object) -> bool:
                 raise ValueError("endpoint document names no target table")
 
-        servicer = DestinationServicer(_RaisingHandler(), MagicMock())
-        ack = await servicer._handle_schema_message(
-            SchemaMessage(stream_id="s1", version=1, ack_timeout_seconds=30)
-        )
+        ack = await _ack_from(_RaisingHandler())
         assert not ack.accepted
         assert ack.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
 
     @pytest.mark.asyncio
     async def test_an_accepted_handshake_declares_nothing(self) -> None:
-        from unittest.mock import MagicMock
-
-        from cdk.types import RetrySemantics, RetryVerdict
-        from src.destination.server import DestinationServicer
-        from src.grpc.generated.analitiq.v1 import SchemaMessage
-
-        class _AcceptingHandler:
-            def set_statement_timeout(self, seconds: int) -> None:
-                pass
-
+        class _AcceptingHandler(_StubHandler):
             async def configure_schema(self, schema_spec: object) -> bool:
                 return True
 
-            def retry_semantics(self, stream_id: str) -> RetryVerdict:
-                return RetryVerdict(
-                    semantics=RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE,
-                    reason="dedups by primary key",
-                )
-
-        servicer = DestinationServicer(_AcceptingHandler(), MagicMock())
-        ack = await servicer._handle_schema_message(
-            SchemaMessage(stream_id="s1", version=1, ack_timeout_seconds=30)
-        )
+        ack = await _ack_from(_AcceptingHandler())
         assert ack.accepted
         assert ack.failure_category == FailureCategory.FAILURE_CATEGORY_UNSPECIFIED

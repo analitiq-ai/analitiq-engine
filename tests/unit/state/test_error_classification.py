@@ -99,7 +99,7 @@ def test_every_stage_names_a_code():
     )
     # Totality: the boundaries all tag through this table, so a stage with no
     # default would raise inside the failure-reporting path.
-    for stage in FailureStage:
+    for stage in tuple(FailureStage):
         assert isinstance(default_code_for_stage(stage), ErrorCode)
 
 
@@ -268,7 +268,7 @@ def test_every_failure_stage_has_a_tagging_boundary():
     sources = "\n".join(
         path.read_text() for path in Path("src").rglob("*.py") if path.is_file()
     )
-    for stage in FailureStage:
+    for stage in tuple(FailureStage):
         assert (
             f"stage=FailureStage.{stage.name}" in sources
         ), f"no raise site tags {stage.name}"
@@ -386,7 +386,7 @@ def test_code_for_declared_category_mirrors_classification():
     # the error strategy (#351).
     from src.engine.exceptions import StreamProcessingError
 
-    for category in FailureCategory:
+    for category in tuple(FailureCategory):
         code = code_for_declared_category(category)
         if category is FailureCategory.FAILURE_CATEGORY_UNSPECIFIED:
             assert code is None

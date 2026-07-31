@@ -65,5 +65,5 @@ class TestUndeclaredSourceFailure:
             ErrorCode.SOURCE_UNREACHABLE,
             ErrorCode.RATE_LIMITED,
         }
-        defaults = {default_code_for_stage(stage) for stage in FailureStage}
+        defaults = {default_code_for_stage(stage) for stage in tuple(FailureStage)}
         assert not (defaults & source_only)
