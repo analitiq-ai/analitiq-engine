@@ -1440,9 +1440,10 @@ class TestMappingCompileFailureIsReported:
             mapping=mapping,
         )
 
-        with caplog.at_level(logging.INFO, logger="src.state.log_emitter"):
-            with pytest.raises(TransformationError, match="Unknown function"):
-                await processor.run()
+        with caplog.at_level(
+            logging.INFO, logger="src.state.log_emitter"
+        ), pytest.raises(TransformationError, match="Unknown function"):
+            await processor.run()
 
         emitted = _emitted_metrics_payloads(caplog)
         assert "stream" in emitted, (
