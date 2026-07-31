@@ -43,4 +43,6 @@ def test_schema_message_translates_every_contract_mode(mode: str) -> None:
     there raises ``Unknown write_mode`` on a document the contract accepts."""
     client = DestinationGRPCClient()
     schema_msg = client._build_schema_message(mode, {"write_mode": mode})
-    assert schema_msg.write_mode == getattr(ProtoWriteMode, f"WRITE_MODE_{mode.upper()}")
+    assert schema_msg.write_mode == getattr(
+        ProtoWriteMode, f"WRITE_MODE_{mode.upper()}"
+    )
