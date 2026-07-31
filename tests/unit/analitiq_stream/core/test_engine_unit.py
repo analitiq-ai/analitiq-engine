@@ -143,11 +143,13 @@ class TestStreamingEngine:
 
     def _processor(self, engine, stream_config: dict[str, Any]):
         """Build a StreamProcessor wired the way engine._process_stream does."""
+        from src.engine.mapping import MappingDocument
         from src.engine.stream_processor import StreamProcessor
 
         return StreamProcessor(
             stream_id="s1",
             stream_config=stream_config,
+            mapping=MappingDocument(),
             pipeline_config={"pipeline_id": engine.pipeline_id},
             pipeline_id=engine.pipeline_id,
             state_manager=engine.state_manager,

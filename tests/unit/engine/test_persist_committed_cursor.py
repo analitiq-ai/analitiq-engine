@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.engine.exceptions import StreamProcessingError
+from src.engine.mapping import MappingDocument
 from src.engine.stream_processor import StreamProcessor
 from src.grpc.cursor import encode_cursor
 from src.grpc.generated.analitiq.v1 import Cursor
@@ -26,6 +27,7 @@ def _processor(stream_version: int = 1) -> StreamProcessor:
     return StreamProcessor(
         stream_id="s1",
         stream_config={"name": "s1", "stream_version": stream_version},
+        mapping=MappingDocument(),
         pipeline_config={},
         pipeline_id="p1",
         state_manager=MagicMock(),

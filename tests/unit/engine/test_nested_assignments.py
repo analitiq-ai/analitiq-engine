@@ -1,16 +1,16 @@
-"""Nested-object and JSON assignments through the vectorized transform.
+"""Nested-object and JSON assignments through the mapping transform.
 
 Covers:
 - ``build_output_schema`` produces ``pa.struct``/``pa.list_`` fields from
   ``target.arrow_type: "Object" | "List"`` plus the recursive sub-schema.
 - dict/list constants and nested ``get`` drilling flow end-to-end through
-  ``compile_transform(...).run(batch)``.
-- ``Json`` targets encode a dict const to a JSON string, pass an already-encoded
-  string through, and reject a non-dict/list/str/None value loudly.
+  ``compile_mapping(...).run(batch)``.
+- ``Json`` targets encode a dict constant to a JSON string, pass an
+  already-encoded string through, and reject a non-dict/list/str/None value
+  loudly.
 
-The transform is one vectorized path: assignments are compiled once and applied
-to a ``pa.RecordBatch``. Success returns typed columns; bad data raises
-``TransformationError`` for the whole batch.
+The documents here are written exactly as a stream carries them: one spelling,
+no translation step between the contract and the transform.
 """
 
 from __future__ import annotations
@@ -18,13 +18,21 @@ from __future__ import annotations
 import pyarrow as pa
 import pytest
 
-from src.engine.data_transformer import build_output_schema, compile_transform
 from src.engine.exceptions import TransformationError
-from src.runner import _translate_assignment
+from src.engine.mapping import MappingDocument, build_output_schema, compile_mapping
+
+_CHECK_ACCOUNT_PROPERTIES = {
+    "id": {"arrow_type": "Utf8"},
+    "objectName": {"arrow_type": "Utf8"},
+}
+
+
+def _document(assignments):
+    return MappingDocument.parse({"assignments": assignments})
 
 
 def _run(records, assignments):
-    """Compile contract/transformer-shaped *assignments* and run them.
+    """Compile *assignments* and run them.
 
     ``records`` may be a list of dicts (types inferred) or a built
     ``pa.RecordBatch`` when an exact source type matters.
@@ -34,7 +42,7 @@ def _run(records, assignments):
         if isinstance(records, pa.RecordBatch)
         else pa.RecordBatch.from_pylist(records)
     )
-    return compile_transform(assignments).run(batch).to_pylist()
+    return compile_mapping(_document(assignments)).run(batch).to_pylist()
 
 
 class TestBuildOutputSchemaNested:
@@ -45,18 +53,19 @@ class TestBuildOutputSchemaNested:
                     "path": "checkAccount",
                     "arrow_type": "Object",
                     "nullable": False,
-                    "properties": {
-                        "id": {"arrow_type": "Utf8"},
-                        "objectName": {"arrow_type": "Utf8"},
-                    },
+                    "properties": _CHECK_ACCOUNT_PROPERTIES,
                 },
                 "value": {
-                    "kind": "const",
-                    "const": {"value": {"id": "123456", "objectName": "CheckAccount"}},
+                    "kind": "constant",
+                    "constant": {
+                        "arrow_type": "Object",
+                        "value": {"id": "123456", "objectName": "CheckAccount"},
+                        "properties": _CHECK_ACCOUNT_PROPERTIES,
+                    },
                 },
             }
         ]
-        schema = build_output_schema(assignments)
+        schema = build_output_schema(_document(assignments).assignments)
         f = schema.field("checkAccount")
         assert pa.types.is_struct(f.type)
         assert {sub.name for sub in f.type} == {"id", "objectName"}
@@ -77,46 +86,53 @@ class TestBuildOutputSchemaNested:
                         },
                     },
                 },
-                "value": {"kind": "const", "const": {"value": []}},
+                "value": {
+                    "kind": "constant",
+                    "constant": {
+                        "arrow_type": "List",
+                        "value": [],
+                        "items": {"arrow_type": "Utf8"},
+                    },
+                },
             }
         ]
-        schema = build_output_schema(assignments)
+        schema = build_output_schema(_document(assignments).assignments)
         f = schema.field("positions")
         assert pa.types.is_list(f.type)
         assert pa.types.is_struct(f.type.value_type)
 
 
 class TestNestedConstantsEndToEnd:
-    """Contract-shaped assignments with dict/list constants flow through the
-    translator, the compiler, and Arrow assembly without losing the nesting."""
+    """Dict/list constants reach Arrow assembly with their nesting intact."""
 
-    CONTRACT_ASSIGNMENTS = [
+    ASSIGNMENTS = [
         {
             "target": {"path": "id", "arrow_type": "Utf8", "nullable": False},
-            "value": {"expression": {"op": "get", "path": "id"}},
+            "value": {
+                "kind": "expression",
+                "expression": {"op": "get", "path": ["id"]},
+            },
         },
         {
             "target": {
                 "path": "checkAccount",
                 "arrow_type": "Object",
                 "nullable": False,
-                "properties": {
-                    "id": {"arrow_type": "Utf8"},
-                    "objectName": {"arrow_type": "Utf8"},
-                },
+                "properties": _CHECK_ACCOUNT_PROPERTIES,
             },
             "value": {
+                "kind": "constant",
                 "constant": {
-                    "value": {"id": "42", "objectName": "CheckAccount"},
                     "arrow_type": "Object",
-                }
+                    "value": {"id": "42", "objectName": "CheckAccount"},
+                    "properties": _CHECK_ACCOUNT_PROPERTIES,
+                },
             },
         },
     ]
 
     def test_dict_constant_builds_struct_column(self):
-        translated = [_translate_assignment(a) for a in self.CONTRACT_ASSIGNMENTS]
-        out = compile_transform(translated).run(
+        out = compile_mapping(_document(self.ASSIGNMENTS)).run(
             pa.RecordBatch.from_pylist([{"id": "r1"}, {"id": "r2"}])
         )
         assert pa.types.is_struct(out.schema.field("checkAccount").type)
@@ -128,11 +144,18 @@ class TestNestedConstantsEndToEnd:
     def test_list_constant_builds_list_column(self):
         assignment = {
             "target": {
-                "path": ["tags"],
+                "path": "tags",
                 "arrow_type": "List",
                 "items": {"arrow_type": "Utf8"},
             },
-            "value": {"kind": "const", "const": {"value": ["a", "b"]}},
+            "value": {
+                "kind": "constant",
+                "constant": {
+                    "arrow_type": "List",
+                    "value": ["a", "b"],
+                    "items": {"arrow_type": "Utf8"},
+                },
+            },
         }
         out = _run([{"x": 1}], [assignment])
         assert out == [{"tags": ["a", "b"]}]
@@ -142,10 +165,10 @@ class TestNestedConstantsEndToEnd:
             [pa.array([{"inner": "v1"}, {"inner": "v2"}])], names=["outer"]
         )
         assignment = {
-            "target": {"path": ["x"], "arrow_type": "Utf8"},
+            "target": {"path": "x", "arrow_type": "Utf8"},
             "value": {
-                "kind": "expr",
-                "expr": {"op": "get", "path": ["outer", "inner"]},
+                "kind": "expression",
+                "expression": {"op": "get", "path": ["outer", "inner"]},
             },
         }
         assert _run(batch, [assignment]) == [{"x": "v1"}, {"x": "v2"}]
@@ -155,40 +178,46 @@ class TestNestedConstantsEndToEnd:
         the all-null column meets the nullability check loudly."""
         assignment = {
             "target": {
-                "path": ["checkAccount"],
+                "path": "checkAccount",
                 "arrow_type": "Object",
                 "nullable": False,
                 "properties": {"id": {"arrow_type": "Utf8"}},
             },
-            "value": {"kind": "expr", "expr": {"op": "get", "path": ["absent"]}},
+            "value": {
+                "kind": "expression",
+                "expression": {"op": "get", "path": ["absent"]},
+            },
         }
         with pytest.raises(TransformationError, match="not nullable"):
             _run([{"id": "r1"}], [assignment])
 
 
 class TestJsonTarget:
-    """A ``Json`` target carries an encoded string column. A dict const is
+    """A ``Json`` target carries an encoded string column. A dict constant is
     json.dumps-ed; an already-encoded string passes through; a non-encodable
     scalar (int) is an author mistake the transform rejects loudly."""
 
     def test_dict_constant_serialized_to_json_string(self):
-        contract = [
+        assignments = [
             {
                 "target": {"path": "id", "arrow_type": "Utf8", "nullable": False},
-                "value": {"expression": {"op": "get", "path": "id"}},
+                "value": {
+                    "kind": "expression",
+                    "expression": {"op": "get", "path": ["id"]},
+                },
             },
             {
                 "target": {"path": "metadata", "arrow_type": "Json", "nullable": True},
                 "value": {
+                    "kind": "constant",
                     "constant": {
                         "arrow_type": "Json",
                         "value": {"some_key": "some_value", "n": 42},
-                    }
+                    },
                 },
             },
         ]
-        translated = [_translate_assignment(a) for a in contract]
-        out = compile_transform(translated).run(
+        out = compile_mapping(_document(assignments)).run(
             pa.RecordBatch.from_pylist([{"id": "r1"}])
         )
         assert pa.types.is_large_string(out.schema.field("metadata").type)
@@ -200,12 +229,13 @@ class TestJsonTarget:
         """A get pulling an already-encoded JSON string from a source column
         passes through so the destination's ``decode_json_columns`` reverses
         it."""
-        assignment = _translate_assignment(
-            {
-                "target": {"path": "metadata", "arrow_type": "Json", "nullable": True},
-                "value": {"expression": {"op": "get", "path": "upstream_blob"}},
-            }
-        )
+        assignment = {
+            "target": {"path": "metadata", "arrow_type": "Json", "nullable": True},
+            "value": {
+                "kind": "expression",
+                "expression": {"op": "get", "path": ["upstream_blob"]},
+            },
+        }
         out = _run([{"upstream_blob": '{"k": "v"}'}], [assignment])
         assert out == [{"metadata": '{"k": "v"}'}]
 
@@ -213,11 +243,12 @@ class TestJsonTarget:
         """A Json target receiving an int is an author mistake: the transform
         rejects it loudly rather than passing it to a vague Arrow error far from
         the source."""
-        assignment = _translate_assignment(
-            {
-                "target": {"path": "metadata", "arrow_type": "Json", "nullable": True},
-                "value": {"expression": {"op": "get", "path": "bad_field"}},
-            }
-        )
+        assignment = {
+            "target": {"path": "metadata", "arrow_type": "Json", "nullable": True},
+            "value": {
+                "kind": "expression",
+                "expression": {"op": "get", "path": ["bad_field"]},
+            },
+        }
         with pytest.raises(TransformationError, match="dict/list/str/None"):
             _run([{"bad_field": 42}], [assignment])

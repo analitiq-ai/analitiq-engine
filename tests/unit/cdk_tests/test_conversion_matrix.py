@@ -32,8 +32,8 @@ from cdk.type_map.conversions import (
 )
 from cdk.type_map.exceptions import InvalidTypeMapError
 from cdk.type_map.grammar import ARROW_FAMILIES
-from src.engine.data_transformer import _FUNCTION_CATALOG, compile_transform
 from src.engine.exceptions import TransformationError
+from src.engine.mapping import _FUNCTION_CATALOG, MappingDocument, compile_mapping
 
 _VALID_MODES = {"identity", "auto", "explicit", "forbidden"}
 
@@ -306,12 +306,17 @@ class TestDestinationBoundaryConformance:
 def _retype_batch(target_arrow_type: str, column: pa.Array) -> pa.RecordBatch:
     assignments = [
         {
-            "target": {"path": ["c"], "arrow_type": target_arrow_type},
-            "value": {"kind": "expr", "expr": {"op": "get", "path": ["src"]}},
+            "target": {"path": "c", "arrow_type": target_arrow_type},
+            "value": {
+                "kind": "expression",
+                "expression": {"op": "get", "path": ["src"]},
+            },
         }
     ]
     batch = pa.RecordBatch.from_arrays([column], names=["src"])
-    return compile_transform(assignments).run(batch)
+    return compile_mapping(MappingDocument.parse({"assignments": assignments})).run(
+        batch
+    )
 
 
 class TestTransformBoundaryConformance:
@@ -475,12 +480,17 @@ def _retype_nested(target: dict, column: pa.Array) -> pa.RecordBatch:
     """Run the transform retype into a nested (``Object``/``List``) target."""
     assignments = [
         {
-            "target": {"path": ["c"], **target},
-            "value": {"kind": "expr", "expr": {"op": "get", "path": ["src"]}},
+            "target": {"path": "c", **target},
+            "value": {
+                "kind": "expression",
+                "expression": {"op": "get", "path": ["src"]},
+            },
         }
     ]
     batch = pa.RecordBatch.from_arrays([column], names=["src"])
-    return compile_transform(assignments).run(batch)
+    return compile_mapping(MappingDocument.parse({"assignments": assignments})).run(
+        batch
+    )
 
 
 def _cast_nested(target: dict, column: pa.Array) -> pa.RecordBatch:

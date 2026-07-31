@@ -27,6 +27,7 @@ from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.generic import GenericSQLConnector
 from cdk.sql.generic import _StreamState as SqlStreamState
 from cdk.sql.sqlalchemy_backend import SqlAlchemyBackend
+from src.engine.mapping import MappingDocument
 from src.engine.stream_processor import StreamProcessor, _FullRefreshCheckpoint
 
 # A fixed, timezone-aware emit instant for write_batch/send_batch calls; the
@@ -46,6 +47,7 @@ def _make_processor(
     processor = StreamProcessor(
         stream_id="s1",
         stream_config=config,
+        mapping=MappingDocument(),
         pipeline_config={"pipeline_id": "p1"},
         pipeline_id="p1",
         state_manager=state_manager if state_manager is not None else MagicMock(),

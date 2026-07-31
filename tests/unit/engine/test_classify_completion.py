@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from src.engine.mapping import MappingDocument
 from src.engine.stream_processor import StreamProcessor
 from src.state.error_classification import ErrorCode, customer_message
 
@@ -18,6 +19,7 @@ def _processor() -> StreamProcessor:
     return StreamProcessor(
         stream_id="s1",
         stream_config={"name": "s1"},
+        mapping=MappingDocument(),
         pipeline_config={},
         pipeline_id="p1",
         state_manager=MagicMock(),

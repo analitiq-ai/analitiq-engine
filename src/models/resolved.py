@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from cdk.connection_runtime import ConnectionRuntime
 from src.config import settings
 from src.config.schema_validator import EndpointDocument
+from src.engine.mapping import MappingDocument
 from src.models.stream import EndpointRef
 
 
@@ -180,7 +181,7 @@ class ResolvedStream:
     tags: list[str]
     source: ResolvedSource
     destinations: list[ResolvedDestination]
-    mapping: dict[str, Any]
+    mapping: MappingDocument
 
     def __post_init__(self) -> None:
         if not self.stream_id:
