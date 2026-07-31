@@ -4,7 +4,6 @@ This handler writes records to files using configurable formatters and a
 local storage backend.
 """
 
-import errno
 import hashlib
 import logging
 from datetime import datetime
@@ -13,7 +12,12 @@ from typing import Any
 
 import pyarrow as pa
 
-from cdk.base_handler import BaseDestinationHandler, BatchWriteResult, reject_batch
+from cdk.base_handler import (
+    BaseDestinationHandler,
+    BatchWriteResult,
+    os_error_verdict,
+    reject_batch,
+)
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.types import AckStatus, Cursor, RetrySemantics, RetryVerdict, SchemaSpec
 
@@ -383,43 +387,13 @@ class FileDestinationHandler(BaseDestinationHandler):
             )
 
         except OSError as e:
-            # ENOSPC / EACCES / EROFS / EDQUOT are not transient — retrying
-            # without operator intervention is hopeless. Classify as FATAL
-            # so the engine routes to DLQ instead of looping.
-            errno_label = (
-                errno.errorcode.get(e.errno, str(e.errno))
-                if e.errno is not None
-                else "unknown"
-            )
-            fatal_errnos = {errno.ENOSPC, errno.EACCES, errno.EROFS, errno.EDQUOT}
-            if e.errno in fatal_errnos:
-                logger.error(
-                    "Fatal filesystem error writing batch "
-                    "(run=%s, stream=%s, seq=%s, errno=%s): %s",
-                    run_id,
-                    stream_id,
-                    batch_seq,
-                    errno_label,
-                    e,
-                    exc_info=True,
-                )
-                return BatchWriteResult(
-                    status=AckStatus.ACK_STATUS_FATAL_FAILURE,
-                    records_written=0,
-                    failure_summary=f"OSError[{errno_label}]: {e}",
-                )
-            logger.error(
-                "Retryable I/O error writing batch (run=%s, stream=%s, seq=%s): %s",
-                run_id,
-                stream_id,
-                batch_seq,
+            return os_error_verdict(
+                logger,
                 e,
-                exc_info=True,
-            )
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
-                records_written=0,
-                failure_summary=f"OSError[{errno_label}]: {e}",
+                run_id=run_id,
+                stream_id=stream_id,
+                batch_seq=batch_seq,
+                what="batch",
             )
         except Exception as e:
             # The formatter and the storage backend are both pluggable and

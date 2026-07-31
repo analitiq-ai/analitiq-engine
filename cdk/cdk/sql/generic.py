@@ -32,8 +32,6 @@ package.
 """
 
 import asyncio
-import hashlib
-import json
 import logging
 from collections.abc import AsyncIterator, Mapping
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, nullcontext
@@ -55,6 +53,7 @@ from cdk.connection_runtime import (
 from cdk.database_utils import acquire_connection
 from cdk.declarations import DECLARED_WRITE_VERDICTS, ErrorMap, error_map_for
 from cdk.query_builder import Filter, ParamsLike, QueryBuilder, QueryConfig
+from cdk.record_identity import record_digest
 from cdk.schema_contract import SchemaContract
 from cdk.type_map import InvalidTypeMapError, TypeMapper, UnmappedTypeError
 from cdk.types import (
@@ -1864,9 +1863,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         seen: set[str] = set()
         keep: list[int] = []
         for i in range(batch.num_rows):
+            # The row as it will be stored: this runs after the cast to the
+            # destination schema, so the digest identifies the row the
+            # destination holds rather than the one the engine read. That is
+            # this site's choice of basis; the canonicalisation is shared.
             row = {name: batch.column(name)[i].as_py() for name in batch.schema.names}
-            canonical = json.dumps(row, sort_keys=True, default=str)
-            digest = hashlib.sha256(canonical.encode()).hexdigest()
+            digest = record_digest(row)
             if digest not in seen:
                 seen.add(digest)
                 keep.append(i)

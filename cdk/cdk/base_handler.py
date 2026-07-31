@@ -5,6 +5,7 @@ destination types (PostgreSQL, MySQL, APIs, etc.). The gRPC server
 delegates all data operations to these handlers.
 """
 
+import errno
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
@@ -32,7 +33,89 @@ if TYPE_CHECKING:
 # translates protobuf <-> these types at the wire boundary. ``BatchWriteResult``
 # is re-exported here because handlers/tests import it as
 # ``from cdk.base_handler import BaseDestinationHandler, BatchWriteResult``.
-__all__ = ["BaseDestinationHandler", "BatchWriteResult", "reject_batch"]
+__all__ = [
+    "BaseDestinationHandler",
+    "BatchWriteResult",
+    "os_error_verdict",
+    "reject_batch",
+]
+
+# Errno values a retry cannot clear, for every sink that writes through a file
+# descriptor. One table, the union of what the file and stdout sinks listed
+# separately: they were never two policies, only two incomplete lists. EPIPE
+# cannot occur writing to a file and EROFS cannot occur writing to stdout, so
+# listing them costs those sinks nothing, and nobody ever decided that EROFS
+# was retryable on stdout.
+#
+# Anything unlisted is retryable. That direction is deliberate: an unknown
+# errno retried a bounded number of times costs a delay, while an unknown
+# errno treated as fatal dead-letters a batch the sink might well have taken
+# on the next attempt.
+_FATAL_ERRNOS = frozenset(
+    {
+        errno.EPIPE,  # the reader closed: nothing downstream is listening
+        errno.ENOSPC,  # the volume is full
+        errno.EACCES,  # the process may not write here
+        errno.EROFS,  # the volume is read-only
+        errno.EDQUOT,  # the quota is exhausted
+        errno.EBADF,  # writing to a descriptor we already closed
+    }
+)
+
+
+def os_error_verdict(
+    logger: logging.Logger,
+    error: OSError,
+    *,
+    run_id: str,
+    stream_id: str,
+    batch_seq: int,
+    what: str,
+) -> BatchWriteResult:
+    """Judge an ``OSError`` raised while writing a batch, and log it.
+
+    *what* names the thing being written ("batch", "stdout") so the log line
+    says where the failure happened without each sink re-deciding the rest of
+    the wording.
+
+    EBADF is the one fatal errno that is not the destination's fault: a
+    descriptor this process already closed is our bug, and saying so keeps it
+    from impersonating a full disk or a permissions problem the operator
+    would go looking for.
+    """
+    label = (
+        errno.errorcode.get(error.errno, str(error.errno))
+        if error.errno is not None
+        else "unknown"
+    )
+    fatal = error.errno in _FATAL_ERRNOS
+    status = (
+        AckStatus.ACK_STATUS_FATAL_FAILURE
+        if fatal
+        else AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+    )
+    category = (
+        FailureCategory.FAILURE_CATEGORY_INTERNAL
+        if error.errno == errno.EBADF
+        else FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED
+    )
+    logger.error(
+        "%s I/O error writing %s (run=%s, stream=%s, seq=%s, errno=%s): %s",
+        "Fatal" if fatal else "Retryable",
+        what,
+        run_id,
+        stream_id,
+        batch_seq,
+        label,
+        error,
+        exc_info=True,
+    )
+    return BatchWriteResult(
+        status=status,
+        records_written=0,
+        failure_summary=f"OSError[{label}]: {error}",
+        failure_category=category,
+    )
 
 
 def reject_batch(
@@ -100,6 +183,22 @@ class BaseDestinationHandler(ABC):
       ignored
     - All writes within a batch must be atomic (all-or-nothing)
     """
+
+    #: Why the most recent ``configure_schema`` returned ``False``. The
+    #: servicer puts it on the rejected ``SchemaAck`` so the engine reports
+    #: the real reason instead of a generic "Schema configuration failed".
+    #: Contract members rather than attributes the servicer probes for: a
+    #: handler that returns ``False`` without setting them is answering
+    #: "no" without saying why, which is a defect the interface should
+    #: make visible rather than paper over with a default.
+    last_schema_rejection: str | None = None
+
+    #: Who owns that rejection. UNSPECIFIED resolves from the handshake
+    #: outcome the engine observed itself, so a handler that knows better
+    #: -- a shell that could not reach its connector worker -- says so.
+    last_schema_failure_category: FailureCategory = (
+        FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+    )
 
     def set_endpoint_refs(self, endpoint_refs: Mapping[str, Any]) -> None:
         """Register the ``stream_id → endpoint_ref`` index for this handler.

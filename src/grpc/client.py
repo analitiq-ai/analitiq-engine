@@ -5,9 +5,7 @@ including schema negotiation, batch sending, and ACK handling.
 """
 
 import asyncio
-import hashlib
 import io
-import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -16,6 +14,7 @@ from typing import Any
 import pyarrow as pa
 
 import grpc
+from cdk.record_identity import record_digest
 from cdk.types import FailureCategory
 from grpc import aio as grpc_aio
 from src.config import settings
@@ -1111,10 +1110,13 @@ def generate_record_id(
     The full SHA-256 hex digest is returned (not truncated): it doubles as the
     ``_record_hash`` dedup key for keyless inserts, where a truncated digest's
     collision odds would silently drop legitimately-distinct rows.
+
+    Only the basis is chosen here; the canonicalisation is
+    :func:`~cdk.record_identity.record_digest`, shared with every other
+    row-identity digest so the three cannot drift apart.
     """
     if primary_key_fields and all(field in record for field in primary_key_fields):
         basis: Any = {field: record[field] for field in primary_key_fields}
     else:
         basis = record
-    canonical = json.dumps(basis, sort_keys=True, default=str)
-    return hashlib.sha256(canonical.encode()).hexdigest()
+    return record_digest(basis)

@@ -6,7 +6,6 @@ rate limiting, retries, and contract-declared request batching.
 
 import asyncio
 import base64
-import hashlib
 import json
 import logging
 from collections.abc import Mapping
@@ -32,6 +31,7 @@ from cdk.connection_runtime import ConnectionRuntime
 from cdk.declarations import DECLARED_WRITE_VERDICTS, ErrorMap, error_map_for
 from cdk.json_utils import decode_json_fields
 from cdk.rate_limiter import RateLimiter
+from cdk.record_identity import record_digest
 from cdk.request_binding import (
     bind_param_refs,
     bind_record_inputs,
@@ -365,13 +365,17 @@ def _content_idempotency_key(record: Mapping[str, Any]) -> str:
     Upsert exists to reconcile changed rows, so its key must change when
     the content changes: a stable identity key would make the provider's
     replay cache swallow a legitimate update to the same entity within
-    its dedup window. The canonicalisation mirrors the SQL destination's
-    ``_record_hash`` (sorted-key JSON, ``default=str``), so an identical
-    replay dedups and a changed row gets a new key — SQL upsert
-    semantics, provider-side.
+    its dedup window. Hashing the whole record is therefore the point, and
+    it is the basis this site chooses; the canonicalisation is the shared
+    :func:`~cdk.record_identity.record_digest`, so an identical replay
+    dedups and a changed row gets a new key — SQL upsert semantics,
+    provider-side.
+
+    The record is hashed as sent: declared JSON columns have already been
+    decoded to objects by this point, so the key covers what the provider
+    receives rather than the wire encoding of it.
     """
-    canonical = json.dumps(dict(record), sort_keys=True, default=str)
-    return hashlib.sha256(canonical.encode()).hexdigest()
+    return record_digest(dict(record))
 
 
 @dataclass
@@ -661,9 +665,19 @@ class ApiDestinationHandler(BaseDestinationHandler):
         (issue #231 channel), so the engine-side operator sees the real
         reason instead of the generic "Schema configuration failed" that
         otherwise leaves only the sidecar log to dig through.
+
+        Every rejection this handler makes is a defect in the endpoint
+        document or the stream's write config -- a missing write block, an
+        unusable idempotency declaration, a batching shape the provider
+        cannot take -- so it declares CONFIG_DEFECT rather than leaving the
+        engine to infer it. The handler was reachable and understood the
+        request; what it refused was the configuration.
         """
         logger.error("Schema rejected for stream %r: %s", stream_id, reason)
         self.last_schema_rejection = reason
+        self.last_schema_failure_category = (
+            FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
+        )
         return False
 
     async def configure_schema(self, schema_spec: SchemaSpec) -> bool:
@@ -679,6 +693,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
         # The handler is shared across concurrent streams, so the reset ->
         # read window is race-free only while this method stays await-free.
         self.last_schema_rejection = None
+        self.last_schema_failure_category = FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
         endpoint_doc = self._stream_endpoints.get(stream_id)
         if endpoint_doc is None:
             return self._reject_schema(

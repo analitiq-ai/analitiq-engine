@@ -4,7 +4,6 @@ This handler writes records to stdout, useful for testing and debugging.
 It does not implement idempotency since stdout is not persistent.
 """
 
-import errno
 import logging
 import sys
 from datetime import datetime
@@ -12,7 +11,12 @@ from typing import Any
 
 import pyarrow as pa
 
-from cdk.base_handler import BaseDestinationHandler, BatchWriteResult, reject_batch
+from cdk.base_handler import (
+    BaseDestinationHandler,
+    BatchWriteResult,
+    os_error_verdict,
+    reject_batch,
+)
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.types import AckStatus, Cursor, RetrySemantics, RetryVerdict, SchemaSpec
 
@@ -191,36 +195,13 @@ class StreamDestinationHandler(BaseDestinationHandler):
             )
 
         except OSError as e:
-            # Closed/broken stdout (EPIPE), permissions, disk-full on a
-            # redirected stream — none are recoverable by retry.
-            errno_code = (
-                errno.errorcode.get(e.errno, str(e.errno))
-                if e.errno is not None
-                else "unknown"
-            )
-            fatal_errnos = {errno.EPIPE, errno.ENOSPC, errno.EACCES, errno.EBADF}
-            status = (
-                AckStatus.ACK_STATUS_FATAL_FAILURE
-                if e.errno in fatal_errnos
-                else AckStatus.ACK_STATUS_RETRYABLE_FAILURE
-            )
-            logger.error(
-                "%s I/O error writing to stdout "
-                "(run=%s, stream=%s, seq=%s, errno=%s): %s",
-                "Fatal"
-                if status == AckStatus.ACK_STATUS_FATAL_FAILURE
-                else "Retryable",
-                run_id,
-                stream_id,
-                batch_seq,
-                errno_code,
+            return os_error_verdict(
+                logger,
                 e,
-                exc_info=True,
-            )
-            return BatchWriteResult(
-                status=status,
-                records_written=0,
-                failure_summary=(f"OSError[{errno_code}]: {e}"),
+                run_id=run_id,
+                stream_id=stream_id,
+                batch_seq=batch_seq,
+                what="to stdout",
             )
         except Exception as e:
             # The formatter is pluggable and sits inside this try, so its
