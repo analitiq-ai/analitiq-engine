@@ -7,6 +7,8 @@ engine classifies structurally instead of from text.
 
 from __future__ import annotations
 
+import asyncio
+import errno
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -258,3 +260,67 @@ class TestSourceHttpReadError:
         )
         err = _read_error_for_status(400, "detail", None)
         assert isinstance(err, ReadError)
+
+
+class TestTransportErrorsReachTheDeclaredMap:
+    """aiohttp's transport failures are ``OSError`` subclasses.
+
+    ``asyncio.TimeoutError`` *is* the builtin ``TimeoutError`` on Python
+    3.11, and aiohttp's connection errors derive from ``OSError`` too. A
+    generic errno branch in front of the handler would swallow exactly the
+    failures the declared exception family exists to classify: a declared
+    config defect would be retried to exhaustion, and a mid-request
+    disconnect carrying EPIPE would dead-letter the batch instead of
+    retrying it.
+    """
+
+    async def _drive(self, declared, raised):
+        handler = ApiDestinationHandler()
+        runtime = MagicMock()
+        runtime.connector_id = "demo"
+        runtime.declared_error_map = declared
+        runtime.materialize = AsyncMock()
+        runtime.raw_config = {}
+        runtime.session.headers = {}
+        await handler.connect(runtime)
+        handler._streams["s1"] = _StreamState(endpoint="/things")
+        handler._send_request = AsyncMock(side_effect=raised)
+        return await handler.write_batch(
+            run_id="r1",
+            stream_id="s1",
+            batch_seq=1,
+            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
+            record_ids=["rec-1"],
+            cursor=Cursor(),
+            emitted_at=datetime.now(timezone.utc),
+        )
+
+    async def test_a_declared_connection_failure_is_the_config_defect_it_says(self):
+        # A bad host or port is deterministic: retrying it burns the whole
+        # budget to arrive at the same place.
+        result = await self._drive(
+            {"exception": {"ClientConnectorError": "config"}},
+            aiohttp.ClientConnectorError(MagicMock(), OSError(111, "refused")),
+        )
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.failure_category == (
+            FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
+        )
+        assert "OSError[" not in result.failure_summary
+
+    async def test_a_timeout_is_judged_as_http_not_as_a_file_descriptor(self):
+        result = await self._drive({}, asyncio.TimeoutError())
+        assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        # The status alone does not discriminate -- an errno-less OSError
+        # is retryable too. The summary shape does: an errno verdict reads
+        # "OSError[unknown]", which would mean the HTTP taxonomy never ran.
+        assert "OSError[" not in result.failure_summary
+        assert "TimeoutError" in result.failure_summary
+
+    async def test_a_mid_request_disconnect_stays_retryable(self):
+        # ClientOSError carries a real errno; judged by an errno table it
+        # would read as a fatal broken pipe and dead-letter the batch.
+        result = await self._drive(
+            {}, aiohttp.ClientOSError(errno.EPIPE, "broken pipe")
+        )
+        assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE

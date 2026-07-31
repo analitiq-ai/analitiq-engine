@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pyarrow as pa
 import pytest
 
+from cdk.types import FailureCategory
 from src.destination.connectors.file import FileDestinationHandler
 from src.destination.connectors.stream import StreamDestinationHandler
 from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
@@ -78,23 +79,59 @@ async def _drive_stream(handler: StreamDestinationHandler, raise_exc: BaseExcept
         )
 
 
+#: The one table both sinks judge by. It is the union of the two lists they
+#: kept separately: EPIPE cannot occur writing to a file and EROFS cannot
+#: occur writing to stdout, so each sink carrying the other's entries costs
+#: nothing -- and "EROFS is retryable on stdout" was nobody's decision.
+FATAL_ERRNOS = [
+    errno.EPIPE,
+    errno.ENOSPC,
+    errno.EACCES,
+    errno.EROFS,
+    errno.EDQUOT,
+    errno.EBADF,
+]
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "errno_code",
-    [
-        errno.ENOSPC,
-        errno.EACCES,
-        errno.EROFS,
-        errno.EDQUOT,
-    ],
-)
+@pytest.mark.parametrize("errno_code", FATAL_ERRNOS)
 async def test_file_handler_fatal_errnos(errno_code):
-    """Disk-full, permission, read-only fs, quota: never recoverable."""
+    """Closed pipe, disk-full, permission, read-only fs, quota, bad fd."""
     exc = OSError(errno_code, "fatal i/o")
     result = await _drive_file(FileDestinationHandler(), exc)
     assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
     assert result.success is False
     assert errno.errorcode[errno_code] in result.failure_summary
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("errno_code", FATAL_ERRNOS)
+async def test_both_sinks_judge_an_errno_the_same_way(errno_code):
+    """One table, so neither sink can call fatal what the other retries."""
+    exc = OSError(errno_code, "fatal i/o")
+    file_result = await _drive_file(FileDestinationHandler(), exc)
+    stream_result = await _drive_stream(StreamDestinationHandler(), exc)
+    assert file_result.status == stream_result.status
+    assert file_result.failure_category == stream_result.failure_category
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("errno_code", FATAL_ERRNOS)
+async def test_a_failed_write_says_who_owns_it(errno_code):
+    """A full disk is the destination's; a closed descriptor is ours.
+
+    EBADF means this process wrote to a descriptor it already closed, which
+    no operator can act on. Reporting it as a write rejection would send
+    them looking for a full volume or a permissions problem that is not
+    there.
+    """
+    result = await _drive_file(FileDestinationHandler(), OSError(errno_code, "x"))
+    expected = (
+        FailureCategory.FAILURE_CATEGORY_INTERNAL
+        if errno_code == errno.EBADF
+        else FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED
+    )
+    assert result.failure_category == expected
 
 
 @pytest.mark.asyncio
@@ -114,15 +151,7 @@ async def test_file_handler_non_oserror_is_fatal():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "errno_code",
-    [
-        errno.EPIPE,
-        errno.ENOSPC,
-        errno.EACCES,
-        errno.EBADF,
-    ],
-)
+@pytest.mark.parametrize("errno_code", FATAL_ERRNOS)
 async def test_stream_handler_fatal_errnos(errno_code):
     """Closed pipe, disk-full on redirect, permission, bad-fd: never
     recoverable by retry."""

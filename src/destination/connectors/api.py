@@ -6,18 +6,15 @@ rate limiting, retries, and contract-declared request batching.
 
 import asyncio
 import base64
-import hashlib
 import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
 import aiohttp
 import orjson
-import pyarrow as pa
 from aiohttp_retry import ExponentialRetry, RetryClient
 from analitiq.contracts.endpoints import (
     ApiEndpointDoc,
@@ -27,11 +24,17 @@ from analitiq.contracts.endpoints import (
 )
 from pydantic import ValidationError
 
-from cdk.base_handler import BaseDestinationHandler, BatchWriteResult, reject_batch
+from cdk.base_handler import (
+    BaseDestinationHandler,
+    BatchRejected,
+    BatchWriteResult,
+    LandingBatch,
+)
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.declarations import DECLARED_WRITE_VERDICTS, ErrorMap, error_map_for
 from cdk.json_utils import decode_json_fields
 from cdk.rate_limiter import RateLimiter
+from cdk.record_identity import record_digest
 from cdk.request_binding import (
     bind_param_refs,
     bind_record_inputs,
@@ -365,13 +368,17 @@ def _content_idempotency_key(record: Mapping[str, Any]) -> str:
     Upsert exists to reconcile changed rows, so its key must change when
     the content changes: a stable identity key would make the provider's
     replay cache swallow a legitimate update to the same entity within
-    its dedup window. The canonicalisation mirrors the SQL destination's
-    ``_record_hash`` (sorted-key JSON, ``default=str``), so an identical
-    replay dedups and a changed row gets a new key — SQL upsert
-    semantics, provider-side.
+    its dedup window. Hashing the whole record is therefore the point, and
+    it is the basis this site chooses; the canonicalisation is the shared
+    :func:`~cdk.record_identity.record_digest`, so an identical replay
+    dedups and a changed row gets a new key — SQL upsert semantics,
+    provider-side.
+
+    The record is hashed as sent: declared JSON columns have already been
+    decoded to objects by this point, so the key covers what the provider
+    receives rather than the wire encoding of it.
     """
-    canonical = json.dumps(dict(record), sort_keys=True, default=str)
-    return hashlib.sha256(canonical.encode()).hexdigest()
+    return record_digest(dict(record))
 
 
 @dataclass
@@ -661,9 +668,19 @@ class ApiDestinationHandler(BaseDestinationHandler):
         (issue #231 channel), so the engine-side operator sees the real
         reason instead of the generic "Schema configuration failed" that
         otherwise leaves only the sidecar log to dig through.
+
+        Every rejection this handler makes is a defect in the endpoint
+        document or the stream's write config -- a missing write block, an
+        unusable idempotency declaration, a batching shape the provider
+        cannot take -- so it declares CONFIG_DEFECT rather than leaving the
+        engine to infer it. The handler was reachable and understood the
+        request; what it refused was the configuration.
         """
         logger.error("Schema rejected for stream %r: %s", stream_id, reason)
         self.last_schema_rejection = reason
+        self.last_schema_failure_category = (
+            FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
+        )
         return False
 
     async def configure_schema(self, schema_spec: SchemaSpec) -> bool:
@@ -679,6 +696,7 @@ class ApiDestinationHandler(BaseDestinationHandler):
         # The handler is shared across concurrent streams, so the reset ->
         # read window is race-free only while this method stays await-free.
         self.last_schema_rejection = None
+        self.last_schema_failure_category = FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
         endpoint_doc = self._stream_endpoints.get(stream_id)
         if endpoint_doc is None:
             return self._reject_schema(
@@ -762,102 +780,110 @@ class ApiDestinationHandler(BaseDestinationHandler):
         )
         return True
 
-    async def write_batch(
+    def not_ready_reason(self, stream_id: str) -> str | None:
+        """Report what an API write is still missing: a session, a configured stream."""
+        if not self._session or not self._connected:
+            return "Handler not connected"
+        if self._streams.get(stream_id) is None:
+            return "Schema not configured"
+        return None
+
+    async def land(self, batch: LandingBatch) -> int:
+        """Send the batch's records to the endpoint.
+
+        Records stay row-oriented: Arrow-native Python types (``datetime`` /
+        ``Decimal`` / ``date`` / ``time``) survive into the dicts and
+        ``orjson`` handles them at the serialisation boundary, so pre-casting
+        in Arrow space would be a second pass for no gain. ``emitted_at`` is
+        part of the contract for time-partitioned sinks and has no meaning
+        here.
+        """
+        state = self._streams[batch.stream_id]
+        records = batch.records
+        decode_json_fields(records, state.json_fields)
+        if state.max_records is None:
+            (
+                written,
+                failed_ids,
+                failure_detail,
+                failure_category,
+            ) = await self._write_single_mode(state, records, batch.record_ids)
+        else:
+            (
+                written,
+                failed_ids,
+                failure_detail,
+                failure_category,
+            ) = await self._write_chunked_mode(state, records, batch.record_ids)
+        logger.info(
+            "API wrote batch %s: %s/%s records",
+            batch.batch_seq,
+            written,
+            len(records),
+        )
+        total = len(records)
+        if written == total and not failed_ids:
+            return written
+        # A shortfall is fatal, never retryable: the records that did land
+        # are already written, so retrying the whole batch would duplicate
+        # them. The count and the failed ids ride the refusal so the engine
+        # dead-letters exactly what did not land.
+        failed_count = len(failed_ids) or (total - written)
+        summary = f"{failed_count}/{total} records failed to write to API"
+        if failure_detail:
+            summary = f"{summary}; first failure: {failure_detail}"
+        raise BatchRejected(
+            summary,
+            category=failure_category,
+            records_written=written,
+            failed_record_ids=tuple(failed_ids),
+        )
+
+    def os_error_failure(
         self,
+        error: OSError,
+        *,
         run_id: str,
         stream_id: str,
         batch_seq: int,
-        record_batch: pa.RecordBatch,
-        record_ids: list[str],
-        cursor: Cursor,
-        emitted_at: datetime,
     ) -> BatchWriteResult:
-        """Write an Arrow record batch to the API.
+        """Judge an HTTP transport failure, not a filesystem one.
 
-        HTTP request bodies are dict-shaped, so the batch is materialized
-        once at this boundary. ``emitted_at`` is part of the write_batch
-        contract for time-partitioned sinks and has no meaning for an API
-        destination, so it is unused here.
+        aiohttp's connection errors derive from ``OSError`` and
+        ``asyncio.TimeoutError`` *is* the builtin ``TimeoutError``, so the
+        base's errno table would otherwise swallow exactly the failures the
+        connector's declared exception map exists to classify -- retrying a
+        declared config defect to exhaustion, and dead-lettering a batch on
+        a mid-request disconnect that carries EPIPE.
         """
-        if not self._session or not self._connected:
-            return reject_batch(
-                logger,
-                "Handler not connected",
-                run_id=run_id,
-                stream_id=stream_id,
-                batch_seq=batch_seq,
-            )
+        return self.unexpected_write_failure(
+            error, run_id=run_id, stream_id=stream_id, batch_seq=batch_seq
+        )
 
-        state = self._streams.get(stream_id)
-        if state is None:
-            return reject_batch(
-                logger,
-                "Schema not configured",
-                run_id=run_id,
-                stream_id=stream_id,
-                batch_seq=batch_seq,
-            )
-
-        # Materialise once, stay row-oriented. Arrow-native Python types
-        # (``datetime`` / ``Decimal`` / ``date`` / ``time``) survive into
-        # the records dict — ``orjson`` handles them at the serialisation
-        # boundary (natively for datetime/date/time, via the default-hook
-        # for Decimal/bytes). Pre-casting in Arrow space would be a
-        # second pass for no gain.
-        records = record_batch.to_pylist()
-
-        if not records:
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_SUCCESS,
-                records_written=0,
-                committed_cursor=cursor,
-            )
-
-        try:
-            decode_json_fields(records, state.json_fields)
-            if state.max_records is None:
-                (
-                    written,
-                    failed_ids,
-                    failure_detail,
-                    failure_category,
-                ) = await self._write_single_mode(state, records, record_ids)
-            else:
-                (
-                    written,
-                    failed_ids,
-                    failure_detail,
-                    failure_category,
-                ) = await self._write_chunked_mode(state, records, record_ids)
-
-            logger.info(
-                f"API wrote batch {batch_seq}: {written}/{len(records)} records"
-            )
-            return self._build_write_result(
-                written=written,
-                failed_record_ids=failed_ids,
-                total=len(records),
-                cursor=cursor,
-                failure_detail=failure_detail,
-                failure_category=failure_category,
-            )
-
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            status, failure_category = _http_verdict(e, self._error_map)
-            logger.error("Transport error writing to API: %s", e, exc_info=True)
+    def unexpected_write_failure(
+        self,
+        error: Exception,
+        *,
+        run_id: str,
+        stream_id: str,
+        batch_seq: int,
+    ) -> BatchWriteResult:
+        """Let the declared error map judge a transport failure first."""
+        if isinstance(error, (aiohttp.ClientError, asyncio.TimeoutError)):
+            status, failure_category = _http_verdict(error, self._error_map)
+            logger.error("Transport error writing to API: %s", error, exc_info=True)
             return BatchWriteResult(
                 status=status,
                 records_written=0,
-                failure_summary=f"{type(e).__name__}: {e}",
+                failure_summary=f"{type(error).__name__}: {error}",
                 failure_category=failure_category,
             )
-        except Exception as e:
-            logger.error("Fatal error writing to API: %s", e, exc_info=True)
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
-                records_written=0,
-                failure_summary=f"{type(e).__name__}: {e}",
-            )
+        logger.error("Fatal error writing to API: %s", error, exc_info=True)
+        return BatchWriteResult(
+            status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+            records_written=0,
+            failure_summary=f"{type(error).__name__}: {error}",
+        )
 
     def _resolve_write_params(self, state: _StreamState) -> dict[str, Any]:
         """Resolve declared write-param defaults into a value table.

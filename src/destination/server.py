@@ -421,33 +421,26 @@ class DestinationServicer(DestinationServiceServicer):
                 derive_statement_timeout_seconds(schema_msg.ack_timeout_seconds)
             )
             accepted = await self.handler.configure_schema(schema_spec)
-            # A handler that proxies to a worker (WorkerProxyHandler)
-            # records the worker's real rejection reason; surface it
-            # verbatim so the engine ack is not the generic message
-            # (issue #231). Handlers that raise instead are caught
-            # below; those that return False with no reason fall back.
+            # A handler that returns False records why on the contract, and
+            # who owns it: a proxying handler surfaces the worker's real
+            # reason so the engine ack is not the generic message (issue
+            # #231), and a shell that could not reach its worker declares
+            # NOT_READY so the engine never has to read that back out of the
+            # message text (issue #429). Handlers that raise instead are
+            # caught below; one that returns False saying nothing falls back
+            # to the generic reason and lets the engine's own view of the
+            # handshake name the code.
             ack_message = (
                 ""
                 if accepted
                 else (
-                    getattr(self.handler, "last_schema_rejection", None)
-                    or "Schema configuration failed"
+                    self.handler.last_schema_rejection or "Schema configuration failed"
                 )
             )
-            # A proxying handler also records *who owns* the rejection, not
-            # just its wording (issue #429): a worker it could not reach is
-            # NOT_READY, and only the ack's category can say so -- the engine
-            # must never read that back out of the message text. Handlers
-            # that declare nothing leave UNSPECIFIED, and the engine resolves
-            # it from the handshake outcome it observed itself.
             ack_category = (
                 CdkFailureCategory.FAILURE_CATEGORY_UNSPECIFIED
                 if accepted
-                else getattr(
-                    self.handler,
-                    "last_schema_failure_category",
-                    CdkFailureCategory.FAILURE_CATEGORY_UNSPECIFIED,
-                )
+                else self.handler.last_schema_failure_category
             )
         except (UnmappedTypeError, InvalidTypeMapError) as e:
             logger.error(

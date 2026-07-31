@@ -4,18 +4,26 @@ This handler writes records to files using configurable formatters and a
 local storage backend.
 """
 
-import errno
 import hashlib
 import logging
 from datetime import datetime
 from string import Formatter
 from typing import Any
 
-import pyarrow as pa
-
-from cdk.base_handler import BaseDestinationHandler, BatchWriteResult, reject_batch
+from cdk.base_handler import (
+    BaseDestinationHandler,
+    BatchRejected,
+    BatchWriteResult,
+    LandingBatch,
+)
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.types import AckStatus, Cursor, RetrySemantics, RetryVerdict, SchemaSpec
+from cdk.types import (
+    AckStatus,
+    FailureCategory,
+    RetrySemantics,
+    RetryVerdict,
+    SchemaSpec,
+)
 
 from ..formatters import get_formatter
 from ..formatters.base import BaseFormatter
@@ -239,208 +247,124 @@ class FileDestinationHandler(BaseDestinationHandler):
         )
         return True
 
-    async def write_batch(
+    def not_ready_reason(self, stream_id: str) -> str | None:
+        """Report what a file write is still missing: connection, backend, formatter."""
+        _ = stream_id
+        if not self._connected:
+            return "Handler not connected"
+        missing = [
+            name
+            for name, component in (
+                ("storage", self._storage),
+                ("formatter", self._formatter),
+            )
+            if component is None
+        ]
+        if missing:
+            return f"Handler components not initialized: {', '.join(missing)}"
+        return None
+
+    async def land(self, batch: LandingBatch) -> int:
+        """Serialize the batch and write it to one content-addressed file.
+
+        When a ``path_template`` carries time placeholders the partition
+        directory resolves from ``emitted_at`` -- the engine's replay-stable
+        per-batch instant -- so a retried batch overwrites the same file
+        instead of landing in a new partition (issue #353).
+        """
+        storage, formatter = self._storage, self._formatter
+        if storage is None or formatter is None:
+            # not_ready_reason proved both were present; losing one
+            # between that check and here is a defect, not a bad batch.
+            raise BatchRejected(
+                "file handler lost its storage or formatter mid-batch",
+                category=FailureCategory.FAILURE_CATEGORY_INTERNAL,
+            )
+
+        # A time-partitioned layout depends entirely on emitted_at being a
+        # real, replay-stable UTC instant. It crosses the process boundary
+        # from the engine (and, for a sandboxed connector, a second gRPC
+        # hop), so validate it before writing: a missing or epoch-zero stamp
+        # would silently bucket every replay under year=1970 and defeat the
+        # same-path overwrite this value exists to guarantee. The guard
+        # fires only for a template that actually substitutes a time
+        # placeholder -- a static-prefix template never touches emitted_at.
+        if _template_needs_timestamp(self._path_template) and not _is_stamped_utc(
+            batch.emitted_at
+        ):
+            raise BatchRejected(
+                f"file destination has a time-based path_template "
+                f"({self._path_template!r}) but the batch carries no usable "
+                f"emitted_at ({batch.emitted_at!r}); refusing to derive a "
+                f"partition path from the write-time clock"
+            )
+
+        # Serialize before building the path so the filename includes a
+        # content hash: different content at the same batch_seq lands in a
+        # new file (issue #319), while identical content overwrites the same
+        # file with the same bytes -- the write itself is the replay dedup,
+        # with no batch-level commit ledger (issue #306).
+        data = formatter.serialize_batch(batch.records)
+        if not data:
+            # A non-empty records list that serialized to empty bytes is a
+            # formatter contract violation; writing a zero-byte file and
+            # committing records_written=N would silently drop all N rows
+            # (issue #322).
+            raise BatchRejected(
+                f"{type(formatter).__name__}.serialize_batch() returned "
+                f"empty bytes for {len(batch.records)} records"
+            )
+
+        content_hash = hashlib.sha256(data).hexdigest()[:16]
+        base_path = self._config.get("path", "") or self._config.get("prefix", "")
+        file_path = storage.build_path(
+            base_path=base_path,
+            stream_id=batch.stream_id,
+            batch_seq=batch.batch_seq,
+            content_hash=content_hash,
+            extension=formatter.file_extension,
+            timestamp=batch.emitted_at,
+            partition_template=self._path_template,
+        )
+        written_path = await storage.write_file(
+            path=file_path,
+            data=data,
+            content_type=formatter.content_type,
+        )
+        logger.info(
+            "Wrote batch %s: %s records, %s bytes to %s",
+            batch.batch_seq,
+            len(batch.records),
+            len(data),
+            written_path,
+        )
+        return len(batch.records)
+
+    def unexpected_write_failure(
         self,
+        error: Exception,
+        *,
         run_id: str,
         stream_id: str,
         batch_seq: int,
-        record_batch: pa.RecordBatch,
-        record_ids: list[str],
-        cursor: Cursor,
-        emitted_at: datetime,
     ) -> BatchWriteResult:
-        """Write an Arrow record batch to a file.
-
-        Formatters consume dicts, so the batch is materialized once at
-        this boundary. When a ``path_template`` carries time placeholders,
-        the partition directory resolves from ``emitted_at`` -- the engine's
-        replay-stable per-batch instant -- so a retried batch overwrites the
-        same file instead of landing in a new partition (issue #353).
-        """
-        if not self._connected:
-            return reject_batch(
-                logger,
-                "Handler not connected",
-                run_id=run_id,
-                stream_id=stream_id,
-                batch_seq=batch_seq,
-            )
-
-        if self._storage is None or self._formatter is None:
-            missing = [
-                name
-                for name, component in (
-                    ("storage", self._storage),
-                    ("formatter", self._formatter),
-                )
-                if component is None
-            ]
-            return reject_batch(
-                logger,
-                f"Handler components not initialized: {', '.join(missing)}",
-                run_id=run_id,
-                stream_id=stream_id,
-                batch_seq=batch_seq,
-            )
-
-        try:
-            records = record_batch.to_pylist()
-
-            if not records:
-                # Nothing to write; ack success so the cursor still advances.
-                # An empty batch never renders a partition path, so it needs
-                # no emitted_at.
-                return BatchWriteResult(
-                    status=AckStatus.ACK_STATUS_SUCCESS,
-                    records_written=0,
-                    committed_cursor=cursor,
-                )
-
-            # A time-partitioned layout depends entirely on emitted_at being a
-            # real, replay-stable UTC instant. It crosses the process boundary
-            # from the engine (and, for a sandboxed connector, a second gRPC
-            # hop), so validate it before writing: a missing or epoch-zero
-            # stamp would silently bucket every replay under year=1970 and
-            # defeat the same-path overwrite this value exists to guarantee
-            # (issue #353). The guard fires only for a template that actually
-            # substitutes a time placeholder -- a static-prefix template never
-            # touches emitted_at, so it needs no stamp. Fail loud so the batch
-            # routes to the DLQ instead.
-            if _template_needs_timestamp(self._path_template) and not _is_stamped_utc(
-                emitted_at
-            ):
-                msg = (
-                    f"file destination has a time-based path_template "
-                    f"({self._path_template!r}) but the batch carries no "
-                    f"usable emitted_at ({emitted_at!r}); refusing to derive a "
-                    f"partition path from the write-time clock "
-                    f"(run={run_id}, stream={stream_id}, seq={batch_seq})"
-                )
-                logger.error(msg)
-                return BatchWriteResult(
-                    status=AckStatus.ACK_STATUS_FATAL_FAILURE,
-                    records_written=0,
-                    failure_summary=msg,
-                )
-
-            # Serialize before building path so the filename includes a content
-            # hash: different content at the same batch_seq lands in a new file
-            # (issue #319), while identical content overwrites the same file
-            # with the same bytes — the write itself is the replay dedup, with
-            # no batch-level commit ledger (issue #306).
-            data = self._formatter.serialize_batch(records)
-
-            if not data:
-                # A non-empty records list that serialized to empty bytes is a
-                # formatter contract violation; writing a zero-byte file and
-                # committing records_written=N would silently drop all N rows
-                # (issue #322). Fail loud so the batch routes to the DLQ.
-                msg = (
-                    f"{type(self._formatter).__name__}.serialize_batch() "
-                    f"returned empty bytes for {len(records)} records "
-                    f"(run={run_id}, stream={stream_id}, seq={batch_seq})"
-                )
-                logger.error(msg)
-                return BatchWriteResult(
-                    status=AckStatus.ACK_STATUS_FATAL_FAILURE,
-                    records_written=0,
-                    failure_summary=msg,
-                )
-
-            content_hash = hashlib.sha256(data).hexdigest()[:16]
-
-            # Build file path
-            base_path = self._config.get("path", "") or self._config.get("prefix", "")
-            file_path = self._storage.build_path(
-                base_path=base_path,
-                stream_id=stream_id,
-                batch_seq=batch_seq,
-                content_hash=content_hash,
-                extension=self._formatter.file_extension,
-                timestamp=emitted_at,
-                partition_template=self._path_template,
-            )
-
-            # Write to storage
-            written_path = await self._storage.write_file(
-                path=file_path,
-                data=data,
-                content_type=self._formatter.content_type,
-            )
-
-            logger.info(
-                "Wrote batch %s: %s records, %s bytes to %s",
-                batch_seq,
-                len(records),
-                len(data),
-                written_path,
-            )
-
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_SUCCESS,
-                records_written=len(records),
-                committed_cursor=cursor,
-            )
-
-        except OSError as e:
-            # ENOSPC / EACCES / EROFS / EDQUOT are not transient — retrying
-            # without operator intervention is hopeless. Classify as FATAL
-            # so the engine routes to DLQ instead of looping.
-            errno_label = (
-                errno.errorcode.get(e.errno, str(e.errno))
-                if e.errno is not None
-                else "unknown"
-            )
-            fatal_errnos = {errno.ENOSPC, errno.EACCES, errno.EROFS, errno.EDQUOT}
-            if e.errno in fatal_errnos:
-                logger.error(
-                    "Fatal filesystem error writing batch "
-                    "(run=%s, stream=%s, seq=%s, errno=%s): %s",
-                    run_id,
-                    stream_id,
-                    batch_seq,
-                    errno_label,
-                    e,
-                    exc_info=True,
-                )
-                return BatchWriteResult(
-                    status=AckStatus.ACK_STATUS_FATAL_FAILURE,
-                    records_written=0,
-                    failure_summary=f"OSError[{errno_label}]: {e}",
-                )
-            logger.error(
-                "Retryable I/O error writing batch (run=%s, stream=%s, seq=%s): %s",
-                run_id,
-                stream_id,
-                batch_seq,
-                e,
-                exc_info=True,
-            )
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_RETRYABLE_FAILURE,
-                records_written=0,
-                failure_summary=f"OSError[{errno_label}]: {e}",
-            )
-        except Exception as e:
-            # The formatter and the storage backend are both pluggable and
-            # both sit inside this try, so without their identities a broken
-            # Parquet formatter and a broken CSV one log identically (#328).
-            logger.error(
-                "Fatal error writing batch "
-                "(run=%s, stream=%s, seq=%s, formatter=%s, storage=%s): %s",
-                run_id,
-                stream_id,
-                batch_seq,
-                type(self._formatter).__name__,
-                type(self._storage).__name__,
-                e,
-                exc_info=True,
-            )
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
-                records_written=0,
-                failure_summary=f"{type(e).__name__}: {e}",
-            )
+        """Name both pluggable parts: either can be the one that broke (#328)."""
+        logger.error(
+            "Fatal error writing batch "
+            "(run=%s, stream=%s, seq=%s, formatter=%s, storage=%s): %s",
+            run_id,
+            stream_id,
+            batch_seq,
+            type(self._formatter).__name__,
+            type(self._storage).__name__,
+            error,
+            exc_info=True,
+        )
+        return BatchWriteResult(
+            status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+            records_written=0,
+            failure_summary=f"{type(error).__name__}: {error}",
+        )
 
     async def health_check(self) -> bool:
         """

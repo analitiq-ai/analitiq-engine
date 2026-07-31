@@ -4,17 +4,24 @@ This handler writes records to stdout, useful for testing and debugging.
 It does not implement idempotency since stdout is not persistent.
 """
 
-import errno
 import logging
 import sys
-from datetime import datetime
 from typing import Any
 
-import pyarrow as pa
-
-from cdk.base_handler import BaseDestinationHandler, BatchWriteResult, reject_batch
+from cdk.base_handler import (
+    BaseDestinationHandler,
+    BatchRejected,
+    BatchWriteResult,
+    LandingBatch,
+)
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.types import AckStatus, Cursor, RetrySemantics, RetryVerdict, SchemaSpec
+from cdk.types import (
+    AckStatus,
+    FailureCategory,
+    RetrySemantics,
+    RetryVerdict,
+    SchemaSpec,
+)
 
 from ..formatters import get_formatter
 from ..formatters.base import BaseFormatter
@@ -133,114 +140,67 @@ class StreamDestinationHandler(BaseDestinationHandler):
         )
         return True
 
-    async def write_batch(
+    #: Names stdout in the I/O failure log line, as it did before.
+    write_target = "to stdout"
+
+    def not_ready_reason(self, stream_id: str) -> str | None:
+        """Report what stdout is still missing: a live handler and its formatter."""
+        _ = stream_id
+        if not self._connected:
+            return "Handler not connected"
+        if self._formatter is None:
+            return "Handler components not initialized: formatter"
+        return None
+
+    async def land(self, batch: LandingBatch) -> int:
+        """Serialize the records and write them to stdout.
+
+        ``emitted_at`` is part of the contract for time-partitioned sinks;
+        stdout has no output path, so it goes unread here.
+        """
+        formatter = self._formatter
+        if formatter is None:
+            # not_ready_reason proved it was present; losing it between
+            # that check and here is a defect, not a bad batch.
+            raise BatchRejected(
+                "stdout handler lost its formatter mid-batch",
+                category=FailureCategory.FAILURE_CATEGORY_INTERNAL,
+            )
+        data = formatter.serialize_batch(batch.records)
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+        logger.debug(
+            "Wrote batch %s to stdout: %s records, %s bytes",
+            batch.batch_seq,
+            len(batch.records),
+            len(data),
+        )
+        return len(batch.records)
+
+    def unexpected_write_failure(
         self,
+        error: Exception,
+        *,
         run_id: str,
         stream_id: str,
         batch_seq: int,
-        record_batch: pa.RecordBatch,
-        record_ids: list[str],
-        cursor: Cursor,
-        emitted_at: datetime,
     ) -> BatchWriteResult:
-        """Write an Arrow record batch to stdout.
-
-        The stdout formatter consumes dicts, so the batch is materialized
-        once at this boundary. ``emitted_at`` is part of the write_batch
-        contract for time-partitioned sinks; stdout has no output path, so
-        it is unused here.
-        """
-        if not self._connected or self._formatter is None:
-            reason = (
-                "Handler not connected"
-                if not self._connected
-                else "Handler components not initialized: formatter"
-            )
-            return reject_batch(
-                logger,
-                reason,
-                run_id=run_id,
-                stream_id=stream_id,
-                batch_seq=batch_seq,
-            )
-
-        try:
-            records = record_batch.to_pylist()
-
-            if not records:
-                return BatchWriteResult(
-                    status=AckStatus.ACK_STATUS_SUCCESS,
-                    records_written=0,
-                    committed_cursor=cursor,
-                )
-
-            # Serialize and write to stdout
-            data = self._formatter.serialize_batch(records)
-            sys.stdout.buffer.write(data)
-            sys.stdout.buffer.flush()
-
-            logger.debug(
-                f"Wrote batch {batch_seq} to stdout: "
-                f"{len(records)} records, {len(data)} bytes"
-            )
-
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_SUCCESS,
-                records_written=len(records),
-                committed_cursor=cursor,
-            )
-
-        except OSError as e:
-            # Closed/broken stdout (EPIPE), permissions, disk-full on a
-            # redirected stream — none are recoverable by retry.
-            errno_code = (
-                errno.errorcode.get(e.errno, str(e.errno))
-                if e.errno is not None
-                else "unknown"
-            )
-            fatal_errnos = {errno.EPIPE, errno.ENOSPC, errno.EACCES, errno.EBADF}
-            status = (
-                AckStatus.ACK_STATUS_FATAL_FAILURE
-                if e.errno in fatal_errnos
-                else AckStatus.ACK_STATUS_RETRYABLE_FAILURE
-            )
-            logger.error(
-                "%s I/O error writing to stdout "
-                "(run=%s, stream=%s, seq=%s, errno=%s): %s",
-                "Fatal"
-                if status == AckStatus.ACK_STATUS_FATAL_FAILURE
-                else "Retryable",
-                run_id,
-                stream_id,
-                batch_seq,
-                errno_code,
-                e,
-                exc_info=True,
-            )
-            return BatchWriteResult(
-                status=status,
-                records_written=0,
-                failure_summary=(f"OSError[{errno_code}]: {e}"),
-            )
-        except Exception as e:
-            # The formatter is pluggable and sits inside this try, so its
-            # identity is what distinguishes one serialization failure from
-            # another (#328).
-            logger.error(
-                "Fatal error writing to stdout "
-                "(run=%s, stream=%s, seq=%s, formatter=%s): %s",
-                run_id,
-                stream_id,
-                batch_seq,
-                type(self._formatter).__name__,
-                e,
-                exc_info=True,
-            )
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
-                records_written=0,
-                failure_summary=f"{type(e).__name__}: {e}",
-            )
+        """Name the formatter: it is the pluggable part that can fail (#328)."""
+        logger.error(
+            "Fatal error writing to stdout "
+            "(run=%s, stream=%s, seq=%s, formatter=%s): %s",
+            run_id,
+            stream_id,
+            batch_seq,
+            type(self._formatter).__name__,
+            error,
+            exc_info=True,
+        )
+        return BatchWriteResult(
+            status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+            records_written=0,
+            failure_summary=f"{type(error).__name__}: {error}",
+        )
 
     async def health_check(self) -> bool:
         """

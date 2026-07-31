@@ -380,15 +380,16 @@ class WorkerProxyHandler(BaseDestinationHandler):
         cursor: Cursor,
         emitted_at: datetime,
     ) -> BatchWriteResult:
-        client = self._streams.get(stream_id)
-        if client is None:
+        reason = self.not_ready_reason(stream_id)
+        if reason is not None:
             return reject_batch(
                 logger,
-                "worker stream not configured",
+                reason,
                 run_id=run_id,
                 stream_id=stream_id,
                 batch_seq=batch_seq,
             )
+        client = self._streams[stream_id]
         # The servicer hands the handler the CDK cursor; the forwarding
         # client builds proto messages — convert at the boundary. emitted_at
         # rides the forwarded batch unchanged so the worker's file handler
@@ -435,64 +436,40 @@ class WorkerProxyHandler(BaseDestinationHandler):
         return await self._control.health_check()
 
     # ------------------------------------------------------------------
-    # Capabilities (cached from the worker at connect)
+    # Capabilities (forwarded from the worker at connect)
     # ------------------------------------------------------------------
 
     @property
+    def forwards_capabilities(self) -> bool:
+        """This handler relays the worker's advertisement, never its own."""
+        return True
+
+    def not_ready_reason(self, stream_id: str) -> str | None:
+        """Report whether the forwarded stream completed its handshake."""
+        if self._streams.get(stream_id) is None:
+            return "worker stream not configured"
+        return None
+
+    @property
     def connector_type(self) -> str:
+        """The worker's own connector id, or a placeholder before connect."""
         if self._capabilities is not None:
             connector_type: str = self._capabilities.connector_type
             return connector_type
         return "unknown"
 
     @property
-    def supports_transactions(self) -> bool:
-        return bool(self._capabilities and self._capabilities.supports_transactions)
+    def forwarded_capabilities(self) -> Any | None:
+        """The worker's own GetCapabilitiesResponse, forwarded whole.
 
-    @property
-    def supports_upsert(self) -> bool:
-        return bool(self._capabilities and self._capabilities.supports_upsert)
+        The shell already holds the response it fetched at connect, so it
+        forwards that object rather than re-deriving one property at a time.
+        Nine hand-written mirrors said only what this says, and each was a
+        place for the shell's answer to drift from the worker's -- a
+        connector that gained a write mode would advertise it to the engine
+        only if someone remembered to add another property here.
 
-    @property
-    def supports_bulk_load(self) -> bool:
-        return bool(self._capabilities and self._capabilities.supports_bulk_load)
-
-    @property
-    def supports_auto_create(self) -> bool:
-        return bool(self._capabilities and self._capabilities.supports_auto_create)
-
-    @property
-    def supports_insert(self) -> bool:
-        # Mirrored from the worker's write-mode list exactly like truncate
-        # (issue #388): inheriting the base's unconditional True would
-        # re-advertise a mode the worker's schema handshake will refuse
-        # (e.g. a SQLAlchemy connector without declared stage capabilities).
-        if not self._capabilities:
-            return False
-        return WriteMode.WRITE_MODE_INSERT in self._capabilities.supported_write_modes
-
-    @property
-    def supports_truncate(self) -> bool:
-        # The wire response advertises truncate through the write-mode list,
-        # not a dedicated bool; mirror exactly what the worker advertised so
-        # the proxy and the underlying connector cannot drift.
-        if not self._capabilities:
-            return False
-        return (
-            WriteMode.WRITE_MODE_TRUNCATE_INSERT
-            in self._capabilities.supported_write_modes
-        )
-
-    @property
-    def max_batch_size(self) -> int:
-        if self._capabilities is not None and self._capabilities.max_batch_size:
-            max_batch_size: int = self._capabilities.max_batch_size
-            return max_batch_size
-        return super().max_batch_size
-
-    @property
-    def max_batch_bytes(self) -> int:
-        if self._capabilities is not None and self._capabilities.max_batch_bytes:
-            max_batch_bytes: int = self._capabilities.max_batch_bytes
-            return max_batch_bytes
-        return super().max_batch_bytes
+        ``None`` before connect, which the servicer reads as "nothing
+        declared" and answers from the base defaults.
+        """
+        return self._capabilities
