@@ -10,7 +10,6 @@ range than the author declared.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -18,8 +17,6 @@ from typing import Any
 from ..exceptions import ReadError
 
 __all__ = ["cursor_param_for", "effective_start"]
-
-logger = logging.getLogger(__name__)
 
 #: The keys that make a cursor mapping a window rather than a single bound.
 _WINDOW_KEYS = ("start_param", "end_param", "start_operator", "end_operator")

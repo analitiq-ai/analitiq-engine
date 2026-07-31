@@ -182,6 +182,10 @@ class GenericAPIConnector(BaseDestinationHandler):
             try:
                 await asyncio.sleep(0.25)
             except asyncio.CancelledError:
+                # Absorbed on purpose: this drain is the last thing a
+                # failing read does, and letting the cancellation out here
+                # would replace the error the caller needs to see with the
+                # teardown's own.
                 pass
         self._http = None
         self._connected = False

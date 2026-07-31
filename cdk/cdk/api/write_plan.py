@@ -15,7 +15,6 @@ idempotency means promising exactly-once while never sending the key.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -35,8 +34,6 @@ __all__ = [
     "retry_verdict",
     "write_mode_block",
 ]
-
-logger = logging.getLogger(__name__)
 
 #: Proto write-mode int -> the ``operations.write.<key>`` block it selects.
 #: The contract's write map is closed and keyed by mode name.
