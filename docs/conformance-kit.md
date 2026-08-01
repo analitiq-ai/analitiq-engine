@@ -115,9 +115,22 @@ accurate report.
 
 The suite needs three inputs: the connector checkout
 (`--connector-dir`, holding `definition/connector.json`), the connector
-class (resolved from the installed package's entry points; overridable
-with `--connector-class package.module:Class`), and — for tier 2 — a
-live connection document (`--live-connection`). The flags come from an
+class, and — for tier 2 — a live connection document
+(`--live-connection`).
+
+The class is resolved the way the engine registry resolves it, from the
+same `cdk.registry.KIND_DEFAULTS` table, so what the suite audits is what
+production loads: an explicit `--connector-class package.module:Class`
+wins (for running the suite before the package is installed), then the
+installed package's entry points, then the CDK's generic default for the
+connector's kind — the thin path, for every kind the CDK ships a default
+for. Both entry-point groups are read and must name the same class; a
+connector that registers a different class per role is refused at load,
+because a split there is how the two directions drift apart while the
+suite stays green. A kind the CDK ships no default for resolves no class
+and its class-level checks skip, so a genuinely new kind loads rather
+than failing. A kind whose transport is not installed fails naming the
+extra to install. The flags come from an
 options plugin loaded explicitly (`-p cdk.conformance.plugin` — it is
 deliberately not a `pytest11` entry point, so installing the CDK never
 changes unrelated pytest runs); each option doubles as an environment

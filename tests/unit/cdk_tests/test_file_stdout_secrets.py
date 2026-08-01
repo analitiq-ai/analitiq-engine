@@ -1,4 +1,4 @@
-"""Tests that file and stream handlers do not retain secrets after connect()."""
+"""The file and stdout connectors keep no secret on self._config after connect()."""
 
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -35,7 +35,7 @@ def _make_file_runtime(*, raw_config=None):
     )
 
 
-class TestFileHandlerSecretRetention:
+class TestFileConnectorSecretRetention:
     """Verify GenericFileConnector does not retain secrets on self._config."""
 
     @pytest.mark.asyncio
@@ -138,7 +138,7 @@ class TestFileHandlerSecretRetention:
 
             import pyarrow as pa
 
-            from src.grpc.generated.analitiq.v1 import Cursor
+            from cdk.types import Cursor
 
             result = await handler.write_batch(
                 run_id="run-1",
@@ -157,7 +157,7 @@ class TestFileHandlerSecretRetention:
         assert call_kwargs[1]["base_path"] == "/tmp/output"
 
 
-class TestStreamHandlerSecretRetention:
+class TestStdoutConnectorSecretRetention:
     """Verify GenericStdoutConnector does not retain secrets on self._config."""
 
     @pytest.mark.asyncio

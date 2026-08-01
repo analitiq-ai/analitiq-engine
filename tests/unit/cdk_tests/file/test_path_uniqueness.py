@@ -20,7 +20,7 @@ import pytest
 from cdk.file.backend import BaseStorageBackend
 from cdk.file.generic import GenericFileConnector
 from cdk.file.local_backend import LocalFileStorage
-from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
+from cdk.types import AckStatus, Cursor
 
 # ---------------------------------------------------------------------------
 # build_path: unit tests on the base class method

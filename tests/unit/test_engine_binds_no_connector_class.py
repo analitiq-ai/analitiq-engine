@@ -35,7 +35,9 @@ from cdk.registry import KIND_DEFAULTS
 _SRC_DIR = Path(src.__file__).resolve().parent
 
 #: The modules that define a kind default, and the class names they export.
-_FORBIDDEN_MODULES = {entry.class_path.split(":")[0] for entry in KIND_DEFAULTS.values()}
+_FORBIDDEN_MODULES = {
+    entry.class_path.split(":")[0] for entry in KIND_DEFAULTS.values()
+}
 _FORBIDDEN_NAMES = {entry.class_path.split(":")[1] for entry in KIND_DEFAULTS.values()}
 
 
@@ -68,7 +70,9 @@ def _violations(path: Path) -> list[str]:
     for module, name, lineno in _imported_targets(tree):
         if module in _FORBIDDEN_MODULES:
             if name is None or name in _FORBIDDEN_NAMES:
-                found.append(f"{path}:{lineno}: imports {module}" + (f".{name}" if name else ""))
+                found.append(
+                    f"{path}:{lineno}: imports {module}" + (f".{name}" if name else "")
+                )
     return found
 
 

@@ -13,7 +13,7 @@ import pyarrow as pa
 import pytest
 
 from cdk.file.generic import GenericFileConnector
-from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
+from cdk.types import AckStatus, Cursor
 
 # A fixed, timezone-aware emit instant for write_batch/send_batch calls; the
 # engine stamps this per batch (issue #353). Value is arbitrary for sinks

@@ -1,4 +1,4 @@
-"""OSError errno classification tests for file/stream destinations.
+"""OSError errno classification tests for the file and stdout destinations.
 
 Disk-full, permission, EROFS, and EPIPE are not recoverable by retry —
 classifying them as RETRYABLE would burn the DLQ budget and mask the
@@ -20,8 +20,7 @@ import pytest
 
 from cdk.file.generic import GenericFileConnector
 from cdk.stdout.generic import GenericStdoutConnector
-from cdk.types import FailureCategory
-from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
+from cdk.types import AckStatus, Cursor, FailureCategory
 
 # Derived from the subject, never hand-written: a stale literal here selects
 # no records at all, and an assertion over an empty list is the quiet kind of
@@ -192,7 +191,7 @@ async def test_stream_handler_non_oserror_is_fatal():
 
 @pytest.mark.asyncio
 async def test_stream_handler_to_pylist_arrow_invalid_is_fatal():
-    """ArrowInvalid from to_pylist in stream handler must not propagate — FATAL."""
+    """ArrowInvalid from to_pylist in the stdout connector is FATAL, not a raise."""
     handler = GenericStdoutConnector()
     handler._connected = True
     handler._formatter = MagicMock()

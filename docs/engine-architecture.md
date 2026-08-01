@@ -36,22 +36,26 @@ cdk/cdk/                     # Connector Development Kit (shared by source + des
 ├── base_handler.py          # BaseDestinationHandler ABC
 ├── contract.py              # Readable / Writable / Discoverable / TableCreator Protocols
 ├── types.py                 # Shared CDK types
-├── registry.py              # ConnectorRegistry + build_registries(...)
+├── registry.py              # ConnectorRegistry + KIND_DEFAULTS + build_registries()
 ├── secrets/                 # Secret resolvers
 ├── query_builder.py         # WHERE / SELECT rendering
+├── formatters/              # JSONL / CSV / Parquet serializers (file + stdout)
 ├── sql/                     # GenericSQLConnector + dialects / DDL / discovery / execution
 │   └── generic.py           # GenericSQLConnector (source reads + destination writes)
-└── api/                     # GenericAPIConnector + page loop / strategies / HTTP / verdicts
-    └── generic.py           # GenericAPIConnector (source reads + destination writes)
+├── api/                     # GenericAPIConnector + page loop / strategies / HTTP / verdicts
+│   └── generic.py           # GenericAPIConnector (source reads + destination writes)
+├── file/                    # GenericFileConnector + storage backends (file / s3 kinds)
+│   ├── generic.py           # GenericFileConnector (destination writes)
+│   ├── backend.py           # BaseStorageBackend: the storage transport seam
+│   └── local_backend.py     # LocalFileStorage
+└── stdout/                  # GenericStdoutConnector
+    └── generic.py           # GenericStdoutConnector (destination writes)
 
 src/
 ├── shared/                  # Engine-local helpers
 │   └── run_id.py
 │
 ├── destination/             # Destination side (see destination-config.md)
-│   ├── connectors/              # File / Stream handlers
-│   ├── formatters/              # JSONL / CSV / Parquet
-│   ├── storage/                 # Local file storage
 │   └── server.py                # gRPC server
 │
 ├── engine/                  # Core engine
@@ -65,7 +69,7 @@ src/
 │   ├── readable.py              # WorkerReadable (engine-side client)
 │   ├── source_service.py        # Worker-side read loop
 │   ├── proxy.py / shell.py / spawn.py / bootstrap.py
-│   └── __init__.py              # build_worker_registries (kind + connector_id resolution)
+│   └── __init__.py              # package docstring only; the worker binds no connector class
 │
 ├── state/                   # Fault tolerance
 │   ├── state_manager.py
@@ -389,20 +393,40 @@ the full CDK contract.
 ## Connector Registries
 
 Connector classes are resolved through `ConnectorRegistry`
-(`cdk/cdk/registry.py`), constructed by `build_registries(...)`. There
+(`cdk/cdk/registry.py`), constructed by `build_registries()`. There
 is no `HandlerRegistry`.
 
-Both registries are built in one place: `build_worker_registries` in
-`src/worker/__init__.py`, inside the spawned worker subprocess, because
+The engine binds no connector class. Every kind default is a CDK generic
+class named once in `cdk.registry.KIND_DEFAULTS`, which maps a kind to a
+`module:ClassName` string plus the extra that importing it needs:
+
+| kind | kind default | extra |
+|------|--------------|-------|
+| `database` | `cdk.sql.generic:GenericSQLConnector` | `arrow` |
+| `api` | `cdk.api.generic:GenericAPIConnector` | `api` |
+| `file` | `cdk.file.generic:GenericFileConnector` | `file` |
+| `s3` | `cdk.file.generic:GenericFileConnector` | `file` |
+| `stdout` | `cdk.stdout.generic:GenericStdoutConnector` | `arrow` |
+
+The table holds strings, not classes, so reading the kind vocabulary costs
+no transport: only resolving a kind imports one, and a kind whose transport
+is absent fails naming the extra to install. `build_registries()` seeds both
+registries from that one table, and **which roles a kind serves is read off
+the class**, never declared beside it — a class is registered as a source
+default iff it satisfies `Readable` and as a destination default iff it
+satisfies `Writable` (`cdk/cdk/contract.py`). So `file`, `s3` and `stdout`
+have no source default at all, and a `kind: file` source fails loud instead
+of resolving a class with no read path.
+
+`build_registries()` is called inside the spawned worker subprocess, because
 that is where connector classes execute. The engine process holds only the
 `WorkerReadable` client and never loads connector code.
 
-The built-ins are the generic kind defaults — `database` and `api` seed
-`GenericSQLConnector` and `GenericAPIConnector` into both registries, and
-`file` / `s3` / `stdout` seed the engine-local destination handlers.
-Externally installed connector packages add themselves through the
+Externally installed connector packages add themselves on top through the
 `analitiq.source_connectors` and `analitiq.destination_connectors`
-entry-point groups.
+entry-point groups. A package states its roles by which groups it registers
+under; a kind default states them through the Protocols its class
+implements.
 
 ## Structured Logging
 

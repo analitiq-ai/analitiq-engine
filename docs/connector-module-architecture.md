@@ -173,18 +173,20 @@ implemented in the CDK and wired into the engine. Each note records the shipped
 reality.
 
 1. **The code layer is pluggable.** The hardcoded handler dict is gone.
-   `ConnectorRegistry` + `build_registries(..., discover=True)`
+   `ConnectorRegistry` + `build_registries(discover=True)`
    (`cdk/cdk/registry.py`) keep a `kind` → connector-class map for each role and
    discover externally pip-installed connectors via setuptools entry points
-   (`analitiq.source_connectors` / `analitiq.destination_connectors`). Built-ins
-   are seeded explicitly first (always available, works in editable installs and
-   under pytest); entry-point discovery is additive and best-effort (a broken
-   plugin is logged and skipped, never fatal). The worker subprocess
-   (`build_worker_registries` in `src/worker/__init__.py`) is the one caller of
-   `build_registries`, seeding `{"database": GenericSQLConnector, "api":
-   GenericAPIConnector}` into both the source and the destination registry and
-   discovering the rest; the engine process holds only the `WorkerReadable`
-   client. A duplicate `kind` raises rather than silently shadowing.
+   (`analitiq.source_connectors` / `analitiq.destination_connectors`). Kind
+   defaults are seeded first from `KIND_DEFAULTS` (always available, works in
+   editable installs and under pytest, because it depends on no package
+   metadata); entry-point discovery is additive and best-effort (a broken
+   plugin is logged and skipped, never fatal). Every kind default is a CDK
+   generic class, and which registry it lands in is read off the class's own
+   capability Protocols rather than declared beside it, so a write-only kind
+   has no source default. The worker subprocess is the one caller of
+   `build_registries`, because that is where connector classes execute; the
+   engine process holds only the `WorkerReadable` client and imports no
+   connector. A duplicate `kind` raises rather than silently shadowing.
 2. **Introspection operations exist.** `list_schemas` / `list_tables` /
    `list_columns` ship in the CDK (`cdk/cdk/sql/discovery.py`, exposed on
    `GenericSQLConnector`), running `INFORMATION_SCHEMA` queries over the same
@@ -527,7 +529,11 @@ installed packages are discovered additively.
    because the engine keeps a registry per role, but a connector registers the
    same class in both: one class serves the system in both directions, and the
    conformance suite refuses a connector that registers two, because a split
-   there is exactly how the two directions drift apart.
+   there is exactly how the two directions drift apart. The CDK's own kind
+   defaults obey the same one-class rule without an entry point to state it:
+   the class named in `KIND_DEFAULTS` is registered as a source default iff it
+   satisfies `Readable` and as a destination default iff it satisfies
+   `Writable`, so the roles are read off the code the CDK owns.
 
    ```toml
    # connectors/postgresql/pyproject.toml
@@ -537,9 +543,8 @@ installed packages are discovered additively.
    database = "analitiq_connector_postgresql.connector:PostgresConnector"
    ```
 
-2. **Engine discovers it at startup.** `build_registries(..., discover=True)`
-   seeds the built-ins (`{"database": GenericSQLConnector, "api":
-   GenericAPIConnector}`) then scans the
+2. **Engine discovers it at startup.** `build_registries(discover=True)`
+   seeds the CDK's kind defaults from `KIND_DEFAULTS`, then scans the
    `analitiq.source_connectors` / `analitiq.destination_connectors` entry-point
    groups, registering each `ConnectorRegistry` by `kind`. A broken plugin is
    logged and skipped; a duplicate `kind` raises rather than silently shadowing.
