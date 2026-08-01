@@ -56,8 +56,6 @@ from .http import (
     SignedRequest,
     encode_body,
     failure_facts,
-    follow_url,
-    join_url,
 )
 from .page_loop import (
     Fetch,
@@ -73,6 +71,7 @@ from .replication import cursor_param_for, effective_start
 from .request import ParamTable, RequestBuilder, build_write_body
 from .response_schema import apply_read_type_map, records_items_schema
 from .strategies import Resolve, build_strategy, resolve_page_size
+from .urls import follow_url, join_url
 from .verdicts import declared_retry_statuses, read_verdict, write_verdict
 from .write_plan import (
     WRITE_MODE_KEYS,
