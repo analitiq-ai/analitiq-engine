@@ -138,7 +138,7 @@ async def test_serialize_batch_failure_summary_includes_formatter_name():
             return b""
 
         def configure(self, config):
-            pass
+            """Accept any config: this fake exists for serialize_batch alone."""
 
     handler = GenericFileConnector()
     handler._connected = True

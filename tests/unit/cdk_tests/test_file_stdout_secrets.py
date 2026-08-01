@@ -104,9 +104,8 @@ class TestFileConnectorSecretRetention:
         with patch(
             "cdk.file.generic.get_storage_backend",
             return_value=mock_storage,
-        ):
-            with pytest.raises(ValueError, match="path invalid"):
-                await handler.connect(runtime)
+        ), pytest.raises(ValueError, match="path invalid"):
+            await handler.connect(runtime)
 
         # Secrets must be scrubbed even on failure
         assert runtime._resolved_config is None
@@ -212,9 +211,8 @@ class TestStdoutConnectorSecretRetention:
         with patch(
             "cdk.stdout.generic.get_formatter",
             side_effect=ValueError("unknown format"),
-        ):
-            with pytest.raises(ValueError, match="unknown format"):
-                await handler.connect(runtime)
+        ), pytest.raises(ValueError, match="unknown format"):
+            await handler.connect(runtime)
 
         # Secrets must be scrubbed even on failure
         assert runtime._resolved_config is None

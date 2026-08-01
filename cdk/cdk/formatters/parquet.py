@@ -111,7 +111,8 @@ class ParquetFormatter(BaseFormatter):
         data: bytes = buffer.getvalue().to_pybytes()
         return data
 
-    def _prepare_records(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    @staticmethod
+    def _prepare_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """
         Prepare records for Parquet conversion.
 
