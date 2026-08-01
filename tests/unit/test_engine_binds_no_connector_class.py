@@ -68,11 +68,21 @@ def _violations(path: Path) -> list[str]:
     tree = ast.parse(path.read_text(), filename=str(path))
     found = []
     for module, name, lineno in _imported_targets(tree):
-        if module in _FORBIDDEN_MODULES:
-            if name is None or name in _FORBIDDEN_NAMES:
-                found.append(
-                    f"{path}:{lineno}: imports {module}" + (f".{name}" if name else "")
-                )
+        if not module.split(".")[0] == "cdk":
+            continue
+        # Two ways to reach a kind default, and the audit has to see both.
+        # Naming the defining module is one. The other is the family's own
+        # surface -- ``cdk.api`` and ``cdk.stdout`` re-export their class --
+        # so matching only the defining module would let through the exact
+        # line this invariant was written to keep out.
+        reaches_module = module in _FORBIDDEN_MODULES and (
+            name is None or name in _FORBIDDEN_NAMES
+        )
+        reaches_name = name in _FORBIDDEN_NAMES
+        if reaches_module or reaches_name:
+            found.append(
+                f"{path}:{lineno}: imports {module}" + (f".{name}" if name else "")
+            )
     return found
 
 
@@ -109,6 +119,18 @@ def test_the_gate_catches_a_reintroduced_connector_import(tmp_path: Path) -> Non
     submodule_form = tmp_path / "submodule_form.py"
     submodule_form.write_text("from cdk.stdout import generic\n")
     assert _violations(submodule_form)
+
+    # The family surface. This is the exact line #432 deleted from
+    # src/worker/__init__.py, and matching only the defining module let it
+    # back in -- the one regression the audit exists to catch.
+    for source in (
+        "from cdk.api import GenericAPIConnector\n",
+        "from cdk.stdout import GenericStdoutConnector\n",
+        "from cdk.sql import GenericSQLConnector\n",
+    ):
+        surface_form = tmp_path / "surface_form.py"
+        surface_form.write_text(source)
+        assert _violations(surface_form), source
 
     allowed = tmp_path / "allowed.py"
     allowed.write_text(

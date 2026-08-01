@@ -67,6 +67,11 @@ class ConformanceTarget:
     declared_capabilities: SqlCapabilities | None
     type_mapper: TypeMapper | None
     connector_class: type | None
+    #: Why ``connector_class`` is ``None`` despite the kind having a
+    #: default -- the transport extra is absent from this install. A check
+    #: that needs the class reports this instead of skipping, so "not
+    #: installed here" never reads as "this kind is inapplicable".
+    class_unavailable: str | None = None
 
     def declared_transports(self) -> dict[str, dict[str, Any]]:
         """Return transport blocks with ``transport_defaults`` merged.
@@ -236,8 +241,14 @@ def _entry_point_class(group: str, connector_id: str) -> type | None:
 
 def _resolve_connector_class(
     connector_id: str, kind: str, class_path: str | None
-) -> type | None:
+) -> tuple[type | None, str | None]:
     """Resolve the class the way the engine registry would.
+
+    Returns the class and, when the kind HAS a default this install
+    cannot import, the reason it could not. Those are different answers:
+    ``(None, None)`` says the CDK ships no default for the kind, and
+    ``(None, reason)`` says it ships one that this environment lacks the
+    transport for.
 
     Explicit ``class_path`` wins (for running the suite before the
     package is installed); then the installed entry points; then the
@@ -260,7 +271,7 @@ def _resolve_connector_class(
     checks skipped, not fail to load.
     """
     if class_path:
-        return _load_class(class_path)
+        return _load_class(class_path), None
     loaded = {
         group: cls
         for group in (SOURCE_GROUP, DESTINATION_GROUP)
@@ -274,16 +285,20 @@ def _resolve_connector_class(
             f"entry-point group ({names}); one class serves both roles"
         )
     if classes:
-        return classes.pop()
+        return classes.pop(), None
     if kind.lower() not in KIND_DEFAULTS:
-        return None
+        return None, None
     try:
-        return load_kind_default(kind)
+        return load_kind_default(kind), None
     except MissingExtraError as err:
-        raise ConformanceSetupError(
-            f"running the conformance suite against a kind {kind!r} "
-            f"connector needs its transport: {err}"
-        ) from err
+        # Not a setup error. Every check that reads the class is gated on
+        # the kind it applies to, so demanding a transport those checks
+        # never touch would replace a run's real verdict -- which checks
+        # apply, which pass -- with one import failure at fixture setup.
+        # The reason travels on the target instead, so a check that DOES
+        # need the class reports "not installed here" rather than skipping
+        # as though the kind were inapplicable.
+        return None, str(err)
 
 
 def _load_type_mapper(definition_dir: Path, connector_id: str) -> TypeMapper | None:
@@ -349,6 +364,9 @@ def load_target(
     except SqlCapabilitiesError as err:
         raise ConformanceSetupError(str(err)) from err
 
+    connector_class, class_unavailable = _resolve_connector_class(
+        connector_id, kind, class_path
+    )
     return ConformanceTarget(
         root=root,
         definition_dir=definition_dir,
@@ -357,5 +375,6 @@ def load_target(
         kind=kind,
         declared_capabilities=capabilities,
         type_mapper=_load_type_mapper(definition_dir, connector_id),
-        connector_class=_resolve_connector_class(connector_id, kind, class_path),
+        connector_class=connector_class,
+        class_unavailable=class_unavailable,
     )

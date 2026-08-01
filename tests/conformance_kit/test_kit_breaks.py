@@ -1055,6 +1055,11 @@ class TestAKindDefaultWithoutItsExtra:
     connector's suite does not fail to start over one it never touches. A
     connector whose transport is genuinely absent has to say which extra it
     needs rather than resolve no class and report itself inapplicable.
+
+    It says so on the target rather than by refusing to load one. Every
+    check that reads the class is gated on the kind it applies to, so
+    raising here would replace a run's real verdict -- which checks apply,
+    which pass -- with one import failure at fixture setup.
     """
 
     @staticmethod
@@ -1085,11 +1090,19 @@ class TestAKindDefaultWithoutItsExtra:
     ) -> None:
         monkeypatch.setattr(cdk.registry, "import_module", self._refuse(missing))
 
-        with pytest.raises(
-            ConformanceSetupError, match=rf"analitiq-cdk\[{extra}\]"
-        ) as exc:
-            _resolve_connector_class("not-installed", kind, None)
-        assert missing in str(exc.value)
+        cls, reason = _resolve_connector_class("not-installed", kind, None)
+        assert cls is None
+        assert reason is not None
+        assert f"analitiq-cdk[{extra}]" in reason
+        assert missing in reason
+
+    def test_a_kind_with_no_default_reads_differently_from_one_uninstalled(
+        self,
+    ) -> None:
+        # Two ways to have no class, and a check that needs one has to be
+        # able to tell them apart: the CDK ships nothing for this kind,
+        # versus it ships something this install cannot import.
+        assert _resolve_connector_class("not-installed", "redis", None) == (None, None)
 
     def test_a_broken_install_is_not_relabelled_as_a_missing_extra(
         self, monkeypatch: pytest.MonkeyPatch
