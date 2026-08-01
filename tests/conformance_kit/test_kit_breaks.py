@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 from _pytest.outcomes import Skipped
 
+import cdk.registry
 from cdk.conformance import (
     check_declaration_consistency,
     check_override_surface,
@@ -25,7 +26,11 @@ from cdk.conformance import (
     load_target,
 )
 from cdk.conformance import target as target_module
-from cdk.conformance.target import ConformanceSetupError, ConformanceTarget
+from cdk.conformance.target import (
+    ConformanceSetupError,
+    ConformanceTarget,
+    _resolve_connector_class,
+)
 from cdk.conformance.tier1 import test_rendering as kit_rendering
 from cdk.sql.capabilities import SqlCapabilities
 from cdk.sql.dialects import SqlDialect, TableAddress
@@ -1043,27 +1048,57 @@ class TestAnApiTargetSkipsTheSqlChecks:
             _ = target.dialect
 
 
-class TestAnApiTargetWithoutTheApiExtra:
-    def test_it_names_the_extra_instead_of_dying_on_the_import(self) -> None:
-        # The conformance extra deliberately does not pull the HTTP
-        # transport, so a database connector's suite does not fail to start
-        # over one it never touches. An api connector's run has to say what
-        # it needs rather than resolve no class and report itself
-        # inapplicable.
-        import builtins
+class TestAKindDefaultWithoutItsExtra:
+    """Every kind's default names its own extra, not just api's.
 
-        from cdk.conformance.target import _generic_class_for
+    The conformance extra deliberately pulls no transport, so a database
+    connector's suite does not fail to start over one it never touches. A
+    connector whose transport is genuinely absent has to say which extra it
+    needs rather than resolve no class and report itself inapplicable.
+    """
 
-        real_import = builtins.__import__
+    @staticmethod
+    def _refuse(missing: str) -> Any:
+        """A stand-in for the import machinery with one package absent.
 
-        def refuse(name: str, *args: Any, **kwargs: Any) -> Any:
-            if name == "cdk.api":
-                raise ImportError("No module named 'aiohttp'")
-            return real_import(name, *args, **kwargs)
+        ``ImportError.name`` is set the way the real machinery sets it,
+        because that is the discriminator ``cdk._extras`` uses to tell an
+        absent extra from a broken install.
+        """
 
-        builtins.__import__ = refuse
-        try:
-            with pytest.raises(ConformanceSetupError, match=r"analitiq-cdk\[api\]"):
-                _generic_class_for("api")
-        finally:
-            builtins.__import__ = real_import
+        def _import(module_name: str) -> Any:
+            raise ModuleNotFoundError(f"No module named {missing!r}", name=missing)
+
+        return _import
+
+    @pytest.mark.parametrize(
+        ("kind", "missing", "extra"),
+        [
+            ("api", "aiohttp", "api"),
+            ("file", "aiofiles", "file"),
+            ("s3", "aiofiles", "file"),
+            ("stdout", "pyarrow", "arrow"),
+        ],
+    )
+    def test_it_names_the_extra_instead_of_dying_on_the_import(
+        self, monkeypatch: pytest.MonkeyPatch, kind: str, missing: str, extra: str
+    ) -> None:
+        monkeypatch.setattr(cdk.registry, "import_module", self._refuse(missing))
+
+        with pytest.raises(
+            ConformanceSetupError, match=rf"analitiq-cdk\[{extra}\]"
+        ) as exc:
+            _resolve_connector_class("not-installed", kind, None)
+        assert missing in str(exc.value)
+
+    def test_a_broken_install_is_not_relabelled_as_a_missing_extra(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A present-but-broken pyarrow fails on one of its own submodules.
+        # Calling that "install the extra" would send the operator chasing a
+        # package they already have.
+        monkeypatch.setattr(cdk.registry, "import_module", self._refuse("pyarrow.lib"))
+
+        with pytest.raises(ModuleNotFoundError) as exc:
+            _resolve_connector_class("not-installed", "database", None)
+        assert exc.value.name == "pyarrow.lib"

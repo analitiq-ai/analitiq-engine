@@ -13,18 +13,25 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from functools import cached_property
-from importlib import import_module, metadata
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 
-from cdk.registry import DESTINATION_GROUP, SOURCE_GROUP
+from cdk._extras import MissingExtraError
+from cdk.registry import (
+    DESTINATION_GROUP,
+    KIND_DEFAULTS,
+    SOURCE_GROUP,
+    ConnectorClassError,
+    load_class,
+    load_kind_default,
+)
 from cdk.sql.capabilities import (
     SqlCapabilities,
     SqlCapabilitiesError,
     parse_declared_capabilities,
 )
 from cdk.sql.dialects import SqlDialect
-from cdk.sql.generic import GenericSQLConnector
 from cdk.transport_factory import merged_transports
 from cdk.type_map.exceptions import InvalidTypeMapError
 from cdk.type_map.loader import build_type_mapper, read_raw_type_maps
@@ -49,7 +56,7 @@ class ConformanceTarget:
     ``connector_class`` is the class the registry would resolve: the
     package's own entry-point class when one is installed, else the
     CDK's generic fallback for the kind (the thin path), else ``None``
-    for kinds whose generic classes live outside the CDK.
+    for a kind the CDK ships no default for.
     """
 
     root: Path
@@ -165,33 +172,23 @@ def _resolve_definition_dir(root: Path) -> Path:
 
 
 def _load_class(class_path: str) -> type:
-    """Import a ``module:Class`` reference."""
-    module_name, sep, attr = class_path.partition(":")
-    if not sep or not module_name or not attr:
-        raise ConformanceSetupError(
-            f"connector class reference {class_path!r} must be "
-            f"'package.module:ClassName'"
-        )
+    """Import a ``module:Class`` reference, as a setup error when it fails.
+
+    The grammar itself lives in ``cdk.registry`` — the kit and the engine
+    registry resolve the same references, and two parsers for one grammar
+    is where they diverge. Only the re-labelling is the kit's own: an
+    unusable ``--connector-class`` is a setup problem, not a finding.
+    """
+    module_name = class_path.partition(":")[0]
     try:
-        module = import_module(module_name)
+        return load_class(class_path)
+    except ConnectorClassError as err:
+        raise ConformanceSetupError(str(err)) from err
     except ImportError as err:
         raise ConformanceSetupError(
             f"cannot import {module_name!r} for connector class "
             f"{class_path!r}: {err}"
         ) from err
-    try:
-        cls = getattr(module, attr)
-    except AttributeError as err:
-        raise ConformanceSetupError(
-            f"module {module_name!r} has no attribute {attr!r} "
-            f"(from connector class reference {class_path!r})"
-        ) from err
-    if not isinstance(cls, type):
-        raise ConformanceSetupError(
-            f"connector class reference {class_path!r} resolves to "
-            f"{cls!r}, which is not a class"
-        )
-    return cls
 
 
 def _entry_point_class(group: str, connector_id: str) -> type | None:
@@ -244,63 +241,49 @@ def _resolve_connector_class(
 
     Explicit ``class_path`` wins (for running the suite before the
     package is installed); then the installed entry points; then the
-    CDK's generic fallback for the kind. A kind with no generic class
-    in the CDK and no entry point resolves to ``None`` and the
-    class-level checks skip.
+    CDK's generic default for the kind — read from the same
+    ``cdk.registry.KIND_DEFAULTS`` table the engine registry seeds, so
+    what the suite audits is what production loads, for every kind
+    rather than for database alone.
 
-    Both entry-point groups are always loaded: the engine keeps
-    separate source and destination registries, and a
-    registered-but-broken source entry point would otherwise fall back
-    silently to the generic class in production while the suite went
-    green against the destination class. The two groups must agree —
-    one class serves both roles, and a split would let them drift.
+    Both entry-point groups are loaded and must agree. One class serves
+    both roles, so there is nothing to prefer between them: a connector
+    that registers two is refused rather than audited through whichever
+    one the kit happened to look at first, which is how the two
+    directions drift apart while the suite stays green.
+
+    ``None`` only for a kind the CDK ships no default for. The kind
+    vocabulary is owned by the published schema and open to
+    registry-discovered kinds (see
+    :func:`~cdk.conformance.declaration._database_shaped_kind_mismatch`),
+    so a genuinely new kind must pass through with its class-level
+    checks skipped, not fail to load.
     """
     if class_path:
         return _load_class(class_path)
-    loaded: dict[str, type] = {}
-    for group in (DESTINATION_GROUP, SOURCE_GROUP):
-        cls = _entry_point_class(group, connector_id)
-        if cls is not None:
-            loaded[group] = cls
-    if loaded:
-        classes = set(loaded.values())
-        if len(classes) > 1:
-            names = {group: cls.__name__ for group, cls in loaded.items()}
-            raise ConformanceSetupError(
-                f"connector {connector_id!r} registers different classes per "
-                f"entry-point group ({names}); one class serves both roles"
-            )
-        return loaded.get(DESTINATION_GROUP) or next(iter(loaded.values()))
-    return _generic_class_for(kind)
-
-
-def _generic_class_for(kind: str) -> type | None:
-    """Return the CDK's generic connector for *kind*, or ``None``.
-
-    The api entry is imported on demand: the ``conformance`` extra does not
-    pull aiohttp, and a database connector's suite must not fail to start
-    over a transport it never touches.
-    """
-    if kind == "database":
-        return GenericSQLConnector
-    if kind == "api":
-        try:
-            from cdk.api import GenericAPIConnector
-        except ImportError as err:
-            # The conformance extra deliberately does not pull the HTTP
-            # transport -- a database connector's suite must not fail to
-            # start over one it never touches. So an api connector's run
-            # says which extra it needs, rather than dying on an import
-            # trace or, worse, resolving no class and reporting the suite
-            # as inapplicable.
-            raise ConformanceSetupError(
-                "running the conformance suite against a kind 'api' connector "
-                "needs the API transport; install analitiq-cdk[api] alongside "
-                f"analitiq-cdk[conformance] ({err})"
-            ) from err
-
-        return GenericAPIConnector
-    return None
+    loaded = {
+        group: cls
+        for group in (SOURCE_GROUP, DESTINATION_GROUP)
+        if (cls := _entry_point_class(group, connector_id)) is not None
+    }
+    classes = set(loaded.values())
+    if len(classes) > 1:
+        names = {group: cls.__name__ for group, cls in loaded.items()}
+        raise ConformanceSetupError(
+            f"connector {connector_id!r} registers different classes per "
+            f"entry-point group ({names}); one class serves both roles"
+        )
+    if classes:
+        return classes.pop()
+    if kind.lower() not in KIND_DEFAULTS:
+        return None
+    try:
+        return load_kind_default(kind)
+    except MissingExtraError as err:
+        raise ConformanceSetupError(
+            f"running the conformance suite against a kind {kind!r} "
+            f"connector needs its transport: {err}"
+        ) from err
 
 
 def _load_type_mapper(definition_dir: Path, connector_id: str) -> TypeMapper | None:

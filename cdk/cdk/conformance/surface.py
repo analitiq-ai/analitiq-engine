@@ -320,7 +320,9 @@ def check_override_surface(target: ConformanceTarget) -> list[Violation]:
     Applies to ``kind: database`` connectors that ship their own class;
     a thin connector running on the CDK generic class defines nothing
     and passes vacuously. Non-database kinds are out of this check's
-    scope (their base classes live outside the CDK).
+    scope: their base class is ``BaseDestinationHandler``, not
+    ``GenericSQLConnector``, so the SQL facade's sanctioned surface says
+    nothing about what they may override.
     """
     if not target.is_database or target.connector_class is None:
         return []

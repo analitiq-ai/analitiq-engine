@@ -7,39 +7,7 @@ owns the connector class, the driver, and every external connection; it
 never sees the secret store, the config volume, or the engine's state —
 everything it may use arrived resolved in the bootstrap.
 
-Registry seeding lives here (not in the engine) because the worker is
-where connector classes execute. Built-ins are the generic kind defaults;
-installed connector packages add themselves via entry points.
+The engine binds no connector class. Every kind default is the CDK's own
+generic connector, registered from ``cdk.registry.KIND_DEFAULTS``; the
+worker resolves through that registry and imports no connector itself.
 """
-
-from __future__ import annotations
-
-from cdk.registry import ConnectorRegistry, build_registries
-
-
-def build_worker_registries() -> tuple[ConnectorRegistry, ConnectorRegistry]:
-    """Seed the kind defaults and discover installed connector packages."""
-    # Imports are local so importing src.worker stays cheap for the shells
-    # (they only need the spawn helpers, not the handler graph).
-    from cdk.api import GenericAPIConnector
-    from cdk.file.generic import GenericFileConnector
-    from cdk.sql.generic import GenericSQLConnector
-    from cdk.stdout.generic import GenericStdoutConnector
-
-    # ``database`` and ``api`` seed the same class in both registries: one
-    # connector serves read and write for those kinds, so a role-specific
-    # answer here would be a place for the two directions to drift.
-    return build_registries(
-        source_builtins={
-            "database": GenericSQLConnector,
-            "api": GenericAPIConnector,
-        },
-        destination_builtins={
-            "database": GenericSQLConnector,
-            "api": GenericAPIConnector,
-            "stdout": GenericStdoutConnector,
-            "file": GenericFileConnector,
-            "s3": GenericFileConnector,
-        },
-        discover=True,
-    )

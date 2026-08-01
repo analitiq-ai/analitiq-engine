@@ -4,9 +4,9 @@ The engine and the cloud control-plane both need to turn a connection's
 connector reference into a concrete class. Resolution happens in two steps
 (ADR §7, "Resolve by kind, then connector_id"):
 
-1. ``kind`` (``database`` / ``api`` / ``file`` / ``stdout``) selects the
-   family and provides the **generic fallback** class for connectors that
-   ship no code of their own (the thin path).
+1. ``kind`` (the keys of :data:`KIND_DEFAULTS`) selects the family and
+   provides the **generic fallback** class for connectors that ship no code
+   of their own (the thin path).
 2. ``connector_id`` (``postgres``, ``mysql``, ``xero``, ...) selects the
    concrete class when the connector package ships one (the thick path).
    Per-system quirks live in that class — the generic fallback never
@@ -14,10 +14,10 @@ connector reference into a concrete class. Resolution happens in two steps
 
 The registry is populated two ways:
 
-* **Kind defaults** — built-in generic classes baked into the image are
-  seeded by the host at startup (``register_default``). This is the
-  always-available path; it does not depend on package metadata, so it works
-  for an in-tree / editable install and under pytest.
+* **Kind defaults** — the CDK's own generic classes, named once in
+  :data:`KIND_DEFAULTS` and registered by :func:`build_registries`. This is
+  the always-available path; it does not depend on package metadata, so it
+  works for an in-tree / editable install and under pytest.
 * **Connector packages** — pip-installed connector packages advertise their
   class under a setuptools entry-point group whose entry **name is the
   connector_id** (``discover_entry_points``). Best-effort: a
@@ -25,17 +25,23 @@ The registry is populated two ways:
   broken connector cannot take the engine down at startup.
 
 Source and destination connectors are tracked in **separate** registries
-(separate entry-point groups) because a connector package states the two
-roles separately: a package may advertise itself for reading only, for
-writing only, or for both, and which class serves a role is the package's
-answer to give. A kind whose generic connector serves both roles seeds the
-same class into both registries.
+(separate entry-point groups) because a connector may serve one role or
+both. The two populations state their roles differently, and deliberately:
+a **connector package** states them through the two entry-point groups (the
+package's answer to give), while a **kind default** states them through the
+capability Protocols its class implements (``cdk.contract``), because the
+CDK owns that class and reading the answer off it is what stops a
+hand-written table from disagreeing with the code.
 """
 
 from __future__ import annotations
 
 import logging
-from importlib import metadata
+from dataclasses import dataclass
+from importlib import import_module, metadata
+
+from ._extras import reraise_for_missing_extra
+from .contract import Readable, Writable
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +49,129 @@ logger = logging.getLogger(__name__)
 # the entry-point name is the connector_id.
 SOURCE_GROUP = "analitiq.source_connectors"
 DESTINATION_GROUP = "analitiq.destination_connectors"
+
+
+@dataclass(frozen=True)
+class KindDefault:
+    """The CDK's generic connector for one kind, and what importing it needs.
+
+    ``class_path`` is a ``module:ClassName`` string rather than a class:
+    importing this module must not import a transport. ``cdk.registry`` is
+    imported by ``cdk.conformance.target`` for the entry-point group
+    constants, under an extra that ships no aiohttp — a table of class
+    objects would make every consumer of the registry pay for every
+    transport the CDK can speak.
+
+    ``extra`` / ``modules`` are what ``cdk._extras`` needs to tell a
+    genuinely-absent extra apart from a broken install, so a missing
+    transport names the extra to install for every kind, not just for api.
+    """
+
+    class_path: str
+    extra: str
+    modules: tuple[str, ...]
+
+
+#: kind -> the CDK's generic connector. The single authority for what serves
+#: a kind: the engine registry seeds from it and the conformance kit resolves
+#: through it, so what the suite audits is what production loads. Which roles
+#: a kind's class serves is NOT declared here — it is read off the class's
+#: own ``Readable`` / ``Writable`` Protocols (see :func:`build_registries`).
+KIND_DEFAULTS: dict[str, KindDefault] = {
+    "database": KindDefault(
+        "cdk.sql.generic:GenericSQLConnector", "arrow", ("pyarrow",)
+    ),
+    "api": KindDefault(
+        "cdk.api.generic:GenericAPIConnector",
+        "api",
+        ("aiohttp", "aiohttp_retry", "orjson", "pyarrow"),
+    ),
+    "file": KindDefault(
+        "cdk.file.generic:GenericFileConnector", "file", ("aiofiles", "pyarrow")
+    ),
+    "s3": KindDefault(
+        "cdk.file.generic:GenericFileConnector", "file", ("aiofiles", "pyarrow")
+    ),
+    "stdout": KindDefault(
+        "cdk.stdout.generic:GenericStdoutConnector", "arrow", ("pyarrow",)
+    ),
+}
+
+
+class ConnectorClassError(ImportError):
+    """A ``module:ClassName`` reference does not name a class.
+
+    Subclasses ``ImportError`` because that is what failing to load a class
+    is; the distinct type lets the conformance kit re-label it as a setup
+    error without catching every import failure in the process.
+    """
+
+
+class UnknownConnectorKindError(KeyError):
+    """The CDK ships no generic connector for a kind."""
+
+    def __init__(self, kind: str, known: list[str]) -> None:
+        self.kind = kind
+        super().__init__(
+            f"the CDK ships no generic connector for kind {kind!r}; "
+            f"kinds with a default: {', '.join(known) or '(none)'}"
+        )
+
+
+def load_class(class_path: str) -> type:
+    """Import the class named by a ``module:ClassName`` reference.
+
+    The grammar is defined once here because two callers resolve it — the
+    kind-default table and the conformance kit's ``--connector-class``
+    override — and two parsers for one grammar is where they diverge.
+    ``ImportError`` from the module import propagates untouched: only the
+    caller knows whether a missing module means "install this extra" or
+    "your class reference is wrong".
+    """
+    module_name, sep, attr = class_path.partition(":")
+    if not sep or not module_name or not attr:
+        raise ConnectorClassError(
+            f"connector class reference {class_path!r} must be "
+            f"'package.module:ClassName'"
+        )
+    module = import_module(module_name)
+    try:
+        cls = getattr(module, attr)
+    except AttributeError as err:
+        raise ConnectorClassError(
+            f"module {module_name!r} has no attribute {attr!r} "
+            f"(from connector class reference {class_path!r})"
+        ) from err
+    if not isinstance(cls, type):
+        raise ConnectorClassError(
+            f"connector class reference {class_path!r} resolves to "
+            f"{cls!r}, which is not a class"
+        )
+    return cls
+
+
+def load_kind_default(kind: str) -> type:
+    """Import and return the CDK's generic connector for *kind*.
+
+    A kind with no default fails naming every kind that has one. A default
+    whose transport is not installed fails naming the extra — the answer
+    ``cdk.api`` hand-wrote for one kind, now given uniformly, so no kind
+    gets a worse error than another for the same intent.
+    """
+    entry = KIND_DEFAULTS.get(kind.lower())
+    if entry is None:
+        raise UnknownConnectorKindError(kind, sorted(KIND_DEFAULTS))
+    try:
+        return load_class(entry.class_path)
+    except ConnectorClassError:
+        raise
+    except ImportError as exc:
+        reraise_for_missing_extra(
+            exc,
+            feature=f"the {kind!r} kind default ({entry.class_path})",
+            extra=entry.extra,
+            modules=entry.modules,
+        )
 
 
 class ConnectorNotRegisteredError(KeyError):
@@ -212,23 +341,38 @@ def _entry_points(group: str) -> tuple[metadata.EntryPoint, ...]:
 
 
 def build_registries(
-    *,
-    source_builtins: dict[str, type] | None = None,
-    destination_builtins: dict[str, type] | None = None,
-    discover: bool = True,
+    *, discover: bool = True
 ) -> tuple[ConnectorRegistry, ConnectorRegistry]:
     """Build the (source, destination) registries.
 
-    Built-ins are the **kind defaults** (always available), registered first;
-    connector packages are then discovered from entry points (additive,
+    Every kind default is the CDK's own generic class, seeded from one
+    table: a kind has one connector, and which roles it serves is read off
+    the class rather than declared a second time. Two hand-written maps
+    that had to agree by hand were the place the two directions drifted
+    apart (issue #431), and a table that seeded both registries blindly
+    would hand a file *source* a class with no read path — a default that
+    hides a wiring defect. The Protocols answer both at once.
+
+    Connector packages are then discovered from entry points (additive,
     best-effort) when *discover* is set.
     """
     source = ConnectorRegistry("source")
     destination = ConnectorRegistry("destination")
-    for kind, cls in (source_builtins or {}).items():
-        source.register_default(kind, cls)
-    for kind, cls in (destination_builtins or {}).items():
-        destination.register_default(kind, cls)
+    for kind in KIND_DEFAULTS:
+        cls = load_kind_default(kind)
+        roles = []
+        if issubclass(cls, Readable):
+            source.register_default(kind, cls)
+            roles.append("source")
+        if issubclass(cls, Writable):
+            destination.register_default(kind, cls)
+            roles.append("destination")
+        if not roles:
+            raise ConnectorClassError(
+                f"the kind default for {kind!r} ({cls.__module__}."
+                f"{cls.__name__}) implements neither Readable nor Writable, "
+                f"so no registry can serve it"
+            )
     if discover:
         source.discover_entry_points(SOURCE_GROUP)
         destination.discover_entry_points(DESTINATION_GROUP)

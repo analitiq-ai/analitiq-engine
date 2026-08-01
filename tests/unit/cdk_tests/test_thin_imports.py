@@ -1,15 +1,16 @@
-"""The SQL control-plane surface imports without the ``arrow``/``api`` extras.
+"""The thin CDK surface imports without the ``arrow`` / ``api`` / ``file`` extras.
 
-``cdk.sql`` (discovery + standalone ``create_table``) and the string-only
-``cdk.type_map`` surface must stay importable when neither ``pyarrow`` nor
-``aiohttp`` is installed -- that is the whole point of making them optional
-extras (a control-plane process introspects schemas and creates tables without
-the columnar streaming weight).
+``cdk.sql`` (discovery + standalone ``create_table``), the string-only
+``cdk.type_map`` surface and ``cdk.registry`` (the kind vocabulary) must stay
+importable when none of ``pyarrow``, ``aiohttp`` or ``aiofiles`` is installed
+-- that is the whole point of making them optional extras (a control-plane
+process introspects schemas and creates tables without the columnar streaming
+weight).
 
-We cannot uninstall pyarrow/aiohttp from the test venv, so each case runs in a
-fresh subprocess that installs a meta-path finder blocking those modules
-*before* importing ``cdk``. The lazy (PEP 562) accessors must therefore raise
-``ModuleNotFoundError`` only when actually touched, never at package import.
+We cannot uninstall those packages from the test venv, so each case runs in a
+fresh subprocess that installs a meta-path finder blocking them *before*
+importing ``cdk``. The lazy (PEP 562) accessors and the kind-default resolver
+must therefore raise only when actually touched, never at package import.
 """
 
 from __future__ import annotations
@@ -27,13 +28,14 @@ import pytest
 # inherit that, so hand it the same source dir.
 _CDK_SRC = str(Path(__file__).resolve().parents[3] / "cdk")
 
-# Prologue: block ``pyarrow`` and ``aiohttp`` (and any submodule) at import
-# time, exactly as a thin ``analitiq-cdk`` install without the extras would.
+# Prologue: block ``pyarrow``, ``aiohttp`` and ``aiofiles`` (and any
+# submodule) at import time, exactly as a thin ``analitiq-cdk`` install
+# without the extras would.
 _BLOCK = textwrap.dedent(
     """
     import sys
 
-    _BLOCKED = ("pyarrow", "aiohttp")
+    _BLOCKED = ("pyarrow", "aiohttp", "aiofiles")
 
     class _Blocker:
         def find_spec(self, name, path=None, target=None):
@@ -144,6 +146,94 @@ class TestThinControlPlaneImports:
                 assert "analitiq-cdk[api]" in str(exc), str(exc)
             else:
                 raise AssertionError("the connector resolved with aiohttp blocked")
+
+            print("OK")
+            """
+        )
+        assert result.returncode == 0, result.stderr
+        assert "OK" in result.stdout
+
+    def test_cdk_registry_imports_without_any_extra(self):
+        """The kind table costs nothing to read.
+
+        ``cdk.registry`` is what the conformance kit and the control-plane
+        import for the entry-point groups and the kind vocabulary. Holding
+        class *objects* in ``KIND_DEFAULTS`` would make every one of those
+        consumers pay for every transport the CDK can speak -- this is the
+        assertion that stops it.
+        """
+        result = _run(
+            """
+            import cdk.registry as reg
+
+            for name in (
+                "KIND_DEFAULTS", "KindDefault", "build_registries",
+                "load_kind_default", "load_class", "ConnectorRegistry",
+                "ConnectorNotRegisteredError", "ConnectorClassError",
+                "UnknownConnectorKindError",
+                "SOURCE_GROUP", "DESTINATION_GROUP",
+            ):
+                assert hasattr(reg, name), name
+
+            # Reading the table is free; only resolving a kind costs a
+            # transport, and every kind names the extra it would need.
+            assert set(reg.KIND_DEFAULTS) == {
+                "database", "api", "file", "s3", "stdout"
+            }
+            for kind, entry in reg.KIND_DEFAULTS.items():
+                assert ":" in entry.class_path, kind
+                assert entry.extra and entry.modules, kind
+
+            print("OK")
+            """
+        )
+        assert result.returncode == 0, result.stderr
+        assert "OK" in result.stdout
+
+    def test_every_kind_default_names_its_own_extra_when_blocked(self):
+        """A missing transport names the extra to install, for every kind."""
+        result = _run(
+            """
+            from cdk._extras import MissingExtraError
+            from cdk.registry import load_kind_default
+
+            for kind, extra in (
+                ("database", "arrow"),
+                ("api", "api"),
+                ("file", "file"),
+                ("s3", "file"),
+                ("stdout", "arrow"),
+            ):
+                try:
+                    load_kind_default(kind)
+                except MissingExtraError as exc:
+                    assert f"analitiq-cdk[{extra}]" in str(exc), (kind, str(exc))
+                    assert kind in str(exc), (kind, str(exc))
+                else:
+                    raise AssertionError(f"{kind} resolved with its extra blocked")
+
+            print("OK")
+            """
+        )
+        assert result.returncode == 0, result.stderr
+        assert "OK" in result.stdout
+
+    def test_load_kind_default_rejects_an_unknown_kind(self):
+        """A kind the CDK ships no default for names every kind that has one."""
+        result = _run(
+            """
+            from cdk.registry import KIND_DEFAULTS, UnknownConnectorKindError
+            from cdk.registry import load_kind_default
+
+            try:
+                load_kind_default("redis")
+            except UnknownConnectorKindError as exc:
+                message = str(exc)
+                assert "redis" in message, message
+                for known in KIND_DEFAULTS:
+                    assert known in message, (known, message)
+            else:
+                raise AssertionError("an unknown kind resolved a class")
 
             print("OK")
             """
