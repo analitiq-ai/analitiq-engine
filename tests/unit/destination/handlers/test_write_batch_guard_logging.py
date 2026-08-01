@@ -22,10 +22,10 @@ import pyarrow as pa
 import pytest
 
 from cdk.api import GenericAPIConnector
+from cdk.file.generic import GenericFileConnector
 from cdk.sql.generic import GenericSQLConnector
+from cdk.stdout.generic import GenericStdoutConnector
 from cdk.types import AckStatus, Cursor, FailureCategory
-from src.destination.connectors.file import FileDestinationHandler
-from src.destination.connectors.stream import StreamDestinationHandler
 from src.worker.proxy import WorkerProxyHandler
 
 RUN_ID = "run-guard"
@@ -65,34 +65,34 @@ def _assert_rejection_logged(caplog: pytest.LogCaptureFixture) -> str:
     return message
 
 
-def _disconnected_file() -> FileDestinationHandler:
-    handler = FileDestinationHandler()
+def _disconnected_file() -> GenericFileConnector:
+    handler = GenericFileConnector()
     handler._connected = False
     return handler
 
 
-def _uninitialized_file() -> FileDestinationHandler:
+def _uninitialized_file() -> GenericFileConnector:
     """Connected, but connect() never built the components."""
-    handler = FileDestinationHandler()
+    handler = GenericFileConnector()
     handler._connected = True
     handler._storage = None
     handler._formatter = None
     return handler
 
 
-def _disconnected_stream() -> StreamDestinationHandler:
-    handler = StreamDestinationHandler()
+def _disconnected_stream() -> GenericStdoutConnector:
+    handler = GenericStdoutConnector()
     handler._connected = False
     return handler
 
 
-def _formatterless_stream() -> StreamDestinationHandler:
+def _formatterless_stream() -> GenericStdoutConnector:
     """Connected, but connect() never built the formatter.
 
     The other arm of the same guard as ``_disconnected_stream`` -- the two
     report different reasons, so both need pinning.
     """
-    handler = StreamDestinationHandler()
+    handler = GenericStdoutConnector()
     handler._connected = True
     handler._formatter = None
     return handler

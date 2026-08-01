@@ -48,8 +48,8 @@ class CsvFormatter(BaseFormatter):
             "quoting": self._config.get("quoting", csv.QUOTE_MINIMAL),
         }
 
+    @staticmethod
     def _get_fieldnames(
-        self,
         records: list[dict[str, Any]],
         schema: dict[str, Any] | None = None,
     ) -> list[str]:
@@ -114,7 +114,8 @@ class CsvFormatter(BaseFormatter):
 
         return output.getvalue().encode("utf-8")
 
-    def _format_value(self, value: Any) -> str:
+    @staticmethod
+    def _format_value(value: Any) -> str:
         """
         Format a value for CSV output.
 

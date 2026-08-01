@@ -9,7 +9,7 @@ controls, its built-in value, and how to override it.
 |---|---|---|
 | Engine defaults (code) | [`src/config/settings.py`](../src/config/settings.py) | The single source for every engine + infrastructure default, with its environment-variable override. |
 | Per-pipeline runtime | `pipelines/{pipeline_id}/pipeline.json` -> `runtime` block | Per-pipeline overrides of the runtime-tuning defaults. |
-| Connector / formatter defaults | each connector package, and the destination formatters under `src/destination/formatters/` | Connector- and format-specific defaults. The engine stays connector-agnostic, so these live with their owner, not here. |
+| Connector / formatter defaults | each connector package, and the CDK's batch formatters under `cdk/cdk/formatters/` | Connector- and format-specific defaults. The engine stays connector-agnostic, so these live with their owner, not here. |
 
 ## How a value is resolved
 
@@ -87,4 +87,4 @@ the engine stays connector-agnostic. Examples: the source API connector's
 incremental `safety_window_seconds` (`120`), API request timeout/retries, and
 the destination formatter defaults (CSV delimiter, Parquet compression and row
 group size, JSONL options). Find them in the connector package and in
-`src/destination/formatters/`.
+`cdk/cdk/formatters/`.

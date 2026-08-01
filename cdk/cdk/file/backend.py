@@ -132,8 +132,8 @@ class BaseStorageBackend(ABC):
         """
         pass
 
+    @staticmethod
     def build_path(
-        self,
         base_path: str,
         stream_id: str,
         batch_seq: int,

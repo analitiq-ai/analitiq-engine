@@ -1,7 +1,7 @@
-"""File destination handler for writing to the local filesystem.
+"""The CDK's generic file connector: writes batches to a storage backend.
 
-This handler writes records to files using configurable formatters and a
-local storage backend.
+The connector serializes each batch through a configurable formatter and
+hands the bytes to the storage backend its connector kind resolves to.
 """
 
 import hashlib
@@ -10,25 +10,18 @@ from datetime import datetime
 from string import Formatter
 from typing import Any
 
-from cdk.base_handler import (
+from ..base_handler import (
     BaseDestinationHandler,
     BatchRejected,
     BatchWriteResult,
     LandingBatch,
 )
-from cdk.connection_runtime import ConnectionRuntime
-from cdk.types import (
-    AckStatus,
-    FailureCategory,
-    RetrySemantics,
-    RetryVerdict,
-    SchemaSpec,
-)
-
+from ..connection_runtime import ConnectionRuntime
 from ..formatters import get_formatter
 from ..formatters.base import BaseFormatter
-from ..storage import get_storage_backend
-from ..storage.base import BaseStorageBackend
+from ..types import AckStatus, FailureCategory, RetrySemantics, RetryVerdict, SchemaSpec
+from . import get_storage_backend
+from .backend import BaseStorageBackend
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +69,7 @@ def _is_stamped_utc(value: object) -> bool:
     )
 
 
-class FileDestinationHandler(BaseDestinationHandler):
+class GenericFileConnector(BaseDestinationHandler):
     """
     Destination handler that writes records to files.
 
@@ -212,7 +205,7 @@ class FileDestinationHandler(BaseDestinationHandler):
 
         self._connected = True
         logger.info(
-            "FileDestinationHandler connected: storage=%s, format=%s",
+            "GenericFileConnector connected: storage=%s, format=%s",
             storage.storage_type,
             file_format,
         )
@@ -224,7 +217,7 @@ class FileDestinationHandler(BaseDestinationHandler):
         if self._runtime:
             await self._runtime.close()
         self._connected = False
-        logger.info("FileDestinationHandler disconnected")
+        logger.info("GenericFileConnector disconnected")
 
     # skipcq PYL-R0201: configure_schema is abstract on
     # BaseDestinationHandler and a member of the Writable protocol, so the
@@ -242,7 +235,7 @@ class FileDestinationHandler(BaseDestinationHandler):
         can look up the contract endpoint via ``set_stream_endpoints``.
         """
         logger.info(
-            "FileDestinationHandler: schema accepted for stream %s",
+            "GenericFileConnector: schema accepted for stream %s",
             schema_spec.stream_id,
         )
         return True

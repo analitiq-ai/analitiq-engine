@@ -12,8 +12,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pyarrow as pa
 import pytest
 
-from src.destination.connectors.file import FileDestinationHandler
-from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
+from cdk.file.generic import GenericFileConnector
+from cdk.types import AckStatus, Cursor
 
 # A fixed, timezone-aware emit instant for write_batch/send_batch calls; the
 # engine stamps this per batch (issue #353). Value is arbitrary for sinks
@@ -21,8 +21,8 @@ from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 _EMITTED_AT = datetime(2026, 7, 21, 9, 0, 0, tzinfo=timezone.utc)
 
 
-def _handler_with_formatter_returning(data) -> FileDestinationHandler:
-    handler = FileDestinationHandler()
+def _handler_with_formatter_returning(data) -> GenericFileConnector:
+    handler = GenericFileConnector()
     handler._connected = True
     handler._formatter = MagicMock()
     handler._formatter.serialize_batch = MagicMock(return_value=data)
@@ -138,9 +138,9 @@ async def test_serialize_batch_failure_summary_includes_formatter_name():
             return b""
 
         def configure(self, config):
-            pass
+            """Accept any config: this fake exists for serialize_batch alone."""
 
-    handler = FileDestinationHandler()
+    handler = GenericFileConnector()
     handler._connected = True
     handler._formatter = MyBrokenFormatter()
     handler._storage = MagicMock()

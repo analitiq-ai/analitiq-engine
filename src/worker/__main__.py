@@ -17,7 +17,7 @@ import asyncio
 import logging
 import sys
 
-from src.worker import build_worker_registries
+from cdk.registry import build_registries
 from src.worker.bootstrap import WorkerBootstrap, read_bootstrap_from_stdin
 
 logger = logging.getLogger("src.worker")
@@ -27,7 +27,7 @@ async def _run_destination(bootstrap: WorkerBootstrap) -> int:
     """Serve the destination role for the bootstrap's connector."""
     from src.destination.server import DestinationGRPCServer
 
-    _, destination_registry = build_worker_registries()
+    _, destination_registry = build_registries()
     handler_cls = destination_registry.resolve(bootstrap.kind, bootstrap.connector_id)
     handler = handler_cls()
     logger.info(
@@ -59,7 +59,7 @@ async def _run_source(bootstrap: WorkerBootstrap) -> int:
     )
     from src.worker.source_service import SourceWorkerServicer
 
-    source_registry, _ = build_worker_registries()
+    source_registry, _ = build_registries()
     readable_cls = source_registry.resolve(bootstrap.kind, bootstrap.connector_id)
     readable = readable_cls()
     logger.info(

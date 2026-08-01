@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.destination.formatters.csv import CsvFormatter
+from cdk.formatters.csv import CsvFormatter
 
 RECORDS = [
     {"id": 1, "name": "Alice", "active": True},

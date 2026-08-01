@@ -1,7 +1,7 @@
 """A registered destination kind with no storage backend says so (issue #424).
 
-``s3`` is a planned destination kind: the worker registry routes it to
-``FileDestinationHandler`` exactly like ``file``, but no S3 storage backend
+``s3`` is a planned destination kind: the destination registry routes it to
+``GenericFileConnector`` exactly like ``file``, but no S3 storage backend
 exists yet. The operator must learn that from one message naming the kind and
 the missing backend -- not from a lookup failure deep in a storage registry
 they have no reason to know exists.
@@ -14,10 +14,10 @@ from unittest.mock import AsyncMock
 import pytest
 
 from cdk.connection_runtime import ConnectionRuntime
-from src.destination.connectors.file import FileDestinationHandler
-from src.destination.storage import StorageBackendNotBuiltError
-from src.destination.storage.local import LocalFileStorage
-from src.worker import build_worker_registries
+from cdk.file import StorageBackendNotBuiltError
+from cdk.file.generic import GenericFileConnector
+from cdk.file.local_backend import LocalFileStorage
+from cdk.registry import build_registries
 
 
 def _runtime(kind: str, config: dict[str, object]) -> ConnectionRuntime:
@@ -34,11 +34,11 @@ def _runtime(kind: str, config: dict[str, object]) -> ConnectionRuntime:
 class TestPlannedKindWithoutBackend:
     @pytest.mark.asyncio
     async def test_s3_destination_refuses_to_connect(self):
-        """The kind the worker registry hands the file handler is refused at
+        """The kind the destination registry hands the file connector is refused at
         connect, through the same registry a pipeline resolves it with."""
-        _, registry = build_worker_registries()
+        _, registry = build_registries()
         handler = registry.create("s3", "my-bucket")
-        assert isinstance(handler, FileDestinationHandler)
+        assert isinstance(handler, GenericFileConnector)
 
         with pytest.raises(StorageBackendNotBuiltError) as excinfo:
             await handler.connect(_runtime("s3", {"prefix": "data/"}))
@@ -63,7 +63,7 @@ class TestPlannedKindWithoutBackend:
         process exists, so the credentials were fetched long before connect().
         """
         runtime = _runtime("s3", {"prefix": "data/"})
-        handler = FileDestinationHandler()
+        handler = GenericFileConnector()
 
         with pytest.raises(StorageBackendNotBuiltError):
             await handler.connect(runtime)
@@ -78,7 +78,7 @@ class TestPlannedKindWithoutBackend:
     ):
         """The refusal is scoped to the unbuilt kind: ``file`` still resolves
         the local filesystem backend and connects."""
-        _, registry = build_worker_registries()
+        _, registry = build_registries()
         handler = registry.create("file", "csvbox")
 
         await handler.connect(_runtime("file", {"path": str(tmp_path)}))

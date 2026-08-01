@@ -28,8 +28,8 @@ For the connection / connector schema itself, see
                              |
 +-----------------------------------------------------------+
 |                  HANDLER LAYER (orchestration)            |
-| GenericSQLConnector         GenericAPIConnector          |
-| FileDestinationHandler      StreamDestinationHandler      |
+| GenericSQLConnector    GenericAPIConnector                |
+| GenericFileConnector   GenericStdoutConnector             |
 +-----------------------------------------------------------+
                              |
               +--------------+--------------+
@@ -56,28 +56,27 @@ the same way: one connect, one HTTP round trip, one classification of what a
 response status means, one paging loop. What varies between an API read and
 an API write is the endpoint document's `operations` block, not the class.
 
-Handler source lives under `src/destination/`:
-
-- `connectors/` — the handlers whose implementation is engine-local.
-  - `file.py` — `FileDestinationHandler`.
-  - `stream.py` — `StreamDestinationHandler` (stdout).
-- `formatters/` — JSONL / CSV / Parquet serializers.
-- `storage/` — local filesystem backend.
-- `server.py` — gRPC server.
-
-The database and API families live in the CDK at `cdk/cdk/`, alongside the
-shared building blocks:
+Every connector family lives in the CDK at `cdk/cdk/`, alongside the shared
+building blocks. The engine keeps only the gRPC server that fronts them
+(`src/destination/server.py`):
 
 - `sql/generic.py` — `GenericSQLConnector` (the database handler).
 - `api/generic.py` — `GenericAPIConnector` (the API handler, and the API
   source).
+- `file/generic.py` — `GenericFileConnector` (the `file` and `s3` kinds).
+- `stdout/generic.py` — `GenericStdoutConnector`.
+- `file/backend.py` + `file/local_backend.py` — `BaseStorageBackend`, the
+  storage transport seam, and the local filesystem backend behind it.
+- `formatters/` — JSONL / CSV / Parquet serializers. Top-level rather than
+  inside `file/` because the stdout family serializes batches too, and
+  nesting the vocabulary under one family would make the other import it.
 - `base_handler.py` — `BaseDestinationHandler` ABC and `BatchWriteResult`.
 - `schema_contract.py` — Arrow-based `SchemaContract`.
 - `type_map/mapper.py` — `TypeMapper`, the canonical-Arrow <-> native-type
   mapper driven by the connector's own type maps.
 - `sql/ddl.py` — `build_create_table_sql`, which renders each column's
   canonical type through `SqlDialect.render_column_type`.
-- `registry.py` — `ConnectorRegistry` / `build_registries`.
+- `registry.py` — `ConnectorRegistry` / `KIND_DEFAULTS` / `build_registries`.
 
 ## Environment Variables
 
@@ -108,31 +107,36 @@ local config volume — they are **never** transmitted over gRPC.
 
 Handlers are mapped by the connector's `connector_type` (its *kind*). Both
 registries — source and destination — are built in one place,
-`build_worker_registries` in `src/worker/__init__.py`, because the worker
-subprocess is where connector classes execute. Nothing else builds one: the
-engine and the destination service hold clients, not connector code.
+`build_registries()` in `cdk/cdk/registry.py`, called inside the worker
+subprocess because that is where connector classes execute. Nothing else
+builds one: the engine and the destination service hold clients, not
+connector code.
 
-Built-in kind defaults:
+Kind defaults, named once in `cdk.registry.KIND_DEFAULTS`:
 
 | `connector_type` | Handler | Use Case |
 |------------------|---------|----------|
 | `database` | `GenericSQLConnector` | All SQL dialects via SQLAlchemy or ADBC (PostgreSQL, MySQL, Snowflake, BigQuery, Redshift) |
 | `api` | `GenericAPIConnector` | REST endpoints |
-| `file` | `FileDestinationHandler` | Local filesystem |
-| `s3` | `FileDestinationHandler` | Object storage — planned; refused at connect until its storage backend exists |
-| `stdout` | `StreamDestinationHandler` | Diagnostics / debugging |
+| `file` | `GenericFileConnector` | Local filesystem |
+| `s3` | `GenericFileConnector` | Object storage — planned; refused at connect until its storage backend exists |
+| `stdout` | `GenericStdoutConnector` | Diagnostics / debugging |
 
-`database` and `api` seed the same class into both registries. A kind whose
-one system is read and written by one class has no role-specific answer to
-give here, and offering one would be a place for the two directions to
-drift apart.
+One class serves a kind, and it is registered into the registries whose
+capability Protocol it implements: source iff `Readable`, destination iff
+`Writable` (`cdk/cdk/contract.py`). `database` and `api` therefore seed the
+same object into both, while `file`, `s3` and `stdout` seed the destination
+registry only — a `kind: file` *source* raises
+`ConnectorNotRegisteredError` rather than resolving a class with no read
+path. Reading the answer off the class is what keeps a hand-written table
+from disagreeing with the code it describes.
 
 Externally installed connector packages add themselves through the
 `analitiq.destination_connectors` entry-point group (discovered at
 registry build time).
 
 The set of runnable connector kinds is owned by the worker registry:
-a kind that is neither a built-in default nor registry-discovered fails
+a kind that is neither a kind default nor registry-discovered fails
 at worker startup with `ConnectorNotRegisteredError`
 (`cdk/cdk/registry.py`); neither the engine nor the CDK pins a parallel
 kind enum.
@@ -218,14 +222,14 @@ optional `rate_limit`.
 
 ### File destination
 
-`file` and `s3` connector types are routed to `FileDestinationHandler`.
+`file` and `s3` connector types are routed to `GenericFileConnector`.
 The connection config defines `path` (or `prefix`), `file_format`, and an
 optional `path_template` for partitioning. Format-specific options
 (`compression`, `delimiter`, etc.) are passed through the formatter
 config.
 
 The connector kind picks the storage backend that performs the write
-(`src/destination/storage/__init__.py`). Only `file` has one — the local
+(`cdk/cdk/file/__init__.py`). Only `file` has one — the local
 filesystem. `s3` is a registered but unbuilt kind, so an `s3` destination
 raises `StorageBackendNotBuiltError` at the top of `connect()`, before the
 runtime is acquired and before any storage connection is opened; the
@@ -421,8 +425,8 @@ are in
 |-------------|---------------|
 | New SQL dialect (SQLAlchemy or ADBC transport) | 0 lines (point a connector at it) |
 | New API endpoint | 0 lines (write a connector + endpoints) |
-| New storage backend (e.g. GCS) | New class in `src/destination/storage/` |
-| New formatter (e.g. Avro) | New class in `src/destination/formatters/` |
+| New storage backend (e.g. a network share) | New class in `cdk/cdk/file/`, registered in that package's backend table |
+| New formatter (e.g. Avro) | New class in `cdk/cdk/formatters/` |
 | Brand-new handler family | Subclass `BaseDestinationHandler` and publish the class in the `analitiq.destination_connectors` entry-point group |
 
 ### What a new handler implements

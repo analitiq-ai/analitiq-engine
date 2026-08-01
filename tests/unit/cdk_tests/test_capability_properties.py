@@ -8,9 +8,9 @@ cannot create a relation or truncate it; a SQL destination can.
 import pytest
 
 from cdk.api import GenericAPIConnector
+from cdk.file.generic import GenericFileConnector
 from cdk.sql.generic import GenericSQLConnector
-from src.destination.connectors.file import FileDestinationHandler
-from src.destination.connectors.stream import StreamDestinationHandler
+from cdk.stdout.generic import GenericStdoutConnector
 
 
 @pytest.mark.unit
@@ -18,8 +18,8 @@ class TestCapabilityProperties:
     @pytest.mark.parametrize(
         "handler",
         [
-            StreamDestinationHandler(),
-            FileDestinationHandler(),
+            GenericStdoutConnector(),
+            GenericFileConnector(),
             GenericAPIConnector(),
         ],
     )

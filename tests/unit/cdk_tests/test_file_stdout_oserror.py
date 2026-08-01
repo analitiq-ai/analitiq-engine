@@ -1,4 +1,4 @@
-"""OSError errno classification tests for file/stream destinations.
+"""OSError errno classification tests for the file and stdout destinations.
 
 Disk-full, permission, EROFS, and EPIPE are not recoverable by retry —
 classifying them as RETRYABLE would burn the DLQ budget and mask the
@@ -18,10 +18,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pyarrow as pa
 import pytest
 
-from cdk.types import FailureCategory
-from src.destination.connectors.file import FileDestinationHandler
-from src.destination.connectors.stream import StreamDestinationHandler
-from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
+from cdk.file.generic import GenericFileConnector
+from cdk.stdout.generic import GenericStdoutConnector
+from cdk.types import AckStatus, Cursor, FailureCategory
+
+# Derived from the subject, never hand-written: a stale literal here selects
+# no records at all, and an assertion over an empty list is the quiet kind of
+# pass that hides a broken test.
+_FILE_LOGGER = GenericFileConnector.__module__
 
 # A fixed, timezone-aware emit instant for write_batch/send_batch calls; the
 # engine stamps this per batch (issue #353). Value is arbitrary for sinks
@@ -37,7 +41,7 @@ def _cursor() -> Cursor:
     return Cursor(token=b"")
 
 
-async def _drive_file(handler: FileDestinationHandler, raise_exc: BaseException):
+async def _drive_file(handler: GenericFileConnector, raise_exc: BaseException):
     handler._connected = True
     handler._formatter = MagicMock()
     handler._formatter.serialize_batch = MagicMock(return_value=b"data\n")
@@ -59,11 +63,11 @@ async def _drive_file(handler: FileDestinationHandler, raise_exc: BaseException)
     )
 
 
-async def _drive_stream(handler: StreamDestinationHandler, raise_exc: BaseException):
+async def _drive_stream(handler: GenericStdoutConnector, raise_exc: BaseException):
     handler._connected = True
     handler._formatter = MagicMock()
     handler._formatter.serialize_batch = MagicMock(return_value=b"data\n")
-    with patch("src.destination.connectors.stream.sys") as fake_sys:
+    with patch("cdk.stdout.generic.sys") as fake_sys:
         fake_sys.stdout = MagicMock()
         fake_sys.stdout.buffer = MagicMock()
         fake_sys.stdout.buffer.write = MagicMock(side_effect=raise_exc)
@@ -98,7 +102,7 @@ FATAL_ERRNOS = [
 async def test_file_handler_fatal_errnos(errno_code):
     """Closed pipe, disk-full, permission, read-only fs, quota, bad fd."""
     exc = OSError(errno_code, "fatal i/o")
-    result = await _drive_file(FileDestinationHandler(), exc)
+    result = await _drive_file(GenericFileConnector(), exc)
     assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
     assert result.success is False
     assert errno.errorcode[errno_code] in result.failure_summary
@@ -109,8 +113,8 @@ async def test_file_handler_fatal_errnos(errno_code):
 async def test_both_sinks_judge_an_errno_the_same_way(errno_code):
     """One table, so neither sink can call fatal what the other retries."""
     exc = OSError(errno_code, "fatal i/o")
-    file_result = await _drive_file(FileDestinationHandler(), exc)
-    stream_result = await _drive_stream(StreamDestinationHandler(), exc)
+    file_result = await _drive_file(GenericFileConnector(), exc)
+    stream_result = await _drive_stream(GenericStdoutConnector(), exc)
     assert file_result.status == stream_result.status
     assert file_result.failure_category == stream_result.failure_category
 
@@ -125,7 +129,7 @@ async def test_a_failed_write_says_who_owns_it(errno_code):
     them looking for a full volume or a permissions problem that is not
     there.
     """
-    result = await _drive_file(FileDestinationHandler(), OSError(errno_code, "x"))
+    result = await _drive_file(GenericFileConnector(), OSError(errno_code, "x"))
     expected = (
         FailureCategory.FAILURE_CATEGORY_INTERNAL
         if errno_code == errno.EBADF
@@ -138,14 +142,14 @@ async def test_a_failed_write_says_who_owns_it(errno_code):
 async def test_file_handler_eio_is_retryable():
     """Transient I/O errors (EIO) should stay RETRYABLE."""
     exc = OSError(errno.EIO, "transient")
-    result = await _drive_file(FileDestinationHandler(), exc)
+    result = await _drive_file(GenericFileConnector(), exc)
     assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
 
 
 @pytest.mark.asyncio
 async def test_file_handler_non_oserror_is_fatal():
     """Programming errors (KeyError, TypeError, …) become FATAL."""
-    result = await _drive_file(FileDestinationHandler(), KeyError("missing"))
+    result = await _drive_file(GenericFileConnector(), KeyError("missing"))
     assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
     assert "KeyError" in result.failure_summary
 
@@ -156,7 +160,7 @@ async def test_stream_handler_fatal_errnos(errno_code):
     """Closed pipe, disk-full on redirect, permission, bad-fd: never
     recoverable by retry."""
     exc = OSError(errno_code, "fatal stdout")
-    result = await _drive_stream(StreamDestinationHandler(), exc)
+    result = await _drive_stream(GenericStdoutConnector(), exc)
     assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
     assert result.success is False
 
@@ -164,7 +168,7 @@ async def test_stream_handler_fatal_errnos(errno_code):
 @pytest.mark.asyncio
 async def test_stream_handler_eio_is_retryable():
     exc = OSError(errno.EIO, "transient stdout")
-    result = await _drive_stream(StreamDestinationHandler(), exc)
+    result = await _drive_stream(GenericStdoutConnector(), exc)
     assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
 
 
@@ -172,7 +176,7 @@ async def test_stream_handler_eio_is_retryable():
 async def test_stream_handler_no_errno_oserror_is_retryable():
     """OSError with no errno renders 'unknown' not 'None' in failure_summary."""
     exc = OSError("connection reset with no errno")
-    result = await _drive_stream(StreamDestinationHandler(), exc)
+    result = await _drive_stream(GenericStdoutConnector(), exc)
     assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
     assert "None" not in result.failure_summary
     assert "unknown" in result.failure_summary
@@ -180,15 +184,15 @@ async def test_stream_handler_no_errno_oserror_is_retryable():
 
 @pytest.mark.asyncio
 async def test_stream_handler_non_oserror_is_fatal():
-    result = await _drive_stream(StreamDestinationHandler(), TypeError("bug"))
+    result = await _drive_stream(GenericStdoutConnector(), TypeError("bug"))
     assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
     assert "TypeError" in result.failure_summary
 
 
 @pytest.mark.asyncio
 async def test_stream_handler_to_pylist_arrow_invalid_is_fatal():
-    """ArrowInvalid from to_pylist in stream handler must not propagate — FATAL."""
-    handler = StreamDestinationHandler()
+    """ArrowInvalid from to_pylist in the stdout connector is FATAL, not a raise."""
+    handler = GenericStdoutConnector()
     handler._connected = True
     handler._formatter = MagicMock()
     mock_batch = MagicMock(spec=pa.RecordBatch)
@@ -209,12 +213,12 @@ async def test_stream_handler_to_pylist_arrow_invalid_is_fatal():
 
 
 def _make_file_handler():
-    """Return a wired FileDestinationHandler for early write_batch path tests.
+    """Return a wired GenericFileConnector for early write_batch path tests.
 
     Verifies that to_pylist is caught by the try/except rather than
     propagating.
     """
-    handler = FileDestinationHandler()
+    handler = GenericFileConnector()
     handler._connected = True
     handler._formatter = MagicMock()
     handler._formatter.serialize_batch = MagicMock(return_value=b"data\n")
@@ -270,7 +274,7 @@ async def test_to_pylist_memory_error_is_fatal():
 
 
 async def _drive_file_with_context(
-    handler: FileDestinationHandler, raise_exc: BaseException
+    handler: GenericFileConnector, raise_exc: BaseException
 ):
     """Like _drive_file but with distinct batch identity values for log assertions."""
     handler._connected = True
@@ -296,7 +300,7 @@ async def _drive_file_with_context(
 
 def _assert_batch_context_in_log(caplog):
     """Assert one ERROR record from file.py carries the batch identity fields."""
-    logger_name = "src.destination.connectors.file"
+    logger_name = _FILE_LOGGER
     msgs = [
         r.getMessage()
         for r in caplog.records
@@ -312,14 +316,14 @@ def _assert_batch_context_in_log(caplog):
 async def test_file_handler_fatal_errno_log_includes_batch_context(caplog):
     """Fatal OSError log must include run_id, stream_id, batch_seq."""
     exc = OSError(errno.ENOSPC, "disk full")
-    with caplog.at_level(logging.ERROR, logger="src.destination.connectors.file"):
-        await _drive_file_with_context(FileDestinationHandler(), exc)
+    with caplog.at_level(logging.ERROR, logger=_FILE_LOGGER):
+        await _drive_file_with_context(GenericFileConnector(), exc)
 
     _assert_batch_context_in_log(caplog)
     assert any(
         "ENOSPC" in r.getMessage()
         for r in caplog.records
-        if r.levelno == logging.ERROR and r.name == "src.destination.connectors.file"
+        if r.levelno == logging.ERROR and r.name == _FILE_LOGGER
     )
 
 
@@ -327,8 +331,8 @@ async def test_file_handler_fatal_errno_log_includes_batch_context(caplog):
 async def test_file_handler_retryable_oserror_log_includes_batch_context(caplog):
     """Retryable OSError log must include run_id, stream_id, batch_seq."""
     exc = OSError(errno.EIO, "transient")
-    with caplog.at_level(logging.ERROR, logger="src.destination.connectors.file"):
-        await _drive_file_with_context(FileDestinationHandler(), exc)
+    with caplog.at_level(logging.ERROR, logger=_FILE_LOGGER):
+        await _drive_file_with_context(GenericFileConnector(), exc)
 
     _assert_batch_context_in_log(caplog)
 
@@ -336,7 +340,7 @@ async def test_file_handler_retryable_oserror_log_includes_batch_context(caplog)
 @pytest.mark.asyncio
 async def test_file_handler_non_oserror_log_includes_batch_context(caplog):
     """Catch-all Exception log must include run_id, stream_id, batch_seq."""
-    with caplog.at_level(logging.ERROR, logger="src.destination.connectors.file"):
-        await _drive_file_with_context(FileDestinationHandler(), KeyError("missing"))
+    with caplog.at_level(logging.ERROR, logger=_FILE_LOGGER):
+        await _drive_file_with_context(GenericFileConnector(), KeyError("missing"))
 
     _assert_batch_context_in_log(caplog)

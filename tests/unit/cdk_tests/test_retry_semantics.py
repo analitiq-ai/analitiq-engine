@@ -14,12 +14,12 @@ from typing import Any
 import pytest
 
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult
+from cdk.file.generic import GenericFileConnector
 from cdk.sql.dialects import TableAddress
 from cdk.sql.generic import GenericSQLConnector
 from cdk.sql.generic import _StreamState as SqlStreamState
+from cdk.stdout.generic import GenericStdoutConnector
 from cdk.types import Cursor, RetrySemantics, SchemaSpec
-from src.destination.connectors.file import FileDestinationHandler
-from src.destination.connectors.stream import StreamDestinationHandler
 
 
 class _DeclareNothingHandler(BaseDestinationHandler):
@@ -69,12 +69,12 @@ class TestFileAndStdoutVerdicts:
         same bytes, but a same-run restart re-reads the inclusive cursor
         boundary and writes those rows into a new file (issue #306) —
         the verdict must not claim exactly-once."""
-        verdict = FileDestinationHandler().retry_semantics("s1")
+        verdict = GenericFileConnector().retry_semantics("s1")
         assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE
         assert "content-addressed" in verdict.reason
 
     def test_stdout_reports_at_least_once(self):
-        verdict = StreamDestinationHandler().retry_semantics("s1")
+        verdict = GenericStdoutConnector().retry_semantics("s1")
         assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE
         assert "prints" in verdict.reason
 

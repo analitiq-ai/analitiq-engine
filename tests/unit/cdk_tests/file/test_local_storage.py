@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.destination.storage.local import LocalFileStorage
+from cdk.file.local_backend import LocalFileStorage
 
 
 @pytest.fixture
@@ -97,7 +97,7 @@ class TestWriteFile:
 
         with (
             patch(
-                "src.destination.storage.local.aiofiles.open",
+                "cdk.file.local_backend.aiofiles.open",
                 side_effect=OSError(5, "boom"),
             ),
             pytest.raises(OSError, match="boom"),
