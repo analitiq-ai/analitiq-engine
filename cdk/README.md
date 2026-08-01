@@ -29,8 +29,11 @@ seam (Protocol / ABC) the other side implements (`SecretsResolver`,
 - the type-map engine (`type_map/`).
 - the secrets seam + local/in-memory resolvers (`secrets/`).
 - the abstract destination base (`base_handler.py`).
-- the two connector families, one class each serving read and write:
-  `sql/` (`GenericSQLConnector`) and `api/` (`GenericAPIConnector`).
+- the connector families, one class each: `sql/` (`GenericSQLConnector`) and
+  `api/` (`GenericAPIConnector`) serve read and write; `file/`
+  (`GenericFileConnector`, plus the storage backends) and `stdout/`
+  (`GenericStdoutConnector`) write only.
+- the batch serializers the write-only families share (`formatters/`).
 
 ## Dependency tiers (core + extras)
 
@@ -45,7 +48,8 @@ surface never pulls `pyarrow`/`aiohttp`.
 | core (always) | `sqlalchemy`, `pydantic` | SQL control-plane: `cdk.sql` discovery + standalone `create_table`, `ConnectionRuntime`/transport seam, type-map (string surface), secrets |
 | `[arrow]` | `pyarrow` | columnar streaming: `schema_contract`, `sql.adbc_reader`, `type_map.parse_arrow_type`, `GenericSQLConnector` read/write |
 | `[api]` | `aiohttp`, `aiohttp-retry`, `orjson`, `python-dateutil` | HTTP transport plus `GenericAPIConnector`: bounded transport retries, a lossless JSON encoder, and the ISO parser a stored replication cursor is read with |
-| `[streaming]` | `[arrow]` + `[api]` | full connector surface the engine consumes |
+| `[file]` | `aiofiles` + `pyarrow` | the file / s3 destination family (`cdk.file`), which writes through the local filesystem backend |
+| `[streaming]` | `[arrow]` + `[api]` + `[file]` | full connector surface the engine consumes |
 | `[s3]` | `boto3` | `s3://` secret refs (`SchemeSecretsResolver`) |
 | `[conformance]` | `pytest` + `pyarrow` | the connector conformance suite a connector repo runs in its own CI |
 
@@ -62,8 +66,9 @@ dep) is re-raised untouched so the real cause survives.
 
 Directly importing a streaming module that belongs to an extra
 (`cdk.schema_contract`, `cdk.sql.adbc_reader`, `cdk.type_map.arrow`,
-`cdk.sql.generic`, `cdk.base_handler`) without that extra
-raises a plain `ImportError` naming `pyarrow` on the import line — those modules
+`cdk.sql.generic`, `cdk.file.generic`, `cdk.stdout.generic`,
+`cdk.base_handler`) without that extra
+raises a plain `ImportError` naming the missing package on the import line — those modules
 *are* the extra and require it by design; a thin control-plane consumer reaches
 the Arrow surface only through the guarded lazy reexports above, never by
 importing these modules directly.

@@ -1,15 +1,22 @@
-"""Storage backends for file-based destinations.
+"""The CDK's file connector family: one class, one storage backend per kind.
 
 The destination registry routes every file-based connector kind to
-``FileDestinationHandler``; this module turns that kind into the backend
+``GenericFileConnector``; this module turns that kind into the backend
 that performs the write. Kinds are registered ahead of their backends
 (``s3`` is a planned destination alongside ``nosql`` and ``document``), so
 a kind that reaches here with no backend is unbuilt, not misconfigured,
 and must say so in one message the operator can act on.
+
+Registering ``s3`` ahead of its backend is what makes a misdirected ``s3``
+destination refuse *by name* instead of quietly writing to the local disk.
+No object-store client is involved: this family speaks the local
+filesystem only, and pulls no cloud SDK until an object-store backend
+ships.
 """
 
-from .base import BaseStorageBackend
-from .local import LocalFileStorage
+from .backend import BaseStorageBackend
+from .exceptions import StorageBackendNotBuiltError
+from .local_backend import LocalFileStorage
 
 __all__ = [
     "BaseStorageBackend",
@@ -26,28 +33,6 @@ _BACKENDS: dict[str, type[BaseStorageBackend]] = {
 }
 
 
-class StorageBackendNotBuiltError(RuntimeError):
-    """A registered file-based kind whose storage backend does not exist yet.
-
-    Deliberately not a ``ValueError``: nothing the operator writes in the
-    connection can satisfy it, so it must not read as a config error.
-    """
-
-    def __init__(self, kind: str) -> None:
-        self.kind = kind
-        self.backend = f"{kind} storage backend"
-        built = ", ".join(
-            f"{name} ({cls.__name__})" for name, cls in sorted(_BACKENDS.items())
-        )
-        super().__init__(
-            f"destination kind {kind!r} is registered but the {self.backend} "
-            f"that writes its files does not exist yet: it is planned, not "
-            f"misconfigured, so no connection setting enables it. Built "
-            f"storage backends: {built}. Point this destination at a built "
-            f"kind until the {self.backend} ships."
-        )
-
-
 def get_storage_backend(kind: str) -> BaseStorageBackend:
     """Instantiate the storage backend serving the connector *kind*.
 
@@ -62,6 +47,6 @@ def get_storage_backend(kind: str) -> BaseStorageBackend:
     """
     backend_class = _BACKENDS.get(kind.lower())
     if backend_class is None:
-        raise StorageBackendNotBuiltError(kind)
+        raise StorageBackendNotBuiltError(kind, _BACKENDS)
 
     return backend_class()

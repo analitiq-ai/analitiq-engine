@@ -1,11 +1,12 @@
 """Parquet formatter implementation.
 
 Parquet is a columnar storage format optimized for analytics workloads.
-Requires pyarrow: poetry install -E analytics
+Requires pyarrow: ``analitiq-cdk[arrow]``.
 """
 
 from typing import Any
 
+from .._extras import reraise_for_missing_extra
 from .base import BaseFormatter
 
 
@@ -24,7 +25,7 @@ class ParquetFormatter(BaseFormatter):
     - row_group_size: Number of rows per row group. Default: 10000
     - version: Parquet version ('1.0', '2.4', '2.6'). Default: '2.6'
 
-    Requires: pyarrow (install with: poetry install -E analytics)
+    Requires: pyarrow (install with: ``analitiq-cdk[arrow]``)
     """
 
     @property
@@ -43,14 +44,23 @@ class ParquetFormatter(BaseFormatter):
         return "application/vnd.apache.parquet"
 
     def _ensure_pyarrow(self) -> None:
-        """Ensure pyarrow is available."""
+        """Fail with the extra to install, not a bare import trace.
+
+        The engine extra this once named ships pandas and numpy, never
+        pyarrow, so the instruction was unactionable even before the
+        module moved. ``reraise_for_missing_extra`` is what every other
+        lazy Arrow entry in the CDK uses, and it re-raises a *broken*
+        pyarrow install untouched rather than mislabelling it.
+        """
         try:
             import pyarrow  # noqa: F401
-        except ImportError:
-            raise ImportError(
-                "ParquetFormatter requires pyarrow. "
-                "Install with: poetry install -E analytics"
-            ) from None
+        except ImportError as exc:
+            reraise_for_missing_extra(
+                exc,
+                feature="cdk.formatters.ParquetFormatter",
+                extra="arrow",
+                modules=("pyarrow",),
+            )
 
     def serialize_batch(
         self,

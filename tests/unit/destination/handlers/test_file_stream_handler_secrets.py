@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from cdk.connection_runtime import ConnectionRuntime
-from src.destination.connectors.file import FileDestinationHandler
-from src.destination.connectors.stream import StreamDestinationHandler
+from cdk.file.generic import GenericFileConnector
+from cdk.stdout.generic import GenericStdoutConnector
 
 # A fixed, timezone-aware emit instant for write_batch/send_batch calls; the
 # engine stamps this per batch (issue #353). Value is arbitrary for sinks
@@ -36,22 +36,26 @@ def _make_file_runtime(*, raw_config=None):
 
 
 class TestFileHandlerSecretRetention:
-    """Verify FileDestinationHandler does not retain secrets on self._config."""
+    """Verify GenericFileConnector does not retain secrets on self._config."""
 
     @pytest.mark.asyncio
     async def test_config_contains_only_path_and_prefix(self):
         runtime = _make_file_runtime()
-        handler = FileDestinationHandler()
+        handler = GenericFileConnector()
 
         mock_storage = AsyncMock()
         mock_storage.health_check = AsyncMock(return_value=True)
 
         with patch(
-            "src.destination.connectors.file.get_storage_backend",
+            "cdk.file.generic.get_storage_backend",
             return_value=mock_storage,
         ):
             await handler.connect(runtime)
 
+        # Prove the double was the thing that ran: a patch target that no
+        # longer names the lookup site would leave the real backend writing
+        # to the real filesystem, and every assertion below would still pass.
+        mock_storage.connect.assert_awaited_once()
         assert set(handler._config.keys()) == {"path", "prefix"}
         assert handler._config["path"] == "/tmp/output"
         assert handler._config["prefix"] == "data/"
@@ -59,44 +63,46 @@ class TestFileHandlerSecretRetention:
     @pytest.mark.asyncio
     async def test_secret_fields_not_in_config(self):
         runtime = _make_file_runtime()
-        handler = FileDestinationHandler()
+        handler = GenericFileConnector()
 
         mock_storage = AsyncMock()
 
         with patch(
-            "src.destination.connectors.file.get_storage_backend",
+            "cdk.file.generic.get_storage_backend",
             return_value=mock_storage,
         ):
             await handler.connect(runtime)
 
+        mock_storage.connect.assert_awaited_once()
         assert "secret_field" not in handler._config
         assert "MY_SECRET" not in str(handler._config.values())
 
     @pytest.mark.asyncio
     async def test_runtime_resolved_config_scrubbed_after_connect(self):
         runtime = _make_file_runtime()
-        handler = FileDestinationHandler()
+        handler = GenericFileConnector()
 
         mock_storage = AsyncMock()
 
         with patch(
-            "src.destination.connectors.file.get_storage_backend",
+            "cdk.file.generic.get_storage_backend",
             return_value=mock_storage,
         ):
             await handler.connect(runtime)
 
+        mock_storage.connect.assert_awaited_once()
         assert runtime._resolved_config is None
 
     @pytest.mark.asyncio
     async def test_secrets_scrubbed_on_connect_failure(self):
         runtime = _make_file_runtime()
-        handler = FileDestinationHandler()
+        handler = GenericFileConnector()
 
         mock_storage = AsyncMock()
         mock_storage.connect.side_effect = ValueError("path invalid")
 
         with patch(
-            "src.destination.connectors.file.get_storage_backend",
+            "cdk.file.generic.get_storage_backend",
             return_value=mock_storage,
         ):
             with pytest.raises(ValueError, match="path invalid"):
@@ -108,7 +114,7 @@ class TestFileHandlerSecretRetention:
     @pytest.mark.asyncio
     async def test_write_batch_uses_reduced_config(self):
         runtime = _make_file_runtime()
-        handler = FileDestinationHandler()
+        handler = GenericFileConnector()
 
         mock_storage = AsyncMock()
         mock_storage.build_path.return_value = "/tmp/output/stream-1/0.jsonl"
@@ -120,11 +126,11 @@ class TestFileHandlerSecretRetention:
 
         with (
             patch(
-                "src.destination.connectors.file.get_storage_backend",
+                "cdk.file.generic.get_storage_backend",
                 return_value=mock_storage,
             ),
             patch(
-                "src.destination.connectors.file.get_formatter",
+                "cdk.file.generic.get_formatter",
                 return_value=mock_formatter,
             ),
         ):
@@ -152,7 +158,7 @@ class TestFileHandlerSecretRetention:
 
 
 class TestStreamHandlerSecretRetention:
-    """Verify StreamDestinationHandler does not retain secrets on self._config."""
+    """Verify GenericStdoutConnector does not retain secrets on self._config."""
 
     @pytest.mark.asyncio
     async def test_config_is_empty_after_connect(self):
@@ -168,7 +174,7 @@ class TestStreamHandlerSecretRetention:
             driver=None,
             resolver=AsyncMock(resolve=AsyncMock(return_value={"KEY": "secret-key"})),
         )
-        handler = StreamDestinationHandler()
+        handler = GenericStdoutConnector()
         await handler.connect(runtime)
 
         assert handler._config == {}
@@ -183,7 +189,7 @@ class TestStreamHandlerSecretRetention:
             driver=None,
             resolver=AsyncMock(resolve=AsyncMock(return_value={})),
         )
-        handler = StreamDestinationHandler()
+        handler = GenericStdoutConnector()
         await handler.connect(runtime)
 
         assert runtime._resolved_config is None
@@ -201,10 +207,10 @@ class TestStreamHandlerSecretRetention:
             driver=None,
             resolver=AsyncMock(resolve=AsyncMock(return_value={})),
         )
-        handler = StreamDestinationHandler()
+        handler = GenericStdoutConnector()
 
         with patch(
-            "src.destination.connectors.stream.get_formatter",
+            "cdk.stdout.generic.get_formatter",
             side_effect=ValueError("unknown format"),
         ):
             with pytest.raises(ValueError, match="unknown format"):

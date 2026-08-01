@@ -1,35 +1,29 @@
-"""Stream destination handler for stdout output.
+"""The CDK's generic stdout connector: prints batches for inspection.
 
-This handler writes records to stdout, useful for testing and debugging.
-It does not implement idempotency since stdout is not persistent.
+The connector writes serialized records to stdout, which is useful for
+testing and debugging. It does not implement idempotency since stdout is
+not persistent.
 """
 
 import logging
 import sys
 from typing import Any
 
-from cdk.base_handler import (
+from ..base_handler import (
     BaseDestinationHandler,
     BatchRejected,
     BatchWriteResult,
     LandingBatch,
 )
-from cdk.connection_runtime import ConnectionRuntime
-from cdk.types import (
-    AckStatus,
-    FailureCategory,
-    RetrySemantics,
-    RetryVerdict,
-    SchemaSpec,
-)
-
+from ..connection_runtime import ConnectionRuntime
 from ..formatters import get_formatter
 from ..formatters.base import BaseFormatter
+from ..types import AckStatus, FailureCategory, RetrySemantics, RetryVerdict, SchemaSpec
 
 logger = logging.getLogger(__name__)
 
 
-class StreamDestinationHandler(BaseDestinationHandler):
+class GenericStdoutConnector(BaseDestinationHandler):
     """
     Destination handler that writes records to stdout.
 
@@ -107,7 +101,7 @@ class StreamDestinationHandler(BaseDestinationHandler):
             runtime.scrub_resolved_config()
 
         self._connected = True
-        logger.info(f"StreamDestinationHandler connected with format: {file_format}")
+        logger.info(f"GenericStdoutConnector connected with format: {file_format}")
 
     async def disconnect(self) -> None:
         """
@@ -120,7 +114,7 @@ class StreamDestinationHandler(BaseDestinationHandler):
         if self._runtime:
             await self._runtime.close()
         self._connected = False
-        logger.info("StreamDestinationHandler disconnected")
+        logger.info("GenericStdoutConnector disconnected")
 
     async def configure_schema(self, schema_spec: SchemaSpec) -> bool:
         """
@@ -135,9 +129,7 @@ class StreamDestinationHandler(BaseDestinationHandler):
         Returns:
             Always True
         """
-        logger.info(
-            "StreamDestinationHandler: Schema accepted (no configuration needed)"
-        )
+        logger.info("GenericStdoutConnector: Schema accepted (no configuration needed)")
         return True
 
     #: Names stdout in the I/O failure log line, as it did before.

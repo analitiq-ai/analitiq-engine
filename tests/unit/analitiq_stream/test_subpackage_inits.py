@@ -46,27 +46,17 @@ class TestStatePackageInit:
         assert state_manager is not None
 
 
-class TestDestinationConnectorsPackageInit:
-    """Test destination/connectors package __init__ file."""
-
-    @pytest.mark.unit
-    def test_destination_connectors_imports(self):
-        """Test that destination connectors package can be imported."""
-        import src.destination.connectors as connectors
-
-        # Check if __all__ is defined
-        if hasattr(connectors, "__all__"):
-            for export in connectors.__all__:
-                assert hasattr(connectors, export)
+class TestWorkerRegistries:
+    """Test the registries the worker seeds and discovers into."""
 
     @pytest.mark.unit
     def test_worker_destination_registry_resolves_builtin_kinds(self):
         """The worker's destination registry serves every builtin kind."""
         from cdk.api import GenericAPIConnector
+        from cdk.file.generic import GenericFileConnector
         from cdk.registry import ConnectorNotRegisteredError
-        from src.destination.connectors import GenericSQLConnector
-        from src.destination.connectors.file import FileDestinationHandler
-        from src.destination.connectors.stream import StreamDestinationHandler
+        from cdk.sql.generic import GenericSQLConnector
+        from cdk.stdout.generic import GenericStdoutConnector
         from src.worker import build_worker_registries
 
         _, registry = build_worker_registries()
@@ -76,10 +66,10 @@ class TestDestinationConnectorsPackageInit:
         assert registry.resolve("database", "anydb") is GenericSQLConnector
         assert isinstance(registry.create("database", "anydb"), GenericSQLConnector)
         assert registry.resolve("api", "anyapi") is GenericAPIConnector
-        assert isinstance(registry.create("stdout", "stdout"), StreamDestinationHandler)
-        # file and s3 share the file handler.
-        assert isinstance(registry.create("file", "csvbox"), FileDestinationHandler)
-        assert isinstance(registry.create("s3", "mybucket"), FileDestinationHandler)
+        assert isinstance(registry.create("stdout", "stdout"), GenericStdoutConnector)
+        # file and s3 share the file connector.
+        assert isinstance(registry.create("file", "csvbox"), GenericFileConnector)
+        assert isinstance(registry.create("s3", "mybucket"), GenericFileConnector)
 
         with pytest.raises(ConnectorNotRegisteredError):
             registry.create("redis", "redis")
@@ -89,7 +79,7 @@ class TestDestinationConnectorsPackageInit:
         """The worker's source registry serves the builtin source kinds."""
         from cdk.api import GenericAPIConnector
         from cdk.registry import ConnectorNotRegisteredError
-        from src.destination.connectors import GenericSQLConnector
+        from cdk.sql.generic import GenericSQLConnector
         from src.worker import build_worker_registries
 
         registry, _ = build_worker_registries()

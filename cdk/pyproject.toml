@@ -50,6 +50,9 @@ orjson = { version = "^3.9.0", optional = true }
 # strings, and a cursor string is provider data -- narrowing what parses would
 # silently start failing cursors that work today.
 python-dateutil = { version = "^2.8.0", optional = true }
+# Optional: the local filesystem storage backend behind the file destination
+# kind (cdk.file.local_backend) writes through aiofiles.
+aiofiles = { version = "^23.0.0", optional = true }
 # Optional: S3 / S3-compatible object store for s3:// secret refs
 # (cdk.secrets.resolvers.scheme.SchemeSecretsResolver s3 scheme).
 boto3 = { version = "^1.26.0", optional = true }
@@ -67,11 +70,24 @@ arrow = ["pyarrow"]
 # destination handler -- `analitiq-cdk[api]` is what cdk.api's import error
 # tells the user to install, so it has to be enough to import it.
 api = ["aiohttp", "aiohttp-retry", "orjson", "python-dateutil", "pyarrow"]
+# The file / s3 destination family (cdk.file). pyarrow rides along because
+# GenericFileConnector inherits the Arrow-based destination handler --
+# `analitiq-cdk[file]` is what cdk.file's import error names, so it has to be
+# enough to import it (same rule as [api]).
+file = ["aiofiles", "pyarrow"]
 # s3:// secret refs (SchemeSecretsResolver s3 scheme). Lazy boto3 import, so the
 # CDK core stays dependency-light and cloud-free unless a connection uses it.
 s3 = ["boto3"]
-# Full streaming connector surface the engine consumes: both of the above.
-streaming = ["pyarrow", "aiohttp", "aiohttp-retry", "orjson", "python-dateutil"]
+# Full streaming connector surface the engine consumes: every family the CDK
+# ships, so the engine's worker can construct any kind default.
+streaming = [
+    "pyarrow",
+    "aiohttp",
+    "aiohttp-retry",
+    "orjson",
+    "python-dateutil",
+    "aiofiles",
+]
 # The connector conformance suite (issue #391): tier 1 contract tests and
 # the tier 2 live suite a connector repo runs in its own CI.
 # `pytest --pyargs cdk.conformance.tier1 --connector-dir .`

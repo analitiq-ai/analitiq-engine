@@ -17,9 +17,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pyarrow as pa
 import pytest
 
-from src.destination.connectors.file import FileDestinationHandler
-from src.destination.storage.base import BaseStorageBackend
-from src.destination.storage.local import LocalFileStorage
+from cdk.file.backend import BaseStorageBackend
+from cdk.file.generic import GenericFileConnector
+from cdk.file.local_backend import LocalFileStorage
 from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
 
 # ---------------------------------------------------------------------------
@@ -128,9 +128,9 @@ class TestBuildPathContentHash:
 # ---------------------------------------------------------------------------
 
 
-def _make_handler(serialize_return: bytes) -> FileDestinationHandler:
+def _make_handler(serialize_return: bytes) -> GenericFileConnector:
     """Return a wired-up handler whose formatter returns a fixed byte string."""
-    handler = FileDestinationHandler()
+    handler = GenericFileConnector()
     handler._connected = True
 
     mock_formatter = MagicMock()

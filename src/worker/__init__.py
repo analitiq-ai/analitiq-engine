@@ -22,11 +22,9 @@ def build_worker_registries() -> tuple[ConnectorRegistry, ConnectorRegistry]:
     # Imports are local so importing src.worker stays cheap for the shells
     # (they only need the spawn helpers, not the handler graph).
     from cdk.api import GenericAPIConnector
+    from cdk.file.generic import GenericFileConnector
     from cdk.sql.generic import GenericSQLConnector
-    from src.destination.connectors import (
-        FileDestinationHandler,
-        StreamDestinationHandler,
-    )
+    from cdk.stdout.generic import GenericStdoutConnector
 
     # ``database`` and ``api`` seed the same class in both registries: one
     # connector serves read and write for those kinds, so a role-specific
@@ -39,9 +37,9 @@ def build_worker_registries() -> tuple[ConnectorRegistry, ConnectorRegistry]:
         destination_builtins={
             "database": GenericSQLConnector,
             "api": GenericAPIConnector,
-            "stdout": StreamDestinationHandler,
-            "file": FileDestinationHandler,
-            "s3": FileDestinationHandler,
+            "stdout": GenericStdoutConnector,
+            "file": GenericFileConnector,
+            "s3": GenericFileConnector,
         },
         discover=True,
     )

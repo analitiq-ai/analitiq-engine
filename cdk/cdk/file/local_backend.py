@@ -9,7 +9,7 @@ from typing import Any
 import aiofiles  # type: ignore[import-untyped]  # types-aiofiles not installed
 import aiofiles.os  # type: ignore[import-untyped]  # types-aiofiles not installed
 
-from .base import BaseStorageBackend
+from .backend import BaseStorageBackend
 
 logger = logging.getLogger(__name__)
 

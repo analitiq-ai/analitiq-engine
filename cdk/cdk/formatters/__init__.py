@@ -1,4 +1,9 @@
-"""Formatters for serializing records to different output formats."""
+"""Formatters for serializing records to different output formats.
+
+Top-level rather than inside a connector family: both the file and the
+stdout families serialize batches, and putting the vocabulary under either
+one would make the other import a family it has nothing to do with.
+"""
 
 from collections.abc import Callable
 
