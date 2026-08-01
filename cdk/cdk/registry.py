@@ -65,35 +65,54 @@ class KindDefault:
     ``extra`` / ``modules`` are what ``cdk._extras`` needs to tell a
     genuinely-absent extra apart from a broken install, so a missing
     transport names the extra to install for every kind, not just for api.
+
+    ``roles`` is declared rather than read off the class, because reading it
+    means importing the class, and importing the class is the cost this
+    whole table exists to defer. The declaration cannot drift from the code:
+    :func:`load_kind_default` checks it against the class's own
+    ``Readable`` / ``Writable`` Protocols the moment the class is loaded, so
+    a table that says something the class does not fails there.
     """
 
     class_path: str
     extra: str
     modules: tuple[str, ...]
+    roles: tuple[str, ...]
 
 
 #: kind -> the CDK's generic connector. The single authority for what serves
 #: a kind: the engine registry seeds from it and the conformance kit resolves
-#: through it, so what the suite audits is what production loads. Which roles
-#: a kind's class serves is NOT declared here — it is read off the class's
-#: own ``Readable`` / ``Writable`` Protocols (see :func:`build_registries`).
+#: through it, so what the suite audits is what production loads.
 KIND_DEFAULTS: dict[str, KindDefault] = {
     "database": KindDefault(
-        "cdk.sql.generic:GenericSQLConnector", "arrow", ("pyarrow",)
+        "cdk.sql.generic:GenericSQLConnector",
+        "arrow",
+        ("pyarrow",),
+        ("source", "destination"),
     ),
     "api": KindDefault(
         "cdk.api.generic:GenericAPIConnector",
         "api",
         ("aiohttp", "aiohttp_retry", "orjson", "pyarrow"),
+        ("source", "destination"),
     ),
     "file": KindDefault(
-        "cdk.file.generic:GenericFileConnector", "file", ("aiofiles", "pyarrow")
+        "cdk.file.generic:GenericFileConnector",
+        "file",
+        ("aiofiles", "pyarrow"),
+        ("destination",),
     ),
     "s3": KindDefault(
-        "cdk.file.generic:GenericFileConnector", "file", ("aiofiles", "pyarrow")
+        "cdk.file.generic:GenericFileConnector",
+        "file",
+        ("aiofiles", "pyarrow"),
+        ("destination",),
     ),
     "stdout": KindDefault(
-        "cdk.stdout.generic:GenericStdoutConnector", "arrow", ("pyarrow",)
+        "cdk.stdout.generic:GenericStdoutConnector",
+        "arrow",
+        ("pyarrow",),
+        ("destination",),
     ),
 }
 
@@ -162,7 +181,7 @@ def load_kind_default(kind: str) -> type:
     if entry is None:
         raise UnknownConnectorKindError(kind, sorted(KIND_DEFAULTS))
     try:
-        return load_class(entry.class_path)
+        cls = load_class(entry.class_path)
     except ConnectorClassError:
         raise
     except ImportError as exc:
@@ -171,6 +190,37 @@ def load_kind_default(kind: str) -> type:
             feature=f"the {kind!r} kind default ({entry.class_path})",
             extra=entry.extra,
             modules=entry.modules,
+        )
+    _check_declared_roles(kind, entry, cls)
+    return cls
+
+
+def _check_declared_roles(kind: str, entry: KindDefault, cls: type) -> None:
+    """Refuse a table entry the class does not back up.
+
+    The roles are declared so registration costs no import, and this is
+    what keeps the declaration honest: the first time the class is actually
+    loaded, what it claims to serve is checked against what it implements.
+    A kind declared for a role whose Protocol the class does not satisfy
+    would otherwise hand that role a connector with no code path for it.
+    """
+    implemented = {
+        role
+        for role, protocol in (("source", Readable), ("destination", Writable))
+        if issubclass(cls, protocol)
+    }
+    declared = set(entry.roles)
+    if not declared:
+        raise ConnectorClassError(
+            f"the kind default for {kind!r} declares no roles, so no "
+            f"registry can serve it"
+        )
+    unbacked = declared - implemented
+    if unbacked:
+        raise ConnectorClassError(
+            f"the kind default for {kind!r} ({entry.class_path}) is declared "
+            f"for {sorted(unbacked)} but implements "
+            f"{sorted(implemented) or 'neither Readable nor Writable'}"
         )
 
 
@@ -213,6 +263,11 @@ class ConnectorRegistry:
     def __init__(self, role: str) -> None:
         self._role = role
         self._defaults: dict[str, type] = {}
+        #: Kinds this role serves per :data:`KIND_DEFAULTS`, whose class is
+        #: loaded on first resolve. Declaring one costs no import, which is
+        #: the point: a worker that speaks one transport must not have to
+        #: install every other transport the CDK can speak.
+        self._declared_kinds: set[str] = set()
         self._specific: dict[str, type] = {}
 
     @property
@@ -239,6 +294,16 @@ class ConnectorRegistry:
                 f"(pass override=True to replace)"
             )
         self._defaults[key] = cls
+
+    def declare_default(self, kind: str) -> None:
+        """Note that *kind*'s CDK default serves this role, without loading it.
+
+        The class is imported by the first :meth:`resolve` that needs it, so
+        building a registry pulls in no transport at all. A default already
+        registered eagerly wins and this is a no-op -- the eager one is a
+        deliberate override.
+        """
+        self._declared_kinds.add(kind.lower())
 
     def register(self, connector_id: str, cls: type, *, override: bool = False) -> None:
         """Register *cls* as the concrete class for *connector_id*.
@@ -272,9 +337,17 @@ class ConnectorRegistry:
         cls = self._specific.get(connector_id.lower())
         if cls is not None:
             return cls
-        default = self._defaults.get(kind.lower())
+        key = kind.lower()
+        default = self._defaults.get(key)
         if default is not None:
             return default
+        if key in self._declared_kinds:
+            # First use of this kind in this process: import it now. A
+            # missing transport raises here naming the extra, which is the
+            # honest moment -- the run that needs it is the one that pays.
+            loaded = load_kind_default(key)
+            self._defaults[key] = loaded
+            return loaded
         raise ConnectorNotRegisteredError(
             kind,
             connector_id,
@@ -288,8 +361,13 @@ class ConnectorRegistry:
         return self.resolve(kind, connector_id)()
 
     def kinds(self) -> list[str]:
-        """Kinds with a registered generic default."""
-        return sorted(self._defaults)
+        """Kinds this registry can serve a generic default for.
+
+        Declared kinds count: whether the class has been imported yet is an
+        implementation detail, and a caller asking what the registry serves
+        would otherwise get a different answer before and after a resolve.
+        """
+        return sorted(set(self._defaults) | self._declared_kinds)
 
     def connector_ids(self) -> list[str]:
         """connector_ids with a registered concrete class."""
@@ -346,33 +424,29 @@ def build_registries(
     """Build the (source, destination) registries.
 
     Every kind default is the CDK's own generic class, seeded from one
-    table: a kind has one connector, and which roles it serves is read off
-    the class rather than declared a second time. Two hand-written maps
-    that had to agree by hand were the place the two directions drifted
-    apart (issue #431), and a table that seeded both registries blindly
-    would hand a file *source* a class with no read path — a default that
-    hides a wiring defect. The Protocols answer both at once.
+    table. Two hand-written maps that had to agree by hand were the place
+    the two directions drifted apart (issue #431), and a table that seeded
+    both registries blindly would hand a file *source* a class with no read
+    path — a default that hides a wiring defect. One table with the roles on
+    it answers both.
+
+    Building imports nothing. The kinds are declared and each class loads on
+    the first resolve that needs it, because the extras are split by family:
+    an install carrying only ``[api]`` would otherwise fail here on the file
+    default's ``aiofiles``, for a run that never touches file or s3. What
+    keeps the declaration honest is :func:`load_kind_default`, which checks
+    each class against the roles claimed for it as it loads.
 
     Connector packages are then discovered from entry points (additive,
     best-effort) when *discover* is set.
     """
     source = ConnectorRegistry("source")
     destination = ConnectorRegistry("destination")
-    for kind in KIND_DEFAULTS:
-        cls = load_kind_default(kind)
-        roles = []
-        if issubclass(cls, Readable):
-            source.register_default(kind, cls)
-            roles.append("source")
-        if issubclass(cls, Writable):
-            destination.register_default(kind, cls)
-            roles.append("destination")
-        if not roles:
-            raise ConnectorClassError(
-                f"the kind default for {kind!r} ({cls.__module__}."
-                f"{cls.__name__}) implements neither Readable nor Writable, "
-                f"so no registry can serve it"
-            )
+    for kind, entry in KIND_DEFAULTS.items():
+        if "source" in entry.roles:
+            source.declare_default(kind)
+        if "destination" in entry.roles:
+            destination.declare_default(kind)
     if discover:
         source.discover_entry_points(SOURCE_GROUP)
         destination.discover_entry_points(DESTINATION_GROUP)

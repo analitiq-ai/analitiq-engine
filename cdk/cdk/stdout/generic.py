@@ -101,7 +101,7 @@ class GenericStdoutConnector(BaseDestinationHandler):
             runtime.scrub_resolved_config()
 
         self._connected = True
-        logger.info(f"GenericStdoutConnector connected with format: {file_format}")
+        logger.info("GenericStdoutConnector connected with format: %s", file_format)
 
     async def disconnect(self) -> None:
         """

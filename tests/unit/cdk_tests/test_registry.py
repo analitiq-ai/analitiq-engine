@@ -168,7 +168,10 @@ class TestEntryPointDiscovery:
 #: by dotted path -- and the SQL connector is the cheapest real one to import.
 _SQL_ONLY = {
     "database": KindDefault(
-        "cdk.sql.generic:GenericSQLConnector", "arrow", ("pyarrow",)
+        "cdk.sql.generic:GenericSQLConnector",
+        "arrow",
+        ("pyarrow",),
+        ("source", "destination"),
     )
 }
 
@@ -203,18 +206,44 @@ class TestBuildRegistries:
     def test_a_default_serving_neither_role_is_refused(self, monkeypatch):
         # A class that implements neither Protocol would land in no registry
         # at all, so every connection of that kind would fail far from the
-        # cause. Refuse at build time, naming the class.
+        # cause. Refuse when the class loads, naming it -- building the
+        # registry deliberately imports nothing, so that is the first moment
+        # anything can be checked against the class itself.
         monkeypatch.setattr(
             reg,
             "KIND_DEFAULTS",
             {
                 "database": KindDefault(
-                    "cdk.registry:KindDefault", "arrow", ("pyarrow",)
+                    "cdk.registry:KindDefault",
+                    "arrow",
+                    ("pyarrow",),
+                    ("source", "destination"),
                 )
             },
         )
+        source, _ = build_registries(discover=False)
         with pytest.raises(reg.ConnectorClassError, match="neither Readable nor"):
-            build_registries(discover=False)
+            source.resolve("database", "any")
+
+    def test_a_role_the_class_does_not_back_is_refused(self, monkeypatch):
+        # The roles are declared so registration costs no import. This is
+        # what stops the declaration drifting from the code: a file source
+        # would be a connector with no read path.
+        monkeypatch.setattr(
+            reg,
+            "KIND_DEFAULTS",
+            {
+                "file": KindDefault(
+                    "cdk.file.generic:GenericFileConnector",
+                    "file",
+                    ("aiofiles", "pyarrow"),
+                    ("source", "destination"),
+                )
+            },
+        )
+        source, _ = build_registries(discover=False)
+        with pytest.raises(reg.ConnectorClassError, match="declared for"):
+            source.resolve("file", "any")
 
 
 class TestKindDefaults:
@@ -231,9 +260,15 @@ class TestKindDefaults:
         source, destination = build_registries(discover=False)
 
         assert set(KIND_DEFAULTS) == {"database", "api", "file", "s3", "stdout"}
-        for kind in KIND_DEFAULTS:
+        for kind, entry in KIND_DEFAULTS.items():
             cls = load_kind_default(kind)
-            if issubclass(cls, Readable):
+            # load_kind_default already refuses a role the class does not
+            # implement, so reaching here means the two agree. What is left
+            # to check is that the registries were seeded from the same
+            # answer rather than from a second one.
+            assert issubclass(cls, Readable) == ("source" in entry.roles)
+            assert issubclass(cls, Writable) == ("destination" in entry.roles)
+            if "source" in entry.roles:
                 assert source.resolve(kind, "any") is cls
             else:
                 with pytest.raises(ConnectorNotRegisteredError):
@@ -298,3 +333,51 @@ class TestLoadClass:
         # "your reference is wrong", so load_class does not decide.
         with pytest.raises(ImportError):
             reg.load_class("cdk.no_such_module:Whatever")
+
+
+class TestBuildingImportsNoTransport:
+    """The reason the table holds paths instead of classes.
+
+    The CDK's extras are split by family. A worker installed with only
+    ``[api]`` has no ``aiofiles``, and building the registry eagerly made it
+    load the file default anyway -- so a run that never touches file or s3
+    died at construction on a transport it does not speak.
+    """
+
+    def test_construction_loads_no_kind_default(self, monkeypatch):
+        loaded: list[str] = []
+
+        def _record(kind: str):
+            loaded.append(kind)
+            raise AssertionError(f"loaded {kind!r} while merely building")
+
+        monkeypatch.setattr(reg, "load_kind_default", _record)
+        build_registries(discover=False)
+        assert loaded == []
+
+    def test_a_kind_whose_transport_is_absent_costs_nothing_until_used(
+        self, monkeypatch
+    ):
+        # The failure belongs to the run that needs the kind, naming the
+        # extra -- not to every consumer of the registry.
+        def _refuse(kind: str):
+            if kind == "file":
+                raise reg.ConnectorClassError("no module named 'aiofiles'")
+            return load_kind_default(kind)
+
+        monkeypatch.setattr(reg, "load_kind_default", _refuse)
+        _, destination = build_registries(discover=False)
+
+        assert destination.resolve("stdout", "any") is load_kind_default("stdout")
+        with pytest.raises(reg.ConnectorClassError, match="aiofiles"):
+            destination.resolve("file", "any")
+
+    def test_the_registry_reports_the_kinds_it_serves_before_any_resolve(self):
+        # Whether a class has been imported yet is an implementation
+        # detail; a caller asking what the registry serves must not get a
+        # different answer before and after the first resolve.
+        source, destination = build_registries(discover=False)
+        assert source.kinds() == ["api", "database"]
+        assert destination.kinds() == ["api", "database", "file", "s3", "stdout"]
+        destination.resolve("stdout", "any")
+        assert destination.kinds() == ["api", "database", "file", "s3", "stdout"]

@@ -43,7 +43,8 @@ class ParquetFormatter(BaseFormatter):
         """Return the MIME content type."""
         return "application/vnd.apache.parquet"
 
-    def _ensure_pyarrow(self) -> None:
+    @staticmethod
+    def _ensure_pyarrow() -> None:
         """Fail with the extra to install, not a bare import trace.
 
         The engine extra this once named ships pandas and numpy, never

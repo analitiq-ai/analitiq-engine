@@ -55,7 +55,7 @@ class LocalFileStorage(BaseStorageBackend):
             self._base_path.mkdir(parents=True, exist_ok=True)
 
         self._connected = True
-        logger.info(f"LocalFileStorage connected to: {self._base_path}")
+        logger.info("LocalFileStorage connected to: %s", self._base_path)
 
     async def disconnect(self) -> None:
         """Disconnect from local file storage."""
@@ -166,7 +166,7 @@ class LocalFileStorage(BaseStorageBackend):
             return False
 
         await aiofiles.os.remove(full_path)
-        logger.debug(f"Deleted file: {full_path}")
+        logger.debug("Deleted file: %s", full_path)
         return True
 
     async def health_check(self) -> bool:
@@ -193,5 +193,5 @@ class LocalFileStorage(BaseStorageBackend):
             return True
 
         except Exception as e:
-            logger.warning(f"Health check failed: {e}")
+            logger.warning("Health check failed: %s", e)
             return False
