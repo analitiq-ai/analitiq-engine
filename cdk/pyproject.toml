@@ -39,8 +39,17 @@ pydantic = "^2.0.0"
 # Optional: Arrow columnar read/write (read_batches / write_batch, schema
 # casting, the ADBC reader, the DDL type renderers).
 pyarrow = { version = ">=14.0.0", optional = true }
-# Optional: HTTP transport for API connectors.
+# Optional: HTTP transport for API connectors, plus what the generic API
+# connector itself needs on that transport: bounded transport retries and a
+# JSON encoder that renders datetimes and decimals losslessly.
 aiohttp = { version = "^3.8.0", optional = true }
+aiohttp-retry = { version = "^2.8.3", optional = true }
+orjson = { version = "^3.9.0", optional = true }
+# Optional: the API connector parses a stored replication cursor with
+# dateutil's ISO parser. The stdlib parser accepts a strictly narrower set of
+# strings, and a cursor string is provider data -- narrowing what parses would
+# silently start failing cursors that work today.
+python-dateutil = { version = "^2.8.0", optional = true }
 # Optional: S3 / S3-compatible object store for s3:// secret refs
 # (cdk.secrets.resolvers.scheme.SchemeSecretsResolver s3 scheme).
 boto3 = { version = "^1.26.0", optional = true }
@@ -52,13 +61,17 @@ pytest = { version = ">=7.0", optional = true }
 # Arrow columnar streaming surface (cdk.schema_contract,
 # cdk.sql.adbc_reader, type_map.parse_arrow_type, GenericSQLConnector read/write).
 arrow = ["pyarrow"]
-# HTTP transport for API connectors (cdk.transport_factory http builder).
-api = ["aiohttp"]
+# HTTP transport for API connectors (cdk.transport_factory http builder) and
+# the generic API connector (cdk.api). pyarrow rides along because
+# GenericAPIConnector reads into Arrow batches and inherits the Arrow-based
+# destination handler -- `analitiq-cdk[api]` is what cdk.api's import error
+# tells the user to install, so it has to be enough to import it.
+api = ["aiohttp", "aiohttp-retry", "orjson", "python-dateutil", "pyarrow"]
 # s3:// secret refs (SchemeSecretsResolver s3 scheme). Lazy boto3 import, so the
 # CDK core stays dependency-light and cloud-free unless a connection uses it.
 s3 = ["boto3"]
 # Full streaming connector surface the engine consumes: both of the above.
-streaming = ["pyarrow", "aiohttp"]
+streaming = ["pyarrow", "aiohttp", "aiohttp-retry", "orjson", "python-dateutil"]
 # The connector conformance suite (issue #391): tier 1 contract tests and
 # the tier 2 live suite a connector repo runs in its own CI.
 # `pytest --pyargs cdk.conformance.tier1 --connector-dir .`

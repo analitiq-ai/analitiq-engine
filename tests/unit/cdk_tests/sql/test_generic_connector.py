@@ -21,8 +21,8 @@ from unittest.mock import AsyncMock, patch
 import pyarrow as pa
 import pytest
 
+from cdk.exceptions import ReadError
 from cdk.secrets.exceptions import PlaceholderExpansionError
-from cdk.sql.exceptions import ReadError
 from cdk.sql.generic import GenericSQLConnector
 
 from .conftest import caps_block

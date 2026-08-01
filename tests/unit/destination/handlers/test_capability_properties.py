@@ -7,8 +7,8 @@ cannot create a relation or truncate it; a SQL destination can.
 
 import pytest
 
+from cdk.api import GenericAPIConnector
 from cdk.sql.generic import GenericSQLConnector
-from src.destination.connectors.api import ApiDestinationHandler
 from src.destination.connectors.file import FileDestinationHandler
 from src.destination.connectors.stream import StreamDestinationHandler
 
@@ -20,7 +20,7 @@ class TestCapabilityProperties:
         [
             StreamDestinationHandler(),
             FileDestinationHandler(),
-            ApiDestinationHandler(),
+            GenericAPIConnector(),
         ],
     )
     def test_non_relational_handlers_cannot_auto_create_or_truncate(self, handler):

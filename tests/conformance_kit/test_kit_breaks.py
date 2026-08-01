@@ -11,9 +11,11 @@ from __future__ import annotations
 import dataclasses
 import shutil
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import pytest
+from _pytest.outcomes import Skipped
 
 from cdk.conformance import (
     check_declaration_consistency,
@@ -989,3 +991,79 @@ def _caps_with(target: ConformanceTarget, **facts: Any) -> SqlCapabilities:
     caps = target.declared_capabilities
     assert caps is not None
     return dataclasses.replace(caps, **facts)
+
+
+class TestAnApiTargetSkipsTheSqlChecks:
+    """An api connector must not error the SQL half of tier 1.
+
+    ``ConformanceTarget.dialect`` answers the SQL dialect specifically, and
+    every check that asks for one is a SQL check. Once the registry started
+    resolving ``GenericAPIConnector`` for kind ``api``, that class's
+    ``dialect_class`` is an ``ApiDialect``, so a type guard written for the
+    database family would fail the run of every api connector rather than
+    skipping the checks that do not apply to it.
+    """
+
+    def _api_target(self) -> ConformanceTarget:
+        from cdk.api import GenericAPIConnector
+
+        return ConformanceTarget(
+            root=Path("."),
+            definition_dir=Path("."),
+            definition={"kind": "api", "connector_id": "probe"},
+            connector_id="probe",
+            kind="api",
+            declared_capabilities=None,
+            type_mapper=None,
+            connector_class=GenericAPIConnector,
+        )
+
+    def test_the_sql_dialect_is_absent_rather_than_an_error(self) -> None:
+        assert self._api_target().dialect is None
+
+    def test_the_sql_checks_skip_instead_of_failing(self) -> None:
+        from cdk.conformance.skips import require_dialect
+
+        # Skipped derives from BaseException, so it has to be named: a bare
+        # `except Exception` would let it escape and skip this test instead.
+        with pytest.raises(Skipped):
+            require_dialect(self._api_target())
+
+    def test_a_database_class_with_a_foreign_dialect_still_fails(self) -> None:
+        # The guard exists for a real defect and keeps working where it
+        # applies: a database connector whose dialect_class is not a
+        # SqlDialect is a broken connector, not a different family.
+        class Wrong:
+            dialect_class = object
+
+        target = dataclasses.replace(
+            self._api_target(), kind="database", connector_class=Wrong
+        )
+        with pytest.raises(ConformanceSetupError, match="not a SqlDialect"):
+            _ = target.dialect
+
+
+class TestAnApiTargetWithoutTheApiExtra:
+    def test_it_names_the_extra_instead_of_dying_on_the_import(self) -> None:
+        # The conformance extra deliberately does not pull the HTTP
+        # transport, so a database connector's suite does not fail to start
+        # over one it never touches. An api connector's run has to say what
+        # it needs rather than resolve no class and report itself
+        # inapplicable.
+        import builtins
+
+        from cdk.conformance.target import _generic_class_for
+
+        real_import = builtins.__import__
+
+        def refuse(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name == "cdk.api":
+                raise ImportError("No module named 'aiohttp'")
+            return real_import(name, *args, **kwargs)
+
+        builtins.__import__ = refuse
+        try:
+            with pytest.raises(ConformanceSetupError, match=r"analitiq-cdk\[api\]"):
+                _generic_class_for("api")
+        finally:
+            builtins.__import__ = real_import

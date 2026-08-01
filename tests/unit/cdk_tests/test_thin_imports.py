@@ -82,9 +82,13 @@ class TestThinControlPlaneImports:
                 "SqlDialect",
                 "fetch_rows", "execute_ddl",
                 "SqlIntrospectionError", "UnsupportedDialectOperationError",
-                "DiscoveryError", "CreateTableError", "ReadError",
+                "DiscoveryError", "CreateTableError",
             ):
                 assert hasattr(cdk.sql, name), name
+
+            # ReadError is one class for every transport now, so it lives at
+            # the CDK root -- and must stay reachable without either extra.
+            from cdk.exceptions import ReadError, TransientReadError  # noqa: F401
 
             # The direct ``from cdk.sql import create_table`` form (the one the
             # control-plane actually uses) must resolve, not just attr access.
@@ -94,6 +98,52 @@ class TestThinControlPlaneImports:
             # pyarrow import added there would break this assertion.
             from cdk.sql._adbc_utils import _adbc_execute  # noqa: F401
             assert callable(_adbc_execute)
+
+            print("OK")
+            """
+        )
+        assert result.returncode == 0, result.stderr
+        assert "OK" in result.stdout
+
+    def test_api_loop_surface_imports_without_the_api_extra(self):
+        """``cdk.api``'s loop surface loads with aiohttp/pyarrow blocked."""
+        result = _run(
+            """
+            import cdk.api
+
+            # The loop, the five scheme adapters and the stop-condition
+            # evaluator carry no transport, which is what lets a connector
+            # author test them without one.
+            for name in (
+                "PageLoop", "Page", "PageRequest", "build_strategy",
+                "resolve_page_size", "evaluate_predicate", "ApiDialect",
+                "UnknownPaginationStrategy", "ConnectorConnectionError",
+            ):
+                assert hasattr(cdk.api, name), name
+
+            from cdk.api.strategies import build_strategy  # noqa: F401
+            from cdk.api.records import extract_records  # noqa: F401
+            from cdk.api.verdicts import http_is_transient  # noqa: F401
+
+            print("OK")
+            """
+        )
+        assert result.returncode == 0, result.stderr
+        assert "OK" in result.stdout
+
+    def test_the_api_connector_names_its_extra_when_blocked(self):
+        """Touching the connector raises only on access, naming the extra."""
+        result = _run(
+            """
+            import cdk.api
+            from cdk._extras import MissingExtraError
+
+            try:
+                cdk.api.GenericAPIConnector
+            except MissingExtraError as exc:
+                assert "analitiq-cdk[api]" in str(exc), str(exc)
+            else:
+                raise AssertionError("the connector resolved with aiohttp blocked")
 
             print("OK")
             """

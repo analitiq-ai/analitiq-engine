@@ -42,7 +42,6 @@ from .exceptions import (
     CatalogAddressingError,
     CreateTableError,
     DiscoveryError,
-    ReadError,
     SchemaConfigurationError,
     SqlIntrospectionError,
     TlsVerificationError,
@@ -101,7 +100,6 @@ __all__ = [
     "CatalogAddressingError",
     "DiscoveryError",
     "CreateTableError",
-    "ReadError",
     "SchemaConfigurationError",
     "TlsVerificationError",
 ]

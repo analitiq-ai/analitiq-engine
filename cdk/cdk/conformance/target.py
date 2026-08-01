@@ -48,8 +48,8 @@ class ConformanceTarget:
 
     ``connector_class`` is the class the registry would resolve: the
     package's own entry-point class when one is installed, else the
-    CDK's generic fallback for ``kind: database`` (the thin path), else
-    ``None`` for kinds whose generic classes live outside the CDK.
+    CDK's generic fallback for the kind (the thin path), else ``None``
+    for kinds whose generic classes live outside the CDK.
     """
 
     root: Path
@@ -96,7 +96,12 @@ class ConformanceTarget:
     def dialect(self) -> SqlDialect | None:
         """A dialect instance from the connector class, carrying its declaration.
 
-        ``None`` when no class resolved or the class carries no dialect.
+        ``None`` when no class resolved, when the target is not a database,
+        or when the class carries no dialect. This is the SQL dialect
+        specifically, and every check that asks for one is a SQL check --
+        an api connector carries an :class:`ApiDialect`, which answers a
+        different set of questions and is audited by the api checks.
+
         The kit has the parsed declaration already, so it constructs the
         dialect with it directly rather than through
         :meth:`SqlDialect.for_runtime` (there is no runtime here); the
@@ -105,7 +110,7 @@ class ConformanceTarget:
         declaration.
         """
         cls = self.connector_class
-        if cls is None:
+        if cls is None or not self.is_database:
             return None
         dialect_class = getattr(cls, "dialect_class", None)
         if dialect_class is None:
@@ -239,19 +244,16 @@ def _resolve_connector_class(
 
     Explicit ``class_path`` wins (for running the suite before the
     package is installed); then the installed entry points; then the
-    CDK's generic database fallback. Non-database kinds without an
-    entry point resolve to ``None``: their generic classes live in the
-    engine, and the class-level checks skip.
+    CDK's generic fallback for the kind. A kind with no generic class
+    in the CDK and no entry point resolves to ``None`` and the
+    class-level checks skip.
 
     Both entry-point groups are always loaded: the engine keeps
     separate source and destination registries, and a
     registered-but-broken source entry point would otherwise fall back
     silently to the generic class in production while the suite went
-    green against the destination class. For ``kind: database`` the two
-    groups must agree — one unified SQL class serves both roles, and a
-    split would let them drift. Other kinds may legitimately register
-    different classes per role (the engine's api family does); the
-    destination class is used there, matching the write-focused checks.
+    green against the destination class. The two groups must agree —
+    one class serves both roles, and a split would let them drift.
     """
     if class_path:
         return _load_class(class_path)
@@ -262,16 +264,42 @@ def _resolve_connector_class(
             loaded[group] = cls
     if loaded:
         classes = set(loaded.values())
-        if len(classes) > 1 and kind == "database":
+        if len(classes) > 1:
             names = {group: cls.__name__ for group, cls in loaded.items()}
             raise ConformanceSetupError(
-                f"database connector {connector_id!r} registers different "
-                f"classes per entry-point group ({names}); one unified SQL "
-                f"class serves both roles"
+                f"connector {connector_id!r} registers different classes per "
+                f"entry-point group ({names}); one class serves both roles"
             )
         return loaded.get(DESTINATION_GROUP) or next(iter(loaded.values()))
+    return _generic_class_for(kind)
+
+
+def _generic_class_for(kind: str) -> type | None:
+    """Return the CDK's generic connector for *kind*, or ``None``.
+
+    The api entry is imported on demand: the ``conformance`` extra does not
+    pull aiohttp, and a database connector's suite must not fail to start
+    over a transport it never touches.
+    """
     if kind == "database":
         return GenericSQLConnector
+    if kind == "api":
+        try:
+            from cdk.api import GenericAPIConnector
+        except ImportError as err:
+            # The conformance extra deliberately does not pull the HTTP
+            # transport -- a database connector's suite must not fail to
+            # start over one it never touches. So an api connector's run
+            # says which extra it needs, rather than dying on an import
+            # trace or, worse, resolving no class and reporting the suite
+            # as inapplicable.
+            raise ConformanceSetupError(
+                "running the conformance suite against a kind 'api' connector "
+                "needs the API transport; install analitiq-cdk[api] alongside "
+                f"analitiq-cdk[conformance] ({err})"
+            ) from err
+
+        return GenericAPIConnector
     return None
 
 

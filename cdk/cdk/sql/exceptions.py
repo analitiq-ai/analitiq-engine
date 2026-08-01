@@ -87,15 +87,3 @@ class SchemaConfigurationError(Exception):
     bare ``ValueError`` these paths used to raise (issue #153) so an
     intentional config-error signal is distinguishable from a defect.
     """
-
-
-class ReadError(Exception):
-    """A source read (``read_batches``) could not be set up or executed.
-
-    Raised for caller-actionable read failures: an endpoint document
-    missing its target table, an empty column projection, or a transport
-    returning named parameters on the qmark-only ADBC path. Distinct from
-    the control-plane :class:`SqlIntrospectionError` family — a read is an
-    engine source operation, not a control-plane introspection — so the
-    engine's extract stage can tell the two apart.
-    """

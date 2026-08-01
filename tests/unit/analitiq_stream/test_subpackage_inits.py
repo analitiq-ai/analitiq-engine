@@ -24,35 +24,6 @@ class TestEnginePackageInit:
         assert StreamingEngine is not None
 
 
-class TestSourceConnectorsPackageInit:
-    """Test source/connectors package __init__ file."""
-
-    @pytest.mark.unit
-    def test_source_connectors_imports(self):
-        """Test that source connectors package can be imported."""
-        import src.source.connectors as connectors
-
-        # Check if __all__ is defined
-        if hasattr(connectors, "__all__"):
-            for export in connectors.__all__:
-                assert hasattr(connectors, export)
-
-    @pytest.mark.unit
-    def test_source_connectors_submodules(self):
-        """Test that source connector submodules are accessible."""
-        from src.source.connectors import api, base
-
-        assert api is not None
-        assert base is not None
-
-        # Test that main classes can be imported
-        from src.source.connectors.api import APIConnector
-        from src.source.connectors.base import BaseConnector
-
-        assert APIConnector is not None
-        assert BaseConnector is not None
-
-
 class TestStatePackageInit:
     """Test state package __init__ file."""
 
@@ -91,6 +62,7 @@ class TestDestinationConnectorsPackageInit:
     @pytest.mark.unit
     def test_worker_destination_registry_resolves_builtin_kinds(self):
         """The worker's destination registry serves every builtin kind."""
+        from cdk.api import GenericAPIConnector
         from cdk.registry import ConnectorNotRegisteredError
         from src.destination.connectors import GenericSQLConnector
         from src.destination.connectors.file import FileDestinationHandler
@@ -103,6 +75,7 @@ class TestDestinationConnectorsPackageInit:
         # ``database`` kind (two-step resolution: connector_id first).
         assert registry.resolve("database", "anydb") is GenericSQLConnector
         assert isinstance(registry.create("database", "anydb"), GenericSQLConnector)
+        assert registry.resolve("api", "anyapi") is GenericAPIConnector
         assert isinstance(registry.create("stdout", "stdout"), StreamDestinationHandler)
         # file and s3 share the file handler.
         assert isinstance(registry.create("file", "csvbox"), FileDestinationHandler)
@@ -114,18 +87,40 @@ class TestDestinationConnectorsPackageInit:
     @pytest.mark.unit
     def test_worker_source_registry_resolves_builtin_kinds(self):
         """The worker's source registry serves the builtin source kinds."""
+        from cdk.api import GenericAPIConnector
         from cdk.registry import ConnectorNotRegisteredError
         from src.destination.connectors import GenericSQLConnector
-        from src.source.connectors.api import APIConnector
         from src.worker import build_worker_registries
 
         registry, _ = build_worker_registries()
 
         assert registry.resolve("database", "anydb") is GenericSQLConnector
-        assert registry.resolve("api", "anyapi") is APIConnector
+        assert registry.resolve("api", "anyapi") is GenericAPIConnector
 
         with pytest.raises(ConnectorNotRegisteredError):
             registry.resolve("file", "csvbox")
+
+    @pytest.mark.unit
+    def test_both_registries_serve_one_class_for_a_unified_kind(self):
+        """A kind whose connector serves both roles seeds one class, not two.
+
+        The api family shipped as a class per direction and drifted on
+        questions that belong to HTTP rather than to a direction; asserting
+        object identity here is what keeps a role-specific answer from
+        reappearing (issue #431).
+        """
+        from cdk.api import GenericAPIConnector
+        from cdk.sql.generic import GenericSQLConnector
+        from src.worker import build_worker_registries
+
+        source, destination = build_worker_registries()
+
+        for kind, expected in (
+            ("database", GenericSQLConnector),
+            ("api", GenericAPIConnector),
+        ):
+            assert source.resolve(kind, "any") is expected
+            assert destination.resolve(kind, "any") is expected
 
 
 class TestSharedPackageInit:

@@ -9,7 +9,7 @@ weight.
 ## The one rule
 
 The dependency points **engine → CDK, never back**. No CDK module may import
-anything engine-side (`src/grpc`, `src/state`, `src/models`, `src/source`,
+anything engine-side (`src/grpc`, `src/state`, `src/models`,
 `src/engine/{engine,orchestrator,pipeline}`, `server.py`, `runner.py`,
 `main.py`). Anything that must cross from engine to CDK crosses as a plain value
 or a CDK-owned type — never an engine object. A connectivity capability whose
@@ -29,6 +29,8 @@ seam (Protocol / ABC) the other side implements (`SecretsResolver`,
 - the type-map engine (`type_map/`).
 - the secrets seam + local/in-memory resolvers (`secrets/`).
 - the abstract destination base (`base_handler.py`).
+- the two connector families, one class each serving read and write:
+  `sql/` (`GenericSQLConnector`) and `api/` (`GenericAPIConnector`).
 
 ## Dependency tiers (core + extras)
 
@@ -42,8 +44,8 @@ surface never pulls `pyarrow`/`aiohttp`.
 |---|---|---|
 | core (always) | `sqlalchemy`, `pydantic` | SQL control-plane: `cdk.sql` discovery + standalone `create_table`, `ConnectionRuntime`/transport seam, type-map (string surface), secrets |
 | `[arrow]` | `pyarrow` | columnar streaming: `schema_contract`, `sql.adbc_reader`, `type_map.parse_arrow_type`, `GenericSQLConnector` read/write |
-| `[api]` | `aiohttp` | HTTP transport for API connectors |
-| `[streaming]` | `pyarrow` + `aiohttp` | full connector surface the engine consumes (`[arrow]` + `[api]`) |
+| `[api]` | `aiohttp`, `aiohttp-retry`, `orjson`, `python-dateutil` | HTTP transport plus `GenericAPIConnector`: bounded transport retries, a lossless JSON encoder, and the ISO parser a stored replication cursor is read with |
+| `[streaming]` | `[arrow]` + `[api]` | full connector surface the engine consumes |
 | `[s3]` | `boto3` | `s3://` secret refs (`SchemeSecretsResolver`) |
 | `[conformance]` | `pytest` + `pyarrow` | the connector conformance suite a connector repo runs in its own CI |
 

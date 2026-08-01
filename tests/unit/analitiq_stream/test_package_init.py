@@ -24,8 +24,6 @@ class TestMainPackageInit:
         expected_exports = [
             "StreamingEngine",
             "DeadLetterQueue",
-            "BaseConnector",
-            "APIConnector",
         ]
 
         for export in expected_exports:
@@ -34,25 +32,14 @@ class TestMainPackageInit:
 
     def test_core_classes_importable(self):
         """Test that core classes can be imported directly."""
-        from src import APIConnector, BaseConnector, DeadLetterQueue, StreamingEngine
+        from src import DeadLetterQueue, StreamingEngine
 
-        for cls in (
-            StreamingEngine,
-            DeadLetterQueue,
-            BaseConnector,
-            APIConnector,
-        ):
+        for cls in (StreamingEngine, DeadLetterQueue):
             assert cls is not None
 
 
 class TestSubPackageInits:
     """Test sub-package __init__.py files."""
-
-    def test_source_connectors_init(self):
-        """Source connectors package is importable at its new path."""
-        import src.source.connectors
-
-        assert src.source.connectors is not None
 
     def test_state_init(self):
         """State package (formerly ``fault_tolerance``) is importable."""
@@ -65,13 +52,6 @@ class TestSubPackageInits:
         import src.models
 
         assert src.models is not None
-
-    def test_api_connector_importable(self):
-        """The API source connector module and class are importable."""
-        import src.source.connectors.api
-
-        assert src.source.connectors.api is not None
-        assert src.source.connectors.api.APIConnector is not None
 
 
 class TestImportErrors:
@@ -91,10 +71,10 @@ class TestImportErrors:
         # Import in different orders to test for circular imports
         import src
         import src.engine.engine
-        import src.source.connectors.api
+        import src.worker
 
         # All imports should succeed
-        assert all([src.engine.engine, src.source.connectors.api, src])
+        assert all([src.engine.engine, src.worker, src])
 
 
 class TestPackageStructure:
@@ -144,7 +124,6 @@ class TestPackageStructure:
             "runner",
             "secrets",
             "shared",
-            "source",
             "state",
             "worker",
         ]

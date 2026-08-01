@@ -7,7 +7,6 @@ import pytest
 from src.engine.engine import StreamingEngine
 from src.engine.exceptions import ConfigurationError
 from src.models.resolved import BatchingConfig, RuntimeConfig
-from src.source.connectors.base import BaseConnector
 
 
 def _runtime(*, batch_size: int, buffer_size: int) -> RuntimeConfig:
@@ -16,67 +15,6 @@ def _runtime(*, batch_size: int, buffer_size: int) -> RuntimeConfig:
         batching=BatchingConfig(batch_size=batch_size),
         buffer_size=buffer_size,
     )
-
-
-class InMemorySourceConnector(BaseConnector):
-    """Real in-memory source connector for testing."""
-
-    def __init__(self, records: list[dict[str, Any]] = None):
-        super().__init__()
-        self.records = records or []
-        self.connected = False
-        self.batch_size = 10
-
-    async def connect(self, config: dict[str, Any]) -> None:
-        self.connected = True
-
-    async def disconnect(self) -> None:
-        self.connected = False
-
-    async def health_check(self) -> bool:
-        return self.connected
-
-    async def read_batch(self, batch_size: int = None) -> list[dict[str, Any]]:
-        size = batch_size or self.batch_size
-        if not self.records:
-            return []
-        batch = self.records[:size]
-        self.records = self.records[size:]
-        return batch
-
-    async def read_batches(self, batch_size: int = None):
-        """Generator for reading batches."""
-        size = batch_size or self.batch_size
-        while self.records:
-            batch = self.records[:size]
-            self.records = self.records[size:]
-            yield batch
-
-
-class InMemoryDestinationConnector(BaseConnector):
-    """Real in-memory destination connector for testing."""
-
-    def __init__(self):
-        super().__init__()
-        self.records_written: list[dict[str, Any]] = []
-        self.connected = False
-        self.configured = False
-
-    async def connect(self, config: dict[str, Any]) -> None:
-        self.connected = True
-
-    async def configure(self, config: dict[str, Any]) -> None:
-        self.configured = True
-
-    async def disconnect(self) -> None:
-        self.connected = False
-
-    async def health_check(self) -> bool:
-        return self.connected
-
-    async def write_batch(self, records: list[dict[str, Any]]) -> int:
-        self.records_written.extend(records)
-        return len(records)
 
 
 @pytest.mark.unit

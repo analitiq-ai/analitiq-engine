@@ -21,9 +21,9 @@ from unittest.mock import MagicMock
 import pyarrow as pa
 import pytest
 
+from cdk.api import GenericAPIConnector
 from cdk.sql.generic import GenericSQLConnector
 from cdk.types import AckStatus, Cursor, FailureCategory
-from src.destination.connectors.api import ApiDestinationHandler
 from src.destination.connectors.file import FileDestinationHandler
 from src.destination.connectors.stream import StreamDestinationHandler
 from src.worker.proxy import WorkerProxyHandler
@@ -98,17 +98,17 @@ def _formatterless_stream() -> StreamDestinationHandler:
     return handler
 
 
-def _disconnected_api() -> ApiDestinationHandler:
-    handler = ApiDestinationHandler()
+def _disconnected_api() -> GenericAPIConnector:
+    handler = GenericAPIConnector()
     handler._connected = False
-    handler._session = None
+    handler._http = None
     return handler
 
 
-def _unconfigured_api() -> ApiDestinationHandler:
-    handler = ApiDestinationHandler()
+def _unconfigured_api() -> GenericAPIConnector:
+    handler = GenericAPIConnector()
     handler._connected = True
-    handler._session = MagicMock()
+    handler._http = MagicMock()
     handler._streams = {}
     return handler
 

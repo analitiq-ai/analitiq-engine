@@ -24,7 +24,33 @@ from cdk.connection_runtime import ConnectionRuntime
 from src.config import settings
 from src.config.schema_validator import EndpointDocument
 from src.engine.mapping import MappingDocument
+from src.models.state import ReplicationConfig as StateReplicationConfig
 from src.models.stream import EndpointRef
+
+
+def with_effective_safety_window(stream_source: dict[str, Any]) -> dict[str, Any]:
+    """Return *stream_source* with the safety window filled on an incremental read.
+
+    The safety window is operational policy: it is how far back a stored
+    cursor is rewound to cover clock skew and late-arriving rows, and a
+    connector never declares it. Filling it here rather than in a connector
+    keeps one owner for the number and lets the connector treat an absent
+    value as the wiring defect it is, instead of inventing a default of its
+    own — which is how the engine came to hold three copies of it.
+    """
+    replication = stream_source.get("replication")
+    if not isinstance(replication, dict):
+        return stream_source
+    if replication.get("method") != "incremental":
+        return stream_source
+    if replication.get("safety_window_seconds") is not None:
+        return stream_source
+    filled = dict(stream_source)
+    filled["replication"] = {
+        **replication,
+        "safety_window_seconds": StateReplicationConfig.safety_window_seconds,
+    }
+    return filled
 
 
 def dump_endpoint_document(document: EndpointDocument) -> dict[str, Any]:
@@ -96,9 +122,10 @@ _VALID_REPLICATION_METHODS = _variant_literals(Replication, "method")
 class ReplicationConfig:
     """Source replication policy, typed against the published stream contract.
 
-    ``safety_window_seconds`` is intentionally not carried: the engine never
-    reads it (it travels to the connector inside the ``stream_source`` wire
-    document), so there is nothing to type here.
+    ``safety_window_seconds`` is intentionally not carried: it travels to the
+    connector inside the ``stream_source`` wire document (see
+    :func:`with_effective_safety_window`) and no engine decision reads it, so
+    there is nothing to type here.
     """
 
     method: str
@@ -152,7 +179,7 @@ class ResolvedSource:
             "endpoint_ref": self.endpoint_ref.to_dict(),
             "connection_ref": self.connection_ref,
             "endpoint_document": dump_endpoint_document(self.endpoint_document),
-            "stream_source": self.stream_source,
+            "stream_source": with_effective_safety_window(self.stream_source),
         }
 
 

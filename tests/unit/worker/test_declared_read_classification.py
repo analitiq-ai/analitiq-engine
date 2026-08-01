@@ -66,7 +66,7 @@ class TestBirthSiteCategory:
         # A connector's HTTP site stamps the declared category on the
         # typed error; the worker forwards it without re-matching (the
         # error_map here would say nothing about ReadError).
-        from src.source.connectors.base import TransientReadError
+        from cdk.exceptions import TransientReadError
 
         exc = TransientReadError("status 403", declared_category="rate_limited")
         deterministic, declared = classify_read_error(exc, None)
@@ -74,7 +74,7 @@ class TestBirthSiteCategory:
         assert declared == "rate_limited"
 
     def test_birth_site_category_outranks_the_map(self):
-        from src.source.connectors.base import ReadError
+        from cdk.exceptions import ReadError
 
         error_map = _map({"exception": {"ReadError": "transient"}})
         exc = ReadError("status 503", declared_category="auth")

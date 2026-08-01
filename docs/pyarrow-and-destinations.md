@@ -31,7 +31,7 @@ record_batch
 
 ### Source side
 
-- `APIConnector._read_batches_impl` (`src/source/connectors/api.py`) -- HTTP
+- `GenericAPIConnector.read_batches` (`cdk/cdk/api/generic.py`) -- HTTP
   returns `List[Dict]`, then `schema_contract.from_pylist(...)` rebuilds a
   `pa.RecordBatch`.
 - `GenericSQLConnector.read_batches` (`cdk/cdk/sql/generic.py`) --
@@ -99,7 +99,7 @@ once and use `orjson.dumps(default=...)` with a small encoder hook that
 handles `datetime`, `Decimal`, `UUID`, etc. directly from Python.
 
 Recommended API destination flow (implemented in
-`src/destination/connectors/api.py`, encoder hook `_orjson_default`):
+`cdk/cdk/api/generic.py`, with body encoding in `cdk/cdk/api/http.py`):
 
 ```
 record_batch

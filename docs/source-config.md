@@ -145,7 +145,7 @@ pipelines with `status: "active"` are executable.
 | `source.primary_keys` | No | List of fields used for deduplication and as fallback record IDs |
 | `source.replication.method` | No | `full_refresh` (default) or `incremental` |
 | `source.replication.cursor_field` | When `incremental` | Name of the cursor field, a single string (e.g. `"created"`) |
-| `source.replication.safety_window_seconds` | No | Subtracted from cursor for late-arriving data |
+| `source.replication.safety_window_seconds` | No | Subtracted from the stored cursor to cover late-arriving data. Operational policy the engine owns: it fills the default on an incremental stream before the config crosses to the connector, so a connector never invents one |
 | `source.replication.tie_breaker_fields` | No | Used for deterministic ordering when cursor values tie |
 | `source.database_pagination.order_by_field` | No | Declared page ordering for database reads; systems that require an ordering for paged reads (e.g. MSSQL) need this on full-refresh streams. On incremental streams it must equal `cursor_field` (cursor checkpointing requires cursor-ordered pages); any other value is rejected |
 
@@ -273,50 +273,109 @@ ssl context, rate-limit shape) see
 **Public (connector-scoped):** `connectors/{connector_id}/definition/endpoints/{name}.json`
 **Private (connection-scoped):** `connections/{connection_id}/definition/endpoints/{name}.json`
 
-Public endpoints describe a connector's API surface (HTTP path, method,
-filters, pagination, response schema). Private endpoints describe
+Public endpoints describe a connector's API surface (HTTP request, declared
+params, pagination, response schema). Private endpoints describe
 connection-specific resources (e.g. a database table belonging to one
 connection).
 
 ### API endpoint (public example)
 
+The authoritative shape is the `api-endpoint` JSON Schema at
+`schemas.analitiq.ai`; the engine validates every endpoint document against
+it before the document crosses into the connector process.
+
 ```json
 {
-  "endpoint": "/v1/transfers",
-  "method": "GET",
-  "version": 1,
-  "endpoint_schema": { /* JSON Schema for response items */ },
-  "filters": {
-    "profile": {
-      "type": "integer",
-      "operators": ["eq"],
-      "required": true,
-      "default": "${profile_id}"
-    },
-    "createdDateStart": {
-      "type": "string",
-      "operators": ["gte"],
-      "required": false
+  "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
+  "endpoint_id": "transfers",
+  "operations": {
+    "read": {
+      "request": {
+        "method": "GET",
+        "path": "/v1/transfers",
+        "query": {
+          "profile": { "from_param": "profile" },
+          "limit": { "from_param": "limit" },
+          "offset": { "from_param": "offset" },
+          "createdDateStart": { "from_param": "createdDateStart" }
+        }
+      },
+      "params": {
+        "profile": {
+          "in": "query", "type": "integer", "required": true,
+          "default": { "ref": "connection.selections.profile_id" }
+        },
+        "limit": {
+          "in": "query", "type": "integer", "required": false,
+          "controlled_by": "pagination"
+        },
+        "offset": {
+          "in": "query", "type": "integer", "required": false,
+          "controlled_by": "pagination"
+        },
+        "createdDateStart": {
+          "in": "query", "type": "string", "required": false,
+          "controlled_by": "replication"
+        }
+      },
+      "response": {
+        "schema": {
+          "type": "object",
+          "properties": {
+            "records": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": { "type": "integer" },
+                  "created": { "type": "string", "format": "date-time" }
+                }
+              }
+            }
+          }
+        },
+        "records": { "ref": "response.body.records" }
+      },
+      "pagination": {
+        "type": "offset",
+        "offset": {
+          "param": "offset", "initial": 0,
+          "increment_by": { "ref": "response.record_count" }
+        },
+        "limit": {
+          "param": "limit",
+          "default": { "ref": "runtime.batch_size" },
+          "max": 500
+        },
+        "stop_when": { "empty": { "ref": "response.body.records" } }
+      },
+      "replication": {
+        "supported_methods": ["full_refresh", "incremental"],
+        "cursor_mappings": [
+          { "cursor_field": "created", "param": "createdDateStart", "operator": "gte" }
+        ]
+      }
     }
-  },
-  "pagination": {
-    "type": "offset",
-    "params": { "limit_param": "limit", "offset_param": "offset" }
-  },
-  "replication_filter_mapping": {
-    "created": "createdDateStart"
   }
 }
 ```
 
 | Field | Description |
 |-------|-------------|
-| `endpoint` | Path appended to the transport's `base_url` |
-| `method` | HTTP method (default `GET`) |
-| `endpoint_schema` | JSON Schema describing the response payload |
-| `filters` | Per-filter type, allowed operators, default values (defaults can reference `connection.selections` via `${name}` placeholders) |
-| `pagination.type` | `offset`, `cursor`, `page`, `time`, or `link` |
-| `replication_filter_mapping` | Maps a stream's `cursor_field` to an API filter name |
+| `operations.read.request.method` / `.path` | HTTP verb, and the path appended to the transport's `base_url` |
+| `operations.read.request.query` / `.headers` / `.body` | Where each declared param lands on the wire. Every declared param must be bound exactly once, and every binding must name a declared param — the contract refuses a document that breaks either rule |
+| `operations.read.params.<name>` | One declared param: `in` (`query` / `header` / `body` / `path`), `type`, `required`, an optional `default` value expression (`literal` / `ref` / `template` / `function`), and `controlled_by` (`pagination` or `replication`) for a param whose value a loop sets rather than the author |
+| `operations.read.response.schema` | JSON Schema for the response body. Each record field's canonical Arrow type is resolved from the endpoint's read type-map unless the field declares `arrow_type` itself; a JSON type with no rule in that type-map fails the read naming the field |
+| `operations.read.response.records.ref` | `response.body`, or `response.body.<field>[.<field>...]` — where a page's records sit in the decoded body. A ref anchored anywhere else, or one that addresses a value carrying no records, fails the read naming the ref |
+| `operations.read.pagination.type` | One of `offset`, `page`, `cursor`, `keyset`, `link`. The union is closed: an unrecognised value fails loud rather than reading one page |
+| `operations.read.pagination.stop_when` | Required on every strategy. The authoritative end-of-pages condition, evaluated against the page's own body |
+| `operations.read.pagination.limit` | Optional on every strategy: `param` (where the page size lands), `default` (a value expression; `runtime.batch_size` is in scope), and `max`, the provider's cap, which clamps whatever the default produced. Under `link` it binds to the first request only — a followed `next_url` carries the provider's own query |
+| `operations.read.replication.cursor_mappings` | Maps a stream's `cursor_field` to a declared param. The single form (`param` plus `operator`) drives the incremental filter; the window form (`start_param` / `end_param` / `start_operator` / `end_operator`) is declarable but binds no filter, because sending a lower bound with no upper one would read a different range than the author declared |
+
+All five strategies run on one loop, `cdk.api.PageLoop`, with one adapter per
+scheme. The loop stops on an empty page, on the strategy having nowhere left
+to go, or on the declared `stop_when` — and on nothing else. See
+[ADR 0002](adr/0002-one-stop-rule-for-every-paging-scheme.md).
 
 ### Database endpoint (private example)
 

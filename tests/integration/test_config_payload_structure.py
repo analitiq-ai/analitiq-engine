@@ -275,14 +275,14 @@ class TestResolvedConnectionKeys:
         """Verify resolved connection keys are plain UUIDs for API-to-API."""
         resolved_connections = _api_to_api_resolved_connections()
 
-        for key in resolved_connections.keys():
+        for key in resolved_connections:
             assert ":" not in key, f"Connection key should be plain UUID, got: {key}"
             parts = key.split("-")
             assert len(parts) == 5, f"Connection key should be UUID format, got: {key}"
 
         resolved_endpoints = _api_to_api_resolved_endpoints()
 
-        for key in resolved_endpoints.keys():
+        for key in resolved_endpoints:
             assert not key.startswith(
                 "path:"
             ), f"Endpoint key should not have 'path:' prefix, got: {key}"
@@ -416,7 +416,7 @@ class TestEndToEndConfigFlow:
     """Complete flow tests from constructed configs to Engine."""
 
     def test_api_connection_config_has_required_fields(self):
-        """APIConnector.connect() receives a runtime with host and parameters."""
+        """The api connector's connect() gets a runtime with host and parameters."""
         resolved_connections = _api_to_api_resolved_connections()
         runtime = resolved_connections[WISE_CONNECTION_ID]
         config = runtime.raw_config

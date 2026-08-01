@@ -180,11 +180,11 @@ reality.
    are seeded explicitly first (always available, works in editable installs and
    under pytest); entry-point discovery is additive and best-effort (a broken
    plugin is logged and skipped, never fatal). The worker subprocess
-   (`build_worker_registries` in `src/worker/__init__.py`) and the destination
-   (`src/destination/connectors/__init__.py`) both call `build_registries`,
-   seeding `{"database": GenericSQLConnector}` and discovering the rest; the
-   engine process holds only the `WorkerReadable` client. A duplicate `kind`
-   raises rather than silently shadowing.
+   (`build_worker_registries` in `src/worker/__init__.py`) is the one caller of
+   `build_registries`, seeding `{"database": GenericSQLConnector, "api":
+   GenericAPIConnector}` into both the source and the destination registry and
+   discovering the rest; the engine process holds only the `WorkerReadable`
+   client. A duplicate `kind` raises rather than silently shadowing.
 2. **Introspection operations exist.** `list_schemas` / `list_tables` /
    `list_columns` ship in the CDK (`cdk/cdk/sql/discovery.py`, exposed on
    `GenericSQLConnector`), running `INFORMATION_SCHEMA` queries over the same
@@ -410,8 +410,8 @@ capabilities are opt-in extras:
 | Extra | Pulls | Enables |
 |---|---|---|
 | `[arrow]` | `pyarrow` | Arrow columnar read/write batches |
-| `[api]` | `aiohttp` | the HTTP transport |
-| `[streaming]` | `pyarrow` + `aiohttp` | both of the above |
+| `[api]` | `aiohttp`, `aiohttp-retry`, `orjson`, `python-dateutil` | the HTTP transport and the generic API connector |
+| `[streaming]` | `[arrow]` + `[api]` | both of the above |
 
 Imports are lazy at the package seams (`cdk/sql/__init__.py`,
 `cdk/type_map/__init__.py`) via PEP 562 `__getattr__`: importing the
@@ -523,9 +523,11 @@ installed packages are discovered additively.
    pip install "git+https://…/postgresql@v1.0.0"
    ```
 
-   The package advertises itself via entry points (separate groups per role, so
-   a `database` source and destination can resolve to the same or different
-   classes):
+   The package advertises itself via entry points. There is a group per role
+   because the engine keeps a registry per role, but a connector registers the
+   same class in both: one class serves the system in both directions, and the
+   conformance suite refuses a connector that registers two, because a split
+   there is exactly how the two directions drift apart.
 
    ```toml
    # connectors/postgresql/pyproject.toml
@@ -536,7 +538,8 @@ installed packages are discovered additively.
    ```
 
 2. **Engine discovers it at startup.** `build_registries(..., discover=True)`
-   seeds the built-ins (`{"database": GenericSQLConnector}`) then scans the
+   seeds the built-ins (`{"database": GenericSQLConnector, "api":
+   GenericAPIConnector}`) then scans the
    `analitiq.source_connectors` / `analitiq.destination_connectors` entry-point
    groups, registering each `ConnectorRegistry` by `kind`. A broken plugin is
    logged and skipped; a duplicate `kind` raises rather than silently shadowing.

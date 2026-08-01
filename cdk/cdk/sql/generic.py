@@ -52,6 +52,7 @@ from cdk.connection_runtime import (
 )
 from cdk.database_utils import acquire_connection
 from cdk.declarations import DECLARED_WRITE_VERDICTS, ErrorMap, error_map_for
+from cdk.exceptions import ReadError
 from cdk.query_builder import Filter, ParamsLike, QueryBuilder, QueryConfig
 from cdk.record_identity import record_digest
 from cdk.schema_contract import SchemaContract
@@ -81,7 +82,6 @@ from .discovery import list_schemas as _sql_list_schemas
 from .discovery import list_tables as _sql_list_tables
 from .exceptions import (
     CatalogAddressingError,
-    ReadError,
     SchemaConfigurationError,
     TlsVerificationError,
     UnsupportedDialectOperationError,

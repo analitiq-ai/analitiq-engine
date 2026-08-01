@@ -20,12 +20,8 @@ import pyarrow as pa
 import grpc
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.declarations import DECLARED_READ_DETERMINISTIC, ErrorMap, error_map_for
-from cdk.exceptions import TransportSpecError
-from cdk.sql.exceptions import (
-    ReadError,
-    TlsVerificationError,
-    UnsupportedDialectOperationError,
-)
+from cdk.exceptions import ReadError, TransportSpecError
+from cdk.sql.exceptions import TlsVerificationError, UnsupportedDialectOperationError
 from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
 from src.grpc.generated.analitiq.v1 import (
     CursorSave,
@@ -36,19 +32,14 @@ from src.grpc.generated.analitiq.v1 import (
 from src.grpc.generated.analitiq.v1 import ReadError as ReadErrorMsg
 from src.grpc.generated.analitiq.v1 import ReadRequest, ReadResponse
 from src.grpc.generated.analitiq.v1.source_service_pb2_grpc import SourceServiceServicer
-from src.source.connectors.base import ReadError as ApiReadError
 from src.state.store import decode_cursor_state, encode_cursor_state
 
 logger = logging.getLogger(__name__)
 
 # Errors retrying cannot heal: contract/configuration problems. The engine
-# shell fails the stream fatally on these instead of retrying. The two
-# ReadError classes are distinct types raised for the same intent — the SQL
-# connectors raise the CDK one, the API connector its base-module one — so
-# both must classify identically here.
+# shell fails the stream fatally on these instead of retrying.
 _DETERMINISTIC_READ_ERRORS = (
     ReadError,
-    ApiReadError,
     UnsupportedDialectOperationError,
     UnmappedTypeError,
     InvalidTypeMapError,

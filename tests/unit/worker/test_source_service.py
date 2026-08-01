@@ -15,12 +15,9 @@ from unittest.mock import MagicMock
 import pyarrow as pa
 import pytest
 
-from cdk.exceptions import TransportSpecError
-from cdk.sql.exceptions import ReadError
+from cdk.exceptions import ReadError, TransientReadError, TransportSpecError
 from cdk.type_map import UnmappedTypeError
 from src.grpc.generated.analitiq.v1.source_service_pb2 import ReadRequest
-from src.source.connectors.base import ReadError as ApiReadError
-from src.source.connectors.base import TransientReadError as ApiTransientReadError
 from src.state.store import decode_cursor_state
 from src.worker.readable import _decode_arrow_ipc
 from src.worker.source_service import (
@@ -166,9 +163,6 @@ class TestReadStream:
         "exc",
         [
             ReadError("bad endpoint document"),
-            # The API connector raises its own ReadError class for the
-            # same intent — it must classify identically.
-            ApiReadError("source config missing 'endpoint_document'"),
             UnmappedTypeError("demo", "forward", "FANCYTYPE"),
             # A transport-spec/value-expression authoring defect that
             # escapes a connector unwrapped is deterministic by its own
@@ -193,8 +187,8 @@ class TestReadStream:
         [
             ConnectionResetError("db went away"),
             # Transient API failures (429/5xx) heal on retry and must not
-            # classify deterministic alongside the contract ReadError.
-            ApiTransientReadError("API request failed: status 503"),
+            # classify deterministic alongside ReadError.
+            TransientReadError("API request failed: status 503"),
         ],
     )
     async def test_runtime_errors_marked_retryable(self, exc):

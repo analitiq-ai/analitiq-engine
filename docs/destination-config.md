@@ -28,7 +28,7 @@ For the connection / connector schema itself, see
                              |
 +-----------------------------------------------------------+
 |                  HANDLER LAYER (orchestration)            |
-| GenericSQLConnector         ApiDestinationHandler         |
+| GenericSQLConnector         GenericAPIConnector          |
 | FileDestinationHandler      StreamDestinationHandler      |
 +-----------------------------------------------------------+
                              |
@@ -51,19 +51,26 @@ aiomysql, plain sync for sync-only drivers such as Redshift
 transport detail lives in
 [`pyarrow-and-destinations.md`](pyarrow-and-destinations.md).
 
+`GenericAPIConnector` is the single API connector, and it serves both roles
+the same way: one connect, one HTTP round trip, one classification of what a
+response status means, one paging loop. What varies between an API read and
+an API write is the endpoint document's `operations` block, not the class.
+
 Handler source lives under `src/destination/`:
 
-- `connectors/` — handler implementations and the destination registry.
-  - `api.py` — `ApiDestinationHandler`.
+- `connectors/` — the handlers whose implementation is engine-local.
   - `file.py` — `FileDestinationHandler`.
   - `stream.py` — `StreamDestinationHandler` (stdout).
 - `formatters/` — JSONL / CSV / Parquet serializers.
 - `storage/` — local filesystem backend.
 - `server.py` — gRPC server.
 
-Shared building blocks moved to the CDK at `cdk/cdk/`:
+The database and API families live in the CDK at `cdk/cdk/`, alongside the
+shared building blocks:
 
 - `sql/generic.py` — `GenericSQLConnector` (the database handler).
+- `api/generic.py` — `GenericAPIConnector` (the API handler, and the API
+  source).
 - `base_handler.py` — `BaseDestinationHandler` ABC and `BatchWriteResult`.
 - `schema_contract.py` — Arrow-based `SchemaContract`.
 - `type_map/mapper.py` — `TypeMapper`, the canonical-Arrow <-> native-type
@@ -99,30 +106,26 @@ local config volume — they are **never** transmitted over gRPC.
 
 ## Handler Registry
 
-Handlers are mapped by the connector's `connector_type` (its *kind*).
-`src/destination/connectors/__init__.py` builds a shared CDK
-`ConnectorRegistry` via `build_registries(...)` and exports the
-`destination_registry` instance plus a `get_handler(kind)` convenience
-factory:
+Handlers are mapped by the connector's `connector_type` (its *kind*). Both
+registries — source and destination — are built in one place,
+`build_worker_registries` in `src/worker/__init__.py`, because the worker
+subprocess is where connector classes execute. Nothing else builds one: the
+engine and the destination service hold clients, not connector code.
 
-```python
-from src.destination.connectors import destination_registry, get_handler
-
-handler = get_handler("database")            # instance (convenience factory)
-handler = destination_registry.create("api") # instance
-handler_class = destination_registry.get("api")  # class
-destination_registry.register("custom", MyHandler)
-```
-
-Built-ins (`_DESTINATION_BUILTINS`):
+Built-in kind defaults:
 
 | `connector_type` | Handler | Use Case |
 |------------------|---------|----------|
 | `database` | `GenericSQLConnector` | All SQL dialects via SQLAlchemy or ADBC (PostgreSQL, MySQL, Snowflake, BigQuery, Redshift) |
-| `api` | `ApiDestinationHandler` | REST endpoints |
+| `api` | `GenericAPIConnector` | REST endpoints |
 | `file` | `FileDestinationHandler` | Local filesystem |
 | `s3` | `FileDestinationHandler` | Object storage — planned; refused at connect until its storage backend exists |
 | `stdout` | `StreamDestinationHandler` | Diagnostics / debugging |
+
+`database` and `api` seed the same class into both registries. A kind whose
+one system is read and written by one class has no role-specific answer to
+give here, and offering one would be a place for the two directions to
+drift apart.
 
 Externally installed connector packages add themselves through the
 `analitiq.destination_connectors` entry-point group (discovered at
@@ -420,7 +423,7 @@ are in
 | New API endpoint | 0 lines (write a connector + endpoints) |
 | New storage backend (e.g. GCS) | New class in `src/destination/storage/` |
 | New formatter (e.g. Avro) | New class in `src/destination/formatters/` |
-| Brand-new handler family | Subclass `BaseDestinationHandler` and `destination_registry.register(...)` |
+| Brand-new handler family | Subclass `BaseDestinationHandler` and publish the class in the `analitiq.destination_connectors` entry-point group |
 
 ### What a new handler implements
 

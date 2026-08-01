@@ -23,7 +23,7 @@ import pyarrow as pa
 
 import grpc
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.sql.exceptions import ReadError
+from cdk.exceptions import ReadError
 from cdk.types import CheckpointStore
 from src.grpc import DEFAULT_MAX_MESSAGE_SIZE
 from src.grpc.generated.analitiq.v1 import ReadRequest
