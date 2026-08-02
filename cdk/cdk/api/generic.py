@@ -66,7 +66,7 @@ from .page_loop import (
     StopCondition,
 )
 from .predicates import evaluate_predicate
-from .records import extract_records, page_scope
+from .records import extract_records, page_resolver
 from .replication import cursor_param_for, effective_start
 from .request import ParamTable, RequestBuilder, build_write_body
 from .response_schema import apply_read_type_map, records_items_schema
@@ -476,17 +476,12 @@ class GenericAPIConnector(BaseDestinationHandler):
             # type cannot hold. None of them heals on a retry.
             raise ReadError(f"read failed after {batch_count} batches: {err}") from err
 
-    @staticmethod
-    def _page_resolver(resolver: Resolver, page: Page | None) -> Resolver:
-        """Give the resolver the page's body as its ``response`` scope."""
-        return resolver if page is None else resolver.with_response(page_scope(page))
-
     def _page_expression_resolver(self, resolver: Resolver) -> Resolve:
         """Adapt the read's resolver to what a strategy asks of it."""
 
         def resolve(expr: Any, page: Page | None) -> Any:
             try:
-                return self._page_resolver(resolver, page).resolve_for_request(expr)
+                return page_resolver(resolver, page).resolve_for_request(expr)
             except _RESOLUTION_FAILURES as err:
                 raise ReadError(
                     f"pagination expression failed to resolve: {err}"
@@ -504,7 +499,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                 return False
             try:
                 return evaluate_predicate(
-                    declared, self._page_resolver(resolver, page).resolve_for_request
+                    declared, page_resolver(resolver, page).resolve_for_request
                 )
             except _RESOLUTION_FAILURES as err:
                 raise ReadError(

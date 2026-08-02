@@ -60,10 +60,28 @@ in a customer pipeline (spec
   `read(write(x)) == x` is deliberately **not** asserted: most systems
   have no unsigned or 8-bit types, so `Int8 -> SMALLINT -> Int16` is
   correct authoring, not a defect.
-- **The read path compiles.** The CDK's QueryBuilder resolves the
-  connector's dialect flavour (`sqlalchemy_registry_name`) against the
-  connector's own installed requirements, and cursor reads order by the
-  cursor field — the precondition for monotonic checkpoints.
+- **The read path compiles.** For a database, the CDK's QueryBuilder
+  resolves the connector's dialect flavour (`sqlalchemy_registry_name`)
+  against the connector's own installed requirements, and cursor reads
+  order by the cursor field — the precondition for monotonic checkpoints.
+- **The api read path runs, with nothing sent.** An api read compiles into
+  a `PageRequest` the way a database read compiles into SQL, so each
+  endpoint document is driven as far as a definition can be driven: the
+  first request is built, a scripted page is advanced past, the author's
+  `stop_when` is evaluated against that page, and the declared records
+  become an Arrow schema. Every drive calls the functions the engine's own
+  read calls, so what passes here is what the engine executes — a paging
+  scheme with nowhere to go, a stop condition that reads nothing off the
+  page, a keyset ordering field no record declares, or a next link leaving
+  the connection's origin all fail here rather than in a pipeline. Nothing
+  is fetched and no HTTP client is needed, which is why the `conformance`
+  extra pulls no transport.
+- **No read declares something the path drops.** The contract lets a
+  request name its own `transport_ref` and map query keys onto param
+  names; the api path implements neither, opening one connection at
+  connect time and sending every non-body param under the param's own
+  name. Both gaps fail silently — the request still goes out — so they are
+  reported from the declaration, there being no execution to drive.
 
 **Tier 2 — live tests** (`cdk.conformance.tier2`, the connector's
 system as a CI service container): all three write modes end-to-end
@@ -82,22 +100,30 @@ contract tier).
 Cloud warehouses with no containerizable server (Snowflake, BigQuery,
 Redshift) run tier 1 only; that is an accepted residual risk.
 
+There is no live tier for `kind: api`, and that is a statement about the
+tier rather than a gap in it. The live tier's whole value is a round trip
+against the real system: a public CI carries no provider credentials, and
+a stub HTTP server would certify the connector's own fixtures rather than
+the provider — worse than nothing, because it reads green. So an api
+connector's tier-2 run skips, naming that reason, and the applicability
+gate below does not fire. Kind `api` is assessed in full at tier 1, where
+the read path is executed.
+
 ## What it cannot assess, it does not pass
 
-Every behavioural check in both tiers applies to `kind: database` — each
-one renders SQL through a dialect or drives the write primitive. Pointed
-at a connector of any other kind, the suite would collect nothing but
-skips and still exit zero, reporting *not assessed* as *passed*. That is
-the one outcome a required status check must never produce, and the fix
-belongs in the kit rather than in a kind branch in every connector
-repo's CI.
+Every behavioural check gates itself on the connector kinds it applies
+to. Pointed at a connector of a kind nothing covers, the suite would
+collect nothing but skips and still exit zero, reporting *not assessed*
+as *passed*. That is the one outcome a required status check must never
+produce, and the fix belongs in the kit rather than in a kind branch in
+every connector repo's CI.
 
 So a run that collects no check for its target's kind fails, naming it:
 
 ```
 [kind-applicability] no check in this run applies to connector kind
-'api', so this connector is ungated: the checks collected here apply to
-kind 'database'.
+'file', so this connector is ungated: the checks collected here apply to
+kind 'api', 'database'.
 ```
 
 A check module states the kinds it applies to once (`APPLIES_TO_KINDS`),
@@ -129,8 +155,13 @@ connector that registers a different class per role is refused at load,
 because a split there is how the two directions drift apart while the
 suite stays green. A kind the CDK ships no default for resolves no class
 and its class-level checks skip, so a genuinely new kind loads rather
-than failing. A kind whose transport is not installed fails naming the
-extra to install. The flags come from an
+than failing. A kind whose default the install carries no transport for
+resolves no class either, and the reason travels on the target so a check
+that needs the class reports "not installed here" naming the extra —
+rather than skipping as though the kind were inapplicable. The api checks
+never ask for the class: they read the endpoint documents and drive the
+CDK's own read path, so they answer the same verdict whether or not a
+connector package is installed. The flags come from an
 options plugin loaded explicitly (`-p cdk.conformance.plugin` — it is
 deliberately not a `pytest11` entry point, so installing the CDK never
 changes unrelated pytest runs); each option doubles as an environment
@@ -194,6 +225,11 @@ jobs:
           --pyargs cdk.conformance.tier2 --connector-dir .
           --live-connection ci/live-connection.json
 ```
+
+An api connector's job is the tier-1 step alone, and it needs no service
+container and no `[api]` extra: the suite carries no live tier for the
+kind, and the checks it does carry run from the definition with no HTTP
+client installed.
 
 Systems without a service container drop the tier-2 step; the tier-1
 step is mandatory in every connector repo whose kind the suite assesses. A job that *does* provision

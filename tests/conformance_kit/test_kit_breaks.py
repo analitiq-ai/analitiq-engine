@@ -9,6 +9,7 @@ asserts the kit fails with a message naming the offending member.
 from __future__ import annotations
 
 import dataclasses
+import json
 import shutil
 from collections.abc import Sequence
 from pathlib import Path
@@ -19,13 +20,20 @@ from _pytest.outcomes import Skipped
 
 import cdk.registry
 from cdk.conformance import (
+    check_api_query_bindings,
+    check_api_read_advances,
+    check_api_read_compiles,
+    check_api_read_stop_condition,
+    check_api_record_schema,
     check_declaration_consistency,
     check_override_surface,
+    check_read_transport_selection,
     check_type_map_grammar,
     check_type_map_round_trip,
     load_target,
 )
 from cdk.conformance import target as target_module
+from cdk.conformance import violation_report
 from cdk.conformance.target import (
     ConformanceSetupError,
     ConformanceTarget,
@@ -37,8 +45,14 @@ from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.generic import GenericSQLConnector
 from cdk.type_map.loader import build_type_mapper
 
-from .kit_runner import REFERENCE_CLASS, REFERENCE_DIR
+from .kit_runner import API_REFERENCE_DIR, REFERENCE_CLASS, REFERENCE_DIR
 from .reference_connector import ReferenceConnector, ReferencePostgresDialect
+
+
+def _report(violations: Sequence[Any]) -> str:
+    """The kit's own rendering of a check's findings, for assertions."""
+    assert violations, "the check reported nothing"
+    return violation_report(violations)
 
 
 @pytest.fixture()
@@ -1115,3 +1129,198 @@ class TestAKindDefaultWithoutItsExtra:
         with pytest.raises(ModuleNotFoundError) as exc:
             _resolve_connector_class("not-installed", "database", None)
         assert exc.value.name == "pyarrow.lib"
+
+
+class TestApiReadPathBreaks:
+    """A bent api endpoint document fails the drives that execute it.
+
+    Each break here is one an author makes and a green suite would ship:
+    a paging scheme with nowhere to go reads one page and reports success,
+    a stop condition reading nothing off the page never ends a traversal,
+    and a records ref addressing an undeclared field fails on the first
+    response. None of them raises anywhere before the read runs, which is
+    why the kit has to drive the read to find them.
+    """
+
+    @staticmethod
+    def _broken(tmp_path: Path, stem: str, mutate: Any) -> ConformanceTarget:
+        """The api fixture with one endpoint's read operation bent."""
+        root = tmp_path / "api"
+        shutil.copytree(API_REFERENCE_DIR, root)
+        document = root / "definition" / "endpoints" / f"{stem}.json"
+        parsed = json.loads(document.read_text())
+        mutate(parsed["operations"]["read"])
+        document.write_text(json.dumps(parsed))
+        return load_target(root)
+
+    def test_an_unknown_paging_scheme_names_the_contracts_union(
+        self, tmp_path: Path
+    ) -> None:
+        target = self._broken(
+            tmp_path, "widgets", lambda read: read["pagination"].update(type="seek")
+        )
+        report = _report(check_api_read_compiles(target))
+        assert "'seek'" in report
+        assert "'offset'" in report, "the message must name the union it is not in"
+
+    def test_a_cursor_param_with_a_default_ships_on_the_first_request(
+        self, tmp_path: Path
+    ) -> None:
+        """The first page has nothing to continue from, so it sends no token."""
+
+        def to_cursor(read: dict[str, Any]) -> None:
+            read["params"]["page_token"] = {
+                "in": "query",
+                "type": "string",
+                "default": {"literal": "start"},
+            }
+            read["pagination"] = {
+                "type": "cursor",
+                "limit": {"param": "limit", "default": {"ref": "runtime.batch_size"}},
+                "cursor": {
+                    "param": "page_token",
+                    "next_cursor": {"ref": "response.body.next_token"},
+                },
+                "stop_when": {"missing": {"ref": "response.body.next_token"}},
+            }
+
+        target = self._broken(tmp_path, "widgets", to_cursor)
+        report = _report(check_api_read_compiles(target))
+        assert "'page_token'" in report
+        assert "controlled_by" in report
+
+    def test_a_next_value_off_the_page_scope_reads_one_page(
+        self, tmp_path: Path
+    ) -> None:
+        """A traversal that cannot advance is a truncated read reporting success."""
+
+        def to_cursor(read: dict[str, Any]) -> None:
+            read["pagination"] = {
+                "type": "cursor",
+                "limit": {"param": "limit", "default": {"ref": "runtime.batch_size"}},
+                # The page scope carries the body and the record count; a
+                # header is not in it, so this resolves to nothing forever.
+                "cursor": {
+                    "param": "page_token",
+                    "next_cursor": {"ref": "response.headers.x-next"},
+                },
+                "stop_when": {"missing": {"ref": "response.body.next_token"}},
+            }
+
+        target = self._broken(tmp_path, "widgets", to_cursor)
+        report = _report(check_api_read_advances(target))
+        assert "reads its first page and reports success" in report
+
+    def test_a_step_that_cannot_advance_is_reported_before_the_yield(
+        self, tmp_path: Path
+    ) -> None:
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            lambda read: read["pagination"]["offset"].update(increment_by=0),
+        )
+        report = _report(check_api_read_advances(target))
+        assert "must be positive" in report
+
+    def test_a_keyset_ordering_field_no_record_declares(self, tmp_path: Path) -> None:
+        """The records the drive scripts carry exactly what the schema declares."""
+        target = self._broken(
+            tmp_path,
+            "ledger",
+            lambda read: read["pagination"]["keyset"].update(
+                order_by_field="ordering.seq"
+            ),
+        )
+        report = _report(check_api_read_advances(target))
+        assert "'ordering.seq'" in report
+        assert "keyset pagination cannot continue" in report
+
+    def test_a_stop_condition_reading_nothing_off_the_page(
+        self, tmp_path: Path
+    ) -> None:
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            lambda read: read["pagination"].update(stop_when={"eq": [1, 2]}),
+        )
+        report = _report(check_api_read_stop_condition(target))
+        assert "reads nothing under 'response'" in report
+
+    def test_a_missing_stop_condition(self, tmp_path: Path) -> None:
+        target = self._broken(
+            tmp_path, "widgets", lambda read: read["pagination"].pop("stop_when")
+        )
+        report = _report(check_api_read_stop_condition(target))
+        assert "declares no stop_when" in report
+
+    def test_a_stop_condition_that_cannot_compare_its_operands(
+        self, tmp_path: Path
+    ) -> None:
+        target = self._broken(
+            tmp_path,
+            "events",
+            lambda read: read["pagination"].update(
+                stop_when={"lt": [{"ref": "response.body.links.next"}, 5]}
+            ),
+        )
+        report = _report(check_api_read_stop_condition(target))
+        assert "cannot compare str with int" in report
+
+    def test_a_records_ref_the_response_schema_does_not_declare(
+        self, tmp_path: Path
+    ) -> None:
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            lambda read: read["response"]["records"].update(ref="response.body.items"),
+        )
+        report = _report(check_api_record_schema(target))
+        assert "'items'" in report
+        assert "not declared under properties" in report
+
+    def test_a_json_type_the_read_map_has_no_rule_for(self, tmp_path: Path) -> None:
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            lambda read: read["response"]["schema"]["properties"]["objects"]["items"][
+                "properties"
+            ]["id"].update(type="geometry"),
+        )
+        report = _report(check_api_record_schema(target))
+        assert "'geometry'" in report
+        assert "read type-map" in report
+
+    def test_a_read_asking_for_a_transport_the_path_will_not_open(
+        self, tmp_path: Path
+    ) -> None:
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            lambda read: read["request"].update(transport_ref="oauth"),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "'oauth'" in report
+        assert "default_transport" in report
+
+    def test_a_query_key_that_is_not_its_params_name(self, tmp_path: Path) -> None:
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            lambda read: read["request"].update(
+                query={"page[limit]": {"from_param": "limit"}}
+            ),
+        )
+        report = _report(check_api_query_bindings(target))
+        assert "'page[limit]'" in report
+        assert "never sees" in report
+
+    def test_a_query_key_matching_its_param_is_a_no_op(self, tmp_path: Path) -> None:
+        """The binding the path happens to honour is not a finding."""
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            lambda read: read["request"].update(
+                query={"limit": {"from_param": "limit"}}
+            ),
+        )
+        assert check_api_query_bindings(target) == []
