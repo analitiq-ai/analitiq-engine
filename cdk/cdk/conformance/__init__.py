@@ -44,12 +44,17 @@ wrappers over these functions.
 """
 
 from .api_read_path import (
+    check_api_page_references,
     check_api_read_advances,
     check_api_read_compiles,
     check_api_read_stop_condition,
     check_api_record_schema,
 )
-from .api_surface import check_api_query_bindings, check_read_transport_selection
+from .api_surface import (
+    check_api_query_bindings,
+    check_api_request_placements,
+    check_read_transport_selection,
+)
 from .applicability import check_kind_applicability
 from .declaration import check_declaration_consistency
 from .roundtrip import check_type_map_grammar, check_type_map_round_trip
@@ -61,11 +66,13 @@ __all__ = [
     "ConformanceSetupError",
     "ConformanceTarget",
     "Violation",
+    "check_api_page_references",
     "check_api_query_bindings",
     "check_api_read_advances",
     "check_api_read_compiles",
     "check_api_read_stop_condition",
     "check_api_record_schema",
+    "check_api_request_placements",
     "check_declaration_consistency",
     "check_kind_applicability",
     "check_override_surface",
