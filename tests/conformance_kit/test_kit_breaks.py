@@ -21,6 +21,7 @@ from _pytest.outcomes import Skipped
 import cdk.registry
 from cdk.conformance import (
     api_read_path,
+    check_api_has_reads,
     check_api_page_references,
     check_api_query_bindings,
     check_api_read_advances,
@@ -1671,4 +1672,212 @@ class TestApiRequestBodyBreaks:
             read["request"]["body"] = {"ref": "connection.parameters.filter"}
 
         target = self._broken(tmp_path, "widgets", bend)
+        assert check_api_read_compiles(target) == []
+
+
+class TestApiRunWithNothingToDrive:
+    """A green tier 1 must mean the read path ran, not that there was none."""
+
+    def test_a_connector_with_no_endpoints(self, tmp_path: Path) -> None:
+        root = tmp_path / "api"
+        shutil.copytree(API_REFERENCE_DIR, root)
+        shutil.rmtree(root / "definition" / "endpoints")
+        report = _report(check_api_has_reads(load_target(root)))
+        assert "ships no endpoint documents at all" in report
+
+    def test_a_connector_whose_endpoints_are_write_only(self, tmp_path: Path) -> None:
+        root = tmp_path / "api"
+        shutil.copytree(API_REFERENCE_DIR, root)
+        endpoints = root / "definition" / "endpoints"
+        for path in list(endpoints.glob("*.json")):
+            if path.stem != "widgets":
+                path.unlink()
+                continue
+            document = json.loads(path.read_text())
+            document["operations"].pop("read")
+            path.write_text(json.dumps(document))
+        report = _report(check_api_has_reads(load_target(root)))
+        assert "declare no operations.read" in report
+
+    def test_a_database_connector_is_not_asked_for_reads(self) -> None:
+        """The gate is the api tier's own; every other kind is untouched."""
+        target = load_target(REFERENCE_DIR, class_path=REFERENCE_CLASS)
+        assert check_api_has_reads(target) == []
+
+
+class TestApiBaseUrlBreaks:
+    """The transport build needs a base URL resolving to a non-empty string."""
+
+    _bent_definition = staticmethod(TestApiTransportBreaks._bent_definition)
+
+    @pytest.mark.parametrize("declared", [None, ""])
+    def test_a_default_transport_with_no_usable_base_url(
+        self, tmp_path: Path, declared: object
+    ) -> None:
+        def bend(definition: dict[str, Any]) -> None:
+            block = definition["transports"]["api"]
+            if declared is None:
+                block.pop("base_url")
+            else:
+                block["base_url"] = declared
+
+        target = self._bent_definition(tmp_path, bend)
+        report = _report(check_read_transport_selection(target))
+        assert "no usable base_url" in report
+
+    def test_a_base_url_the_connection_supplies_is_clean(self, tmp_path: Path) -> None:
+        """A definition-only run cannot say what a reference will resolve to."""
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(
+                base_url={"ref": "connection.parameters.host"}
+            ),
+        )
+        assert check_read_transport_selection(target) == []
+
+
+class TestApiPositionlessSchemeBreaks:
+    """Cursor and link hold only what the last page handed back."""
+
+    _broken = staticmethod(TestApiReadPathBreaks._broken)
+
+    def test_a_cursor_continuing_from_a_constant(self, tmp_path: Path) -> None:
+        target = self._broken(
+            tmp_path,
+            "invoices",
+            lambda read: read["pagination"]["cursor"].update(
+                next_cursor={"literal": "same"}
+            ),
+        )
+        report = _report(check_api_page_references(target))
+        assert "keeps no position of its own" in report
+
+    def test_a_link_continuing_from_the_connection(self, tmp_path: Path) -> None:
+        target = self._broken(
+            tmp_path,
+            "events",
+            lambda read: read["pagination"]["link"].update(
+                next_url={"ref": "connection.parameters.next_page"}
+            ),
+        )
+        report = _report(check_api_page_references(target))
+        assert "keeps no position of its own" in report
+
+    def test_an_offset_stepping_by_a_constant_is_clean(self, tmp_path: Path) -> None:
+        """Offset counts rows for itself, so a fixed step is exactly right."""
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            lambda read: read["pagination"]["offset"].update(increment_by=50),
+        )
+        assert check_api_page_references(target) == []
+
+
+class TestApiOriginGuardCoversPrefixTemplates:
+    """The scheme and host come from whatever sits at the front of the URL."""
+
+    _broken = staticmethod(TestApiReadPathBreaks._broken)
+
+    @staticmethod
+    def _link_probe(target: ConformanceTarget) -> Any:
+        probes, _ = api_read_path._probes(target)
+        links = [probe for probe in probes if probe.label == "events"]
+        assert links, "the fixture's link-paginated endpoint is what this tests"
+        return links[0]
+
+    def test_a_template_opening_with_the_value_is_armed(self, tmp_path: Path) -> None:
+        target = self._broken(
+            tmp_path,
+            "events",
+            lambda read: read["pagination"]["link"].update(
+                next_url={"template": "${response.body.links.next}&limit=50"}
+            ),
+        )
+        assert api_read_path._response_controls_the_url(self._link_probe(target))
+        assert check_api_read_advances(target) == []
+
+    def test_a_template_opening_with_the_authors_own_path_is_not(
+        self, tmp_path: Path
+    ) -> None:
+        target = self._broken(
+            tmp_path,
+            "events",
+            lambda read: read["pagination"]["link"].update(
+                next_url={"template": "/v1/events?after=${response.body.links.next}"}
+            ),
+        )
+        assert not api_read_path._response_controls_the_url(self._link_probe(target))
+
+
+class TestApiWholeBodyStopConditionBreaks:
+    """A full page's body is present and non-empty, so stopping on it is wrong."""
+
+    _broken = staticmethod(TestApiReadPathBreaks._broken)
+
+    def test_a_stop_condition_on_the_whole_payload(self, tmp_path: Path) -> None:
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            lambda read: read["pagination"].update(
+                stop_when={"not_empty": {"ref": "response.body"}}
+            ),
+        )
+        report = _report(check_api_read_stop_condition(target))
+        assert "holds on a full page" in report
+
+
+class TestApiRequestBodyIsValidatedAroundConnectionValues:
+    """One connection-scoped field must not switch off the whole body check."""
+
+    _broken = staticmethod(TestApiReadPathBreaks._broken)
+
+    @staticmethod
+    def _post_body(spec: dict[str, Any]) -> Any:
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["method"] = "POST"
+            read["request"]["body"] = spec
+
+        return bend
+
+    def test_a_malformed_branch_beside_a_connection_reference(
+        self, tmp_path: Path
+    ) -> None:
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            self._post_body(
+                {
+                    "scope": {"ref": "connection.parameters.scope"},
+                    "page": {"from_param": "offset"},
+                    "broken": {"ref": 123},
+                }
+            ),
+        )
+        report = _report(check_api_read_compiles(target))
+        assert "`ref` must be a string" in report
+
+    def test_a_well_formed_body_reading_the_connection_is_clean(
+        self, tmp_path: Path
+    ) -> None:
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            self._post_body(
+                {
+                    "scope": {"ref": "connection.parameters.scope"},
+                    "page": {"from_param": "offset"},
+                }
+            ),
+        )
+        assert check_api_read_compiles(target) == []
+
+    def test_a_body_that_is_one_connection_expression_is_clean(
+        self, tmp_path: Path
+    ) -> None:
+        """That one really does resolve to nothing, for no fault of the connector."""
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            self._post_body({"ref": "connection.parameters.filter"}),
+        )
         assert check_api_read_compiles(target) == []

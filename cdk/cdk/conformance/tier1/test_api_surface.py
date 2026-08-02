@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 
 from cdk.conformance.api_surface import (
+    check_api_has_reads,
     check_api_query_bindings,
     check_api_request_placements,
     check_read_transport_selection,
@@ -23,6 +24,15 @@ from cdk.conformance.violations import violation_report
 #: Every check is about the api path's request dispatch (see
 #: cdk.conformance.applicability).
 APPLIES_TO_KINDS = ("api",)
+
+
+def test_the_connector_gives_the_api_checks_something_to_drive(
+    conformance_target: ConformanceTarget,
+) -> None:
+    """Every api check drives a read, so there has to be one."""
+    violations = check_api_has_reads(conformance_target)
+    if violations:
+        pytest.fail(violation_report(violations))
 
 
 def test_no_read_selects_a_transport_the_path_will_not_open(

@@ -81,11 +81,11 @@ def _assert_suite_passed(
 
 
 #: Every tier-1 check that applies to kind 'api': five read-path drives,
-#: three surface checks, and the kind-agnostic scaffolding. Pinned to the
+#: four surface checks, and the kind-agnostic scaffolding. Pinned to the
 #: exact count, not a floor: a loose floor lets a whole check module be
 #: deleted without a skip line to notice, which is the same "not assessed
 #: reads as passed" failure one level down.
-API_TIER1_EXPECTED_PASSED = 14
+API_TIER1_EXPECTED_PASSED = 15
 
 #: The check modules a run against an api connector must actually execute.
 API_CHECK_MODULES = ("test_api_read_path.py", "test_api_surface.py")
