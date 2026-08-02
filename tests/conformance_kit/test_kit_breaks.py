@@ -1609,13 +1609,13 @@ class TestApiOriginGuardIsArmedOnlyWhereThereIsAnOriginToLeave:
         )
         assert check_api_read_advances(target) == []
 
-    def test_the_guard_is_still_armed_where_the_value_is_the_url(
-        self, tmp_path: Path
-    ) -> None:
+    def test_the_guard_is_still_armed_where_the_value_is_the_url(self) -> None:
+        """The narrowing must not disarm the drive for a bare-ref link."""
         target = load_target(API_REFERENCE_DIR)
         probes, _ = api_read_path._probes(target)
-        link = next(p for p in probes if p.label == "events")
-        assert api_read_path._response_controls_the_url(link)
+        links = [probe for probe in probes if probe.label == "events"]
+        assert links, "the fixture's link-paginated endpoint is what this tests"
+        assert api_read_path._response_controls_the_url(links[0])
 
 
 class TestApiTransportBreaks:
