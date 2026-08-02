@@ -60,7 +60,7 @@ def read_operations(target: ConformanceTarget) -> list[tuple[str, dict[str, Any]
 
 
 def api_base_url(target: ConformanceTarget) -> str | None:
-    """The literal base URL the default http transport declares, if any.
+    """Return the base URL the default http transport declares literally.
 
     ``None`` when the connector declares no http default transport, or
     when its ``base_url`` is a value expression rather than a literal: a

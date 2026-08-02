@@ -181,7 +181,9 @@ def _page_expression_resolver(resolver: Resolver) -> Resolve:
     return resolve
 
 
-def _compile_read(target: ConformanceTarget, label: str, read: dict[str, Any]) -> _ReadProbe:
+def _compile_read(
+    target: ConformanceTarget, label: str, read: dict[str, Any]
+) -> _ReadProbe:
     """Compile one read to its first request, raising on any authoring defect.
 
     Mirrors ``GenericAPIConnector._plan_read`` in the order that matters:
@@ -291,7 +293,9 @@ def _plant(body: dict[str, Any], path: list[str], value: Any) -> None:
     node[path[-1]] = value
 
 
-def _scripted_page(probe: _ReadProbe, *, continuation: Any, records: list[dict[str, Any]]) -> Page:
+def _scripted_page(
+    probe: _ReadProbe, *, continuation: Any, records: list[dict[str, Any]]
+) -> Page:
     """Build the page a scheme advances from, with nothing fetched.
 
     A value is planted at every ``response.body`` path the pagination block
@@ -338,7 +342,7 @@ def _sample_value(schema: Any) -> Any:
 
 
 def _sample_object(schema: Mapping[str, Any]) -> dict[str, Any]:
-    """An object carrying exactly the properties *schema* declares."""
+    """Build an object carrying exactly the properties *schema* declares."""
     properties = schema.get("properties")
     if not isinstance(properties, Mapping):
         return {}
@@ -346,7 +350,7 @@ def _sample_object(schema: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _declared_record(probe: _ReadProbe) -> dict[str, Any] | None:
-    """A record shaped like the endpoint's own declared record schema.
+    """Build a record shaped like the endpoint's own declared record schema.
 
     ``None`` when that schema does not resolve, which the record-schema
     check reports on its own.
@@ -361,7 +365,7 @@ def _declared_record(probe: _ReadProbe) -> dict[str, Any] | None:
 
 
 def _probe_records(probe: _ReadProbe, *, declared: bool = True) -> list[dict[str, Any]]:
-    """The records the scripted page carries.
+    """Build the records the scripted page carries.
 
     Built from the endpoint's own record schema, so a scheme that continues
     from a record field -- keyset -- finds its ordering value exactly when
@@ -384,7 +388,7 @@ def _probe_records(probe: _ReadProbe, *, declared: bool = True) -> list[dict[str
 
 
 def _keyset_field(probe: _ReadProbe) -> str | None:
-    """The keyset scheme's ordering field, or ``None`` for the other four."""
+    """Return the keyset scheme's ordering field, ``None`` for the other four."""
     block = probe.pagination or {}
     if block.get("type") != "keyset":
         return None
@@ -642,7 +646,7 @@ def _stop_condition_violations(probe: _ReadProbe, declared: Any) -> list[Violati
 
 
 def _stop_resolver(probe: _ReadProbe, page: Page) -> Callable[[Any], Any]:
-    """The one-argument resolve a predicate is evaluated through."""
+    """Return the one-argument resolve a predicate is evaluated through."""
 
     def resolve(expr: Any) -> Any:
         return probe.resolve(expr, page)

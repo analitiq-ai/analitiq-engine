@@ -135,6 +135,36 @@ def _read_operation(
     return endpoint_id, read, stream_source, endpoint_ref
 
 
+def _page_expression_resolver(resolver: Resolver) -> Resolve:
+    """Adapt the read's resolver to what a strategy asks of it."""
+
+    def resolve(expr: Any, page: Page | None) -> Any:
+        try:
+            return page_resolver(resolver, page).resolve_for_request(expr)
+        except _RESOLUTION_FAILURES as err:
+            raise ReadError(f"pagination expression failed to resolve: {err}") from err
+
+    return resolve
+
+
+def _stop_condition(declared: Any, resolver: Resolver) -> StopCondition:
+    """Adapt the declared stop condition to what the loop asks of it."""
+
+    def stop_when(page: Page) -> bool:
+        if declared is None:
+            # No pagination block, so the strategy already ends the
+            # traversal after its one page.
+            return False
+        try:
+            return evaluate_predicate(
+                declared, page_resolver(resolver, page).resolve_for_request
+            )
+        except _RESOLUTION_FAILURES as err:
+            raise ReadError(f"pagination stop_when failed to evaluate: {err}") from err
+
+    return stop_when
+
+
 class GenericAPIConnector(BaseDestinationHandler):
     """One API connector serving both roles, as the SQL one does for databases.
 
@@ -379,7 +409,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                 fetch=self._fetcher(
                     self._http, builder, method=method, records_ref=records_ref
                 ),
-                stop_when=self._stop_condition(
+                stop_when=_stop_condition(
                     (pagination or {}).get("stop_when"), resolver
                 ),
             ),
@@ -415,7 +445,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                 pagination,
                 url=url,
                 base_params=table.values,
-                resolve=self._page_expression_resolver(resolver),
+                resolve=_page_expression_resolver(resolver),
                 follow_url=partial(follow_url, origin=base_url),
             )
         except ValueError as err:
@@ -475,38 +505,6 @@ class GenericAPIConnector(BaseDestinationHandler):
             # keyset page with no ordering value, a record a declared Arrow
             # type cannot hold. None of them heals on a retry.
             raise ReadError(f"read failed after {batch_count} batches: {err}") from err
-
-    def _page_expression_resolver(self, resolver: Resolver) -> Resolve:
-        """Adapt the read's resolver to what a strategy asks of it."""
-
-        def resolve(expr: Any, page: Page | None) -> Any:
-            try:
-                return page_resolver(resolver, page).resolve_for_request(expr)
-            except _RESOLUTION_FAILURES as err:
-                raise ReadError(
-                    f"pagination expression failed to resolve: {err}"
-                ) from err
-
-        return resolve
-
-    def _stop_condition(self, declared: Any, resolver: Resolver) -> StopCondition:
-        """Adapt the declared stop condition to what the loop asks of it."""
-
-        def stop_when(page: Page) -> bool:
-            if declared is None:
-                # No pagination block, so the strategy already ends the
-                # traversal after its one page.
-                return False
-            try:
-                return evaluate_predicate(
-                    declared, page_resolver(resolver, page).resolve_for_request
-                )
-            except _RESOLUTION_FAILURES as err:
-                raise ReadError(
-                    f"pagination stop_when failed to evaluate: {err}"
-                ) from err
-
-        return stop_when
 
     def _fetcher(
         self,
