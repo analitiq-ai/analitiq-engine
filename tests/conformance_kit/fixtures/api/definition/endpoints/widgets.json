@@ -1,0 +1,66 @@
+{
+  "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
+  "endpoint_id": "widgets",
+  "display_name": "Widgets (offset-paginated)",
+  "description": "Offset pagination reading its own page size back out of the response, the shape a records-counting provider serves.",
+  "operations": {
+    "read": {
+      "request": {
+        "method": "GET",
+        "path": "/v1/widgets"
+      },
+      "params": {
+        "limit": {
+          "in": "query",
+          "type": "integer",
+          "required": false,
+          "controlled_by": "pagination"
+        },
+        "offset": {
+          "in": "query",
+          "type": "integer",
+          "required": false,
+          "controlled_by": "pagination"
+        }
+      },
+      "pagination": {
+        "type": "offset",
+        "limit": {
+          "param": "limit",
+          "default": { "ref": "runtime.batch_size" },
+          "max": 500
+        },
+        "offset": {
+          "param": "offset",
+          "initial": 0,
+          "increment_by": { "ref": "response.record_count" }
+        },
+        "stop_when": {
+          "empty": { "ref": "response.body.objects" }
+        }
+      },
+      "response": {
+        "records": { "ref": "response.body.objects" },
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "objects": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": { "type": "string" },
+                  "name": { "type": "string" },
+                  "weight_grams": { "type": "integer" },
+                  "in_stock": { "type": "boolean" },
+                  "created_at": { "type": "string", "format": "date-time" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
