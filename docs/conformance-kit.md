@@ -96,6 +96,15 @@ in a customer pipeline (spec
   param's own name. All four fail silently — the request still goes out —
   so they are reported from the declaration, there being no execution to
   drive.
+- **There is a read to drive, on a transport that can open.** Every api
+  check iterates the read operations, so a connector shipping none — or
+  only write-only endpoints — would satisfy all of them by having nothing
+  to fail, and the applicability gate would not notice because those
+  modules do apply to the kind. That is the kit's own founding rule one
+  level down, so it is a failure. So is a `default_transport` that is
+  absent, is not `http`, or carries no `base_url` that could resolve to a
+  non-empty string: every read opens that one transport at connect time,
+  and without it no stream reaches its first request.
 
 **Tier 2 — live tests** (`cdk.conformance.tier2`, the connector's
 system as a CI service container): all three write modes end-to-end

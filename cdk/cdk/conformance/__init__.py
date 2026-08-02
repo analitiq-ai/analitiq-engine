@@ -51,6 +51,7 @@ from .api_read_path import (
     check_api_record_schema,
 )
 from .api_surface import (
+    check_api_has_reads,
     check_api_query_bindings,
     check_api_request_placements,
     check_read_transport_selection,
@@ -66,6 +67,7 @@ __all__ = [
     "ConformanceSetupError",
     "ConformanceTarget",
     "Violation",
+    "check_api_has_reads",
     "check_api_page_references",
     "check_api_query_bindings",
     "check_api_read_advances",

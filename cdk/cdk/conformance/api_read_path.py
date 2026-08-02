@@ -129,6 +129,15 @@ _DECLARED = object()
 #: says nothing about the connector.
 _CONNECTION_SCOPES = ("connection.", "secrets.", "auth.")
 
+#: What marks a mapping as a value expression rather than a plain object
+#: (``Resolver._EXPR_KEYS``).
+_EXPRESSION_KEYS = frozenset({"ref", "template", "literal", "function"})
+
+#: The schemes that keep no position of their own, and the field each one
+#: continues from. Offset and page count for themselves; these two hold
+#: only what the provider last handed back.
+_POSITIONLESS_SCHEMES = {"cursor": "next_cursor", "link": "next_url"}
+
 #: Markers from the CDK's own raise sites, so a drive can tell the refusal
 #: it armed from some other failure that happened to raise first.
 _KEYSET_REFUSAL = "keyset.order_by_field"
@@ -239,12 +248,16 @@ def _materialize_first_request(
     -- gets that far and no further, so stopping at the ``PageRequest``
     would certify a read that cannot issue its first request.
 
-    Skipped when the declared body reads a scope only a connection
-    supplies. Such a body legitimately resolves to nothing here and would
-    be refused for the one reason that says nothing about the connector.
+    Skipped only when the body is *itself* one expression reading a scope a
+    connection supplies. That one resolves to nothing here and is refused
+    for the single reason that says nothing about the connector. A
+    connection-scoped expression nested inside the body is not skipped:
+    request-time resolution omits an unresolved field rather than failing,
+    so the rest of the body still binds -- and a malformed branch beside it
+    still has to be caught.
     """
     body = request_block.get("body")
-    if body is None or _reads_connection_scope(body):
+    if body is None or _is_connection_expression(body):
         return
     RequestBuilder(
         probe.table,
@@ -254,8 +267,15 @@ def _materialize_first_request(
     ).for_page(first.params)
 
 
-def _reads_connection_scope(node: Any) -> bool:
-    """Whether *node* reads a scope a definition-only run cannot supply."""
+def _is_connection_expression(node: Any) -> bool:
+    """Whether *node* is one expression reading a scope only a connection has.
+
+    Deliberately not "reads one anywhere": a nested unresolved expression
+    omits its own field and the body still builds, so skipping the whole
+    materialization over one would hide every other defect beside it.
+    """
+    if not isinstance(node, Mapping) or not _EXPRESSION_KEYS & set(node):
+        return False
     return any(
         lookup.startswith(_CONNECTION_SCOPES) for lookup in _declared_lookups(node)
     )
@@ -603,7 +623,42 @@ def check_api_page_references(target: ConformanceTarget) -> list[Violation]:
         if probe.pagination is None:
             continue
         violations.extend(_reference_violations(probe))
+        violations.extend(_positionless_scheme_violations(probe))
     return violations
+
+
+def _positionless_scheme_violations(probe: _ReadProbe) -> list[Violation]:
+    """Report a scheme that continues from nothing the provider supplies.
+
+    Two of the five carry no position of their own. ``_Offset`` counts rows
+    and ``_Page`` counts pages, so a constant step is exactly right for
+    them; ``_Cursor`` and ``_Link`` hold only what the last page handed
+    back, so a continuation that reads nothing under ``response`` sends the
+    same token or the same URL on every request. The provider then answers
+    the same page forever and the loop's only escape is the author's stop
+    condition -- which, reading a page that never changes, also answers the
+    same thing forever.
+    """
+    block = probe.pagination or {}
+    scheme = str(block.get("type", ""))
+    if scheme not in _POSITIONLESS_SCHEMES:
+        return []
+    field = _POSITIONLESS_SCHEMES[scheme]
+    declared = (block.get(scheme) or {}).get(field)
+    if any(
+        lookup.startswith(_RESPONSE_PREFIX) for lookup in _declared_lookups(declared)
+    ):
+        return []
+    return [
+        Violation(
+            REFERENCES_CHECK,
+            f"endpoint {probe.label!r}: {scheme}.{field} is {declared!r}, "
+            f"which reads nothing under 'response'. This scheme keeps no "
+            f"position of its own -- it continues from what the last page "
+            f"handed back -- so every request after the first is identical "
+            f"to the one before it, and the read never moves past page two.",
+        )
+    ]
 
 
 def _reference_violations(probe: _ReadProbe) -> list[Violation]:
@@ -770,11 +825,12 @@ def _response_controls_the_url(probe: _ReadProbe) -> bool:
         # A function, or something this build does not recognise. Its result
         # is unconstrained, so treat it as controlling the URL.
         return "literal" not in declared
-    return (
-        template.startswith("${")
-        and template.endswith("}")
-        and template.count("${") == 1
-    )
+    # The scheme and host come from whatever sits at the front. A template
+    # opening with a placeholder hands the provider the origin however much
+    # the author appends after it -- ``${...}&limit=50`` is as off-origin as
+    # a bare ref. One opening with the author's own text keeps the origin
+    # whatever is substituted later on.
+    return template.startswith("${")
 
 
 def _refuses(
@@ -924,7 +980,10 @@ def _premature_stop(probe: _ReadProbe, declared: Any, stops: bool) -> list[Viola
 
 def _non_terminal_paths(probe: _ReadProbe) -> set[str]:
     """Return the lookups that say a scripted page is not the last one."""
-    evidence = {f"{_RESPONSE_PREFIX}record_count"}
+    # The body itself counts: a full page's body is present and non-empty,
+    # so a condition reading the whole payload and stopping is deciding
+    # about this page.
+    evidence = {f"{_RESPONSE_PREFIX}record_count", _BODY_PREFIX.rstrip(".")}
     for path in _continuation_paths(probe):
         evidence.add(_BODY_PREFIX + ".".join(path))
     records_ref = ((probe.read.get("response") or {}).get("records") or {}).get("ref")

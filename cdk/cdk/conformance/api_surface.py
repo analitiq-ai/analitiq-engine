@@ -37,6 +37,7 @@ from .violations import Violation
 
 __all__ = [
     "api_base_url",
+    "check_api_has_reads",
     "check_api_query_bindings",
     "check_api_request_placements",
     "check_read_transport_selection",
@@ -46,6 +47,7 @@ __all__ = [
 TRANSPORT_CHECK = "api-read-transport-selection"
 QUERY_CHECK = "api-query-bindings"
 PLACEMENT_CHECK = "api-request-placements"
+READS_CHECK = "api-has-reads"
 
 #: The transport type the api path materializes.
 HTTP_TRANSPORT_TYPE = "http"
@@ -145,7 +147,7 @@ def check_read_transport_selection(target: ConformanceTarget) -> list[Violation]
                 f"reaches its first request.",
             )
         )
-    elif block.get("transport_type") != HTTP_TRANSPORT_TYPE:
+    elif block.get("transport_type") != HTTP_TRANSPORT_TYPE:  # noqa: SIM114
         violations.append(
             Violation(
                 TRANSPORT_CHECK,
@@ -154,6 +156,18 @@ def check_read_transport_selection(target: ConformanceTarget) -> list[Violation]
                 f"{HTTP_TRANSPORT_TYPE!r}. An api connector's reads go out on "
                 f"an HTTP session built from this block; there is no session "
                 f"and no base URL to read from without one.",
+            )
+        )
+    elif not _declares_a_base_url(block):
+        violations.append(
+            Violation(
+                TRANSPORT_CHECK,
+                f"default_transport {default_ref!r} declares no usable "
+                f"base_url ({block.get('base_url')!r}). The transport build "
+                f"requires one that resolves to a non-empty string, so "
+                f"connect() fails before any stream reaches its first "
+                f"request. A value expression is fine -- the connection "
+                f"supplies it -- but an absent or empty one is not.",
             )
         )
     for label, read in read_operations(target):
@@ -173,6 +187,53 @@ def check_read_transport_selection(target: ConformanceTarget) -> list[Violation]
             )
         )
     return violations
+
+
+def _declares_a_base_url(block: Mapping[str, Any]) -> bool:
+    """Whether the block could yield the non-empty base URL the build needs.
+
+    A value expression passes: the connection supplies it, and a
+    definition-only run has no way to say what it will be. An absent key or
+    an empty literal cannot resolve to anything, whatever the connection
+    says.
+    """
+    declared = block.get("base_url")
+    if isinstance(declared, Mapping):
+        return bool(declared)
+    return isinstance(declared, str) and bool(declared)
+
+
+def check_api_has_reads(target: ConformanceTarget) -> list[Violation]:
+    """Certify that this connector gives the api checks something to drive.
+
+    Every check here and next door iterates the read operations, so a
+    connector shipping no endpoint documents -- or only write-only ones --
+    satisfies all of them by having nothing to fail. The applicability gate
+    does not catch it either: those modules do declare they apply to kind
+    ``api``, so the run reports itself as having assessed the kind.
+
+    That is the kit's own founding rule one level down. A green tier 1 has
+    to mean the read path was exercised, not that there was no read path to
+    exercise.
+    """
+    if target.kind != "api" or read_operations(target):
+        return []
+    endpoints = sorted(target.endpoints)
+    carried = (
+        f"the endpoint documents it does ship ({', '.join(endpoints)}) declare "
+        f"no operations.read"
+        if endpoints
+        else "it ships no endpoint documents at all"
+    )
+    return [
+        Violation(
+            READS_CHECK,
+            f"connector {target.connector_id!r} is kind 'api', but "
+            f"{carried}. Every api check drives a read, so all of them pass "
+            f"here by having nothing to drive -- a green run that certifies "
+            f"nothing about this connector.",
+        )
+    ]
 
 
 def check_api_query_bindings(target: ConformanceTarget) -> list[Violation]:
