@@ -69,19 +69,33 @@ in a customer pipeline (spec
   endpoint document is driven as far as a definition can be driven: the
   first request is built, a scripted page is advanced past, the author's
   `stop_when` is evaluated against that page, and the declared records
-  become an Arrow schema. Every drive calls the functions the engine's own
-  read calls, so what passes here is what the engine executes — a paging
-  scheme with nowhere to go, a stop condition that reads nothing off the
-  page, a keyset ordering field no record declares, or a next link leaving
-  the connection's origin all fail here rather than in a pipeline. Nothing
-  is fetched and no HTTP client is needed, which is why the `conformance`
-  extra pulls no transport.
-- **No read declares something the path drops.** The contract lets a
-  request name its own `transport_ref` and map query keys onto param
-  names; the api path implements neither, opening one connection at
-  connect time and sending every non-body param under the param's own
-  name. Both gaps fail silently — the request still goes out — so they are
-  reported from the declaration, there being no execution to drive.
+  become an Arrow schema. Every drive goes through `build_read_strategy`
+  and `stop_condition` — the same functions the read itself calls — so a
+  paging scheme with nowhere to go, a next link leaving the connection's
+  origin, or a stop condition that raises mid-traversal fails here rather
+  than in a pipeline. Nothing is fetched and no HTTP client is needed,
+  which is why the `conformance` extra pulls no transport.
+- **Every page value a read declares is one a page carries.** The drives
+  above script their page *from* the declarations, so on their own they
+  can never find a reference that addresses nothing. This is the check
+  with something independent to read against: the page scope carries
+  `body` and `record_count` and nothing else, and a body path is checked
+  against the response schema the connector published. A reference outside
+  either resolves to nothing on every page — and absent is not neutral. A
+  `missing` or `empty` condition on it holds at page one and the stream
+  stops there reporting success; an `exists` condition never holds and the
+  read runs to exhaustion; a next cursor or link resolves to nothing and
+  the traversal ends after one page.
+- **No read declares something the path drops.** The contract is wider
+  than the path in four places: a request may name its own
+  `transport_ref`, put placeholders in its path with `path_params`,
+  declare `headers`, and map query keys onto param names. The path
+  implements none of them — it opens one connection at connect time,
+  joins the declared path verbatim, sends the connection's own session
+  headers, and puts every non-body param on the query string under the
+  param's own name. All four fail silently — the request still goes out —
+  so they are reported from the declaration, there being no execution to
+  drive.
 
 **Tier 2 — live tests** (`cdk.conformance.tier2`, the connector's
 system as a CI service container): all three write modes end-to-end

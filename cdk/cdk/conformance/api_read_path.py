@@ -23,16 +23,18 @@ the loop the day the loop changes.
 Two substitutions are the kit's own, and both are named in the message
 when they bite:
 
-* the page a scheme advances from is *scripted*, not fetched. Its records
-  are built from the endpoint's own declared record schema -- which the
-  engine does execute, since ``SchemaContract`` builds every batch from it
-  -- so a scheme continuing from a record field finds its value exactly
-  when the connector declared that field. Its envelope is built by
-  planting a continuation value at each ``response.body.<path>`` the
-  scheme references, and nothing more: outside the records path the
-  response schema is documentation the read never consults, so treating it
-  as the whole of what a provider sends would fail connectors that are
-  correct.
+* the page a scheme advances from is *scripted*, not fetched. Its body
+  carries, at every path the pagination block reads, a value of the type
+  the endpoint's own response schema declares there -- so a comparison in
+  ``stop_when`` sees the operand the connector said it would, and a next
+  link the author pointed at the object containing it is handed that
+  object. A path the schema does not declare is a finding in its own right
+  (``check_api_page_references``) rather than a type the kit invents: an
+  invented type is what decides whether an ordering comparison raises, so
+  inventing one would make the verdict the kit's rather than the
+  connector's. Its records are shaped the same way, plus the keyset
+  ordering field, which is planted because the engine walks the provider's
+  raw record and not the declared schema.
 * the origin the link guard is armed with is the default transport's
   literal ``base_url``, or a stand-in when the definition expresses it as
   a reference the connection document supplies. What the guard certifies
@@ -42,18 +44,17 @@ when they bite:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from functools import partial
+from collections.abc import Mapping
+from copy import deepcopy
+from dataclasses import dataclass, replace
 from typing import Any
 
 from cdk.api.page_loop import Page, PageRequest, PaginationStrategy
-from cdk.api.predicates import evaluate_predicate
-from cdk.api.records import page_resolver, split_records_ref
+from cdk.api.read_setup import build_read_strategy, stop_condition
+from cdk.api.records import split_records_ref
 from cdk.api.request import ParamTable
 from cdk.api.response_schema import records_items_schema, resolve_field_arrow_type
-from cdk.api.strategies import Resolve, build_strategy, resolve_page_size
-from cdk.api.urls import follow_url, join_url
+from cdk.api.urls import join_url
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.exceptions import ReadError, TransportSpecError
 from cdk.resolver import Resolver
@@ -66,6 +67,7 @@ from .target import ConformanceTarget
 from .violations import Violation
 
 __all__ = [
+    "check_api_page_references",
     "check_api_read_advances",
     "check_api_read_compiles",
     "check_api_read_stop_condition",
@@ -73,15 +75,18 @@ __all__ = [
 ]
 
 COMPILE_CHECK = "api-read-compiles"
+REFERENCES_CHECK = "api-page-references"
 ADVANCE_CHECK = "api-read-advances"
 STOP_CHECK = "api-read-stop-condition"
 RECORDS_CHECK = "api-record-schema"
 
-#: The failures a deterministic authoring defect surfaces as. The engine's
-#: own read path catches the same set (``_RESOLUTION_FAILURES`` plus the
-#: read error the schema walk raises); anything outside it is a defect in
-#: the CDK rather than in the connector, and propagates.
-_READ_FAILURES = (ReadError, TransportSpecError, ValueError, KeyError, TypeError)
+#: The failures a deterministic authoring defect surfaces as: exactly what
+#: the read itself catches (``ReadError`` plus the engine's own resolution
+#: failures). Anything wider would relabel a CDK bug as a connector finding
+#: -- ``TypeError`` in particular, which the read does not catch and the
+#: worker may classify as retryable, so a check swallowing one here would
+#: hide it from the only person able to fix it.
+_READ_FAILURES = (ReadError, TransportSpecError, ValueError, KeyError)
 
 #: The page size the probe reads with. Any positive integer works; a value
 #: unlike the contract's own bounds makes it obvious in a message that the
@@ -103,8 +108,23 @@ _STAND_IN_ORIGIN = "https://conformance.invalid"
 #: A next link on another host, for arming the origin guard.
 _OFF_ORIGIN_URL = "https://elsewhere.invalid/page/2"
 
-#: The scope prefix a scripted page can plant a value under.
+#: The page scope, and the part of it a value can be planted under.
+_RESPONSE_PREFIX = "response."
 _BODY_PREFIX = "response.body."
+
+#: What ``cdk.api.records.page_scope`` puts in the response scope. Nothing
+#: else is in it, so a declared expression reading anything else resolves to
+#: nothing on every page the provider serves.
+_PAGE_SCOPE_KEYS = ("body", "record_count")
+
+#: "take the type the response schema declares" -- distinct from any value
+#: a drive could legitimately want planted, ``None`` included.
+_DECLARED = object()
+
+#: Markers from the CDK's own raise sites, so a drive can tell the refusal
+#: it armed from some other failure that happened to raise first.
+_KEYSET_REFUSAL = "keyset.order_by_field"
+_ORIGIN_REFUSAL = "leaves the connection's origin"
 
 #: A continuation value shaped for the scheme that reads it: a cursor token
 #: is opaque text, a next link is a relative URL (so it resolves against
@@ -126,7 +146,8 @@ class _ReadProbe:
 
     Holds the pieces rather than a built strategy because every scheme is
     stateful and single-use -- a check that drives one page must start from
-    a fresh traversal, so :meth:`strategy` builds a new adapter per drive.
+    a fresh traversal, so :meth:`strategy` builds a new adapter per drive
+    through the read's own setup.
     """
 
     label: str
@@ -134,51 +155,20 @@ class _ReadProbe:
     pagination: dict[str, Any] | None
     url: str
     origin: str
-    base_params: dict[str, Any]
-    resolve: Resolve
+    table: ParamTable
+    resolver: Resolver
     first: PageRequest
 
     def strategy(self) -> PaginationStrategy:
         """Build a fresh adapter for this read, exactly as the engine does."""
-        return _strategy_for(
+        return build_read_strategy(
             self.pagination,
+            table=self.table,
+            resolver=self.resolver,
             url=self.url,
-            origin=self.origin,
-            base_params=self.base_params,
-            resolve=self.resolve,
+            base_url=self.origin,
+            batch_size=_PROBE_BATCH_SIZE,
         )
-
-
-def _strategy_for(
-    pagination: dict[str, Any] | None,
-    *,
-    url: str,
-    origin: str,
-    base_params: dict[str, Any],
-    resolve: Resolve,
-) -> PaginationStrategy:
-    """Build a paging adapter the way ``_build_strategy`` does in the read.
-
-    The one construction both the compile step and every per-page drive go
-    through, so a drive can never probe a differently-built traversal from
-    the one the compile step certified.
-    """
-    return build_strategy(
-        pagination,
-        url=url,
-        base_params=base_params,
-        resolve=resolve,
-        follow_url=partial(follow_url, origin=origin),
-    )
-
-
-def _page_expression_resolver(resolver: Resolver) -> Resolve:
-    """Adapt *resolver* to what a strategy asks of it, as the read does."""
-
-    def resolve(expr: Any, page: Page | None) -> Any:
-        return page_resolver(resolver, page).resolve_for_request(expr)
-
-    return resolve
 
 
 def _compile_read(
@@ -186,12 +176,13 @@ def _compile_read(
 ) -> _ReadProbe:
     """Compile one read to its first request, raising on any authoring defect.
 
-    Mirrors ``GenericAPIConnector._plan_read`` in the order that matters:
-    one resolver per read carrying the engine's page size, the param table
-    built from it, the page size resolved and placed under the declared
-    limit param, then the strategy. A second resolver built anywhere else
-    would leave ``runtime.batch_size`` unresolvable and probe at the wrong
-    page size, which is the defect this ordering exists to prevent.
+    The ordering is the read's own: one resolver per read carrying the
+    engine's page size, the param table built from it, then
+    :func:`~cdk.api.read_setup.build_read_strategy` -- the same function
+    the read calls, so the page size lands where the read puts it and the
+    origin guard is armed the way the read arms it. A second resolver built
+    here would leave ``runtime.batch_size`` unresolvable and probe at the
+    wrong page size.
     """
     runtime = ConnectionRuntime(
         raw_config={},
@@ -213,41 +204,29 @@ def _compile_read(
 
     origin = api_base_url(target) or _STAND_IN_ORIGIN
     pagination = read.get("pagination")
-    table = ParamTable.for_read(read.get("params") or {}, resolver)
-
-    page_size = resolve_page_size(
-        pagination, batch_size=_PROBE_BATCH_SIZE, resolve=resolver.resolve_for_request
-    )
-    limit = (pagination or {}).get("limit") or {}
-    if limit.get("param"):
-        table.values[limit["param"]] = page_size
-
-    block = pagination if isinstance(pagination, dict) else None
-    url = join_url(origin, path)
-    resolve = _page_expression_resolver(resolver)
-    strategy = _strategy_for(
-        block, url=url, origin=origin, base_params=table.values, resolve=resolve
-    )
-    return _ReadProbe(
+    probe = _ReadProbe(
         label=label,
         read=read,
-        pagination=block,
-        url=url,
+        pagination=pagination if isinstance(pagination, dict) else None,
+        url=join_url(origin, path),
         origin=origin,
-        base_params=table.values,
-        resolve=resolve,
-        first=strategy.first(),
+        table=ParamTable.for_read(read.get("params") or {}, resolver),
+        resolver=resolver,
+        first=PageRequest(""),
     )
+    return replace(probe, first=probe.strategy().first())
 
 
 def _probes(target: ConformanceTarget) -> tuple[list[_ReadProbe], list[Violation]]:
     """Compile every read, splitting what compiled from what did not.
 
-    The violations are returned by :func:`check_api_read_compiles` alone.
-    Every other check drops them and skips the endpoint: a read that does
-    not compile has no ``advance`` and no ``stop_when`` to drive, and
-    reporting the same defect from four checks would bury the one message
-    that says what to change.
+    A read that does not compile has no ``advance`` and no ``stop_when`` to
+    drive. Only :func:`check_api_read_compiles` reports why -- repeating
+    the same defect from four checks would bury the one message that says
+    what to change -- but every other check still says it did not drive
+    that endpoint (:func:`_undriven`). Each check is exported on its own
+    and a repo may wire one into a harness of its own, so "returned
+    nothing" must never be how a check reports "ran against nothing".
     """
     probes: list[_ReadProbe] = []
     violations: list[Violation] = []
@@ -266,19 +245,70 @@ def _probes(target: ConformanceTarget) -> tuple[list[_ReadProbe], list[Violation
     return probes, violations
 
 
-def _declared_refs(node: Any) -> list[str]:
-    """Every ``{"ref": "..."}`` string declared below *node*."""
+def _undriven(check: str, violations: list[Violation]) -> list[Violation]:
+    """Say which endpoints a dependent check could not drive, if any."""
+    if not violations:
+        return []
+    return [
+        Violation(
+            check,
+            f"{len(violations)} endpoint(s) were not driven because their "
+            f"read does not compile into a first request; see the "
+            f"{COMPILE_CHECK!r} check for what to fix. Nothing here says "
+            f"anything about them.",
+        )
+    ]
+
+
+def _declared_lookups(node: Any) -> list[str]:
+    """Every scope path *node* reads, in either spelling that reads one.
+
+    The contract's value expressions are ``literal``, ``ref``, ``template``
+    and ``function``. Two of them address a scope: ``ref`` names one path,
+    and ``template`` names any number inside ``${...}`` placeholders. A
+    ``function`` node's inputs are themselves expressions, so the walk
+    reaches those by recursion.
+
+    Reading only ``ref`` would leave a template-spelled next link invisible
+    -- and an invisible read is worse than an unread one here, because the
+    kit would then script a page missing the value and blame the connector
+    for not advancing past it.
+    """
     found: list[str] = []
     if isinstance(node, Mapping):
         ref = node.get("ref")
         if isinstance(ref, str):
             found.append(ref)
+        template = node.get("template")
+        if isinstance(template, str):
+            found.extend(_template_lookups(template))
         for value in node.values():
-            found.extend(_declared_refs(value))
+            found.extend(_declared_lookups(value))
     elif isinstance(node, list):
         for item in node:
-            found.extend(_declared_refs(item))
+            found.extend(_declared_lookups(item))
     return found
+
+
+def _template_lookups(template: str) -> list[str]:
+    """Return the scope paths a ``${...}`` template substitutes.
+
+    Deliberately forgiving where ``Resolver._resolve_template`` is strict:
+    an unterminated placeholder is an authoring defect the resolver raises
+    on, and re-raising it from a scripting helper would replace that
+    message with a worse one.
+    """
+    found: list[str] = []
+    rest = template
+    while True:
+        start = rest.find("${")
+        if start < 0:
+            return found
+        end = rest.find("}", start + 2)
+        if end < 0:
+            return found
+        found.append(rest[start + 2 : end])
+        rest = rest[end + 1 :]
 
 
 def _plant(body: dict[str, Any], path: list[str], value: Any) -> None:
@@ -293,20 +323,81 @@ def _plant(body: dict[str, Any], path: list[str], value: Any) -> None:
     node[path[-1]] = value
 
 
+def _body_paths(node: Any) -> list[list[str]]:
+    """Return the ``response.body`` field paths *node* reads."""
+    return [
+        lookup[len(_BODY_PREFIX) :].split(".")
+        for lookup in _declared_lookups(node)
+        if lookup.startswith(_BODY_PREFIX)
+    ]
+
+
+def _response_schema(probe: _ReadProbe) -> Any:
+    """Return the endpoint's declared response schema, or ``None``."""
+    response = probe.read.get("response")
+    return response.get("schema") if isinstance(response, Mapping) else None
+
+
+def _schema_at(schema: Any, path: list[str]) -> Any | None:
+    """Return the declared sub-schema at *path*, or ``None`` for none."""
+    node = schema
+    for key in path:
+        properties = node.get("properties") if isinstance(node, Mapping) else None
+        if not isinstance(properties, Mapping) or key not in properties:
+            return None
+        node = properties[key]
+    return node
+
+
+def _continuation_paths(probe: _ReadProbe) -> list[list[str]]:
+    """Return the body paths the scheme itself continues from.
+
+    Only these get a scheme-shaped value. A ``stop_when`` operand lives in
+    the same block but is not a continuation, and giving it a cursor token
+    would type the author's comparison by the paging scheme rather than by
+    what the connector declared the field to be.
+    """
+    block = probe.pagination or {}
+    scheme = block.get(str(block.get("type", "")))
+    return _body_paths(scheme) if scheme is not None else []
+
+
 def _scripted_page(
-    probe: _ReadProbe, *, continuation: Any, records: list[dict[str, Any]]
+    probe: _ReadProbe,
+    *,
+    records: list[dict[str, Any]],
+    continuation: Any = _DECLARED,
 ) -> Page:
     """Build the page a scheme advances from, with nothing fetched.
 
-    A value is planted at every ``response.body`` path the pagination block
-    references, so each declared expression has something to resolve. The
-    records land at the declared ``records.ref`` too, so a ``stop_when``
-    written against the records array sees the same page the loop would.
+    Every body path the pagination block reads gets a value of the type the
+    endpoint's own response schema declares for it -- the continuation paths
+    included. Letting the declaration win there is what catches a next link
+    the author pointed at the object *containing* it: the scheme is handed
+    the dict the provider would send and refuses, rather than being handed a
+    URL string the kit invented and succeeding.
+
+    A path the schema does not declare gets a scheme-shaped value instead,
+    so the traversal still runs; the reference check reports that path,
+    which is the finding worth acting on. ``continuation`` overrides the
+    continuation paths outright, which is how a drive arms the origin guard
+    with a link the connector would never have declared.
+
+    The records land at the declared ``records.ref``, so a stop condition
+    written against the records array sees the page the loop would hand it.
     """
+    scheme = str((probe.pagination or {}).get("type", ""))
+    schema = _response_schema(probe)
     payload: dict[str, Any] = {}
-    for ref in _declared_refs(probe.pagination):
-        if ref.startswith(_BODY_PREFIX):
-            _plant(payload, ref[len(_BODY_PREFIX) :].split("."), continuation)
+    for path in _body_paths(probe.pagination):
+        declared = _schema_at(schema, path)
+        if declared is not None:
+            _plant(payload, path, _sample_value(declared))
+    for path in _continuation_paths(probe):
+        if continuation is not _DECLARED:
+            _plant(payload, path, continuation)
+        elif _schema_at(schema, path) is None:
+            _plant(payload, path, _CONTINUATION_VALUES.get(scheme, 1))
     records_ref = ((probe.read.get("response") or {}).get("records") or {}).get("ref")
     try:
         records_path = split_records_ref(records_ref)
@@ -367,23 +458,22 @@ def _declared_record(probe: _ReadProbe) -> dict[str, Any] | None:
 def _probe_records(probe: _ReadProbe, *, declared: bool = True) -> list[dict[str, Any]]:
     """Build the records the scripted page carries.
 
-    Built from the endpoint's own record schema, so a scheme that continues
-    from a record field -- keyset -- finds its ordering value exactly when
-    the connector declared the field it orders by, and finds nothing when
-    it did not. ``declared=False`` builds records carrying nothing, which
-    is how the keyset refusal is armed.
+    Shaped like the endpoint's own record schema, plus the keyset ordering
+    field. The field is planted rather than taken from the schema because
+    the engine walks the *provider's* record: ``extract_records`` hands the
+    strategy the raw response objects, so ordering by a field the provider
+    sends and the schema does not declare reads perfectly well. Asserting
+    otherwise would fail a working connector.
+
+    ``declared=False`` builds records carrying nothing, which is how the
+    keyset refusal is armed.
     """
     if not declared:
         return [{} for _ in range(_PROBE_RECORDS)]
-    template = _declared_record(probe)
-    if template is None:
-        # The record schema is already a reported violation. Plant the
-        # ordering field so this drive reports what it is about rather than
-        # the same defect a second time.
-        template = {}
-        ordering = _keyset_field(probe)
-        if ordering:
-            _plant(template, ordering.split("."), _PROBE_KEY_VALUE)
+    template = _declared_record(probe) or {}
+    ordering = _keyset_field(probe)
+    if ordering:
+        _plant(template, ordering.split("."), _PROBE_KEY_VALUE)
     return [dict(template) for _ in range(_PROBE_RECORDS)]
 
 
@@ -406,9 +496,9 @@ def check_api_read_compiles(target: ConformanceTarget) -> list[Violation]:
     expression that resolves to nothing usable -- fails every page of the
     stream, so it is worth reporting from a definition alone.
 
-    What the compiled request itself has to show is read back off it: the
-    declared path is in the URL, and a cursor scheme's continuation token
-    is *absent*. A param the loop owns that also carries a declared default
+    What the compiled request itself has to show is read back off it: a
+    cursor scheme's continuation token must be *absent* from the first
+    request. A param the loop owns that also carries a declared default
     is resolved into the table before the loop touches it, and for the four
     schemes that set their param on the first request the default is simply
     overwritten -- but a cursor sends no token on the first request, so
@@ -416,16 +506,6 @@ def check_api_read_compiles(target: ConformanceTarget) -> list[Violation]:
     """
     probes, violations = _probes(target)
     for probe in probes:
-        declared_path = probe.read["request"]["path"]
-        if declared_path.lstrip("/") not in probe.first.url:
-            violations.append(
-                Violation(
-                    COMPILE_CHECK,
-                    f"endpoint {probe.label!r}: the first request goes to "
-                    f"{probe.first.url!r}, which does not carry the declared "
-                    f"path {declared_path!r}.",
-                )
-            )
         cursor_param = ((probe.pagination or {}).get("cursor") or {}).get("param")
         if cursor_param and cursor_param in probe.first.params:
             violations.append(
@@ -438,6 +518,75 @@ def check_api_read_compiles(target: ConformanceTarget) -> list[Violation]:
                     f"resume from a position it never issued. The param is "
                     f"declared with a default the pagination loop then owns; "
                     f"mark it controlled_by 'pagination'.",
+                )
+            )
+    return violations
+
+
+def check_api_page_references(target: ConformanceTarget) -> list[Violation]:
+    """Certify that every page value a read declares is one a page carries.
+
+    The other drives script a page from these declarations, so on their own
+    they can never find a reference that addresses nothing -- the page is
+    built to satisfy whatever the author wrote. This is the check that reads
+    the declarations against something independent: the scope a page
+    actually has, and the response schema the connector itself published.
+
+    Two ways a reference reaches for what is not there:
+
+    * a scope the page has no notion of. ``page_scope`` builds ``body`` and
+      ``record_count``; a condition on ``response.headers`` resolves to
+      nothing on every page ever served;
+    * a body field the endpoint's own response schema does not declare. The
+      schema is what ``records.ref`` is already resolved against, so a
+      pagination value pointing outside it is either a typo or a field the
+      connector forgot to declare -- and both read as absent, forever.
+
+    Absent is not neutral. A ``missing`` or ``empty`` condition on it holds
+    on page one and the stream stops there reporting success; an ``exists``
+    condition never holds and the read runs to exhaustion; a next cursor or
+    link resolves to nothing and the traversal ends after one page.
+    """
+    probes, compile_violations = _probes(target)
+    violations: list[Violation] = _undriven(REFERENCES_CHECK, compile_violations)
+    for probe in probes:
+        if probe.pagination is None:
+            continue
+        violations.extend(_reference_violations(probe))
+    return violations
+
+
+def _reference_violations(probe: _ReadProbe) -> list[Violation]:
+    """Report every page reference this endpoint's pagination cannot resolve."""
+    violations: list[Violation] = []
+    schema = _response_schema(probe)
+    for lookup in dict.fromkeys(_declared_lookups(probe.pagination)):
+        if not lookup.startswith(_RESPONSE_PREFIX):
+            continue
+        scope = lookup[len(_RESPONSE_PREFIX) :].split(".")[0]
+        if scope not in _PAGE_SCOPE_KEYS:
+            violations.append(
+                Violation(
+                    REFERENCES_CHECK,
+                    f"endpoint {probe.label!r}: pagination reads {lookup!r}, "
+                    f"but a page carries only "
+                    f"{', '.join(repr(k) for k in _PAGE_SCOPE_KEYS)} under "
+                    f"'response'. This resolves to nothing on every page.",
+                )
+            )
+            continue
+        if not lookup.startswith(_BODY_PREFIX):
+            continue
+        path = lookup[len(_BODY_PREFIX) :].split(".")
+        if schema is None or _schema_at(schema, path) is None:
+            violations.append(
+                Violation(
+                    REFERENCES_CHECK,
+                    f"endpoint {probe.label!r}: pagination reads {lookup!r}, "
+                    f"which the declared response schema does not reach. "
+                    f"Either the path is a typo or the field is one the "
+                    f"schema does not declare; either way it resolves to "
+                    f"nothing on every page.",
                 )
             )
     return violations
@@ -461,8 +610,8 @@ def check_api_read_advances(target: ConformanceTarget) -> list[Violation]:
       host. Both refusals fire before the yield, which is what keeps them
       from landing records the read cannot continue past.
     """
-    probes, _compile_violations = _probes(target)
-    violations: list[Violation] = []
+    probes, compile_violations = _probes(target)
+    violations: list[Violation] = _undriven(ADVANCE_CHECK, compile_violations)
     for probe in probes:
         violations.extend(_advance_violations(probe))
         violations.extend(_refusal_violations(probe))
@@ -473,11 +622,7 @@ def _advance_violations(probe: _ReadProbe) -> list[Violation]:
     """Drive one page through ``advance`` and report what it answered."""
     scheme = str((probe.pagination or {}).get("type", ""))
     records = _probe_records(probe)
-    page = _scripted_page(
-        probe,
-        continuation=_CONTINUATION_VALUES.get(scheme, 1),
-        records=records,
-    )
+    page = _scripted_page(probe, records=records)
     try:
         following = probe.strategy().advance(page)
     except _READ_FAILURES as err:
@@ -527,14 +672,10 @@ def _refusal_violations(probe: _ReadProbe) -> list[Violation]:
     """Arm the two refusals that have to fire before a page is yielded."""
     scheme = str((probe.pagination or {}).get("type", ""))
     if scheme == "keyset":
-        page = _scripted_page(
-            probe,
-            continuation=_CONTINUATION_VALUES["keyset"],
-            records=_probe_records(probe, declared=False),
-        )
         return _refuses(
             probe,
-            page,
+            _scripted_page(probe, records=_probe_records(probe, declared=False)),
+            marker=_KEYSET_REFUSAL,
             expected=(
                 f"keyset pagination continues from the last record's "
                 f"{_keyset_field(probe)!r}, so a page without one has no next "
@@ -543,12 +684,12 @@ def _refusal_violations(probe: _ReadProbe) -> list[Violation]:
             ),
         )
     if scheme == "link":
-        page = _scripted_page(
-            probe, continuation=_OFF_ORIGIN_URL, records=_probe_records(probe)
-        )
         return _refuses(
             probe,
-            page,
+            _scripted_page(
+                probe, records=_probe_records(probe), continuation=_OFF_ORIGIN_URL
+            ),
+            marker=_ORIGIN_REFUSAL,
             expected=(
                 f"a next link on another host must be refused: the session "
                 f"sends the connection's headers, credentials included, on "
@@ -559,12 +700,32 @@ def _refusal_violations(probe: _ReadProbe) -> list[Violation]:
     return []
 
 
-def _refuses(probe: _ReadProbe, page: Page, *, expected: str) -> list[Violation]:
-    """Report when ``advance`` accepted a page it had to refuse."""
+def _refuses(
+    probe: _ReadProbe, page: Page, *, marker: str, expected: str
+) -> list[Violation]:
+    """Report when ``advance`` did not refuse a page for the stated reason.
+
+    The refusal has to be *the* refusal. Reading "it raised something" as
+    "it refused correctly" is how a connector whose next-page value has the
+    wrong shape passes: the strategy raises about the shape, the kit counts
+    that as the origin guard firing, and the guard is never exercised at
+    all. So the message is checked for the marker the CDK's own raise site
+    carries.
+    """
     try:
         following = probe.strategy().advance(page)
-    except _READ_FAILURES:
-        return []
+    except _READ_FAILURES as err:
+        if marker in str(err):
+            return []
+        return [
+            Violation(
+                ADVANCE_CHECK,
+                f"endpoint {probe.label!r}: advancing raised {err}, which is "
+                f"not the refusal this page arms. {expected}. Fix what it did "
+                f"raise about first -- until then nothing certifies the "
+                f"refusal itself.",
+            )
+        ]
     return [
         Violation(
             ADVANCE_CHECK,
@@ -590,8 +751,8 @@ def check_api_read_stop_condition(target: ConformanceTarget) -> list[Violation]:
       ends the stream at page one or never ends it, and no page the provider
       serves can change its mind.
     """
-    probes, _compile_violations = _probes(target)
-    violations: list[Violation] = []
+    probes, compile_violations = _probes(target)
+    violations: list[Violation] = _undriven(STOP_CHECK, compile_violations)
     for probe in probes:
         if probe.pagination is None:
             continue
@@ -614,24 +775,22 @@ def check_api_read_stop_condition(target: ConformanceTarget) -> list[Violation]:
 def _stop_condition_violations(probe: _ReadProbe, declared: Any) -> list[Violation]:
     """Evaluate one declared stop condition against a scripted page."""
     violations: list[Violation] = []
-    scheme = str(probe.pagination.get("type", "")) if probe.pagination else ""
-    page = _scripted_page(
-        probe,
-        continuation=_CONTINUATION_VALUES.get(scheme, 1),
-        records=_probe_records(probe),
-    )
-    try:
-        evaluate_predicate(declared, _stop_resolver(probe, page))
-    except _READ_FAILURES as err:
-        violations.append(
-            Violation(
-                STOP_CHECK,
-                f"endpoint {probe.label!r}: stop_when raised {err} against a "
-                f"page. The loop evaluates it before every yield, so the read "
-                f"fails there rather than ending.",
+    page = _scripted_page(probe, records=_probe_records(probe))
+    if _operands_are_declared(probe, declared):
+        try:
+            stop_condition(declared, probe.resolver)(page)
+        except _READ_FAILURES as err:
+            violations.append(
+                Violation(
+                    STOP_CHECK,
+                    f"endpoint {probe.label!r}: stop_when raised {err} against "
+                    f"a page. The loop evaluates it before every yield, so the "
+                    f"read fails there rather than ending.",
+                )
             )
-        )
-    if not any(ref.startswith("response.") for ref in _declared_refs(declared)):
+    if not any(
+        lookup.startswith(_RESPONSE_PREFIX) for lookup in _declared_lookups(declared)
+    ):
         violations.append(
             Violation(
                 STOP_CHECK,
@@ -645,13 +804,18 @@ def _stop_condition_violations(probe: _ReadProbe, declared: Any) -> list[Violati
     return violations
 
 
-def _stop_resolver(probe: _ReadProbe, page: Page) -> Callable[[Any], Any]:
-    """Return the one-argument resolve a predicate is evaluated through."""
+def _operands_are_declared(probe: _ReadProbe, declared: Any) -> bool:
+    """Whether every body operand the condition reads has a declared type.
 
-    def resolve(expr: Any) -> Any:
-        return probe.resolve(expr, page)
-
-    return resolve
+    A scripted page can only carry the types the response schema names. For
+    a path it does not name the kit has to invent one, and an invented type
+    is exactly what decides whether an ordering comparison raises -- so a
+    condition reading an undeclared path is not evaluated here at all. The
+    reference check reports that path instead, which is the actionable
+    finding: declare the field, and the evaluation follows.
+    """
+    schema = _response_schema(probe)
+    return all(_schema_at(schema, path) is not None for path in _body_paths(declared))
 
 
 def check_api_record_schema(target: ConformanceTarget) -> list[Violation]:
@@ -678,7 +842,7 @@ def check_api_record_schema(target: ConformanceTarget) -> list[Violation]:
             )
             continue
         try:
-            items = records_items_schema(label, response)
+            items = deepcopy(records_items_schema(label, response))
             _resolve_arrow_types(items, mapper)
             SchemaContract(items)
         except _READ_FAILURES as err:

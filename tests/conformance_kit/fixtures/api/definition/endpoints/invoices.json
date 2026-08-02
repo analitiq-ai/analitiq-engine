@@ -1,0 +1,75 @@
+{
+  "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
+  "endpoint_id": "invoices",
+  "display_name": "Invoices (cursor-paginated)",
+  "description": "The provider hands back an opaque token with each page, and the first request carries none: there is nothing to continue from yet.",
+  "operations": {
+    "read": {
+      "request": {
+        "method": "GET",
+        "path": "/v1/invoices"
+      },
+      "params": {
+        "page_size": {
+          "in": "query",
+          "type": "integer",
+          "required": false,
+          "controlled_by": "pagination"
+        },
+        "page_token": {
+          "in": "query",
+          "type": "string",
+          "required": false,
+          "controlled_by": "pagination"
+        }
+      },
+      "pagination": {
+        "type": "cursor",
+        "limit": {
+          "param": "page_size",
+          "default": { "ref": "runtime.batch_size" },
+          "max": 250
+        },
+        "cursor": {
+          "param": "page_token",
+          "next_cursor": { "ref": "response.body.meta.next_token" }
+        },
+        "stop_when": {
+          "lt": [
+            { "ref": "response.body.meta.returned" },
+            { "ref": "runtime.batch_size" }
+          ]
+        }
+      },
+      "response": {
+        "records": { "ref": "response.body.results" },
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "meta": {
+              "type": "object",
+              "properties": {
+                "next_token": { "type": ["string", "null"] },
+                "returned": { "type": "integer" }
+              }
+            },
+            "results": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": { "type": "string" },
+                  "number": { "type": "string" },
+                  "total": { "type": "number" },
+                  "paid": { "type": "boolean" },
+                  "issued_on": { "type": "string", "format": "date" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

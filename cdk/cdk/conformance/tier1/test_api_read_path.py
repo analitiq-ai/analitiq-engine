@@ -18,6 +18,7 @@ from __future__ import annotations
 import pytest
 
 from cdk.conformance.api_read_path import (
+    check_api_page_references,
     check_api_read_advances,
     check_api_read_compiles,
     check_api_read_stop_condition,
@@ -36,6 +37,15 @@ def test_every_read_compiles_into_a_first_request(
 ) -> None:
     """Params bind, the page size is placed, the paging adapter builds."""
     violations = check_api_read_compiles(conformance_target)
+    if violations:
+        pytest.fail(violation_report(violations))
+
+
+def test_every_page_value_a_read_declares_is_one_a_page_carries(
+    conformance_target: ConformanceTarget,
+) -> None:
+    """Nothing pagination reads addresses a scope or field that is absent."""
+    violations = check_api_page_references(conformance_target)
     if violations:
         pytest.fail(violation_report(violations))
 

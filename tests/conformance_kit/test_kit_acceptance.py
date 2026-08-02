@@ -80,10 +80,12 @@ def _assert_suite_passed(
     )
 
 
-#: The tier-1 api checks: four read-path drives, two surface checks, plus
-#: the kind-agnostic scaffolding. A floor keeps an all-skip regression
-#: from reading as green for the api half too.
-API_TIER1_MIN_PASSED = 8
+#: Every tier-1 check that applies to kind 'api': five read-path drives,
+#: three surface checks, and the kind-agnostic scaffolding. Pinned to the
+#: exact count, not a floor: a loose floor lets a whole check module be
+#: deleted without a skip line to notice, which is the same "not assessed
+#: reads as passed" failure one level down.
+API_TIER1_EXPECTED_PASSED = 14
 
 #: The check modules a run against an api connector must actually execute.
 API_CHECK_MODULES = ("test_api_read_path.py", "test_api_surface.py")
@@ -102,9 +104,10 @@ def _assert_api_suite_passed(completed: subprocess.CompletedProcess[str]) -> Non
         completed.returncode == 0
     ), f"tier 1 failed against the api fixture:\n{output}"
     passed = re.search(r"(\d+) passed", output)
-    assert passed and int(passed.group(1)) >= API_TIER1_MIN_PASSED, (
-        f"expected at least {API_TIER1_MIN_PASSED} tier-1 checks to run for "
-        f"kind 'api', got:\n{output}"
+    assert passed and int(passed.group(1)) == API_TIER1_EXPECTED_PASSED, (
+        f"expected exactly {API_TIER1_EXPECTED_PASSED} tier-1 checks to run "
+        f"for kind 'api'; a different count means a check was added or lost "
+        f"without this number moving with it:\n{output}"
     )
     skipped_api = [
         line
@@ -277,11 +280,13 @@ class TestUnassessableKindIsNotAPass:
 class TestApiReferencePassesTier1:
     """The api fixture is assessed, not skipped past (issue #433).
 
-    Its endpoint documents declare three of the contract's five paging
-    schemes, so the drives that compile a request, advance past a page and
-    evaluate a stop condition all have something to run. A green run here
-    means those checks executed; the applicability gate above is what keeps
-    an all-skip regression from producing the same green.
+    Its endpoint documents declare all five of the contract's paging
+    schemes, so every drive has something to run on every scheme -- which
+    is what makes "a correct connector is clean" an assertion rather than
+    an assumption, for the schemes whose break cases live next door. A
+    green run here means those checks executed; the applicability gate
+    above is what keeps an all-skip regression from producing the same
+    green.
     """
 
     def test_api_fixture_passes_tier1_on_the_generic_path(self) -> None:

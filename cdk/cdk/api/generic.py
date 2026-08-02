@@ -24,7 +24,6 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
-from functools import partial
 from typing import Any
 
 import aiohttp
@@ -57,21 +56,13 @@ from .http import (
     encode_body,
     failure_facts,
 )
-from .page_loop import (
-    Fetch,
-    Page,
-    PageLoop,
-    PageRequest,
-    PaginationStrategy,
-    StopCondition,
-)
-from .predicates import evaluate_predicate
-from .records import extract_records, page_resolver
+from .page_loop import Fetch, Page, PageLoop, PageRequest
+from .read_setup import build_read_strategy, stop_condition
+from .records import extract_records
 from .replication import cursor_param_for, effective_start
 from .request import ParamTable, RequestBuilder, build_write_body
 from .response_schema import apply_read_type_map, records_items_schema
-from .strategies import Resolve, build_strategy, resolve_page_size
-from .urls import follow_url, join_url
+from .urls import join_url
 from .verdicts import declared_retry_statuses, read_verdict, write_verdict
 from .write_plan import (
     WRITE_MODE_KEYS,
@@ -133,36 +124,6 @@ def _read_operation(
             "requires it to declare per-field types"
         )
     return endpoint_id, read, stream_source, endpoint_ref
-
-
-def _page_expression_resolver(resolver: Resolver) -> Resolve:
-    """Adapt the read's resolver to what a strategy asks of it."""
-
-    def resolve(expr: Any, page: Page | None) -> Any:
-        try:
-            return page_resolver(resolver, page).resolve_for_request(expr)
-        except _RESOLUTION_FAILURES as err:
-            raise ReadError(f"pagination expression failed to resolve: {err}") from err
-
-    return resolve
-
-
-def _stop_condition(declared: Any, resolver: Resolver) -> StopCondition:
-    """Adapt the declared stop condition to what the loop asks of it."""
-
-    def stop_when(page: Page) -> bool:
-        if declared is None:
-            # No pagination block, so the strategy already ends the
-            # traversal after its one page.
-            return False
-        try:
-            return evaluate_predicate(
-                declared, page_resolver(resolver, page).resolve_for_request
-            )
-        except _RESOLUTION_FAILURES as err:
-            raise ReadError(f"pagination stop_when failed to evaluate: {err}") from err
-
-    return stop_when
 
 
 class GenericAPIConnector(BaseDestinationHandler):
@@ -394,7 +355,7 @@ class GenericAPIConnector(BaseDestinationHandler):
             endpoint=request_block["path"],
         )
 
-        strategy = self._build_strategy(
+        strategy = build_read_strategy(
             pagination,
             table=table,
             resolver=resolver,
@@ -409,52 +370,11 @@ class GenericAPIConnector(BaseDestinationHandler):
                 fetch=self._fetcher(
                     self._http, builder, method=method, records_ref=records_ref
                 ),
-                stop_when=_stop_condition(
-                    (pagination or {}).get("stop_when"), resolver
-                ),
+                stop_when=stop_condition((pagination or {}).get("stop_when"), resolver),
             ),
             schema=schema_contract,
             cursor_field=cursor_field,
         )
-
-    def _build_strategy(
-        self,
-        pagination: dict[str, Any] | None,
-        *,
-        table: ParamTable,
-        resolver: Resolver,
-        url: str,
-        base_url: str,
-        batch_size: int,
-    ) -> PaginationStrategy:
-        """Build the paging adapter, binding the page size it walks with.
-
-        The page size binds here rather than in the loop: the loop has no
-        page-size concept, so a read that skipped this would raise nothing
-        and quietly take the provider's own default forever.
-        """
-        try:
-            page_size = resolve_page_size(
-                pagination, batch_size=batch_size, resolve=resolver.resolve_for_request
-            )
-            limit = (pagination or {}).get("limit") or {}
-            if limit.get("param"):
-                table.values[limit["param"]] = page_size
-
-            return build_strategy(
-                pagination,
-                url=url,
-                base_params=table.values,
-                resolve=_page_expression_resolver(resolver),
-                follow_url=partial(follow_url, origin=base_url),
-            )
-        except ValueError as err:
-            # An unknown scheme, a page size that cannot advance, a step
-            # that is not a whole number: authoring defects the loop cannot
-            # run at all. They are deterministic, so they must reach the
-            # worker as a read error rather than as a bare ValueError it
-            # would classify as worth retrying.
-            raise ReadError(f"pagination could not be set up: {err}") from err
 
     async def _read_pages(
         self,
