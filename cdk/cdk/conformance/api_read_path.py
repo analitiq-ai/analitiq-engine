@@ -52,7 +52,7 @@ from typing import Any
 from cdk.api.page_loop import Page, PageRequest, PaginationStrategy
 from cdk.api.read_setup import build_read_strategy, stop_condition
 from cdk.api.records import split_records_ref
-from cdk.api.request import ParamTable
+from cdk.api.request import ParamTable, RequestBuilder
 from cdk.api.response_schema import records_items_schema, resolve_field_arrow_type
 from cdk.api.urls import join_url
 from cdk.connection_runtime import ConnectionRuntime
@@ -93,8 +93,11 @@ _READ_FAILURES = (ReadError, TransportSpecError, ValueError, KeyError)
 #: number came from the kit rather than from the connector.
 _PROBE_BATCH_SIZE = 37
 
-#: How many records the scripted page carries.
-_PROBE_RECORDS = 2
+#: How many records the scripted page carries: a full one. A stop condition
+#: comparing the record count against the page size is asking "was this page
+#: short", and a short probe page would answer "the stream ended here" for
+#: every connector that asks.
+_PROBE_RECORDS = _PROBE_BATCH_SIZE
 
 #: The value a scripted record carries for a declared field. Distinctive
 #: on purpose: a keyset scheme advances to the last record's ordering
@@ -120,6 +123,11 @@ _PAGE_SCOPE_KEYS = ("body", "record_count")
 #: "take the type the response schema declares" -- distinct from any value
 #: a drive could legitimately want planted, ``None`` included.
 _DECLARED = object()
+
+#: Scopes a connection document fills in. A definition-only run has none,
+#: so an expression reading one resolves to nothing here for a reason that
+#: says nothing about the connector.
+_CONNECTION_SCOPES = ("connection.", "secrets.", "auth.")
 
 #: Markers from the CDK's own raise sites, so a drive can tell the refusal
 #: it armed from some other failure that happened to raise first.
@@ -214,7 +222,43 @@ def _compile_read(
         resolver=resolver,
         first=PageRequest(""),
     )
-    return replace(probe, first=probe.strategy().first())
+    first = probe.strategy().first()
+    _materialize_first_request(probe, request_block, first)
+    return replace(probe, first=first)
+
+
+def _materialize_first_request(
+    probe: _ReadProbe, request_block: Mapping[str, Any], first: PageRequest
+) -> None:
+    """Build the first request's query and body, as the fetch does.
+
+    ``strategy.first()`` answers where the request goes; the read then runs
+    ``RequestBuilder.for_page`` to turn the param table into what is
+    actually sent. A body-paginated read whose declared body is malformed
+    -- a bad ``from_param`` node, a page value too wide for a JSON number
+    -- gets that far and no further, so stopping at the ``PageRequest``
+    would certify a read that cannot issue its first request.
+
+    Skipped when the declared body reads a scope only a connection
+    supplies. Such a body legitimately resolves to nothing here and would
+    be refused for the one reason that says nothing about the connector.
+    """
+    body = request_block.get("body")
+    if body is None or _reads_connection_scope(body):
+        return
+    RequestBuilder(
+        probe.table,
+        raw_body=body,
+        resolver=probe.resolver,
+        endpoint=str(request_block.get("path")),
+    ).for_page(first.params)
+
+
+def _reads_connection_scope(node: Any) -> bool:
+    """Whether *node* reads a scope a definition-only run cannot supply."""
+    return any(
+        lookup.startswith(_CONNECTION_SCOPES) for lookup in _declared_lookups(node)
+    )
 
 
 def _probes(target: ConformanceTarget) -> tuple[list[_ReadProbe], list[Violation]]:
@@ -276,6 +320,12 @@ def _declared_lookups(node: Any) -> list[str]:
     """
     found: list[str] = []
     if isinstance(node, Mapping):
+        if "literal" in node:
+            # Opaque data, whatever it looks like. The resolver hands a
+            # literal back untouched, so a ref or a placeholder inside one
+            # reads nothing -- and counting it as a read would certify a
+            # stop condition that sees the same constant on every page.
+            return found
         ref = node.get("ref")
         if isinstance(ref, str):
             found.append(ref)
@@ -683,7 +733,7 @@ def _refusal_violations(probe: _ReadProbe) -> list[Violation]:
                 f"continue past"
             ),
         )
-    if scheme == "link":
+    if scheme == "link" and _response_controls_the_url(probe):
         return _refuses(
             probe,
             _scripted_page(
@@ -698,6 +748,33 @@ def _refusal_violations(probe: _ReadProbe) -> list[Violation]:
             ),
         )
     return []
+
+
+def _response_controls_the_url(probe: _ReadProbe) -> bool:
+    """Whether the provider's value becomes the whole of the next URL.
+
+    Only then is there an origin to leave. Where the author writes the URL
+    around the value -- ``{"template": "/v1/events?after=${...}"}`` -- what
+    the provider supplies is a query fragment on a path the connector chose,
+    and the result is relative whatever the provider puts in it. Arming the
+    guard there would report a violation for a connector that never could
+    send its credentials elsewhere.
+    """
+    declared = ((probe.pagination or {}).get("link") or {}).get("next_url")
+    if not isinstance(declared, Mapping):
+        return False
+    if isinstance(declared.get("ref"), str):
+        return True
+    template = declared.get("template")
+    if not isinstance(template, str):
+        # A function, or something this build does not recognise. Its result
+        # is unconstrained, so treat it as controlling the URL.
+        return "literal" not in declared
+    return (
+        template.startswith("${")
+        and template.endswith("}")
+        and template.count("${") == 1
+    )
 
 
 def _refuses(
@@ -778,7 +855,7 @@ def _stop_condition_violations(probe: _ReadProbe, declared: Any) -> list[Violati
     page = _scripted_page(probe, records=_probe_records(probe))
     if _operands_are_declared(probe, declared):
         try:
-            stop_condition(declared, probe.resolver)(page)
+            stops = stop_condition(declared, probe.resolver)(page)
         except _READ_FAILURES as err:
             violations.append(
                 Violation(
@@ -788,6 +865,8 @@ def _stop_condition_violations(probe: _ReadProbe, declared: Any) -> list[Violati
                     f"read fails there rather than ending.",
                 )
             )
+        else:
+            violations.extend(_premature_stop(probe, declared, stops))
     if not any(
         lookup.startswith(_RESPONSE_PREFIX) for lookup in _declared_lookups(declared)
     ):
@@ -802,6 +881,56 @@ def _stop_condition_violations(probe: _ReadProbe, declared: Any) -> list[Violati
             )
         )
     return violations
+
+
+def _premature_stop(probe: _ReadProbe, declared: Any, stops: bool) -> list[Violation]:
+    """Report a condition that ends the traversal on a plainly-full page.
+
+    The verdict itself has to be read, not just the fact that it evaluated:
+    a condition written the wrong way round -- ``exists`` where the author
+    meant ``missing`` -- holds on the first page the provider serves, and
+    the stream stops there reporting success. Nothing else in the suite
+    sees that, because ``advance`` is driven directly and never consults
+    the loop's stopping rule.
+
+    Asserted only when the condition reads something that says, without
+    interpretation, that this page is not the last one: the value the
+    scheme continues from, the records themselves, or how many there were.
+    A condition on other envelope fields -- a page number against a page
+    total, say -- is about the traversal's position, and a scripted page
+    has no position to be right about. Guessing one would replace a real
+    verdict with the kit's arithmetic.
+    """
+    if not stops:
+        return []
+    evidence = _non_terminal_paths(probe)
+    lookups = set(_declared_lookups(declared))
+    if not lookups & evidence:
+        return []
+    return [
+        Violation(
+            STOP_CHECK,
+            f"endpoint {probe.label!r}: stop_when holds on a full page that "
+            f"carries {_PROBE_RECORDS} records and the value the traversal "
+            f"continues from. It reads "
+            f"{', '.join(sorted(repr(item) for item in lookups & evidence))}, "
+            f"so it is deciding about this page rather than about the "
+            f"provider running out -- and it decides to stop. In production "
+            f"the read ends after its first page and reports success. Check "
+            f"the condition is not written the wrong way round.",
+        )
+    ]
+
+
+def _non_terminal_paths(probe: _ReadProbe) -> set[str]:
+    """Return the lookups that say a scripted page is not the last one."""
+    evidence = {f"{_RESPONSE_PREFIX}record_count"}
+    for path in _continuation_paths(probe):
+        evidence.add(_BODY_PREFIX + ".".join(path))
+    records_ref = ((probe.read.get("response") or {}).get("records") or {}).get("ref")
+    if isinstance(records_ref, str):
+        evidence.add(records_ref)
+    return evidence
 
 
 def _operands_are_declared(probe: _ReadProbe, declared: Any) -> bool:
