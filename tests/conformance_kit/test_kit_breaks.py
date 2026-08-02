@@ -20,6 +20,7 @@ from _pytest.outcomes import Skipped
 
 import cdk.registry
 from cdk.conformance import (
+    api_read_path,
     check_api_page_references,
     check_api_query_bindings,
     check_api_read_advances,
@@ -1522,3 +1523,152 @@ class TestApiChecksSayWhenTheyDroveNothing:
             report = _report(check(target))
             assert "not driven" in report, check.__name__
             assert "api-read-compiles" in report, check.__name__
+
+
+class TestApiStopConditionDecidesAboutTheRightThing:
+    """A stop condition written the wrong way round stops at page one.
+
+    Nothing else in the suite sees it: ``advance`` is driven directly and
+    never consults the loop's stopping rule, so an inverted condition
+    produces a perfectly good next request that production never issues.
+    """
+
+    _broken = staticmethod(TestApiReadPathBreaks._broken)
+
+    @pytest.mark.parametrize(
+        ("stem", "stop_when"),
+        [
+            ("invoices", {"exists": {"ref": "response.body.meta.next_token"}}),
+            ("events", {"exists": {"ref": "response.body.links.next"}}),
+            ("widgets", {"not_empty": {"ref": "response.body.objects"}}),
+            (
+                "ledger",
+                {
+                    "gte": [
+                        {"ref": "response.record_count"},
+                        {"ref": "runtime.batch_size"},
+                    ]
+                },
+            ),
+        ],
+    )
+    def test_an_inverted_stop_condition_is_caught_on_every_scheme(
+        self, tmp_path: Path, stem: str, stop_when: dict[str, Any]
+    ) -> None:
+        target = self._broken(
+            tmp_path, stem, lambda read: read["pagination"].update(stop_when=stop_when)
+        )
+        report = _report(check_api_read_stop_condition(target))
+        assert "holds on a full page" in report
+
+    def test_a_condition_about_the_traversals_position_is_not_judged(
+        self, tmp_path: Path
+    ) -> None:
+        """A page number against a page total is not the kit's call.
+
+        The scripted page has no position to be right about, so guessing one
+        would replace the connector's verdict with the kit's arithmetic. The
+        page-number fixture declares exactly that condition and is clean.
+        """
+        assert check_api_read_stop_condition(load_target(API_REFERENCE_DIR)) == []
+
+    def test_a_literal_is_not_a_page_lookup(self, tmp_path: Path) -> None:
+        """The resolver hands a literal back untouched, so it reads nothing."""
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            lambda read: read["pagination"].update(
+                stop_when={"missing": {"literal": {"ref": "response.body.objects"}}}
+            ),
+        )
+        report = _report(check_api_read_stop_condition(target))
+        assert "reads nothing under 'response'" in report
+
+
+class TestApiOriginGuardIsArmedOnlyWhereThereIsAnOriginToLeave:
+    """The provider must control the whole URL for the guard to mean anything."""
+
+    _broken = staticmethod(TestApiReadPathBreaks._broken)
+
+    def test_a_relative_url_built_around_the_value_is_clean(
+        self, tmp_path: Path
+    ) -> None:
+        """The author owns the path; the provider supplies a query fragment.
+
+        Substituting an off-origin URL into that placeholder yields a
+        relative URL on the connector's own origin, so demanding a refusal
+        would fail a connector that never could send its credentials
+        elsewhere.
+        """
+        target = self._broken(
+            tmp_path,
+            "events",
+            lambda read: read["pagination"]["link"].update(
+                next_url={"template": "/v1/events?after=${response.body.links.next}"}
+            ),
+        )
+        assert check_api_read_advances(target) == []
+
+    def test_the_guard_is_still_armed_where_the_value_is_the_url(
+        self, tmp_path: Path
+    ) -> None:
+        target = load_target(API_REFERENCE_DIR)
+        probes, _ = api_read_path._probes(target)
+        link = next(p for p in probes if p.label == "events")
+        assert api_read_path._response_controls_the_url(link)
+
+
+class TestApiTransportBreaks:
+    """Every read opens default_transport, so there has to be one."""
+
+    @staticmethod
+    def _bent_definition(tmp_path: Path, mutate: Any) -> ConformanceTarget:
+        root = tmp_path / "api"
+        shutil.copytree(API_REFERENCE_DIR, root)
+        path = root / "definition" / "connector.json"
+        definition = json.loads(path.read_text())
+        mutate(definition)
+        path.write_text(json.dumps(definition))
+        return load_target(root)
+
+    def test_a_default_transport_that_is_not_declared(self, tmp_path: Path) -> None:
+        target = self._bent_definition(
+            tmp_path, lambda d: d.update(default_transport="oauth")
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "'oauth'" in report
+        assert "no stream on this connector reaches its first request" in report
+
+    def test_a_default_transport_of_another_type(self, tmp_path: Path) -> None:
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(transport_type="sqlalchemy"),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "'sqlalchemy'" in report
+        assert "no session" in report
+
+
+class TestApiRequestBodyBreaks:
+    """The first request is query *and* body; the read builds both."""
+
+    _broken = staticmethod(TestApiReadPathBreaks._broken)
+
+    def test_a_declared_body_that_resolves_to_nothing(self, tmp_path: Path) -> None:
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["method"] = "POST"
+            read["request"]["body"] = {"ref": "response.body.not_a_request_scope"}
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "resolved to nothing" in report
+
+    def test_a_body_reading_the_connection_is_not_judged(self, tmp_path: Path) -> None:
+        """A definition-only run has no connection, and that is not a defect."""
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["method"] = "POST"
+            read["request"]["body"] = {"ref": "connection.parameters.filter"}
+
+        target = self._broken(tmp_path, "widgets", bend)
+        assert check_api_read_compiles(target) == []

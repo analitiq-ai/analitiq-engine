@@ -89,13 +89,15 @@ def read_operations(target: ConformanceTarget) -> list[tuple[str, dict[str, Any]
 def api_base_url(target: ConformanceTarget) -> str | None:
     """Return the base URL the default http transport declares literally.
 
-    ``None`` when the connector declares no http default transport, or
-    when its ``base_url`` is a value expression rather than a literal: a
-    reference resolves from the connection document, which a definition-only
-    run does not have. The read-path checks substitute a stand-in origin in
-    that case, because what they certify -- that a path segment joins and
-    that an off-origin link is refused -- holds for whatever origin the
-    connection supplies.
+    ``None`` when the ``base_url`` is a value expression rather than a
+    literal -- a reference resolves from the connection document, which a
+    definition-only run does not have -- and when there is no http default
+    transport to read one from at all. The read-path checks substitute a
+    stand-in origin either way, because what they certify (that a path
+    segment joins, that an off-origin link is refused) holds for whatever
+    origin the connection supplies; an absent or non-http default transport
+    is a failure in its own right, reported by
+    :func:`check_read_transport_selection`.
     """
     ref = target.definition.get("default_transport")
     block = target.declared_transports().get(ref) if isinstance(ref, str) else None
@@ -108,19 +110,52 @@ def api_base_url(target: ConformanceTarget) -> str | None:
 
 
 def check_read_transport_selection(target: ConformanceTarget) -> list[Violation]:
-    """Certify that no read asks for a transport the api path will not open.
+    """Certify that the one transport every read opens exists and is HTTP.
 
-    The contract lets a request name the transport it dispatches through
-    (``operations.read.request.transport_ref``, defaulting to
-    ``default_transport``). The CDK's api path does not implement that
-    selection: ``connect()`` materializes one connection with no
-    ``transport_ref`` and every read goes out on it. A definition naming
-    any other transport is contract-valid and unexecutable -- and
-    unexecutable silently, since the request still succeeds against the
-    wrong origin with the wrong headers.
+    ``connect()`` materializes ``default_transport`` with no
+    ``transport_ref`` and every read goes out on it, which makes two
+    demands on the definition.
+
+    It must name an http transport. A connector whose default is absent, or
+    points at a block of another type, materializes no session and no base
+    URL, so every read fails at ``connect()`` -- before a stream reads a
+    row. Reported here rather than tolerated, because the read-path checks
+    substitute a stand-in origin to certify what they are about, and a
+    silent stand-in for a transport that does not exist would let a
+    connector that cannot connect at all pass tier 1.
+
+    And nothing may ask for another. The contract lets a request name the
+    transport it dispatches through
+    (``operations.read.request.transport_ref``), which is contract-valid
+    and unexecutable -- and unexecutable silently, since the request still
+    succeeds against the wrong origin with the wrong headers.
     """
-    default_ref = target.definition.get("default_transport")
     violations: list[Violation] = []
+    default_ref = target.definition.get("default_transport")
+    transports = target.declared_transports()
+    block = transports.get(default_ref) if isinstance(default_ref, str) else None
+    if not isinstance(block, Mapping):
+        violations.append(
+            Violation(
+                TRANSPORT_CHECK,
+                f"connector.json names default_transport {default_ref!r}, "
+                f"which is not one of the declared transports "
+                f"{sorted(transports)}. Every read opens the default "
+                f"transport at connect time, so no stream on this connector "
+                f"reaches its first request.",
+            )
+        )
+    elif block.get("transport_type") != HTTP_TRANSPORT_TYPE:
+        violations.append(
+            Violation(
+                TRANSPORT_CHECK,
+                f"default_transport {default_ref!r} declares transport_type "
+                f"{block.get('transport_type')!r}, not "
+                f"{HTTP_TRANSPORT_TYPE!r}. An api connector's reads go out on "
+                f"an HTTP session built from this block; there is no session "
+                f"and no base URL to read from without one.",
+            )
+        )
     for label, read in read_operations(target):
         request = read.get("request")
         ref = request.get("transport_ref") if isinstance(request, Mapping) else None
