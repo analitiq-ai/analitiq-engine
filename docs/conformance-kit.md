@@ -78,6 +78,19 @@ in a customer pipeline (spec
   raises mid-traversal fails here rather than in a pipeline. Nothing is
   fetched and no HTTP client is needed, which is why the `conformance`
   extra pulls no transport.
+
+  What a definition cannot supply is deferred rather than guessed at or
+  reported. The engine fills a path placeholder from a param default
+  resolved against a real connection, from the stream's filters, or from
+  the replication cursor, and substitutes the path only once the
+  incremental filter has bound; a definition-only run has none of the
+  three, so a placeholder bound to a declared param gets a stand-in segment
+  and the drives carry on. Only a placeholder nothing could ever bind — one
+  with no binding at all, or one bound to a param the endpoint does not
+  declare — is a finding, because that one fails for every connection and
+  every stream. The same rule governs the request body and the transport's
+  `base_url`: resolve what a definition settles, defer what reads a
+  connection scope, refuse what nothing could fix.
 - **Every page value a read declares is one a page carries.** The drives
   above script their page *from* the declarations, so on their own they
   can never find a reference that addresses nothing. This is the check
@@ -282,10 +295,20 @@ each fail with a message naming the offending member.
 An api-shaped reference connector (one endpoint document per paging
 scheme) does the same job for the api drives: a bent document must fail
 the drive that executes it — an unknown paging scheme, a next value the
-page scope has no notion of, a path placeholder nothing binds, a header
-the connection already sends, a stop condition written the wrong way
-round, a body that builds on page one and not on page two. The clean
-cases are pinned just as hard, because a check that fails a correct
+page scope has no notion of, a path placeholder nothing could bind, a
+header the connection's transport declares, a stop condition written the
+wrong way round, a body that builds on page one and not on page two. The
+clean cases are pinned just as hard, because a check that fails a correct
 connector is the more expensive defect: a link the connector derives into
-a relative URL, a base URL the connection supplies, a stop operand the
-response schema reaches but types only through composition.
+a relative URL, a base URL the connection supplies, a path segment a
+stream's filters supply, a stop operand the response schema reaches but
+types only through composition.
+
+A refusal the engine itself enforces needs one test more. Every connector
+the kit ships passes the origin guard and the keyset guard, because the
+engine refuses before the kit can judge — so "the check found nothing"
+says the same thing whether the drive ran or was never armed, which is
+the silent non-coverage the drives exist to remove. Each of those drives
+is therefore also pointed at a traversal whose guard has been taken out
+from under it, and required to report; disarm the planting they depend on
+and those tests fail.

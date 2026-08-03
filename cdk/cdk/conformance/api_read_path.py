@@ -20,8 +20,8 @@ the whole difference from the enumeration this replaces: a table of "offset
 pagination should increment by ..." certifies the table, and drifts from
 the loop the day the loop changes.
 
-Two substitutions are the kit's own, and both are named in the message
-when they bite:
+Three substitutions are the kit's own, and each is named in the message
+when it bites:
 
 * the page a scheme advances from is *scripted*, not fetched. Its body
   carries, at every path the pagination block reads, a value of the type
@@ -40,11 +40,19 @@ when they bite:
   a reference the connection document supplies. What the guard certifies
   -- that a link handed to the traversal is either refused or resolved
   back onto that origin -- holds for either.
+* a path placeholder whose value the connection, a stream's filters or the
+  replication cursor supplies gets a stand-in segment. The engine builds
+  its param table from all three and substitutes the path after the
+  incremental filter binds; a definition-only run has none of them, so
+  demanding a value here would fail a connector the engine reads
+  correctly. Only a placeholder nothing could ever bind -- one with no
+  binding at all, or one bound to a param the endpoint does not declare --
+  is a finding.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import Any
@@ -57,11 +65,13 @@ from cdk.api.request import (
     ParamTable,
     RequestBuilder,
     bind_request_values,
+    path_placeholders,
     request_block_problem,
     substitute_path,
 )
 from cdk.api.response_schema import records_items_schema, resolve_field_arrow_type
 from cdk.api.urls import join_url, same_origin
+from cdk.api.write_plan import reserved_header_names
 from cdk.exceptions import ReadError, TransportSpecError
 from cdk.resolver import Resolver, expression_node_problem, scope_paths
 from cdk.schema_contract import SchemaContract
@@ -90,18 +100,30 @@ ADVANCE_CHECK = "api-read-advances"
 STOP_CHECK = "api-read-stop-condition"
 RECORDS_CHECK = "api-record-schema"
 
-#: What compiling a read raises. Widest of the four on purpose: the kit is
+#: What building one request raises. ``RequestBuilder.for_page`` binds the
+#: ``from_param`` nodes (``ValueError``) and then hands the declared
+#: headers, query and body to ``Resolver.resolve_for_request`` *directly* --
+#: nothing wraps it there, the way ``page_expression_resolver`` wraps the
+#: strategies' resolutions -- so an unknown scope arrives as ``KeyError``, a
+#: conflicting pair of expression markers as ``TransportSpecError``, and a
+#: derived function handed the wrong type as ``TypeError``. All four are
+#: defects in the declaration being built, so all four are findings.
+_REQUEST_BUILD_FAILURES = (TransportSpecError, TypeError, ValueError, KeyError)
+
+#: What compiling a read raises: everything building its first request
+#: raises, plus ``ReadError``. Widest of the four on purpose: the kit is
 #: the one place an endpoint document is *unvalidated* raw JSON, so a
 #: strategy reaching for the block its own ``pagination.type`` names
 #: (``_Offset``'s ``block["offset"]``) raises ``KeyError`` on a bent
 #: document -- a finding naming the missing block, not a crash.
-_COMPILE_FAILURES = (ReadError, TransportSpecError, ValueError, KeyError)
+_COMPILE_FAILURES = (ReadError, *_REQUEST_BUILD_FAILURES)
 
-#: What ``advance`` and the request build after it raise: ``ValueError``
-#: from the strategies' own refusals (a keyset page with no ordering value,
-#: a link off the origin, a next link that is not a URL string) and
-#: ``ReadError`` from the page expression resolver, which already wraps
-#: everything else it catches.
+#: What ``advance`` raises: ``ValueError`` from the strategies' own refusals
+#: (a keyset page with no ordering value, a link off the origin, a next link
+#: that is not a URL string) and ``ReadError`` from the page expression
+#: resolver, which already wraps everything else it catches. The request
+#: build that follows an advance is a different site with a different set
+#: (:data:`_REQUEST_BUILD_FAILURES`).
 _ADVANCE_FAILURES = (ReadError, ValueError)
 
 #: What evaluating a stop condition raises: ``stop_condition`` wraps
@@ -134,6 +156,12 @@ _PROBE_KEY_VALUE = 9901
 
 #: Stands in for a ``base_url`` the definition expresses as a reference.
 _STAND_IN_ORIGIN = "https://conformance.invalid"
+
+#: Stands in for a path segment only a connection, a stream's filters or the
+#: replication cursor supplies. Distinctive on purpose: it appears verbatim
+#: in the compiled URL, so a message quoting that URL says where it came
+#: from.
+_STAND_IN_PATH_SEGMENT = "conformance-path-value"
 
 #: A next link on another host, for arming the origin guard.
 _OFF_ORIGIN_URL = "https://elsewhere.invalid/page/2"
@@ -228,7 +256,8 @@ def _compile_read(
 
     The ordering is the read's own: one resolver per read carrying the
     engine's page size, the param table built from it, the request block
-    judged against what the path can send, the path substituted, and then
+    judged against what the path can send, the path substituted
+    (:func:`_path_values`), and then
     :func:`~cdk.api.read_setup.build_read_strategy` -- the same function
     the read calls, so the page size lands where the read puts it and the
     origin guard is armed the way the read arms it. A second resolver built
@@ -245,22 +274,24 @@ def _compile_read(
     if not isinstance(declared_path, str) or not declared_path:
         raise ReadError("operations.read.request declares no path")
 
-    table = ParamTable.for_read(read.get("params") or {}, resolver)
+    declared_params = read.get("params") or {}
+    table = ParamTable.for_read(declared_params, resolver)
     problem = request_block_problem(
         request_block,
         reserved_headers=_transport_header_names(target),
         paged_params=table.pagination_controlled,
+        header_params=table.header_params(),
     )
     if problem is not None:
         raise ReadError(problem)
     path = substitute_path(
         declared_path,
-        bind_request_values(
-            request_block.get("path_params"),
-            params=table.values,
+        _path_values(
+            declared_path,
+            request_block,
+            table=table,
+            declared_params=declared_params,
             resolver=resolver,
-            block="path_params",
-            endpoint=declared_path,
         ),
         endpoint=declared_path,
     )
@@ -283,19 +314,113 @@ def _compile_read(
     return replace(probe, first=first)
 
 
-def _transport_header_names(target: ConformanceTarget) -> frozenset[str]:
-    """Name the headers the session would carry, lowercased.
+def _path_values(
+    declared_path: str,
+    request_block: Mapping[str, Any],
+    *,
+    table: ParamTable,
+    declared_params: Mapping[str, Any],
+    resolver: Resolver,
+) -> dict[str, Any]:
+    """Bind the path placeholders, standing in for what only a run supplies.
 
-    An endpoint may not re-declare one: the request build never sees their
-    values, only their names, so declaring one can only shadow what the
-    connection sends.
+    The engine builds its param table from the declared defaults, the
+    stream's filters and the replication cursor, and substitutes the path
+    after the incremental filter has bound -- its own comment says
+    substituting earlier "would refuse a read that works". A definition-only
+    run has the defaults and nothing else, so a placeholder left unbound
+    here is usually a value the run supplies rather than a defect, and
+    reporting it would fail a connector the engine reads correctly.
+
+    So this applies the rule the rest of the module applies to a body and to
+    a base URL: defer what a definition cannot supply, refuse only what
+    nothing could ever bind (:func:`_binds_at_run_time`). A deferred
+    placeholder gets :data:`_STAND_IN_PATH_SEGMENT`, which is enough for
+    every drive after this one -- they certify how the traversal moves, and
+    the value inside one path segment is the same on every page.
+    """
+    bindings = request_block.get("path_params")
+    bound = bind_request_values(
+        bindings,
+        params=table.values,
+        resolver=resolver,
+        block="path_params",
+        endpoint=declared_path,
+    )
+    declared_bindings = bindings if isinstance(bindings, Mapping) else {}
+    for name in path_placeholders(declared_path):
+        value = bound.get(name)
+        if value is not None and str(value):
+            continue
+        binding = declared_bindings.get(name)
+        if _binds_at_run_time(binding, declared_params):
+            bound[name] = _STAND_IN_PATH_SEGMENT
+            continue
+        raise ReadError(
+            f"path {declared_path!r} leaves the placeholder {{{name}}} "
+            f"unbound, and nothing a connection, a stream's filters or the "
+            f"replication cursor supplies could fill it: "
+            f"{_unbindable_reason(name, binding)}. Every read of this "
+            f"endpoint fails on the URL it builds."
+        )
+    return bound
+
+
+def _binds_at_run_time(binding: Any, declared_params: Mapping[str, Any]) -> bool:
+    """Whether something a definition-only run lacks could still fill *binding*.
+
+    A ``{from_param}`` naming a declared param is one: the value arrives
+    from that param's default resolved against a real connection, from a
+    stream's filters, or from the replication cursor. Any other expression
+    is judged the way ``base_url`` is -- deferred when it reads a scope the
+    connection supplies, refused otherwise, because nothing else will ever
+    change the answer.
+    """
+    if isinstance(binding, Mapping) and "from_param" in binding:
+        return binding["from_param"] in declared_params
+    return binding is not None and reads_a_connection_scope(binding)
+
+
+def _unbindable_reason(name: str, binding: Any) -> str:
+    """Say what the declaration does that leaves *name* with no possible value."""
+    if binding is None:
+        return f"request.path_params declares no binding for {{{name}}}"
+    if isinstance(binding, Mapping) and "from_param" in binding:
+        return (
+            f"request.path_params binds it to the param "
+            f"{binding['from_param']!r}, which operations.read.params does "
+            f"not declare"
+        )
+    return (
+        f"request.path_params binds it to {binding!r}, which resolves to "
+        f"nothing and reads no scope a connection supplies"
+    )
+
+
+def _transport_header_names(target: ConformanceTarget) -> frozenset[str]:
+    """Name the headers an endpoint of this connector may not declare.
+
+    The engine reserves the names its session carries, which is what the
+    transport declares once each value has resolved: a header resolving to
+    nothing is dropped. A definition-only run cannot resolve those values,
+    so it reserves every declared name -- including one this connection
+    would drop.
+
+    That is deliberate rather than approximate. The request build never sees
+    a session header's value, only its name, so an endpoint re-declaring one
+    can only shadow it; and which connections drop it is a fact about
+    connection documents, not about the connector being certified. Letting
+    the endpoint keep its copy because *some* connection leaves the header
+    empty would make a credential-shadowing defect appear only for the
+    connections that fill it in.
     """
     ref = target.definition.get("default_transport")
     block = target.declared_transports().get(ref) if isinstance(ref, str) else None
     declared = block.get("headers") if isinstance(block, Mapping) else None
-    if not isinstance(declared, Mapping):
-        return frozenset()
-    return frozenset(str(name).lower() for name in declared)
+    names = declared if isinstance(declared, Mapping) else {}
+    # The engine's own set builder, so the engine-owned names it adds are
+    # reserved here too rather than named a second time.
+    return reserved_header_names(str(name) for name in names)
 
 
 def _request_builder(probe: _ReadProbe) -> RequestBuilder:
@@ -385,7 +510,9 @@ def _is_connection_expression(node: Any) -> bool:
     return Resolver.is_expression_node(node) and reads_a_connection_scope(node)
 
 
-def _probes(target: ConformanceTarget) -> tuple[list[_ReadProbe], list[Violation]]:
+def _probes(
+    target: ConformanceTarget,
+) -> tuple[tuple[_ReadProbe, ...], tuple[Violation, ...]]:
     """Compile every read, splitting what compiled from what did not.
 
     A read that does not compile has no ``advance`` and no ``stop_when`` to
@@ -399,10 +526,16 @@ def _probes(target: ConformanceTarget) -> tuple[list[_ReadProbe], list[Violation
     Compiled once per target: the four checks that need probes would
     otherwise each rebuild every read, and a compile is the most expensive
     thing the api tier does.
+
+    Shared state is handed out as tuples for that reason. A list would be
+    the same object in all four callers, so one of them appending its own
+    finding to it -- which the compile check has every reason to do -- would
+    put that finding in the other three, and would grow the cache by one
+    more copy on every call.
     """
-    cached: tuple[list[_ReadProbe], list[Violation]] | None = target.__dict__.get(
-        _PROBE_CACHE
-    )
+    cached: tuple[
+        tuple[_ReadProbe, ...], tuple[Violation, ...]
+    ] | None = target.__dict__.get(_PROBE_CACHE)
     if cached is not None:
         return cached
     probes: list[_ReadProbe] = []
@@ -419,12 +552,12 @@ def _probes(target: ConformanceTarget) -> tuple[list[_ReadProbe], list[Violation
                     f"serve fails here, before anything is sent.",
                 )
             )
-    compiled = (probes, violations)
+    compiled = (tuple(probes), tuple(violations))
     target.__dict__[_PROBE_CACHE] = compiled
     return compiled
 
 
-def _undriven(check: str, violations: list[Violation]) -> list[Violation]:
+def _undriven(check: str, violations: Sequence[Violation]) -> list[Violation]:
     """Say which endpoints a dependent check could not drive, if any."""
     if not violations:
         return []
@@ -662,7 +795,8 @@ def check_api_read_compiles(target: ConformanceTarget) -> list[Violation]:
     overwritten -- but a cursor sends no token on the first request, so
     there the stale default survives onto the wire.
     """
-    probes, violations = _probes(target)
+    probes, compile_violations = _probes(target)
+    violations = list(compile_violations)
     for probe in probes:
         cursor_param = ((probe.pagination or {}).get("cursor") or {}).get("param")
         if cursor_param and cursor_param in probe.first.params:
@@ -864,7 +998,7 @@ def _advance_violations(probe: _ReadProbe) -> list[Violation]:
         _request_builder(probe).for_page(
             following.params, sends_declared_body=following.sends_declared_body
         )
-    except _ADVANCE_FAILURES as err:
+    except _REQUEST_BUILD_FAILURES as err:
         return [
             Violation(
                 ADVANCE_CHECK,
