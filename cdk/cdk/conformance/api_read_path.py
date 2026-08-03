@@ -45,9 +45,11 @@ when it bites:
   its param table from all three and substitutes the path after the
   incremental filter binds; a definition-only run has none of them, so
   demanding a value here would fail a connector the engine reads
-  correctly. Only a placeholder nothing could ever bind -- one with no
-  binding at all, or one bound to a param the endpoint does not declare --
-  is a finding.
+  correctly. Only a placeholder nothing could ever bind is a finding, and
+  there are three of those: one with no binding at all, one bound to a
+  param the endpoint does not declare, and one bound to an expression that
+  resolves to nothing and reads no scope a connection supplies. Each fails
+  for every connection and every stream.
 """
 
 from __future__ import annotations
@@ -263,6 +265,7 @@ def _compile_read(
     problem = request_block_problem(
         request_block,
         reserved_headers=_transport_header_names(target),
+        resolver=resolver,
         paged_params=table.pagination_controlled,
     )
     if problem is not None:

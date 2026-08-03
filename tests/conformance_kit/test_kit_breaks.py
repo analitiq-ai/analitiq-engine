@@ -1749,8 +1749,14 @@ class TestApiRefusalDrivesAreArmed:
     exactly what makes "the check returned nothing" unreadable -- it says
     the same thing whether the drive ran or was never armed. So each drive
     is pointed at a traversal whose guard has been taken out from under it,
-    and required to report. Disarm the planting these tests depend on and
-    they fail, which is the property the assertions above cannot have.
+    and required to report.
+
+    The stand-in that replaces a guard still reads what the drive planted
+    -- ``urljoin`` follows the link it was handed, and the keyset walk
+    substitutes a value only where the record had none. That is what makes
+    these tests say something the assertions above cannot: take the
+    planting away and each one fails, because the traversal was then handed
+    a page it had every reason to accept.
     """
 
     _broken = staticmethod(TestApiReadPathBreaks._broken)
@@ -1800,16 +1806,31 @@ class TestApiRefusalDrivesAreArmed:
 
         That is what a keyset scheme which does not refuse looks like, and
         the drive has to say so: a traversal continuing past a page it
-        cannot continue from lands rows the read can never get past. The
-        other half -- that the page really does carry records with nothing
-        in them -- is pinned by every clean assertion in the class above:
-        give them the declared records instead and each one reports this
-        same violation.
+        cannot continue from lands rows the read can never get past.
+
+        The stand-in walks the record first and only substitutes a value
+        where the record had none, so the page the drive planted is still
+        what decides. That is what makes the arming testable rather than
+        assumed: ``found`` carries what the real walk saw, and a page
+        carrying the declared records -- one the keyset guard has every
+        reason to accept -- never puts a ``None`` in it.
         """
-        monkeypatch.setattr(strategies, "walk_path", lambda record, path: "planted")
+        found: list[Any] = []
+        walk = strategies.walk_path
+
+        def planting_walk(record: dict[str, Any], path: list[str]) -> Any:
+            value = walk(record, path)
+            found.append(value)
+            return "planted" if value is None else value
+
+        monkeypatch.setattr(strategies, "walk_path", planting_walk)
         report = _report(check_api_read_advances(load_target(API_REFERENCE_DIR)))
         assert "instead of refusing" in report
         assert "'sequence'" in report
+        assert None in found, (
+            "the keyset drive never handed the traversal a record without an "
+            "ordering value, so the refusal it certifies was never armed"
+        )
 
 
 class TestApiTransportBreaks:
@@ -2212,6 +2233,26 @@ class TestApiRequestBlockBreaks:
         assert "{account_id}" in report
         assert "'acount'" in report
         assert "does not declare" in report
+
+    def test_a_path_placeholder_bound_to_a_dead_expression_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        """The third unbindable case: an expression no run can change.
+
+        Not a ``{from_param}`` binding and not connection-scoped, so
+        nothing a run supplies enters into it -- it resolves to nothing
+        here and resolves to nothing in production, and the URL it builds
+        addresses the collection rather than the record.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["path"] = "/v1/accounts/{account_id}/widgets"
+            read["request"]["path_params"] = {"account_id": {"literal": ""}}
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "{account_id}" in report
+        assert "resolves to nothing and reads no scope a connection supplies" in report
 
     def test_a_path_placeholder_a_run_supplies_is_not_a_finding(
         self, tmp_path: Path

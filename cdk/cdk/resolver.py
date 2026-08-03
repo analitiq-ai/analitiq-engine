@@ -343,12 +343,12 @@ class Resolver:
         with its children resolved recursively.
         """
         if self.is_expression_node(value):
-            resolved = self._resolve_node_for_request(value)
-            if resolved is None:
-                logger.warning(
-                    "value-expression: top-level expression resolved to None"
-                )
-            return resolved
+            # No warning here. A top-level node has no key of its own to
+            # name, and every caller that hands one over already knows what
+            # it was resolving -- a header, a query parameter, a param's
+            # default -- and says so. Logging both put two lines on the wire
+            # for one dropped value, the first of them naming nothing.
+            return self._resolve_node_for_request(value)
         if isinstance(value, Mapping):
             resolved_dict: dict[str, Any] = {}
             for key, child in value.items():

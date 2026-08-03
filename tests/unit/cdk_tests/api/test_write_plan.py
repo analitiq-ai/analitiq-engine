@@ -508,6 +508,18 @@ class TestTheRequestTheStreamWillActuallySend:
         assert isinstance(plan, StreamWritePlan)
         assert plan.headers == {"Content-Type": "application/json"}
 
+    def test_a_content_type_declared_as_an_expression_is_permitted(self) -> None:
+        # The contract lets a header value be a literal or an expression,
+        # and both spellings send the same media type. Judging the shape
+        # instead of the value refused this one and told the author to
+        # declare the value they had already declared.
+        doc = _document(headers={"Content-Type": {"literal": "application/json"}})
+        plan = build_write_plan(
+            doc, _spec(), session_header_names=set(), resolver=_resolver()
+        )
+        assert isinstance(plan, StreamWritePlan)
+        assert plan.headers == {"Content-Type": "application/json"}
+
     def test_a_conflicting_content_type_is_rejected(self) -> None:
         doc = _document(headers={"Content-Type": "application/xml"})
         outcome = build_write_plan(

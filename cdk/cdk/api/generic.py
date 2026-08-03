@@ -347,6 +347,7 @@ class GenericAPIConnector(BaseDestinationHandler):
             problem = request_block_problem(
                 request_block,
                 reserved_headers=reserved_header_names(self._session_header_names),
+                resolver=resolver,
                 paged_params=table.pagination_controlled,
             )
             if problem is not None:

@@ -329,6 +329,7 @@ def build_write_plan(
         problem = request_block_problem(
             request,
             reserved_headers=reserved,
+            resolver=resolver,
             paged_params=table.pagination_controlled,
         )
         if problem is not None:

@@ -273,6 +273,7 @@ def request_block_problem(
     request_block: Mapping[str, Any],
     *,
     reserved_headers: frozenset[str] | set[str],
+    resolver: Resolver,
     paged_params: Collection[str] = (),
 ) -> str | None:
     """Why this request block cannot be sent as declared, or ``None``.
@@ -280,6 +281,10 @@ def request_block_problem(
     ``paged_params`` is a fact about the declared param table, passed in
     because this check runs before the table's values are complete and must
     judge the declarations rather than the values.
+
+    ``resolver`` is the one the request build itself uses, so the header
+    rule below judges the value that would go out rather than the spelling
+    it was declared in.
     """
     removals = request_block.get("headers_remove")
     if removals:
@@ -293,6 +298,7 @@ def request_block_problem(
     problem = _header_map_problem(
         request_block.get("headers"),
         reserved_headers=reserved_headers,
+        resolver=resolver,
     )
     if problem is not None:
         return problem
@@ -306,6 +312,7 @@ def _header_map_problem(
     declared: Any,
     *,
     reserved_headers: frozenset[str] | set[str],
+    resolver: Resolver,
 ) -> str | None:
     """Why the headers this request sends may not go out, or ``None``.
 
@@ -316,12 +323,17 @@ def _header_map_problem(
 
     Content-Type is the engine's own: it is permitted only where the author
     declared exactly what the engine already sends, which makes the collision
-    a no-op rather than a conflict nobody can see. Every other reserved name
-    carries the connection's values (auth and friends), and the request build
-    never sees those values -- only their names -- so an endpoint
-    re-declaring one can only shadow it.
+    a no-op rather than a conflict nobody can see. What counts is the value
+    that would reach the wire, not the spelling it was declared in -- the
+    contract lets a header value be a literal or an expression, so
+    ``{"literal": "application/json"}`` sends exactly what the plain string
+    does and has to be read the same way.
 
-    A name is all this rule ever has, which is why the refusal speaks of
+    Every other reserved name carries the connection's values (auth and
+    friends), and the request build never sees those values -- only their
+    names -- so an endpoint re-declaring one can only shadow it.
+
+    A name is all THAT rule ever has, which is why its refusal speaks of
     what the transport declares rather than of what a particular connection
     sends. The two differ: a transport header whose value resolves to
     nothing is dropped, so one connection sends it and another does not.
@@ -334,12 +346,14 @@ def _header_map_problem(
     for name, value in declared.items():
         lowered = str(name).lower()
         if lowered == "content-type":
-            if isinstance(value, str) and value.strip().lower() == JSON_CONTENT_TYPE:
+            sent = _header_value_sent(name, value, resolver)
+            if sent is None or sent.strip().lower() == JSON_CONTENT_TYPE:
                 continue
             return (
-                f"request.headers declares {name!r}, which the engine owns: it "
-                f"sends {JSON_CONTENT_TYPE!r} with every JSON body. Declare "
-                f"that exact value or remove the header."
+                f"request.headers declares {name!r} as {sent!r}, and the "
+                f"engine owns that header: it sends {JSON_CONTENT_TYPE!r} "
+                f"with every JSON body. Declare that exact value or remove "
+                f"the header."
             )
         if lowered in reserved_headers:
             return (
@@ -350,6 +364,35 @@ def _header_map_problem(
                 f"endpoint's. Remove it, or change the transport's headers."
             )
     return None
+
+
+def _header_value_sent(name: str, declared: Any, resolver: Resolver) -> str | None:
+    """Return the value this header would carry, or ``None`` if nothing can say.
+
+    Three answers, because the declaration has three shapes and only two of
+    them settle here:
+
+    * a plain literal is already the value :func:`bind_query_and_headers`
+      stringifies onto the wire;
+    * an expression node is resolved through the same call the request build
+      makes, so the two cannot disagree about what it says. One that resolves
+      to nothing sends no header at all -- ``bind_request_values`` drops the
+      key -- so there is nothing to judge and nothing to refuse;
+    * anything else is a ``{from_param}`` binding, whose value is the param
+      table's and arrives per run. Judging it from the declaration would be
+      guessing.
+
+    A malformed expression leaves as a :class:`RequestSpecError` naming the
+    header, the same way the request build reports it, rather than as
+    whichever builtin the resolver happened to raise.
+    """
+    if not isinstance(declared, Mapping):
+        return str(declared)
+    if not Resolver.is_expression_node(declared):
+        return None
+    with request_spec_errors(f"request.headers.{name}"):
+        resolved = resolver.resolve_for_request(declared)
+    return None if resolved is None else str(resolved)
 
 
 def _path_encoding_problem(request_block: Mapping[str, Any]) -> str | None:
