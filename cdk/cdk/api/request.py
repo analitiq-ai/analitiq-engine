@@ -41,6 +41,7 @@ __all__ = [
     "bind_query_and_headers",
     "bind_request_values",
     "build_write_body",
+    "path_placeholders",
     "request_block_problem",
     "substitute_path",
 ]
@@ -249,6 +250,17 @@ def bind_request_values(
     return resolved
 
 
+def path_placeholders(path: str) -> list[str]:
+    """Name every ``{name}`` placeholder in a declared path, in order.
+
+    The one reader of the placeholder grammar. Substitution, the refusals
+    below and the conformance kit all ask this rather than each carrying a
+    pattern of its own -- a second pattern is a second answer to "what is a
+    placeholder", and the two would disagree the day the grammar moves.
+    """
+    return _PLACEHOLDER.findall(path)
+
+
 def substitute_path(path: str, values: Mapping[str, Any], *, endpoint: str) -> str:
     """Replace every ``{name}`` in *path* with its bound value.
 
@@ -334,6 +346,14 @@ def _header_map_problem(
     carries the connection's values (auth and friends), and the request build
     never sees those values -- only their names -- so an endpoint
     re-declaring one can only shadow it.
+
+    A name is all this rule ever has, which is why the refusal speaks of
+    what the transport declares rather than of what a particular connection
+    sends. The two differ: a transport header whose value resolves to
+    nothing is dropped, so one connection sends it and another does not.
+    Permitting the endpoint's copy for the connections that drop it would
+    make the shadowing depend on a connection document nobody reads while
+    authoring the endpoint.
     """
     routes: list[tuple[str, str, Any]] = []
     if isinstance(declared, Mapping):
@@ -357,9 +377,11 @@ def _header_map_problem(
             )
         if lowered in reserved_headers:
             return (
-                f"{source} {name!r}, which the connection already sends; an "
-                f"endpoint cannot shadow the connection's own header. Remove "
-                f"it, or change the transport's headers."
+                f"{source} {name!r}, which the connection's transport declares. "
+                f"An endpoint cannot shadow a header the connection sends, and "
+                f"whether a given connection fills this one in is the "
+                f"connection's business rather than the endpoint's. Remove it, "
+                f"or change the transport's headers."
             )
     return None
 
@@ -412,8 +434,7 @@ def _paged_placeholder_problem(
     bindings = request_block.get("path_params")
     if not isinstance(bindings, Mapping):
         return None
-    for match in _PLACEHOLDER.finditer(path):
-        name = match.group(1)
+    for name in path_placeholders(path):
         binding = bindings.get(name)
         if not isinstance(binding, Mapping):
             continue

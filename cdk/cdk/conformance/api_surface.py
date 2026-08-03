@@ -49,6 +49,22 @@ HTTP_TRANSPORT_TYPE = "http"
 #: connector.
 _CONNECTION_SCOPES = ("connection.", "secrets.", "auth.")
 
+#: What resolving one declared value expression raises. ``Resolver`` answers
+#: a malformed node with ``TransportSpecError``, a scope it does not know
+#: with a plain ``KeyError`` and absent data with ``UnresolvedValueError``;
+#: the registered derived functions answer a missing field with
+#: ``ValueError`` and one of the wrong type with ``TypeError``. Every one of
+#: them is a defect in the declaration being resolved, so every one of them
+#: is a finding naming it -- and a check that let any escape would take the
+#: checks after it down with it.
+_RESOLUTION_FAILURES = (
+    TransportSpecError,
+    UnresolvedValueError,
+    KeyError,
+    TypeError,
+    ValueError,
+)
+
 
 def read_operations(target: ConformanceTarget) -> list[tuple[str, dict[str, Any]]]:
     """Every endpoint document's read operation, labelled for messages.
@@ -199,6 +215,12 @@ def _base_url_violations(
     ``${auth.access_token}`` is perfectly well-formed, so resolving the
     whole block strictly would refuse it and take the base-url check down
     with it.
+
+    Resolving is what makes the failure set matter: every way a declaration
+    can be malformed now arrives here as an exception, and one this did not
+    catch would not merely lose the base-url finding -- it would abandon the
+    ``transport_ref`` loop that runs after it, so a second, unrelated defect
+    would go unreported because of the first.
     """
     declared = block.get("base_url")
     if reads_a_connection_scope(declared):
@@ -206,7 +228,7 @@ def _base_url_violations(
     unusable = f"({declared!r})"
     try:
         resolved = definition_resolver(target).resolve(declared)
-    except (TransportSpecError, UnresolvedValueError) as err:
+    except _RESOLUTION_FAILURES as err:
         resolved = None
         unusable = f"({declared!r}, which does not resolve: {err})"
     if isinstance(resolved, str) and resolved:
