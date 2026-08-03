@@ -330,7 +330,8 @@ def build_write_plan(
             request,
             reserved_headers=reserved,
             resolver=resolver,
-            paged_params=table.pagination_controlled,
+            params=table.values,
+            controlled_by=table.controlled_by,
         )
         if problem is not None:
             return problem

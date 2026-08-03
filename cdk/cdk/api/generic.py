@@ -348,7 +348,8 @@ class GenericAPIConnector(BaseDestinationHandler):
                 request_block,
                 reserved_headers=reserved_header_names(self._session_header_names),
                 resolver=resolver,
-                paged_params=table.pagination_controlled,
+                params=table.values,
+                controlled_by=table.controlled_by,
             )
             if problem is not None:
                 raise ReadError(f"endpoint {endpoint_id!r}: {problem}")
@@ -365,11 +366,12 @@ class GenericAPIConnector(BaseDestinationHandler):
                     partition=partition,
                 )
 
-            # Substituted here, after the incremental filter has written its
-            # value into the table: a path param the replication loop owns is
-            # bound by that call, and substituting before it would refuse a
-            # read that works. A pagination-owned one is refused above, since
-            # its value exists only per page.
+            # Substituted here, after the incremental filter has written the
+            # cursor into the table: a path bound to an ordinary param the
+            # filter overrides must see the value this run uses. A
+            # placeholder bound to a param either loop OWNS is refused
+            # above -- neither loop has produced a value at this point, and
+            # the path is substituted once.
             path = substitute_path(
                 request_block["path"],
                 bind_request_values(
@@ -811,7 +813,12 @@ class GenericAPIConnector(BaseDestinationHandler):
                 body = self._build_body(plan, record=record)
                 if plan.idempotency_in == "body" and key is not None:
                     body = body_with_idempotency_key(plan, body, key)
-            except (TypeError, ValueError) as err:
+            # Two authoring defects, one verdict: the body build answers
+            # every way its declaration can fail with RequestSpecError, and
+            # the engine-owned idempotency key refuses a body it cannot be
+            # added to with ValueError. Both are deterministic and both
+            # concern this one record.
+            except (RequestSpecError, ValueError) as err:
                 logger.warning(
                     "failed to build body for record %s: %s: %s",
                     record_ids[index],
@@ -897,7 +904,7 @@ class GenericAPIConnector(BaseDestinationHandler):
             chunk = records[start : start + chunk_size]
             try:
                 body = self._build_body(plan, records=chunk)
-            except (TypeError, ValueError) as err:
+            except RequestSpecError as err:
                 logger.warning(
                     "failed to build body for chunk at offset %d (%d records "
                     "%s...): %s: %s",

@@ -36,9 +36,10 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Any
 from urllib.parse import quote
 
@@ -99,13 +100,12 @@ class ParamTable:
     """
 
     values: dict[str, Any] = field(default_factory=dict)
-    #: Params the pagination loop owns (``controlled_by: pagination``), read
-    #: by exactly one caller: :func:`request_block_problem`, which refuses a
-    #: path placeholder bound to one. Replication-controlled params are
-    #: deliberately not here -- their value is written into ``values``
-    #: before the first request, so the path substitution can see it, while
-    #: a page's value does not exist until the loop is running.
-    pagination_controlled: frozenset[str] = frozenset()
+    #: Every param a loop owns, mapped to the loop that owns it
+    #: (``controlled_by``). Read by exactly one caller:
+    #: :func:`request_block_problem`, which refuses a path placeholder bound
+    #: to one -- see :func:`_controlled_placeholder_problem` for why both
+    #: loops are the same defect there.
+    controlled_by: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def for_read(
@@ -121,6 +121,14 @@ class ParamTable:
         out of the defaults: their loops set them, and a resolved default
         would be overwritten on the first page anyway -- or worse, survive
         as a stale value the loop never touched.
+
+        A filter names a param, and a param reaches the provider only
+        through a request binding that names it in turn. One naming no
+        declared param therefore narrows nothing: the stream reads the whole
+        collection while reporting success, which for a filter is a
+        correctness failure rather than a slow read. Nothing in the contract
+        links a filter to a param declaration, so this is the only place it
+        can be caught, and it is caught loudly.
         """
         uncontrolled = {
             name: decl
@@ -132,14 +140,21 @@ class ParamTable:
         # as whichever builtin the resolver happened to raise.
         with request_spec_errors("a read param's declared default"):
             values = resolve_param_defaults(uncontrolled, resolver)
-        table = cls(
-            values=values,
-            pagination_controlled=_pagination_controlled(declared),
-        )
+        table = cls(values=values, controlled_by=_controlled_by(declared))
         for declared_filter in filters:
             target = declared_filter.get("field")
+            if not target:
+                continue
+            if target not in declared:
+                raise RequestSpecError(
+                    f"the stream filters on {target!r}, which "
+                    f"operations.read.params does not declare, so nothing "
+                    f"can send it: the filter narrows nothing and the stream "
+                    f"reads the whole collection. Declared params: "
+                    f"{sorted(declared)}"
+                )
             value = declared_filter.get("value")
-            if target and value is not None:
+            if value is not None:
                 table.values[target] = value
         return table
 
@@ -153,19 +168,16 @@ class ParamTable:
         """
         with request_spec_errors("a write param's declared default"):
             values = resolve_param_defaults(declared, resolver, context="write param")
-        return cls(
-            values=values,
-            pagination_controlled=_pagination_controlled(declared),
-        )
+        return cls(values=values, controlled_by=_controlled_by(declared))
 
 
-def _pagination_controlled(declared: Mapping[str, Any]) -> frozenset[str]:
-    """Name the declared params whose value only the pagination loop supplies."""
-    return frozenset(
-        name
+def _controlled_by(declared: Mapping[str, Any]) -> dict[str, str]:
+    """Map each declared param a loop owns to the loop that owns it."""
+    return {
+        name: str(decl["controlled_by"])
         for name, decl in declared.items()
-        if isinstance(decl, Mapping) and decl.get("controlled_by") == "pagination"
-    )
+        if isinstance(decl, Mapping) and decl.get("controlled_by")
+    }
 
 
 def bind_request_values(
@@ -274,17 +286,20 @@ def request_block_problem(
     *,
     reserved_headers: frozenset[str] | set[str],
     resolver: Resolver,
-    paged_params: Collection[str] = (),
+    params: Mapping[str, Any],
+    controlled_by: Mapping[str, str] = MappingProxyType({}),
 ) -> str | None:
     """Why this request block cannot be sent as declared, or ``None``.
 
-    ``paged_params`` is a fact about the declared param table, passed in
-    because this check runs before the table's values are complete and must
-    judge the declarations rather than the values.
+    ``controlled_by`` is a fact about the declarations rather than about
+    the values: a loop-owned param HAS no value here, which is exactly what
+    :func:`_controlled_placeholder_problem` judges.
 
-    ``resolver`` is the one the request build itself uses, so the header
-    rule below judges the value that would go out rather than the spelling
-    it was declared in.
+    ``params`` and ``resolver`` are what the request build itself uses, in
+    the order it uses them -- bind, then resolve -- so the header rule below
+    judges the value that would go out rather than the spelling it was
+    declared in. Both roles call this after their param table is built, so
+    the values are the run's own.
     """
     removals = request_block.get("headers_remove")
     if removals:
@@ -299,13 +314,14 @@ def request_block_problem(
         request_block.get("headers"),
         reserved_headers=reserved_headers,
         resolver=resolver,
+        params=params,
     )
     if problem is not None:
         return problem
     problem = _path_encoding_problem(request_block)
     if problem is not None:
         return problem
-    return _paged_placeholder_problem(request_block, paged_params)
+    return _controlled_placeholder_problem(request_block, controlled_by)
 
 
 def _header_map_problem(
@@ -313,6 +329,7 @@ def _header_map_problem(
     *,
     reserved_headers: frozenset[str] | set[str],
     resolver: Resolver,
+    params: Mapping[str, Any],
 ) -> str | None:
     """Why the headers this request sends may not go out, or ``None``.
 
@@ -346,7 +363,7 @@ def _header_map_problem(
     for name, value in declared.items():
         lowered = str(name).lower()
         if lowered == "content-type":
-            sent = _header_value_sent(name, value, resolver)
+            sent = _header_value_sent(name, value, resolver, params)
             if sent is None or sent.strip().lower() == JSON_CONTENT_TYPE:
                 continue
             return (
@@ -366,21 +383,28 @@ def _header_map_problem(
     return None
 
 
-def _header_value_sent(name: str, declared: Any, resolver: Resolver) -> str | None:
+def _header_value_sent(
+    name: str, declared: Any, resolver: Resolver, params: Mapping[str, Any]
+) -> str | None:
     """Return the value this header would carry, or ``None`` if nothing can say.
 
-    Three answers, because the declaration has three shapes and only two of
-    them settle here:
+    The build's own two steps, in the build's own order: bind
+    ``{from_param}`` against the params in flight, then resolve the bound
+    node. Resolving the raw declaration instead reads a binding node as an
+    expression and refuses a connector that works -- a ``lookup`` over a
+    ``{from_param}`` input is a correct Content-Type declaration, and the
+    raw node makes it "input must resolve to a scalar; got dict".
+
+    Binding first is also what lets the rule judge a plain
+    ``{"from_param": "ct"}``: its value is the param table's, and by the
+    time this runs the table is built. Only two things are left unjudged,
+    and neither is a spelling of the media type:
 
     * a plain literal is already the value :func:`bind_query_and_headers`
-      stringifies onto the wire;
-    * an expression node is resolved through the same call the request build
-      makes, so the two cannot disagree about what it says. One that resolves
-      to nothing sends no header at all -- ``bind_request_values`` drops the
-      key -- so there is nothing to judge and nothing to refuse;
-    * anything else is a ``{from_param}`` binding, whose value is the param
-      table's and arrives per run. Judging it from the declaration would be
-      guessing.
+      stringifies onto the wire, so it needs no resolving;
+    * a bound node that resolves to nothing sends no header at all --
+      ``bind_request_values`` drops the key -- so there is nothing to judge
+      and nothing to refuse.
 
     A malformed expression leaves as a :class:`RequestSpecError` naming the
     header, the same way the request build reports it, rather than as
@@ -388,10 +412,11 @@ def _header_value_sent(name: str, declared: Any, resolver: Resolver) -> str | No
     """
     if not isinstance(declared, Mapping):
         return str(declared)
-    if not Resolver.is_expression_node(declared):
-        return None
     with request_spec_errors(f"request.headers.{name}"):
-        resolved = resolver.resolve_for_request(declared)
+        node = bind_param_refs(declared, params)
+        if not Resolver.is_expression_node(node):
+            return None
+        resolved = resolver.resolve_for_request(node)
     return None if resolved is None else str(resolved)
 
 
@@ -427,18 +452,29 @@ def _calls_url_encode(node: Any) -> bool:
     return False
 
 
-def _paged_placeholder_problem(
-    request_block: Mapping[str, Any], paged_params: Collection[str]
+def _controlled_placeholder_problem(
+    request_block: Mapping[str, Any], controlled_by: Mapping[str, str]
 ) -> str | None:
     """Why a path placeholder cannot be substituted, or ``None``.
 
-    A pagination-owned param has no value until the loop is running, and the
-    path is substituted once before the first request. Freezing page one's
-    value into the URL forever is a read that reports success while fetching
-    the same page, so it is refused by name.
+    A loop-owned param has no value when the path is substituted, and the
+    path is substituted once, before the first request. Both loops leave the
+    placeholder empty there, so both are the same authoring defect:
+
+    * pagination produces its first value from page one's response, so
+      freezing it into the URL would read one page forever;
+    * replication produces its value from the stored cursor, which does not
+      exist on the first run and is never consulted at all by a
+      full-refresh stream. The read fails on the URL it builds, blaming a
+      binding that is correct, and then succeeds on the next run -- a
+      document that works or not depending on stored state.
+
+    Refused deterministically at plan time for both, because the value a
+    loop owns is a position in a traversal and a position cannot address a
+    resource.
     """
     path = request_block.get("path")
-    if not isinstance(path, str) or not paged_params:
+    if not isinstance(path, str) or not controlled_by:
         return None
     bindings = request_block.get("path_params")
     if not isinstance(bindings, Mapping):
@@ -448,12 +484,16 @@ def _paged_placeholder_problem(
         if not isinstance(binding, Mapping):
             continue
         source = binding.get("from_param")
-        if isinstance(source, str) and source in paged_params:
+        controller = controlled_by.get(source) if isinstance(source, str) else None
+        if controller is not None:
             return (
                 f"path {path!r} binds the placeholder {{{name}}} to the param "
-                f"{source!r}, which the pagination loop owns; the path is "
-                f"substituted once per read, so a per-page value can never "
-                f"reach it"
+                f"{source!r}, which the {controller} loop owns; the path is "
+                f"substituted once, before that loop has a value, so a "
+                f"loop-owned value can never address this resource. Bind the "
+                f"placeholder to a param the connection or the stream fills, "
+                f"and let the {controller} loop keep {source!r} in a request "
+                f"binding"
             )
     return None
 
@@ -622,9 +662,18 @@ def build_write_body(
     ``from_input`` nodes to the record data, then resolve the value
     expressions -- an unresolved expression omits its field rather than
     going onto the wire raw.
+
+    Inside the same boundary the read's body build sits behind: one defect
+    class in a declared body -- an unknown scope, a conflicting pair of
+    markers, a function handed the wrong type, a binding with siblings --
+    used to leave here as four different exceptions, and the write's catch
+    sites classified two of them as a rejected record and let the other two
+    tear down the batch. What went wrong inside a body cannot decide what
+    the failure MEANS.
     """
     if body_spec is None:
         return record if record is not None else records
-    bound = bind_param_refs(body_spec, dict(params))
-    bound = bind_record_inputs(bound, record=record, records=records)
-    return _require_body(resolver.resolve_for_request(bound), endpoint)
+    with request_spec_errors(f"request.body for endpoint {endpoint!r}"):
+        bound = bind_param_refs(body_spec, dict(params))
+        bound = bind_record_inputs(bound, record=record, records=records)
+        return _require_body(resolver.resolve_for_request(bound), endpoint)
