@@ -244,7 +244,7 @@ def bind_request_values(
 def path_placeholders(path: str) -> list[str]:
     """Name every ``{name}`` placeholder in a declared path, in order.
 
-    The one reader of the placeholder grammar. Substitution, the refusals
+    The one reader of :data:`_PLACEHOLDER`. Substitution, the refusals
     below and the conformance kit all ask this rather than each carrying a
     pattern of its own -- a second pattern is a second answer to "what is a
     placeholder", and the two would disagree the day the grammar moves.
@@ -264,10 +264,12 @@ def substitute_path(path: str, values: Mapping[str, Any], *, endpoint: str) -> s
     every record instead of one, and a PUT or PATCH targets the collection.
     ``url_encode`` returns ``""`` for an unbound input, so the empty case is
     reachable without anyone declaring it.
-    """
 
-    def bound(match: re.Match[str]) -> str:
-        name = match.group(1)
+    Which spans of *path* are placeholders is :func:`path_placeholders`'s
+    answer, not a second reading of the pattern here.
+    """
+    substituted = path
+    for name in path_placeholders(path):
         value = values.get(name)
         segment = "" if value is None else str(value)
         if not segment:
@@ -276,9 +278,11 @@ def substitute_path(path: str, values: Mapping[str, Any], *, endpoint: str) -> s
                 f"placeholder {{{name}}}; bind it in request.path_params to "
                 f"something that resolves to a non-empty value"
             )
-        return quote(segment, safe="")
-
-    return _PLACEHOLDER.sub(bound, path)
+        # Encoding before replacing is what makes replacing by name safe:
+        # ``quote`` percent-encodes braces, so no bound value can spell a
+        # placeholder for a later turn of this loop to substitute again.
+        substituted = substituted.replace(f"{{{name}}}", quote(segment, safe=""))
+    return substituted
 
 
 def request_block_problem(

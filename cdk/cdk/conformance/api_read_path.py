@@ -135,11 +135,22 @@ _PROBE_BATCH_SIZE = 37
 #: every connector that asks.
 _PROBE_RECORDS = _PROBE_BATCH_SIZE
 
-#: The value a scripted record carries for a declared field. Distinctive
-#: on purpose: a keyset scheme advances to the last record's ordering
-#: value, and a value that happened to equal the declared ``initial``
-#: would read as a traversal that never moved.
+#: The value a scripted record carries for a declared field, and the seed
+#: every other scripted value is derived from. Distinctive on purpose: a
+#: keyset scheme advances to the last record's ordering value, and a value
+#: that happened to equal the declared ``initial`` would read as a
+#: traversal that never moved.
 _PROBE_KEY_VALUE = 9901
+
+#: The pages a traversal is driven through, each as the name a message
+#: gives it and the seed it is scripted from. Consecutive pages of a real
+#: read differ in what the provider hands back -- a different token, a
+#: different next link, a different last ordering value -- and two pages
+#: scripted from the same seed would be one page served twice, which every
+#: scheme that continues from the page would answer with the same request.
+#: A drive comparing those requests would then read every correct cursor,
+#: link and keyset connector as one that cannot move.
+_DRIVEN_PAGES = (("first", _PROBE_KEY_VALUE), ("second", _PROBE_KEY_VALUE + 1))
 
 #: Stands in for a ``base_url`` the definition expresses as a reference.
 _STAND_IN_ORIGIN = "https://conformance.invalid"
@@ -176,31 +187,28 @@ _UNTYPED = object()
 #: and the same one used here.
 _PROBE_CACHE = "_api_read_probes"
 
-#: The schemes that keep no position of their own, and the field each one
-#: continues from. Offset and page count for themselves; these two hold
-#: only what the provider last handed back.
-_POSITIONLESS_SCHEMES = {"cursor": "next_cursor", "link": "next_url"}
-
 #: Markers from the CDK's own raise sites, so a drive can tell the refusal
 #: it armed from some other failure that happened to raise first.
 _KEYSET_REFUSAL = "keyset.order_by_field"
 _ORIGIN_REFUSAL = "leaves the connection's origin"
 
 #: A continuation value shaped for the scheme that reads it: a cursor token
-#: is opaque text, a next link is a relative URL (so it resolves against
-#: the page it came from whatever the origin is), and a numeric step is a
-#: whole number. Not a statement about how a scheme paginates -- only about
-#: what type its declared field holds.
+#: is opaque text and a next link is a relative URL (so it resolves against
+#: the page it came from whatever the origin is). Not a statement about how
+#: a scheme paginates -- only about what type its declared field holds. A
+#: scheme with no entry here continues from a number, and gets the page key
+#: itself, which is a whole positive one.
 #:
-#: Keyset has no entry: it continues from the last *record's* ordering
-#: field, and ``_Keyset`` reads only ``param``, ``order_by_field`` and
-#: ``initial`` off its block, so a keyset read declares no continuation
-#: path at all.
-_CONTINUATION_VALUES: dict[str, Any] = {
-    "cursor": "conformance-next-page-token",  # nosec B105 - not a credential
-    "link": "?conformance-page=2",
-    "offset": _PROBE_BATCH_SIZE,
-    "page": _PROBE_BATCH_SIZE,
+#: Every value carries the key of the page it was planted on, so two pages
+#: hand back two different continuations the way a provider does.
+#:
+#: Keyset has no entry for a second reason: it continues from the last
+#: *record's* ordering field, and ``_Keyset`` reads only ``param``,
+#: ``order_by_field`` and ``initial`` off its block, so a keyset read
+#: declares no continuation path at all.
+_CONTINUATION_TEMPLATES: dict[str, str] = {
+    "cursor": "conformance-next-page-token-{key}",  # nosec B105 - not a credential
+    "link": "?conformance-page={key}",
 }
 
 
@@ -654,6 +662,7 @@ def _scripted_page(
     *,
     records: list[dict[str, Any]],
     continuation: Any = _DECLARED,
+    key: int = _PROBE_KEY_VALUE,
 ) -> Page:
     """Build the page a scheme advances from, with nothing fetched.
 
@@ -671,6 +680,10 @@ def _scripted_page(
     a drive arms the origin guard with a link the connector would never have
     declared.
 
+    ``key`` seeds every scripted value, so the pages of one driven traversal
+    differ from each other exactly where a provider's own consecutive pages
+    do (:data:`_DRIVEN_PAGES`).
+
     The records land at the declared ``records.ref``, so a stop condition
     written against the records array sees the page the loop would hand it.
     """
@@ -678,14 +691,14 @@ def _scripted_page(
     schema = _response_schema(probe)
     payload: dict[str, Any] = {}
     for path in _body_paths(probe.pagination):
-        sample = _sample_value(_declared_schema(schema, path))
+        sample = _sample_value(_declared_schema(schema, path), key=key)
         if sample is not _UNTYPED:
             _plant(payload, path, sample)
     for path in _continuation_paths(probe):
         if continuation is not _DECLARED:
             _plant(payload, path, continuation)
         elif declared_type(_declared_schema(schema, path)) is None:
-            _plant(payload, path, _CONTINUATION_VALUES.get(scheme, 1))
+            _plant(payload, path, _continuation_value(scheme, key))
     records_ref = ((probe.read.get("response") or {}).get("records") or {}).get("ref")
     try:
         records_path = split_records_ref(records_ref)
@@ -697,7 +710,13 @@ def _scripted_page(
     return Page(records=records, payload=payload or records)
 
 
-def _sample_value(schema: Any) -> Any:
+def _continuation_value(scheme: str, key: int) -> Any:
+    """Return what the page seeded with *key* hands *scheme* to continue from."""
+    template = _CONTINUATION_TEMPLATES.get(scheme)
+    return key if template is None else template.format(key=key)
+
+
+def _sample_value(schema: Any, *, key: int) -> Any:
     """One value of the JSON type *schema* declares, or :data:`_UNTYPED`.
 
     Never ``None``: a record field the provider serves is a value, and
@@ -706,32 +725,37 @@ def _sample_value(schema: Any) -> Any:
     its ordering value. And never a guess -- a node declaring no type gets
     no sample, because the type it would have been given is exactly what
     the connector is being judged on.
+
+    ``key`` carries into the value itself, scalar by scalar, so two pages
+    scripted from two keys differ at every field either of them declares.
     """
     kind = declared_type(schema)
     if kind == "object":
-        return _sample_object(schema)
+        return _sample_object(schema, key=key)
     if kind == "array":
-        item = _sample_value(schema.get("items"))
+        item = _sample_value(schema.get("items"), key=key)
         return [] if item is _UNTYPED else [item]
     if kind in ("integer", "number"):
-        return _PROBE_KEY_VALUE
+        return key
     if kind == "boolean":
+        # The one type with no room for a second value. Nothing continues a
+        # traversal from a boolean, so no drive reads one back.
         return True
     if kind == "string":
-        return f"conformance-{_PROBE_KEY_VALUE}"
+        return f"conformance-{key}"
     return _UNTYPED
 
 
-def _sample_object(schema: Mapping[str, Any]) -> dict[str, Any]:
+def _sample_object(schema: Mapping[str, Any], *, key: int) -> dict[str, Any]:
     """Build an object carrying the properties *schema* declares a type for."""
     properties = schema.get("properties")
     if not isinstance(properties, Mapping):
         return {}
-    sampled = {name: _sample_value(prop) for name, prop in properties.items()}
+    sampled = {name: _sample_value(prop, key=key) for name, prop in properties.items()}
     return {name: value for name, value in sampled.items() if value is not _UNTYPED}
 
 
-def _declared_record(probe: _ReadProbe) -> dict[str, Any] | None:
+def _declared_record(probe: _ReadProbe, *, key: int) -> dict[str, Any] | None:
     """Build a record shaped like the endpoint's own declared record schema.
 
     ``None`` when that schema does not resolve, which the record-schema
@@ -741,7 +765,7 @@ def _declared_record(probe: _ReadProbe) -> dict[str, Any] | None:
     if not isinstance(response, Mapping):
         return None
     try:
-        return _sample_object(records_items_schema(probe.label, response))
+        return _sample_object(records_items_schema(probe.label, response), key=key)
     except ReadError:
         # The only failure ``records_items_schema`` raises: a ref that is
         # not anchored, does not resolve, or reaches something carrying no
@@ -749,7 +773,9 @@ def _declared_record(probe: _ReadProbe) -> dict[str, Any] | None:
         return None
 
 
-def _probe_records(probe: _ReadProbe, *, declared: bool = True) -> list[dict[str, Any]]:
+def _probe_records(
+    probe: _ReadProbe, *, declared: bool = True, key: int = _PROBE_KEY_VALUE
+) -> list[dict[str, Any]]:
     """Build the records the scripted page carries.
 
     Shaped like the endpoint's own record schema, plus the keyset ordering
@@ -759,15 +785,19 @@ def _probe_records(probe: _ReadProbe, *, declared: bool = True) -> list[dict[str
     sends and the schema does not declare reads perfectly well. Asserting
     otherwise would fail a working connector.
 
+    ``key`` is the page's seed, and the ordering field carries it: a keyset
+    traversal continues from the last record's value, so two pages whose
+    records held the same one would read as a scheme going nowhere.
+
     ``declared=False`` builds records carrying nothing, which is how the
     keyset refusal is armed.
     """
     if not declared:
         return [{} for _ in range(_PROBE_RECORDS)]
-    template = _declared_record(probe) or {}
+    template = _declared_record(probe, key=key) or {}
     ordering = _keyset_field(probe)
     if ordering:
-        _plant(template, ordering.split("."), _PROBE_KEY_VALUE)
+        _plant(template, ordering.split("."), key)
     return [dict(template) for _ in range(_PROBE_RECORDS)]
 
 
@@ -855,40 +885,7 @@ def check_api_page_references(target: ConformanceTarget) -> list[Violation]:
         if probe.pagination is None:
             continue
         violations.extend(_reference_violations(probe))
-        violations.extend(_positionless_scheme_violations(probe))
     return violations
-
-
-def _positionless_scheme_violations(probe: _ReadProbe) -> list[Violation]:
-    """Report a scheme that continues from nothing the provider supplies.
-
-    Two of the five carry no position of their own. ``_Offset`` counts rows
-    and ``_Page`` counts pages, so a constant step is exactly right for
-    them; ``_Cursor`` and ``_Link`` hold only what the last page handed
-    back, so a continuation that reads nothing under ``response`` sends the
-    same token or the same URL on every request. The provider then answers
-    the same page forever and the loop's only escape is the author's stop
-    condition -- which, reading a page that never changes, also answers the
-    same thing forever.
-    """
-    block = probe.pagination or {}
-    scheme = str(block.get("type", ""))
-    if scheme not in _POSITIONLESS_SCHEMES:
-        return []
-    field = _POSITIONLESS_SCHEMES[scheme]
-    declared = (block.get(scheme) or {}).get(field)
-    if any(lookup.startswith(_RESPONSE_PREFIX) for lookup in scope_paths(declared)):
-        return []
-    return [
-        Violation(
-            REFERENCES_CHECK,
-            f"endpoint {probe.label!r}: {scheme}.{field} is {declared!r}, "
-            f"which reads nothing under 'response'. This scheme keeps no "
-            f"position of its own -- it continues from what the last page "
-            f"handed back -- so every request after the first is identical "
-            f"to the one before it, and the read never moves past page two.",
-        )
-    ]
 
 
 def _reference_violations(probe: _ReadProbe) -> list[Violation]:
@@ -931,12 +928,14 @@ def check_api_read_advances(target: ConformanceTarget) -> list[Violation]:
     """Certify that each read can work out the request after a page.
 
     ``advance`` runs before the loop yields, so what it answers decides
-    whether a stream reads past its first page at all. Three things are
-    driven, each on a fresh traversal:
+    whether a stream reads past its first page at all. Four things are
+    driven:
 
-    * a page carrying a continuation value must produce a request that
-      differs from the first one. ``None`` there is a stream that reads one
-      page and reports success;
+    * the traversal must keep moving. Two pages go through one strategy and
+      every request is compared with the one before it, the first request
+      included; a scheme answering ``None`` while the page still carries a
+      continuation reads one page and reports success
+      (:func:`_advance_violations`);
     * a read declaring no pagination must answer ``None`` -- the single
       page is the whole stream, and a scheme that kept going would re-read
       it forever;
@@ -947,7 +946,8 @@ def check_api_read_advances(target: ConformanceTarget) -> list[Violation]:
       ordering value, and a link read handed a next URL on another host
       must either refuse it or resolve it back onto the connection's own
       origin. Both fire before the yield, which is what keeps them from
-      landing records the read cannot continue past.
+      landing records the read cannot continue past, and each is armed on a
+      fresh traversal of its own.
     """
     probes, compile_violations = _probes(target)
     violations: list[Violation] = _undriven(ADVANCE_CHECK, compile_violations)
@@ -958,56 +958,31 @@ def check_api_read_advances(target: ConformanceTarget) -> list[Violation]:
 
 
 def _advance_violations(probe: _ReadProbe) -> list[Violation]:
-    """Drive one page through ``advance`` and report what it answered."""
+    """Drive a traversal page by page and report where it stopped moving.
+
+    Two pages, through one strategy, because "the request after a page is
+    the request before it" is the whole of what stops a read moving -- and
+    which page shows it depends on the scheme. A pagination param that
+    reaches no request binding shows on the first: the offset counts on and
+    the built request does not change. A scheme that keeps no position of
+    its own -- a cursor continuing from a literal, a link whose next URL
+    comes from the connection rather than from the page -- builds a request
+    that differs from page one's and then repeats *that* one forever, so
+    nothing before the second page tells it from a read that moves.
+
+    Driving it is what lets the invariant be stated once for all five
+    schemes. A table naming which of them keeps a position of its own, and
+    which field each of the others continues from, states the same thing
+    about ``strategies.py`` from outside it, and is wrong the day a field is
+    renamed.
+
+    The pages differ everywhere a provider's own consecutive pages differ
+    (:data:`_DRIVEN_PAGES`), which is what makes a repeated request mean
+    something rather than being the same page served twice.
+    """
     scheme = str((probe.pagination or {}).get("type", ""))
-    records = _probe_records(probe)
-    page = _scripted_page(probe, records=records)
-    try:
-        following = probe.strategy().advance(page)
-    except _ADVANCE_FAILURES as err:
-        return [
-            Violation(
-                ADVANCE_CHECK,
-                f"endpoint {probe.label!r}: advancing past a page raised "
-                f"{err}. The read fails there having already been handed the "
-                f"page's records.",
-            )
-        ]
-    if probe.pagination is None:
-        if following is None:
-            return []
-        return [
-            Violation(
-                ADVANCE_CHECK,
-                f"endpoint {probe.label!r}: the read declares no pagination, "
-                f"so its one page is the whole stream, but the traversal "
-                f"asked for {following.url!r} next.",
-            )
-        ]
-    if following is None:
-        return [
-            Violation(
-                ADVANCE_CHECK,
-                f"endpoint {probe.label!r}: pagination.type {scheme!r} has "
-                f"nowhere to go after a page carrying a value at every "
-                f"response path it declares. This stream reads its first "
-                f"page and reports success.",
-            )
-        ]
-    try:
-        prepared = _request_builder(probe).for_page(
-            following.params, sends_declared_body=following.sends_declared_body
-        )
-    except RequestSpecError as err:
-        return [
-            Violation(
-                ADVANCE_CHECK,
-                f"endpoint {probe.label!r}: the request after a page could "
-                f"not be built: {err}. The first request builds, so this read "
-                f"passes every check that stops there and then fails on page "
-                f"two, with page one's records already handed over.",
-            )
-        ]
+    strategy = probe.strategy()
+    builder = _request_builder(probe)
     # What moves a traversal is what is SENT, and a param reaches the wire
     # only through a request binding that names it. Comparing the param
     # tables instead passes an endpoint that advances its table and binds
@@ -1015,18 +990,72 @@ def _advance_violations(probe: _ReadProbe) -> list[Violation]:
     # read that moves. The whole prepared request is compared because a
     # body-paginated read moves in its body while its URL and query stay
     # put, and that is still a read that moves.
-    if (following.url, prepared) == (probe.first.url, probe.first_sent):
-        return [
-            Violation(
-                ADVANCE_CHECK,
-                f"endpoint {probe.label!r}: the request after a page is the "
-                f"first request again ({following.url!r}, query "
-                f"{prepared.query!r}, body {prepared.body!r}). The read would "
-                f"fetch one page forever. A pagination param moves the "
-                f"traversal only where request.query, request.headers or "
-                f"request.body binds it.",
+    sent = (probe.first.url, probe.first_sent)
+    for word, key in _DRIVEN_PAGES:
+        page = _scripted_page(probe, records=_probe_records(probe, key=key), key=key)
+        try:
+            following = strategy.advance(page)
+        except _ADVANCE_FAILURES as err:
+            return [
+                Violation(
+                    ADVANCE_CHECK,
+                    f"endpoint {probe.label!r}: advancing past the {word} page "
+                    f"raised {err}. The read fails there having already been "
+                    f"handed the page's records.",
+                )
+            ]
+        if probe.pagination is None:
+            if following is None:
+                return []
+            return [
+                Violation(
+                    ADVANCE_CHECK,
+                    f"endpoint {probe.label!r}: the read declares no "
+                    f"pagination, so its one page is the whole stream, but "
+                    f"the traversal asked for {following.url!r} next.",
+                )
+            ]
+        if following is None:
+            return [
+                Violation(
+                    ADVANCE_CHECK,
+                    f"endpoint {probe.label!r}: pagination.type {scheme!r} has "
+                    f"nowhere to go after a page carrying a value at every "
+                    f"response path it declares. This stream stops after the "
+                    f"{word} page and reports success.",
+                )
+            ]
+        try:
+            prepared = builder.for_page(
+                following.params, sends_declared_body=following.sends_declared_body
             )
-        ]
+        except RequestSpecError as err:
+            return [
+                Violation(
+                    ADVANCE_CHECK,
+                    f"endpoint {probe.label!r}: the request after the {word} "
+                    f"page could not be built: {err}. The first request "
+                    f"builds, so this read passes every check that stops there "
+                    f"and then fails mid-traversal, with the records it has "
+                    f"already handed over.",
+                )
+            ]
+        if (following.url, prepared) == sent:
+            return [
+                Violation(
+                    ADVANCE_CHECK,
+                    f"endpoint {probe.label!r}: the request after the {word} "
+                    f"page is the request before it again ({following.url!r}, "
+                    f"query {prepared.query!r}, body {prepared.body!r}). The "
+                    f"read would fetch that page forever. A pagination param "
+                    f"moves the traversal only where request.query, "
+                    f"request.headers or request.body binds it, and a scheme "
+                    f"that continues from what the last page handed back moves "
+                    f"only where its declared continuation reads a value off "
+                    f"that page.",
+                )
+            ]
+        sent = (following.url, prepared)
     return []
 
 

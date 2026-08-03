@@ -1213,7 +1213,7 @@ class TestApiReadPathBreaks:
 
         target = self._broken(tmp_path, "widgets", to_cursor)
         report = _report(check_api_read_advances(target))
-        assert "reads its first page and reports success" in report
+        assert "stops after the first page and reports success" in report
 
     def test_pagination_params_that_reach_no_binding_read_one_page_forever(
         self, tmp_path: Path
@@ -1232,7 +1232,9 @@ class TestApiReadPathBreaks:
             tmp_path, "widgets", lambda read: read["request"].pop("query")
         )
         report = _report(check_api_read_advances(target))
-        assert "the request after a page is the first request again" in report
+        assert (
+            "the request after the first page is the request before it again" in report
+        )
         assert "request.query" in report, "the report must name the missing sink"
 
     def test_a_step_that_cannot_advance_is_reported_before_the_yield(
@@ -2039,7 +2041,15 @@ class TestApiBaseUrlBreaks:
 
 
 class TestApiPositionlessSchemeBreaks:
-    """Cursor and link hold only what the last page handed back."""
+    """A scheme holding only what the last page handed back has to read it.
+
+    The defect is one page later than every other advance defect: the
+    request after page one differs from the first request, so a drive that
+    stops there certifies the read. It is the request after page TWO that
+    comes back identical, and it does so for a cursor, a link and a keyset
+    alike -- which is why the drive advances twice rather than the kit
+    holding a table of which schemes keep a position of their own.
+    """
 
     _broken = staticmethod(TestApiReadPathBreaks._broken)
 
@@ -2051,10 +2061,22 @@ class TestApiPositionlessSchemeBreaks:
                 next_cursor={"literal": "same"}
             ),
         )
-        report = _report(check_api_page_references(target))
-        assert "keeps no position of its own" in report
+        report = _report(check_api_read_advances(target))
+        assert "the request after the second page is the request before it" in report
+
+    def test_a_link_continuing_from_a_constant(self, tmp_path: Path) -> None:
+        target = self._broken(
+            tmp_path,
+            "events",
+            lambda read: read["pagination"]["link"].update(
+                next_url={"literal": "/v1/events?after=fixed"}
+            ),
+        )
+        report = _report(check_api_read_advances(target))
+        assert "the request after the second page is the request before it" in report
 
     def test_a_link_continuing_from_the_connection(self, tmp_path: Path) -> None:
+        """Nothing a definition-only run resolves, so the traversal ends."""
         target = self._broken(
             tmp_path,
             "events",
@@ -2062,8 +2084,19 @@ class TestApiPositionlessSchemeBreaks:
                 next_url={"ref": "connection.parameters.next_page"}
             ),
         )
-        report = _report(check_api_page_references(target))
-        assert "keeps no position of its own" in report
+        report = _report(check_api_read_advances(target))
+        assert "stops after the first page and reports success" in report
+
+    def test_a_keyset_ordering_a_moving_field_is_clean(self, tmp_path: Path) -> None:
+        """Keyset continues from the record, and the record moves.
+
+        Which is why no table is needed to exempt it: the drive hands the
+        second page a later ordering value, exactly as a provider does, and
+        the request that follows differs on its own. Whether a *provider*
+        moves that field is a fact about data, not about the declaration,
+        and nothing a definition-only run can judge either way.
+        """
+        assert check_api_read_advances(load_target(API_REFERENCE_DIR)) == []
 
     def test_an_offset_stepping_by_a_constant_is_clean(self, tmp_path: Path) -> None:
         """Offset counts rows for itself, so a fixed step is exactly right."""
@@ -2072,7 +2105,7 @@ class TestApiPositionlessSchemeBreaks:
             "widgets",
             lambda read: read["pagination"]["offset"].update(increment_by=50),
         )
-        assert check_api_page_references(target) == []
+        assert check_api_read_advances(target) == []
 
 
 class TestApiWholeBodyStopConditionBreaks:
@@ -2484,7 +2517,7 @@ class TestApiRequestBlockBreaks:
         target = self._broken(tmp_path, "widgets", bend)
         assert check_api_read_compiles(target) == []
         report = _report(check_api_read_advances(target))
-        assert "the request after a page could not be built" in report
+        assert "the request after the first page could not be built" in report
         assert "Unknown resolution scope 'connectio'" in report
 
     def test_a_header_the_connection_does_not_send_is_clean(
@@ -2521,4 +2554,4 @@ class TestApiRequestBlockBreaks:
         target = self._broken(tmp_path, "widgets", bend)
         assert check_api_read_compiles(target) == []
         report = _report(check_api_read_advances(target))
-        assert "the request after a page could not be built" in report
+        assert "the request after the first page could not be built" in report
