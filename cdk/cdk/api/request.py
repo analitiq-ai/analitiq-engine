@@ -18,6 +18,7 @@ The request builder is a named unit rather than a closure so a page's
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -37,16 +38,34 @@ __all__ = [
     "ParamTable",
     "PreparedRequest",
     "RequestBuilder",
+    "bind_query_and_headers",
     "bind_request_values",
     "build_write_body",
     "request_block_problem",
     "substitute_path",
 ]
 
+logger = logging.getLogger(__name__)
+
 #: Where a declared param lands. The raw contract key is ``in`` -- reading
 #: it as ``location`` (the model's Python attribute name) finds nothing and
 #: silently places every param in the query string.
 _PLACEMENT_KEY = "in"
+
+#: The placement that puts a param in the header map rather than the query
+#: string. Named once because the request build, the reserved-header refusal
+#: and the query filter all have to agree on what it means.
+_HEADER_PLACEMENT = "header"
+
+#: Placements that keep a param off the query string. ``path`` was already
+#: substituted into the URL, ``header`` lands in the header map, and ``body``
+#: is bound into the request body.
+_OFF_QUERY_PLACEMENTS = frozenset({"body", "path", _HEADER_PLACEMENT})
+
+#: The derived function that percent-encodes a value. The engine encodes
+#: every substituted path segment itself, so this one inside ``path_params``
+#: encodes twice.
+_URL_ENCODE = "url_encode"
 
 #: The media type the engine sends for a JSON body. ``cdk.api.http`` adds it
 #: when a body is present and the endpoint declared none; ``write_plan``
@@ -71,9 +90,9 @@ class PreparedRequest:
 class ParamTable:
     """The declared params' resolved values, and where each one lands.
 
-    ``values`` is the single table a page request materialises from: the
-    body's ``from_param`` binding reads it whole, and the query string
-    takes everything not declared ``in: body``.
+    ``values`` is the single table a request materialises from: every
+    ``{from_param}`` binding reads it, and each param also reaches the sink
+    its declared ``in`` names.
     """
 
     values: dict[str, Any] = field(default_factory=dict)
@@ -133,6 +152,34 @@ class ParamTable:
             pagination_controlled=_pagination_controlled(declared),
         )
 
+    def places_in_header(self, name: str) -> bool:
+        """Whether the param *name* lands in the header map."""
+        return self.placements.get(name) == _HEADER_PLACEMENT
+
+    def places_in_query(self, name: str) -> bool:
+        """Whether the param *name* lands on the query string.
+
+        The contract requires ``in`` on every param, so a name with no
+        placement here is one this table never saw declared -- a value the
+        pagination loop or a stream filter put in. The query string is the
+        only sink such a value can reach without a declaration to route it.
+        """
+        return self.placements.get(name) not in _OFF_QUERY_PLACEMENTS
+
+    def header_params(self) -> dict[str, Any]:
+        """Name the params declared ``in: header``, with the value each sends.
+
+        A param placed here lands in the same map as ``request.headers``, so
+        the reserved-header rule has to see both. The value is the resolved
+        default when there is one -- ``None`` when the declaration alone is
+        all there is, which is enough to judge the name.
+        """
+        return {
+            name: self.values.get(name)
+            for name, placement in self.placements.items()
+            if placement == _HEADER_PLACEMENT
+        }
+
 
 def _placements(declared: Mapping[str, Any]) -> dict[str, str]:
     """Where each declared param lands, read from the raw contract key."""
@@ -169,6 +216,13 @@ def bind_request_values(
     ``{from_param}`` against the params in flight, then run the value
     expressions under the per-request policy (an unresolved value omits its
     key rather than going out raw).
+
+    Each declared VALUE is resolved on its own. Handing the whole map to the
+    resolver would put the map itself in a value position, and a header,
+    query or path-param whose NAME is ``ref``, ``template``, ``literal`` or
+    ``function`` would then be read as an expression marker -- ``ref`` is a
+    real query parameter name, so that mis-read breaks a working endpoint
+    with an error no caller classifies.
     """
     if declared is None:
         return {}
@@ -177,12 +231,21 @@ def bind_request_values(
             f"request.{block} for endpoint {endpoint!r} must be a JSON object, "
             f"got {type(declared).__name__}"
         )
-    resolved = resolver.resolve_for_request(bind_param_refs(dict(declared), params))
-    if not isinstance(resolved, dict):
-        raise ValueError(
-            f"request.{block} for endpoint {endpoint!r} resolved to a "
-            f"{type(resolved).__name__}, not a map of names to values"
-        )
+    resolved: dict[str, Any] = {}
+    for name, value in bind_param_refs(dict(declared), params).items():
+        bound = resolver.resolve_for_request(value)
+        if bound is None and Resolver.is_expression_node(value):
+            # The per-request policy: an expression with nothing to resolve
+            # omits its key rather than going onto the wire raw.
+            logger.warning(
+                "request.%s for endpoint %r: dropping %r -- its expression "
+                "resolved to nothing",
+                block,
+                endpoint,
+                name,
+            )
+            continue
+        resolved[name] = bound
     return resolved
 
 
@@ -192,17 +255,25 @@ def substitute_path(path: str, values: Mapping[str, Any], *, endpoint: str) -> s
     Each value is percent-encoded as a single path segment: it crosses a
     trust boundary (config or provider data), and a value carrying ``/``,
     ``?`` or ``#`` would otherwise rewrite the URL's structure.
+
+    An empty segment is refused alongside a missing one. ``/Contact/{id}``
+    with an empty ``id`` addresses the whole collection: a read then fetches
+    every record instead of one, and a PUT or PATCH targets the collection.
+    ``url_encode`` returns ``""`` for an unbound input, so the empty case is
+    reachable without anyone declaring it.
     """
 
     def bound(match: re.Match[str]) -> str:
         name = match.group(1)
         value = values.get(name)
-        if value is None:
+        segment = "" if value is None else str(value)
+        if not segment:
             raise ValueError(
                 f"path {path!r} for endpoint {endpoint!r} has no value for the "
-                f"placeholder {{{name}}}; bind it in request.path_params"
+                f"placeholder {{{name}}}; bind it in request.path_params to "
+                f"something that resolves to a non-empty value"
             )
-        return quote(str(value), safe="")
+        return quote(segment, safe="")
 
     return _PLACEHOLDER.sub(bound, path)
 
@@ -212,8 +283,15 @@ def request_block_problem(
     *,
     reserved_headers: frozenset[str] | set[str],
     paged_params: Collection[str] = (),
+    header_params: Mapping[str, Any] | None = None,
 ) -> str | None:
-    """Why this request block cannot be sent as declared, or ``None``."""
+    """Why this request block cannot be sent as declared, or ``None``.
+
+    ``paged_params`` and ``header_params`` are two facts about the same
+    declared param table (:meth:`ParamTable.header_params` builds the
+    second), passed in because this check runs before the table's values are
+    complete and must judge the declarations rather than the values.
+    """
     removals = request_block.get("headers_remove")
     if removals:
         return (
@@ -223,45 +301,99 @@ def request_block_problem(
             f"delete one. Remove the key, or move the header off the "
             f"transport's defaults."
         )
-    problem = _declared_header_problem(
-        request_block.get("headers"), reserved_headers=reserved_headers
+    problem = _header_map_problem(
+        request_block.get("headers"),
+        header_params or {},
+        reserved_headers=reserved_headers,
     )
+    if problem is not None:
+        return problem
+    problem = _path_encoding_problem(request_block)
     if problem is not None:
         return problem
     return _paged_placeholder_problem(request_block, paged_params)
 
 
-def _declared_header_problem(
-    declared: Any, *, reserved_headers: frozenset[str] | set[str]
+def _header_map_problem(
+    declared: Any,
+    header_params: Mapping[str, Any],
+    *,
+    reserved_headers: frozenset[str] | set[str],
 ) -> str | None:
-    """Why a declared header may not be sent, or ``None``.
+    """Why the headers this request sends may not go out, or ``None``.
+
+    Two declarations reach the same header map -- ``request.headers`` and any
+    param placed ``in: header`` -- so one rule judges the MERGED result. A
+    rule that read one route only would refuse ``Authorization`` spelled as a
+    header and permit the byte-identical param, and the param route wins on
+    the wire, so the bypass is the one that ships.
 
     Content-Type is the engine's own: it is permitted only where the author
-    declared exactly what the engine already sends, which makes the
-    collision a no-op rather than a conflict nobody can see. Every other
-    reserved name carries the connection's values (auth and friends), and
-    the request build never sees those values -- only their names -- so an
-    endpoint re-declaring one can only shadow it.
+    declared exactly what the engine already sends, which makes the collision
+    a no-op rather than a conflict nobody can see. Every other reserved name
+    carries the connection's values (auth and friends), and the request build
+    never sees those values -- only their names -- so an endpoint
+    re-declaring one can only shadow it.
     """
-    if not isinstance(declared, Mapping):
-        return None
-    for name, value in declared.items():
+    routes: list[tuple[str, str, Any]] = []
+    if isinstance(declared, Mapping):
+        routes += [
+            ("request.headers declares", name, value)
+            for name, value in declared.items()
+        ]
+    routes += [
+        ("the param declared in: header sends", name, value)
+        for name, value in header_params.items()
+    ]
+    for source, name, value in routes:
         lowered = str(name).lower()
         if lowered == "content-type":
             if isinstance(value, str) and value.strip().lower() == JSON_CONTENT_TYPE:
                 continue
             return (
-                f"request.headers declares {name!r}, which the engine owns: it "
-                f"sends {JSON_CONTENT_TYPE!r} with every JSON body. Declare "
-                f"that exact value or remove the header."
+                f"{source} {name!r}, which the engine owns: it sends "
+                f"{JSON_CONTENT_TYPE!r} with every JSON body. Declare that "
+                f"exact value or remove the header."
             )
         if lowered in reserved_headers:
             return (
-                f"request.headers declares {name!r}, which the connection "
-                f"already sends; an endpoint cannot shadow the connection's "
-                f"own header. Remove it, or change the transport's headers."
+                f"{source} {name!r}, which the connection already sends; an "
+                f"endpoint cannot shadow the connection's own header. Remove "
+                f"it, or change the transport's headers."
             )
     return None
+
+
+def _path_encoding_problem(request_block: Mapping[str, Any]) -> str | None:
+    """Why a path binding cannot be substituted as declared, or ``None``.
+
+    :func:`substitute_path` percent-encodes every segment it substitutes, so
+    a binding that encodes the value itself sends ``a%252Fb`` where the
+    provider expects ``a%2Fb`` and answers 404.
+    """
+    bindings = request_block.get("path_params")
+    if not isinstance(bindings, Mapping):
+        return None
+    for name, binding in bindings.items():
+        if _calls_url_encode(binding):
+            return (
+                f"request.path_params binds {{{name}}} through the "
+                f"{_URL_ENCODE!r} function, which encodes the value a second "
+                f"time: the engine already percent-encodes every substituted "
+                f"path segment. Bind the raw value."
+            )
+    return None
+
+
+def _calls_url_encode(node: Any) -> bool:
+    """Whether *node* reaches the ``url_encode`` function anywhere inside it."""
+    if isinstance(node, Mapping):
+        if node.get("function") == _URL_ENCODE:
+            return True
+        return any(_calls_url_encode(child) for child in node.values())
+    if isinstance(node, list):
+        return any(_calls_url_encode(item) for item in node)
+    return False
 
 
 def _paged_placeholder_problem(
@@ -294,6 +426,58 @@ def _paged_placeholder_problem(
                 f"reach it"
             )
     return None
+
+
+def bind_query_and_headers(
+    *,
+    table: ParamTable,
+    params: Mapping[str, Any],
+    declared_query: Any,
+    declared_headers: Any,
+    resolver: Resolver,
+    endpoint: str,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Build the query string and the header map one request sends.
+
+    Both roles call this. The placement vocabulary is declared once in the
+    endpoint document, so it has to be honoured once: a write that read
+    ``request.query`` but ignored ``in: query`` would drop the API key the
+    identical read sends, and nothing would report it.
+    """
+    headers = {
+        str(name): str(value)
+        for name, value in bind_request_values(
+            declared_headers,
+            params=params,
+            resolver=resolver,
+            block="headers",
+            endpoint=endpoint,
+        ).items()
+    }
+    # A param declared ``in: header`` is the more specific statement, so it
+    # wins over the endpoint-wide headers map.
+    headers.update(
+        {
+            str(name): str(value)
+            for name, value in params.items()
+            if table.places_in_header(name)
+        }
+    )
+    query = {
+        name: value for name, value in params.items() if table.places_in_query(name)
+    }
+    # request.query is the endpoint's explicit statement of what goes on the
+    # query string, so it wins a key collision with a param.
+    query.update(
+        bind_request_values(
+            declared_query,
+            params=params,
+            resolver=resolver,
+            block="query",
+            endpoint=endpoint,
+        )
+    )
+    return query, headers
 
 
 def _require_body(body: Any, endpoint: str) -> Any:
@@ -384,44 +568,17 @@ class RequestBuilder:
         # bindings read the table too: a header-placed param must carry the
         # same value on page two as on page one.
         binding_params = {**self._table.values, **page_params}
-        headers = {
-            str(name): str(value)
-            for name, value in bind_request_values(
-                self._declared_headers,
-                params=binding_params,
-                resolver=self._resolver,
-                block="headers",
-                endpoint=self._endpoint,
-            ).items()
-        }
-        # A param declared ``in: header`` is the more specific statement, so
-        # it wins over the endpoint-wide headers map.
-        headers.update(
-            {
-                str(name): str(value)
-                for name, value in binding_params.items()
-                if self._table.placements.get(name) == "header"
-            }
+        query, headers = bind_query_and_headers(
+            table=self._table,
+            params=binding_params,
+            # A continuation replaces the whole request, query string
+            # included, so the endpoint's own query map does not apply to it.
+            declared_query=self._declared_query if sends_declared_body else None,
+            declared_headers=self._declared_headers,
+            resolver=self._resolver,
+            endpoint=self._endpoint,
         )
-
-        if sends_declared_body:
-            query = {
-                name: value
-                for name, value in page_params.items()
-                if self._table.placements.get(name) not in ("body", "path", "header")
-            }
-            # request.query is the endpoint's explicit statement of what goes
-            # on the query string, so it wins a key collision with a param.
-            query.update(
-                bind_request_values(
-                    self._declared_query,
-                    params=binding_params,
-                    resolver=self._resolver,
-                    block="query",
-                    endpoint=self._endpoint,
-                )
-            )
-        else:
+        if not sends_declared_body:
             query = dict(page_params)
 
         if self._raw_body is None or not sends_declared_body:

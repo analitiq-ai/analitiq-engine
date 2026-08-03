@@ -24,6 +24,7 @@ from ..resolver import Resolver
 from ..types import RetrySemantics, RetryVerdict, SchemaSpec
 from .request import (
     ParamTable,
+    bind_query_and_headers,
     bind_request_values,
     request_block_problem,
     substitute_path,
@@ -324,7 +325,10 @@ def build_write_plan(
     reserved = reserved_header_names(session_header_names)
     table = ParamTable.for_write(mode_block.get("params") or {}, resolver)
     problem = request_block_problem(
-        request, reserved_headers=reserved, paged_params=table.pagination_controlled
+        request,
+        reserved_headers=reserved,
+        paged_params=table.pagination_controlled,
+        header_params=table.header_params(),
     )
     if problem is not None:
         return problem
@@ -348,21 +352,15 @@ def build_write_plan(
             ),
             endpoint=endpoint_id,
         )
-        plan.headers = {
-            str(name): str(value)
-            for name, value in bind_request_values(
-                request.get("headers"),
-                params=table.values,
-                resolver=resolver,
-                block="headers",
-                endpoint=endpoint_id,
-            ).items()
-        }
-        plan.query = bind_request_values(
-            request.get("query"),
+        # The same builder the read role's pages go through, so a param
+        # placed ``in: query`` or ``in: header`` reaches the wire whichever
+        # role sends it.
+        plan.query, plan.headers = bind_query_and_headers(
+            table=table,
             params=table.values,
+            declared_query=request.get("query"),
+            declared_headers=request.get("headers"),
             resolver=resolver,
-            block="query",
             endpoint=endpoint_id,
         )
     except ValueError as err:

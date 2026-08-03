@@ -171,6 +171,113 @@ class TestTheRequestTheContractDescribes:
         )
         assert session.calls[0]["headers"]["X-Tenant"] == "acme"
 
+    async def test_a_header_placed_param_shadowing_the_connection_is_refused(
+        self,
+    ) -> None:
+        # Two declarations reach one header map: request.headers, and any
+        # param placed ``in: header`` -- which lands under the PARAM's name,
+        # not the binding key. A rule reading request.headers alone refuses
+        # the harmless spelling and ships the one that overwrites the
+        # connection's credential.
+        session = FakeSession()
+        session.headers["Authorization"] = "Bearer connection"
+        with pytest.raises(ReadError, match="in: header"):
+            await _read(
+                session,
+                endpoint_document(
+                    request={
+                        "method": "GET",
+                        "path": "/items",
+                        "headers": {"X-Auth": {"from_param": "Authorization"}},
+                    },
+                    params={
+                        "Authorization": {
+                            "in": "header",
+                            "type": "string",
+                            "required": True,
+                            "default": {"literal": "Bearer attacker"},
+                        }
+                    },
+                ),
+            )
+        assert session.calls == []
+
+    async def test_a_query_key_named_ref_is_sent_as_a_parameter(self) -> None:
+        # "ref" is a real query parameter name. Resolving the whole map as
+        # one node reads the key as an expression marker, and the endpoint
+        # fails with an error no caller classifies.
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        await _read(
+            session,
+            endpoint_document(
+                request={
+                    "method": "GET",
+                    "path": "/items",
+                    "query": {"ref": {"literal": "main"}},
+                }
+            ),
+        )
+        assert session.calls[0]["params"]["ref"] == "main"
+
+    async def test_a_path_placeholder_binding_to_an_empty_value_is_refused(
+        self,
+    ) -> None:
+        # "/items/" addresses the whole collection: the read would fetch
+        # every record and report success.
+        session = FakeSession()
+        with pytest.raises(ReadError, match=r"\{id\}"):
+            await _read(
+                session,
+                endpoint_document(
+                    request={
+                        "method": "GET",
+                        "path": "/items/{id}",
+                        "path_params": {"id": {"from_param": "id"}},
+                    },
+                    params={
+                        "id": {
+                            "in": "path",
+                            "type": "string",
+                            "required": True,
+                            "default": {"literal": ""},
+                        }
+                    },
+                ),
+            )
+        assert session.calls == []
+
+    async def test_a_path_binding_that_encodes_the_value_itself_is_refused(
+        self,
+    ) -> None:
+        # The engine percent-encodes every segment it substitutes, so this
+        # sends a%252Fb where the provider expects a%2Fb and answers 404.
+        session = FakeSession()
+        with pytest.raises(ReadError, match="url_encode"):
+            await _read(
+                session,
+                endpoint_document(
+                    request={
+                        "method": "GET",
+                        "path": "/items/{id}",
+                        "path_params": {
+                            "id": {
+                                "function": "url_encode",
+                                "input": {"from_param": "id"},
+                            }
+                        },
+                    },
+                    params={
+                        "id": {
+                            "in": "path",
+                            "type": "string",
+                            "required": True,
+                            "default": {"literal": "a/b"},
+                        }
+                    },
+                ),
+            )
+        assert session.calls == []
+
     async def test_a_read_removing_a_transport_header_is_refused(self) -> None:
         # The connection's defaults live on the shared session; nothing in
         # the request build can delete one, so it is refused rather than
