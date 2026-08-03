@@ -76,9 +76,7 @@ def _counted_claims(doc: str) -> list[tuple[str, int, int]]:
     return claims
 
 
-@pytest.mark.parametrize(
-    "path", sorted(_CDK.rglob("*.py")), ids=lambda path: path.name
-)
+@pytest.mark.parametrize("path", sorted(_CDK.rglob("*.py")), ids=lambda path: path.name)
 def test_a_counted_docstring_claim_matches_the_list_it_introduces(path: Path) -> None:
     """Say three and list four and the reader hunts for a rule nobody wrote."""
     mismatched = [
