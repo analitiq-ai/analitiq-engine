@@ -38,8 +38,8 @@ when they bite:
 * the origin the link guard is armed with is the default transport's
   literal ``base_url``, or a stand-in when the definition expresses it as
   a reference the connection document supplies. What the guard certifies
-  -- that a link leaving the origin is refused before the records are
-  yielded -- holds for either.
+  -- that a link handed to the traversal is either refused or resolved
+  back onto that origin -- holds for either.
 """
 
 from __future__ import annotations
@@ -48,21 +48,31 @@ from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import Any
+from urllib.parse import urlsplit
 
 from cdk.api.page_loop import Page, PageRequest, PaginationStrategy
 from cdk.api.read_setup import build_read_strategy, stop_condition
 from cdk.api.records import split_records_ref
-from cdk.api.request import ParamTable, RequestBuilder
+from cdk.api.request import (
+    ParamTable,
+    RequestBuilder,
+    bind_request_values,
+    request_block_problem,
+    substitute_path,
+)
 from cdk.api.response_schema import records_items_schema, resolve_field_arrow_type
-from cdk.api.urls import join_url
-from cdk.connection_runtime import ConnectionRuntime
+from cdk.api.urls import join_url, same_origin
 from cdk.exceptions import ReadError, TransportSpecError
-from cdk.resolver import Resolver
+from cdk.resolver import Resolver, expression_node_problem, scope_paths
 from cdk.schema_contract import SchemaContract
 from cdk.type_map import TypeMapper
 
-from .api_surface import api_base_url, read_operations
-from .fakes import NoSecretsResolver
+from .api_surface import (
+    api_base_url,
+    definition_resolver,
+    read_operations,
+    reads_a_connection_scope,
+)
 from .target import ConformanceTarget
 from .violations import Violation
 
@@ -80,13 +90,30 @@ ADVANCE_CHECK = "api-read-advances"
 STOP_CHECK = "api-read-stop-condition"
 RECORDS_CHECK = "api-record-schema"
 
-#: The failures a deterministic authoring defect surfaces as: exactly what
-#: the read itself catches (``ReadError`` plus the engine's own resolution
-#: failures). Anything wider would relabel a CDK bug as a connector finding
-#: -- ``TypeError`` in particular, which the read does not catch and the
-#: worker may classify as retryable, so a check swallowing one here would
+#: What compiling a read raises. Widest of the four on purpose: the kit is
+#: the one place an endpoint document is *unvalidated* raw JSON, so a
+#: strategy reaching for the block its own ``pagination.type`` names
+#: (``_Offset``'s ``block["offset"]``) raises ``KeyError`` on a bent
+#: document -- a finding naming the missing block, not a crash.
+_COMPILE_FAILURES = (ReadError, TransportSpecError, ValueError, KeyError)
+
+#: What ``advance`` and the request build after it raise: ``ValueError``
+#: from the strategies' own refusals (a keyset page with no ordering value,
+#: a link off the origin, a next link that is not a URL string) and
+#: ``ReadError`` from the page expression resolver, which already wraps
+#: everything else it catches.
+_ADVANCE_FAILURES = (ReadError, ValueError)
+
+#: What evaluating a stop condition raises: ``stop_condition`` wraps
+#: ``ValueError``/``KeyError``/``TransportSpecError`` into ``ReadError``,
+#: and the predicates convert ``TypeError`` upstream. Anything else
+#: escaping is a CDK bug, and reporting it as a connector finding would
 #: hide it from the only person able to fix it.
-_READ_FAILURES = (ReadError, TransportSpecError, ValueError, KeyError)
+_STOP_FAILURES = (ReadError,)
+
+#: What building a record schema raises: ``ReadError`` from the records ref
+#: and the arrow-type resolution, ``ValueError`` from ``SchemaContract``.
+_RECORD_FAILURES = (ReadError, ValueError)
 
 #: The page size the probe reads with. Any positive integer works; a value
 #: unlike the contract's own bounds makes it obvious in a message that the
@@ -124,14 +151,15 @@ _PAGE_SCOPE_KEYS = ("body", "record_count")
 #: a drive could legitimately want planted, ``None`` included.
 _DECLARED = object()
 
-#: Scopes a connection document fills in. A definition-only run has none,
-#: so an expression reading one resolves to nothing here for a reason that
-#: says nothing about the connector.
-_CONNECTION_SCOPES = ("connection.", "secrets.", "auth.")
+#: "the response schema names no type here", so nothing can be scripted at
+#: this path. Distinct from ``None``, which is a value a field can hold.
+_UNTYPED = object()
 
-#: What marks a mapping as a value expression rather than a plain object
-#: (``Resolver._EXPR_KEYS``).
-_EXPRESSION_KEYS = frozenset({"ref", "template", "literal", "function"})
+#: Where the compiled probes are cached on the target. A conformance target
+#: carries unhashable fields, so it cannot key a mapping; it does have a
+#: ``__dict__``, which is the slot ``functools.cached_property`` writes into
+#: and the same one used here.
+_PROBE_CACHE = "_api_read_probes"
 
 #: The schemes that keep no position of their own, and the field each one
 #: continues from. Offset and page count for themselves; these two hold
@@ -148,12 +176,16 @@ _ORIGIN_REFUSAL = "leaves the connection's origin"
 #: the page it came from whatever the origin is), and a numeric step is a
 #: whole number. Not a statement about how a scheme paginates -- only about
 #: what type its declared field holds.
+#:
+#: Keyset has no entry: it continues from the last *record's* ordering
+#: field, and ``_Keyset`` reads only ``param``, ``order_by_field`` and
+#: ``initial`` off its block, so a keyset read declares no continuation
+#: path at all.
 _CONTINUATION_VALUES: dict[str, Any] = {
     "cursor": "conformance-next-page-token",  # nosec B105 - not a credential
     "link": "?conformance-page=2",
     "offset": _PROBE_BATCH_SIZE,
     "page": _PROBE_BATCH_SIZE,
-    "keyset": _PROBE_BATCH_SIZE,
 }
 
 
@@ -169,6 +201,7 @@ class _ReadProbe:
 
     label: str
     read: dict[str, Any]
+    request: Mapping[str, Any]
     pagination: dict[str, Any] | None
     url: str
     origin: str
@@ -194,52 +227,110 @@ def _compile_read(
     """Compile one read to its first request, raising on any authoring defect.
 
     The ordering is the read's own: one resolver per read carrying the
-    engine's page size, the param table built from it, then
+    engine's page size, the param table built from it, the request block
+    judged against what the path can send, the path substituted, and then
     :func:`~cdk.api.read_setup.build_read_strategy` -- the same function
     the read calls, so the page size lands where the read puts it and the
     origin guard is armed the way the read arms it. A second resolver built
     here would leave ``runtime.batch_size`` unresolvable and probe at the
     wrong page size.
     """
-    runtime = ConnectionRuntime(
-        raw_config={},
-        connection_id="conformance-definition",
-        connector_id=target.connector_id,
-        connector_type=target.kind,
-        resolver=NoSecretsResolver(),
-        connector_definition=target.definition,
-    )
-    resolver = runtime.request_resolver(
-        runtime_values={"batch_size": _PROBE_BATCH_SIZE}
+    resolver = definition_resolver(
+        target, runtime_values={"batch_size": _PROBE_BATCH_SIZE}
     )
     request_block = read.get("request")
     if not isinstance(request_block, Mapping):
         raise ReadError("operations.read declares no request block")
-    path = request_block.get("path")
-    if not isinstance(path, str) or not path:
+    declared_path = request_block.get("path")
+    if not isinstance(declared_path, str) or not declared_path:
         raise ReadError("operations.read.request declares no path")
+
+    table = ParamTable.for_read(read.get("params") or {}, resolver)
+    problem = request_block_problem(
+        request_block,
+        reserved_headers=_transport_header_names(target),
+        paged_params=table.pagination_controlled,
+    )
+    if problem is not None:
+        raise ReadError(problem)
+    path = substitute_path(
+        declared_path,
+        bind_request_values(
+            request_block.get("path_params"),
+            params=table.values,
+            resolver=resolver,
+            block="path_params",
+            endpoint=declared_path,
+        ),
+        endpoint=declared_path,
+    )
 
     origin = api_base_url(target) or _STAND_IN_ORIGIN
     pagination = read.get("pagination")
     probe = _ReadProbe(
         label=label,
         read=read,
+        request=request_block,
         pagination=pagination if isinstance(pagination, dict) else None,
         url=join_url(origin, path),
         origin=origin,
-        table=ParamTable.for_read(read.get("params") or {}, resolver),
+        table=table,
         resolver=resolver,
         first=PageRequest(""),
     )
     first = probe.strategy().first()
-    _materialize_first_request(probe, request_block, first)
+    _materialize_first_request(probe, first)
     return replace(probe, first=first)
 
 
-def _materialize_first_request(
-    probe: _ReadProbe, request_block: Mapping[str, Any], first: PageRequest
-) -> None:
-    """Build the first request's query and body, as the fetch does.
+def _transport_header_names(target: ConformanceTarget) -> frozenset[str]:
+    """Name the headers the session would carry, lowercased.
+
+    An endpoint may not re-declare one: the request build never sees their
+    values, only their names, so declaring one can only shadow what the
+    connection sends.
+    """
+    ref = target.definition.get("default_transport")
+    block = target.declared_transports().get(ref) if isinstance(ref, str) else None
+    declared = block.get("headers") if isinstance(block, Mapping) else None
+    if not isinstance(declared, Mapping):
+        return frozenset()
+    return frozenset(str(name).lower() for name in declared)
+
+
+def _request_builder(probe: _ReadProbe) -> RequestBuilder:
+    """Build the request builder the read itself constructs for this endpoint.
+
+    Same arguments the engine passes, declared query and headers included:
+    a builder given less would certify a request the engine does not build.
+    """
+    return RequestBuilder(
+        probe.table,
+        raw_body=_drivable_body(probe),
+        resolver=probe.resolver,
+        endpoint=str(probe.request.get("path")),
+        declared_query=probe.request.get("query"),
+        declared_headers=probe.request.get("headers"),
+    )
+
+
+def _drivable_body(probe: _ReadProbe) -> Any:
+    """Return the declared body, or ``None`` where a definition cannot resolve it.
+
+    Withheld only when the body is *itself* one expression reading a scope
+    a connection supplies. That one resolves to nothing here and would be
+    refused for the single reason that says nothing about the connector. A
+    connection-scoped expression nested inside the body is kept:
+    request-time resolution omits an unresolved field rather than failing,
+    so the rest of the body still binds -- and a malformed branch beside it
+    still has to be caught.
+    """
+    body = probe.request.get("body")
+    return None if body is None or _is_connection_expression(body) else body
+
+
+def _materialize_first_request(probe: _ReadProbe, first: PageRequest) -> None:
+    """Build the first request's query, headers and body, as the fetch does.
 
     ``strategy.first()`` answers where the request goes; the read then runs
     ``RequestBuilder.for_page`` to turn the param table into what is
@@ -248,23 +339,40 @@ def _materialize_first_request(
     -- gets that far and no further, so stopping at the ``PageRequest``
     would certify a read that cannot issue its first request.
 
-    Skipped only when the body is *itself* one expression reading a scope a
-    connection supplies. That one resolves to nothing here and is refused
-    for the single reason that says nothing about the connector. A
-    connection-scoped expression nested inside the body is not skipped:
-    request-time resolution omits an unresolved field rather than failing,
-    so the rest of the body still binds -- and a malformed branch beside it
-    still has to be caught.
+    The body's *grammar* is judged even where its resolution is deferred:
+    a node the connection supplies is still a node, and ``{"ref":
+    "connection.x", "extra": 1}`` is an authoring defect the engine raises
+    on the first time the stream runs.
     """
-    body = request_block.get("body")
-    if body is None or _is_connection_expression(body):
-        return
-    RequestBuilder(
-        probe.table,
-        raw_body=body,
-        resolver=probe.resolver,
-        endpoint=str(request_block.get("path")),
-    ).for_page(first.params)
+    body = probe.request.get("body")
+    problem = None if body is None else _expression_grammar_problem(body)
+    if problem is not None:
+        raise ReadError(problem)
+    _request_builder(probe).for_page(
+        first.params, sends_declared_body=first.sends_declared_body
+    )
+
+
+def _expression_grammar_problem(node: Any) -> str | None:
+    """Return the first malformed expression node in *node*, or ``None``.
+
+    The shape rules are the resolver's own
+    (:func:`~cdk.resolver.expression_node_problem`), applied to a
+    declaration rather than to a resolution -- which is what lets a
+    deferred branch still be judged. A ``literal`` is opaque data, so an
+    expression spelled inside one is not one.
+    """
+    if isinstance(node, list):
+        return next((p for p in map(_expression_grammar_problem, node) if p), None)
+    if not isinstance(node, Mapping):
+        return None
+    if Resolver.is_expression_node(node):
+        problem = expression_node_problem(node)
+        if problem is not None:
+            return problem
+        if "literal" in node:
+            return None
+    return next((p for p in map(_expression_grammar_problem, node.values()) if p), None)
 
 
 def _is_connection_expression(node: Any) -> bool:
@@ -274,11 +382,7 @@ def _is_connection_expression(node: Any) -> bool:
     omits its own field and the body still builds, so skipping the whole
     materialization over one would hide every other defect beside it.
     """
-    if not isinstance(node, Mapping) or not _EXPRESSION_KEYS & set(node):
-        return False
-    return any(
-        lookup.startswith(_CONNECTION_SCOPES) for lookup in _declared_lookups(node)
-    )
+    return Resolver.is_expression_node(node) and reads_a_connection_scope(node)
 
 
 def _probes(target: ConformanceTarget) -> tuple[list[_ReadProbe], list[Violation]]:
@@ -291,13 +395,22 @@ def _probes(target: ConformanceTarget) -> tuple[list[_ReadProbe], list[Violation
     that endpoint (:func:`_undriven`). Each check is exported on its own
     and a repo may wire one into a harness of its own, so "returned
     nothing" must never be how a check reports "ran against nothing".
+
+    Compiled once per target: the four checks that need probes would
+    otherwise each rebuild every read, and a compile is the most expensive
+    thing the api tier does.
     """
+    cached: tuple[list[_ReadProbe], list[Violation]] | None = target.__dict__.get(
+        _PROBE_CACHE
+    )
+    if cached is not None:
+        return cached
     probes: list[_ReadProbe] = []
     violations: list[Violation] = []
     for label, read in read_operations(target):
         try:
             probes.append(_compile_read(target, label, read))
-        except _READ_FAILURES as err:
+        except _COMPILE_FAILURES as err:
             violations.append(
                 Violation(
                     COMPILE_CHECK,
@@ -306,7 +419,9 @@ def _probes(target: ConformanceTarget) -> tuple[list[_ReadProbe], list[Violation
                     f"serve fails here, before anything is sent.",
                 )
             )
-    return probes, violations
+    compiled = (probes, violations)
+    target.__dict__[_PROBE_CACHE] = compiled
+    return compiled
 
 
 def _undriven(check: str, violations: list[Violation]) -> list[Violation]:
@@ -322,63 +437,6 @@ def _undriven(check: str, violations: list[Violation]) -> list[Violation]:
             f"anything about them.",
         )
     ]
-
-
-def _declared_lookups(node: Any) -> list[str]:
-    """Every scope path *node* reads, in either spelling that reads one.
-
-    The contract's value expressions are ``literal``, ``ref``, ``template``
-    and ``function``. Two of them address a scope: ``ref`` names one path,
-    and ``template`` names any number inside ``${...}`` placeholders. A
-    ``function`` node's inputs are themselves expressions, so the walk
-    reaches those by recursion.
-
-    Reading only ``ref`` would leave a template-spelled next link invisible
-    -- and an invisible read is worse than an unread one here, because the
-    kit would then script a page missing the value and blame the connector
-    for not advancing past it.
-    """
-    found: list[str] = []
-    if isinstance(node, Mapping):
-        if "literal" in node:
-            # Opaque data, whatever it looks like. The resolver hands a
-            # literal back untouched, so a ref or a placeholder inside one
-            # reads nothing -- and counting it as a read would certify a
-            # stop condition that sees the same constant on every page.
-            return found
-        ref = node.get("ref")
-        if isinstance(ref, str):
-            found.append(ref)
-        template = node.get("template")
-        if isinstance(template, str):
-            found.extend(_template_lookups(template))
-        for value in node.values():
-            found.extend(_declared_lookups(value))
-    elif isinstance(node, list):
-        for item in node:
-            found.extend(_declared_lookups(item))
-    return found
-
-
-def _template_lookups(template: str) -> list[str]:
-    """Return the scope paths a ``${...}`` template substitutes.
-
-    Deliberately forgiving where ``Resolver._resolve_template`` is strict:
-    an unterminated placeholder is an authoring defect the resolver raises
-    on, and re-raising it from a scripting helper would replace that
-    message with a worse one.
-    """
-    found: list[str] = []
-    rest = template
-    while True:
-        start = rest.find("${")
-        if start < 0:
-            return found
-        end = rest.find("}", start + 2)
-        if end < 0:
-            return found
-        found.append(rest[start + 2 : end])
-        rest = rest[end + 1 :]
 
 
 def _plant(body: dict[str, Any], path: list[str], value: Any) -> None:
@@ -397,7 +455,7 @@ def _body_paths(node: Any) -> list[list[str]]:
     """Return the ``response.body`` field paths *node* reads."""
     return [
         lookup[len(_BODY_PREFIX) :].split(".")
-        for lookup in _declared_lookups(node)
+        for lookup in scope_paths(node)
         if lookup.startswith(_BODY_PREFIX)
     ]
 
@@ -408,7 +466,7 @@ def _response_schema(probe: _ReadProbe) -> Any:
     return response.get("schema") if isinstance(response, Mapping) else None
 
 
-def _schema_at(schema: Any, path: list[str]) -> Any | None:
+def _declared_schema(schema: Any, path: list[str]) -> Any | None:
     """Return the declared sub-schema at *path*, or ``None`` for none."""
     node = schema
     for key in path:
@@ -417,6 +475,29 @@ def _schema_at(schema: Any, path: list[str]) -> Any | None:
             return None
         node = properties[key]
     return node
+
+
+def declared_type(node: Any) -> str | None:
+    """Return the JSON type *node* declares, or ``None`` when it declares none.
+
+    ``None`` means "not scriptable", never "string": the type is what
+    decides whether an ordering comparison raises, so guessing one would
+    make the verdict the kit's rather than the connector's.
+
+    A node the schema does reach but types only through composition
+    (``allOf``, ``anyOf``, ``$ref`` -- all permitted by the contract's
+    property-node definition) answers ``None`` and is therefore left
+    unevaluated rather than reported. Walking a composed node needs the
+    single path-resolution algorithm the contract does not yet specify;
+    emitting a finding on one meanwhile would fail contract-valid
+    connectors.
+    """
+    if not isinstance(node, Mapping):
+        return None
+    declared = node.get("type")
+    if isinstance(declared, list):
+        declared = next((item for item in declared if item != "null"), None)
+    return declared if isinstance(declared, str) and declared else None
 
 
 def _continuation_paths(probe: _ReadProbe) -> list[list[str]]:
@@ -447,11 +528,12 @@ def _scripted_page(
     the dict the provider would send and refuses, rather than being handed a
     URL string the kit invented and succeeding.
 
-    A path the schema does not declare gets a scheme-shaped value instead,
-    so the traversal still runs; the reference check reports that path,
-    which is the finding worth acting on. ``continuation`` overrides the
-    continuation paths outright, which is how a drive arms the origin guard
-    with a link the connector would never have declared.
+    A path the schema names no type for gets a scheme-shaped value instead,
+    so the traversal still runs; the reference check reports the path it
+    does not reach at all, which is the finding worth acting on.
+    ``continuation`` overrides the continuation paths outright, which is how
+    a drive arms the origin guard with a link the connector would never have
+    declared.
 
     The records land at the declared ``records.ref``, so a stop condition
     written against the records array sees the page the loop would hand it.
@@ -460,13 +542,13 @@ def _scripted_page(
     schema = _response_schema(probe)
     payload: dict[str, Any] = {}
     for path in _body_paths(probe.pagination):
-        declared = _schema_at(schema, path)
-        if declared is not None:
-            _plant(payload, path, _sample_value(declared))
+        sample = _sample_value(_declared_schema(schema, path))
+        if sample is not _UNTYPED:
+            _plant(payload, path, sample)
     for path in _continuation_paths(probe):
         if continuation is not _DECLARED:
             _plant(payload, path, continuation)
-        elif _schema_at(schema, path) is None:
+        elif declared_type(_declared_schema(schema, path)) is None:
             _plant(payload, path, _CONTINUATION_VALUES.get(scheme, 1))
     records_ref = ((probe.read.get("response") or {}).get("records") or {}).get("ref")
     try:
@@ -480,34 +562,37 @@ def _scripted_page(
 
 
 def _sample_value(schema: Any) -> Any:
-    """One value of the JSON type *schema* declares, never ``None``.
+    """One value of the JSON type *schema* declares, or :data:`_UNTYPED`.
 
-    A record field the provider serves is a value; ``None`` is the answer a
-    field walk gives for a field that is not there, so the two must not be
-    confused when a scheme asks a record for its ordering value.
+    Never ``None``: a record field the provider serves is a value, and
+    ``None`` is the answer a field walk gives for a field that is not
+    there, so the two must not be confused when a scheme asks a record for
+    its ordering value. And never a guess -- a node declaring no type gets
+    no sample, because the type it would have been given is exactly what
+    the connector is being judged on.
     """
-    if not isinstance(schema, Mapping):
-        return _PROBE_KEY_VALUE
-    declared = schema.get("type")
-    if isinstance(declared, list):
-        declared = next((t for t in declared if t != "null"), None)
-    if declared == "object":
+    kind = declared_type(schema)
+    if kind == "object":
         return _sample_object(schema)
-    if declared == "array":
-        return [_sample_value(schema.get("items"))]
-    if declared in ("integer", "number"):
+    if kind == "array":
+        item = _sample_value(schema.get("items"))
+        return [] if item is _UNTYPED else [item]
+    if kind in ("integer", "number"):
         return _PROBE_KEY_VALUE
-    if declared == "boolean":
+    if kind == "boolean":
         return True
-    return f"conformance-{_PROBE_KEY_VALUE}"
+    if kind == "string":
+        return f"conformance-{_PROBE_KEY_VALUE}"
+    return _UNTYPED
 
 
 def _sample_object(schema: Mapping[str, Any]) -> dict[str, Any]:
-    """Build an object carrying exactly the properties *schema* declares."""
+    """Build an object carrying the properties *schema* declares a type for."""
     properties = schema.get("properties")
     if not isinstance(properties, Mapping):
         return {}
-    return {name: _sample_value(prop) for name, prop in properties.items()}
+    sampled = {name: _sample_value(prop) for name, prop in properties.items()}
+    return {name: value for name, value in sampled.items() if value is not _UNTYPED}
 
 
 def _declared_record(probe: _ReadProbe) -> dict[str, Any] | None:
@@ -521,7 +606,10 @@ def _declared_record(probe: _ReadProbe) -> dict[str, Any] | None:
         return None
     try:
         return _sample_object(records_items_schema(probe.label, response))
-    except _READ_FAILURES:
+    except ReadError:
+        # The only failure ``records_items_schema`` raises: a ref that is
+        # not anchored, does not resolve, or reaches something carrying no
+        # records.
         return None
 
 
@@ -645,9 +733,7 @@ def _positionless_scheme_violations(probe: _ReadProbe) -> list[Violation]:
         return []
     field = _POSITIONLESS_SCHEMES[scheme]
     declared = (block.get(scheme) or {}).get(field)
-    if any(
-        lookup.startswith(_RESPONSE_PREFIX) for lookup in _declared_lookups(declared)
-    ):
+    if any(lookup.startswith(_RESPONSE_PREFIX) for lookup in scope_paths(declared)):
         return []
     return [
         Violation(
@@ -665,7 +751,7 @@ def _reference_violations(probe: _ReadProbe) -> list[Violation]:
     """Report every page reference this endpoint's pagination cannot resolve."""
     violations: list[Violation] = []
     schema = _response_schema(probe)
-    for lookup in dict.fromkeys(_declared_lookups(probe.pagination)):
+    for lookup in dict.fromkeys(scope_paths(probe.pagination)):
         if not lookup.startswith(_RESPONSE_PREFIX):
             continue
         scope = lookup[len(_RESPONSE_PREFIX) :].split(".")[0]
@@ -683,7 +769,7 @@ def _reference_violations(probe: _ReadProbe) -> list[Violation]:
         if not lookup.startswith(_BODY_PREFIX):
             continue
         path = lookup[len(_BODY_PREFIX) :].split(".")
-        if schema is None or _schema_at(schema, path) is None:
+        if schema is None or _declared_schema(schema, path) is None:
             violations.append(
                 Violation(
                     REFERENCES_CHECK,
@@ -710,10 +796,14 @@ def check_api_read_advances(target: ConformanceTarget) -> list[Violation]:
     * a read declaring no pagination must answer ``None`` -- the single
       page is the whole stream, and a scheme that kept going would re-read
       it forever;
+    * the request after a page must build. A body derived from the
+      continuation binds nothing on page one and can still be unbuildable
+      once the loop supplies a value, which no other drive reaches;
     * a keyset read must refuse a page whose last record carries no
-      ordering value, and a link read must refuse a next URL on another
-      host. Both refusals fire before the yield, which is what keeps them
-      from landing records the read cannot continue past.
+      ordering value, and a link read handed a next URL on another host
+      must either refuse it or resolve it back onto the connection's own
+      origin. Both fire before the yield, which is what keeps them from
+      landing records the read cannot continue past.
     """
     probes, compile_violations = _probes(target)
     violations: list[Violation] = _undriven(ADVANCE_CHECK, compile_violations)
@@ -730,7 +820,7 @@ def _advance_violations(probe: _ReadProbe) -> list[Violation]:
     page = _scripted_page(probe, records=records)
     try:
         following = probe.strategy().advance(page)
-    except _READ_FAILURES as err:
+    except _ADVANCE_FAILURES as err:
         return [
             Violation(
                 ADVANCE_CHECK,
@@ -770,11 +860,25 @@ def _advance_violations(probe: _ReadProbe) -> list[Violation]:
                 f"forever.",
             )
         ]
+    try:
+        _request_builder(probe).for_page(
+            following.params, sends_declared_body=following.sends_declared_body
+        )
+    except _ADVANCE_FAILURES as err:
+        return [
+            Violation(
+                ADVANCE_CHECK,
+                f"endpoint {probe.label!r}: the request after a page could "
+                f"not be built: {err}. The first request builds, so this read "
+                f"passes every check that stops there and then fails on page "
+                f"two, with page one's records already handed over.",
+            )
+        ]
     return []
 
 
 def _refusal_violations(probe: _ReadProbe) -> list[Violation]:
-    """Arm the two refusals that have to fire before a page is yielded."""
+    """Arm the two rules that have to hold before a page is yielded."""
     scheme = str((probe.pagination or {}).get("type", ""))
     if scheme == "keyset":
         return _refuses(
@@ -788,49 +892,63 @@ def _refusal_violations(probe: _ReadProbe) -> list[Violation]:
                 f"continue past"
             ),
         )
-    if scheme == "link" and _response_controls_the_url(probe):
-        return _refuses(
-            probe,
-            _scripted_page(
-                probe, records=_probe_records(probe), continuation=_OFF_ORIGIN_URL
-            ),
-            marker=_ORIGIN_REFUSAL,
-            expected=(
-                f"a next link on another host must be refused: the session "
-                f"sends the connection's headers, credentials included, on "
-                f"every request, and {probe.origin!r} is the only origin they "
-                f"belong to"
-            ),
-        )
+    if scheme == "link":
+        return _origin_violations(probe)
     return []
 
 
-def _response_controls_the_url(probe: _ReadProbe) -> bool:
-    """Whether the provider's value becomes the whole of the next URL.
+def _origin_violations(probe: _ReadProbe) -> list[Violation]:
+    """Plant an off-origin link and require the engine's own guard to hold.
 
-    Only then is there an origin to leave. Where the author writes the URL
-    around the value -- ``{"template": "/v1/events?after=${...}"}`` -- what
-    the provider supplies is a query fragment on a path the connector chose,
-    and the result is relative whatever the provider puts in it. Arming the
-    guard there would report a violation for a connector that never could
-    send its credentials elsewhere.
+    Every link-paginated read gets this drive, whatever shape the
+    declaration is. What is asserted is the invariant rather than the
+    mechanism: handed a next link on another host, the traversal either
+    refuses it or answers a URL still on the connection's origin --
+    ``cdk.api.urls.same_origin`` being the judge, the same function
+    ``follow_url`` uses. A declaration that writes the URL around the
+    provider's value (``{"template": "/v1/events?after=${...}"}``) lands in
+    the second arm: the result is relative, resolves against the page it
+    came from, and stays put. Classifying the declaration instead -- by
+    whether it opens with a placeholder, say -- is the string-prefix
+    reasoning ``follow_url`` exists to replace, and it leaves whole shapes
+    with the guard never armed at all.
     """
-    declared = ((probe.pagination or {}).get("link") or {}).get("next_url")
-    if not isinstance(declared, Mapping):
-        return False
-    if isinstance(declared.get("ref"), str):
-        return True
-    template = declared.get("template")
-    if not isinstance(template, str):
-        # A function, or something this build does not recognise. Its result
-        # is unconstrained, so treat it as controlling the URL.
-        return "literal" not in declared
-    # The scheme and host come from whatever sits at the front. A template
-    # opening with a placeholder hands the provider the origin however much
-    # the author appends after it -- ``${...}&limit=50`` is as off-origin as
-    # a bare ref. One opening with the author's own text keeps the origin
-    # whatever is substituted later on.
-    return template.startswith("${")
+    page = _scripted_page(
+        probe, records=_probe_records(probe), continuation=_OFF_ORIGIN_URL
+    )
+    expected = (
+        f"a next link on another host must be refused: the session sends the "
+        f"connection's headers, credentials included, on every request, and "
+        f"{probe.origin!r} is the only origin they belong to"
+    )
+    try:
+        following = probe.strategy().advance(page)
+    except _ADVANCE_FAILURES as err:
+        if _ORIGIN_REFUSAL in str(err):
+            return []
+        return [
+            Violation(
+                ADVANCE_CHECK,
+                f"endpoint {probe.label!r}: advancing raised {err}, which is "
+                f"not the refusal this page arms. {expected}. Fix what it did "
+                f"raise about first -- until then nothing certifies the "
+                f"refusal itself.",
+            )
+        ]
+    if following is None:
+        # A declaration that cannot turn any provider value into a next
+        # request is already reported by the advance drive; saying it twice
+        # buries the message that says what to change.
+        return []
+    if same_origin(urlsplit(probe.origin), urlsplit(following.url)):
+        return []
+    return [
+        Violation(
+            ADVANCE_CHECK,
+            f"endpoint {probe.label!r}: advancing answered {following.url!r}, "
+            f"which is not on {probe.origin!r}. {expected}.",
+        )
+    ]
 
 
 def _refuses(
@@ -841,13 +959,12 @@ def _refuses(
     The refusal has to be *the* refusal. Reading "it raised something" as
     "it refused correctly" is how a connector whose next-page value has the
     wrong shape passes: the strategy raises about the shape, the kit counts
-    that as the origin guard firing, and the guard is never exercised at
-    all. So the message is checked for the marker the CDK's own raise site
-    carries.
+    that as the refusal firing, and the rule is never exercised at all. So
+    the message is checked for the marker the CDK's own raise site carries.
     """
     try:
         following = probe.strategy().advance(page)
-    except _READ_FAILURES as err:
+    except _ADVANCE_FAILURES as err:
         if marker in str(err):
             return []
         return [
@@ -912,7 +1029,7 @@ def _stop_condition_violations(probe: _ReadProbe, declared: Any) -> list[Violati
     if _operands_are_declared(probe, declared):
         try:
             stops = stop_condition(declared, probe.resolver)(page)
-        except _READ_FAILURES as err:
+        except _STOP_FAILURES as err:
             violations.append(
                 Violation(
                     STOP_CHECK,
@@ -923,9 +1040,7 @@ def _stop_condition_violations(probe: _ReadProbe, declared: Any) -> list[Violati
             )
         else:
             violations.extend(_premature_stop(probe, declared, stops))
-    if not any(
-        lookup.startswith(_RESPONSE_PREFIX) for lookup in _declared_lookups(declared)
-    ):
+    if not any(lookup.startswith(_RESPONSE_PREFIX) for lookup in scope_paths(declared)):
         violations.append(
             Violation(
                 STOP_CHECK,
@@ -960,7 +1075,7 @@ def _premature_stop(probe: _ReadProbe, declared: Any, stops: bool) -> list[Viola
     if not stops:
         return []
     evidence = _non_terminal_paths(probe)
-    lookups = set(_declared_lookups(declared))
+    lookups = set(scope_paths(declared))
     if not lookups & evidence:
         return []
     return [
@@ -996,14 +1111,18 @@ def _operands_are_declared(probe: _ReadProbe, declared: Any) -> bool:
     """Whether every body operand the condition reads has a declared type.
 
     A scripted page can only carry the types the response schema names. For
-    a path it does not name the kit has to invent one, and an invented type
-    is exactly what decides whether an ordering comparison raises -- so a
-    condition reading an undeclared path is not evaluated here at all. The
-    reference check reports that path instead, which is the actionable
-    finding: declare the field, and the evaluation follows.
+    a path it names no type for the kit would have to invent one, and an
+    invented type is exactly what decides whether an ordering comparison
+    raises -- so a condition reading such a path is not evaluated here at
+    all. Where the schema does not reach the path, the reference check
+    reports it, which is the actionable finding: declare the field, and the
+    evaluation follows.
     """
     schema = _response_schema(probe)
-    return all(_schema_at(schema, path) is not None for path in _body_paths(declared))
+    return all(
+        declared_type(_declared_schema(schema, path)) is not None
+        for path in _body_paths(declared)
+    )
 
 
 def check_api_record_schema(target: ConformanceTarget) -> list[Violation]:
@@ -1033,7 +1152,7 @@ def check_api_record_schema(target: ConformanceTarget) -> list[Violation]:
             items = deepcopy(records_items_schema(label, response))
             _resolve_arrow_types(items, mapper)
             SchemaContract(items)
-        except _READ_FAILURES as err:
+        except _RECORD_FAILURES as err:
             violations.append(
                 Violation(
                     RECORDS_CHECK,
