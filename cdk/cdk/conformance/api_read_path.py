@@ -66,6 +66,7 @@ from cdk.api.read_setup import build_read_strategy, stop_condition
 from cdk.api.records import split_records_ref
 from cdk.api.request import (
     ParamTable,
+    PreparedRequest,
     RequestBuilder,
     bind_request_values,
     path_placeholders,
@@ -211,6 +212,12 @@ class _ReadProbe:
     stateful and single-use -- a check that drives one page must start from
     a fresh traversal, so :meth:`strategy` builds a new adapter per drive
     through the read's own setup.
+
+    ``first`` and ``first_sent`` are two different objects and a check has
+    to pick the one its question is about. ``first.params`` is the param
+    table the traversal carries; ``first_sent`` is what the request builder
+    made of it -- the query keys, the headers and the body that go on the
+    wire.
     """
 
     label: str
@@ -222,6 +229,7 @@ class _ReadProbe:
     table: ParamTable
     resolver: Resolver
     first: PageRequest
+    first_sent: PreparedRequest
 
     def strategy(self) -> PaginationStrategy:
         """Build a fresh adapter for this read, exactly as the engine does."""
@@ -294,10 +302,12 @@ def _compile_read(
         table=table,
         resolver=resolver,
         first=PageRequest(""),
+        first_sent=PreparedRequest(),
     )
     first = probe.strategy().first()
-    _materialize_first_request(probe, first)
-    return replace(probe, first=first)
+    return replace(
+        probe, first=first, first_sent=_materialize_first_request(probe, first)
+    )
 
 
 def _path_values(
@@ -440,7 +450,9 @@ def _drivable_body(probe: _ReadProbe) -> Any:
     return None if body is None or _is_connection_expression(body) else body
 
 
-def _materialize_first_request(probe: _ReadProbe, first: PageRequest) -> None:
+def _materialize_first_request(
+    probe: _ReadProbe, first: PageRequest
+) -> PreparedRequest:
     """Build the first request's query, headers and body, as the fetch does.
 
     ``strategy.first()`` answers where the request goes; the read then runs
@@ -454,12 +466,16 @@ def _materialize_first_request(probe: _ReadProbe, first: PageRequest) -> None:
     a node the connection supplies is still a node, and ``{"ref":
     "connection.x", "extra": 1}`` is an authoring defect the engine raises
     on the first time the stream runs.
+
+    The built request is kept rather than thrown away: it is the only
+    record of what page one actually sends, and the advance drive compares
+    page two against it.
     """
     body = probe.request.get("body")
     problem = None if body is None else _expression_grammar_problem(body)
     if problem is not None:
         raise ReadError(problem)
-    _request_builder(probe).for_page(
+    return _request_builder(probe).for_page(
         first.params, sends_declared_body=first.sends_declared_body
     )
 
@@ -780,6 +796,13 @@ def check_api_read_compiles(target: ConformanceTarget) -> list[Violation]:
     schemes that set their param on the first request the default is simply
     overwritten -- but a cursor sends no token on the first request, so
     there the stale default survives onto the wire.
+
+    This one reads the param TABLE rather than the prepared request, and
+    deliberately: the contract binds every declared param in exactly one
+    map, so a value sitting in the table is a value that goes out -- under
+    the wire name of whichever map binds it, which may be a header or a
+    body field rather than a query key. A check phrased against the query
+    string would go blind on those two.
     """
     probes, compile_violations = _probes(target)
     violations = list(compile_violations)
@@ -970,18 +993,8 @@ def _advance_violations(probe: _ReadProbe) -> list[Violation]:
                 f"page and reports success.",
             )
         ]
-    if (following.url, following.params) == (probe.first.url, probe.first.params):
-        return [
-            Violation(
-                ADVANCE_CHECK,
-                f"endpoint {probe.label!r}: the request after a page is the "
-                f"first request again ({following.url!r}, "
-                f"{sorted(following.params)}). The read would fetch one page "
-                f"forever.",
-            )
-        ]
     try:
-        _request_builder(probe).for_page(
+        prepared = _request_builder(probe).for_page(
             following.params, sends_declared_body=following.sends_declared_body
         )
     except RequestSpecError as err:
@@ -992,6 +1005,25 @@ def _advance_violations(probe: _ReadProbe) -> list[Violation]:
                 f"not be built: {err}. The first request builds, so this read "
                 f"passes every check that stops there and then fails on page "
                 f"two, with page one's records already handed over.",
+            )
+        ]
+    # What moves a traversal is what is SENT, and a param reaches the wire
+    # only through a request binding that names it. Comparing the param
+    # tables instead passes an endpoint that advances its table and binds
+    # none of it -- one identical URL and query per page, forever -- as a
+    # read that moves. The whole prepared request is compared because a
+    # body-paginated read moves in its body while its URL and query stay
+    # put, and that is still a read that moves.
+    if (following.url, prepared) == (probe.first.url, probe.first_sent):
+        return [
+            Violation(
+                ADVANCE_CHECK,
+                f"endpoint {probe.label!r}: the request after a page is the "
+                f"first request again ({following.url!r}, query "
+                f"{prepared.query!r}, body {prepared.body!r}). The read would "
+                f"fetch one page forever. A pagination param moves the "
+                f"traversal only where request.query, request.headers or "
+                f"request.body binds it.",
             )
         ]
     return []

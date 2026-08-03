@@ -32,15 +32,22 @@ from cdk.conformance.roundtrip import probe_canonicals, render_probe
 from cdk.conformance.target import ConformanceTarget
 from cdk.conformance.tier1 import test_definition as kit_definition
 from cdk.type_map.exceptions import UnmappedTypeError
+from src.config.schema_validator import validate_file
+from src.config.utils import load_json_file
 
 from .kit_runner import (
     API_REFERENCE_CLASS,
     API_REFERENCE_DIR,
+    FIXTURES_DIR,
     REFERENCE_CLASS,
     REFERENCE_DIR,
     REPO_ROOT,
     run_kit_suite,
 )
+
+#: Every endpoint document the kit's own fixtures ship, whatever connector
+#: kind they belong to.
+FIXTURE_ENDPOINTS = sorted(FIXTURES_DIR.glob("*/definition/endpoints/*.json"))
 
 #: The tier-1 suite ships 25 tests for a full write-capable target; a
 #: floor well above zero guards against the suite silently collecting or
@@ -275,6 +282,37 @@ class TestUnassessableKindIsNotAPass:
         assert not target.is_database
         with pytest.raises(AssertionError, match="type-map-read.json"):
             kit_definition.test_connector_ships_a_read_type_map(target)
+
+
+class TestFixtureConnectorsAreContractValid:
+    """The kit's own fixtures pass the published contract (issue #433).
+
+    Everything the kit asserts is relative to these documents, so a fixture
+    the contract rejects makes a green run a statement about nothing. Five
+    endpoint documents declared read params that no request binding named:
+    the contract refuses that outright, and the engine sends such a param
+    zero times -- so the drives were certifying a connector that asks the
+    provider for page one on every request.
+
+    The rule the checks are written against is the contract's, not the
+    fixtures', so the fixtures are the side that has to be right. Validation
+    goes through the engine's own ``validate_file``, so this asks the same
+    models the engine loads a connector's documents with.
+    """
+
+    def test_the_fixtures_ship_endpoint_documents_to_validate(self) -> None:
+        """A moved or renamed fixture tree must not read as nothing to check."""
+        assert FIXTURE_ENDPOINTS, (
+            f"no endpoint documents found under {FIXTURES_DIR}; the check "
+            f"below would pass vacuously"
+        )
+
+    @pytest.mark.parametrize(
+        "document", FIXTURE_ENDPOINTS, ids=lambda path: f"{path.parts[-4]}/{path.stem}"
+    )
+    def test_every_fixture_endpoint_document_validates(self, document: Path) -> None:
+        kind = load_json_file(document.parents[1] / "connector.json")["kind"]
+        validate_file(f"{kind}-endpoint", document)
 
 
 class TestApiReferencePassesTier1:

@@ -14,11 +14,15 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-REFERENCE_DIR = Path(__file__).parent / "fixtures" / "reference"
+#: Every connector the kit is measured against. What the kit reports is only
+#: as meaningful as these documents are: a fixture the published contract
+#: would reject makes a green run a statement about nothing.
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
+REFERENCE_DIR = FIXTURES_DIR / "reference"
 REFERENCE_CLASS = "tests.conformance_kit.reference_connector:ReferenceConnector"
-#: A well-formed api connector: three endpoint documents covering three of
-#: the contract's paging schemes, for the tier-1 api read-path drives.
-API_REFERENCE_DIR = Path(__file__).parent / "fixtures" / "api"
+#: A well-formed api connector: five endpoint documents covering the
+#: contract's five paging schemes, for the tier-1 api read-path drives.
+API_REFERENCE_DIR = FIXTURES_DIR / "api"
 API_REFERENCE_CLASS = (
     "tests.conformance_kit.api_reference_connector:ReferenceApiConnector"
 )

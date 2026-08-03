@@ -1215,6 +1215,26 @@ class TestApiReadPathBreaks:
         report = _report(check_api_read_advances(target))
         assert "reads its first page and reports success" in report
 
+    def test_pagination_params_that_reach_no_binding_read_one_page_forever(
+        self, tmp_path: Path
+    ) -> None:
+        """The traversal advances its param table and sends the same request.
+
+        A param reaches the wire only through a binding in ``request.query``,
+        ``request.headers`` or ``request.body``. Strip the query map and the
+        offset strategy still counts rows -- ``advance`` answers a
+        ``PageRequest`` whose params differ from page one's -- while every
+        request built from it is byte-for-byte the first one. A drive
+        comparing the param tables reports nothing here and certifies a
+        connector that fetches page one until the provider gets bored.
+        """
+        target = self._broken(
+            tmp_path, "widgets", lambda read: read["request"].pop("query")
+        )
+        report = _report(check_api_read_advances(target))
+        assert "the request after a page is the first request again" in report
+        assert "request.query" in report, "the report must name the missing sink"
+
     def test_a_step_that_cannot_advance_is_reported_before_the_yield(
         self, tmp_path: Path
     ) -> None:
