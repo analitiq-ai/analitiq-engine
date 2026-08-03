@@ -21,10 +21,10 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from cdk_tests.api.fakes import FakeSession, runtime_with
 
 from cdk.api import GenericAPIConnector
 from cdk.types import FailureCategory
-from cdk_tests.api.fakes import FakeSession, runtime_with
 from src.destination.server import DestinationServicer
 from src.grpc.generated.analitiq.v1 import SchemaMessage
 

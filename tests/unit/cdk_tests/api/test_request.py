@@ -25,7 +25,11 @@ def _resolver(**runtime: Any) -> Resolver:
     return Resolver(
         ResolutionContext(
             connection={
-                "parameters": {"profile": 42},
+                "parameters": {
+                    "profile": 42,
+                    "media_type": "application/json",
+                    "other_type": "xml",
+                },
                 "selections": {},
                 "discovered": {},
             },
@@ -311,6 +315,36 @@ class TestABindingKeyIsAName:
             == {}
         )
 
+    def test_a_dropped_key_is_warned_about_once_and_by_name(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # An optional param nothing filled in is the ordinary case, not a
+        # defect: the key is dropped and a line says which. Resolving each
+        # value on its own put every one of them in a top-level position,
+        # where the resolver logged a second line naming nothing -- so a
+        # read with six optional params paged a thousand times wrote 12,000
+        # lines about a connector behaving exactly as authored.
+        with caplog.at_level("WARNING"):
+            bind_request_values(
+                {
+                    "tenant": {"from_param": "tenant_id"},
+                    "region": {"from_param": "region_code"},
+                },
+                params={},
+                resolver=_resolver(),
+                block="query",
+                endpoint="/items",
+            )
+        messages = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelname == "WARNING"
+        ]
+        assert len(messages) == 2
+        assert all("dropping" in message for message in messages)
+        assert any("'tenant'" in message for message in messages)
+        assert any("'region'" in message for message in messages)
+
 
 class TestRequestBlockRefusals:
     """One rule over the declared header map, and one over the path bindings."""
@@ -319,6 +353,7 @@ class TestRequestBlockRefusals:
         problem = request_block_problem(
             {"headers": {"Authorization": {"literal": "Bearer x"}}},
             reserved_headers=frozenset({"authorization"}),
+            resolver=_resolver(),
         )
         assert problem is not None and "request.headers declares" in problem
 
@@ -331,6 +366,7 @@ class TestRequestBlockRefusals:
             request_block_problem(
                 {"headers": {"X-Legacy-Auth": {"from_param": "Authorization"}}},
                 reserved_headers=frozenset({"authorization"}),
+                resolver=_resolver(),
             )
             is None
         )
@@ -342,6 +378,7 @@ class TestRequestBlockRefusals:
         problem = request_block_problem(
             {"headers": {"Authorization": {"from_param": "tok"}}},
             reserved_headers=frozenset({"authorization"}),
+            resolver=_resolver(),
         )
         assert problem is not None and "Authorization" in problem
 
@@ -354,6 +391,7 @@ class TestRequestBlockRefusals:
                 },
             },
             reserved_headers=frozenset(),
+            resolver=_resolver(),
         )
         assert problem is not None and "url_encode" in problem
 
@@ -365,9 +403,80 @@ class TestRequestBlockRefusals:
                     "path_params": {"id": {"from_param": "id"}},
                 },
                 reserved_headers=frozenset(),
+                resolver=_resolver(),
             )
             is None
         )
+
+
+class TestDeclaredContentType:
+    """The engine's own header, judged by the value it would send.
+
+    The contract lets a header value be a literal or an expression, so the
+    same media type has several spellings. Reading the declaration instead
+    of the value refuses all but one of them, and tells the author to
+    declare what they already declared.
+    """
+
+    @staticmethod
+    def _problem(value: Any) -> str | None:
+        return request_block_problem(
+            {"headers": {"Content-Type": value}},
+            reserved_headers=frozenset({"content-type"}),
+            resolver=_resolver(),
+        )
+
+    @pytest.mark.parametrize(
+        "declared",
+        [
+            "application/json",
+            {"literal": "application/json"},
+            {"template": "application/json"},
+            {"ref": "connection.parameters.media_type"},
+            {
+                "function": "lookup",
+                "input": {"ref": "connection.parameters.profile"},
+                "map": {"42": "application/json"},
+            },
+        ],
+        ids=["plain", "literal", "template", "ref", "function"],
+    )
+    def test_every_spelling_of_the_engines_own_value_is_permitted(
+        self, declared: Any
+    ) -> None:
+        assert self._problem(declared) is None
+
+    @pytest.mark.parametrize(
+        "declared",
+        [
+            "application/xml",
+            {"literal": "application/xml"},
+            {"template": "application/${connection.parameters.other_type}"},
+        ],
+        ids=["plain", "literal", "template"],
+    )
+    def test_a_conflicting_value_is_refused_whatever_its_spelling(
+        self, declared: Any
+    ) -> None:
+        problem = self._problem(declared)
+        assert problem is not None
+        # The refusal names what would go out, so the author can see which
+        # of the two values is theirs.
+        assert "application/xml" in problem
+
+    def test_a_value_that_resolves_to_nothing_is_not_judged(self) -> None:
+        # bind_request_values drops the key, so no Content-Type reaches the
+        # wire and there is no collision to refuse.
+        assert self._problem({"ref": "connection.parameters.absent"}) is None
+
+    def test_a_value_the_param_table_supplies_is_not_judged(self) -> None:
+        # A {from_param} binding carries the param's value, which arrives
+        # per run; the declaration says nothing about it.
+        assert self._problem({"from_param": "media_type"}) is None
+
+    def test_a_malformed_expression_leaves_as_one_classified_error(self) -> None:
+        with pytest.raises(RequestSpecError, match="request.headers.Content-Type"):
+            self._problem({"ref": "connection.parameters.x", "template": "y"})
 
 
 class TestPathSubstitution:

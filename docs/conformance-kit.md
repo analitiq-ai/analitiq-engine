@@ -85,10 +85,12 @@ in a customer pipeline (spec
   the replication cursor, and substitutes the path only once the
   incremental filter has bound; a definition-only run has none of the
   three, so a placeholder bound to a declared param gets a stand-in segment
-  and the drives carry on. Only a placeholder nothing could ever bind — one
-  with no binding at all, or one bound to a param the endpoint does not
-  declare — is a finding, because that one fails for every connection and
-  every stream. The same rule governs the request body and the transport's
+  and the drives carry on. Only a placeholder nothing could ever bind is a
+  finding, and there are three of those: one with no binding at all, one
+  bound to a param the endpoint does not declare, and one bound to an
+  expression that resolves to nothing and reads no scope a connection
+  supplies. Each fails for every connection and every stream. The same
+  rule governs the request body and the transport's
   `base_url`: resolve what a definition settles, defer what reads a
   connection scope, refuse what nothing could fix.
 - **Every page value a read declares is one a page carries.** The drives
@@ -310,5 +312,8 @@ engine refuses before the kit can judge — so "the check found nothing"
 says the same thing whether the drive ran or was never armed, which is
 the silent non-coverage the drives exist to remove. Each of those drives
 is therefore also pointed at a traversal whose guard has been taken out
-from under it, and required to report; disarm the planting they depend on
-and those tests fail.
+from under it, and required to report. What replaces a guard still reads
+what the drive planted — the link stand-in follows the URL it was handed,
+and the keyset stand-in substitutes a value only where the record carried
+none — so taking the planting away fails those tests, which is the whole
+point of writing them.
