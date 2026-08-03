@@ -81,11 +81,11 @@ def _assert_suite_passed(
 
 
 #: Every tier-1 check that applies to kind 'api': five read-path drives,
-#: four surface checks, and the kind-agnostic scaffolding. Pinned to the
+#: two surface checks, and the kind-agnostic scaffolding. Pinned to the
 #: exact count, not a floor: a loose floor lets a whole check module be
 #: deleted without a skip line to notice, which is the same "not assessed
 #: reads as passed" failure one level down.
-API_TIER1_EXPECTED_PASSED = 15
+API_TIER1_EXPECTED_PASSED = 13
 
 #: The check modules a run against an api connector must actually execute.
 API_CHECK_MODULES = ("test_api_read_path.py", "test_api_surface.py")
@@ -436,7 +436,7 @@ from cdk.conformance.api_read_path import (
     check_api_record_schema,
 )
 from cdk.conformance.api_surface import (
-    check_api_query_bindings,
+    check_api_has_reads,
     check_read_transport_selection,
 )
 
@@ -448,7 +448,7 @@ for check in (
     check_api_read_advances,
     check_api_read_stop_condition,
     check_api_record_schema,
-    check_api_query_bindings,
+    check_api_has_reads,
     check_read_transport_selection,
 ):
     findings += check(target)

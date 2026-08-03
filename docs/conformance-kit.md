@@ -67,14 +67,17 @@ in a customer pipeline (spec
 - **The api read path runs, with nothing sent.** An api read compiles into
   a `PageRequest` the way a database read compiles into SQL, so each
   endpoint document is driven as far as a definition can be driven: the
-  first request is built, a scripted page is advanced past, the author's
-  `stop_when` is evaluated against that page, and the declared records
-  become an Arrow schema. Every drive goes through `build_read_strategy`
-  and `stop_condition` — the same functions the read itself calls — so a
-  paging scheme with nowhere to go, a next link leaving the connection's
-  origin, or a stop condition that raises mid-traversal fails here rather
-  than in a pipeline. Nothing is fetched and no HTTP client is needed,
-  which is why the `conformance` extra pulls no transport.
+  first request is built — path placeholders substituted, declared query
+  and headers bound — a scripted page is advanced past, the request *after*
+  that page is built too, the author's `stop_when` is evaluated against the
+  page, and the declared records become an Arrow schema. Every drive goes
+  through `build_read_strategy`, `RequestBuilder` and `stop_condition` —
+  the same functions the read itself calls — so a paging scheme with
+  nowhere to go, a next link the engine's own `follow_url` refuses, a body
+  that binds on page one and not on page two, or a stop condition that
+  raises mid-traversal fails here rather than in a pipeline. Nothing is
+  fetched and no HTTP client is needed, which is why the `conformance`
+  extra pulls no transport.
 - **Every page value a read declares is one a page carries.** The drives
   above script their page *from* the declarations, so on their own they
   can never find a reference that addresses nothing. This is the check
@@ -87,24 +90,22 @@ in a customer pipeline (spec
   read runs to exhaustion; a next cursor or link resolves to nothing and
   the traversal ends after one page.
 - **No read declares something the path drops.** The contract is wider
-  than the path in four places: a request may name its own
-  `transport_ref`, put placeholders in its path with `path_params`,
-  declare `headers`, and map query keys onto param names. The path
-  implements none of them — it opens one connection at connect time,
-  joins the declared path verbatim, sends the connection's own session
-  headers, and puts every non-body param on the query string under the
-  param's own name. All four fail silently — the request still goes out —
-  so they are reported from the declaration, there being no execution to
-  drive.
+  than the path in one place: a request may name its own `transport_ref`.
+  The path implements no such selection — it opens one connection at
+  connect time and dispatches every read through it — and the failure is
+  silent, since the request still goes out, against the wrong origin with
+  the wrong headers. There is no execution to drive, so it is reported
+  from the declaration.
 - **There is a read to drive, on a transport that can open.** Every api
   check iterates the read operations, so a connector shipping none — or
   only write-only endpoints — would satisfy all of them by having nothing
   to fail, and the applicability gate would not notice because those
   modules do apply to the kind. That is the kit's own founding rule one
   level down, so it is a failure. So is a `default_transport` that is
-  absent, is not `http`, or carries no `base_url` that could resolve to a
-  non-empty string: every read opens that one transport at connect time,
-  and without it no stream reaches its first request.
+  absent, is not `http`, or whose `base_url` does not resolve to a
+  non-empty string when it reads no connection scope: every read opens
+  that one transport at connect time, and without it no stream reaches its
+  first request.
 
 **Tier 2 — live tests** (`cdk.conformance.tier2`, the connector's
 system as a CI service container): all three write modes end-to-end
@@ -277,3 +278,14 @@ service container job in `ci.yml`; and `test_kit_breaks.py` proves that
 a bent hook signature, a private-internal override, an
 undeclared-capability use, and a declared-but-unimplemented capability
 each fail with a message naming the offending member.
+
+An api-shaped reference connector (one endpoint document per paging
+scheme) does the same job for the api drives: a bent document must fail
+the drive that executes it — an unknown paging scheme, a next value the
+page scope has no notion of, a path placeholder nothing binds, a header
+the connection already sends, a stop condition written the wrong way
+round, a body that builds on page one and not on page two. The clean
+cases are pinned just as hard, because a check that fails a correct
+connector is the more expensive defect: a link the connector derives into
+a relative URL, a base URL the connection supplies, a stop operand the
+response schema reaches but types only through composition.
