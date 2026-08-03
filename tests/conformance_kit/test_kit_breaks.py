@@ -1246,6 +1246,84 @@ class TestApiReadPathBreaks:
         )
         assert check_api_read_advances(target) == []
 
+    def test_a_next_url_function_handed_the_wrong_type_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        """The drive exists to catch exactly this, so it must not die on it.
+
+        ``base64_encode`` answers a non-string input with ``TypeError``.
+        Nothing between the strategy and the check enumerated that type, so
+        the authoring mistake the module docstring says the drive exists to
+        catch arrived as a raw traceback: the check ERRORed, and every probe
+        queued behind it was never driven at all.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["pagination"]["link"]["next_url"] = {
+                "function": "base64_encode",
+                "input": {"ref": "response.body.links"},
+            }
+
+        target = self._broken(tmp_path, "events", bend)
+        report = _report(check_api_read_advances(target))
+        assert "must resolve to string or bytes" in report
+
+    def test_a_stop_condition_function_handed_the_wrong_type_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        """Same defect, same classification, on the other resolution site."""
+
+        def bend(read: dict[str, Any]) -> None:
+            read["pagination"]["stop_when"] = {
+                "missing": {
+                    "function": "base64_encode",
+                    "input": {"ref": "response.body.links"},
+                }
+            }
+
+        target = self._broken(tmp_path, "events", bend)
+        report = _report(check_api_read_stop_condition(target))
+        assert "must resolve to string or bytes" in report
+
+    def test_a_page_size_default_reading_an_unknown_scope_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        """The page size resolves at compile time and can fail the same ways.
+
+        ``build_read_strategy`` caught ``ValueError`` alone, so a
+        ``limit.default`` naming a scope that does not exist escaped as a
+        bare ``KeyError`` and took the compile check down with it.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["pagination"]["limit"]["default"] = {"ref": "nosuchscope.size"}
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "Unknown resolution scope" in report
+
+    def test_a_param_default_reading_an_unknown_scope_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        """A default is a declared expression, and fails the same ways.
+
+        The param table is built before any binding map is read, so a defect
+        here escaped ahead of every classified site and took the compile
+        check -- and the three checks waiting on its probes -- with it.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read.setdefault("params", {})["tag"] = {
+                "in": "query",
+                "type": "string",
+                "required": False,
+                "default": {"ref": "nosuchscope.tag"},
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "Unknown resolution scope" in report
+
     def test_a_stop_condition_reading_nothing_off_the_page(
         self, tmp_path: Path
     ) -> None:
@@ -2252,15 +2330,40 @@ class TestApiRequestBlockBreaks:
         assert "'X-Tenant'" in report
         assert "transport declares" in report
 
-    def test_a_param_placed_in_the_header_cannot_shadow_the_connection_either(
+    def test_a_param_bound_under_a_transport_header_key_is_reported(
         self, tmp_path: Path
     ) -> None:
-        """Both routes into the header map are judged by the one rule.
+        """The binding KEY is the wire name, so the key is what is judged.
 
-        A param declared ``in: header`` goes out under its own name, into
-        the same map as ``request.headers``, and wins there. The binding key
-        need not match, so a rule reading the declared map alone permits the
-        spelling that ships and refuses only the one nobody uses.
+        A param is the endpoint's internal handle; it reaches the provider
+        only under the ``request.headers`` key that binds it. Binding an
+        innocuous param under a name the transport already sends shadows
+        that header just as declaring a literal there would.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["params"]["media"] = {
+                "in": "header",
+                "type": "string",
+                "required": False,
+                "default": {"literal": "text/csv"},
+            }
+            read["request"]["headers"] = {"Accept": {"from_param": "media"}}
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "'Accept'" in report
+        assert "transport declares" in report
+
+    def test_a_param_named_after_a_transport_header_is_not_reported(
+        self, tmp_path: Path
+    ) -> None:
+        """The mirror image: only the key goes out, so only the key is judged.
+
+        A param CALLED ``Accept`` bound under ``X-Accept`` sends
+        ``X-Accept`` and nothing else. Refusing it would fail an endpoint
+        that shadows nothing, on the strength of a name the provider never
+        sees.
         """
 
         def bend(read: dict[str, Any]) -> None:
@@ -2273,9 +2376,7 @@ class TestApiRequestBlockBreaks:
             read["request"]["headers"] = {"X-Accept": {"from_param": "Accept"}}
 
         target = self._broken(tmp_path, "widgets", bend)
-        report = _report(check_api_read_compiles(target))
-        assert "'Accept'" in report
-        assert "in: header" in report
+        assert check_api_read_compiles(target) == []
 
     def test_a_first_request_a_derived_function_refuses_is_reported(
         self, tmp_path: Path

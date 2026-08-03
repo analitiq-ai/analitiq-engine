@@ -21,8 +21,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from cdk.api.exceptions import RequestSpecError, request_spec_errors
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.exceptions import TransportSpecError, UnresolvedValueError
 from cdk.resolver import Resolver, scope_paths
 
 from .fakes import NoSecretsResolver
@@ -48,22 +48,6 @@ HTTP_TRANSPORT_TYPE = "http"
 #: be resolved from a definition alone, and that says nothing about the
 #: connector.
 _CONNECTION_SCOPES = ("connection.", "secrets.", "auth.")
-
-#: What resolving one declared value expression raises. ``Resolver`` answers
-#: a malformed node with ``TransportSpecError``, a scope it does not know
-#: with a plain ``KeyError`` and absent data with ``UnresolvedValueError``;
-#: the registered derived functions answer a missing field with
-#: ``ValueError`` and one of the wrong type with ``TypeError``. Every one of
-#: them is a defect in the declaration being resolved, so every one of them
-#: is a finding naming it -- and a check that let any escape would take the
-#: checks after it down with it.
-_RESOLUTION_FAILURES = (
-    TransportSpecError,
-    UnresolvedValueError,
-    KeyError,
-    TypeError,
-    ValueError,
-)
 
 
 def read_operations(target: ConformanceTarget) -> list[tuple[str, dict[str, Any]]]:
@@ -216,19 +200,24 @@ def _base_url_violations(
     whole block strictly would refuse it and take the base-url check down
     with it.
 
-    Resolving is what makes the failure set matter: every way a declaration
-    can be malformed now arrives here as an exception, and one this did not
-    catch would not merely lose the base-url finding -- it would abandon the
-    ``transport_ref`` loop that runs after it, so a second, unrelated defect
-    would go unreported because of the first.
+    Resolving is what makes the classification matter: every way a
+    declaration can be malformed arrives here as an exception, and one that
+    escaped would not merely lose the base-url finding -- it would abandon
+    the ``transport_ref`` loop that runs after it, so a second, unrelated
+    defect would go unreported because of the first. That is why this
+    catches the engine's own resolution boundary rather than a list of
+    exception types kept in step by hand: the list here once named both
+    ``UnresolvedValueError`` and the ``KeyError`` it subclasses, and still
+    could not say what it was missing.
     """
     declared = block.get("base_url")
     if reads_a_connection_scope(declared):
         return []
     unusable = f"({declared!r})"
     try:
-        resolved = definition_resolver(target).resolve(declared)
-    except _RESOLUTION_FAILURES as err:
+        with request_spec_errors("transport base_url"):
+            resolved = definition_resolver(target).resolve(declared)
+    except RequestSpecError as err:
         resolved = None
         unusable = f"({declared!r}, which does not resolve: {err})"
     if isinstance(resolved, str) and resolved:

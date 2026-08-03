@@ -22,8 +22,9 @@ from __future__ import annotations
 from functools import partial
 from typing import Any
 
-from ..exceptions import ReadError, TransportSpecError
+from ..exceptions import ReadError
 from ..resolver import Resolver
+from .exceptions import RequestSpecError, request_spec_errors
 from .page_loop import Page, PaginationStrategy, StopCondition
 from .predicates import evaluate_predicate
 from .records import page_resolver
@@ -33,20 +34,23 @@ from .urls import follow_url
 
 __all__ = ["build_read_strategy", "page_expression_resolver", "stop_condition"]
 
-#: Failures resolving a declared expression against a page. They are
-#: authoring or data defects, and each becomes a read error naming what
-#: was being resolved.
-_RESOLUTION_FAILURES = (ValueError, KeyError, TransportSpecError)
-
 
 def page_expression_resolver(resolver: Resolver) -> Resolve:
-    """Adapt the read's resolver to what a strategy asks of it."""
+    """Adapt the read's resolver to what a strategy asks of it.
+
+    The resolution boundary is :func:`~cdk.api.exceptions.request_spec_errors`,
+    the same one the request build uses, so a defect inside a pagination
+    expression is classified where it happens rather than by whichever
+    catch site happened to list its exception type. The read error is what
+    the traversal's callers already handle.
+    """
 
     def resolve(expr: Any, page: Page | None) -> Any:
         try:
-            return page_resolver(resolver, page).resolve_for_request(expr)
-        except _RESOLUTION_FAILURES as err:
-            raise ReadError(f"pagination expression failed to resolve: {err}") from err
+            with request_spec_errors("pagination expression"):
+                return page_resolver(resolver, page).resolve_for_request(expr)
+        except RequestSpecError as err:
+            raise ReadError(str(err)) from err
 
     return resolve
 
@@ -60,11 +64,12 @@ def stop_condition(declared: Any, resolver: Resolver) -> StopCondition:
             # traversal after its one page.
             return False
         try:
-            return evaluate_predicate(
-                declared, page_resolver(resolver, page).resolve_for_request
-            )
-        except _RESOLUTION_FAILURES as err:
-            raise ReadError(f"pagination stop_when failed to evaluate: {err}") from err
+            with request_spec_errors("pagination stop_when"):
+                return evaluate_predicate(
+                    declared, page_resolver(resolver, page).resolve_for_request
+                )
+        except RequestSpecError as err:
+            raise ReadError(str(err)) from err
 
     return stop_when
 
@@ -85,24 +90,25 @@ def build_read_strategy(
     quietly take the provider's own default forever.
     """
     try:
-        page_size = resolve_page_size(
-            pagination, batch_size=batch_size, resolve=resolver.resolve_for_request
-        )
-        limit = (pagination or {}).get("limit") or {}
-        if limit.get("param"):
-            table.values[limit["param"]] = page_size
+        with request_spec_errors("pagination"):
+            page_size = resolve_page_size(
+                pagination, batch_size=batch_size, resolve=resolver.resolve_for_request
+            )
+            limit = (pagination or {}).get("limit") or {}
+            if limit.get("param"):
+                table.values[limit["param"]] = page_size
 
-        return build_strategy(
-            pagination,
-            url=url,
-            base_params=table.values,
-            resolve=page_expression_resolver(resolver),
-            follow_url=partial(follow_url, origin=base_url),
-        )
-    except ValueError as err:
+            return build_strategy(
+                pagination,
+                url=url,
+                base_params=table.values,
+                resolve=page_expression_resolver(resolver),
+                follow_url=partial(follow_url, origin=base_url),
+            )
+    except RequestSpecError as err:
         # An unknown scheme, a page size that cannot advance, a step that
-        # is not a whole number: authoring defects the loop cannot run at
-        # all. They are deterministic, so they must reach the worker as a
-        # read error rather than as a bare ValueError it would classify as
-        # worth retrying.
+        # is not a whole number, a ``limit.default`` reading a scope that
+        # is not there: authoring defects the loop cannot run at all. They
+        # are deterministic, so they must reach the worker as a read error
+        # rather than as a bare builtin it would classify as worth retrying.
         raise ReadError(f"pagination could not be set up: {err}") from err

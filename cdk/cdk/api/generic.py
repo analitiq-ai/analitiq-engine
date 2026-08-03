@@ -48,7 +48,7 @@ from ..types import (
     SchemaSpec,
 )
 from .dialects import ApiDialect
-from .exceptions import ConnectorConnectionError
+from .exceptions import ConnectorConnectionError, RequestSpecError
 from .http import (
     DEFAULT_MAX_RETRIES,
     HttpSender,
@@ -333,38 +333,42 @@ class GenericAPIConnector(BaseDestinationHandler):
         # page size.
         resolver = runtime.request_resolver(runtime_values={"batch_size": batch_size})
 
-        table = ParamTable.for_read(
-            read.get("params") or {},
-            resolver,
-            filters=stream_source.get("filters") or [],
-        )
-        problem = request_block_problem(
-            request_block,
-            reserved_headers=reserved_header_names(self._session_header_names),
-            paged_params=table.pagination_controlled,
-            header_params=table.header_params(),
-        )
-        if problem is not None:
-            raise ReadError(f"endpoint {endpoint_id!r}: {problem}")
-
-        replication_block = stream_source.get("replication") or {}
-        cursor_field = replication_block.get("cursor_field")
-        if replication_block.get("method") == "incremental":
-            await self._bind_incremental_filter(
-                table.values,
-                read.get("replication"),
-                replication_block,
-                checkpoint=checkpoint,
-                stream_name=stream_name,
-                partition=partition,
-            )
-
-        # Substituted here, after the incremental filter has written its
-        # value into the table: a path param the replication loop owns is
-        # bound by that call, and substituting before it would refuse a
-        # read that works. A pagination-owned one is refused above, since
-        # its value exists only per page.
+        # One try over every declaration this plan resolves -- the param
+        # defaults and the path bindings. All of them leave the request
+        # build as one classified error, and all of them mean the same
+        # thing here: a read that cannot address its own URL, or fill its
+        # own params, never heals on a retry.
         try:
+            table = ParamTable.for_read(
+                read.get("params") or {},
+                resolver,
+                filters=stream_source.get("filters") or [],
+            )
+            problem = request_block_problem(
+                request_block,
+                reserved_headers=reserved_header_names(self._session_header_names),
+                paged_params=table.pagination_controlled,
+            )
+            if problem is not None:
+                raise ReadError(f"endpoint {endpoint_id!r}: {problem}")
+
+            replication_block = stream_source.get("replication") or {}
+            cursor_field = replication_block.get("cursor_field")
+            if replication_block.get("method") == "incremental":
+                await self._bind_incremental_filter(
+                    table.values,
+                    read.get("replication"),
+                    replication_block,
+                    checkpoint=checkpoint,
+                    stream_name=stream_name,
+                    partition=partition,
+                )
+
+            # Substituted here, after the incremental filter has written its
+            # value into the table: a path param the replication loop owns is
+            # bound by that call, and substituting before it would refuse a
+            # read that works. A pagination-owned one is refused above, since
+            # its value exists only per page.
             path = substitute_path(
                 request_block["path"],
                 bind_request_values(
@@ -376,8 +380,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                 ),
                 endpoint=endpoint_id,
             )
-        except ValueError as err:
-            # A read that cannot address its own URL never heals on a retry.
+        except RequestSpecError as err:
             raise ReadError(f"endpoint {endpoint_id!r}: {err}") from err
         full_url = join_url(self.base_url, path)
 
@@ -476,7 +479,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                 prepared = builder.for_page(
                     request.params, sends_declared_body=request.sends_declared_body
                 )
-            except ValueError as err:
+            except RequestSpecError as err:
                 raise ReadError(f"request could not be built: {err}") from err
             signed = SignedRequest(
                 method=method,

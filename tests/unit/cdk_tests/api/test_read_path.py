@@ -69,6 +69,17 @@ _OFFSET = {
     "stop_when": {"empty": {"ref": "response.body.records"}},
 }
 
+#: The request block those params reach the wire through. The contract
+#: requires every declared param to be referenced by exactly one binding,
+#: in the map its ``in`` names, so a paginated read declares the query keys
+#: as well -- the param name is the endpoint's internal handle and never
+#: goes out on its own.
+_PAGINATION_REQUEST = {
+    "method": "GET",
+    "path": "/items",
+    "query": {"skip": {"from_param": "skip"}, "limit": {"from_param": "limit"}},
+}
+
 _PAGINATION_PARAMS = {
     "skip": {
         "in": "query",
@@ -115,11 +126,14 @@ class TestOnePage:
 
 @pytest.mark.asyncio
 class TestTheRequestTheContractDescribes:
-    """The three binding maps the read used to drop or misplace.
+    """The three binding maps, which are the whole route to the wire.
 
-    Before this, a param declared ``in: path`` or ``in: header`` went onto
-    the query string, the path was joined with its ``{name}`` braces intact,
-    and ``request.headers`` never reached the wire at all.
+    ``request.path_params``, ``request.headers`` and ``request.query`` are
+    the only things that put a value on a request: the key is the wire name
+    and the declared param behind it is the endpoint's internal handle. The
+    read once joined the path with its ``{name}`` braces intact, never sent
+    ``request.headers`` at all, and then -- having been given the maps --
+    also emitted every param under its own name, sending each value twice.
     """
 
     async def test_a_path_placeholder_is_substituted_before_the_url_is_joined(
@@ -171,27 +185,26 @@ class TestTheRequestTheContractDescribes:
         )
         assert session.calls[0]["headers"]["X-Tenant"] == "acme"
 
-    async def test_a_header_placed_param_shadowing_the_connection_is_refused(
+    async def test_a_declared_header_shadowing_the_connection_is_refused(
         self,
     ) -> None:
-        # Two declarations reach one header map: request.headers, and any
-        # param placed ``in: header`` -- which lands under the PARAM's name,
-        # not the binding key. A rule reading request.headers alone refuses
-        # the harmless spelling and ships the one that overwrites the
-        # connection's credential.
+        # request.headers is the whole header map an endpoint can declare,
+        # so its keys are the names that reach the wire. A key the
+        # connection's transport already sends can only shadow it -- here,
+        # replace the connection's credential with the endpoint's.
         session = FakeSession()
         session.headers["Authorization"] = "Bearer connection"
-        with pytest.raises(ReadError, match="in: header"):
+        with pytest.raises(ReadError, match="request.headers declares"):
             await _read(
                 session,
                 endpoint_document(
                     request={
                         "method": "GET",
                         "path": "/items",
-                        "headers": {"X-Auth": {"from_param": "Authorization"}},
+                        "headers": {"Authorization": {"from_param": "token"}},
                     },
                     params={
-                        "Authorization": {
+                        "token": {
                             "in": "header",
                             "type": "string",
                             "required": True,
@@ -201,6 +214,33 @@ class TestTheRequestTheContractDescribes:
                 ),
             )
         assert session.calls == []
+
+    async def test_a_param_bound_under_a_harmless_key_is_not_refused(self) -> None:
+        # The mirror image, and the reason the rule reads the key rather
+        # than the param name: a param CALLED Authorization that lands
+        # under X-Legacy-Auth shadows nothing, and refusing it would fail a
+        # working endpoint.
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        session.headers["Authorization"] = "Bearer connection"
+        await _read(
+            session,
+            endpoint_document(
+                request={
+                    "method": "GET",
+                    "path": "/items",
+                    "headers": {"X-Legacy-Auth": {"from_param": "Authorization"}},
+                },
+                params={
+                    "Authorization": {
+                        "in": "header",
+                        "type": "string",
+                        "required": True,
+                        "default": {"literal": "legacy"},
+                    }
+                },
+            ),
+        )
+        assert session.calls[0]["headers"] == {"X-Legacy-Auth": "legacy"}
 
     async def test_a_query_key_named_ref_is_sent_as_a_parameter(self) -> None:
         # "ref" is a real query parameter name. Resolving the whole map as
@@ -308,8 +348,12 @@ class TestTheRequestTheContractDescribes:
                         "method": "GET",
                         "path": "/items/{skip}",
                         "path_params": {"skip": {"from_param": "skip"}},
+                        "query": {"limit": {"from_param": "limit"}},
                     },
-                    params=_PAGINATION_PARAMS,
+                    params={
+                        **_PAGINATION_PARAMS,
+                        "skip": {**_PAGINATION_PARAMS["skip"], "in": "path"},
+                    },
                     pagination=_OFFSET,
                 ),
             )
@@ -350,6 +394,97 @@ class TestTheRequestTheContractDescribes:
         assert session.calls[0]["url"] == f"{BASE_URL}/items/2026-07-31T11%3A59%3A00Z"
 
 
+#: One authoring defect per request block, each raising a different thing
+#: out of the resolver: conflicting expression markers and an unknown
+#: derived function raise ``TransportSpecError``, a scope that does not
+#: exist raises ``KeyError``, a function handed the wrong type raises
+#: ``TypeError``. The read used to catch ``ValueError`` at both the path
+#: substitution and the request build, so three of the four escaped the
+#: connector as raw builtins the worker classified by accident.
+_DECLARATION_DEFECTS = {
+    "a header with conflicting markers": {
+        "headers": {"X-T": {"ref": "connection.parameters.a", "template": "b"}}
+    },
+    "a header reading a scope that does not exist": {
+        "headers": {"X-T": {"ref": "nosuchscope.a"}}
+    },
+    "a query value calling an unregistered function": {
+        "query": {"q": {"function": "nope", "input": {"literal": 1}}}
+    },
+    "a query value handing a function the wrong type": {
+        "query": {"q": {"function": "base64_encode", "input": {"literal": 5}}}
+    },
+    "a path binding reading a scope that does not exist": {
+        "path": "/items/{id}",
+        "path_params": {"id": {"ref": "nosuchscope.id"}},
+    },
+    "a path binding calling an unregistered function": {
+        "path": "/items/{id}",
+        "path_params": {"id": {"function": "nope", "input": {"literal": 1}}},
+    },
+}
+
+#: The same class one step earlier: a param's declared default is resolved
+#: before any binding map is read, so a defect there escaped ahead of every
+#: catch site the read has.
+_DEFECTIVE_PARAM = {
+    "tag": {
+        "in": "query",
+        "type": "string",
+        "required": False,
+        "default": {"ref": "nosuchscope.tag"},
+    }
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "defect", sorted(_DECLARATION_DEFECTS), ids=sorted(_DECLARATION_DEFECTS)
+)
+class TestADeclarationDefectReachesTheCallerAsOneError:
+    """Every way a declaration fails to resolve leaves the read as ReadError.
+
+    The worker fails a stream deterministically on ``ReadError`` and would
+    retry a bare ``KeyError`` or ``TypeError`` to exhaustion. Classifying
+    at the resolution boundary is what makes one ``except`` at each caller
+    correct; enumerating the resolver's exception types at each catch site
+    instead left a different one uncaught at each site.
+    """
+
+    async def test_the_read_fails_with_a_read_error(self, defect: str) -> None:
+        block = {"method": "GET", "path": "/items", **_DECLARATION_DEFECTS[defect]}
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        with pytest.raises(ReadError):
+            await _read(session, endpoint_document(request=block))
+
+    async def test_nothing_reaches_the_provider(self, defect: str) -> None:
+        # A request the endpoint could not describe must not go out at all.
+        block = {"method": "GET", "path": "/items", **_DECLARATION_DEFECTS[defect]}
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        with pytest.raises(ReadError):
+            await _read(session, endpoint_document(request=block))
+        assert session.calls == []
+
+
+@pytest.mark.asyncio
+class TestAParamDefaultIsADeclarationLikeAnyOther:
+    async def test_a_defective_default_fails_the_read_with_a_read_error(self) -> None:
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        with pytest.raises(ReadError):
+            await _read(
+                session,
+                endpoint_document(
+                    request={
+                        "method": "GET",
+                        "path": "/items",
+                        "query": {"tag": {"from_param": "tag"}},
+                    },
+                    params=_DEFECTIVE_PARAM,
+                ),
+            )
+        assert session.calls == []
+
+
 @pytest.mark.asyncio
 class TestPageSizeBinding:
     async def test_the_provider_cap_clamps_the_engines_batch_size(self) -> None:
@@ -358,7 +493,11 @@ class TestPageSizeBinding:
         )
         await _read(
             session,
-            endpoint_document(pagination=_OFFSET, params=_PAGINATION_PARAMS),
+            endpoint_document(
+                pagination=_OFFSET,
+                params=_PAGINATION_PARAMS,
+                request=_PAGINATION_REQUEST,
+            ),
             batch_size=100,
         )
         assert session.calls[0]["params"]["limit"] == 25
@@ -376,7 +515,11 @@ class TestPageSizeBinding:
         )
         await _read(
             session,
-            endpoint_document(pagination=pagination, params=_PAGINATION_PARAMS),
+            endpoint_document(
+                pagination=pagination,
+                params=_PAGINATION_PARAMS,
+                request=_PAGINATION_REQUEST,
+            ),
             batch_size=7,
         )
         assert session.calls[0]["params"]["limit"] == 7
@@ -391,7 +534,11 @@ class TestPageSizeBinding:
         )
         await _read(
             session,
-            endpoint_document(pagination=pagination, params=_PAGINATION_PARAMS),
+            endpoint_document(
+                pagination=pagination,
+                params=_PAGINATION_PARAMS,
+                request=_PAGINATION_REQUEST,
+            ),
             batch_size=100,
         )
         assert session.calls[0]["params"]["limit"] == 5
@@ -405,7 +552,11 @@ class TestPageSizeBinding:
         )
         await _read(
             session,
-            endpoint_document(pagination=pagination, params=_PAGINATION_PARAMS),
+            endpoint_document(
+                pagination=pagination,
+                params=_PAGINATION_PARAMS,
+                request=_PAGINATION_REQUEST,
+            ),
             batch_size=10,
         )
         assert "limit" not in session.calls[0]["params"]
@@ -419,7 +570,11 @@ class TestPageSizeBinding:
         with pytest.raises(ReadError, match="limit.default"):
             await _read(
                 session,
-                endpoint_document(pagination=pagination, params=_PAGINATION_PARAMS),
+                endpoint_document(
+                    pagination=pagination,
+                    params=_PAGINATION_PARAMS,
+                    request=_PAGINATION_REQUEST,
+                ),
             )
         assert session.calls == []
 
@@ -435,7 +590,12 @@ class TestPaging:
             ]
         )
         batches = await _read(
-            session, endpoint_document(pagination=_OFFSET, params=_PAGINATION_PARAMS)
+            session,
+            endpoint_document(
+                pagination=_OFFSET,
+                params=_PAGINATION_PARAMS,
+                request=_PAGINATION_REQUEST,
+            ),
         )
         assert [call["params"]["skip"] for call in session.calls] == [0, 3, 5]
         assert [batch.num_rows for batch in batches] == [3, 2]
@@ -448,7 +608,11 @@ class TestPaging:
         )
         batches = await _read(
             session,
-            endpoint_document(pagination=_OFFSET, params=_PAGINATION_PARAMS),
+            endpoint_document(
+                pagination=_OFFSET,
+                params=_PAGINATION_PARAMS,
+                request=_PAGINATION_REQUEST,
+            ),
             batch_size=100,
         )
         assert len(batches) == 1
@@ -462,7 +626,12 @@ class TestPaging:
         body = {**_rows(2), "has_more": False}
         session = FakeSession([FakeResponse(body=body)])
         batches = await _read(
-            session, endpoint_document(pagination=pagination, params=_PAGINATION_PARAMS)
+            session,
+            endpoint_document(
+                pagination=pagination,
+                params=_PAGINATION_PARAMS,
+                request=_PAGINATION_REQUEST,
+            ),
         )
         assert len(batches) == 1
         assert len(session.calls) == 1
@@ -498,6 +667,11 @@ class TestPaging:
 class TestIncremental:
     def _document(self) -> dict[str, Any]:
         return endpoint_document(
+            request={
+                "method": "GET",
+                "path": "/items",
+                "query": {"since": {"from_param": "since"}},
+            },
             params={
                 "since": {
                     "in": "query",
@@ -731,7 +905,7 @@ class TestAFollowedLinkReplacesTheWholeRequest:
                     "required": False,
                     "default": "2024-01-01",
                 },
-                "X-Tenant": {
+                "tenant": {
                     "in": "header",
                     "type": "string",
                     "required": False,
@@ -741,6 +915,7 @@ class TestAFollowedLinkReplacesTheWholeRequest:
             request={
                 "method": "POST",
                 "path": "/items",
+                "headers": {"X-Tenant": {"from_param": "tenant"}},
                 "body": {"filter": {"from_param": "since"}},
             },
         )
