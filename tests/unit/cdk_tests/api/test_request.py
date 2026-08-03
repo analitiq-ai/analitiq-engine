@@ -9,7 +9,9 @@ import pytest
 from cdk.api.request import (
     ParamTable,
     RequestBuilder,
+    bind_request_values,
     build_write_body,
+    request_block_problem,
     substitute_path,
 )
 from cdk.derived_functions import DEFAULT_FUNCTIONS
@@ -274,6 +276,151 @@ class TestRequestBuilder:
             builder.for_page({})
 
 
+class TestABindingKeyIsAName:
+    """A key in a binding map names a header, a query param or a placeholder.
+
+    Resolving the map as one value puts it in a value position, where the
+    grammar's four expression markers are keywords. ``ref`` is a real query
+    parameter name, so that mis-read breaks a working endpoint outright --
+    and raises past the ``except ValueError`` both roles classify with.
+    """
+
+    @pytest.mark.parametrize("marker", ["ref", "template", "literal", "function"])
+    def test_a_key_named_after_an_expression_marker_is_still_a_name(
+        self, marker: str
+    ) -> None:
+        assert bind_request_values(
+            {marker: {"literal": "main"}},
+            params={},
+            resolver=_resolver(),
+            block="query",
+            endpoint="/items",
+        ) == {marker: "main"}
+
+    def test_a_path_placeholder_may_be_named_ref(self) -> None:
+        bound = bind_request_values(
+            {"ref": {"literal": "main"}},
+            params={},
+            resolver=_resolver(),
+            block="path_params",
+            endpoint="/contents",
+        )
+        assert (
+            substitute_path("/contents/{ref}", bound, endpoint="/contents")
+            == "/contents/main"
+        )
+
+    def test_an_expression_that_resolves_to_nothing_still_omits_its_key(self) -> None:
+        # The per-request policy survives the per-value resolution: an
+        # unresolved expression drops its key rather than going out raw.
+        assert (
+            bind_request_values(
+                {"tenant": {"ref": "connection.parameters.absent"}},
+                params={},
+                resolver=_resolver(),
+                block="query",
+                endpoint="/items",
+            )
+            == {}
+        )
+
+
+class TestRequestBlockRefusals:
+    """One rule over the merged header map, and one over the path bindings."""
+
+    def _table(self, **declared: Any) -> ParamTable:
+        return ParamTable.for_read(declared, _resolver())
+
+    def test_a_declared_header_the_connection_owns_is_refused(self) -> None:
+        problem = request_block_problem(
+            {"headers": {"Authorization": {"literal": "Bearer x"}}},
+            reserved_headers=frozenset({"authorization"}),
+        )
+        assert problem is not None and "request.headers declares" in problem
+
+    def test_a_header_placed_param_the_connection_owns_is_refused(self) -> None:
+        # Byte-identical intent, so the same verdict -- and this is the route
+        # that reaches the wire, because the params fold in after the
+        # declared map.
+        table = self._table(
+            Authorization={
+                "in": "header",
+                "type": "string",
+                "required": True,
+                "default": {"literal": "Bearer attacker"},
+            }
+        )
+        problem = request_block_problem(
+            {"headers": {"X-Auth": {"from_param": "Authorization"}}},
+            reserved_headers=frozenset({"authorization"}),
+            header_params=table.header_params(),
+        )
+        assert problem is not None
+        assert "Authorization" in problem and "in: header" in problem
+
+    def test_a_header_placed_param_conflicting_on_content_type_is_refused(
+        self,
+    ) -> None:
+        table = self._table(
+            **{
+                "Content-Type": {
+                    "in": "header",
+                    "type": "string",
+                    "required": True,
+                    "default": {"literal": "application/xml"},
+                }
+            }
+        )
+        problem = request_block_problem(
+            {}, reserved_headers=frozenset(), header_params=table.header_params()
+        )
+        assert problem is not None and "application/json" in problem
+
+    def test_a_header_placed_content_type_matching_the_engine_is_permitted(
+        self,
+    ) -> None:
+        table = self._table(
+            **{
+                "Content-Type": {
+                    "in": "header",
+                    "type": "string",
+                    "required": True,
+                    "default": {"literal": "application/json"},
+                }
+            }
+        )
+        assert (
+            request_block_problem(
+                {}, reserved_headers=frozenset(), header_params=table.header_params()
+            )
+            is None
+        )
+
+    def test_a_path_binding_that_encodes_the_value_itself_is_refused(self) -> None:
+        problem = request_block_problem(
+            {
+                "path": "/Contact/{id}",
+                "path_params": {
+                    "id": {"function": "url_encode", "input": {"from_param": "id"}}
+                },
+            },
+            reserved_headers=frozenset(),
+        )
+        assert problem is not None and "url_encode" in problem
+
+    def test_a_plain_path_binding_is_permitted(self) -> None:
+        assert (
+            request_block_problem(
+                {
+                    "path": "/Contact/{id}",
+                    "path_params": {"id": {"from_param": "id"}},
+                },
+                reserved_headers=frozenset(),
+            )
+            is None
+        )
+
+
 class TestPathSubstitution:
     def test_a_placeholder_takes_its_bound_value(self) -> None:
         assert (
@@ -300,6 +447,14 @@ class TestPathSubstitution:
     def test_a_placeholder_resolving_to_nothing_is_refused(self) -> None:
         with pytest.raises(ValueError, match=r"\{id\}"):
             substitute_path("/Contact/{id}", {"id": None}, endpoint="items")
+
+    def test_a_placeholder_resolving_to_an_empty_string_is_refused(self) -> None:
+        # "/Contact/" addresses the whole collection: a read fetches every
+        # record instead of one, and a PUT or PATCH targets all of them.
+        # url_encode answers "" for an unbound input, so this is reachable
+        # without anyone declaring an empty value.
+        with pytest.raises(ValueError, match=r"\{id\}"):
+            substitute_path("/Contact/{id}", {"id": ""}, endpoint="items")
 
 
 class TestWriteBody:

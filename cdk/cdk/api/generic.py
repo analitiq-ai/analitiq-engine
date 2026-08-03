@@ -36,7 +36,7 @@ from ..base_handler import (
     LandingBatch,
 )
 from ..connection_runtime import ConnectionRuntime
-from ..exceptions import ReadError, TransportSpecError
+from ..exceptions import ReadError
 from ..json_utils import decode_json_fields
 from ..resolver import Resolver
 from ..schema_contract import SchemaContract
@@ -84,11 +84,6 @@ from .write_plan import (
 logger = logging.getLogger(__name__)
 
 __all__ = ["GenericAPIConnector"]
-
-#: Failures resolving a declared expression against a page. They are
-#: authoring or data defects, and each becomes a read error naming what
-#: was being resolved.
-_RESOLUTION_FAILURES = (ValueError, KeyError, TransportSpecError)
 
 
 @dataclass(frozen=True)
@@ -347,6 +342,7 @@ class GenericAPIConnector(BaseDestinationHandler):
             request_block,
             reserved_headers=reserved_header_names(self._session_header_names),
             paged_params=table.pagination_controlled,
+            header_params=table.header_params(),
         )
         if problem is not None:
             raise ReadError(f"endpoint {endpoint_id!r}: {problem}")

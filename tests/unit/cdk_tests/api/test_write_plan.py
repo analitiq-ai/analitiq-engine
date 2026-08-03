@@ -21,6 +21,7 @@ import pytest
 from analitiq.contracts.endpoints import ApiEndpointDoc
 
 import cdk.api
+from cdk.api.request import ParamTable, RequestBuilder
 from cdk.api.write_plan import (
     StreamWritePlan,
     body_with_idempotency_key,
@@ -336,8 +337,195 @@ class TestTheRequestTheStreamWillActuallySend:
             doc, _spec(), session_header_names=set(), resolver=_resolver(tenant="acme")
         )
         assert isinstance(plan, StreamWritePlan)
-        assert plan.headers == {"X-Tenant": "acme"}
+        assert plan.headers["X-Tenant"] == "acme"
         assert plan.query == {"page[limit]": 50}
+
+    def test_the_write_role_places_params_exactly_as_the_read_role_does(self) -> None:
+        # Parity is the invariant, not any particular placement: the two
+        # roles read one placement vocabulary out of one document, so a
+        # declaration that reaches the wire on a read has to reach it on a
+        # write. Before this the write plan read request.query and
+        # request.headers only, and ``in: query`` / ``in: header`` were
+        # honoured by one role and silently dropped by the other.
+        doc = _document(
+            headers={"X-Tenant": {"from_param": "tenant"}},
+            query={"page[limit]": {"from_param": "limit"}},
+            params={
+                "tenant": {
+                    "in": "header",
+                    "type": "string",
+                    "required": True,
+                    "default": {"ref": "connection.parameters.tenant"},
+                },
+                "limit": {
+                    "in": "query",
+                    "type": "integer",
+                    "required": False,
+                    "default": {"literal": 50},
+                },
+            },
+        )
+        resolver = _resolver(tenant="acme")
+        plan = build_write_plan(
+            doc, _spec(), session_header_names=set(), resolver=resolver
+        )
+        assert isinstance(plan, StreamWritePlan)
+
+        block = write_mode_block(doc, "insert")
+        assert block is not None
+        request = block["request"]
+        table = ParamTable.for_write(block["params"], resolver)
+        as_read = RequestBuilder(
+            table,
+            raw_body=None,
+            resolver=resolver,
+            endpoint="/items",
+            declared_query=request["query"],
+            declared_headers=request["headers"],
+        ).for_page(table.values)
+        assert (plan.query, plan.headers) == (as_read.query, as_read.headers)
+
+    def test_a_body_placed_param_stays_off_the_query_string(self) -> None:
+        # It feeds the body's from_param binding; repeating it as ?tag= is a
+        # parameter the endpoint never described.
+        doc = _document(
+            body={"item": {"from_input": "record"}, "tag": {"from_param": "tag"}},
+            params={
+                "tag": {
+                    "in": "body",
+                    "type": "string",
+                    "required": True,
+                    "default": {"literal": "x"},
+                }
+            },
+        )
+        plan = build_write_plan(
+            doc, _spec(), session_header_names=set(), resolver=_resolver()
+        )
+        assert isinstance(plan, StreamWritePlan)
+        assert plan.query == {}
+
+    def test_a_header_placed_param_shadowing_the_connection_is_rejected(self) -> None:
+        # A param placed ``in: header`` lands in the same map request.headers
+        # does, under the PARAM's name -- which the binding key need not
+        # match. A rule reading request.headers alone refuses "Authorization"
+        # spelled as a header key and ships the byte-identical param, and the
+        # param route is the one that reaches the wire.
+        doc = _document(
+            headers={"X-Auth": {"from_param": "Authorization"}},
+            params={
+                "Authorization": {
+                    "in": "header",
+                    "type": "string",
+                    "required": True,
+                    "default": {"literal": "Bearer attacker"},
+                }
+            },
+        )
+        outcome = build_write_plan(
+            doc,
+            _spec(),
+            session_header_names={"authorization"},
+            resolver=_resolver(),
+        )
+        assert isinstance(outcome, str)
+        assert "Authorization" in outcome and "in: header" in outcome
+
+    def test_a_header_placed_param_conflicting_on_content_type_is_rejected(
+        self,
+    ) -> None:
+        doc = _document(
+            headers={"X-Ct": {"from_param": "Content-Type"}},
+            params={
+                "Content-Type": {
+                    "in": "header",
+                    "type": "string",
+                    "required": True,
+                    "default": {"literal": "application/xml"},
+                }
+            },
+        )
+        outcome = build_write_plan(
+            doc, _spec(), session_header_names=set(), resolver=_resolver()
+        )
+        assert isinstance(outcome, str)
+        assert "application/json" in outcome and "in: header" in outcome
+
+    def test_a_header_placed_content_type_matching_the_engine_is_permitted(
+        self,
+    ) -> None:
+        # Identical intent, identical verdict: the same value spelled in
+        # request.headers is permitted, so this spelling must be too.
+        doc = _document(
+            headers={"X-Ct": {"from_param": "Content-Type"}},
+            params={
+                "Content-Type": {
+                    "in": "header",
+                    "type": "string",
+                    "required": True,
+                    "default": {"literal": "application/json"},
+                }
+            },
+        )
+        plan = build_write_plan(
+            doc, _spec(), session_header_names=set(), resolver=_resolver()
+        )
+        assert isinstance(plan, StreamWritePlan)
+        assert plan.headers["Content-Type"] == "application/json"
+
+    def test_a_query_key_named_ref_survives_resolution(self) -> None:
+        # "ref" is a real query parameter name. Resolving the map as one node
+        # reads the key as an expression marker and the endpoint breaks.
+        doc = _document(query={"ref": {"literal": "main"}})
+        plan = build_write_plan(
+            doc, _spec(), session_header_names=set(), resolver=_resolver()
+        )
+        assert isinstance(plan, StreamWritePlan)
+        assert plan.query == {"ref": "main"}
+
+    def test_a_path_binding_that_encodes_the_value_itself_is_rejected(self) -> None:
+        # The engine percent-encodes every substituted segment, so this one
+        # sends a%252Fb where the provider expects a%2Fb.
+        doc = _document(
+            path="/Contact/{id}",
+            path_params={
+                "id": {"function": "url_encode", "input": {"from_param": "id"}}
+            },
+            params={
+                "id": {
+                    "in": "path",
+                    "type": "string",
+                    "required": True,
+                    "default": {"literal": "a/b"},
+                }
+            },
+        )
+        outcome = build_write_plan(
+            doc, _spec(), session_header_names=set(), resolver=_resolver()
+        )
+        assert isinstance(outcome, str)
+        assert "url_encode" in outcome and "{id}" in outcome
+
+    def test_a_path_placeholder_binding_to_an_empty_value_is_rejected(self) -> None:
+        # "/Contact/" addresses the whole collection: this write would PATCH
+        # every contact instead of one.
+        doc = _document(
+            path="/Contact/{id}",
+            path_params={"id": {"from_param": "id"}},
+            params={
+                "id": {
+                    "in": "path",
+                    "type": "string",
+                    "required": True,
+                    "default": {"literal": ""},
+                }
+            },
+        )
+        outcome = build_write_plan(
+            doc, _spec(), session_header_names=set(), resolver=_resolver()
+        )
+        assert isinstance(outcome, str)
+        assert "{id}" in outcome
 
     def test_a_request_removing_a_transport_header_is_rejected(self) -> None:
         # The connection's defaults live on the shared session; a
