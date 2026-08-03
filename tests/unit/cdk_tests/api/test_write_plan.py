@@ -521,6 +521,28 @@ class TestTheRequestTheStreamWillActuallySend:
         assert isinstance(plan, StreamWritePlan)
         assert plan.headers == {"Content-Type": "application/json"}
 
+    def test_a_content_type_the_param_table_supplies_is_judged(self) -> None:
+        # The param table is built before the request block is judged, so
+        # this value is known here. Deferring it accepted the stream and
+        # then sent 'Content-Type: text/xml' with a JSON body -- refused by
+        # nobody, at any point.
+        doc = _document(
+            headers={"Content-Type": {"from_param": "ct"}},
+            params={
+                "ct": {
+                    "in": "header",
+                    "type": "string",
+                    "required": False,
+                    "default": {"literal": "text/xml"},
+                }
+            },
+        )
+        outcome = build_write_plan(
+            doc, _spec(), session_header_names=set(), resolver=_resolver()
+        )
+        assert isinstance(outcome, str)
+        assert "text/xml" in outcome
+
     def test_a_conflicting_content_type_is_rejected(self) -> None:
         doc = _document(headers={"Content-Type": "application/xml"})
         outcome = build_write_plan(

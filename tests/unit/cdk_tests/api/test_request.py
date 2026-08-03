@@ -133,6 +133,18 @@ class TestReadParamTable:
         )
         assert table.values == {"status": "open"}
 
+    def test_a_filter_naming_no_declared_param_is_refused(self) -> None:
+        # A filter reaches the provider as a declared param bound by a
+        # request map. One naming no param narrows nothing: the value sat
+        # in the table, no binding read it, and the stream read the whole
+        # collection while reporting success.
+        with pytest.raises(RequestSpecError, match="customer_number"):
+            ParamTable.for_read(
+                {"cn": {"in": "query", "type": "string", "required": False}},
+                _resolver(),
+                filters=[{"field": "customer_number", "value": "C-1"}],
+            )
+
     def test_an_unresolved_default_omits_its_param(self, caplog) -> None:
         with caplog.at_level("WARNING"):
             table = ParamTable.for_read(
@@ -373,6 +385,7 @@ class TestRequestBlockRefusals:
             {"headers": {"Authorization": {"literal": "Bearer x"}}},
             reserved_headers=frozenset({"authorization"}),
             resolver=_resolver(),
+            params={},
         )
         assert problem is not None and "request.headers declares" in problem
 
@@ -386,6 +399,7 @@ class TestRequestBlockRefusals:
                 {"headers": {"X-Legacy-Auth": {"from_param": "Authorization"}}},
                 reserved_headers=frozenset({"authorization"}),
                 resolver=_resolver(),
+                params={},
             )
             is None
         )
@@ -398,6 +412,7 @@ class TestRequestBlockRefusals:
             {"headers": {"Authorization": {"from_param": "tok"}}},
             reserved_headers=frozenset({"authorization"}),
             resolver=_resolver(),
+            params={},
         )
         assert problem is not None and "Authorization" in problem
 
@@ -411,6 +426,7 @@ class TestRequestBlockRefusals:
             },
             reserved_headers=frozenset(),
             resolver=_resolver(),
+            params={},
         )
         assert problem is not None and "url_encode" in problem
 
@@ -423,9 +439,32 @@ class TestRequestBlockRefusals:
                 },
                 reserved_headers=frozenset(),
                 resolver=_resolver(),
+                params={},
             )
             is None
         )
+
+    @pytest.mark.parametrize("loop", ["pagination", "replication"])
+    def test_a_placeholder_bound_to_a_loop_owned_param_is_refused(
+        self, loop: str
+    ) -> None:
+        # The path is substituted once, before either loop has produced a
+        # value. Pagination would freeze page one into the URL; replication
+        # has no cursor on the first run and none at all under full
+        # refresh, so the read failed on the URL it built and blamed a
+        # correct binding -- then worked on the next run.
+        problem = request_block_problem(
+            {
+                "path": "/items/{since}",
+                "path_params": {"since": {"from_param": "since"}},
+            },
+            reserved_headers=frozenset(),
+            resolver=_resolver(),
+            params={},
+            controlled_by={"since": loop},
+        )
+        assert problem is not None
+        assert f"{loop} loop owns" in problem
 
 
 class TestDeclaredContentType:
@@ -438,11 +477,12 @@ class TestDeclaredContentType:
     """
 
     @staticmethod
-    def _problem(value: Any) -> str | None:
+    def _problem(value: Any, params: dict[str, Any] | None = None) -> str | None:
         return request_block_problem(
             {"headers": {"Content-Type": value}},
             reserved_headers=frozenset({"content-type"}),
             resolver=_resolver(),
+            params=params or {},
         )
 
     @pytest.mark.parametrize(
@@ -488,10 +528,39 @@ class TestDeclaredContentType:
         # wire and there is no collision to refuse.
         assert self._problem({"ref": "connection.parameters.absent"}) is None
 
-    def test_a_value_the_param_table_supplies_is_not_judged(self) -> None:
-        # A {from_param} binding carries the param's value, which arrives
-        # per run; the declaration says nothing about it.
-        assert self._problem({"from_param": "media_type"}) is None
+    def test_a_conflicting_value_the_param_table_supplies_is_refused(self) -> None:
+        # The rule runs after the param table is built, so a {from_param}
+        # binding has its value here. Deferring it let an endpoint send
+        # 'Content-Type: text/xml' while the engine serialised JSON --
+        # judged nowhere, because configure_schema accepted the document and
+        # the request went out.
+        problem = self._problem({"from_param": "ct"}, {"ct": "text/xml"})
+        assert problem is not None and "text/xml" in problem
+
+    def test_the_engines_own_value_from_the_param_table_is_permitted(self) -> None:
+        assert self._problem({"from_param": "ct"}, {"ct": "application/json"}) is None
+
+    def test_a_binding_whose_param_has_no_value_is_not_judged(self) -> None:
+        # An unbound param binds None, which bind_request_values drops: no
+        # Content-Type reaches the wire, so there is no collision.
+        assert self._problem({"from_param": "ct"}) is None
+
+    def test_a_function_over_a_binding_is_judged_by_what_it_sends(self) -> None:
+        # Binding comes FIRST in the request build, so the function sees a
+        # scalar. Resolving the raw declaration reads the binding node as
+        # the function's input and refuses a connector that sends exactly
+        # the engine's own value.
+        assert (
+            self._problem(
+                {
+                    "function": "lookup",
+                    "input": {"from_param": "fmt"},
+                    "map": {"json": "application/json"},
+                },
+                {"fmt": "json"},
+            )
+            is None
+        )
 
     def test_a_malformed_expression_leaves_as_one_classified_error(self) -> None:
         with pytest.raises(RequestSpecError, match="request.headers.Content-Type"):
@@ -572,9 +641,37 @@ class TestWriteBody:
         assert body == {"items": [{"id": 1}, {"id": 2}]}
 
     def test_a_spec_that_resolves_away_entirely_is_refused(self) -> None:
-        with pytest.raises(ValueError, match="resolved to nothing"):
+        with pytest.raises(RequestSpecError, match="resolved to nothing"):
             build_write_body(
                 body_spec={"ref": "connection.parameters.absent"},
+                endpoint="/items",
+                params={},
+                resolver=_resolver(),
+                record={"id": 1},
+            )
+
+    @pytest.mark.parametrize(
+        "body_spec",
+        [
+            {"x": {"ref": "connection.parameters.a", "template": "b"}},
+            {"x": {"ref": "nope.a"}},
+            {"x": {"function": "nope", "input": 1}},
+            {"x": {"from_param": "p", "extra": 1}},
+        ],
+        ids=["two markers", "unknown scope", "unknown function", "binding siblings"],
+    )
+    def test_every_defect_in_a_spec_leaves_as_one_classified_error(
+        self, body_spec: dict[str, Any]
+    ) -> None:
+        # These four used to leave as TransportSpecError, KeyError,
+        # TransportSpecError and ValueError. The write's catch sites
+        # classified the ValueError as a rejected record and let the others
+        # fail the whole batch, so what went wrong inside the body decided
+        # what the failure MEANT. The read's body build has answered one
+        # class all along; this is the same body, built for the other role.
+        with pytest.raises(RequestSpecError, match="request.body for endpoint"):
+            build_write_body(
+                body_spec=body_spec,
                 endpoint="/items",
                 params={},
                 resolver=_resolver(),

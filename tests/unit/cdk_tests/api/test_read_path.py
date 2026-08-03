@@ -185,6 +185,66 @@ class TestTheRequestTheContractDescribes:
         )
         assert session.calls[0]["headers"]["X-Tenant"] == "acme"
 
+    async def test_a_content_type_derived_from_a_param_reaches_the_wire(self) -> None:
+        # The engine-owned-header rule judges what a header WOULD send, and
+        # it has to work the value out the way the build does: bind the
+        # param, then resolve. Reading the raw declaration put the binding
+        # node in the function's input position and failed this read with
+        # "input must resolve to a scalar; got dict" -- against a connector
+        # that sends exactly the engine's own value.
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        await _read(
+            session,
+            endpoint_document(
+                request={
+                    "method": "GET",
+                    "path": "/items",
+                    "headers": {
+                        "Content-Type": {
+                            "function": "lookup",
+                            "input": {"from_param": "fmt"},
+                            "map": {"json": "application/json"},
+                        }
+                    },
+                },
+                params={
+                    "fmt": {
+                        "in": "header",
+                        "type": "string",
+                        "required": False,
+                        "default": {"literal": "json"},
+                    }
+                },
+            ),
+        )
+        assert session.calls[0]["headers"]["Content-Type"] == "application/json"
+
+    async def test_a_stream_filter_naming_no_declared_param_is_refused(self) -> None:
+        # The filter's value used to sit in the param table with nothing
+        # bound to it: the read issued no filtered param at all and
+        # returned the whole collection, reporting success. A filter that
+        # does not filter is a correctness failure, so the stream fails
+        # before its first request.
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        with pytest.raises(ReadError, match="customer_number"):
+            await _read(
+                session,
+                endpoint_document(
+                    request={
+                        "method": "GET",
+                        "path": "/items",
+                        "query": {"customerNumber": {"from_param": "cn"}},
+                    },
+                    params={"cn": {"in": "query", "type": "string", "required": False}},
+                ),
+                source=stream_source(
+                    filters=[
+                        {"field": "customer_number", "operator": "eq", "value": "C-1"}
+                    ]
+                ),
+            )
+        assert session.calls == []
+
     async def test_a_declared_header_shadowing_the_connection_is_refused(
         self,
     ) -> None:
@@ -359,39 +419,46 @@ class TestTheRequestTheContractDescribes:
             )
         assert session.calls == []
 
-    async def test_a_path_param_the_replication_loop_owns_is_substituted(self) -> None:
-        # Safe at plan time: the stored cursor is written into the param
-        # table before the path is substituted.
+    async def test_a_path_param_the_replication_loop_owns_is_refused(self) -> None:
+        # The same refusal as the pagination case, for the same reason: the
+        # path is substituted once and the loop that owns the value has not
+        # run. A stored cursor happens to fill this one in, which is what
+        # makes it worth refusing -- the first run of the stream has no
+        # cursor and a full-refresh run never asks for one, so the document
+        # reads or fails depending on what is in the checkpoint. Refusing at
+        # plan time gives every run the same answer, and names the real
+        # problem instead of blaming a correct binding for an empty segment.
         session = FakeSession([FakeResponse(body=_rows(1))])
-        await _read(
-            session,
-            endpoint_document(
-                request={
-                    "method": "GET",
-                    "path": "/items/{since}",
-                    "path_params": {"since": {"from_param": "since"}},
-                },
-                params={
-                    "since": {
-                        "in": "path",
-                        "type": "string",
-                        "required": True,
-                        "controlled_by": "replication",
-                    }
-                },
-                replication={
-                    "supported_methods": ["full_refresh", "incremental"],
-                    "cursor_mappings": [
-                        {"cursor_field": "id", "param": "since", "operator": "gte"}
-                    ],
-                },
-            ),
-            source=stream_source(
-                method="incremental", cursor_field="id", safety_window=60
-            ),
-            checkpoint=FakeCheckpoint({"cursor": "2026-07-31T12:00:00Z"}),
-        )
-        assert session.calls[0]["url"] == f"{BASE_URL}/items/2026-07-31T11%3A59%3A00Z"
+        with pytest.raises(ReadError, match="replication loop owns"):
+            await _read(
+                session,
+                endpoint_document(
+                    request={
+                        "method": "GET",
+                        "path": "/items/{since}",
+                        "path_params": {"since": {"from_param": "since"}},
+                    },
+                    params={
+                        "since": {
+                            "in": "path",
+                            "type": "string",
+                            "required": True,
+                            "controlled_by": "replication",
+                        }
+                    },
+                    replication={
+                        "supported_methods": ["full_refresh", "incremental"],
+                        "cursor_mappings": [
+                            {"cursor_field": "id", "param": "since", "operator": "gte"}
+                        ],
+                    },
+                ),
+                source=stream_source(
+                    method="incremental", cursor_field="id", safety_window=60
+                ),
+                checkpoint=FakeCheckpoint({"cursor": "2026-07-31T12:00:00Z"}),
+            )
+        assert session.calls == []
 
 
 #: One authoring defect per request block, each raising a different thing

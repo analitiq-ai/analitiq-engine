@@ -274,7 +274,8 @@ def _compile_read(
         request_block,
         reserved_headers=_transport_header_names(target),
         resolver=resolver,
-        paged_params=table.pagination_controlled,
+        params=table.values,
+        controlled_by=table.controlled_by,
     )
     if problem is not None:
         raise ReadError(problem)
