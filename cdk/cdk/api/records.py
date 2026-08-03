@@ -18,9 +18,16 @@ import logging
 from typing import Any
 
 from ..exceptions import ReadError
+from ..resolver import Resolver
 from .page_loop import Page
 
-__all__ = ["extract_records", "page_scope", "split_records_ref", "walk_path"]
+__all__ = [
+    "extract_records",
+    "page_resolver",
+    "page_scope",
+    "split_records_ref",
+    "walk_path",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -115,3 +122,17 @@ def page_scope(page: Page) -> dict[str, Any]:
     all see the same scope.
     """
     return {"body": page.payload, "record_count": len(page.records)}
+
+
+def page_resolver(resolver: Resolver, page: Page | None) -> Resolver:
+    """Give *resolver* the page's body as its ``response`` scope.
+
+    Every declared expression a page carries -- ``stop_when``,
+    ``next_cursor``, ``next_url``, ``increment_by`` -- resolves against this
+    one scope, and ``None`` is the pre-first-request phase where no page
+    exists yet. It lives beside :func:`page_scope` rather than in the
+    connector so the conformance kit resolves a page expression exactly as
+    the read does; the kit installs no HTTP client, and a rule it had to
+    copy is a rule that drifts.
+    """
+    return resolver if page is None else resolver.with_response(page_scope(page))

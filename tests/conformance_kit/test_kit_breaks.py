@@ -9,23 +9,35 @@ asserts the kit fails with a message naming the offending member.
 from __future__ import annotations
 
 import dataclasses
+import json
 import shutil
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin
 
 import pytest
 from _pytest.outcomes import Skipped
 
 import cdk.registry
+from cdk.api import read_setup, strategies
 from cdk.conformance import (
+    api_read_path,
+    check_api_has_reads,
+    check_api_page_references,
+    check_api_read_advances,
+    check_api_read_compiles,
+    check_api_read_stop_condition,
+    check_api_record_schema,
     check_declaration_consistency,
     check_override_surface,
+    check_read_transport_selection,
     check_type_map_grammar,
     check_type_map_round_trip,
     load_target,
 )
 from cdk.conformance import target as target_module
+from cdk.conformance import violation_report
 from cdk.conformance.target import (
     ConformanceSetupError,
     ConformanceTarget,
@@ -37,8 +49,14 @@ from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.generic import GenericSQLConnector
 from cdk.type_map.loader import build_type_mapper
 
-from .kit_runner import REFERENCE_CLASS, REFERENCE_DIR
+from .kit_runner import API_REFERENCE_DIR, REFERENCE_CLASS, REFERENCE_DIR
 from .reference_connector import ReferenceConnector, ReferencePostgresDialect
+
+
+def _report(violations: Sequence[Any]) -> str:
+    """The kit's own rendering of a check's findings, for assertions."""
+    assert violations, "the check reported nothing"
+    return violation_report(violations)
 
 
 @pytest.fixture()
@@ -1115,3 +1133,1425 @@ class TestAKindDefaultWithoutItsExtra:
         with pytest.raises(ModuleNotFoundError) as exc:
             _resolve_connector_class("not-installed", "database", None)
         assert exc.value.name == "pyarrow.lib"
+
+
+class TestApiReadPathBreaks:
+    """A bent api endpoint document fails the drives that execute it.
+
+    Each break here is one an author makes and a green suite would ship:
+    a paging scheme with nowhere to go reads one page and reports success,
+    a stop condition reading nothing off the page never ends a traversal,
+    and a records ref addressing an undeclared field fails on the first
+    response. None of them raises anywhere before the read runs, which is
+    why the kit has to drive the read to find them.
+    """
+
+    @staticmethod
+    def _broken(tmp_path: Path, stem: str, mutate: Any) -> ConformanceTarget:
+        """The api fixture with one endpoint's read operation bent."""
+        root = tmp_path / "api"
+        shutil.copytree(API_REFERENCE_DIR, root)
+        document = root / "definition" / "endpoints" / f"{stem}.json"
+        parsed = json.loads(document.read_text())
+        mutate(parsed["operations"]["read"])
+        document.write_text(json.dumps(parsed))
+        return load_target(root)
+
+    def test_an_unknown_paging_scheme_names_the_contracts_union(
+        self, tmp_path: Path
+    ) -> None:
+        target = self._broken(
+            tmp_path, "widgets", lambda read: read["pagination"].update(type="seek")
+        )
+        report = _report(check_api_read_compiles(target))
+        assert "'seek'" in report
+        assert "'offset'" in report, "the message must name the union it is not in"
+
+    def test_a_cursor_param_with_a_default_ships_on_the_first_request(
+        self, tmp_path: Path
+    ) -> None:
+        """The first page has nothing to continue from, so it sends no token."""
+
+        def to_cursor(read: dict[str, Any]) -> None:
+            read["params"]["page_token"] = {
+                "in": "query",
+                "type": "string",
+                "default": {"literal": "start"},
+            }
+            read["pagination"] = {
+                "type": "cursor",
+                "limit": {"param": "limit", "default": {"ref": "runtime.batch_size"}},
+                "cursor": {
+                    "param": "page_token",
+                    "next_cursor": {"ref": "response.body.next_token"},
+                },
+                "stop_when": {"missing": {"ref": "response.body.next_token"}},
+            }
+
+        target = self._broken(tmp_path, "widgets", to_cursor)
+        report = _report(check_api_read_compiles(target))
+        assert "'page_token'" in report
+        assert "controlled_by" in report
+
+    def test_a_next_value_off_the_page_scope_reads_one_page(
+        self, tmp_path: Path
+    ) -> None:
+        """A traversal that cannot advance is a truncated read reporting success."""
+
+        def to_cursor(read: dict[str, Any]) -> None:
+            read["pagination"] = {
+                "type": "cursor",
+                "limit": {"param": "limit", "default": {"ref": "runtime.batch_size"}},
+                # The page scope carries the body and the record count; a
+                # header is not in it, so this resolves to nothing forever.
+                "cursor": {
+                    "param": "page_token",
+                    "next_cursor": {"ref": "response.headers.x-next"},
+                },
+                "stop_when": {"missing": {"ref": "response.body.next_token"}},
+            }
+
+        target = self._broken(tmp_path, "widgets", to_cursor)
+        report = _report(check_api_read_advances(target))
+        assert "stops after the first page and reports success" in report
+
+    def test_pagination_params_that_reach_no_binding_read_one_page_forever(
+        self, tmp_path: Path
+    ) -> None:
+        """The traversal advances its param table and sends the same request.
+
+        A param reaches the wire only through a binding in ``request.query``,
+        ``request.headers`` or ``request.body``. Strip the query map and the
+        offset strategy still counts rows -- ``advance`` answers a
+        ``PageRequest`` whose params differ from page one's -- while every
+        request built from it is byte-for-byte the first one. A drive
+        comparing the param tables reports nothing here and certifies a
+        connector that fetches page one until the provider gets bored.
+        """
+        target = self._broken(
+            tmp_path, "widgets", lambda read: read["request"].pop("query")
+        )
+        report = _report(check_api_read_advances(target))
+        assert (
+            "the request after the first page is the request before it again" in report
+        )
+        assert "request.query" in report, "the report must name the missing sink"
+
+    def test_a_step_that_cannot_advance_is_reported_before_the_yield(
+        self, tmp_path: Path
+    ) -> None:
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            lambda read: read["pagination"]["offset"].update(increment_by=0),
+        )
+        report = _report(check_api_read_advances(target))
+        assert "must be positive" in report
+
+    def test_a_keyset_ordering_field_the_schema_omits_is_not_a_finding(
+        self, tmp_path: Path
+    ) -> None:
+        """The engine walks the provider's record, not the declared schema.
+
+        ``extract_records`` hands the strategy the raw response objects, so
+        ordering by a field the provider sends and the response schema does
+        not declare reads perfectly well. A check asserting otherwise would
+        fail a working connector, which is why the ordering field is planted
+        rather than sampled.
+        """
+        target = self._broken(
+            tmp_path,
+            "ledger",
+            lambda read: read["response"]["schema"]["properties"]["entries"]["items"][
+                "properties"
+            ].pop("sequence"),
+        )
+        assert check_api_read_advances(target) == []
+
+    def test_a_next_url_function_handed_the_wrong_type_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        """The drive exists to catch exactly this, so it must not die on it.
+
+        ``base64_encode`` answers a non-string input with ``TypeError``.
+        Nothing between the strategy and the check enumerated that type, so
+        the authoring mistake the module docstring says the drive exists to
+        catch arrived as a raw traceback: the check ERRORed, and every probe
+        queued behind it was never driven at all.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["pagination"]["link"]["next_url"] = {
+                "function": "base64_encode",
+                "input": {"ref": "response.body.links"},
+            }
+
+        target = self._broken(tmp_path, "events", bend)
+        report = _report(check_api_read_advances(target))
+        assert "must resolve to string or bytes" in report
+
+    def test_a_stop_condition_function_handed_the_wrong_type_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        """Same defect, same classification, on the other resolution site."""
+
+        def bend(read: dict[str, Any]) -> None:
+            read["pagination"]["stop_when"] = {
+                "missing": {
+                    "function": "base64_encode",
+                    "input": {"ref": "response.body.links"},
+                }
+            }
+
+        target = self._broken(tmp_path, "events", bend)
+        report = _report(check_api_read_stop_condition(target))
+        assert "must resolve to string or bytes" in report
+
+    def test_a_page_size_default_reading_an_unknown_scope_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        """The page size resolves at compile time and can fail the same ways.
+
+        ``build_read_strategy`` caught ``ValueError`` alone, so a
+        ``limit.default`` naming a scope that does not exist escaped as a
+        bare ``KeyError`` and took the compile check down with it.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["pagination"]["limit"]["default"] = {"ref": "nosuchscope.size"}
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "Unknown resolution scope" in report
+
+    def test_a_param_default_reading_an_unknown_scope_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        """A default is a declared expression, and fails the same ways.
+
+        The param table is built before any binding map is read, so a defect
+        here escaped ahead of every classified site and took the compile
+        check -- and the three checks waiting on its probes -- with it.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read.setdefault("params", {})["tag"] = {
+                "in": "query",
+                "type": "string",
+                "required": False,
+                "default": {"ref": "nosuchscope.tag"},
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "Unknown resolution scope" in report
+
+    def test_a_stop_condition_reading_nothing_off_the_page(
+        self, tmp_path: Path
+    ) -> None:
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            lambda read: read["pagination"].update(stop_when={"eq": [1, 2]}),
+        )
+        report = _report(check_api_read_stop_condition(target))
+        assert "reads nothing under 'response'" in report
+
+    def test_a_missing_stop_condition(self, tmp_path: Path) -> None:
+        target = self._broken(
+            tmp_path, "widgets", lambda read: read["pagination"].pop("stop_when")
+        )
+        report = _report(check_api_read_stop_condition(target))
+        assert "declares no stop_when" in report
+
+    def test_a_stop_condition_that_cannot_compare_its_operands(
+        self, tmp_path: Path
+    ) -> None:
+        target = self._broken(
+            tmp_path,
+            "events",
+            lambda read: read["pagination"].update(
+                stop_when={"lt": [{"ref": "response.body.links.next"}, 5]}
+            ),
+        )
+        report = _report(check_api_read_stop_condition(target))
+        assert "cannot compare str with int" in report
+
+    def test_a_records_ref_the_response_schema_does_not_declare(
+        self, tmp_path: Path
+    ) -> None:
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            lambda read: read["response"]["records"].update(ref="response.body.items"),
+        )
+        report = _report(check_api_record_schema(target))
+        assert "'items'" in report
+        assert "not declared under properties" in report
+
+    def test_a_json_type_the_read_map_has_no_rule_for(self, tmp_path: Path) -> None:
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            lambda read: read["response"]["schema"]["properties"]["objects"]["items"][
+                "properties"
+            ]["id"].update(type="geometry"),
+        )
+        report = _report(check_api_record_schema(target))
+        assert "'geometry'" in report
+        assert "read type-map" in report
+
+    def test_a_read_asking_for_a_transport_the_path_will_not_open(
+        self, tmp_path: Path
+    ) -> None:
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            lambda read: read["request"].update(transport_ref="oauth"),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "'oauth'" in report
+        assert "default_transport" in report
+
+
+class TestApiPageReferenceBreaks:
+    """A page value the read declares must be one a page actually carries.
+
+    The drives next door script their page *from* these declarations, so on
+    their own they can never find a reference that addresses nothing -- the
+    page is built to satisfy whatever the author wrote. These are the cases
+    that need something independent to check against: the scope a page has,
+    and the response schema the connector published.
+    """
+
+    _broken = staticmethod(TestApiReadPathBreaks._broken)
+
+    def test_a_typo_in_a_stop_condition_path(self, tmp_path: Path) -> None:
+        """The defect the whole check exists for: a silently truncated read."""
+        target = self._broken(
+            tmp_path,
+            "events",
+            lambda read: read["pagination"].update(
+                stop_when={"missing": {"ref": "response.body.lnks.next"}}
+            ),
+        )
+        report = _report(check_api_page_references(target))
+        assert "'response.body.lnks.next'" in report
+        assert "does not reach" in report
+
+    def test_a_scope_the_page_has_no_notion_of(self, tmp_path: Path) -> None:
+        target = self._broken(
+            tmp_path,
+            "invoices",
+            lambda read: read["pagination"]["cursor"].update(
+                next_cursor={"ref": "response.headers.x-next-page"}
+            ),
+        )
+        report = _report(check_api_page_references(target))
+        assert "'response.headers.x-next-page'" in report
+        assert "'body', 'record_count'" in report
+
+    def test_a_template_spelled_reference_is_seen(self, tmp_path: Path) -> None:
+        """``ref`` is one of two spellings that read a scope, not the only one."""
+        target = self._broken(
+            tmp_path,
+            "events",
+            lambda read: read["pagination"]["link"].update(
+                next_url={"template": "${response.body.lnks.next}"}
+            ),
+        )
+        report = _report(check_api_page_references(target))
+        assert "'response.body.lnks.next'" in report
+
+    def test_a_template_spelled_reference_that_resolves_is_clean(
+        self, tmp_path: Path
+    ) -> None:
+        """And seeing it means not blaming the connector for the kit's blindness."""
+        target = self._broken(
+            tmp_path,
+            "events",
+            lambda read: read["pagination"]["link"].update(
+                next_url={"template": "${response.body.links.next}"}
+            ),
+        )
+        assert check_api_page_references(target) == []
+        assert check_api_read_advances(target) == []
+
+
+class TestApiScriptedPageTakesTheDeclaredTypes:
+    """The page a drive scripts carries the types the connector declared.
+
+    Typing a scripted operand by the paging scheme instead would make the
+    verdict the kit's rather than the connector's: the same declaration
+    would pass on one scheme and fail on another.
+    """
+
+    _broken = staticmethod(TestApiReadPathBreaks._broken)
+
+    def test_a_next_link_pointing_at_its_container_is_caught(
+        self, tmp_path: Path
+    ) -> None:
+        """The declared type wins, so the strategy is handed the real shape."""
+        target = self._broken(
+            tmp_path,
+            "events",
+            lambda read: (
+                read["pagination"]["link"].update(
+                    next_url={"ref": "response.body.links"}
+                ),
+                read["pagination"].update(
+                    stop_when={"missing": {"ref": "response.body.links"}}
+                ),
+            ),
+        )
+        report = _report(check_api_read_advances(target))
+        assert "not a URL" in report
+
+    def test_a_numeric_stop_operand_on_a_cursor_scheme_is_clean(
+        self, tmp_path: Path
+    ) -> None:
+        """ "returned < requested" is a stop condition, not a defect."""
+        target = self._broken(
+            tmp_path,
+            "invoices",
+            lambda read: read["pagination"].update(
+                stop_when={
+                    "lt": [
+                        {"ref": "response.body.meta.returned"},
+                        {"ref": "runtime.batch_size"},
+                    ]
+                }
+            ),
+        )
+        assert check_api_read_stop_condition(target) == []
+
+    def test_the_same_type_defect_is_caught_on_any_scheme(self, tmp_path: Path) -> None:
+        """A declared string ordered against a number, on a numeric scheme."""
+
+        def bend(read: dict[str, Any]) -> None:
+            read["response"]["schema"]["properties"]["total"] = {"type": "string"}
+            read["pagination"].update(
+                stop_when={"lt": [{"ref": "response.body.total"}, 5]}
+            )
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_stop_condition(target))
+        assert "cannot compare str with int" in report
+
+    def test_an_operand_the_schema_declares_without_a_type_is_not_evaluated(
+        self, tmp_path: Path
+    ) -> None:
+        """Reaching the node is not the same as knowing what it holds.
+
+        A property node carrying no ``type`` is contract-valid -- it may
+        compose its type through ``allOf``/``anyOf``/``$ref``. The kit has
+        no value to script there, and a guessed string is exactly what
+        decides whether the ordering comparison raises, so the condition is
+        left unevaluated instead of failing a working connector.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["response"]["schema"]["properties"]["total"] = {
+                "description": "how many widgets there are in all"
+            }
+            read["pagination"].update(
+                stop_when={"gte": [{"ref": "response.body.total"}, 5]}
+            )
+
+        target = self._broken(tmp_path, "widgets", bend)
+        assert check_api_read_stop_condition(target) == []
+
+
+class TestApiChecksSayWhenTheyDroveNothing:
+    """A dependent check must not report "nothing to say" as "nothing wrong".
+
+    Every check is exported on its own, so a repo may wire one into a
+    harness of its own. A read that does not compile has no traversal to
+    drive; the compile check says why, and the others say they did not
+    drive it.
+    """
+
+    _broken = staticmethod(TestApiReadPathBreaks._broken)
+
+    def test_a_read_that_does_not_compile_is_reported_by_every_check(
+        self, tmp_path: Path
+    ) -> None:
+        target = self._broken(
+            tmp_path, "widgets", lambda read: read["pagination"].update(type="seek")
+        )
+        for check in (
+            check_api_page_references,
+            check_api_read_advances,
+            check_api_read_stop_condition,
+        ):
+            report = _report(check(target))
+            assert "not driven" in report, check.__name__
+            assert "api-read-compiles" in report, check.__name__
+
+
+class TestACompileFindingBelongsToTheCompileCheck:
+    """What one check finds must not turn up in the report of another.
+
+    The compiled probes are shared between four checks, and the compile
+    check has findings of its own to add to them. Sharing the mutable list
+    makes those findings arrive in three other checks as "N endpoint(s)
+    were not driven" -- said about endpoints that compiled and were driven
+    -- and makes the same check answer differently the second time it is
+    called.
+    """
+
+    _broken = staticmethod(TestApiReadPathBreaks._broken)
+
+    @staticmethod
+    def _stale_cursor_default(read: dict[str, Any]) -> None:
+        """A cursor param carrying a default: a compile finding, not a crash."""
+        read["params"]["page_token"].pop("controlled_by")
+        read["params"]["page_token"]["default"] = {"literal": "start"}
+
+    def test_a_read_that_compiled_is_never_reported_as_undriven(
+        self, tmp_path: Path
+    ) -> None:
+        target = self._broken(tmp_path, "invoices", self._stale_cursor_default)
+        assert "'page_token'" in _report(check_api_read_compiles(target))
+        for check in (
+            check_api_page_references,
+            check_api_read_advances,
+            check_api_read_stop_condition,
+        ):
+            assert "not driven" not in _messages(check(target)), check.__name__
+
+    def test_a_check_answers_the_same_thing_every_time_it_is_called(
+        self, tmp_path: Path
+    ) -> None:
+        target = self._broken(tmp_path, "invoices", self._stale_cursor_default)
+        # Copied as it is answered: a check handing back the cached list
+        # itself compares equal to its own later state, which is the one
+        # thing this must not read as agreement.
+        first = list(check_api_read_compiles(target))
+        second = list(check_api_read_compiles(target))
+        assert first == second
+
+
+class TestApiStopConditionDecidesAboutTheRightThing:
+    """A stop condition written the wrong way round stops at page one.
+
+    Nothing else in the suite sees it: ``advance`` is driven directly and
+    never consults the loop's stopping rule, so an inverted condition
+    produces a perfectly good next request that production never issues.
+    """
+
+    _broken = staticmethod(TestApiReadPathBreaks._broken)
+
+    @pytest.mark.parametrize(
+        ("stem", "stop_when"),
+        [
+            ("invoices", {"exists": {"ref": "response.body.meta.next_token"}}),
+            ("events", {"exists": {"ref": "response.body.links.next"}}),
+            ("widgets", {"not_empty": {"ref": "response.body.objects"}}),
+            (
+                "ledger",
+                {
+                    "gte": [
+                        {"ref": "response.record_count"},
+                        {"ref": "runtime.batch_size"},
+                    ]
+                },
+            ),
+        ],
+    )
+    def test_an_inverted_stop_condition_is_caught_on_every_scheme(
+        self, tmp_path: Path, stem: str, stop_when: dict[str, Any]
+    ) -> None:
+        target = self._broken(
+            tmp_path, stem, lambda read: read["pagination"].update(stop_when=stop_when)
+        )
+        report = _report(check_api_read_stop_condition(target))
+        assert "holds on a full page" in report
+
+    def test_a_condition_about_the_traversals_position_is_not_judged(
+        self, tmp_path: Path
+    ) -> None:
+        """A page number against a page total is not the kit's call.
+
+        The scripted page has no position to be right about, so guessing one
+        would replace the connector's verdict with the kit's arithmetic. The
+        page-number fixture declares exactly that condition and is clean.
+        """
+        assert check_api_read_stop_condition(load_target(API_REFERENCE_DIR)) == []
+
+    def test_a_literal_is_not_a_page_lookup(self, tmp_path: Path) -> None:
+        """The resolver hands a literal back untouched, so it reads nothing."""
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            lambda read: read["pagination"].update(
+                stop_when={"missing": {"literal": {"ref": "response.body.objects"}}}
+            ),
+        )
+        report = _report(check_api_read_stop_condition(target))
+        assert "reads nothing under 'response'" in report
+
+
+class TestApiOriginGuardCoversEveryLinkDeclaration:
+    """Handed an off-origin link, a link read refuses it or stays on origin.
+
+    The invariant, not the mechanism: the drive plants the off-origin URL
+    at the continuation path and lets ``follow_url`` and ``same_origin`` --
+    the engine's own functions -- decide. Every declaration shape gets the
+    drive, so none of them can go uncertified.
+    """
+
+    _broken = staticmethod(TestApiReadPathBreaks._broken)
+
+    def test_a_bare_reference_link_is_refused(self) -> None:
+        """The provider's value is the whole URL, so leaving the origin is fatal."""
+        assert check_api_read_advances(load_target(API_REFERENCE_DIR)) == []
+
+    def test_a_template_opening_with_the_value_is_refused(self, tmp_path: Path) -> None:
+        """``${...}&limit=50`` hands the provider the origin as surely as a ref."""
+        target = self._broken(
+            tmp_path,
+            "events",
+            lambda read: read["pagination"]["link"].update(
+                next_url={"template": "${response.body.links.next}&limit=50"}
+            ),
+        )
+        assert check_api_read_advances(target) == []
+
+    def test_a_relative_url_built_around_the_value_is_clean(
+        self, tmp_path: Path
+    ) -> None:
+        """The author owns the path; the provider supplies a query fragment.
+
+        Substituting an off-origin URL into that placeholder yields a
+        relative URL that resolves back onto the connector's own origin, so
+        demanding a refusal would fail a connector that never could send its
+        credentials elsewhere. This is the proof that driving every shape
+        does not start failing correct connectors.
+        """
+        target = self._broken(
+            tmp_path,
+            "events",
+            lambda read: read["pagination"]["link"].update(
+                next_url={"template": "/v1/events?after=${response.body.links.next}"}
+            ),
+        )
+        assert check_api_read_advances(target) == []
+
+    def test_a_link_the_connector_derives_is_judged_by_where_it_lands(
+        self, tmp_path: Path
+    ) -> None:
+        """A function's result is a relative segment, so it stays on the origin.
+
+        There is no reading of the declaration that says so: only running it
+        and asking ``same_origin`` about the answer. Demanding a refusal
+        here -- because a function's result is "unconstrained" -- reports a
+        violation against a connector whose next request provably cannot
+        leave the origin.
+        """
+        target = self._broken(
+            tmp_path,
+            "events",
+            lambda read: read["pagination"]["link"].update(
+                next_url={
+                    "function": "base64_encode",
+                    "input": {"ref": "response.body.links.next"},
+                }
+            ),
+        )
+        assert check_api_read_advances(target) == []
+
+
+class TestApiRefusalDrivesAreArmed:
+    """A drive that certifies a refusal has to be able to report one.
+
+    Every connector shipped here passes: the refusals are the engine's own
+    (``follow_url`` for a link, ``_Keyset.advance`` for an ordering value),
+    so no authorable document reaches them and answers wrongly. That is
+    exactly what makes "the check returned nothing" unreadable -- it says
+    the same thing whether the drive ran or was never armed. So each drive
+    is pointed at a traversal whose guard has been taken out from under it,
+    and required to report.
+
+    The stand-in that replaces a guard still reads what the drive planted
+    -- ``urljoin`` follows the link it was handed, and the keyset walk
+    substitutes a value only where the record had none. That is what makes
+    these tests say something the assertions above cannot: take the
+    planting away and each one fails, because the traversal was then handed
+    a page it had every reason to accept.
+    """
+
+    _broken = staticmethod(TestApiReadPathBreaks._broken)
+
+    @staticmethod
+    def _following_link(current: str, target: str, *, origin: str) -> str:
+        """``follow_url`` with the origin refusal taken out."""
+        return urljoin(current, target)
+
+    @pytest.mark.parametrize(
+        ("next_url", "shape"),
+        [
+            ({"ref": "response.body.links.next"}, "a bare reference"),
+            (
+                {"template": "${response.body.links.next}&limit=50"},
+                "a template opening with the value",
+            ),
+        ],
+    )
+    def test_a_link_read_that_leaves_the_origin_is_reported(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        next_url: dict[str, Any],
+        shape: str,
+    ) -> None:
+        """Both declaration shapes are handed the off-origin link, not just one.
+
+        The drive plants it at the continuation path; a drive that did not
+        would hand the traversal the connector's own declared value, which
+        resolves back onto the origin and reports nothing.
+        """
+        monkeypatch.setattr(read_setup, "follow_url", self._following_link)
+        target = self._broken(
+            tmp_path,
+            "events",
+            lambda read: read["pagination"]["link"].update(next_url=next_url),
+        )
+        report = _report(check_api_read_advances(target))
+        assert "elsewhere.invalid" in report, shape
+        assert "must be refused" in report, shape
+
+    def test_a_keyset_read_that_accepts_a_page_with_no_ordering_value(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Taking the ordering value from anywhere but the record must bite.
+
+        That is what a keyset scheme which does not refuse looks like, and
+        the drive has to say so: a traversal continuing past a page it
+        cannot continue from lands rows the read can never get past.
+
+        The stand-in walks the record first and only substitutes a value
+        where the record had none, so the page the drive planted is still
+        what decides. That is what makes the arming testable rather than
+        assumed: ``found`` carries what the real walk saw, and a page
+        carrying the declared records -- one the keyset guard has every
+        reason to accept -- never puts a ``None`` in it.
+        """
+        found: list[Any] = []
+        walk = strategies.walk_path
+
+        def planting_walk(record: dict[str, Any], path: list[str]) -> Any:
+            value = walk(record, path)
+            found.append(value)
+            return "planted" if value is None else value
+
+        monkeypatch.setattr(strategies, "walk_path", planting_walk)
+        report = _report(check_api_read_advances(load_target(API_REFERENCE_DIR)))
+        assert "instead of refusing" in report
+        assert "'sequence'" in report
+        assert None in found, (
+            "the keyset drive never handed the traversal a record without an "
+            "ordering value, so the refusal it certifies was never armed"
+        )
+
+
+class TestApiTransportBreaks:
+    """Every read opens default_transport, so there has to be one."""
+
+    @staticmethod
+    def _bent_definition(tmp_path: Path, mutate: Any) -> ConformanceTarget:
+        root = tmp_path / "api"
+        shutil.copytree(API_REFERENCE_DIR, root)
+        path = root / "definition" / "connector.json"
+        definition = json.loads(path.read_text())
+        mutate(definition)
+        path.write_text(json.dumps(definition))
+        return load_target(root)
+
+    def test_a_default_transport_that_is_not_declared(self, tmp_path: Path) -> None:
+        target = self._bent_definition(
+            tmp_path, lambda d: d.update(default_transport="oauth")
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "'oauth'" in report
+        assert "no stream on this connector reaches its first request" in report
+
+    def test_a_default_transport_of_another_type(self, tmp_path: Path) -> None:
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(transport_type="sqlalchemy"),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "'sqlalchemy'" in report
+        assert "no session" in report
+
+
+class TestApiRequestBodyBreaks:
+    """The first request is query *and* body; the read builds both."""
+
+    _broken = staticmethod(TestApiReadPathBreaks._broken)
+
+    def test_a_declared_body_that_resolves_to_nothing(self, tmp_path: Path) -> None:
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["method"] = "POST"
+            read["request"]["body"] = {"ref": "response.body.not_a_request_scope"}
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "resolved to nothing" in report
+
+    def test_a_body_reading_the_connection_is_not_judged(self, tmp_path: Path) -> None:
+        """A definition-only run has no connection, and that is not a defect."""
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["method"] = "POST"
+            read["request"]["body"] = {"ref": "connection.parameters.filter"}
+
+        target = self._broken(tmp_path, "widgets", bend)
+        assert check_api_read_compiles(target) == []
+
+
+class TestApiRunWithNothingToDrive:
+    """A green tier 1 must mean the read path ran, not that there was none."""
+
+    def test_a_connector_with_no_endpoints(self, tmp_path: Path) -> None:
+        root = tmp_path / "api"
+        shutil.copytree(API_REFERENCE_DIR, root)
+        shutil.rmtree(root / "definition" / "endpoints")
+        report = _report(check_api_has_reads(load_target(root)))
+        assert "ships no endpoint documents at all" in report
+
+    def test_a_connector_whose_endpoints_are_write_only(self, tmp_path: Path) -> None:
+        root = tmp_path / "api"
+        shutil.copytree(API_REFERENCE_DIR, root)
+        endpoints = root / "definition" / "endpoints"
+        for path in list(endpoints.glob("*.json")):
+            if path.stem != "widgets":
+                path.unlink()
+                continue
+            document = json.loads(path.read_text())
+            document["operations"].pop("read")
+            path.write_text(json.dumps(document))
+        report = _report(check_api_has_reads(load_target(root)))
+        assert "declare no operations.read" in report
+
+    def test_a_database_connector_is_not_asked_for_reads(self) -> None:
+        """The gate is the api tier's own; every other kind is untouched."""
+        target = load_target(REFERENCE_DIR, class_path=REFERENCE_CLASS)
+        assert check_api_has_reads(target) == []
+
+
+class TestApiBaseUrlBreaks:
+    """The transport build needs a base URL resolving to a non-empty string."""
+
+    _bent_definition = staticmethod(TestApiTransportBreaks._bent_definition)
+
+    @pytest.mark.parametrize("declared", [None, ""])
+    def test_a_default_transport_with_no_usable_base_url(
+        self, tmp_path: Path, declared: object
+    ) -> None:
+        def bend(definition: dict[str, Any]) -> None:
+            block = definition["transports"]["api"]
+            if declared is None:
+                block.pop("base_url")
+            else:
+                block["base_url"] = declared
+
+        target = self._bent_definition(tmp_path, bend)
+        report = _report(check_read_transport_selection(target))
+        assert "no usable base_url" in report
+
+    def test_a_base_url_literal_that_is_empty_is_not_a_usable_one(
+        self, tmp_path: Path
+    ) -> None:
+        """A mapping is not the same as a value: this one resolves to ''.
+
+        Reading the declaration for truthiness certifies a connector whose
+        ``connect()`` cannot open a session, because the transport build
+        rejects the empty string.
+        """
+        target = self._bent_definition(
+            tmp_path, lambda d: d["transports"]["api"].update(base_url={"literal": ""})
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "no usable base_url" in report
+
+    def test_a_base_url_expression_that_cannot_resolve_names_why(
+        self, tmp_path: Path
+    ) -> None:
+        """An expression reading no connection scope is resolved, not deferred."""
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(
+                base_url={"ref": "runtime.no_such_value"}
+            ),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "no usable base_url" in report
+        assert "no_such_value" in report
+
+    def test_a_base_url_the_connection_supplies_is_clean(self, tmp_path: Path) -> None:
+        """A definition-only run cannot say what a reference will resolve to."""
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(
+                base_url={"ref": "connection.parameters.host"}
+            ),
+        )
+        assert check_read_transport_selection(target) == []
+
+    def test_a_base_url_scope_that_does_not_exist_does_not_stop_the_run(
+        self, tmp_path: Path
+    ) -> None:
+        """A typo in the scope name is a bare KeyError, not a resolver error.
+
+        ``"connectio."`` is not ``"connection."``, so nothing defers it and
+        the resolver is asked. It answers with the ``KeyError`` it raises
+        for any unknown scope, and a check that let that through would
+        report neither this defect nor the ``transport_ref`` beside it --
+        one authoring mistake hiding another.
+        """
+        root = tmp_path / "api"
+        shutil.copytree(API_REFERENCE_DIR, root)
+        connector = root / "definition" / "connector.json"
+        definition = json.loads(connector.read_text())
+        definition["transports"]["api"]["base_url"] = {"ref": "connectio.base_url"}
+        connector.write_text(json.dumps(definition))
+        document = root / "definition" / "endpoints" / "widgets.json"
+        parsed = json.loads(document.read_text())
+        parsed["operations"]["read"]["request"]["transport_ref"] = "other"
+        document.write_text(json.dumps(parsed))
+
+        report = _report(check_read_transport_selection(load_target(root)))
+        assert "no usable base_url" in report
+        assert "connectio" in report
+        assert "transport_ref 'other'" in report, "the arm after it still ran"
+
+    def test_a_transport_header_the_connection_supplies_is_not_resolved(
+        self, tmp_path: Path
+    ) -> None:
+        """Only the base URL is resolved, so an auth header is no obstacle."""
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"]["headers"].update(
+                Authorization={"template": "Bearer ${auth.access_token}"}
+            ),
+        )
+        assert check_read_transport_selection(target) == []
+
+
+class TestApiPositionlessSchemeBreaks:
+    """A scheme holding only what the last page handed back has to read it.
+
+    The defect is one page later than every other advance defect: the
+    request after page one differs from the first request, so a drive that
+    stops there certifies the read. It is the request after page TWO that
+    comes back identical, and it does so for a cursor, a link and a keyset
+    alike -- which is why the drive advances twice rather than the kit
+    holding a table of which schemes keep a position of their own.
+    """
+
+    _broken = staticmethod(TestApiReadPathBreaks._broken)
+
+    def test_a_cursor_continuing_from_a_constant(self, tmp_path: Path) -> None:
+        target = self._broken(
+            tmp_path,
+            "invoices",
+            lambda read: read["pagination"]["cursor"].update(
+                next_cursor={"literal": "same"}
+            ),
+        )
+        report = _report(check_api_read_advances(target))
+        assert "the request after the second page is the request before it" in report
+
+    def test_a_link_continuing_from_a_constant(self, tmp_path: Path) -> None:
+        target = self._broken(
+            tmp_path,
+            "events",
+            lambda read: read["pagination"]["link"].update(
+                next_url={"literal": "/v1/events?after=fixed"}
+            ),
+        )
+        report = _report(check_api_read_advances(target))
+        assert "the request after the second page is the request before it" in report
+
+    def test_a_link_continuing_from_the_connection(self, tmp_path: Path) -> None:
+        """Nothing a definition-only run resolves, so the traversal ends."""
+        target = self._broken(
+            tmp_path,
+            "events",
+            lambda read: read["pagination"]["link"].update(
+                next_url={"ref": "connection.parameters.next_page"}
+            ),
+        )
+        report = _report(check_api_read_advances(target))
+        assert "stops after the first page and reports success" in report
+
+    def test_a_keyset_ordering_a_moving_field_is_clean(self, tmp_path: Path) -> None:
+        """Keyset continues from the record, and the record moves.
+
+        Which is why no table is needed to exempt it: the drive hands the
+        second page a later ordering value, exactly as a provider does, and
+        the request that follows differs on its own. Whether a *provider*
+        moves that field is a fact about data, not about the declaration,
+        and nothing a definition-only run can judge either way.
+        """
+        assert check_api_read_advances(load_target(API_REFERENCE_DIR)) == []
+
+    def test_an_offset_stepping_by_a_constant_is_clean(self, tmp_path: Path) -> None:
+        """Offset counts rows for itself, so a fixed step is exactly right."""
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            lambda read: read["pagination"]["offset"].update(increment_by=50),
+        )
+        assert check_api_read_advances(target) == []
+
+
+class TestApiWholeBodyStopConditionBreaks:
+    """A full page's body is present and non-empty, so stopping on it is wrong."""
+
+    _broken = staticmethod(TestApiReadPathBreaks._broken)
+
+    def test_a_stop_condition_on_the_whole_payload(self, tmp_path: Path) -> None:
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            lambda read: read["pagination"].update(
+                stop_when={"not_empty": {"ref": "response.body"}}
+            ),
+        )
+        report = _report(check_api_read_stop_condition(target))
+        assert "holds on a full page" in report
+
+
+class TestApiRequestBodyIsValidatedAroundConnectionValues:
+    """One connection-scoped field must not switch off the whole body check."""
+
+    _broken = staticmethod(TestApiReadPathBreaks._broken)
+
+    @staticmethod
+    def _post_body(spec: dict[str, Any]) -> Any:
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["method"] = "POST"
+            read["request"]["body"] = spec
+
+        return bend
+
+    def test_a_malformed_branch_beside_a_connection_reference(
+        self, tmp_path: Path
+    ) -> None:
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            self._post_body(
+                {
+                    "scope": {"ref": "connection.parameters.scope"},
+                    "page": {"from_param": "offset"},
+                    "broken": {"ref": 123},
+                }
+            ),
+        )
+        report = _report(check_api_read_compiles(target))
+        assert "`ref` must be a string" in report
+
+    def test_a_well_formed_body_reading_the_connection_is_clean(
+        self, tmp_path: Path
+    ) -> None:
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            self._post_body(
+                {
+                    "scope": {"ref": "connection.parameters.scope"},
+                    "page": {"from_param": "offset"},
+                }
+            ),
+        )
+        assert check_api_read_compiles(target) == []
+
+    def test_a_body_that_is_one_connection_expression_is_clean(
+        self, tmp_path: Path
+    ) -> None:
+        """That one really does resolve to nothing, for no fault of the connector."""
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            self._post_body({"ref": "connection.parameters.filter"}),
+        )
+        assert check_api_read_compiles(target) == []
+
+    def test_a_sibling_key_beside_a_connection_reference_is_caught(
+        self, tmp_path: Path
+    ) -> None:
+        """Deferring the resolution must not defer the grammar with it.
+
+        The value this node reads is the connection's, so a definition-only
+        run cannot produce it -- but the node is malformed whatever the
+        connection says, and the engine raises on it the first time the
+        stream runs.
+        """
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            self._post_body({"ref": "connection.parameters.scope", "extra": 1}),
+        )
+        report = _report(check_api_read_compiles(target))
+        assert "must be the only key" in report
+
+
+class TestApiDeclarationsAreReadThroughTheResolversOwnGrammar:
+    """Every spelling that reads a scope is one the kit sees."""
+
+    _broken = staticmethod(TestApiReadPathBreaks._broken)
+
+    def test_a_reference_inside_a_function_input_is_seen(self, tmp_path: Path) -> None:
+        """A ``function`` node's input is authored structure, not opaque data."""
+        target = self._broken(
+            tmp_path,
+            "invoices",
+            lambda read: read["pagination"]["cursor"].update(
+                next_cursor={
+                    "function": "base64_encode",
+                    "input": {"ref": "response.body.lnks.next"},
+                }
+            ),
+        )
+        report = _report(check_api_page_references(target))
+        assert "'response.body.lnks.next'" in report
+        assert "does not reach" in report
+
+
+class TestApiRequestBlockBreaks:
+    """What the request block declares has to be something the path can send."""
+
+    _broken = staticmethod(TestApiReadPathBreaks._broken)
+
+    def test_a_path_placeholder_the_kit_substitutes_matches_the_engine(
+        self, tmp_path: Path
+    ) -> None:
+        """The kit compiles the URL the engine compiles, braces and all."""
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["path"] = "/v1/accounts/{account_id}/widgets"
+            read["request"]["path_params"] = {"account_id": {"from_param": "account"}}
+            read["params"]["account"] = {
+                "in": "path",
+                "type": "string",
+                "required": True,
+                "default": {"literal": "acme/eu"},
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        assert check_api_read_compiles(target) == []
+        probes, _ = api_read_path._probes(target)
+        widgets = [probe for probe in probes if probe.label == "widgets"]
+        assert widgets, "the bent endpoint is what this tests"
+        assert "{" not in widgets[0].url
+        # Percent-encoded as one segment: a value carrying '/' would
+        # otherwise rewrite the URL's structure.
+        assert widgets[0].url.endswith("/v1/accounts/acme%2Feu/widgets")
+
+    def test_a_path_placeholder_with_no_binding_at_all_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        """Nothing a run supplies reaches a placeholder no binding names."""
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["path"] = "/v1/accounts/{account_id}/widgets"
+            read["request"]["path_params"] = {}
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "{account_id}" in report
+        assert "declares no binding" in report
+
+    def test_a_path_placeholder_bound_to_an_undeclared_param_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        """A param the endpoint never declares is in no table any run builds."""
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["path"] = "/v1/accounts/{account_id}/widgets"
+            read["request"]["path_params"] = {"account_id": {"from_param": "acount"}}
+            read["params"]["account"] = {
+                "in": "path",
+                "type": "string",
+                "required": True,
+                "default": {"literal": "acme"},
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "{account_id}" in report
+        assert "'acount'" in report
+        assert "does not declare" in report
+
+    def test_a_path_placeholder_bound_to_a_dead_expression_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        """The third unbindable case: an expression no run can change.
+
+        Not a ``{from_param}`` binding and not connection-scoped, so
+        nothing a run supplies enters into it -- it resolves to nothing
+        here and resolves to nothing in production, and the URL it builds
+        addresses the collection rather than the record.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["path"] = "/v1/accounts/{account_id}/widgets"
+            read["request"]["path_params"] = {"account_id": {"literal": ""}}
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "{account_id}" in report
+        assert "resolves to nothing and reads no scope a connection supplies" in report
+
+    def test_a_path_placeholder_a_run_supplies_is_not_a_finding(
+        self, tmp_path: Path
+    ) -> None:
+        """The engine binds this one from a stream's filters or the cursor.
+
+        A declared path param carries no value in a definition-only run and
+        every value in a real one: the engine builds its table from the
+        stream's filters and the replication cursor as well as the declared
+        defaults, and substitutes the path only after the incremental filter
+        has bound. Reporting it here fails a connector the engine reads
+        correctly -- so the kit stands a segment in and drives on.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["path"] = "/v1/accounts/{account_id}/widgets"
+            read["request"]["path_params"] = {"account_id": {"from_param": "account"}}
+            read["params"]["account"] = {
+                "in": "path",
+                "type": "string",
+                "required": True,
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        assert check_api_read_compiles(target) == []
+        probes, _ = api_read_path._probes(target)
+        widgets = [probe for probe in probes if probe.label == "widgets"]
+        assert widgets, "the bent endpoint is what this tests"
+        assert widgets[0].url.endswith(
+            f"/v1/accounts/{api_read_path._STAND_IN_PATH_SEGMENT}/widgets"
+        )
+
+    def test_a_path_placeholder_the_connection_supplies_is_not_a_finding(
+        self, tmp_path: Path
+    ) -> None:
+        """A default reading the connection resolves to nothing here, and only here."""
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["path"] = "/v1/accounts/{account_id}/widgets"
+            read["request"]["path_params"] = {"account_id": {"from_param": "account"}}
+            read["params"]["account"] = {
+                "in": "path",
+                "type": "string",
+                "required": True,
+                "default": {"ref": "connection.parameters.account"},
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        assert check_api_read_compiles(target) == []
+
+    def test_a_path_placeholder_the_pagination_loop_owns_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """A per-page value can never reach a path substituted once per read."""
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["path"] = "/v1/widgets/{offset}"
+            read["request"]["path_params"] = {"offset": {"from_param": "offset"}}
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "'offset'" in report
+        assert "pagination loop owns" in report
+
+    def test_a_read_removing_a_transport_header_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """The connection's defaults live on a shared session; nothing deletes one."""
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            lambda read: read["request"].update(headers_remove=["Accept"]),
+        )
+        report = _report(check_api_read_compiles(target))
+        assert "headers_remove" in report
+        assert "shared HTTP session" in report
+
+    def test_a_declared_header_the_connection_owns_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """The request build sees the session's header names, never their values."""
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            lambda read: read["request"].update(headers={"Accept": "text/csv"}),
+        )
+        report = _report(check_api_read_compiles(target))
+        assert "'Accept'" in report
+        assert "cannot shadow" in report
+
+    def test_a_header_the_transport_may_resolve_away_is_still_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """A definition cannot say which connections send an optional header.
+
+        The engine reserves the names its session ended up carrying, so a
+        transport header whose value resolves to nothing is not among them.
+        A definition-only run cannot resolve it either way, and permitting
+        the endpoint's copy would make the shadowing show up only for the
+        connections that fill the header in.
+        """
+        root = tmp_path / "api"
+        shutil.copytree(API_REFERENCE_DIR, root)
+        path = root / "definition" / "connector.json"
+        definition = json.loads(path.read_text())
+        definition["transports"]["api"]["headers"]["X-Tenant"] = {
+            "ref": "connection.parameters.tenant"
+        }
+        path.write_text(json.dumps(definition))
+        document = root / "definition" / "endpoints" / "widgets.json"
+        parsed = json.loads(document.read_text())
+        parsed["operations"]["read"]["request"]["headers"] = {"X-Tenant": "acme"}
+        document.write_text(json.dumps(parsed))
+
+        report = _report(check_api_read_compiles(load_target(root)))
+        assert "'X-Tenant'" in report
+        assert "transport declares" in report
+
+    def test_a_param_bound_under_a_transport_header_key_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        """The binding KEY is the wire name, so the key is what is judged.
+
+        A param is the endpoint's internal handle; it reaches the provider
+        only under the ``request.headers`` key that binds it. Binding an
+        innocuous param under a name the transport already sends shadows
+        that header just as declaring a literal there would.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["params"]["media"] = {
+                "in": "header",
+                "type": "string",
+                "required": False,
+                "default": {"literal": "text/csv"},
+            }
+            read["request"]["headers"] = {"Accept": {"from_param": "media"}}
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "'Accept'" in report
+        assert "transport declares" in report
+
+    def test_a_param_named_after_a_transport_header_is_not_reported(
+        self, tmp_path: Path
+    ) -> None:
+        """The mirror image: only the key goes out, so only the key is judged.
+
+        A param CALLED ``Accept`` bound under ``X-Accept`` sends
+        ``X-Accept`` and nothing else. Refusing it would fail an endpoint
+        that shadows nothing, on the strength of a name the provider never
+        sees.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["params"]["Accept"] = {
+                "in": "header",
+                "type": "string",
+                "required": False,
+                "default": {"literal": "text/csv"},
+            }
+            read["request"]["headers"] = {"X-Accept": {"from_param": "Accept"}}
+
+        target = self._broken(tmp_path, "widgets", bend)
+        assert check_api_read_compiles(target) == []
+
+    def test_a_first_request_a_derived_function_refuses_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        """The build calls the functions, so it raises what they raise.
+
+        ``base64_encode`` answers a non-string input with ``TypeError``,
+        which nothing between it and the compile wraps. Letting that escape
+        turns an authoring defect into a traceback and abandons every read
+        after it.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["method"] = "POST"
+            read["request"]["body"] = {
+                "function": "base64_encode",
+                "input": {"literal": 5},
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "must resolve to string or bytes" in report
+
+    def test_a_follow_up_request_reaching_an_unknown_scope_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        """Page two's body picks a map entry page one never resolves.
+
+        ``lookup`` resolves the entry it matched, so a bad scope inside the
+        entry keyed by the second page's offset arrives as a bare
+        ``KeyError`` -- from the request build, which reaches the resolver
+        directly rather than through the page expression resolver that wraps
+        the strategies.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["method"] = "POST"
+            read["request"]["body"] = {
+                "function": "lookup",
+                "input": {"from_param": "offset"},
+                "map": {"0": "the-first-page", "37": {"ref": "connectio.token"}},
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        assert check_api_read_compiles(target) == []
+        report = _report(check_api_read_advances(target))
+        assert "the request after the first page could not be built" in report
+        assert "Unknown resolution scope 'connectio'" in report
+
+    def test_a_header_the_connection_does_not_send_is_clean(
+        self, tmp_path: Path
+    ) -> None:
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            lambda read: read["request"].update(
+                headers={"X-Tenant": {"from_param": "tenant"}},
+                query={"page[limit]": {"from_param": "limit"}},
+            ),
+        )
+        assert check_api_read_compiles(target) == []
+
+    def test_a_follow_up_request_whose_body_cannot_be_built(
+        self, tmp_path: Path
+    ) -> None:
+        """Page one builds; page two, with the loop's own value, does not.
+
+        Nothing that stops at the first request sees this: the body derives
+        a field from the continuation, and the continuation does not exist
+        until the traversal has already handed page one's records over.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["method"] = "POST"
+            read["request"]["body"] = {
+                "function": "lookup",
+                "input": {"from_param": "offset"},
+                "map": {"0": "the-first-page"},
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        assert check_api_read_compiles(target) == []
+        report = _report(check_api_read_advances(target))
+        assert "the request after the first page could not be built" in report

@@ -69,6 +69,17 @@ _OFFSET = {
     "stop_when": {"empty": {"ref": "response.body.records"}},
 }
 
+#: The request block those params reach the wire through. The contract
+#: requires every declared param to be referenced by exactly one binding,
+#: in the map its ``in`` names, so a paginated read declares the query keys
+#: as well -- the param name is the endpoint's internal handle and never
+#: goes out on its own.
+_PAGINATION_REQUEST = {
+    "method": "GET",
+    "path": "/items",
+    "query": {"skip": {"from_param": "skip"}, "limit": {"from_param": "limit"}},
+}
+
 _PAGINATION_PARAMS = {
     "skip": {
         "in": "query",
@@ -114,6 +125,434 @@ class TestOnePage:
 
 
 @pytest.mark.asyncio
+class TestTheRequestTheContractDescribes:
+    """The three binding maps, which are the whole route to the wire.
+
+    ``request.path_params``, ``request.headers`` and ``request.query`` are
+    the only things that put a value on a request: the key is the wire name
+    and the declared param behind it is the endpoint's internal handle. The
+    read once joined the path with its ``{name}`` braces intact, never sent
+    ``request.headers`` at all, and then -- having been given the maps --
+    also emitted every param under its own name, sending each value twice.
+    """
+
+    async def test_a_path_placeholder_is_substituted_before_the_url_is_joined(
+        self,
+    ) -> None:
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        await _read(
+            session,
+            endpoint_document(
+                request={
+                    "method": "GET",
+                    "path": "/items/{id}",
+                    "path_params": {"id": {"from_param": "id"}},
+                },
+                params={
+                    "id": {
+                        "in": "path",
+                        "type": "string",
+                        "required": True,
+                        "default": {"literal": "a/b"},
+                    }
+                },
+            ),
+        )
+        # Encoded as one segment: the value crosses a trust boundary, and a
+        # slash in it would otherwise rewrite the URL's structure.
+        assert session.calls[0]["url"] == f"{BASE_URL}/items/a%2Fb"
+        assert session.calls[0]["params"] == {}
+
+    async def test_a_declared_header_reaches_the_wire(self) -> None:
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        await _read(
+            session,
+            endpoint_document(
+                request={
+                    "method": "GET",
+                    "path": "/items",
+                    "headers": {"X-Tenant": {"from_param": "tenant"}},
+                },
+                params={
+                    "tenant": {
+                        "in": "query",
+                        "type": "string",
+                        "required": False,
+                        "default": {"literal": "acme"},
+                    }
+                },
+            ),
+        )
+        assert session.calls[0]["headers"]["X-Tenant"] == "acme"
+
+    async def test_a_content_type_derived_from_a_param_reaches_the_wire(self) -> None:
+        # The engine-owned-header rule judges what a header WOULD send, and
+        # it has to work the value out the way the build does: bind the
+        # param, then resolve. Reading the raw declaration put the binding
+        # node in the function's input position and failed this read with
+        # "input must resolve to a scalar; got dict" -- against a connector
+        # that sends exactly the engine's own value.
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        await _read(
+            session,
+            endpoint_document(
+                request={
+                    "method": "GET",
+                    "path": "/items",
+                    "headers": {
+                        "Content-Type": {
+                            "function": "lookup",
+                            "input": {"from_param": "fmt"},
+                            "map": {"json": "application/json"},
+                        }
+                    },
+                },
+                params={
+                    "fmt": {
+                        "in": "header",
+                        "type": "string",
+                        "required": False,
+                        "default": {"literal": "json"},
+                    }
+                },
+            ),
+        )
+        assert session.calls[0]["headers"]["Content-Type"] == "application/json"
+
+    async def test_a_stream_filter_naming_no_declared_param_is_refused(self) -> None:
+        # The filter's value used to sit in the param table with nothing
+        # bound to it: the read issued no filtered param at all and
+        # returned the whole collection, reporting success. A filter that
+        # does not filter is a correctness failure, so the stream fails
+        # before its first request.
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        with pytest.raises(ReadError, match="customer_number"):
+            await _read(
+                session,
+                endpoint_document(
+                    request={
+                        "method": "GET",
+                        "path": "/items",
+                        "query": {"customerNumber": {"from_param": "cn"}},
+                    },
+                    params={"cn": {"in": "query", "type": "string", "required": False}},
+                ),
+                source=stream_source(
+                    filters=[
+                        {"field": "customer_number", "operator": "eq", "value": "C-1"}
+                    ]
+                ),
+            )
+        assert session.calls == []
+
+    async def test_a_declared_header_shadowing_the_connection_is_refused(
+        self,
+    ) -> None:
+        # request.headers is the whole header map an endpoint can declare,
+        # so its keys are the names that reach the wire. A key the
+        # connection's transport already sends can only shadow it -- here,
+        # replace the connection's credential with the endpoint's.
+        session = FakeSession()
+        session.headers["Authorization"] = "Bearer connection"
+        with pytest.raises(ReadError, match="request.headers declares"):
+            await _read(
+                session,
+                endpoint_document(
+                    request={
+                        "method": "GET",
+                        "path": "/items",
+                        "headers": {"Authorization": {"from_param": "token"}},
+                    },
+                    params={
+                        "token": {
+                            "in": "header",
+                            "type": "string",
+                            "required": True,
+                            "default": {"literal": "Bearer attacker"},
+                        }
+                    },
+                ),
+            )
+        assert session.calls == []
+
+    async def test_a_param_bound_under_a_harmless_key_is_not_refused(self) -> None:
+        # The mirror image, and the reason the rule reads the key rather
+        # than the param name: a param CALLED Authorization that lands
+        # under X-Legacy-Auth shadows nothing, and refusing it would fail a
+        # working endpoint.
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        session.headers["Authorization"] = "Bearer connection"
+        await _read(
+            session,
+            endpoint_document(
+                request={
+                    "method": "GET",
+                    "path": "/items",
+                    "headers": {"X-Legacy-Auth": {"from_param": "Authorization"}},
+                },
+                params={
+                    "Authorization": {
+                        "in": "header",
+                        "type": "string",
+                        "required": True,
+                        "default": {"literal": "legacy"},
+                    }
+                },
+            ),
+        )
+        assert session.calls[0]["headers"] == {"X-Legacy-Auth": "legacy"}
+
+    async def test_a_query_key_named_ref_is_sent_as_a_parameter(self) -> None:
+        # "ref" is a real query parameter name. Resolving the whole map as
+        # one node reads the key as an expression marker, and the endpoint
+        # fails with an error no caller classifies.
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        await _read(
+            session,
+            endpoint_document(
+                request={
+                    "method": "GET",
+                    "path": "/items",
+                    "query": {"ref": {"literal": "main"}},
+                }
+            ),
+        )
+        assert session.calls[0]["params"]["ref"] == "main"
+
+    async def test_a_path_placeholder_binding_to_an_empty_value_is_refused(
+        self,
+    ) -> None:
+        # "/items/" addresses the whole collection: the read would fetch
+        # every record and report success.
+        session = FakeSession()
+        with pytest.raises(ReadError, match=r"\{id\}"):
+            await _read(
+                session,
+                endpoint_document(
+                    request={
+                        "method": "GET",
+                        "path": "/items/{id}",
+                        "path_params": {"id": {"from_param": "id"}},
+                    },
+                    params={
+                        "id": {
+                            "in": "path",
+                            "type": "string",
+                            "required": True,
+                            "default": {"literal": ""},
+                        }
+                    },
+                ),
+            )
+        assert session.calls == []
+
+    async def test_a_path_binding_that_encodes_the_value_itself_is_refused(
+        self,
+    ) -> None:
+        # The engine percent-encodes every segment it substitutes, so this
+        # sends a%252Fb where the provider expects a%2Fb and answers 404.
+        session = FakeSession()
+        with pytest.raises(ReadError, match="url_encode"):
+            await _read(
+                session,
+                endpoint_document(
+                    request={
+                        "method": "GET",
+                        "path": "/items/{id}",
+                        "path_params": {
+                            "id": {
+                                "function": "url_encode",
+                                "input": {"from_param": "id"},
+                            }
+                        },
+                    },
+                    params={
+                        "id": {
+                            "in": "path",
+                            "type": "string",
+                            "required": True,
+                            "default": {"literal": "a/b"},
+                        }
+                    },
+                ),
+            )
+        assert session.calls == []
+
+    async def test_a_read_removing_a_transport_header_is_refused(self) -> None:
+        # The connection's defaults live on the shared session; nothing in
+        # the request build can delete one, so it is refused rather than
+        # silently ignored.
+        session = FakeSession()
+        with pytest.raises(ReadError, match="headers_remove"):
+            await _read(
+                session,
+                endpoint_document(
+                    request={
+                        "method": "GET",
+                        "path": "/items",
+                        "headers_remove": ["Authorization"],
+                    }
+                ),
+            )
+        assert session.calls == []
+
+    async def test_a_path_param_the_pagination_loop_owns_is_refused(self) -> None:
+        # The path is substituted once per read, so page one's value would
+        # be frozen into the URL and the read would fetch it forever.
+        session = FakeSession()
+        with pytest.raises(ReadError, match="pagination loop owns"):
+            await _read(
+                session,
+                endpoint_document(
+                    request={
+                        "method": "GET",
+                        "path": "/items/{skip}",
+                        "path_params": {"skip": {"from_param": "skip"}},
+                        "query": {"limit": {"from_param": "limit"}},
+                    },
+                    params={
+                        **_PAGINATION_PARAMS,
+                        "skip": {**_PAGINATION_PARAMS["skip"], "in": "path"},
+                    },
+                    pagination=_OFFSET,
+                ),
+            )
+        assert session.calls == []
+
+    async def test_a_path_param_the_replication_loop_owns_is_refused(self) -> None:
+        # The same refusal as the pagination case, for the same reason: the
+        # path is substituted once and the loop that owns the value has not
+        # run. A stored cursor happens to fill this one in, which is what
+        # makes it worth refusing -- the first run of the stream has no
+        # cursor and a full-refresh run never asks for one, so the document
+        # reads or fails depending on what is in the checkpoint. Refusing at
+        # plan time gives every run the same answer, and names the real
+        # problem instead of blaming a correct binding for an empty segment.
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        with pytest.raises(ReadError, match="replication loop owns"):
+            await _read(
+                session,
+                endpoint_document(
+                    request={
+                        "method": "GET",
+                        "path": "/items/{since}",
+                        "path_params": {"since": {"from_param": "since"}},
+                    },
+                    params={
+                        "since": {
+                            "in": "path",
+                            "type": "string",
+                            "required": True,
+                            "controlled_by": "replication",
+                        }
+                    },
+                    replication={
+                        "supported_methods": ["full_refresh", "incremental"],
+                        "cursor_mappings": [
+                            {"cursor_field": "id", "param": "since", "operator": "gte"}
+                        ],
+                    },
+                ),
+                source=stream_source(
+                    method="incremental", cursor_field="id", safety_window=60
+                ),
+                checkpoint=FakeCheckpoint({"cursor": "2026-07-31T12:00:00Z"}),
+            )
+        assert session.calls == []
+
+
+#: One authoring defect per request block, each raising a different thing
+#: out of the resolver: conflicting expression markers and an unknown
+#: derived function raise ``TransportSpecError``, a scope that does not
+#: exist raises ``KeyError``, a function handed the wrong type raises
+#: ``TypeError``. The read used to catch ``ValueError`` at both the path
+#: substitution and the request build, so three of the four escaped the
+#: connector as raw builtins the worker classified by accident.
+_DECLARATION_DEFECTS = {
+    "a header with conflicting markers": {
+        "headers": {"X-T": {"ref": "connection.parameters.a", "template": "b"}}
+    },
+    "a header reading a scope that does not exist": {
+        "headers": {"X-T": {"ref": "nosuchscope.a"}}
+    },
+    "a query value calling an unregistered function": {
+        "query": {"q": {"function": "nope", "input": {"literal": 1}}}
+    },
+    "a query value handing a function the wrong type": {
+        "query": {"q": {"function": "base64_encode", "input": {"literal": 5}}}
+    },
+    "a path binding reading a scope that does not exist": {
+        "path": "/items/{id}",
+        "path_params": {"id": {"ref": "nosuchscope.id"}},
+    },
+    "a path binding calling an unregistered function": {
+        "path": "/items/{id}",
+        "path_params": {"id": {"function": "nope", "input": {"literal": 1}}},
+    },
+}
+
+#: The same class one step earlier: a param's declared default is resolved
+#: before any binding map is read, so a defect there escaped ahead of every
+#: catch site the read has.
+_DEFECTIVE_PARAM = {
+    "tag": {
+        "in": "query",
+        "type": "string",
+        "required": False,
+        "default": {"ref": "nosuchscope.tag"},
+    }
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "defect", sorted(_DECLARATION_DEFECTS), ids=sorted(_DECLARATION_DEFECTS)
+)
+class TestADeclarationDefectReachesTheCallerAsOneError:
+    """Every way a declaration fails to resolve leaves the read as ReadError.
+
+    The worker fails a stream deterministically on ``ReadError`` and would
+    retry a bare ``KeyError`` or ``TypeError`` to exhaustion. Classifying
+    at the resolution boundary is what makes one ``except`` at each caller
+    correct; enumerating the resolver's exception types at each catch site
+    instead left a different one uncaught at each site.
+    """
+
+    async def test_the_read_fails_with_a_read_error(self, defect: str) -> None:
+        block = {"method": "GET", "path": "/items", **_DECLARATION_DEFECTS[defect]}
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        with pytest.raises(ReadError):
+            await _read(session, endpoint_document(request=block))
+
+    async def test_nothing_reaches_the_provider(self, defect: str) -> None:
+        # A request the endpoint could not describe must not go out at all.
+        block = {"method": "GET", "path": "/items", **_DECLARATION_DEFECTS[defect]}
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        with pytest.raises(ReadError):
+            await _read(session, endpoint_document(request=block))
+        assert session.calls == []
+
+
+@pytest.mark.asyncio
+class TestAParamDefaultIsADeclarationLikeAnyOther:
+    async def test_a_defective_default_fails_the_read_with_a_read_error(self) -> None:
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        with pytest.raises(ReadError):
+            await _read(
+                session,
+                endpoint_document(
+                    request={
+                        "method": "GET",
+                        "path": "/items",
+                        "query": {"tag": {"from_param": "tag"}},
+                    },
+                    params=_DEFECTIVE_PARAM,
+                ),
+            )
+        assert session.calls == []
+
+
+@pytest.mark.asyncio
 class TestPageSizeBinding:
     async def test_the_provider_cap_clamps_the_engines_batch_size(self) -> None:
         session = FakeSession(
@@ -121,7 +560,11 @@ class TestPageSizeBinding:
         )
         await _read(
             session,
-            endpoint_document(pagination=_OFFSET, params=_PAGINATION_PARAMS),
+            endpoint_document(
+                pagination=_OFFSET,
+                params=_PAGINATION_PARAMS,
+                request=_PAGINATION_REQUEST,
+            ),
             batch_size=100,
         )
         assert session.calls[0]["params"]["limit"] == 25
@@ -139,7 +582,11 @@ class TestPageSizeBinding:
         )
         await _read(
             session,
-            endpoint_document(pagination=pagination, params=_PAGINATION_PARAMS),
+            endpoint_document(
+                pagination=pagination,
+                params=_PAGINATION_PARAMS,
+                request=_PAGINATION_REQUEST,
+            ),
             batch_size=7,
         )
         assert session.calls[0]["params"]["limit"] == 7
@@ -154,7 +601,11 @@ class TestPageSizeBinding:
         )
         await _read(
             session,
-            endpoint_document(pagination=pagination, params=_PAGINATION_PARAMS),
+            endpoint_document(
+                pagination=pagination,
+                params=_PAGINATION_PARAMS,
+                request=_PAGINATION_REQUEST,
+            ),
             batch_size=100,
         )
         assert session.calls[0]["params"]["limit"] == 5
@@ -168,7 +619,11 @@ class TestPageSizeBinding:
         )
         await _read(
             session,
-            endpoint_document(pagination=pagination, params=_PAGINATION_PARAMS),
+            endpoint_document(
+                pagination=pagination,
+                params=_PAGINATION_PARAMS,
+                request=_PAGINATION_REQUEST,
+            ),
             batch_size=10,
         )
         assert "limit" not in session.calls[0]["params"]
@@ -182,7 +637,11 @@ class TestPageSizeBinding:
         with pytest.raises(ReadError, match="limit.default"):
             await _read(
                 session,
-                endpoint_document(pagination=pagination, params=_PAGINATION_PARAMS),
+                endpoint_document(
+                    pagination=pagination,
+                    params=_PAGINATION_PARAMS,
+                    request=_PAGINATION_REQUEST,
+                ),
             )
         assert session.calls == []
 
@@ -198,7 +657,12 @@ class TestPaging:
             ]
         )
         batches = await _read(
-            session, endpoint_document(pagination=_OFFSET, params=_PAGINATION_PARAMS)
+            session,
+            endpoint_document(
+                pagination=_OFFSET,
+                params=_PAGINATION_PARAMS,
+                request=_PAGINATION_REQUEST,
+            ),
         )
         assert [call["params"]["skip"] for call in session.calls] == [0, 3, 5]
         assert [batch.num_rows for batch in batches] == [3, 2]
@@ -211,7 +675,11 @@ class TestPaging:
         )
         batches = await _read(
             session,
-            endpoint_document(pagination=_OFFSET, params=_PAGINATION_PARAMS),
+            endpoint_document(
+                pagination=_OFFSET,
+                params=_PAGINATION_PARAMS,
+                request=_PAGINATION_REQUEST,
+            ),
             batch_size=100,
         )
         assert len(batches) == 1
@@ -225,7 +693,12 @@ class TestPaging:
         body = {**_rows(2), "has_more": False}
         session = FakeSession([FakeResponse(body=body)])
         batches = await _read(
-            session, endpoint_document(pagination=pagination, params=_PAGINATION_PARAMS)
+            session,
+            endpoint_document(
+                pagination=pagination,
+                params=_PAGINATION_PARAMS,
+                request=_PAGINATION_REQUEST,
+            ),
         )
         assert len(batches) == 1
         assert len(session.calls) == 1
@@ -261,6 +734,11 @@ class TestPaging:
 class TestIncremental:
     def _document(self) -> dict[str, Any]:
         return endpoint_document(
+            request={
+                "method": "GET",
+                "path": "/items",
+                "query": {"since": {"from_param": "since"}},
+            },
             params={
                 "since": {
                     "in": "query",
@@ -493,11 +971,18 @@ class TestAFollowedLinkReplacesTheWholeRequest:
                     "type": "string",
                     "required": False,
                     "default": "2024-01-01",
-                }
+                },
+                "tenant": {
+                    "in": "header",
+                    "type": "string",
+                    "required": False,
+                    "default": {"literal": "acme"},
+                },
             },
             request={
                 "method": "POST",
                 "path": "/items",
+                "headers": {"X-Tenant": {"from_param": "tenant"}},
                 "body": {"filter": {"from_param": "since"}},
             },
         )
@@ -517,6 +1002,10 @@ class TestAFollowedLinkReplacesTheWholeRequest:
         await _read(session, self._document())
         assert session.calls[1]["data"] is None
         assert session.calls[1]["params"] == {}
+        # The next URL replaces the request, not the connection: a page-two
+        # request that drops the endpoint's headers is a different request
+        # from the one page one certified.
+        assert session.calls[1]["headers"]["X-Tenant"] == "acme"
 
 
 @pytest.mark.asyncio

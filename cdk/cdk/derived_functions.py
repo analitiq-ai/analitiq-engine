@@ -110,9 +110,14 @@ def url_encode_function(node: Mapping[str, Any], resolver: Resolver) -> str:
     """Percent-encode a value for use inside a URL component.
 
     The default ``safe`` characters are empty so every reserved character
-    is escaped — appropriate for substituting into URL credentials and
-    path segments. Connector authors can override the safe set via the
-    ``safe`` field if they need a less aggressive encoding.
+    is escaped — appropriate for substituting into URL credentials.
+    Connector authors can override the safe set via the ``safe`` field if
+    they need a less aggressive encoding.
+
+    NOT for a path segment: the engine percent-encodes every value it
+    substitutes into ``request.path``, so encoding one here sends ``a%252Fb``
+    where the provider expects ``a%2Fb``. A ``path_params`` binding that
+    calls this is refused at plan time.
     """
     value = resolver.resolve(_require(node, "input"))
     if value is None:

@@ -15,7 +15,7 @@ module evaluates.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -23,6 +23,117 @@ from typing import Any
 from cdk.exceptions import TransportSpecError, UnresolvedValueError
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "DerivedFunction",
+    "ResolutionContext",
+    "Resolver",
+    "expression_node_problem",
+    "placeholder_paths",
+    "scope_paths",
+]
+
+#: The four expression markers. Module-level because reading a declaration
+#: is not resolving one: a caller scanning what an endpoint references
+#: needs the grammar without constructing a resolver, and a second copy of
+#: this set is how the two drift apart.
+_EXPR_KEYS = frozenset({"ref", "template", "literal", "function"})
+
+#: The keys a ``function`` node may carry beside its marker.
+_FUNCTION_ALLOWED_SIBLINGS = frozenset({"function", "input", "map", "safe"})
+
+
+def _placeholder_spans(template: str) -> Iterator[tuple[int, int, str]]:
+    """Yield ``(start, end, path)`` for each terminated ``${...}`` in *template*.
+
+    Stops silently at an unterminated placeholder because its two callers
+    need different answers there -- resolution has to raise, a declaration
+    scan has to report what it found -- so the scan is written once and the
+    error stays with the caller that owns it.
+    """
+    i = 0
+    n = len(template)
+    while i < n:
+        start = template.find("${", i)
+        if start < 0:
+            return
+        end = template.find("}", start + 2)
+        if end < 0:
+            return
+        yield start, end, template[start + 2 : end]
+        i = end + 1
+
+
+def placeholder_paths(template: str) -> list[str]:
+    """Every ``${scope.path}`` *template* substitutes, in order.
+
+    Forgiving where :meth:`Resolver._resolve_template` is strict: it returns
+    what it found and lets the resolver own the unterminated-placeholder
+    error, so a caller scanning a declaration does not raise in place of the
+    message the author needs.
+    """
+    return [path for _, _, path in _placeholder_spans(template)]
+
+
+def scope_paths(node: Any) -> list[str]:
+    """Every scope path an expression node reads.
+
+    ``ref`` names one, ``template`` names any inside ``${...}``, a
+    ``function``'s inputs recurse, and ``literal`` reads nothing -- the
+    resolver hands a literal back untouched, so a ref spelled inside one is
+    data, not a read.
+
+    Never raises: a caller scanning a declaration wants what it references,
+    and a malformed node is a defect for
+    :func:`expression_node_problem` to name.
+    """
+    if isinstance(node, list):
+        return [path for item in node for path in scope_paths(item)]
+    if not isinstance(node, Mapping):
+        return []
+    if "literal" in node:
+        return []
+    if "ref" in node:
+        ref = node["ref"]
+        return [ref] if isinstance(ref, str) and ref else []
+    if "template" in node:
+        template = node["template"]
+        return placeholder_paths(template) if isinstance(template, str) else []
+    # A ``function`` node's siblings are authored structure, and a plain
+    # object's values are too; both recurse the same way.
+    return [path for value in node.values() for path in scope_paths(value)]
+
+
+def expression_node_problem(node: Mapping[str, Any]) -> str | None:
+    """Why *node* is not a well-formed expression node, or ``None``.
+
+    The shape rules alone, with no context to resolve against, so a caller
+    reading a declaration reports the same defect the resolver would raise
+    on -- from one statement of the rules rather than a copy.
+    """
+    keys = set(node.keys())
+    marker = keys & _EXPR_KEYS
+    if len(marker) > 1:
+        return (
+            f"Expression node has conflicting markers {sorted(marker)}; "
+            f"use exactly one of {sorted(_EXPR_KEYS)} per node"
+        )
+    if "function" in marker:
+        extra = keys - _FUNCTION_ALLOWED_SIBLINGS
+        if extra:
+            return (
+                f"`function` expression has unexpected sibling keys "
+                f"{sorted(extra)}; allowed: "
+                f"{sorted(_FUNCTION_ALLOWED_SIBLINGS)}"
+            )
+        return None
+    if marker and len(keys) != 1:
+        (only,) = marker
+        return (
+            f"`{only}` expression must be the only key in the node; "
+            f"got siblings {sorted(keys - {only})}"
+        )
+    return None
 
 
 @dataclass
@@ -154,15 +265,10 @@ class Resolver:
     not need wrapping in ``{"literal": ...}``.
     """
 
-    _EXPR_KEYS = {"ref", "template", "literal", "function"}
-    _FUNCTION_ALLOWED_SIBLINGS = {"function", "input", "map", "safe"}
-
     @classmethod
     def is_expression_node(cls, value: Any) -> bool:
         """Return True when ``value`` is a dict carrying an expression marker."""
-        return isinstance(value, Mapping) and not cls._EXPR_KEYS.isdisjoint(
-            value.keys()
-        )
+        return isinstance(value, Mapping) and not _EXPR_KEYS.isdisjoint(value.keys())
 
     def __init__(
         self,
@@ -237,12 +343,12 @@ class Resolver:
         with its children resolved recursively.
         """
         if self.is_expression_node(value):
-            resolved = self._resolve_node_for_request(value)
-            if resolved is None:
-                logger.warning(
-                    "value-expression: top-level expression resolved to None"
-                )
-            return resolved
+            # No warning here. A top-level node has no key of its own to
+            # name, and every caller that hands one over already knows what
+            # it was resolving -- a header, a query parameter, a param's
+            # default -- and says so. Logging both put two lines on the wire
+            # for one dropped value, the first of them naming nothing.
+            return self._resolve_node_for_request(value)
         if isinstance(value, Mapping):
             resolved_dict: dict[str, Any] = {}
             for key, child in value.items():
@@ -298,32 +404,17 @@ class Resolver:
     def _resolve_mapping(self, node: Mapping[str, Any]) -> Any:
         # Detect expression markers. Mixing markers (e.g. `ref` + `template`,
         # or `function` + `ref`) is rejected outright so connector authors
-        # see the typo instead of one marker silently winning.
+        # see the typo instead of one marker silently winning; a bare marker
+        # must be the node's only key so a stray sibling is not dropped.
         keys = set(node.keys())
-        marker = keys & self._EXPR_KEYS
-        if len(marker) > 1:
-            raise TransportSpecError(
-                f"Expression node has conflicting markers {sorted(marker)}; "
-                f"use exactly one of {sorted(self._EXPR_KEYS)} per node"
-            )
+        marker = keys & _EXPR_KEYS
+        if marker:
+            problem = expression_node_problem(node)
+            if problem is not None:
+                raise TransportSpecError(problem)
         if "function" in marker:
-            extra = keys - self._FUNCTION_ALLOWED_SIBLINGS
-            if extra:
-                raise TransportSpecError(
-                    f"`function` expression has unexpected sibling keys "
-                    f"{sorted(extra)}; allowed: "
-                    f"{sorted(self._FUNCTION_ALLOWED_SIBLINGS)}"
-                )
             return self._resolve_function(node)
         if marker:
-            # Bare expression marker: must be the only key in the node so a
-            # stray sibling does not get silently dropped.
-            if len(keys) != 1:
-                (only,) = marker
-                raise TransportSpecError(
-                    f"`{only}` expression must be the only key in the node; "
-                    f"got siblings {sorted(keys - {only})}"
-                )
             (only,) = marker
             if only == "ref":
                 return self._resolve_ref(node["ref"])
@@ -357,19 +448,8 @@ class Resolver:
             )
         out: list[str] = []
         i = 0
-        n = len(template)
-        while i < n:
-            j = template.find("${", i)
-            if j < 0:
-                out.append(template[i:])
-                break
+        for j, k, path in _placeholder_spans(template):
             out.append(template[i:j])
-            k = template.find("}", j + 2)
-            if k < 0:
-                raise TransportSpecError(
-                    f"Unterminated ${{...}} placeholder in template: {template!r}"
-                )
-            path = template[j + 2 : k]
             try:
                 value = self._ctx.lookup(path)
             except UnresolvedValueError:
@@ -399,6 +479,14 @@ class Resolver:
                 )
             out.append(str(value))
             i = k + 1
+        # The shared scanner stops at an unterminated placeholder rather
+        # than raising, so resolution -- the caller that cannot go on
+        # without one -- says so here.
+        if template.find("${", i) >= 0:
+            raise TransportSpecError(
+                f"Unterminated ${{...}} placeholder in template: {template!r}"
+            )
+        out.append(template[i:])
         return "".join(out)
 
     def _resolve_function(self, node: Mapping[str, Any]) -> Any:

@@ -1,0 +1,74 @@
+{
+  "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
+  "endpoint_id": "customers",
+  "display_name": "Customers (page-number-paginated)",
+  "description": "The provider counts pages rather than rows, and the step is fixed for the whole traversal.",
+  "operations": {
+    "read": {
+      "request": {
+        "method": "GET",
+        "path": "/v1/customers",
+        "query": {
+          "per_page": { "from_param": "per_page" },
+          "page": { "from_param": "page" }
+        }
+      },
+      "params": {
+        "per_page": {
+          "in": "query",
+          "type": "integer",
+          "required": false,
+          "controlled_by": "pagination"
+        },
+        "page": {
+          "in": "query",
+          "type": "integer",
+          "required": false,
+          "controlled_by": "pagination"
+        }
+      },
+      "pagination": {
+        "type": "page",
+        "limit": {
+          "param": "per_page",
+          "default": { "ref": "runtime.batch_size" },
+          "max": 100
+        },
+        "page": {
+          "param": "page",
+          "initial": 1,
+          "increment_by": 1
+        },
+        "stop_when": {
+          "gte": [
+            { "ref": "response.body.page" },
+            { "ref": "response.body.total_pages" }
+          ]
+        }
+      },
+      "response": {
+        "records": { "ref": "response.body.items" },
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "page": { "type": "integer" },
+            "total_pages": { "type": "integer" },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": { "type": "integer" },
+                  "email": { "type": "string" },
+                  "display_name": { "type": "string" },
+                  "tags": { "type": "array" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
