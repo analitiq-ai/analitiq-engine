@@ -32,10 +32,23 @@ from cdk.api.write_plan import (
     retry_verdict,
     write_mode_block,
 )
+from cdk.derived_functions import DEFAULT_FUNCTIONS
+from cdk.resolver import ResolutionContext, Resolver
 from cdk.types import RetrySemantics, SchemaSpec, WriteMode
 from src.models.resolved import dump_endpoint_document
 
 pytestmark = pytest.mark.unit
+
+
+def _resolver(**parameters: Any) -> Resolver:
+    """The request resolver a connected write role hands the plan builder."""
+    return Resolver(
+        ResolutionContext(
+            connection={"parameters": parameters or {}},
+            runtime={"connection_id": "test-conn"},
+        ),
+        functions=DEFAULT_FUNCTIONS,
+    )
 
 
 def _document(
@@ -45,6 +58,12 @@ def _document(
     batching: dict[str, Any] | None = None,
     idempotency: dict[str, Any] | None = None,
     properties: dict[str, Any] | None = None,
+    path: str = "/items",
+    path_params: dict[str, Any] | None = None,
+    headers: dict[str, Any] | None = None,
+    headers_remove: list[str] | None = None,
+    query: dict[str, Any] | None = None,
+    params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a write document the api-endpoint contract accepts, then dump it."""
     # The contract requires every write body to address the in-flight
@@ -55,7 +74,15 @@ def _document(
             if batching is not None
             else {"item": {"from_input": "record"}}
         )
-    request: dict[str, Any] = {"method": "POST", "path": "/items", "body": body}
+    request: dict[str, Any] = {"method": "POST", "path": path, "body": body}
+    if path_params is not None:
+        request["path_params"] = path_params
+    if headers is not None:
+        request["headers"] = headers
+    if headers_remove is not None:
+        request["headers_remove"] = headers_remove
+    if query is not None:
+        request["query"] = query
     block: dict[str, Any] = {
         "request": request,
         "input": {
@@ -81,6 +108,8 @@ def _document(
         block["batching"] = batching
     if idempotency is not None:
         block["idempotency"] = idempotency
+    if params is not None:
+        block["params"] = params
     if mode == "upsert":
         block["conflict_keys"] = ["id"]
     raw = {
@@ -105,7 +134,9 @@ class TestRawKeysAreTheOnesThatArrive:
         doc = _document(
             idempotency={"in": "header", "name": "Idempotency-Key"},
         )
-        plan = build_write_plan(doc, _spec(), session_header_names=set())
+        plan = build_write_plan(
+            doc, _spec(), session_header_names=set(), resolver=_resolver()
+        )
         assert isinstance(plan, StreamWritePlan)
         assert plan.idempotency_in == "header"
         assert plan.idempotency_name == "Idempotency-Key"
@@ -113,13 +144,17 @@ class TestRawKeysAreTheOnesThatArrive:
     def test_the_input_schema_survives_the_round_trip(self) -> None:
         # ``schema_`` on the model, ``schema`` in the document.
         doc = _document()
-        plan = build_write_plan(doc, _spec(), session_header_names=set())
+        plan = build_write_plan(
+            doc, _spec(), session_header_names=set(), resolver=_resolver()
+        )
         assert isinstance(plan, StreamWritePlan)
         assert plan.json_fields == {"payload"}
 
     def test_the_request_and_batching_survive_the_round_trip(self) -> None:
         doc = _document(batching={"max_records": 50})
-        plan = build_write_plan(doc, _spec(), session_header_names=set())
+        plan = build_write_plan(
+            doc, _spec(), session_header_names=set(), resolver=_resolver()
+        )
         assert isinstance(plan, StreamWritePlan)
         assert (plan.method, plan.endpoint, plan.max_records) == ("POST", "/items", 50)
 
@@ -155,13 +190,17 @@ class TestModeDispatch:
             _document(),
             _spec(WriteMode.WRITE_MODE_TRUNCATE_INSERT),
             session_header_names=set(),
+            resolver=_resolver(),
         )
         assert isinstance(outcome, str)
         assert "does not support write_mode" in outcome
 
     def test_a_missing_block_names_the_modes_that_are_present(self) -> None:
         outcome = build_write_plan(
-            _document(mode="upsert"), _spec(), session_header_names=set()
+            _document(mode="upsert"),
+            _spec(),
+            session_header_names=set(),
+            resolver=_resolver(),
         )
         assert isinstance(outcome, str)
         assert "operations.write.insert" in outcome and "upsert" in outcome
@@ -181,7 +220,12 @@ class TestIdempotencyRefusals:
         # Layering the key over it would shadow the connection's own value
         # on every request -- or send the record id as the credential.
         doc = _document(idempotency={"in": "header", "name": "Authorization"})
-        outcome = build_write_plan(doc, _spec(), session_header_names={"authorization"})
+        outcome = build_write_plan(
+            doc,
+            _spec(),
+            session_header_names={"authorization"},
+            resolver=_resolver(),
+        )
         assert isinstance(outcome, str) and "collides" in outcome
 
     def test_batching_and_idempotency_cannot_combine(self) -> None:
@@ -230,6 +274,144 @@ class TestIdempotencyRefusals:
         assert problem is not None and "JSON-object request body" in problem
 
 
+class TestTheRequestTheStreamWillActuallySend:
+    """The write path binds the same three maps the read path does.
+
+    Before this, the plan carried ``request.path`` verbatim: an endpoint
+    keyed on a record id POSTed to the literal ``/Contact/{id}``, and every
+    declared header was dropped.
+    """
+
+    def test_a_path_placeholder_is_substituted_into_the_plans_endpoint(self) -> None:
+        doc = _document(
+            path="/Contact/{id}",
+            path_params={"id": {"from_param": "id"}},
+            params={
+                "id": {
+                    "in": "path",
+                    "type": "string",
+                    "required": True,
+                    "default": {"ref": "connection.parameters.contact"},
+                }
+            },
+        )
+        plan = build_write_plan(
+            doc,
+            _spec(),
+            session_header_names=set(),
+            resolver=_resolver(contact="c-9"),
+        )
+        assert isinstance(plan, StreamWritePlan)
+        assert plan.endpoint == "/Contact/c-9"
+
+    def test_a_path_placeholder_with_nothing_to_bind_is_rejected(self) -> None:
+        # Write params resolve their default through the connection, secrets
+        # and runtime scopes; a param with no default has nothing to give,
+        # and a URL that still carries braces is answered 200 by many
+        # providers.
+        doc = _document(
+            path="/Contact/{id}",
+            path_params={"id": {"from_param": "id"}},
+            params={"id": {"in": "path", "type": "string", "required": True}},
+        )
+        outcome = build_write_plan(
+            doc, _spec(), session_header_names=set(), resolver=_resolver()
+        )
+        assert isinstance(outcome, str)
+        assert "{id}" in outcome and "path_params" in outcome
+
+    def test_declared_headers_and_query_land_on_the_plan(self) -> None:
+        doc = _document(
+            headers={"X-Tenant": {"from_param": "tenant"}},
+            query={"page[limit]": {"literal": 50}},
+            params={
+                "tenant": {
+                    "in": "header",
+                    "type": "string",
+                    "required": True,
+                    "default": {"ref": "connection.parameters.tenant"},
+                }
+            },
+        )
+        plan = build_write_plan(
+            doc, _spec(), session_header_names=set(), resolver=_resolver(tenant="acme")
+        )
+        assert isinstance(plan, StreamWritePlan)
+        assert plan.headers == {"X-Tenant": "acme"}
+        assert plan.query == {"page[limit]": 50}
+
+    def test_a_request_removing_a_transport_header_is_rejected(self) -> None:
+        # The connection's defaults live on the shared session; a
+        # per-request header can add or override, never delete.
+        doc = _document(headers_remove=["Authorization"])
+        outcome = build_write_plan(
+            doc, _spec(), session_header_names=set(), resolver=_resolver()
+        )
+        assert isinstance(outcome, str)
+        assert "headers_remove" in outcome
+
+    def test_a_declared_content_type_matching_what_the_engine_sends_is_permitted(
+        self,
+    ) -> None:
+        # The collision is a no-op: the sender skips its own injection when
+        # the request already carries a Content-Type.
+        doc = _document(headers={"Content-Type": "application/json"})
+        plan = build_write_plan(
+            doc, _spec(), session_header_names=set(), resolver=_resolver()
+        )
+        assert isinstance(plan, StreamWritePlan)
+        assert plan.headers == {"Content-Type": "application/json"}
+
+    def test_a_conflicting_content_type_is_rejected(self) -> None:
+        doc = _document(headers={"Content-Type": "application/xml"})
+        outcome = build_write_plan(
+            doc, _spec(), session_header_names=set(), resolver=_resolver()
+        )
+        assert isinstance(outcome, str)
+        assert "application/json" in outcome
+
+    def test_a_declared_header_the_connection_owns_is_rejected(self) -> None:
+        # The request build never sees the connection's header values, only
+        # their names, so re-declaring one can only shadow it.
+        doc = _document(headers={"Authorization": {"literal": "Bearer x"}})
+        outcome = build_write_plan(
+            doc,
+            _spec(),
+            session_header_names={"authorization"},
+            resolver=_resolver(),
+        )
+        assert isinstance(outcome, str)
+        assert "Authorization" in outcome
+
+    def test_an_idempotency_key_colliding_with_a_declared_header_is_rejected(
+        self,
+    ) -> None:
+        # One reserved set: the engine-owned key must not be layered over a
+        # header this endpoint declares either. Hand-written, like the rest
+        # of the second-line-of-defence rules -- the contract rejects this
+        # document too, so a valid one cannot reach the check.
+        doc = {
+            "endpoint_id": "items",
+            "operations": {
+                "write": {
+                    "insert": {
+                        "request": {
+                            "method": "POST",
+                            "path": "/items",
+                            "headers": {"Idempotency-Key": {"literal": "authored"}},
+                            "body": {"item": {"from_input": "record"}},
+                        },
+                        "idempotency": {"in": "header", "name": "Idempotency-Key"},
+                    }
+                }
+            },
+        }
+        outcome = build_write_plan(
+            doc, _spec(), session_header_names=set(), resolver=_resolver()
+        )
+        assert isinstance(outcome, str) and "collides" in outcome
+
+
 class TestRetryVerdicts:
     def test_upsert_is_exactly_once_without_a_declared_key(self) -> None:
         verdict = retry_verdict("upsert", StreamWritePlan())
@@ -246,7 +428,9 @@ class TestRetryVerdicts:
         assert verdict.semantics == RetrySemantics.RETRY_SEMANTICS_AT_LEAST_ONCE
 
     def test_the_plan_carries_its_verdict(self) -> None:
-        plan = build_write_plan(_document(), _spec(), session_header_names=set())
+        plan = build_write_plan(
+            _document(), _spec(), session_header_names=set(), resolver=_resolver()
+        )
         assert isinstance(plan, StreamWritePlan)
         assert plan.retry_verdict is not None
 

@@ -6,7 +6,12 @@ from typing import Any
 
 import pytest
 
-from cdk.api.request import ParamTable, RequestBuilder, build_write_body
+from cdk.api.request import (
+    ParamTable,
+    RequestBuilder,
+    build_write_body,
+    substitute_path,
+)
 from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.resolver import ResolutionContext, Resolver
 
@@ -159,9 +164,85 @@ class TestRequestBuilder:
         builder = RequestBuilder(
             table, raw_body=None, resolver=_resolver(), endpoint="/items"
         )
-        query, body = builder.for_page({"q": "x", "payload": "y"})
-        assert query == {"q": "x"}
-        assert body is None
+        prepared = builder.for_page({"q": "x", "payload": "y"})
+        assert prepared.query == {"q": "x"}
+        assert prepared.body is None
+
+    def test_a_path_placed_param_stays_off_the_query_string(self) -> None:
+        # The path substitution already sent it; repeating it as ?id=<value>
+        # is a parameter the endpoint never described.
+        table = ParamTable.for_read(
+            {"id": {"in": "path", "type": "string", "required": True}},
+            _resolver(),
+        )
+        builder = RequestBuilder(
+            table, raw_body=None, resolver=_resolver(), endpoint="/items/{id}"
+        )
+        assert builder.for_page({"id": "abc"}).query == {}
+
+    def test_a_header_placed_param_lands_in_the_headers(self) -> None:
+        table = ParamTable.for_read(
+            {"X-Tenant": {"in": "header", "type": "string", "required": True}},
+            _resolver(),
+        )
+        builder = RequestBuilder(
+            table, raw_body=None, resolver=_resolver(), endpoint="/items"
+        )
+        prepared = builder.for_page({"X-Tenant": "acme"})
+        assert prepared.headers == {"X-Tenant": "acme"}
+        assert prepared.query == {}
+
+    def test_the_declared_query_map_lands_under_its_own_key(self) -> None:
+        # request.query is not a rename map: the key is what goes on the
+        # wire, and it need not be a declared param's name.
+        table = ParamTable.for_read(
+            {"limit": {"in": "query", "type": "integer", "required": False}},
+            _resolver(),
+        )
+        builder = RequestBuilder(
+            table,
+            raw_body=None,
+            resolver=_resolver(),
+            endpoint="/items",
+            declared_query={"page[limit]": {"from_param": "limit"}},
+        )
+        assert builder.for_page({"limit": 25}).query["page[limit]"] == 25
+
+    def test_a_declared_header_binds_a_param(self) -> None:
+        table = ParamTable.for_read(
+            {"tenant": {"in": "query", "type": "string", "required": False}},
+            _resolver(),
+        )
+        builder = RequestBuilder(
+            table,
+            raw_body=None,
+            resolver=_resolver(),
+            endpoint="/items",
+            declared_headers={"X-Tenant": {"from_param": "tenant"}},
+        )
+        assert builder.for_page({"tenant": "acme"}).headers == {"X-Tenant": "acme"}
+
+    def test_a_continuation_page_keeps_the_endpoint_headers_and_sends_no_body(
+        self,
+    ) -> None:
+        # A next URL replaces the request, not the connection: the headers
+        # say how this connection talks to the provider.
+        table = ParamTable.for_read(
+            {"tenant": {"in": "query", "type": "string", "required": False}},
+            _resolver(),
+            filters=[{"field": "tenant", "value": "acme"}],
+        )
+        builder = RequestBuilder(
+            table,
+            raw_body={"filter": {"literal": "x"}},
+            resolver=_resolver(),
+            endpoint="/items",
+            declared_headers={"X-Tenant": {"from_param": "tenant"}},
+        )
+        prepared = builder.for_page({}, sends_declared_body=False)
+        assert prepared.headers == {"X-Tenant": "acme"}
+        assert prepared.body is None
+        assert prepared.query == {}
 
     def test_the_body_binds_the_pages_own_param_values(self) -> None:
         # Built per page: a body-paginated endpoint must see what the loop
@@ -176,8 +257,8 @@ class TestRequestBuilder:
             resolver=_resolver(),
             endpoint="/items",
         )
-        _, first = builder.for_page({"offset": 0})
-        _, second = builder.for_page({"offset": 100})
+        first = builder.for_page({"offset": 0}).body
+        second = builder.for_page({"offset": 100}).body
         assert (first, second) == ({"page": 0}, {"page": 100})
 
     def test_a_body_that_resolves_away_entirely_is_refused(self) -> None:
@@ -191,6 +272,34 @@ class TestRequestBuilder:
         )
         with pytest.raises(ValueError, match="resolved to nothing"):
             builder.for_page({})
+
+
+class TestPathSubstitution:
+    def test_a_placeholder_takes_its_bound_value(self) -> None:
+        assert (
+            substitute_path("/Contact/{id}", {"id": 42}, endpoint="items")
+            == "/Contact/42"
+        )
+
+    def test_a_path_with_no_placeholder_is_untouched(self) -> None:
+        assert substitute_path("/items", {}, endpoint="items") == "/items"
+
+    def test_a_value_carrying_a_separator_is_encoded_as_one_segment(self) -> None:
+        # The value crosses a trust boundary: unencoded, "a/b" adds a path
+        # segment and "?x" starts a query the endpoint never declared.
+        assert (
+            substitute_path("/Contact/{id}", {"id": "a/b?c"}, endpoint="items")
+            == "/Contact/a%2Fb%3Fc"
+        )
+
+    def test_an_unbound_placeholder_is_refused(self) -> None:
+        # A URL with braces in it is answered 200 by many providers.
+        with pytest.raises(ValueError, match=r"\{id\}"):
+            substitute_path("/Contact/{id}", {}, endpoint="items")
+
+    def test_a_placeholder_resolving_to_nothing_is_refused(self) -> None:
+        with pytest.raises(ValueError, match=r"\{id\}"):
+            substitute_path("/Contact/{id}", {"id": None}, endpoint="items")
 
 
 class TestWriteBody:

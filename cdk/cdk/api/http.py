@@ -26,6 +26,7 @@ from aiohttp_retry import ExponentialRetry, RetryClient
 
 from ..declarations import ErrorMap
 from ..rate_limiter import RateLimiter
+from .request import JSON_CONTENT_TYPE
 from .verdicts import classify_exception, classify_status
 
 if TYPE_CHECKING:
@@ -220,7 +221,7 @@ class HttpSender:
         ):
             request = replace(
                 request,
-                headers={**request.headers, "Content-Type": "application/json"},
+                headers={**request.headers, "Content-Type": JSON_CONTENT_TYPE},
             )
         request = self._dialect.sign_request(request)
         if self._rate_limiter:
