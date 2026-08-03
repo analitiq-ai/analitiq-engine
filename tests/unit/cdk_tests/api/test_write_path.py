@@ -22,18 +22,25 @@ def _document(
     body: Any = None,
     batching: dict[str, Any] | None = None,
     idempotency: dict[str, Any] | None = None,
+    headers: dict[str, Any] | None = None,
+    query: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    request: dict[str, Any] = {
+        "method": "POST",
+        "path": "/items",
+        "body": body
+        or (
+            {"items": {"from_input": "records"}}
+            if batching
+            else {"item": {"from_input": "record"}}
+        ),
+    }
+    if headers is not None:
+        request["headers"] = headers
+    if query is not None:
+        request["query"] = query
     block: dict[str, Any] = {
-        "request": {
-            "method": "POST",
-            "path": "/items",
-            "body": body
-            or (
-                {"items": {"from_input": "records"}}
-                if batching
-                else {"item": {"from_input": "record"}}
-            ),
-        },
+        "request": request,
         "input": {
             "schema": {
                 "type": "object",
@@ -147,6 +154,32 @@ class TestWriting:
         )
         await _write(connector, _batch(1))
         assert session.calls[0]["headers"]["Idempotency-Key"] != "r0"
+
+
+@pytest.mark.asyncio
+class TestTheDeclaredRequestReachesTheWire:
+    """What the write role used to drop: every declared header and query entry."""
+
+    async def test_the_declared_query_reaches_the_wire(self) -> None:
+        session = FakeSession([FakeResponse(body={})])
+        connector = await _connected(
+            session, _document(query={"dry_run": {"literal": "false"}})
+        )
+        await _write(connector, _batch(1))
+        assert session.calls[0]["params"] == {"dry_run": "false"}
+
+    async def test_the_declared_headers_reach_the_wire_on_a_chunked_write(self) -> None:
+        # The chunked path takes no per-record extra headers, so a plan that
+        # did not carry them sent none at all.
+        session = FakeSession([FakeResponse(body={})])
+        connector = await _connected(
+            session,
+            _document(
+                batching={"max_records": 5}, headers={"X-Tenant": {"literal": "acme"}}
+            ),
+        )
+        await _write(connector, _batch(2))
+        assert session.calls[0]["headers"]["X-Tenant"] == "acme"
 
 
 @pytest.mark.asyncio

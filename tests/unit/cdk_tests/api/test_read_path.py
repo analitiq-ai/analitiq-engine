@@ -114,6 +114,136 @@ class TestOnePage:
 
 
 @pytest.mark.asyncio
+class TestTheRequestTheContractDescribes:
+    """The three binding maps the read used to drop or misplace.
+
+    Before this, a param declared ``in: path`` or ``in: header`` went onto
+    the query string, the path was joined with its ``{name}`` braces intact,
+    and ``request.headers`` never reached the wire at all.
+    """
+
+    async def test_a_path_placeholder_is_substituted_before_the_url_is_joined(
+        self,
+    ) -> None:
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        await _read(
+            session,
+            endpoint_document(
+                request={
+                    "method": "GET",
+                    "path": "/items/{id}",
+                    "path_params": {"id": {"from_param": "id"}},
+                },
+                params={
+                    "id": {
+                        "in": "path",
+                        "type": "string",
+                        "required": True,
+                        "default": {"literal": "a/b"},
+                    }
+                },
+            ),
+        )
+        # Encoded as one segment: the value crosses a trust boundary, and a
+        # slash in it would otherwise rewrite the URL's structure.
+        assert session.calls[0]["url"] == f"{BASE_URL}/items/a%2Fb"
+        assert session.calls[0]["params"] == {}
+
+    async def test_a_declared_header_reaches_the_wire(self) -> None:
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        await _read(
+            session,
+            endpoint_document(
+                request={
+                    "method": "GET",
+                    "path": "/items",
+                    "headers": {"X-Tenant": {"from_param": "tenant"}},
+                },
+                params={
+                    "tenant": {
+                        "in": "query",
+                        "type": "string",
+                        "required": False,
+                        "default": {"literal": "acme"},
+                    }
+                },
+            ),
+        )
+        assert session.calls[0]["headers"]["X-Tenant"] == "acme"
+
+    async def test_a_read_removing_a_transport_header_is_refused(self) -> None:
+        # The connection's defaults live on the shared session; nothing in
+        # the request build can delete one, so it is refused rather than
+        # silently ignored.
+        session = FakeSession()
+        with pytest.raises(ReadError, match="headers_remove"):
+            await _read(
+                session,
+                endpoint_document(
+                    request={
+                        "method": "GET",
+                        "path": "/items",
+                        "headers_remove": ["Authorization"],
+                    }
+                ),
+            )
+        assert session.calls == []
+
+    async def test_a_path_param_the_pagination_loop_owns_is_refused(self) -> None:
+        # The path is substituted once per read, so page one's value would
+        # be frozen into the URL and the read would fetch it forever.
+        session = FakeSession()
+        with pytest.raises(ReadError, match="pagination loop owns"):
+            await _read(
+                session,
+                endpoint_document(
+                    request={
+                        "method": "GET",
+                        "path": "/items/{skip}",
+                        "path_params": {"skip": {"from_param": "skip"}},
+                    },
+                    params=_PAGINATION_PARAMS,
+                    pagination=_OFFSET,
+                ),
+            )
+        assert session.calls == []
+
+    async def test_a_path_param_the_replication_loop_owns_is_substituted(self) -> None:
+        # Safe at plan time: the stored cursor is written into the param
+        # table before the path is substituted.
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        await _read(
+            session,
+            endpoint_document(
+                request={
+                    "method": "GET",
+                    "path": "/items/{since}",
+                    "path_params": {"since": {"from_param": "since"}},
+                },
+                params={
+                    "since": {
+                        "in": "path",
+                        "type": "string",
+                        "required": True,
+                        "controlled_by": "replication",
+                    }
+                },
+                replication={
+                    "supported_methods": ["full_refresh", "incremental"],
+                    "cursor_mappings": [
+                        {"cursor_field": "id", "param": "since", "operator": "gte"}
+                    ],
+                },
+            ),
+            source=stream_source(
+                method="incremental", cursor_field="id", safety_window=60
+            ),
+            checkpoint=FakeCheckpoint({"cursor": "2026-07-31T12:00:00Z"}),
+        )
+        assert session.calls[0]["url"] == f"{BASE_URL}/items/2026-07-31T11%3A59%3A00Z"
+
+
+@pytest.mark.asyncio
 class TestPageSizeBinding:
     async def test_the_provider_cap_clamps_the_engines_batch_size(self) -> None:
         session = FakeSession(
@@ -493,7 +623,13 @@ class TestAFollowedLinkReplacesTheWholeRequest:
                     "type": "string",
                     "required": False,
                     "default": "2024-01-01",
-                }
+                },
+                "X-Tenant": {
+                    "in": "header",
+                    "type": "string",
+                    "required": False,
+                    "default": {"literal": "acme"},
+                },
             },
             request={
                 "method": "POST",
@@ -517,6 +653,10 @@ class TestAFollowedLinkReplacesTheWholeRequest:
         await _read(session, self._document())
         assert session.calls[1]["data"] is None
         assert session.calls[1]["params"] == {}
+        # The next URL replaces the request, not the connection: a page-two
+        # request that drops the endpoint's headers is a different request
+        # from the one page one certified.
+        assert session.calls[1]["headers"]["X-Tenant"] == "acme"
 
 
 @pytest.mark.asyncio

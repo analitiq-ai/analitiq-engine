@@ -10,7 +10,13 @@ from __future__ import annotations
 import pytest
 
 from cdk.exceptions import TransportSpecError
-from cdk.resolver import ResolutionContext, Resolver
+from cdk.resolver import (
+    ResolutionContext,
+    Resolver,
+    expression_node_problem,
+    placeholder_paths,
+    scope_paths,
+)
 
 # ---------------------------------------------------------------------------
 # ResolutionContext.lookup
@@ -498,3 +504,75 @@ class TestResolveForRequestAuthoringErrorsRaise:
         r = _request_resolver(connection={"parameters": {"obj": {"k": "v"}}})
         with pytest.raises(TransportSpecError, match="only scalars"):
             r.resolve_for_request({"template": "x${connection.parameters.obj}"})
+
+
+class TestDeclarationReaders:
+    """Reading a declaration is not resolving one.
+
+    The kit reports what an endpoint references without a connection to
+    resolve against. These are the readers it calls, so the grammar is
+    stated once: a second copy is how the two drift apart, and the copy
+    silently under-reports (a ref inside a function input, for one).
+    """
+
+    def test_every_placeholder_is_reported_in_order(self):
+        assert placeholder_paths(
+            "${connection.parameters.host}:${connection.parameters.port}/v1"
+        ) == ["connection.parameters.host", "connection.parameters.port"]
+
+    def test_a_template_with_no_placeholder_reads_nothing(self):
+        assert placeholder_paths("https://api.example.com") == []
+
+    def test_an_unterminated_placeholder_reports_what_was_found(self):
+        # Forgiving where the resolver is strict: the caller scanning a
+        # declaration must not raise in place of the message the author
+        # needs when the value is actually resolved.
+        assert placeholder_paths("${connection.parameters.host}/v1/${gone") == [
+            "connection.parameters.host"
+        ]
+
+    def test_a_ref_names_one_path(self):
+        assert scope_paths({"ref": "connection.parameters.host"}) == [
+            "connection.parameters.host"
+        ]
+
+    def test_a_template_names_its_placeholders(self):
+        assert scope_paths({"template": "${secrets.key}/${auth.token}"}) == [
+            "secrets.key",
+            "auth.token",
+        ]
+
+    def test_a_reference_inside_a_function_input_is_reported(self):
+        assert scope_paths(
+            {
+                "function": "base64_encode",
+                "input": {"ref": "response.body.links.next"},
+            }
+        ) == ["response.body.links.next"]
+
+    def test_a_literal_reads_nothing_however_it_is_spelled(self):
+        # The resolver hands a literal back untouched, so a ref spelled
+        # inside one is data, not a read.
+        assert scope_paths({"literal": {"ref": "connection.parameters.host"}}) == []
+
+    def test_a_malformed_node_reads_nothing_rather_than_raising(self):
+        assert scope_paths({"ref": 123}) == []
+
+    def test_a_well_formed_node_has_no_problem(self):
+        assert expression_node_problem({"ref": "connection.parameters.host"}) is None
+
+    def test_conflicting_markers_are_named(self):
+        problem = expression_node_problem({"ref": "a.b", "template": "c"})
+        assert problem is not None and "conflicting markers" in problem
+
+    def test_a_function_sibling_key_is_named(self):
+        problem = expression_node_problem(
+            {"function": "base64_encode", "input": {}, "rogue": 1}
+        )
+        assert problem is not None and "unexpected sibling keys" in problem
+
+    def test_a_sibling_beside_a_bare_marker_is_named(self):
+        problem = expression_node_problem(
+            {"ref": "connection.parameters.host", "extra": 1}
+        )
+        assert problem is not None and "must be the only key" in problem
