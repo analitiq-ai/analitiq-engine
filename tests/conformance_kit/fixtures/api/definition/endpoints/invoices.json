@@ -7,7 +7,11 @@
     "read": {
       "request": {
         "method": "GET",
-        "path": "/v1/invoices"
+        "path": "/v1/invoices",
+        "query": {
+          "pageSize": { "from_param": "page_size" },
+          "pageToken": { "from_param": "page_token" }
+        }
       },
       "params": {
         "page_size": {

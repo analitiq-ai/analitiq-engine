@@ -7,7 +7,10 @@
     "read": {
       "request": {
         "method": "GET",
-        "path": "/v1/events"
+        "path": "/v1/events",
+        "query": {
+          "page_size": { "from_param": "page_size" }
+        }
       },
       "params": {
         "page_size": {

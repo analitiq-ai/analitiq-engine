@@ -7,7 +7,11 @@
     "read": {
       "request": {
         "method": "GET",
-        "path": "/v1/customers"
+        "path": "/v1/customers",
+        "query": {
+          "per_page": { "from_param": "per_page" },
+          "page": { "from_param": "page" }
+        }
       },
       "params": {
         "per_page": {

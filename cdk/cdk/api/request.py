@@ -572,10 +572,10 @@ class RequestBuilder:
         their initial values frozen at the first request.
 
         ``sends_declared_body`` is False on a provider-supplied continuation,
-        which the contract says replaces the whole request: it carries its
-        own query and takes no declared body. The endpoint's headers still
-        go out -- they describe how this connection talks to the provider,
-        not which page is being asked for.
+        which the contract says replaces the whole request: the URL carries
+        its own query, so this one sends none and takes no declared body.
+        The endpoint's headers still go out -- they describe how this
+        connection talks to the provider, not which page is being asked for.
         """
         # A link continuation arrives with no params of its own, so the
         # bindings read the table too: a header bound to a declared param
@@ -590,9 +590,6 @@ class RequestBuilder:
             resolver=self._resolver,
             endpoint=self._endpoint,
         )
-        if not sends_declared_body:
-            query = dict(page_params)
-
         if self._raw_body is None or not sends_declared_body:
             return PreparedRequest(query=query, headers=headers, body=None)
         with request_spec_errors(f"request.body for endpoint {self._endpoint!r}"):

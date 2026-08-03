@@ -7,7 +7,11 @@
     "read": {
       "request": {
         "method": "GET",
-        "path": "/v1/widgets"
+        "path": "/v1/widgets",
+        "query": {
+          "limit": { "from_param": "limit" },
+          "offset": { "from_param": "offset" }
+        }
       },
       "params": {
         "limit": {

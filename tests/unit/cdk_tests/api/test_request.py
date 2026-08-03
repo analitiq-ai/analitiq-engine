@@ -238,6 +238,25 @@ class TestRequestBuilder:
         assert prepared.body is None
         assert prepared.query == {}
 
+    def test_a_continuation_carrying_params_still_sends_no_query(self) -> None:
+        # The continuation URL carries its own query, and a param reaches
+        # the wire only through a binding that names it. A page's params
+        # going onto the query string raw would be a second sink with its
+        # own spelling rules: internal names, no bindings, no refusals.
+        table = ParamTable.for_read(
+            {"limit": {"in": "query", "type": "integer", "required": False}},
+            _resolver(),
+        )
+        builder = RequestBuilder(
+            table,
+            raw_body=None,
+            resolver=_resolver(),
+            endpoint="/items",
+            declared_query={"page[limit]": {"from_param": "limit"}},
+        )
+        prepared = builder.for_page({"limit": 25}, sends_declared_body=False)
+        assert prepared.query == {}
+
     def test_the_body_binds_the_pages_own_param_values(self) -> None:
         # Built per page: a body-paginated endpoint must see what the loop
         # set, not the values frozen at the first request.
