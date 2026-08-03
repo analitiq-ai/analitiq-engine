@@ -340,13 +340,12 @@ class TestTheRequestTheStreamWillActuallySend:
         assert plan.headers["X-Tenant"] == "acme"
         assert plan.query == {"page[limit]": 50}
 
-    def test_the_write_role_places_params_exactly_as_the_read_role_does(self) -> None:
-        # Parity is the invariant, not any particular placement: the two
-        # roles read one placement vocabulary out of one document, so a
-        # declaration that reaches the wire on a read has to reach it on a
-        # write. Before this the write plan read request.query and
-        # request.headers only, and ``in: query`` / ``in: header`` were
-        # honoured by one role and silently dropped by the other.
+    def test_the_write_role_binds_exactly_as_the_read_role_does(self) -> None:
+        # Parity is the invariant: the two roles read one document through
+        # one binder, so a declaration that reaches the wire on a read has
+        # to reach it on a write, under the same key and with the same
+        # value. A second implementation here is what let the two roles
+        # disagree about the same endpoint.
         doc = _document(
             headers={"X-Tenant": {"from_param": "tenant"}},
             query={"page[limit]": {"from_param": "limit"}},
@@ -385,36 +384,14 @@ class TestTheRequestTheStreamWillActuallySend:
         ).for_page(table.values)
         assert (plan.query, plan.headers) == (as_read.query, as_read.headers)
 
-    def test_a_body_placed_param_stays_off_the_query_string(self) -> None:
-        # It feeds the body's from_param binding; repeating it as ?tag= is a
-        # parameter the endpoint never described.
+    def test_a_param_bound_under_a_reserved_key_is_rejected(self) -> None:
+        # The binding KEY is the wire name, so it is what the reserved-header
+        # rule judges. An innocuous param name under 'Authorization' still
+        # overwrites the connection's credential.
         doc = _document(
-            body={"item": {"from_input": "record"}, "tag": {"from_param": "tag"}},
+            headers={"Authorization": {"from_param": "token"}},
             params={
-                "tag": {
-                    "in": "body",
-                    "type": "string",
-                    "required": True,
-                    "default": {"literal": "x"},
-                }
-            },
-        )
-        plan = build_write_plan(
-            doc, _spec(), session_header_names=set(), resolver=_resolver()
-        )
-        assert isinstance(plan, StreamWritePlan)
-        assert plan.query == {}
-
-    def test_a_header_placed_param_shadowing_the_connection_is_rejected(self) -> None:
-        # A param placed ``in: header`` lands in the same map request.headers
-        # does, under the PARAM's name -- which the binding key need not
-        # match. A rule reading request.headers alone refuses "Authorization"
-        # spelled as a header key and ships the byte-identical param, and the
-        # param route is the one that reaches the wire.
-        doc = _document(
-            headers={"X-Auth": {"from_param": "Authorization"}},
-            params={
-                "Authorization": {
+                "token": {
                     "in": "header",
                     "type": "string",
                     "required": True,
@@ -429,49 +406,31 @@ class TestTheRequestTheStreamWillActuallySend:
             resolver=_resolver(),
         )
         assert isinstance(outcome, str)
-        assert "Authorization" in outcome and "in: header" in outcome
+        assert "Authorization" in outcome
 
-    def test_a_header_placed_param_conflicting_on_content_type_is_rejected(
-        self,
-    ) -> None:
+    def test_a_param_bound_under_a_harmless_key_is_permitted(self) -> None:
+        # The mirror image: a param CALLED Authorization that lands under
+        # X-Legacy-Auth shadows nothing, so refusing it would fail a working
+        # endpoint. Only the key reaches the provider.
         doc = _document(
-            headers={"X-Ct": {"from_param": "Content-Type"}},
+            headers={"X-Legacy-Auth": {"from_param": "Authorization"}},
             params={
-                "Content-Type": {
+                "Authorization": {
                     "in": "header",
                     "type": "string",
                     "required": True,
-                    "default": {"literal": "application/xml"},
-                }
-            },
-        )
-        outcome = build_write_plan(
-            doc, _spec(), session_header_names=set(), resolver=_resolver()
-        )
-        assert isinstance(outcome, str)
-        assert "application/json" in outcome and "in: header" in outcome
-
-    def test_a_header_placed_content_type_matching_the_engine_is_permitted(
-        self,
-    ) -> None:
-        # Identical intent, identical verdict: the same value spelled in
-        # request.headers is permitted, so this spelling must be too.
-        doc = _document(
-            headers={"X-Ct": {"from_param": "Content-Type"}},
-            params={
-                "Content-Type": {
-                    "in": "header",
-                    "type": "string",
-                    "required": True,
-                    "default": {"literal": "application/json"},
+                    "default": {"literal": "legacy"},
                 }
             },
         )
         plan = build_write_plan(
-            doc, _spec(), session_header_names=set(), resolver=_resolver()
+            doc,
+            _spec(),
+            session_header_names={"authorization"},
+            resolver=_resolver(),
         )
         assert isinstance(plan, StreamWritePlan)
-        assert plan.headers["Content-Type"] == "application/json"
+        assert plan.headers == {"X-Legacy-Auth": "legacy"}
 
     def test_a_query_key_named_ref_survives_resolution(self) -> None:
         # "ref" is a real query parameter name. Resolving the map as one node

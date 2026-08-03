@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from cdk.api.exceptions import RequestSpecError
 from cdk.api.request import (
     ParamTable,
     RequestBuilder,
@@ -113,15 +114,6 @@ class TestReadParamTable:
         )
         assert table.values == {}
 
-    def test_the_placement_is_read_from_the_contract_key(self) -> None:
-        # The raw key is "in"; the model spells it "location", and reading
-        # that name finds nothing and puts every param in the query string.
-        table = ParamTable.for_read(
-            {"payload": {"in": "body", "type": "string", "required": False}},
-            _resolver(),
-        )
-        assert table.placements == {"payload": "body"}
-
     def test_a_stream_filter_overrides_a_declared_default(self) -> None:
         table = ParamTable.for_read(
             {
@@ -155,44 +147,40 @@ class TestReadParamTable:
 
 
 class TestRequestBuilder:
-    def test_body_placed_params_stay_out_of_the_query(self) -> None:
+    def test_a_declared_param_reaches_the_wire_only_through_its_binding(self) -> None:
+        # The contract requires every declared param to be referenced by
+        # exactly one binding, in the map its ``in`` names, so the param
+        # name is the endpoint's internal handle and the binding key is the
+        # wire name. Emitting the param name as well sent every value
+        # twice, the second time under a name the provider never declared
+        # -- which for a secret-valued param put a credential on the query
+        # string.
         table = ParamTable.for_read(
             {
-                "q": {"in": "query", "type": "string", "required": False},
+                "api_key": {
+                    "in": "query",
+                    "type": "string",
+                    "required": True,
+                    "default": {"literal": "s3cret"},
+                },
+                "tenant": {"in": "header", "type": "string", "required": True},
+                "id": {"in": "path", "type": "string", "required": True},
                 "payload": {"in": "body", "type": "string", "required": False},
             },
             _resolver(),
         )
         builder = RequestBuilder(
-            table, raw_body=None, resolver=_resolver(), endpoint="/items"
+            table,
+            raw_body={"data": {"from_param": "payload"}},
+            resolver=_resolver(),
+            endpoint="/items/{id}",
+            declared_query={"key": {"from_param": "api_key"}},
+            declared_headers={"X-Tenant": {"from_param": "tenant"}},
         )
-        prepared = builder.for_page({"q": "x", "payload": "y"})
-        assert prepared.query == {"q": "x"}
-        assert prepared.body is None
-
-    def test_a_path_placed_param_stays_off_the_query_string(self) -> None:
-        # The path substitution already sent it; repeating it as ?id=<value>
-        # is a parameter the endpoint never described.
-        table = ParamTable.for_read(
-            {"id": {"in": "path", "type": "string", "required": True}},
-            _resolver(),
-        )
-        builder = RequestBuilder(
-            table, raw_body=None, resolver=_resolver(), endpoint="/items/{id}"
-        )
-        assert builder.for_page({"id": "abc"}).query == {}
-
-    def test_a_header_placed_param_lands_in_the_headers(self) -> None:
-        table = ParamTable.for_read(
-            {"X-Tenant": {"in": "header", "type": "string", "required": True}},
-            _resolver(),
-        )
-        builder = RequestBuilder(
-            table, raw_body=None, resolver=_resolver(), endpoint="/items"
-        )
-        prepared = builder.for_page({"X-Tenant": "acme"})
+        prepared = builder.for_page({"tenant": "acme", "id": "abc", "payload": "y"})
+        assert prepared.query == {"key": "s3cret"}
         assert prepared.headers == {"X-Tenant": "acme"}
-        assert prepared.query == {}
+        assert prepared.body == {"data": "y"}
 
     def test_the_declared_query_map_lands_under_its_own_key(self) -> None:
         # request.query is not a rename map: the key is what goes on the
@@ -272,7 +260,7 @@ class TestRequestBuilder:
             resolver=_resolver(),
             endpoint="/items",
         )
-        with pytest.raises(ValueError, match="resolved to nothing"):
+        with pytest.raises(RequestSpecError, match="resolved to nothing"):
             builder.for_page({})
 
 
@@ -281,8 +269,7 @@ class TestABindingKeyIsAName:
 
     Resolving the map as one value puts it in a value position, where the
     grammar's four expression markers are keywords. ``ref`` is a real query
-    parameter name, so that mis-read breaks a working endpoint outright --
-    and raises past the ``except ValueError`` both roles classify with.
+    parameter name, so that mis-read breaks a working endpoint outright.
     """
 
     @pytest.mark.parametrize("marker", ["ref", "template", "literal", "function"])
@@ -326,10 +313,7 @@ class TestABindingKeyIsAName:
 
 
 class TestRequestBlockRefusals:
-    """One rule over the merged header map, and one over the path bindings."""
-
-    def _table(self, **declared: Any) -> ParamTable:
-        return ParamTable.for_read(declared, _resolver())
+    """One rule over the declared header map, and one over the path bindings."""
 
     def test_a_declared_header_the_connection_owns_is_refused(self) -> None:
         problem = request_block_problem(
@@ -338,63 +322,28 @@ class TestRequestBlockRefusals:
         )
         assert problem is not None and "request.headers declares" in problem
 
-    def test_a_header_placed_param_the_connection_owns_is_refused(self) -> None:
-        # Byte-identical intent, so the same verdict -- and this is the route
-        # that reaches the wire, because the params fold in after the
-        # declared map.
-        table = self._table(
-            Authorization={
-                "in": "header",
-                "type": "string",
-                "required": True,
-                "default": {"literal": "Bearer attacker"},
-            }
-        )
-        problem = request_block_problem(
-            {"headers": {"X-Auth": {"from_param": "Authorization"}}},
-            reserved_headers=frozenset({"authorization"}),
-            header_params=table.header_params(),
-        )
-        assert problem is not None
-        assert "Authorization" in problem and "in: header" in problem
-
-    def test_a_header_placed_param_conflicting_on_content_type_is_refused(
-        self,
-    ) -> None:
-        table = self._table(
-            **{
-                "Content-Type": {
-                    "in": "header",
-                    "type": "string",
-                    "required": True,
-                    "default": {"literal": "application/xml"},
-                }
-            }
-        )
-        problem = request_block_problem(
-            {}, reserved_headers=frozenset(), header_params=table.header_params()
-        )
-        assert problem is not None and "application/json" in problem
-
-    def test_a_header_placed_content_type_matching_the_engine_is_permitted(
-        self,
-    ) -> None:
-        table = self._table(
-            **{
-                "Content-Type": {
-                    "in": "header",
-                    "type": "string",
-                    "required": True,
-                    "default": {"literal": "application/json"},
-                }
-            }
-        )
+    def test_a_param_bound_under_a_permitted_key_is_permitted(self) -> None:
+        # The rule judges the WIRE names, which are the keys of
+        # request.headers. A param named 'Authorization' bound to
+        # 'X-Legacy-Auth' sends only 'X-Legacy-Auth', so refusing it would
+        # refuse an endpoint that shadows nothing.
         assert (
             request_block_problem(
-                {}, reserved_headers=frozenset(), header_params=table.header_params()
+                {"headers": {"X-Legacy-Auth": {"from_param": "Authorization"}}},
+                reserved_headers=frozenset({"authorization"}),
             )
             is None
         )
+
+    def test_a_param_bound_under_a_reserved_key_is_refused(self) -> None:
+        # The mirror image: an innocuous param name under a reserved key
+        # still shadows the connection's header, because the key is what
+        # the provider sees.
+        problem = request_block_problem(
+            {"headers": {"Authorization": {"from_param": "tok"}}},
+            reserved_headers=frozenset({"authorization"}),
+        )
+        assert problem is not None and "Authorization" in problem
 
     def test_a_path_binding_that_encodes_the_value_itself_is_refused(self) -> None:
         problem = request_block_problem(
@@ -441,11 +390,11 @@ class TestPathSubstitution:
 
     def test_an_unbound_placeholder_is_refused(self) -> None:
         # A URL with braces in it is answered 200 by many providers.
-        with pytest.raises(ValueError, match=r"\{id\}"):
+        with pytest.raises(RequestSpecError, match=r"\{id\}"):
             substitute_path("/Contact/{id}", {}, endpoint="items")
 
     def test_a_placeholder_resolving_to_nothing_is_refused(self) -> None:
-        with pytest.raises(ValueError, match=r"\{id\}"):
+        with pytest.raises(RequestSpecError, match=r"\{id\}"):
             substitute_path("/Contact/{id}", {"id": None}, endpoint="items")
 
     def test_a_placeholder_resolving_to_an_empty_string_is_refused(self) -> None:
@@ -453,7 +402,7 @@ class TestPathSubstitution:
         # record instead of one, and a PUT or PATCH targets all of them.
         # url_encode answers "" for an unbound input, so this is reachable
         # without anyone declaring an empty value.
-        with pytest.raises(ValueError, match=r"\{id\}"):
+        with pytest.raises(RequestSpecError, match=r"\{id\}"):
             substitute_path("/Contact/{id}", {"id": ""}, endpoint="items")
 
 

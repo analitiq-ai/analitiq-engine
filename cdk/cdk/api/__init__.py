@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from .._extras import reraise_for_missing_extra
 from .dialects import ApiDialect, dialect_overrides
-from .exceptions import ApiConnectorError, ConnectorConnectionError
+from .exceptions import ApiConnectorError, ConnectorConnectionError, RequestSpecError
 from .page_loop import Page, PageLoop, PageRequest, PaginationStrategy
 from .predicates import UnknownPredicate, evaluate_predicate
 from .strategies import UnknownPaginationStrategy, build_strategy, resolve_page_size
@@ -60,6 +60,7 @@ __all__ = [
     "PageLoop",
     "PageRequest",
     "PaginationStrategy",
+    "RequestSpecError",
     "UnknownPaginationStrategy",
     "UnknownPredicate",
     "build_strategy",

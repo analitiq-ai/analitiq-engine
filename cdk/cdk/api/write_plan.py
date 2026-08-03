@@ -22,6 +22,7 @@ from typing import Any, Literal
 from ..record_identity import record_digest
 from ..resolver import Resolver
 from ..types import RetrySemantics, RetryVerdict, SchemaSpec
+from .exceptions import RequestSpecError
 from .request import (
     ParamTable,
     bind_query_and_headers,
@@ -323,24 +324,23 @@ def build_write_plan(
     request = mode_block.get("request") or {}
     endpoint_id = str(doc.get("endpoint_id", "<unnamed>"))
     reserved = reserved_header_names(session_header_names)
-    table = ParamTable.for_write(mode_block.get("params") or {}, resolver)
-    problem = request_block_problem(
-        request,
-        reserved_headers=reserved,
-        paged_params=table.pagination_controlled,
-        header_params=table.header_params(),
-    )
-    if problem is not None:
-        return problem
-
-    plan = StreamWritePlan(
-        method=request.get("method", "POST"),
-        json_fields=collect_json_fields(mode_block),
-        body_spec=request.get("body"),
-        params=table.values,
-        write_mode_key=mode_key,
-    )
     try:
+        table = ParamTable.for_write(mode_block.get("params") or {}, resolver)
+        problem = request_block_problem(
+            request,
+            reserved_headers=reserved,
+            paged_params=table.pagination_controlled,
+        )
+        if problem is not None:
+            return problem
+
+        plan = StreamWritePlan(
+            method=request.get("method", "POST"),
+            json_fields=collect_json_fields(mode_block),
+            body_spec=request.get("body"),
+            params=table.values,
+            write_mode_key=mode_key,
+        )
         plan.endpoint = substitute_path(
             request.get("path", ""),
             bind_request_values(
@@ -352,21 +352,21 @@ def build_write_plan(
             ),
             endpoint=endpoint_id,
         )
-        # The same builder the read role's pages go through, so a param
-        # placed ``in: query`` or ``in: header`` reaches the wire whichever
-        # role sends it.
+        # The same binder the read role's pages go through, so a declared
+        # query key or header reaches the wire whichever role sends it.
         plan.query, plan.headers = bind_query_and_headers(
-            table=table,
             params=table.values,
             declared_query=request.get("query"),
             declared_headers=request.get("headers"),
             resolver=resolver,
             endpoint=endpoint_id,
         )
-    except ValueError as err:
-        # An unbound placeholder or a malformed binding map: the stream can
-        # never send a correct request, so the schema handshake refuses it
-        # instead of writing to a URL that still carries braces.
+    except RequestSpecError as err:
+        # An unbound placeholder, a param default reading a scope nothing
+        # fills, a malformed binding map: the stream can never send a
+        # correct request, so the schema handshake refuses it with a reason
+        # the ack carries. Letting one of these out instead would tear down
+        # the whole gRPC stream over one stream's defective document.
         return str(err)
 
     # A present batching block IS the multi-record case and carries

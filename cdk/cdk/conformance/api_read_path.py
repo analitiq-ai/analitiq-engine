@@ -58,6 +58,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 from urllib.parse import urlsplit
 
+from cdk.api.exceptions import RequestSpecError
 from cdk.api.page_loop import Page, PageRequest, PaginationStrategy
 from cdk.api.read_setup import build_read_strategy, stop_condition
 from cdk.api.records import split_records_ref
@@ -72,7 +73,7 @@ from cdk.api.request import (
 from cdk.api.response_schema import records_items_schema, resolve_field_arrow_type
 from cdk.api.urls import join_url, same_origin
 from cdk.api.write_plan import reserved_header_names
-from cdk.exceptions import ReadError, TransportSpecError
+from cdk.exceptions import ReadError
 from cdk.resolver import Resolver, expression_node_problem, scope_paths
 from cdk.schema_contract import SchemaContract
 from cdk.type_map import TypeMapper
@@ -100,38 +101,21 @@ ADVANCE_CHECK = "api-read-advances"
 STOP_CHECK = "api-read-stop-condition"
 RECORDS_CHECK = "api-record-schema"
 
-#: What building one request raises. ``RequestBuilder.for_page`` binds the
-#: ``from_param`` nodes (``ValueError``) and then hands the declared
-#: headers, query and body to ``Resolver.resolve_for_request`` *directly* --
-#: nothing wraps it there, the way ``page_expression_resolver`` wraps the
-#: strategies' resolutions -- so an unknown scope arrives as ``KeyError``, a
-#: conflicting pair of expression markers as ``TransportSpecError``, and a
-#: derived function handed the wrong type as ``TypeError``. All four are
-#: defects in the declaration being built, so all four are findings.
-_REQUEST_BUILD_FAILURES = (TransportSpecError, TypeError, ValueError, KeyError)
-
-#: What compiling a read raises: everything building its first request
-#: raises, plus ``ReadError``. Widest of the four on purpose: the kit is
-#: the one place an endpoint document is *unvalidated* raw JSON, so a
-#: strategy reaching for the block its own ``pagination.type`` names
-#: (``_Offset``'s ``block["offset"]``) raises ``KeyError`` on a bent
-#: document -- a finding naming the missing block, not a crash.
-_COMPILE_FAILURES = (ReadError, *_REQUEST_BUILD_FAILURES)
+#: What compiling a read raises: ``RequestSpecError`` from every
+#: declaration the request build resolves, and ``ReadError`` from the
+#: probe's own refusals (a missing request block, a placeholder nothing
+#: could bind) and from ``build_read_strategy``. Two, not five: the engine
+#: classifies at the boundary now, so the kit no longer has to enumerate
+#: the resolver's exception vocabulary -- an enumeration it could only ever
+#: get wrong in one direction, by letting a defect out as a raw traceback
+#: that takes every later probe down with it.
+_COMPILE_FAILURES = (ReadError, RequestSpecError)
 
 #: What ``advance`` raises: ``ValueError`` from the strategies' own refusals
 #: (a keyset page with no ordering value, a link off the origin, a next link
 #: that is not a URL string) and ``ReadError`` from the page expression
-#: resolver, which already wraps everything else it catches. The request
-#: build that follows an advance is a different site with a different set
-#: (:data:`_REQUEST_BUILD_FAILURES`).
+#: resolver, which classifies everything it wraps.
 _ADVANCE_FAILURES = (ReadError, ValueError)
-
-#: What evaluating a stop condition raises: ``stop_condition`` wraps
-#: ``ValueError``/``KeyError``/``TransportSpecError`` into ``ReadError``,
-#: and the predicates convert ``TypeError`` upstream. Anything else
-#: escaping is a CDK bug, and reporting it as a connector finding would
-#: hide it from the only person able to fix it.
-_STOP_FAILURES = (ReadError,)
 
 #: What building a record schema raises: ``ReadError`` from the records ref
 #: and the arrow-type resolution, ``ValueError`` from ``SchemaContract``.
@@ -280,7 +264,6 @@ def _compile_read(
         request_block,
         reserved_headers=_transport_header_names(target),
         paged_params=table.pagination_controlled,
-        header_params=table.header_params(),
     )
     if problem is not None:
         raise ReadError(problem)
@@ -998,7 +981,7 @@ def _advance_violations(probe: _ReadProbe) -> list[Violation]:
         _request_builder(probe).for_page(
             following.params, sends_declared_body=following.sends_declared_body
         )
-    except _REQUEST_BUILD_FAILURES as err:
+    except RequestSpecError as err:
         return [
             Violation(
                 ADVANCE_CHECK,
@@ -1163,7 +1146,7 @@ def _stop_condition_violations(probe: _ReadProbe, declared: Any) -> list[Violati
     if _operands_are_declared(probe, declared):
         try:
             stops = stop_condition(declared, probe.resolver)(page)
-        except _STOP_FAILURES as err:
+        except ReadError as err:
             violations.append(
                 Violation(
                     STOP_CHECK,
