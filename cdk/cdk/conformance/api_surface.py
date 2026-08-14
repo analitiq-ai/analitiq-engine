@@ -26,11 +26,13 @@ from cdk.api.request import REQUEST_SUPPLIED_CONNECTION_SCOPES
 from cdk.connection_runtime import (
     MATERIALIZATION_CONNECTION_SCALARS,
     MATERIALIZATION_CONNECTION_SUBTREES,
+    MATERIALIZATION_SECRET_SCOPES,
     ConnectionRuntime,
 )
 from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.exceptions import TransportSpecError
 from cdk.resolver import (
+    RUNTIME_CONNECTION_ID,
     ResolutionContext,
     Resolver,
     expression_node_problem,
@@ -68,10 +70,10 @@ HTTP_TRANSPORT_TYPE = "http"
 #: the connector.
 _TRANSPORT_DEFERRED_SCOPES = tuple(
     f"connection.{subtree}." for subtree in MATERIALIZATION_CONNECTION_SUBTREES
-) + ("secrets.", "auth.")
+) + tuple(f"{scope}." for scope in MATERIALIZATION_SECRET_SCOPES)
 _TRANSPORT_DEFERRED_KEYS = tuple(
     f"connection.{scalar}" for scalar in MATERIALIZATION_CONNECTION_SCALARS
-) + ("runtime.connection_id",)
+) + (f"runtime.{RUNTIME_CONNECTION_ID}",)
 
 
 def _definition_settled(path: str) -> bool:
@@ -88,8 +90,10 @@ def _definition_settled(path: str) -> bool:
 #: Paths that ARE a scope rather than a value in it. Deferring one would
 #: certify a field that resolves to a whole mapping on every connection --
 #: never the scalar the transport needs.
-_TRANSPORT_MAPPING_ROOTS = ("connection", "secrets", "auth") + tuple(
-    f"connection.{subtree}" for subtree in MATERIALIZATION_CONNECTION_SUBTREES
+_TRANSPORT_MAPPING_ROOTS = (
+    ("connection",)
+    + MATERIALIZATION_SECRET_SCOPES
+    + tuple(f"connection.{subtree}" for subtree in MATERIALIZATION_CONNECTION_SUBTREES)
 )
 
 

@@ -40,7 +40,12 @@ if TYPE_CHECKING:
 from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.exceptions import TransportSpecError
 from cdk.rate_limiter import RateLimiter
-from cdk.resolver import ResolutionContext, Resolver
+from cdk.resolver import (
+    REQUEST_CONNECTION_SUBTREES,
+    RUNTIME_CONNECTION_ID,
+    ResolutionContext,
+    Resolver,
+)
 from cdk.secrets.exceptions import PlaceholderExpansionError, SecretNotFoundError
 from cdk.secrets.protocol import SecretsResolver
 from cdk.sql.exceptions import TlsVerificationError
@@ -71,6 +76,12 @@ MATERIALIZATION_CONNECTION_SUBTREES = (
     "auth_state",
 )
 MATERIALIZATION_CONNECTION_SCALARS = ("name", "status")
+
+#: The non-connection scopes materialization also fills: the resolved secret
+#: store and the connection's auth block (``_build_resolution_context``'s
+#: ``secrets=`` / ``auth=`` arguments). Stated here beside the builder so the
+#: kit's transport deferral derives from it instead of restating it.
+MATERIALIZATION_SECRET_SCOPES = ("secrets", "auth")
 
 
 # Connection-JSON blocks that must never cross into a worker: secret
@@ -408,14 +419,13 @@ class ConnectionRuntime:
         means the same expression behaves the same wherever the connector
         executes.
         """
-        runtime_scope: dict[str, Any] = {"connection_id": self._connection_id}
+        runtime_scope: dict[str, Any] = {RUNTIME_CONNECTION_ID: self._connection_id}
         if runtime_values:
             runtime_scope.update(runtime_values)
         context = ResolutionContext(
             connection={
-                "parameters": dict(self._raw_config.get("parameters") or {}),
-                "selections": dict(self._raw_config.get("selections") or {}),
-                "discovered": dict(self._raw_config.get("discovered") or {}),
+                key: dict(self._raw_config.get(key) or {})
+                for key in REQUEST_CONNECTION_SUBTREES
             },
             runtime=runtime_scope,
         )
@@ -973,7 +983,7 @@ class ConnectionRuntime:
             connection=connection_scope,
             secrets=dict(secrets),
             auth=dict(self._raw_config.get("auth") or {}),
-            runtime={"connection_id": self._connection_id},
+            runtime={RUNTIME_CONNECTION_ID: self._connection_id},
         )
 
     def _merge_secrets_into_config(self, secrets: Mapping[str, Any]) -> dict[str, Any]:

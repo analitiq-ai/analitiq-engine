@@ -64,7 +64,7 @@ from urllib.parse import urlsplit
 from cdk.api.exceptions import RequestSpecError
 from cdk.api.page_loop import Page, PageRequest, PaginationStrategy
 from cdk.api.read_setup import build_read_strategy, stop_condition
-from cdk.api.records import split_records_ref
+from cdk.api.records import PAGE_SCOPE_KEYS, split_records_ref
 from cdk.api.request import (
     ParamTable,
     PreparedRequest,
@@ -169,12 +169,13 @@ _OFF_ORIGIN_URL = "https://elsewhere.invalid/page/2"
 _RESPONSE_PREFIX = "response."
 _BODY_PREFIX = "response.body."
 
-#: What ``cdk.api.records.page_scope`` puts in the response scope. Nothing
-#: else is in it: the contract recognises ``headers``/``status``/``metadata``
-#: as reserved, engine-owned sub-scopes -- RULE-ENDP-023 resolves only
-#: ``response.body`` paths -- and the read path does not put them in the
-#: page scope, so their availability is this module's fact to state.
-_PAGE_SCOPE_KEYS = ("body", "record_count")
+#: What ``cdk.api.records.page_scope`` puts in the response scope, imported
+#: from the builder rather than restated. Nothing else is in it: the contract
+#: recognises ``headers``/``status``/``metadata`` as reserved, engine-owned
+#: sub-scopes -- RULE-ENDP-023 resolves only ``response.body`` paths -- and
+#: the read path does not put them in the page scope, so their availability
+#: is the read path's fact and this check reads it from there.
+_PAGE_SCOPE_KEYS = PAGE_SCOPE_KEYS
 
 #: "take the type the response schema declares" -- distinct from any value
 #: a drive could legitimately want planted, ``None`` included.

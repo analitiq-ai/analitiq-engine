@@ -483,9 +483,9 @@ class TestStreamMappingReachesTheTransform:
         """The document is read at the boundary, not first used mid-run.
 
         A rule addressing a target no assignment declares is refused by the
-        stream contract itself (the engine's own ``MappingDocument`` read
-        mirrors the check for pin-drift diagnosability), so the failure
-        surfaces at config prep -- before the run starts, never mid-batch.
+        stream contract, which config prep validates against before the
+        engine parses the mapping -- so the failure surfaces here, before
+        the run starts, never mid-batch.
         """
         self._write_mapping(
             pipeline_tree,

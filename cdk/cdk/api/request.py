@@ -48,7 +48,7 @@ from ..request_binding import (
     bind_record_inputs,
     resolve_param_defaults,
 )
-from ..resolver import Resolver, scope_paths
+from ..resolver import REQUEST_CONNECTION_SUBTREES, Resolver, scope_paths
 from .exceptions import RequestSpecError, request_spec_errors
 
 __all__ = [
@@ -369,15 +369,13 @@ def request_block_problem(
     return _controlled_placeholder_problem(request_block, controlled_by)
 
 
-#: The connection subtrees per-request resolution supplies --
-#: ``ConnectionRuntime.request_resolver`` builds exactly these three. The
-#: ONE statement of this fact: the conformance kit's request-phase deferral
-#: imports it rather than restating it, so the kit's verdict and the
-#: engine's behavior cannot disagree about what a run will fill.
-REQUEST_SUPPLIED_CONNECTION_SCOPES = (
-    "connection.parameters.",
-    "connection.selections.",
-    "connection.discovered.",
+#: The connection paths per-request resolution supplies, as prefixes --
+#: DERIVED from the subtree names ``ConnectionRuntime.request_resolver``
+#: builds its scope from, never restated, so the guard and the runtime
+#: cannot disagree about what a run will fill. The conformance kit's
+#: request-phase deferral imports this in turn.
+REQUEST_SUPPLIED_CONNECTION_SCOPES = tuple(
+    f"connection.{subtree}." for subtree in REQUEST_CONNECTION_SUBTREES
 )
 
 
@@ -431,11 +429,16 @@ def _secret_read_problem(
     )
     if not reads:
         return None
+    # The message names what IS supplied from the same tuples the check
+    # reads, so an author is never told to use a scope the guard refuses.
+    supplied = ", ".join(
+        [scope.rstrip(".") for scope in REQUEST_SUPPLIED_CONNECTION_SCOPES]
+        + sorted(supplied_runtime)
+    )
     return (
         f"the operation reads {', '.join(repr(path) for path in reads)}, "
         f"which request-time resolution never supplies -- it builds exactly "
-        f"connection.parameters/selections/discovered and the engine's "
-        f"runtime values; secrets and auth resolve once, engine-side, at "
+        f"{supplied}; secrets and auth resolve once, engine-side, at "
         f"transport materialization -- so the value would be dropped from "
         f"every request ever sent. Route it through a declared param, a "
         f"connection parameter, or the transport's headers."

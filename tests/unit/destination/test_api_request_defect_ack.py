@@ -26,13 +26,14 @@ from cdk_tests.api.fakes import FakeSession, runtime_with
 from cdk.api import GenericAPIConnector
 from cdk.types import FailureCategory
 from src.destination.server import DestinationServicer
-from src.grpc.generated.analitiq.v1 import SchemaMessage
+from src.grpc.generated.analitiq.v1 import SchemaMessage, WriteMode
 
 pytestmark = pytest.mark.unit
 
-#: Proto ``WRITE_MODE_INSERT``. The wire carries an int; the CDK-native
-#: enum is built inside the servicer.
-_INSERT = 1
+#: The wire carries an int; the CDK-native enum is built inside the
+#: servicer. Read from the generated enum, never hand-pinned -- the
+#: generated module exists so no test carries the number.
+_INSERT = WriteMode.WRITE_MODE_INSERT
 
 
 def _document(

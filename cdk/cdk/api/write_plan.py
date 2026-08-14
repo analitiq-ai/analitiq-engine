@@ -64,8 +64,10 @@ class StreamWritePlan:
     endpoint: str = ""
     method: str = "POST"
     #: ``request.headers`` and ``request.query``, resolved once: write
-    #: params read the connection, secrets and runtime scopes only, so
-    #: nothing in either map can vary per record.
+    #: params read only what ``request_resolver`` supplies (the connection
+    #: subtrees and the runtime values -- never secrets, which resolve
+    #: engine-side at materialization), so nothing in either map can vary
+    #: per record.
     headers: dict[str, str] = field(default_factory=dict)
     query: dict[str, Any] = field(default_factory=dict)
     #: The declared write params' resolved values, feeding the body's

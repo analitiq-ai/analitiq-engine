@@ -136,6 +136,19 @@ def expression_node_problem(node: Mapping[str, Any]) -> str | None:
     return None
 
 
+#: The connection-document subtrees per-REQUEST resolution supplies -- the
+#: ONE statement of this fact. ``ConnectionRuntime.request_resolver`` builds
+#: its connection scope from it, and ``cdk.api.request`` derives the
+#: never-fillable refusal from it, so the guard and the runtime cannot
+#: disagree about what a run will fill.
+REQUEST_CONNECTION_SUBTREES = ("parameters", "selections", "discovered")
+
+#: The runtime-scope key every resolution phase carries: the id of the
+#: connection being resolved. One spelling, used by both context builders
+#: and by the conformance kit's deferral.
+RUNTIME_CONNECTION_ID = "connection_id"
+
+
 @dataclass
 class ResolutionContext:
     """Typed runtime context for connector template resolution.

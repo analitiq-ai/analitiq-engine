@@ -22,6 +22,7 @@ from ..resolver import Resolver
 from .page_loop import Page
 
 __all__ = [
+    "PAGE_SCOPE_KEYS",
     "extract_records",
     "page_resolver",
     "page_scope",
@@ -33,6 +34,11 @@ logger = logging.getLogger(__name__)
 
 #: The scope every records ref is anchored at, per the contract.
 _ANCHOR = "response.body"
+
+#: The two keys a page's response scope carries, named once here and used by
+#: :func:`page_scope` and :data:`PAGE_SCOPE_KEYS` alike.
+PAGE_SCOPE_BODY = "body"
+PAGE_SCOPE_RECORD_COUNT = "record_count"
 
 
 def walk_path(data: Any, path: list[str]) -> Any:
@@ -121,7 +127,15 @@ def page_scope(page: Page) -> dict[str, Any]:
     page so ``stop_when``, ``next_cursor``, ``next_url`` and ``increment_by``
     all see the same scope.
     """
-    return {"body": page.payload, "record_count": len(page.records)}
+    return {PAGE_SCOPE_BODY: page.payload, PAGE_SCOPE_RECORD_COUNT: len(page.records)}
+
+
+#: What a page's response scope carries, and nothing else -- the keys
+#: :func:`page_scope` builds. Read by the conformance kit, which refuses a
+#: declared ``response.<x>`` a page could never carry; derived from the
+#: builder rather than restated so a key the loop gains cannot fail a
+#: connector that reads it.
+PAGE_SCOPE_KEYS = (PAGE_SCOPE_BODY, PAGE_SCOPE_RECORD_COUNT)
 
 
 def page_resolver(resolver: Resolver, page: Page | None) -> Resolver:

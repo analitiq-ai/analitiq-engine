@@ -81,6 +81,12 @@ from .exceptions import TransformationError
 # A compiled expression: given the source batch, return one value column.
 _ExprFn = Callable[[pa.RecordBatch], pa.Array]
 
+# The rules a null answers rather than skips: every other rule exempts a null
+# value (mirroring the per-record ``if value is not None`` guard), and these
+# are the ones a null LIST ancestor must fail too. Named once, so a rule type
+# added to the mask without the ancestor fold cannot silently exempt itself.
+_NULL_SENSITIVE_RULES: Final[frozenset[str]] = frozenset({"not_null", "required"})
+
 
 # ---------------------------------------------------------------------------
 # The mapping document
@@ -999,7 +1005,7 @@ def _rule_errors(built: Mapping[str, pa.Array], rule: ValidationRule) -> list[st
     mask = _rule_failure_mask(value, present, rule, label)
     failing = [i for i, failed in enumerate(mask.to_pylist()) if failed]
     rows = failing if row_map is None else sorted({row_map[i] for i in failing})
-    if rule.type in ("not_null", "required"):
+    if rule.type in _NULL_SENSITIVE_RULES:
         rows = sorted(set(rows) | set(null_ancestors))
     if not rows:
         return []
@@ -1026,7 +1032,7 @@ def _rule_failure_mask(
 
     try:
         match rule.type:
-            case "not_null" | "required":
+            case rule_type if rule_type in _NULL_SENSITIVE_RULES:
                 return pc.is_null(value)
             case "min_length":
                 length = pc.utf8_length(_string_form(value))

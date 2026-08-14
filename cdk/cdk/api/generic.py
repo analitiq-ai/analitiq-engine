@@ -965,10 +965,10 @@ class GenericAPIConnector(BaseDestinationHandler):
         return build_write_body(
             body_spec=plan.body_spec,
             endpoint=plan.endpoint,
-            # Resolved once at the schema handshake: write params read the
-            # connection, secrets and runtime scopes only, so re-resolving
-            # them per record and per chunk could only produce the same
-            # values again.
+            # Resolved once at the schema handshake: write params read only
+            # what ``request_resolver`` supplies (the connection subtrees and
+            # the runtime values -- never secrets), so re-resolving them per
+            # record and per chunk could only produce the same values again.
             params=plan.params,
             resolver=self._write_resolver,
             record=record,
