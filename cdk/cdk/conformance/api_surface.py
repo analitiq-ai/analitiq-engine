@@ -22,6 +22,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from cdk.api.exceptions import RequestSpecError, request_spec_errors
+from cdk.api.request import REQUEST_SUPPLIED_CONNECTION_SCOPES
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.exceptions import TransportSpecError
@@ -60,18 +61,6 @@ HTTP_TRANSPORT_TYPE = "http"
 #: nothing about the connector.
 _TRANSPORT_DEFERRED_SCOPES = ("connection.", "secrets.", "auth.")
 _TRANSPORT_DEFERRED_KEYS = ("runtime.connection_id",)
-
-#: The subtrees per-request resolution supplies from a connection
-#: (``ConnectionRuntime.request_resolver`` builds exactly these three --
-#: ``connection.name`` and the like exist only at materialization). Secrets
-#: and auth never reach a request-time scope: they are resolved once,
-#: engine-side, at transport materialization, so a request slot reading
-#: them resolves on no run.
-_REQUEST_TIME_SCOPES = (
-    "connection.parameters.",
-    "connection.selections.",
-    "connection.discovered.",
-)
 
 
 def _definition_settled(path: str) -> bool:
@@ -202,16 +191,18 @@ def definition_resolver(
 def fillable_at_request_time(declared: Any) -> bool:
     """Whether a real run's request resolution could still fill *declared*.
 
-    Per-request resolution (``ConnectionRuntime.request_resolver``) builds
-    exactly three connection subtrees and nothing secret, so an expression
-    defers exactly when everything it reads lives under
-    ``connection.parameters/selections/discovered``. One reading
-    ``secrets.*``, ``auth.*`` -- or a connection field outside those
-    subtrees, like ``connection.name`` -- resolves on no run, so it is a
-    defect to report, never a value to defer.
+    The subtree fact is the engine's own statement
+    (:data:`~cdk.api.request.REQUEST_SUPPLIED_CONNECTION_SCOPES`), imported
+    rather than restated: an expression defers exactly when everything it
+    reads is a connection value a run's request resolution will fill. One
+    reading ``secrets.*``, ``auth.*`` -- or a connection field outside the
+    supplied subtrees, like ``connection.name`` -- resolves on no run, so
+    it is a defect to report, never a value to defer.
     """
     paths = scope_paths(declared)
-    return bool(paths) and all(path.startswith(_REQUEST_TIME_SCOPES) for path in paths)
+    return bool(paths) and all(
+        path.startswith(REQUEST_SUPPLIED_CONNECTION_SCOPES) for path in paths
+    )
 
 
 def materialization_resolver(target: ConformanceTarget) -> Resolver:

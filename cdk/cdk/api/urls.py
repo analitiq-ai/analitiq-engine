@@ -15,7 +15,13 @@ from __future__ import annotations
 
 from urllib.parse import SplitResult, urljoin, urlsplit
 
-__all__ = ["follow_url", "join_url", "same_origin"]
+__all__ = ["ORIGIN_REFUSAL_MARKER", "follow_url", "join_url", "same_origin"]
+
+#: The stable fragment of the off-origin refusal below. Exported so a
+#: caller recognizing THIS refusal (the conformance kit's origin guard)
+#: matches the raise site's own words instead of a copied string that
+#: drifts.
+ORIGIN_REFUSAL_MARKER = "leaves the connection's origin"
 
 #: Scheme defaults, so ``https://host:443`` and ``https://host`` compare as
 #: the one origin they are.
@@ -76,7 +82,7 @@ def follow_url(current: str, target: str, *, origin: str) -> str:
     root = urlsplit(origin)
     if not same_origin(root, parsed):
         raise ValueError(
-            f"next_url {target!r} leaves the connection's origin "
+            f"next_url {target!r} {ORIGIN_REFUSAL_MARKER} "
             f"{root.scheme}://{root.netloc}; refusing to send the "
             f"connection's headers to another host"
         )

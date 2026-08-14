@@ -479,6 +479,30 @@ class TestNeverFillableScopeRefusals:
         assert problem is not None
         assert "'secrets.page_size'" in problem
 
+    def test_a_runtime_key_typo_is_refused_not_prefix_matched(self) -> None:
+        # The engine passes exactly connection_id and batch_size; a bare
+        # `runtime.` prefix match would give `runtime.batchsize` the
+        # warn-and-omit fate this walk exists to refuse.
+        problem = request_block_problem(
+            {"query": {"limit": {"ref": "runtime.batchsize"}}},
+            reserved_headers=frozenset(),
+            resolver=_resolver(),
+            params={},
+        )
+        assert problem is not None
+        assert "'runtime.batchsize'" in problem
+
+    def test_the_supplied_runtime_keys_are_not_refused(self) -> None:
+        assert (
+            request_block_problem(
+                {"query": {"limit": {"ref": "runtime.batch_size"}}},
+                reserved_headers=frozenset(),
+                resolver=_resolver(),
+                params={},
+            )
+            is None
+        )
+
     def test_a_connection_read_in_a_param_default_is_not_refused(self) -> None:
         # The refusal is about the phase, not about deferral in general:
         # request-time resolution DOES supply the connection document.

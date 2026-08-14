@@ -53,6 +53,8 @@ from .exceptions import RequestSpecError, request_spec_errors
 
 __all__ = [
     "JSON_CONTENT_TYPE",
+    "REQUEST_SUPPLIED_CONNECTION_SCOPES",
+    "REQUEST_SUPPLIED_RUNTIME_KEYS",
     "ParamTable",
     "PreparedRequest",
     "RequestBuilder",
@@ -367,18 +369,31 @@ def request_block_problem(
     return _controlled_placeholder_problem(request_block, controlled_by)
 
 
-#: Everything request-time resolution supplies, as path prefixes: the three
-#: connection subtrees ``ConnectionRuntime.request_resolver`` builds, and the
-#: engine's runtime values. A read outside these -- ``secrets.*`` and
-#: ``auth.*`` (resolved once, engine-side, at transport materialization: the
-#: sandboxed worker must not see the secret store), ``connector.*``,
-#: ``connection.name``, or any other spelling -- resolves on no run.
-_REQUEST_SUPPLIED_SCOPES = (
+#: The connection subtrees per-request resolution supplies --
+#: ``ConnectionRuntime.request_resolver`` builds exactly these three. The
+#: ONE statement of this fact: the conformance kit's request-phase deferral
+#: imports it rather than restating it, so the kit's verdict and the
+#: engine's behavior cannot disagree about what a run will fill.
+REQUEST_SUPPLIED_CONNECTION_SCOPES = (
     "connection.parameters.",
     "connection.selections.",
     "connection.discovered.",
-    "runtime.",
 )
+
+#: The exact runtime keys the engine passes to request resolution, matched
+#: exactly like every exact-key supply: ``runtime.batchsize`` is a typo
+#: that would be warn-and-omitted from every request forever, not a value
+#: that will arrive.
+REQUEST_SUPPLIED_RUNTIME_KEYS = ("runtime.connection_id", "runtime.batch_size")
+
+
+def _request_time_supplied(path: str) -> bool:
+    """Whether a real run's request resolution supplies *path*."""
+    return (
+        path.startswith(REQUEST_SUPPLIED_CONNECTION_SCOPES)
+        or path in REQUEST_SUPPLIED_RUNTIME_KEYS
+    )
+
 
 #: The request slots a declaration can put an expression in.
 _REQUEST_SLOTS = ("headers", "query", "body", "path_params")
@@ -393,8 +408,8 @@ def _secret_read_problem(
 
     Not an error a run would surface: request-time resolution omits an
     unresolved value rather than failing, so a request slot, a param
-    ``default`` or a pagination value reading a scope outside
-    :data:`_REQUEST_SUPPLIED_SCOPES` builds a request WITHOUT the declared
+    ``default`` or a pagination value reading what request-time resolution
+    does not supply builds a request WITHOUT the declared
     value -- every request, every connection, both roles -- and the run
     stays green while the provider sees the credential-less (or filter-less,
     or unversioned) shape. The refusal therefore happens here, where the
@@ -406,7 +421,7 @@ def _secret_read_problem(
     """
 
     def unfillable(path: str, *, page: bool) -> bool:
-        if path.startswith(_REQUEST_SUPPLIED_SCOPES):
+        if _request_time_supplied(path):
             return False
         return not (page and path.startswith("response."))
 

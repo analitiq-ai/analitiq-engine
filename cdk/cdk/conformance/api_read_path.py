@@ -75,7 +75,8 @@ from cdk.api.request import (
     substitute_path,
 )
 from cdk.api.response_schema import records_items_schema, resolve_field_arrow_type
-from cdk.api.urls import join_url, same_origin
+from cdk.api.strategies import KEYSET_REFUSAL_MARKER
+from cdk.api.urls import ORIGIN_REFUSAL_MARKER, join_url, same_origin
 from cdk.api.write_plan import reserved_header_names
 from cdk.exceptions import ReadError
 from cdk.resolver import Resolver, scope_paths
@@ -189,10 +190,12 @@ _UNTYPED = object()
 #: and the same one used here.
 _PROBE_CACHE = "_api_read_probes"
 
-#: Markers from the CDK's own raise sites, so a drive can tell the refusal
-#: it armed from some other failure that happened to raise first.
-_KEYSET_REFUSAL = "keyset.order_by_field"
-_ORIGIN_REFUSAL = "leaves the connection's origin"
+#: Markers from the CDK's own raise sites, imported from them, so a drive
+#: can tell the refusal it armed from some other failure that happened to
+#: raise first -- and a rewording at the raise site cannot silently stop
+#: the drive from recognizing it.
+_KEYSET_REFUSAL = KEYSET_REFUSAL_MARKER
+_ORIGIN_REFUSAL = ORIGIN_REFUSAL_MARKER
 
 #: A continuation value shaped for the scheme that reads it: a cursor token
 #: is opaque text and a next link is a relative URL (so it resolves against

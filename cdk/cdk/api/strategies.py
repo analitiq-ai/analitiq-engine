@@ -28,12 +28,18 @@ from .page_loop import Page, PageRequest, PaginationStrategy
 from .records import walk_path
 
 __all__ = [
+    "KEYSET_REFUSAL_MARKER",
     "UnknownPaginationStrategy",
     "build_strategy",
     "resolve_page_size",
 ]
 
 logger = logging.getLogger(__name__)
+
+#: The stable fragment of the keyset refusal below. Exported so a caller
+#: recognizing THIS refusal (the conformance kit's arming drives) matches
+#: the raise site's own words instead of a copied string that drifts.
+KEYSET_REFUSAL_MARKER = "keyset.order_by_field"
 
 #: Resolves a declared value expression against the page it was written for.
 Resolve = Callable[[Any, Page | None], Any]
@@ -263,8 +269,9 @@ class _Keyset:
             # there is no next page, and letting the records through first
             # would commit rows the read cannot continue past.
             raise ValueError(
-                f"keyset.order_by_field {self._field!r} is missing from the "
-                f"last record of a page; keyset pagination cannot continue"
+                f"{KEYSET_REFUSAL_MARKER} {self._field!r} is missing from "
+                f"the last record of a page; keyset pagination cannot "
+                f"continue"
             )
         self._last = value
         return PageRequest(self._url, {**self._base, self._param: value})

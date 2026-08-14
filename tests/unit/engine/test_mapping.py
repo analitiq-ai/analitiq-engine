@@ -769,14 +769,18 @@ class TestValidationRules:
             )
         ]
 
-    def test_rule_naming_an_undeclared_target_is_refused(self):
-        """A rule's first token must name a declared target (contract mirror).
+    def test_rule_naming_an_undeclared_target_fails_loud_at_run(self):
+        """Rule-field resolution is the contract's check, made once upstream.
 
-        A typo would name nothing and the rule would silently grade no value
-        at all, which reads exactly like a passing rule.
+        The engine does not restate it -- a stray rule that slipped past a
+        different pin must still fail loud when its head token misses the
+        built record, never grade nothing and read as a pass.
         """
-        with pytest.raises(TransformationError, match="names no assignment target"):
-            _compile(self._validated([_rule("not_null", field="some_other_column")]))
+        with pytest.raises(TransformationError, match="the built value does not carry"):
+            _run(
+                [{"v": 1}],
+                self._validated([_rule("not_null", field="some_other_column")]),
+            )
 
     def test_rule_naming_another_declared_target_grades_that_column(self):
         """Rules grade the record the assignments build together.
@@ -952,10 +956,16 @@ class TestValidationRules:
         with pytest.raises(TransformationError, match=r"rows \[0\]"):
             _run([{"lines": None}, {"lines": []}], assignments)
 
-    def test_rule_token_the_target_does_not_declare_is_refused(self):
-        """Every token past the first must resolve through declared properties."""
-        with pytest.raises(TransformationError, match="does not resolve"):
-            _compile(
+    def test_rule_token_the_target_does_not_declare_fails_loud_at_run(self):
+        """The nested half of the same upstream check: no silent grade.
+
+        A token past the first that the built struct does not carry raises
+        out of the field walk and is classified, never treated as an
+        all-pass rule over nothing.
+        """
+        with pytest.raises(TransformationError, match="the built value does not carry"):
+            _run(
+                [{"address": {"city": "Kyiv"}}],
                 [
                     _assignment(
                         "address",
@@ -966,7 +976,7 @@ class TestValidationRules:
                             "rules": [_rule("not_null", field=["address", "zip"])]
                         },
                     )
-                ]
+                ],
             )
 
     def test_duplicate_assignment_targets_are_refused(self):

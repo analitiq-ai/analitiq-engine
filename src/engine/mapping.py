@@ -62,7 +62,6 @@ import pyarrow as pa
 import pyarrow.compute as pc
 from analitiq.contracts.shared.common import StrictModel
 from analitiq.contracts.stream import (
-    ArrowFieldSpec,
     AssignmentTarget,
     ConstantAssignmentValue,
     Validation,
@@ -154,23 +153,6 @@ class MappingAssignment(StrictModel):
         return data
 
 
-def _declared_child(
-    node: AssignmentTarget | ArrowFieldSpec, token: str
-) -> ArrowFieldSpec | None:
-    """Return the field *token* names under *node*, or ``None`` if undeclared.
-
-    Mirrors the contract's resolution walk (``StreamMapping``): a ``List``
-    node declares its element shape in ``items`` rather than naming it, so
-    the element is stepped through transparently -- a rule on a list of
-    objects addresses the object's fields. ``enforce_container_shape`` keeps
-    ``properties`` and ``items`` mutually exclusive, so the walk is
-    unambiguous and bounded by the declared nesting depth.
-    """
-    while node.properties is None and node.items is not None:
-        node = node.items
-    return (node.properties or {}).get(token)
-
-
 class MappingDocument(StrictModel):
     """A stream's mapping, closed at every level."""
 
@@ -178,11 +160,17 @@ class MappingDocument(StrictModel):
 
     @model_validator(mode="after")
     def _assignment_targets_unique(self) -> MappingDocument:
-        """Refuse two assignments building one field (contract RULE-STRM-002).
+        """Refuse two assignments building one field.
 
-        Arrow accepts duplicate field names, so without this the batch would
-        carry two columns under one name and array position would decide the
-        destination field's value.
+        Not a contract mirror -- this guard has its own engine-side job: the
+        transform keys built columns by ``target.path``
+        (:meth:`CompiledTransform.run`'s ``built`` dict), so a duplicate
+        would silently collapse to the last assignment's column and grade
+        rules against it. The contract's ``StreamMapping`` refuses the same
+        shape upstream (RULE-STRM-002); rule-field resolution, by contrast,
+        is enforced there alone -- a stray rule that slipped past a
+        different pin fails loud at run time when its head token misses the
+        ``built`` dict.
         """
         counts = Counter(a.target.path for a in self.assignments)
         dups = sorted(path for path, count in counts.items() if count > 1)
@@ -191,46 +179,6 @@ class MappingDocument(StrictModel):
                 f"assignments declare duplicate target.path values {dups!r}; "
                 f"each destination field is built by exactly one assignment"
             )
-        return self
-
-    @model_validator(mode="after")
-    def _rule_fields_resolve(self) -> MappingDocument:
-        """Refuse a validation rule addressing a field no assignment declares.
-
-        Mirrors the contract (``StreamMapping``): a rule's ``field`` is a
-        token array whose first token names any ``target.path`` this mapping
-        declares -- rules are authored per assignment but grade the record
-        the assignments build together -- and each later token names a field
-        under that target's ``properties``, descending through ``items`` for
-        a ``List``. Unchecked, a typo would name nothing and the rule would
-        silently grade no value at all, which reads exactly like a passing
-        rule.
-        """
-        declared = {a.target.path: a.target for a in self.assignments}
-        for i, assignment in enumerate(self.assignments):
-            if assignment.validation is None:
-                continue
-            for j, rule in enumerate(assignment.validation.rules):
-                where = f"assignments[{i}].validate.rules[{j}].field"
-                head, *rest = rule.field
-                node: AssignmentTarget | ArrowFieldSpec | None = declared.get(head)
-                if node is None:
-                    raise ValueError(
-                        f"{where} {rule.field!r} names no assignment target: "
-                        f"{head!r} is not a declared assignments[].target.path "
-                        f"(declared: {sorted(declared)})"
-                    )
-                walked = [head]
-                for token in rest:
-                    child = _declared_child(node, token)
-                    if child is None:
-                        raise ValueError(
-                            f"{where} {rule.field!r} does not resolve: "
-                            f"{walked!r} declares no field {token!r} under its "
-                            f"`properties`"
-                        )
-                    node = child
-                    walked.append(token)
         return self
 
     @classmethod
