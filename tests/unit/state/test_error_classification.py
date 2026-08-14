@@ -446,6 +446,23 @@ def test_destination_http_code_never_read_as_source_auth():
 
 
 # --------------------------------------------------------------------------- #
+# The CDK vocabulary mirrors the wire vocabulary
+# --------------------------------------------------------------------------- #
+
+
+def test_the_cdk_enum_mirrors_the_wire_enum():
+    # cdk.types.FailureCategory is hand-written to mirror stream.proto's enum
+    # so values pass straight into a protobuf ack without a lookup table.
+    # Proto3 enums are open, so a drifted member would be accepted silently
+    # at runtime -- this is the only cross-check between the two vocabularies.
+    from src.grpc.generated.analitiq.v1 import stream_pb2
+
+    for member in FailureCategory:
+        assert stream_pb2.FailureCategory.Value(member.name) == member.value
+    assert len(FailureCategory) == len(stream_pb2.FailureCategory.keys())
+
+
+# --------------------------------------------------------------------------- #
 # The destination handshake classifies from its outcome, not its wording
 # --------------------------------------------------------------------------- #
 

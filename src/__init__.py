@@ -9,7 +9,7 @@ __version__ = "0.1.0"
 __author__ = "Analitiq Core Team"
 
 # Aliased to a private name so it is not re-exported as a public package
-# attribute (see tests/.../test_package_init.py::test_no_unexpected_exports).
+# attribute alongside __all__.
 import os as _os
 
 # Disable gRPC's fork handlers before any submodule below imports grpc and

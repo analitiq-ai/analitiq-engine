@@ -216,7 +216,7 @@ class TestDeadLetterQueue:
 
     @pytest.mark.asyncio
     async def test_cleanup_old_files_max_files(self):
-        """Test cleanup based on max files limit."""
+        """Cleanup trims to max_files and keeps files inside retention."""
         dlq = DeadLetterQueue(dlq_path=str(self.dlq_path), max_files=3)
 
         # Create more files than the limit
@@ -226,9 +226,11 @@ class TestDeadLetterQueue:
 
         await dlq.cleanup()
 
-        # Should have only max_files remaining
+        # Exactly max_files remain: the overflow is trimmed, and the fresh
+        # files inside the retention window are kept (== catches a cutoff
+        # comparison bug that would delete everything).
         remaining_files = list(dlq.dlq_path.glob("dlq_*.jsonl"))
-        assert len(remaining_files) <= 3
+        assert len(remaining_files) == 3
 
     @pytest.mark.asyncio
     async def test_get_failed_records_all(self):

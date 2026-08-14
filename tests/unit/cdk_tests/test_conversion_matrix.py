@@ -150,8 +150,8 @@ class TestNamedCells:
         assert conv.runtime_checked == runtime_checked
 
 
-class TestArrowFamilyRoundTrip:
-    """A built DataType maps back to the family it was parsed from."""
+class TestArrowFamilyProbes:
+    """A live Arrow DataType classifies into its published family."""
 
     def test_binary_trio_disambiguated(self) -> None:
         # is_fixed_size_binary / is_large_binary / is_binary are adjacent,
