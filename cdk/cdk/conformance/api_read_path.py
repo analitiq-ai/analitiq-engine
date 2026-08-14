@@ -28,11 +28,11 @@ when it bites:
   the endpoint's own response schema declares there -- so a comparison in
   ``stop_when`` sees the operand the connector said it would, and a next
   link the author pointed at the object containing it is handed that
-  object. A path the schema does not declare is a finding in its own right
-  (``check_api_page_references``) rather than a type the kit invents: an
-  invented type is what decides whether an ordering comparison raises, so
-  inventing one would make the verdict the kit's rather than the
-  connector's. Its records are shaped the same way, plus the keyset
+  object. A path the schema does not declare is a document defect the
+  contract refuses at parse (RULE-ENDP-023) rather than a type the kit
+  invents: an invented type is what decides whether an ordering comparison
+  raises, so inventing one would make the verdict the kit's rather than
+  the connector's. Its records are shaped the same way, plus the keyset
   ordering field, which is planted because the engine walks the provider's
   raw record and not the declared schema.
 * the origin the link guard is armed with is the default transport's
@@ -91,7 +91,6 @@ from .target import ConformanceTarget
 from .violations import Violation
 
 __all__ = [
-    "check_api_page_references",
     "check_api_read_advances",
     "check_api_read_compiles",
     "check_api_read_stop_condition",
@@ -99,7 +98,6 @@ __all__ = [
 ]
 
 COMPILE_CHECK = "api-read-compiles"
-REFERENCES_CHECK = "api-page-references"
 ADVANCE_CHECK = "api-read-advances"
 STOP_CHECK = "api-read-stop-condition"
 RECORDS_CHECK = "api-record-schema"
@@ -167,11 +165,6 @@ _OFF_ORIGIN_URL = "https://elsewhere.invalid/page/2"
 #: The page scope, and the part of it a value can be planted under.
 _RESPONSE_PREFIX = "response."
 _BODY_PREFIX = "response.body."
-
-#: What ``cdk.api.records.page_scope`` puts in the response scope. Nothing
-#: else is in it, so a declared expression reading anything else resolves to
-#: nothing on every page the provider serves.
-_PAGE_SCOPE_KEYS = ("body", "record_count")
 
 #: "take the type the response schema declares" -- distinct from any value
 #: a drive could legitimately want planted, ``None`` included.
@@ -850,75 +843,6 @@ def check_api_read_compiles(target: ConformanceTarget) -> list[Violation]:
                     f"resume from a position it never issued. The param is "
                     f"declared with a default the pagination loop then owns; "
                     f"mark it controlled_by 'pagination'.",
-                )
-            )
-    return violations
-
-
-def check_api_page_references(target: ConformanceTarget) -> list[Violation]:
-    """Certify that every page value a read declares is one a page carries.
-
-    The other drives script a page from these declarations, so on their own
-    they can never find a reference that addresses nothing -- the page is
-    built to satisfy whatever the author wrote. This is the check that reads
-    the declarations against something independent: the scope a page
-    actually has, and the response schema the connector itself published.
-
-    Two ways a reference reaches for what is not there:
-
-    * a scope the page has no notion of. ``page_scope`` builds ``body`` and
-      ``record_count``; a condition on ``response.headers`` resolves to
-      nothing on every page ever served;
-    * a body field the endpoint's own response schema does not declare. The
-      schema is what ``records.ref`` is already resolved against, so a
-      pagination value pointing outside it is either a typo or a field the
-      connector forgot to declare -- and both read as absent, forever.
-
-    Absent is not neutral. A ``missing`` or ``empty`` condition on it holds
-    on page one and the stream stops there reporting success; an ``exists``
-    condition never holds and the read runs to exhaustion; a next cursor or
-    link resolves to nothing and the traversal ends after one page.
-    """
-    probes, compile_violations = _probes(target)
-    violations: list[Violation] = _undriven(REFERENCES_CHECK, compile_violations)
-    for probe in probes:
-        if probe.pagination is None:
-            continue
-        violations.extend(_reference_violations(probe))
-    return violations
-
-
-def _reference_violations(probe: _ReadProbe) -> list[Violation]:
-    """Report every page reference this endpoint's pagination cannot resolve."""
-    violations: list[Violation] = []
-    schema = _response_schema(probe)
-    for lookup in dict.fromkeys(scope_paths(probe.pagination)):
-        if not lookup.startswith(_RESPONSE_PREFIX):
-            continue
-        scope = lookup[len(_RESPONSE_PREFIX) :].split(".")[0]
-        if scope not in _PAGE_SCOPE_KEYS:
-            violations.append(
-                Violation(
-                    REFERENCES_CHECK,
-                    f"endpoint {probe.label!r}: pagination reads {lookup!r}, "
-                    f"but a page carries only "
-                    f"{', '.join(repr(k) for k in _PAGE_SCOPE_KEYS)} under "
-                    f"'response'. This resolves to nothing on every page.",
-                )
-            )
-            continue
-        if not lookup.startswith(_BODY_PREFIX):
-            continue
-        path = lookup[len(_BODY_PREFIX) :].split(".")
-        if schema is None or _declared_schema(schema, path) is None:
-            violations.append(
-                Violation(
-                    REFERENCES_CHECK,
-                    f"endpoint {probe.label!r}: pagination reads {lookup!r}, "
-                    f"which the declared response schema does not reach. "
-                    f"Either the path is a typo or the field is one the "
-                    f"schema does not declare; either way it resolves to "
-                    f"nothing on every page.",
                 )
             )
     return violations

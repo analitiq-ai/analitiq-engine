@@ -24,7 +24,6 @@ from cdk.api import read_setup, strategies
 from cdk.conformance import (
     api_read_path,
     check_api_has_reads,
-    check_api_page_references,
     check_api_read_advances,
     check_api_read_compiles,
     check_api_read_stop_condition,
@@ -1414,70 +1413,6 @@ class TestApiReadPathBreaks:
         assert "default_transport" in report
 
 
-class TestApiPageReferenceBreaks:
-    """A page value the read declares must be one a page actually carries.
-
-    The drives next door script their page *from* these declarations, so on
-    their own they can never find a reference that addresses nothing -- the
-    page is built to satisfy whatever the author wrote. These are the cases
-    that need something independent to check against: the scope a page has,
-    and the response schema the connector published.
-    """
-
-    _broken = staticmethod(TestApiReadPathBreaks._broken)
-
-    def test_a_typo_in_a_stop_condition_path(self, tmp_path: Path) -> None:
-        """The defect the whole check exists for: a silently truncated read."""
-        target = self._broken(
-            tmp_path,
-            "events",
-            lambda read: read["pagination"].update(
-                stop_when={"missing": {"ref": "response.body.lnks.next"}}
-            ),
-        )
-        report = _report(check_api_page_references(target))
-        assert "'response.body.lnks.next'" in report
-        assert "does not reach" in report
-
-    def test_a_scope_the_page_has_no_notion_of(self, tmp_path: Path) -> None:
-        target = self._broken(
-            tmp_path,
-            "invoices",
-            lambda read: read["pagination"]["cursor"].update(
-                next_cursor={"ref": "response.headers.x-next-page"}
-            ),
-        )
-        report = _report(check_api_page_references(target))
-        assert "'response.headers.x-next-page'" in report
-        assert "'body', 'record_count'" in report
-
-    def test_a_template_spelled_reference_is_seen(self, tmp_path: Path) -> None:
-        """``ref`` is one of two spellings that read a scope, not the only one."""
-        target = self._broken(
-            tmp_path,
-            "events",
-            lambda read: read["pagination"]["link"].update(
-                next_url={"template": "${response.body.lnks.next}"}
-            ),
-        )
-        report = _report(check_api_page_references(target))
-        assert "'response.body.lnks.next'" in report
-
-    def test_a_template_spelled_reference_that_resolves_is_clean(
-        self, tmp_path: Path
-    ) -> None:
-        """And seeing it means not blaming the connector for the kit's blindness."""
-        target = self._broken(
-            tmp_path,
-            "events",
-            lambda read: read["pagination"]["link"].update(
-                next_url={"template": "${response.body.links.next}"}
-            ),
-        )
-        assert check_api_page_references(target) == []
-        assert check_api_read_advances(target) == []
-
-
 class TestApiScriptedPageTakesTheDeclaredTypes:
     """The page a drive scripts carries the types the connector declared.
 
@@ -1580,7 +1515,6 @@ class TestApiChecksSayWhenTheyDroveNothing:
             tmp_path, "widgets", lambda read: read["pagination"].update(type="seek")
         )
         for check in (
-            check_api_page_references,
             check_api_read_advances,
             check_api_read_stop_condition,
         ):
@@ -1614,7 +1548,6 @@ class TestACompileFindingBelongsToTheCompileCheck:
         target = self._broken(tmp_path, "invoices", self._stale_cursor_default)
         assert "'page_token'" in _report(check_api_read_compiles(target))
         for check in (
-            check_api_page_references,
             check_api_read_advances,
             check_api_read_stop_condition,
         ):
@@ -2198,28 +2131,6 @@ class TestApiRequestBodyIsValidatedAroundConnectionValues:
         )
         report = _report(check_api_read_compiles(target))
         assert "must be the only key" in report
-
-
-class TestApiDeclarationsAreReadThroughTheResolversOwnGrammar:
-    """Every spelling that reads a scope is one the kit sees."""
-
-    _broken = staticmethod(TestApiReadPathBreaks._broken)
-
-    def test_a_reference_inside_a_function_input_is_seen(self, tmp_path: Path) -> None:
-        """A ``function`` node's input is authored structure, not opaque data."""
-        target = self._broken(
-            tmp_path,
-            "invoices",
-            lambda read: read["pagination"]["cursor"].update(
-                next_cursor={
-                    "function": "base64_encode",
-                    "input": {"ref": "response.body.lnks.next"},
-                }
-            ),
-        )
-        report = _report(check_api_page_references(target))
-        assert "'response.body.lnks.next'" in report
-        assert "does not reach" in report
 
 
 class TestApiRequestBlockBreaks:

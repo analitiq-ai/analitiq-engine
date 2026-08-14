@@ -44,7 +44,6 @@ wrappers over these functions.
 """
 
 from .api_read_path import (
-    check_api_page_references,
     check_api_read_advances,
     check_api_read_compiles,
     check_api_read_stop_condition,
@@ -63,7 +62,6 @@ __all__ = [
     "ConformanceTarget",
     "Violation",
     "check_api_has_reads",
-    "check_api_page_references",
     "check_api_read_advances",
     "check_api_read_compiles",
     "check_api_read_stop_condition",

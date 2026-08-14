@@ -93,17 +93,6 @@ in a customer pipeline (spec
   rule governs the request body and the transport's
   `base_url`: resolve what a definition settles, defer what reads a
   connection scope, refuse what nothing could fix.
-- **Every page value a read declares is one a page carries.** The drives
-  above script their page *from* the declarations, so on their own they
-  can never find a reference that addresses nothing. This is the check
-  with something independent to read against: the page scope carries
-  `body` and `record_count` and nothing else, and a body path is checked
-  against the response schema the connector published. A reference outside
-  either resolves to nothing on every page — and absent is not neutral. A
-  `missing` or `empty` condition on it holds at page one and the stream
-  stops there reporting success; an `exists` condition never holds and the
-  read runs to exhaustion; a next cursor or link resolves to nothing and
-  the traversal ends after one page.
 - **No read declares something the path drops.** The contract is wider
   than the path in one place: a request may name its own `transport_ref`.
   The path implements no such selection — it opens one connection at
@@ -296,10 +285,10 @@ each fail with a message naming the offending member.
 
 An api-shaped reference connector (one endpoint document per paging
 scheme) does the same job for the api drives: a bent document must fail
-the drive that executes it — an unknown paging scheme, a next value the
-page scope has no notion of, a path placeholder nothing could bind, a
-header the connection's transport declares, a stop condition written the
-wrong way round, a body that builds on page one and not on page two. The
+the drive that executes it — an unknown paging scheme, a path placeholder
+nothing could bind, a header the connection's transport declares, a stop
+condition written the wrong way round, a body that builds on page one and
+not on page two. The
 clean cases are pinned just as hard, because a check that fails a correct
 connector is the more expensive defect: a link the connector derives into
 a relative URL, a base URL the connection supplies, a path segment a
