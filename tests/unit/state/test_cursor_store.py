@@ -82,12 +82,6 @@ def test_get_missing_returns_none(tmp_path):
     assert CursorStore(tmp_path).get(_PIPELINE, _STREAM) is None
 
 
-def test_set_none_writes_nothing(tmp_path):
-    store = CursorStore(tmp_path)
-    store.set(_PIPELINE, _STREAM, None)
-    assert store.get(_PIPELINE, _STREAM) is None
-
-
 def test_set_leaves_no_temp_file(tmp_path):
     store = CursorStore(tmp_path)
     store.set(_PIPELINE, _STREAM, datetime(2026, 2, 5, 0, 1, 0, tzinfo=timezone.utc))

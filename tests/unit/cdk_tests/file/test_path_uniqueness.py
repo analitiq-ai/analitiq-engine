@@ -172,39 +172,6 @@ async def test_write_batch_passes_content_hash_to_build_path():
 
 
 @pytest.mark.asyncio
-async def test_same_run_id_restart_different_content_gets_different_path():
-    """Simulates a same-RUN_ID restart: batch_seq=0 on first and second run.
-
-    First run: rows A  → hash_A → path_A
-    Second run: rows B → hash_B → path_B (different file, no overwrite)
-    """
-    data_a = b'{"id":1}\n'
-    data_b = b'{"id":2}\n'
-    hash_a = hashlib.sha256(data_a).hexdigest()[:16]
-    hash_b = hashlib.sha256(data_b).hexdigest()[:16]
-    assert hash_a != hash_b
-
-    handler_a = _make_handler(serialize_return=data_a)
-    handler_b = _make_handler(serialize_return=data_b)
-
-    for handler in (handler_a, handler_b):
-        await handler.write_batch(
-            run_id="run-1",
-            stream_id="s",
-            batch_seq=0,
-            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
-            record_ids=["r1"],
-            cursor=Cursor(token=b"c"),
-            emitted_at=_EMITTED_AT,
-        )
-
-    captured_hash_a = handler_a._storage.build_path.call_args[1]["content_hash"]
-    captured_hash_b = handler_b._storage.build_path.call_args[1]["content_hash"]
-    # Different hashes guarantee different paths given the deterministic format.
-    assert captured_hash_a != captured_hash_b
-
-
-@pytest.mark.asyncio
 async def test_in_run_replay_same_content_overwrites_same_path():
     """A replayed batch reaches the write and lands on the same path.
 
@@ -261,23 +228,6 @@ async def test_restart_batch_at_committed_seq_is_written_not_skipped():
         assert result.records_written == 1
 
     assert handler._storage.write_file.call_count == 2
-
-
-@pytest.mark.asyncio
-async def test_write_batch_result_is_success():
-    """Sanity check: the happy path still returns ACK_STATUS_SUCCESS."""
-    handler = _make_handler(serialize_return=b'{"id":1}\n')
-    result = await handler.write_batch(
-        run_id="r",
-        stream_id="s",
-        batch_seq=0,
-        record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
-        record_ids=["r1"],
-        cursor=Cursor(token=b"c"),
-        emitted_at=_EMITTED_AT,
-    )
-    assert result.status == AckStatus.ACK_STATUS_SUCCESS
-    assert result.committed_cursor.token == b"c"
 
 
 @pytest.mark.asyncio

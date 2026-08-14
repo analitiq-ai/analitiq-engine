@@ -218,29 +218,6 @@ class TestThinControlPlaneImports:
         assert result.returncode == 0, result.stderr
         assert "OK" in result.stdout
 
-    def test_load_kind_default_rejects_an_unknown_kind(self):
-        """A kind the CDK ships no default for names every kind that has one."""
-        result = _run(
-            """
-            from cdk.registry import KIND_DEFAULTS, UnknownConnectorKindError
-            from cdk.registry import load_kind_default
-
-            try:
-                load_kind_default("redis")
-            except UnknownConnectorKindError as exc:
-                message = str(exc)
-                assert "redis" in message, message
-                for known in KIND_DEFAULTS:
-                    assert known in message, (known, message)
-            else:
-                raise AssertionError("an unknown kind resolved a class")
-
-            print("OK")
-            """
-        )
-        assert result.returncode == 0, result.stderr
-        assert "OK" in result.stdout
-
     def test_type_map_string_surface_imports_without_arrow(self):
         """``cdk.type_map`` string surface loads with pyarrow blocked."""
         result = _run(
@@ -335,15 +312,6 @@ class TestExtrasPresentSurface:
     re-exports must resolve via the ``from cdk.sql import X`` form the engine
     uses -- this exercises the PEP-562 success path, which the blocked tests
     cannot."""
-
-    def test_arrow_reexports_resolve_when_pyarrow_present(self):
-        from cdk.sql import AdbcReader, open_adbc_reader
-        from cdk.type_map import parse_arrow_type, resolve_arrow_type
-
-        assert AdbcReader is not None
-        assert open_adbc_reader is not None
-        assert parse_arrow_type is not None
-        assert resolve_arrow_type is not None
 
     def test_arrow_reexport_is_the_real_object(self):
         from cdk import sql

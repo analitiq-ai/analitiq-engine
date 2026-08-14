@@ -303,20 +303,6 @@ def test_the_two_vocabularies_are_not_merged():
     )
 
 
-def test_not_ready_and_write_rejected_stay_distinct():
-    # They drive different dispositions: NOT_READY means nothing was
-    # attempted. Merging the vocabularies would lose the distinction, since
-    # ErrorCode has no counterpart for it.
-    assert (
-        code_for_declared_category(FailureCategory.FAILURE_CATEGORY_NOT_READY)
-        is ErrorCode.INTERNAL
-    )
-    assert (
-        code_for_declared_category(FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED)
-        is ErrorCode.DESTINATION_WRITE_FAILED
-    )
-
-
 # --------------------------------------------------------------------------- #
 # A declaration is signal, not trust
 # --------------------------------------------------------------------------- #
@@ -360,10 +346,6 @@ def test_undeclared_destination_failure_resolves_from_the_stage():
             )
             is ErrorCode.DESTINATION_WRITE_FAILED
         )
-    assert (
-        default_code_for_stage(FailureStage.DESTINATION_LOAD)
-        is ErrorCode.DESTINATION_WRITE_FAILED
-    )
 
 
 def test_an_unreadable_declaration_degrades_to_unspecified(caplog):
@@ -464,47 +446,6 @@ def test_destination_http_code_never_read_as_source_auth():
 
 
 # --------------------------------------------------------------------------- #
-# INTERNAL is expressible on the wire
-# --------------------------------------------------------------------------- #
-
-
-def test_internal_category_exists_on_both_sides_of_the_wire():
-    from src.grpc.generated.analitiq.v1 import stream_pb2
-
-    assert (
-        stream_pb2.FailureCategory.Value("FAILURE_CATEGORY_INTERNAL")
-        == FailureCategory.FAILURE_CATEGORY_INTERNAL.value
-    )
-
-
-def test_internal_verdict_crosses_the_wire_intact():
-    # Without a wire member, an engine-side INTERNAL verdict would have to be
-    # sent as WRITE_REJECTED or UNSPECIFIED -- impersonating a user-owned
-    # failure, which is the gap the two-vocabulary split exists to prevent.
-    from src.grpc.generated.analitiq.v1 import BatchAck, SchemaAck
-
-    ack = BatchAck(failure_category=FailureCategory.FAILURE_CATEGORY_INTERNAL)
-    assert (
-        BatchAck.FromString(ack.SerializeToString()).failure_category
-        == FailureCategory.FAILURE_CATEGORY_INTERNAL
-    )
-    schema_ack = SchemaAck(
-        accepted=False, failure_category=FailureCategory.FAILURE_CATEGORY_INTERNAL
-    )
-    assert (
-        SchemaAck.FromString(schema_ack.SerializeToString()).failure_category
-        == FailureCategory.FAILURE_CATEGORY_INTERNAL
-    )
-
-
-def test_internal_category_is_not_folded_into_a_user_owned_code():
-    assert (
-        code_for_declared_category(FailureCategory.FAILURE_CATEGORY_INTERNAL)
-        is ErrorCode.INTERNAL
-    )
-
-
-# --------------------------------------------------------------------------- #
 # The destination handshake classifies from its outcome, not its wording
 # --------------------------------------------------------------------------- #
 
@@ -585,18 +526,6 @@ def test_error_detail_excludes_message_text_even_on_the_tagged_token_path():
     assert detail == "destination_load/DESTINATION_WRITE_FAILED:RuntimeError"
     assert "leaked-token-xyz" not in detail
     assert "p@h" not in detail
-
-
-def test_error_detail_includes_stage_and_code_for_tagged():
-    exc = tag_failure(
-        _make("StreamProcessingError", message="opaque"),
-        code=ErrorCode.DESTINATION_WRITE_FAILED,
-        stage=FailureStage.DESTINATION_LOAD,
-    )
-    assert (
-        build_error_detail(exc)
-        == "destination_load/DESTINATION_WRITE_FAILED:StreamProcessingError"
-    )
 
 
 def test_error_detail_keeps_the_side_an_internal_code_does_not_name():

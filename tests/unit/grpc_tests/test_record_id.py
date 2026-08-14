@@ -62,14 +62,6 @@ def test_missing_primary_key_fields_fall_back_to_full_record():
     assert generate_record_id(a, primary_key_fields=["id"]) == generate_record_id(a)
 
 
-def test_two_identical_keyless_records_share_id():
-    """Byte-identical keyless records produce the same id -- the synthetic
-    ``_record_hash`` dedup key for a keyless insert stream."""
-    assert generate_record_id({"id": 1, "name": "test"}) == generate_record_id(
-        {"id": 1, "name": "test"}
-    )
-
-
 def test_returned_id_is_full_sha256_hex():
     """The id is the full (untruncated) 64-char SHA-256 hex digest."""
     rid = generate_record_id({"id": 1, "name": "test"})

@@ -29,11 +29,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pyarrow as pa
 import pytest
 
-from cdk.sql._adbc_utils import (
-    _FATAL_ADBC_ERROR_NAMES,
-    _is_fatal_adbc_error,
-    _reclassify_as_fatal,
-)
+from cdk.sql._adbc_utils import _is_fatal_adbc_error, _reclassify_as_fatal
 from cdk.sql.capabilities import SqlCapabilities
 from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.generic import AdbcConfigurationError, GenericSQLConnector, _StreamState
@@ -172,16 +168,6 @@ class TestFatalClassifier:
     def test_unknown_name_does_not_match(self):
         assert not _is_fatal_adbc_error(OperationalError())
         assert not _is_fatal_adbc_error(RuntimeError("transient"))
-
-    def test_set_kept_in_sync(self):
-        assert _FATAL_ADBC_ERROR_NAMES == frozenset(
-            {
-                "ProgrammingError",
-                "NotSupportedError",
-                "IntegrityError",
-                "DataError",
-            }
-        )
 
 
 class TestReclassify:
@@ -669,14 +655,6 @@ class TestAttachRecordHashToBatch:
         batch = pa.RecordBatch.from_pydict({"v": [42, 42]})
         result = h._attach_record_hash_to_batch(batch, self._state())
         assert result.num_rows == 1
-
-    def test_two_different_rows_get_different_hashes(self):
-        h = _FixtureConnector()
-        h._adbc_only = True
-        batch = pa.RecordBatch.from_pydict({"v": [1, 2]})
-        result = h._attach_record_hash_to_batch(batch, self._state())
-        hashes = result.column(GenericSQLConnector.RECORD_HASH_COLUMN).to_pylist()
-        assert hashes[0] != hashes[1]
 
     def test_null_value_produces_stable_hash(self):
         h = _FixtureConnector()

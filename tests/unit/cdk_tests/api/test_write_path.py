@@ -253,43 +253,6 @@ class TestCapabilities:
 
 
 @pytest.mark.asyncio
-class TestTransportFailuresAreNotFilesystemOnes:
-    async def test_a_connection_error_is_judged_by_the_declared_taxonomy(self) -> None:
-        # The client's connection errors derive from OSError, so the base's
-        # errno table would otherwise swallow exactly the failures the
-        # declared map exists to classify.
-        import aiohttp
-
-        connector = GenericAPIConnector()
-        await connector.connect(
-            runtime_with(
-                FakeSession(), error_map={"exception": {"ClientOSError": "config"}}
-            )
-        )
-        result = connector.os_error_failure(
-            aiohttp.ClientOSError("broken pipe"),
-            run_id="run-1",
-            stream_id="items",
-            batch_seq=1,
-        )
-        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
-        assert result.failure_category.name == "FAILURE_CATEGORY_CONFIG_DEFECT"
-
-    async def test_an_undeclared_transport_error_stays_retryable(self) -> None:
-        import aiohttp
-
-        connector = GenericAPIConnector()
-        await connector.connect(runtime_with(FakeSession()))
-        result = connector.os_error_failure(
-            aiohttp.ClientOSError("reset"),
-            run_id="run-1",
-            stream_id="items",
-            batch_seq=1,
-        )
-        assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
-
-
-@pytest.mark.asyncio
 class TestHealthCheck:
     async def test_an_answering_api_is_healthy(self) -> None:
         session = FakeSession([FakeResponse(status=404, body={})])

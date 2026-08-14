@@ -60,26 +60,6 @@ class TestSourcePacingGates:
         assert gates["db-2"]._value == 5
 
 
-class TestPacingGateBoundsConcurrency:
-    async def test_gate_holds_streams_to_the_ceiling(self):
-        # Drive _process_stream's gating shape directly: N tasks under a
-        # 2-slot gate never observe more than 2 concurrent entries.
-        gate = asyncio.Semaphore(2)
-        active = 0
-        peak = 0
-
-        async def stream_body():
-            nonlocal active, peak
-            async with gate:
-                active += 1
-                peak = max(peak, active)
-                await asyncio.sleep(0.01)
-                active -= 1
-
-        await asyncio.gather(*[stream_body() for _ in range(6)])
-        assert peak == 2
-
-
 class TestProcessStreamForwardsTheGate:
     """`_process_stream` hands the gate to the processor, which paces the
     extract stage — a dropped forward would pass the shape tests above

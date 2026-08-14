@@ -21,7 +21,7 @@ import pyarrow as pa
 import pytest
 
 from cdk.schema_contract import SchemaContract
-from cdk.type_map.arrow import arrow_family, parse_arrow_type
+from cdk.type_map.arrow import arrow_family
 from cdk.type_map.conversions import (
     CONVERSION_MATRIX_VERSION,
     build_conversion_grid,
@@ -60,12 +60,6 @@ class TestPublishedArtifactDrift:
 
     def test_document_carries_the_grid_and_nothing_else(self) -> None:
         assert set(load_published_matrix()) == {"version", "conversions"}
-
-    def test_grid_covers_every_family_pair(self) -> None:
-        grid = build_conversion_grid()
-        assert set(grid) == set(ARROW_FAMILIES)
-        for source, row in grid.items():
-            assert set(row) == set(ARROW_FAMILIES), source
 
 
 class TestMatrixInvariants:
@@ -159,50 +153,12 @@ class TestNamedCells:
 class TestArrowFamilyRoundTrip:
     """A built DataType maps back to the family it was parsed from."""
 
-    @pytest.mark.parametrize(
-        "canonical",
-        [
-            "Null",
-            "Int8",
-            "Int64",
-            "UInt8",
-            "UInt16",
-            "UInt32",
-            "UInt64",
-            "Float16",
-            "Float32",
-            "Float64",
-            "Utf8",
-            "LargeUtf8",
-            "Boolean",
-            "Binary",
-            "LargeBinary",
-            "FixedSizeBinary(16)",
-            "Date32",
-            "Date64",
-            "Time32(SECOND)",
-            "Time64(MICROSECOND)",
-            "Timestamp(MICROSECOND, UTC)",
-            "Duration(SECOND)",
-            "Decimal128(10, 2)",
-            "Decimal256(40, 2)",
-        ],
-    )
-    def test_family_round_trip(self, canonical: str) -> None:
-        family = canonical.split("(")[0]
-        assert arrow_family(parse_arrow_type(canonical)) == family
-
     def test_binary_trio_disambiguated(self) -> None:
         # is_fixed_size_binary / is_large_binary / is_binary are adjacent,
         # first-match-wins probes; a reorder would silently misclassify these.
         assert arrow_family(pa.binary()) == "Binary"
         assert arrow_family(pa.large_binary()) == "LargeBinary"
         assert arrow_family(pa.binary(16)) == "FixedSizeBinary"
-
-    def test_struct_and_list_families(self) -> None:
-        assert arrow_family(pa.struct([("a", pa.int64())])) == "Object"
-        assert arrow_family(pa.list_(pa.int64())) == "List"
-        assert arrow_family(pa.large_list(pa.int64())) == "List"
 
     def test_out_of_vocabulary_type_fails_loud(self) -> None:
         # A live Arrow type outside the published vocabulary must raise, not

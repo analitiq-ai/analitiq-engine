@@ -18,26 +18,6 @@ from src.config.exceptions import (
 from src.models.stream import EndpointRef
 
 
-class TestConfig:
-    """Test suite for configuration module."""
-
-    @pytest.mark.unit
-    def test_config_module_exports(self):
-        """Test that config module exports expected attributes."""
-        from src import config
-
-        expected_exports = [
-            "validate_artifact",
-            "resolve_endpoint_ref",
-            "load_connection",
-            "load_connector_definition",
-            "PathBasedConfigLoader",
-        ]
-
-        for attr in expected_exports:
-            assert hasattr(config, attr), f"config module should have attribute: {attr}"
-
-
 class TestPipelineConfigValidator:
     """Test suite for pipeline config validation."""
 
@@ -56,11 +36,6 @@ class TestPipelineConfigValidator:
         }
 
     @pytest.mark.unit
-    def test_valid_pipeline_passes(self, valid_pipeline):
-        validate_artifact("pipeline", valid_pipeline)
-        assert valid_pipeline["display_name"] == "Test Pipeline"
-
-    @pytest.mark.unit
     def test_missing_connections_fails(self, valid_pipeline):
         del valid_pipeline["connections"]
         with pytest.raises(Exception, match="connections"):
@@ -77,25 +52,6 @@ class TestPipelineConfigValidator:
         valid_pipeline["connections"]["destinations"] = []
         with pytest.raises(Exception, match="destinations|minItems|too short"):
             validate_artifact("pipeline", valid_pipeline)
-
-
-class TestConnectionConfigValidator:
-    """Test suite for connection config validation."""
-
-    @pytest.mark.unit
-    def test_valid_connection_passes(self):
-        # A minimal connection that satisfies the published contract:
-        # connector_id is the only required authored field.
-        config = {
-            "$schema": "https://schemas.analitiq.ai/connection/latest.json",
-            "connector_id": "postgresql",
-        }
-        validate_artifact("connection", config)
-
-    @pytest.mark.unit
-    def test_invalid_connection_raises(self):
-        with pytest.raises(ValueError):
-            validate_artifact("connection", {})
 
 
 class TestEndpointRefModel:

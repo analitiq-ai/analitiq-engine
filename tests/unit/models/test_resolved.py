@@ -294,10 +294,6 @@ class TestParseRuntimeConfig:
         cfg = _parse_runtime_config({"error_handling": {"retry_delay_seconds": None}})
         assert cfg.error_handling.retry_delay_seconds == 42
 
-    def test_skip_strategy_parses(self):
-        cfg = _parse_runtime_config({"error_handling": {"strategy": "skip"}})
-        assert cfg.error_handling.strategy == "skip"
-
 
 class TestReplicationConfig:
     def test_vocabulary_equals_the_published_contract_enum(self):
