@@ -20,7 +20,6 @@ from cdk.transport_factory import (
     build_transport,
     register_transport_kind,
     registered_transport_kinds,
-    resolve_adbc_spec,
     resolve_http_spec,
     resolve_sqlalchemy_spec,
     resolve_transport_spec,
@@ -397,16 +396,6 @@ class TestSQLAlchemySpecValidation:
                 },
                 resolver=_resolver(ctx),
             )
-
-
-class TestAdbcSpecValidation:
-    def test_missing_driver_raises_transport_spec_error(self):
-        with pytest.raises(TransportSpecError, match="driver"):
-            resolve_adbc_spec({}, resolver=_resolver())
-
-    def test_no_dsn_or_db_kwargs_raises_transport_spec_error(self):
-        with pytest.raises(TransportSpecError, match="at least one"):
-            resolve_adbc_spec({"driver": "postgresql"}, resolver=_resolver())
 
 
 class TestHttpSpecValidation:

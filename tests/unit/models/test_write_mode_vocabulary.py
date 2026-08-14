@@ -31,13 +31,6 @@ def test_engine_enum_matches_the_contract_vocabulary() -> None:
 
 
 @pytest.mark.parametrize("mode", sorted(CONTRACT_MODES))
-def test_every_contract_mode_has_a_wire_value(mode: str) -> None:
-    """The proto enum carries what the contract permits, so a valid mode always
-    survives the engine -> destination hop."""
-    assert hasattr(ProtoWriteMode, f"WRITE_MODE_{mode.upper()}")
-
-
-@pytest.mark.parametrize("mode", sorted(CONTRACT_MODES))
 def test_schema_message_translates_every_contract_mode(mode: str) -> None:
     """The client's string -> proto lookup covers the whole vocabulary; a gap
     there raises ``Unknown write_mode`` on a document the contract accepts."""

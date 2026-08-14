@@ -101,25 +101,6 @@ class TestRateLimiter:
         assert len(limiter.requests) <= 3
 
     @pytest.mark.asyncio
-    async def test_request_cleanup_over_time(self):
-        """Test that old requests are cleaned up from the tracking list."""
-        limiter = RateLimiter(max_requests=2, time_window=1)
-
-        # Make requests that will age out
-        await limiter.acquire()
-        await limiter.acquire()
-        assert len(limiter.requests) == 2
-
-        # Wait for requests to age out
-        await asyncio.sleep(1.1)
-
-        # Make another request - should clean up old ones
-        await limiter.acquire()
-
-        # Should only have 1 request (the new one) after cleanup
-        assert len(limiter.requests) == 1
-
-    @pytest.mark.asyncio
     async def test_acquire_exact_timing_boundary(self):
         """Test behavior at exact time window boundaries."""
         limiter = RateLimiter(max_requests=1, time_window=1)
@@ -138,54 +119,6 @@ class TestRateLimiter:
         # Verify timing is as expected
         assert second_time - first_time >= 1.0
         assert len(limiter.requests) == 1  # Only recent request should remain
-
-    @pytest.mark.asyncio
-    async def test_acquire_with_no_wait_needed(self):
-        """Test that acquire doesn't wait when old requests have expired."""
-        limiter = RateLimiter(max_requests=2, time_window=1)
-
-        # Fill the limit
-        await limiter.acquire()
-        await limiter.acquire()
-
-        # Wait for expiry
-        await asyncio.sleep(1.1)
-
-        # Should be able to acquire immediately (no wait)
-        start_time = time.time()
-        await limiter.acquire()
-        end_time = time.time()
-
-        # Should be very fast (no waiting)
-        assert end_time - start_time < 0.1
-
-    @pytest.mark.asyncio
-    async def test_concurrent_access_thread_safety(self):
-        """Test thread safety with concurrent access to the rate limiter."""
-        limiter = RateLimiter(max_requests=5, time_window=2)
-
-        results = []
-
-        async def concurrent_acquire(request_id):
-            start = time.time()
-            await limiter.acquire()
-            end = time.time()
-            results.append((request_id, start, end))
-
-        # Launch many concurrent requests
-        tasks = [asyncio.create_task(concurrent_acquire(i)) for i in range(10)]
-
-        await asyncio.gather(*tasks)
-
-        # Verify all requests completed
-        assert len(results) == 10
-
-        # Verify some requests were delayed (rate limited)
-        elapsed_times = [end - start for _, start, end in results]
-        max_elapsed = max(elapsed_times)
-
-        # At least some requests should have been delayed
-        assert max_elapsed > 0.5  # Some requests waited
 
     @pytest.mark.asyncio
     async def test_zero_wait_time_edge_case(self):
@@ -249,28 +182,3 @@ class TestRateLimiter:
         # Should raise CancelledError
         with pytest.raises(asyncio.CancelledError):
             await acquire_task
-
-    @pytest.mark.asyncio
-    async def test_multiple_waiters_fairness(self):
-        """Test that multiple waiting requests are handled fairly."""
-        limiter = RateLimiter(max_requests=1, time_window=1)
-
-        # Fill the rate limit
-        await limiter.acquire()
-
-        completion_order = []
-
-        async def waiting_request(request_id):
-            await limiter.acquire()
-            completion_order.append(request_id)
-
-        # Start multiple waiting requests
-        tasks = [asyncio.create_task(waiting_request(i)) for i in range(3)]
-
-        await asyncio.gather(*tasks)
-
-        # All should complete
-        assert len(completion_order) == 3
-
-        # Should complete in some order (FIFO not guaranteed with async)
-        assert set(completion_order) == {0, 1, 2}

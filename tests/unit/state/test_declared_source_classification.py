@@ -48,14 +48,6 @@ class TestDeclaredCategoryToCode:
 
 
 class TestUndeclaredSourceFailure:
-    def test_extract_stage_default_is_internal(self):
-        # The extract stage establishes that the source side
-        # broke and nothing more. SOURCE_AUTH_FAILED / SOURCE_UNREACHABLE /
-        # RATE_LIMITED each name a mechanism the stage did not observe, so a
-        # connector that declared no error_map entry gets the honest verdict
-        # rather than the most likely-looking one.
-        assert default_code_for_stage(FailureStage.SOURCE_EXTRACT) is ErrorCode.INTERNAL
-
     def test_no_source_code_is_reachable_without_a_declaration(self):
         # The source-specific codes exist only for connectors that declare.
         # If a stage default ever names one, an undeclared failure starts

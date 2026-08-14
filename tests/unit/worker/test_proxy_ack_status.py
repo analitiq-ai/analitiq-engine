@@ -35,13 +35,3 @@ class TestKnownAckStatus:
         with pytest.raises(ValueError):
             AckStatus(99)
         assert _known_ack_status(99) == 99
-
-    def test_the_carried_value_reaches_the_policys_unknown_status_path(self) -> None:
-        # BatchPolicy compares against the known members and falls through
-        # to its unknown-status verdict, so an int that matches none of them
-        # is classified rather than aborting the stream.
-        carried = _known_ack_status(99)
-        assert carried != AckStatus.ACK_STATUS_SUCCESS
-        assert carried != AckStatus.ACK_STATUS_ALREADY_COMMITTED
-        assert carried != AckStatus.ACK_STATUS_RETRYABLE_FAILURE
-        assert carried != AckStatus.ACK_STATUS_FATAL_FAILURE

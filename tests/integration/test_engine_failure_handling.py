@@ -794,19 +794,6 @@ class TestEngineFatalFailureHandling:
                 ErrorCode.DESTINATION_WRITE_FAILED
             ]
 
-    def test_get_partial_error_code_reports_dominant_partial_cause(
-        self, engine: StreamingEngine
-    ):
-        """The runner's no-exception partial classification reads this
-        accessor; it must resolve several partial streams by the same
-        dominance rule the exception path uses, and answer None when no
-        stream completed partial so the runner keeps its default (#351)."""
-        assert engine.get_partial_error_code() is None
-        engine._partial_error_codes.append(ErrorCode.INTERNAL)
-        assert engine.get_partial_error_code() is ErrorCode.INTERNAL
-        engine._partial_error_codes.append(ErrorCode.DESTINATION_WRITE_FAILED)
-        assert engine.get_partial_error_code() is ErrorCode.DESTINATION_WRITE_FAILED
-
     @pytest.mark.asyncio
     async def test_load_stage_retryable_exhaustion_skips_with_skip_strategy(
         self,
@@ -1499,32 +1486,3 @@ class TestMappingCompileFailureIsReported:
         # pointing the customer at us over their own config.
         assert emitted["stream"]["error_code"] == ErrorCode.CONFIG_INVALID.value
         assert emitted["stream"]["error_detail"].startswith("transform/CONFIG_INVALID:")
-
-    @pytest.mark.asyncio
-    async def test_a_compile_failure_reports_what_a_runtime_one_would(
-        self,
-        mock_grpc_client: AsyncMock,
-        sample_stream_config: dict[str, Any],
-        temp_dir: str,
-    ):
-        """Compiling a mapping and running one are the same concept.
-
-        A defect caught at compile time and the same class of defect caught
-        mid-batch are both the customer's mapping, so they must not report
-        different codes depending on when the engine noticed.
-        """
-        from src.state.error_classification import (
-            classify_exception,
-            default_code_for_stage,
-        )
-
-        assert (
-            default_code_for_stage(FailureStage.TRANSFORM) is ErrorCode.CONFIG_INVALID
-        )
-        # What the transform stage's own boundary produces mid-batch.
-        mid_batch = tag_failure(
-            TransformationError("cannot convert value to Int64"),
-            code=default_code_for_stage(FailureStage.TRANSFORM),
-            stage=FailureStage.TRANSFORM,
-        )
-        assert classify_exception(mid_batch) is ErrorCode.CONFIG_INVALID

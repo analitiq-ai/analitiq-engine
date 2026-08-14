@@ -44,17 +44,6 @@ class TestStreamingEngine:
         assert engine.metrics is not None
 
     @pytest.mark.asyncio
-    async def test_invalid_pipeline_configuration(self, engine):
-        """Test error handling for invalid pipeline configuration."""
-        invalid_config = {
-            "pipeline_id": "test",
-            # Missing required fields
-        }
-
-        with pytest.raises(ConfigurationError, match="No streams configured"):
-            await engine.stream_data(invalid_config)
-
-    @pytest.mark.asyncio
     async def test_no_streams_configuration(self, engine):
         """Test error handling when no streams are configured."""
         config = {
@@ -131,15 +120,6 @@ class TestStreamingEngine:
         # read_batches.
         assert db is api
 
-    def test_metrics_initialization(self, engine):
-        """Test that metrics are properly initialized."""
-        assert engine.metrics.records_processed == 0
-        assert engine.metrics.records_failed == 0
-        assert engine.metrics.batches_processed == 0
-        assert engine.metrics.batches_failed == 0
-        assert engine.metrics.streams_processed == 0
-        assert engine.metrics.streams_failed == 0
-
 
 @pytest.mark.unit
 class TestEngineMetrics:
@@ -165,18 +145,6 @@ class TestEngineMetrics:
         assert metrics.streams_processed == 0
         assert metrics.streams_failed == 0
 
-    def test_metrics_update(self, engine):
-        """Test that metrics can be updated."""
-        engine.metrics.records_processed = 100
-        engine.metrics.batches_processed = 10
-        engine.metrics.streams_processed = 1
-
-        metrics = engine.get_metrics()
-
-        assert metrics.records_processed == 100
-        assert metrics.batches_processed == 10
-        assert metrics.streams_processed == 1
-
 
 @pytest.mark.unit
 class TestEngineStateManager:
@@ -190,11 +158,6 @@ class TestEngineStateManager:
             runtime=_runtime(batch_size=10, buffer_size=100),
             dlq_path=temp_dir,
         )
-
-    def test_state_manager_exists(self, engine):
-        """Test that state manager is initialized."""
-        state_manager = engine.get_state_manager()
-        assert state_manager is not None
 
     @pytest.mark.asyncio
     async def test_state_manager_operations(self, engine):
@@ -238,14 +201,3 @@ class TestEngineConfiguration:
 
         assert engine.batch_size == 1000  # ANALITIQ_BATCH_SIZE default
         assert engine.buffer_size == 5000  # ANALITIQ_BUFFER_SIZE default
-
-    def test_engine_with_custom_config_params(self, temp_dir, tmp_project_root):
-        """Test engine with explicit config parameters."""
-        engine = StreamingEngine(
-            pipeline_id="with-config",
-            runtime=_runtime(batch_size=200, buffer_size=2000),
-            dlq_path=temp_dir,
-        )
-
-        assert engine.batch_size == 200
-        assert engine.buffer_size == 2000

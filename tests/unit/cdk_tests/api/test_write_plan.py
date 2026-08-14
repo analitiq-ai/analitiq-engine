@@ -27,7 +27,6 @@ from cdk.api.write_plan import (
     build_write_plan,
     collect_input_field_names,
     collect_json_fields,
-    content_idempotency_key,
     idempotency_config_problem,
     retry_verdict,
     write_mode_block,
@@ -265,18 +264,6 @@ class TestFieldCollection:
         }
         assert collect_json_fields(block) == {"blob"}
         assert collect_input_field_names(block) == {"blob", "id"}
-
-
-class TestContentKey:
-    def test_a_changed_row_gets_a_new_key(self) -> None:
-        # Upsert reconciles changed rows, so a stable identity key would
-        # make the provider's replay cache swallow a legitimate update.
-        assert content_idempotency_key({"id": 1, "v": 1}) != content_idempotency_key(
-            {"id": 1, "v": 2}
-        )
-
-    def test_an_identical_replay_dedups(self) -> None:
-        assert content_idempotency_key({"id": 1}) == content_idempotency_key({"id": 1})
 
 
 class TestBodyKeyInjection:

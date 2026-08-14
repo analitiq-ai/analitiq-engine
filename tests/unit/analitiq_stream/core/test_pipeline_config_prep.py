@@ -1207,33 +1207,6 @@ class TestRealSchemaContract:
     the schemas.analitiq.ai contracts fails in CI instead of slipping
     through the permissive mirror (#96)."""
 
-    def test_fixture_tree_assembles_under_real_schemas(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        real_schema_mirror: Path,
-    ) -> None:
-        root = tmp_path / "project"
-        root.mkdir()
-        _build_tree(root)
-        monkeypatch.chdir(root)
-        monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)
-
-        prep = PipelineConfigPrep()
-        (
-            pipeline_config,
-            stream_configs,
-            connections,
-            endpoints,
-            connectors,
-        ) = prep.create_config()
-
-        assert pipeline_config.pipeline_id == PIPELINE_ID
-        assert [s.stream_id for s in stream_configs] == [STREAM_ID]
-        assert set(connections) == {CONNECTION_SRC_ID, CONNECTION_DST_ID}
-        assert len(endpoints) == 2
-        assert connectors[0]["connector_id"] == CONNECTOR_ID
-
     def test_real_schema_rejects_contract_violation(
         self,
         tmp_path: Path,

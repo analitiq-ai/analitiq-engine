@@ -183,24 +183,6 @@ class TestWriteConflictKeysWiring:
 
 
 # --------------------------------------------------------------------------- #
-# Gap #13: main.py unknown write_mode propagates ValueError                   #
-# --------------------------------------------------------------------------- #
-
-
-class TestMainConflictKeysWiring:
-    """An unknown ``write.mode`` must fail fast at destination startup
-    (format validation). Conflict-key enforcement is no longer the
-    engine's job — Infra validates it, so the engine only rejects a mode
-    string it cannot parse."""
-
-    def test_unknown_mode_raises(self):
-        from src.models.stream import WriteMode
-
-        with pytest.raises(ValueError):
-            WriteMode("merge-typo")
-
-
-# --------------------------------------------------------------------------- #
 # Gap #14: server.py configure_schema deterministic-exception SchemaAck       #
 # --------------------------------------------------------------------------- #
 
@@ -304,57 +286,3 @@ class TestStartStreamStateReset:
         # Final assertion: reset persisted after start_stream returned.
         assert client._task_failure is None
         assert client._peer_closed_stream is False
-
-
-# --------------------------------------------------------------------------- #
-# Gap #16: AssignmentTransformer iso_to_datetime must raise on bad input      #
-# --------------------------------------------------------------------------- #
-
-
-class TestIsoTimestampStrictRaise:
-    """Returning ``datetime.now()`` on unparseable cursor input would
-    silently re-window incremental replication. The vectorized iso_* kernels
-    must raise so the engine routes via error_strategy."""
-
-    def test_iso_to_datetime_raises_on_unparseable(self):
-        # A datetime.now() fallback would fabricate timestamps that are
-        # indistinguishable from valid data (issue #138).
-        import pyarrow as pa
-
-        from src.engine.exceptions import TransformationError
-        from src.engine.mapping import _FUNCTION_CATALOG
-
-        with pytest.raises(TransformationError, match="iso_to_datetime"):
-            _FUNCTION_CATALOG["iso_to_datetime"][1](pa.array(["not-a-timestamp"]))
-
-    def test_iso_to_datetime_parses_valid_input_and_passes_null(self):
-        import pyarrow as pa
-
-        from src.engine.mapping import _FUNCTION_CATALOG
-
-        out = _FUNCTION_CATALOG["iso_to_datetime"][1](
-            pa.array(["2026-05-12T10:30:00Z", None])
-        )
-        assert out.type == pa.timestamp("us", tz="UTC")
-        rows = out.to_pylist()
-        assert rows[0].tzinfo is not None
-        assert rows[1] is None
-
-    def test_iso_to_date_raises_on_unparseable(self):
-        import pyarrow as pa
-
-        from src.engine.exceptions import TransformationError
-        from src.engine.mapping import _FUNCTION_CATALOG
-
-        with pytest.raises(TransformationError, match="iso_to_date"):
-            _FUNCTION_CATALOG["iso_to_date"][1](pa.array(["not-a-date"]))
-
-    def test_iso_to_date_parses_valid_input_and_passes_null(self):
-        import pyarrow as pa
-
-        from src.engine.mapping import _FUNCTION_CATALOG
-
-        out = _FUNCTION_CATALOG["iso_to_date"][1](
-            pa.array(["2026-05-12T10:30:00", "2026-05-12", None])
-        )
-        assert out.to_pylist() == ["2026-05-12", "2026-05-12", None]

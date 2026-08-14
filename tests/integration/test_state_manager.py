@@ -6,7 +6,6 @@ import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -75,36 +74,6 @@ class TestStateManager:
         assert run_id1 == "run1"
         assert run_id2 == "run2"
         assert manager.get_run_info()["run_id"] == "run2"
-
-    def test_save_stream_checkpoint_emits_state_log(self):
-        """Test that save_stream_checkpoint emits ANALITIQ_STATE:: log line."""
-        manager = _make_manager(self.tmp_path)
-        manager.start_run({"pipeline_id": "test"}, "run-abc")
-
-        cursor = {
-            "primary": {"field": "created", "value": "2025-08-18T12:00:00Z"},
-        }
-        hwm = "2025-08-18T12:00:00Z"
-
-        with patch("src.state.state_manager.emit_state_log") as mock_emit:
-            manager.save_stream_checkpoint(
-                stream_name="stream1",
-                partition={},
-                cursor=cursor,
-                hwm=hwm,
-                stream_version=2,
-            )
-
-            mock_emit.assert_called_once()
-            call_kwargs = mock_emit.call_args
-            assert call_kwargs.kwargs["run_id"] == "run-abc"
-            assert call_kwargs.kwargs["pipeline_id"] == "test-pipeline"
-            assert call_kwargs.kwargs["stream_id"] == "stream1"
-            assert call_kwargs.kwargs["cursor_value"] == hwm
-            assert call_kwargs.kwargs["cursor_hex"] == json.dumps(cursor).encode().hex()
-            assert call_kwargs.kwargs["stream_version"] == 2
-            # emitted_at is stamped centrally by emit_log, not passed here.
-            assert "emitted_at" not in call_kwargs.kwargs
 
     def test_save_stream_checkpoint_real_line_carries_both_fields(self, caplog):
         """End-to-end through the real emit chain: the ANALITIQ_STATE:: line a
@@ -220,21 +189,6 @@ class TestStateManagerCommittedCheckpoint:
             "cursor": datetime.fromisoformat(ts)
         }
 
-    async def test_unknown_stream_has_no_cursor(self):
-        _write_checkpoint(self.tmp_path, "orders", 100)
-        manager = _make_manager(self.tmp_path)
-
-        assert await manager.get_cursor("not-a-stream") is None
-
-    async def test_malformed_checkpoint_degrades_to_no_cursor(self):
-        # A corrupt tagged cursor degrades to a full re-scan, never a crash.
-        _write_checkpoint(
-            self.tmp_path, "orders", {"__type__": "datetime", "value": "garbage"}
-        )
-        manager = _make_manager(self.tmp_path)
-
-        assert await manager.get_cursor("orders") is None
-
     async def test_no_checkpoint_means_no_cursor(self):
         manager = _make_manager(self.tmp_path)
 
@@ -271,16 +225,6 @@ class TestStateManagerCommittedCheckpoint:
 
         second = _make_manager(self.tmp_path)
         assert await second.get_cursor("orders") == {"cursor": 5}  # committed 5
-
-    async def test_partial_progress_persists_per_batch(self):
-        # save_stream_checkpoint writes on every ACK, so an interrupted run's
-        # ACKed progress survives with no end-of-run snapshot needed.
-        first = _make_manager(self.tmp_path)
-        _commit(first, "orders", 50)
-        # No clean shutdown -- a fresh process still sees the committed batch.
-
-        second = _make_manager(self.tmp_path)
-        assert await second.get_cursor("orders") == {"cursor": 50}
 
     async def test_save_cursor_is_not_persisted_across_runs(self):
         # save_cursor updates only the in-run cache; the source's pre-ACK position

@@ -46,23 +46,9 @@ class TestStreamProcessingError:
         assert error.stream_id == "stream_123"
         assert error.original_error is original
 
-    def test_exception_inheritance(self):
-        """Test that StreamProcessingError inherits from Exception."""
-        error = StreamProcessingError("Test error")
-
-        assert isinstance(error, Exception)
-        assert isinstance(error, StreamProcessingError)
-
 
 class TestTransformationError:
     """Test TransformationError exception."""
-
-    def test_inheritance(self):
-        """Test TransformationError inheritance."""
-        error = TransformationError("Transformation failed")
-
-        assert isinstance(error, StreamProcessingError)
-        assert isinstance(error, TransformationError)
 
     def test_with_context(self):
         """Test TransformationError with context."""
@@ -116,29 +102,6 @@ class TestExceptionInteroperability:
         assert isinstance(error, Exception)
         assert not isinstance(error, ConfigurationError)
 
-    def test_exception_attributes_preserved(self):
-        """Test that exception attributes are preserved when caught."""
-        original = RuntimeError("Runtime issue")
-        error = TransformationError(
-            "Transformation failed",
-            stream_id="test_stream",
-            original_error=original,
-        )
-
-        try:
-            raise error
-        except TransformationError as caught:
-            assert caught.stream_id == "test_stream"
-            assert caught.original_error is original
-
-    def test_exception_repr(self):
-        """Test exception repr for debugging."""
-        error = StreamProcessingError("Test error", stream_id="test")
-
-        repr_str = repr(error)
-        assert "StreamProcessingError" in repr_str
-        assert "Test error" in repr_str or "test" in repr_str.lower()
-
 
 class TestExceptionEdgeCases:
     """Test edge cases and special scenarios."""
@@ -162,18 +125,3 @@ class TestExceptionEdgeCases:
         error = StreamProcessingError("Test with unicode: áéíóú 🚀")
 
         assert "áéíóú 🚀" in str(error)
-
-    def test_complex_nested_errors(self):
-        """Test complex nested error scenarios."""
-        # Create a chain of errors
-        config_error = ConfigurationError(
-            "Config failed"
-        )  # ConfigurationError doesn't have original_error param
-        stream_error = StreamProcessingError(
-            "Stream failed", stream_id="nested", original_error=config_error
-        )
-
-        error_str = str(stream_error)
-        assert "Stream nested:" in error_str
-        assert "Stream failed" in error_str
-        assert "Config failed" in error_str

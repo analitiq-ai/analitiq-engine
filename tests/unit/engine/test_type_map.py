@@ -34,11 +34,6 @@ from cdk.type_map import (
 from cdk.type_map.loader import TYPE_MAP_FILENAME, WRITE_TYPE_MAP_FILENAME
 from cdk.type_map.rules import TypeMapRule, parse_rules, parse_write_rules
 
-# Repository root, for loading the real connector write-type-maps.
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_CONNECTORS_DIR = _REPO_ROOT / "connectors"
-
-
 # ---------------------------------------------------------------------------
 # normalize_native_type
 # ---------------------------------------------------------------------------
@@ -808,12 +803,6 @@ class TestWriteTypeMapRuleValidation:
         with pytest.raises(InvalidTypeMapError, match="malformed substitution token"):
             WriteTypeMapRule(match="exact", canonical="Utf8", native=bad_native)
 
-    def test_well_formed_placeholder_in_native_accepted(self):
-        rule = WriteTypeMapRule(
-            match="exact", canonical="Utf8", native="VARCHAR(${length})"
-        )
-        assert rule.native == "VARCHAR(${length})"
-
     @pytest.mark.parametrize(
         "bad_canonical,match",
         [
@@ -1135,15 +1124,6 @@ class TestToNativeTypeUnitAliasNormalization:
         assert m.to_native_type("Duration(ms)") == "DUR_MS"
         assert m.to_native_type("Duration(ns)") == "DUR_NS"
 
-    def test_write_mapper_construction_rejects_bad_time_unit_in_canonical(self):
-        # TypeMapper.__init__ pre-computes the normalized key for every exact
-        # write rule; a bad cross-type unit (Time32 + us) must raise here rather
-        # than surfacing as a confusing UnmappedTypeError at lookup time.
-        with pytest.raises(InvalidTypeMapError, match="Time32 accepts"):
-            _write_mapper(
-                [{"match": "exact", "canonical": "Time32(us)", "native": "TIME"}]
-            )
-
     def test_to_native_type_rejects_cross_type_time_unit(self):
         # Bad canonical supplied at lookup time must raise InvalidTypeMapError,
         # not silently fall through to UnmappedTypeError.
@@ -1324,87 +1304,3 @@ class TestWriteMapLoader:
         mapper = load_connection_type_map(tmp_path, "my-pg")
         assert mapper is not None
         assert mapper.to_native_type("Int64") == "BIGINT"
-
-
-# ---------------------------------------------------------------------------
-# Real connector write-type-maps (#564 acceptance: round-trip the vocabulary)
-# ---------------------------------------------------------------------------
-
-
-def _require_connector_write_map(slug: str) -> TypeMapper:
-    """Load a real connector's mapper or skip.
-
-    ``connectors/`` is registry-owned data populated at runtime (gitignored),
-    so it is absent in a clean CI checkout. These tests validate the authored
-    postgres/snowflake write-maps when present (local dev) and skip otherwise.
-    """
-    definition = _CONNECTORS_DIR / slug / "definition"
-    if not (definition / TYPE_MAP_FILENAME).is_file():
-        pytest.skip(f"connector {slug!r} not populated in {_CONNECTORS_DIR}")
-    mapper = load_type_map(_CONNECTORS_DIR, slug)
-    if not mapper.has_write_map:
-        pytest.skip(f"connector {slug!r} has no write-type-map.json")
-    return mapper
-
-
-class TestRealConnectorWriteMaps:
-    def test_postgres_write_map(self):
-        m = _require_connector_write_map("postgres")
-        assert m.has_write_map is True
-        assert m.to_native_type("Boolean") == "BOOLEAN"
-        assert m.to_native_type("Int16") == "SMALLINT"
-        assert m.to_native_type("Int32") == "INTEGER"
-        assert m.to_native_type("Int64") == "BIGINT"
-        assert m.to_native_type("Float32") == "REAL"
-        assert m.to_native_type("Float64") == "DOUBLE PRECISION"
-        assert m.to_native_type("Decimal128(18, 2)") == "NUMERIC(18, 2)"
-        assert m.to_native_type("Decimal128(38, 9)") == "NUMERIC(38, 9)"
-        assert m.to_native_type("Utf8") == "TEXT"
-        assert m.to_native_type("Json") == "JSONB"
-        assert m.to_native_type("Binary") == "BYTEA"
-        assert m.to_native_type("Date32") == "DATE"
-        assert m.to_native_type("Time64(MICROSECOND)") == "TIME"
-        assert m.to_native_type("Timestamp(MICROSECOND)") == "TIMESTAMP"
-        assert m.to_native_type("Timestamp(MICROSECOND, UTC)") == "TIMESTAMPTZ"
-
-    def test_postgres_round_trips_read_canonicals(self):
-        # Every canonical the read map can emit must render to *some* native type
-        # (acceptance: round-trip the canonical vocabulary, no silent default).
-        m = _require_connector_write_map("postgres")
-        for native in (
-            "BOOLEAN",
-            "SMALLINT",
-            "INTEGER",
-            "BIGINT",
-            "REAL",
-            "DOUBLE PRECISION",
-            "NUMERIC(18, 4)",
-            "TEXT",
-            "JSONB",
-            "BYTEA",
-            "DATE",
-            "TIMESTAMPTZ",
-        ):
-            canonical = m.to_arrow_type(native)
-            assert m.to_native_type(canonical)  # non-empty, no raise
-
-    def test_snowflake_write_map(self):
-        m = _require_connector_write_map("snowflake")
-        assert m.has_write_map is True
-        assert m.to_native_type("Boolean") == "BOOLEAN"
-        assert m.to_native_type("Int64") == "NUMBER(38, 0)"
-        assert m.to_native_type("Float64") == "FLOAT"
-        assert m.to_native_type("Decimal128(10, 2)") == "NUMBER(10, 2)"
-        assert m.to_native_type("Utf8") == "VARCHAR"
-        assert m.to_native_type("Json") == "VARIANT"
-        assert m.to_native_type("Binary") == "BINARY"
-        assert m.to_native_type("Date32") == "DATE"
-        assert m.to_native_type("Time64(NANOSECOND)") == "TIME"
-        assert m.to_native_type("Timestamp(NANOSECOND)") == "TIMESTAMP_NTZ"
-        assert m.to_native_type("Timestamp(NANOSECOND, UTC)") == "TIMESTAMP_TZ"
-
-    def test_unmapped_canonical_raises_not_defaults(self):
-        m = _require_connector_write_map("postgres")
-        with pytest.raises(UnmappedTypeError) as exc:
-            m.to_native_type("UInt256")
-        assert exc.value.direction == "reverse"

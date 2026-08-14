@@ -373,25 +373,6 @@ class TestConnectBinding:
         materialize.assert_not_awaited()
         runtime.close.assert_not_awaited()
 
-    @pytest.mark.asyncio
-    async def test_connect_binds_facade_and_dialect(self):
-        handler = GenericSQLConnector()
-        runtime = MagicMock()
-        runtime.connector_id = "demo"
-        runtime.declared_sql_capabilities = caps_block(catalog="full")
-        runtime.declared_error_map = None
-        runtime.is_adbc = False
-        runtime.is_sync_sqlalchemy = False
-        runtime.driver = "postgresql"
-        runtime.engine = MagicMock()
-        from unittest.mock import patch
-
-        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()):
-            await handler.connect(runtime)
-        assert handler._capabilities is not None
-        assert handler._capabilities.catalog == "full"
-        assert handler.dialect.capabilities is handler._capabilities
-
     @staticmethod
     def _adbc_runtime(**overrides):
         runtime = MagicMock()

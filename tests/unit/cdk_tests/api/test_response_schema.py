@@ -12,7 +12,7 @@ from cdk.api.response_schema import (
     resolve_field_arrow_type,
 )
 from cdk.exceptions import ReadError
-from cdk.type_map import TypeMapper, UnmappedTypeError
+from cdk.type_map import UnmappedTypeError
 
 pytestmark = pytest.mark.unit
 
@@ -181,9 +181,3 @@ class TestMapperIsScoped:
             runtime,
         )
         assert len(runtime.asked) == 1
-
-
-def test_the_mapper_type_is_the_cdks_own() -> None:
-    # The read type-map is the same one the database source path consumes;
-    # this pins that it is that type and not an API-only lookalike.
-    assert TypeMapper is not None

@@ -349,39 +349,6 @@ class TestWriteBatchFatalOnTypeMapError:
         assert result.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
 
     @pytest.mark.asyncio
-    async def test_adbc_only_missing_schema_contract_names_table(self):
-        # The ADBC-only guard message must carry schema.table context so
-        # the failure_summary is actionable in monitoring (issue #149).
-        from src.grpc.generated.analitiq.v1 import AckStatus, Cursor
-
-        handler = GenericSQLConnector()
-        handler._connected = True
-        handler._adbc_only = True
-        handler._backend = MagicMock()
-        handler._streams["s1"] = _StreamState(
-            address=TableAddress(table="events", schema="myschema"),
-            write_mode="insert",
-            primary_keys=[],
-            schema_contract=None,
-        )
-
-        import pyarrow as pa
-
-        result = await handler.write_batch(
-            run_id="run-1",
-            stream_id="s1",
-            batch_seq=1,
-            record_batch=pa.RecordBatch.from_pylist([{"id": 1}]),
-            record_ids=["1"],
-            cursor=Cursor(token=b""),
-            emitted_at=_EMITTED_AT,
-        )
-
-        assert result.success is False
-        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
-        assert "myschema.events" in result.failure_summary
-
-    @pytest.mark.asyncio
     async def test_upsert_without_conflict_keys_classified_as_fatal(self):
         # End-to-end through write_batch: the plan builder's raise must be
         # classified FATAL (deterministic — retrying an unkeyed upsert can

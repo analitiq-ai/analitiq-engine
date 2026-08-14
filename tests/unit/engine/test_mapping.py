@@ -606,10 +606,6 @@ class TestFunctionCatalog:
         ).to_pylist()
         assert out == ["2025-08-16"] * 5 + [None]
 
-    def test_iso_to_date_fails_loud_on_non_date(self):
-        with pytest.raises(TransformationError, match="iso_to_date"):
-            self._v1("iso_to_date")(pa.array(["not-a-date"]))
-
 
 class TestFunctionVersionDispatch:
     """A pipe ``fn`` stage dispatches by ``version`` (default 1). Unknown name

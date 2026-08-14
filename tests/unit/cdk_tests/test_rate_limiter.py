@@ -7,8 +7,6 @@ connector's tests.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 import pytest
 
 from cdk.rate_limiter import RateLimiter
@@ -36,13 +34,3 @@ class TestAcquire:
         for _ in range(3):
             await limiter.acquire()
         assert len(limiter.requests) == 3
-
-    async def test_each_acquire_is_recorded_against_the_window(self) -> None:
-        limiter = RateLimiter(max_requests=2, time_window=1)
-        await limiter.acquire()
-        await limiter.acquire()
-        assert len(limiter.requests) == 2
-
-        now = datetime.now(tz=timezone.utc).timestamp()
-        limiter.requests = [now - 0.5, now - 0.3]
-        assert len(limiter.requests) == 2

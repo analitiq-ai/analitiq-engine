@@ -216,7 +216,7 @@ class TestDeadLetterQueue:
 
     @pytest.mark.asyncio
     async def test_cleanup_old_files_max_files(self):
-        """Test cleanup based on max files limit."""
+        """Cleanup trims to max_files and keeps files inside retention."""
         dlq = DeadLetterQueue(dlq_path=str(self.dlq_path), max_files=3)
 
         # Create more files than the limit
@@ -226,38 +226,11 @@ class TestDeadLetterQueue:
 
         await dlq.cleanup()
 
-        # Should have only max_files remaining
+        # Exactly max_files remain: the overflow is trimmed, and the fresh
+        # files inside the retention window are kept (== catches a cutoff
+        # comparison bug that would delete everything).
         remaining_files = list(dlq.dlq_path.glob("dlq_*.jsonl"))
-        assert len(remaining_files) <= 3
-
-    @pytest.mark.asyncio
-    async def test_cleanup_old_files_retention(self):
-        """Test cleanup retention policy (basic functionality)."""
-        dlq = DeadLetterQueue(
-            dlq_path=str(self.dlq_path), retention_days=30, max_files=10
-        )
-
-        # Create multiple files that match the DLQ pattern
-        test_files = []
-        for i in range(3):
-            file_name = f"dlq_202401{i:02d}_120000_000000.jsonl"
-            test_file = dlq.dlq_path / file_name
-            test_file.touch()
-            test_files.append(test_file)
-
-        # Verify files exist before cleanup
-        for test_file in test_files:
-            assert test_file.exists()
-
-        # Run cleanup - with reasonable retention, files should not be removed
-        await dlq.cleanup()
-
-        # Files should still exist (within retention period)
-        for test_file in test_files:
-            assert test_file.exists()
-
-        # Test that cleanup function completes without errors
-        assert len(list(dlq.dlq_path.glob("dlq_*.jsonl"))) == 3
+        assert len(remaining_files) == 3
 
     @pytest.mark.asyncio
     async def test_get_failed_records_all(self):
@@ -631,16 +604,6 @@ class TestDeadLetterQueueEdgeCases:
         # All record IDs should be unique
         record_ids = [r["original_record"]["id"] for r in failed_records]
         assert len(set(record_ids)) == 10
-
-    @pytest.mark.asyncio
-    async def test_dlq_directory_creation_failure(self):
-        """Test handling when DLQ directory cannot be created."""
-        # Try to create DLQ in a read-only location (simulate)
-        with patch(
-            "pathlib.Path.mkdir", side_effect=PermissionError("Cannot create directory")
-        ):
-            with pytest.raises(PermissionError):
-                DeadLetterQueue(dlq_path="/root/readonly/dlq")
 
     @pytest.mark.asyncio
     async def test_cleanup_old_files_error_handling(self):

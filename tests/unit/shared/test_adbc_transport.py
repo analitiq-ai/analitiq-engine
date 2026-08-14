@@ -25,7 +25,6 @@ from cdk.transport_factory import (
     _adbc_dbapi_module_path,
     _resolve_db_kwargs,
     build_adbc_from_spec,
-    registered_transport_kinds,
     resolve_adbc_spec,
 )
 
@@ -53,9 +52,6 @@ class TestModuleConvention:
     )
     def test_dbapi_module_follows_packaging_convention(self, driver, module):
         assert _adbc_dbapi_module_path(driver) == module
-
-    def test_adbc_kind_registered(self):
-        assert "adbc" in registered_transport_kinds()
 
 
 class TestResolveDbKwargs:

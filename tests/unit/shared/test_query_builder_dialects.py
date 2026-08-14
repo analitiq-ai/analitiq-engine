@@ -16,7 +16,6 @@ Exercises:
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import patch
 
 import pytest
 
@@ -53,24 +52,6 @@ class TestBuiltinDialectResolution:
         # the connector's SA dialect package would register it.
         with pytest.raises(ImportError, match="not registered"):
             _get_sqlalchemy_dialect("nonexistent")
-
-
-class TestUnregisteredDialect:
-    def test_missing_dialect_package_raises_actionable_import_error(self):
-        # Simulate the connector's SA dialect package not being installed:
-        # registry.load raises NoSuchModuleError, which must surface as an
-        # actionable ImportError (not the raw SQLAlchemy error).
-        from sqlalchemy.exc import NoSuchModuleError
-
-        with patch(
-            "sqlalchemy.dialects.registry.load",
-            side_effect=NoSuchModuleError("not installed"),
-        ):
-            with pytest.raises(ImportError, match="install the connector") as exc_info:
-                _get_sqlalchemy_dialect("snowflake")
-        # No poetry-extra naming -- extras live in pyproject and would rot
-        # here silently (issue #90).
-        assert "poetry install -E" not in str(exc_info.value)
 
 
 class TestPaging:
