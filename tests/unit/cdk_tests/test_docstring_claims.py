@@ -39,7 +39,7 @@ _COUNTS = {
     "Seven": 7,
 }
 
-_COUNT_WORD = re.compile(r"\b(%s)\b" % "|".join(_COUNTS))
+_COUNT_WORD = re.compile(rf"\b({'|'.join(_COUNTS)})\b")
 _BULLET = re.compile(r"\s*\* ")
 
 
