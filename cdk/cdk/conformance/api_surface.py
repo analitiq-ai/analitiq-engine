@@ -23,7 +23,11 @@ from typing import Any
 
 from cdk.api.exceptions import RequestSpecError, request_spec_errors
 from cdk.api.request import REQUEST_SUPPLIED_CONNECTION_SCOPES
-from cdk.connection_runtime import ConnectionRuntime
+from cdk.connection_runtime import (
+    MATERIALIZATION_CONNECTION_SCALARS,
+    MATERIALIZATION_CONNECTION_SUBTREES,
+    ConnectionRuntime,
+)
 from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.exceptions import TransportSpecError
 from cdk.resolver import (
@@ -54,13 +58,20 @@ READS_CHECK = "api-has-reads"
 #: The transport type the api path materializes.
 HTTP_TRANSPORT_TYPE = "http"
 
-#: What only a CONNECTION brings to transport materialization: the document's
-#: own fields, the secrets and auth it carries -- and, as an exact key, the
-#: per-connection ``runtime.connection_id``. An expression reading one is
-#: deferred: a definition-only run cannot say the value, and that says
-#: nothing about the connector.
-_TRANSPORT_DEFERRED_SCOPES = ("connection.", "secrets.", "auth.")
-_TRANSPORT_DEFERRED_KEYS = ("runtime.connection_id",)
+#: What only a CONNECTION brings to transport materialization: exactly the
+#: connection-document fields ``_build_resolution_context`` puts in scope
+#: (derived from its own statement, never restated -- an unknown field like
+#: ``connection.hostname`` is stray, not deferred), the secrets and auth it
+#: carries, and, as an exact key, the per-connection
+#: ``runtime.connection_id``. An expression reading one is deferred: a
+#: definition-only run cannot say the value, and that says nothing about
+#: the connector.
+_TRANSPORT_DEFERRED_SCOPES = tuple(
+    f"connection.{subtree}." for subtree in MATERIALIZATION_CONNECTION_SUBTREES
+) + ("secrets.", "auth.")
+_TRANSPORT_DEFERRED_KEYS = tuple(
+    f"connection.{scalar}" for scalar in MATERIALIZATION_CONNECTION_SCALARS
+) + ("runtime.connection_id",)
 
 
 def _definition_settled(path: str) -> bool:
@@ -77,13 +88,8 @@ def _definition_settled(path: str) -> bool:
 #: Paths that ARE a scope rather than a value in it. Deferring one would
 #: certify a field that resolves to a whole mapping on every connection --
 #: never the scalar the transport needs.
-_TRANSPORT_MAPPING_ROOTS = (
-    "connection",
-    "connection.parameters",
-    "connection.selections",
-    "connection.discovered",
-    "secrets",
-    "auth",
+_TRANSPORT_MAPPING_ROOTS = ("connection", "secrets", "auth") + tuple(
+    f"connection.{subtree}" for subtree in MATERIALIZATION_CONNECTION_SUBTREES
 )
 
 

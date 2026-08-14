@@ -54,7 +54,6 @@ from .exceptions import RequestSpecError, request_spec_errors
 __all__ = [
     "JSON_CONTENT_TYPE",
     "REQUEST_SUPPLIED_CONNECTION_SCOPES",
-    "REQUEST_SUPPLIED_RUNTIME_KEYS",
     "ParamTable",
     "PreparedRequest",
     "RequestBuilder",
@@ -352,7 +351,7 @@ def request_block_problem(
             f"delete one. Remove the key, or move the header off the "
             f"transport's defaults."
         )
-    problem = _secret_read_problem(request_block, declared_params, pagination)
+    problem = _secret_read_problem(request_block, declared_params, pagination, resolver)
     if problem is not None:
         return problem
     problem = _header_map_problem(
@@ -380,20 +379,6 @@ REQUEST_SUPPLIED_CONNECTION_SCOPES = (
     "connection.discovered.",
 )
 
-#: The exact runtime keys the engine passes to request resolution, matched
-#: exactly like every exact-key supply: ``runtime.batchsize`` is a typo
-#: that would be warn-and-omitted from every request forever, not a value
-#: that will arrive.
-REQUEST_SUPPLIED_RUNTIME_KEYS = ("runtime.connection_id", "runtime.batch_size")
-
-
-def _request_time_supplied(path: str) -> bool:
-    """Whether a real run's request resolution supplies *path*."""
-    return (
-        path.startswith(REQUEST_SUPPLIED_CONNECTION_SCOPES)
-        or path in REQUEST_SUPPLIED_RUNTIME_KEYS
-    )
-
 
 #: The request slots a declaration can put an expression in.
 _REQUEST_SLOTS = ("headers", "query", "body", "path_params")
@@ -403,6 +388,7 @@ def _secret_read_problem(
     request_block: Mapping[str, Any],
     declared_params: Mapping[str, Any],
     pagination: Mapping[str, Any] | None,
+    resolver: Resolver,
 ) -> str | None:
     """Why an operation reads what no request can carry, or ``None``.
 
@@ -419,9 +405,16 @@ def _secret_read_problem(
     block alone also reads ``response.*``: the page loop supplies that
     scope, page by page.
     """
+    # The runtime keys THIS phase supplies, read off the resolver the phase
+    # built rather than restated: the read passes batch_size, the write does
+    # not, and a key outside the set (`runtime.batchsize`, or batch_size on
+    # a write) is a typo that would be warn-and-omitted forever.
+    supplied_runtime = {f"runtime.{key}" for key in resolver.context.runtime}
 
     def unfillable(path: str, *, page: bool) -> bool:
-        if _request_time_supplied(path):
+        if path.startswith(REQUEST_SUPPLIED_CONNECTION_SCOPES):
+            return False
+        if path in supplied_runtime:
             return False
         return not (page and path.startswith("response."))
 

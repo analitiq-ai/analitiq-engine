@@ -2098,6 +2098,26 @@ class TestApiBaseUrlBreaks:
         assert "names nothing in the connector definition" in report
         assert "'connection.parameters.domain'" not in report
 
+    def test_an_unknown_connection_field_is_refused_not_deferred(
+        self, tmp_path: Path
+    ) -> None:
+        """The connection scope has a fixed field vocabulary.
+
+        Materialization exposes exactly the fields
+        `_build_resolution_context` builds -- `connection.hostname` names
+        none of them, so connect() fails on every connection while a bare
+        `connection.` prefix match would have deferred it clean.
+        """
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(
+                base_url={"ref": "connection.hostname"}
+            ),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "'connection.hostname'" in report
+        assert "not a scope transport materialization supplies" in report
+
     def test_a_whole_scope_read_is_refused_not_deferred(self, tmp_path: Path) -> None:
         """`connection.parameters` is a mapping on every connection.
 

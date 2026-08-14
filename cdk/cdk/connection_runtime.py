@@ -58,6 +58,20 @@ from cdk.types import EndpointScope
 
 logger = logging.getLogger(__name__)
 
+#: The connection-document fields transport materialization puts in scope --
+#: the ONE statement of this fact. ``_build_resolution_context`` builds the
+#: connection scope from these, and the conformance kit derives its
+#: transport-phase deferral from them, so the kit cannot defer a field
+#: (``connection.hostname``, say) that connect() will refuse to resolve.
+MATERIALIZATION_CONNECTION_SUBTREES = (
+    "parameters",
+    "selections",
+    "discovered",
+    "secret_refs",
+    "auth_state",
+)
+MATERIALIZATION_CONNECTION_SCALARS = ("name", "status")
+
 
 # Connection-JSON blocks that must never cross into a worker: secret
 # pointers and auth material. Everything else (parameters, selections,
@@ -941,18 +955,19 @@ class ConnectionRuntime:
         self, secrets: Mapping[str, Any]
     ) -> ResolutionContext:
         """Assemble a typed :class:`ResolutionContext` from the connection JSON."""
-        connection_scope = {
-            "parameters": dict(self._raw_config.get("parameters") or {}),
-            "selections": dict(self._raw_config.get("selections") or {}),
-            "discovered": dict(self._raw_config.get("discovered") or {}),
-            "secret_refs": dict(self._raw_config.get("secret_refs") or {}),
-            "auth_state": dict(self._raw_config.get("auth_state") or {}),
-            # Top-level fields that connector value expressions may
-            # reference directly (e.g. ``connection.name`` for logging
-            # decorators). Address fields live in transports.
-            "name": self._raw_config.get("name"),
-            "status": self._raw_config.get("status"),
+        connection_scope: dict[str, Any] = {
+            key: dict(self._raw_config.get(key) or {})
+            for key in MATERIALIZATION_CONNECTION_SUBTREES
         }
+        # Top-level scalar fields that connector value expressions may
+        # reference directly (e.g. ``connection.name`` for logging
+        # decorators). Address fields live in transports.
+        connection_scope.update(
+            {
+                key: self._raw_config.get(key)
+                for key in MATERIALIZATION_CONNECTION_SCALARS
+            }
+        )
         return ResolutionContext(
             connector=self._connector_definition or {},
             connection=connection_scope,

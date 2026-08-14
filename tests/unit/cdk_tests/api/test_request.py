@@ -493,15 +493,29 @@ class TestNeverFillableScopeRefusals:
         assert "'runtime.batchsize'" in problem
 
     def test_the_supplied_runtime_keys_are_not_refused(self) -> None:
+        # The supplied set is the RESOLVER's, per phase: this one carries
+        # batch_size the way the read role's does.
         assert (
             request_block_problem(
                 {"query": {"limit": {"ref": "runtime.batch_size"}}},
                 reserved_headers=frozenset(),
-                resolver=_resolver(),
+                resolver=_resolver(batch_size=37),
                 params={},
             )
             is None
         )
+
+    def test_a_runtime_key_another_phase_supplies_is_refused(self) -> None:
+        # The same read against a resolver built WITHOUT batch_size -- the
+        # write role's shape -- is a value that never arrives on this phase.
+        problem = request_block_problem(
+            {"query": {"limit": {"ref": "runtime.batch_size"}}},
+            reserved_headers=frozenset(),
+            resolver=_resolver(),
+            params={},
+        )
+        assert problem is not None
+        assert "'runtime.batch_size'" in problem
 
     def test_a_connection_read_in_a_param_default_is_not_refused(self) -> None:
         # The refusal is about the phase, not about deferral in general:
