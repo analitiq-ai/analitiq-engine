@@ -53,8 +53,13 @@ def _const_node(value):
 
 
 def _rule(rule_type, field="v", **extra):
-    """A validation rule in the contract's spelling."""
-    return {"type": rule_type, "field": field, **extra}
+    """A validation rule in the contract's spelling.
+
+    ``field`` is the contract's ordered token array; a plain string is a
+    convenience for the common single-token address.
+    """
+    tokens = [field] if isinstance(field, str) else list(field)
+    return {"type": rule_type, "field": tokens, **extra}
 
 
 def _target(name, arrow_type, nullable=True, **extra):
@@ -764,14 +769,129 @@ class TestValidationRules:
             )
         ]
 
-    def test_rule_naming_another_column_is_refused(self):
-        """The rule's `field` restates the assignment's target; it cannot pick.
+    def test_rule_naming_an_undeclared_target_is_refused(self):
+        """A rule's first token must name a declared target (contract mirror).
 
-        Applying such a rule to the target regardless would validate a column
-        the author did not name, silently.
+        A typo would name nothing and the rule would silently grade no value
+        at all, which reads exactly like a passing rule.
         """
-        with pytest.raises(TransformationError, match="cannot select another column"):
+        with pytest.raises(TransformationError, match="names no assignment target"):
             _compile(self._validated([_rule("not_null", field="some_other_column")]))
+
+    def test_rule_naming_another_declared_target_grades_that_column(self):
+        """Rules grade the record the assignments build together.
+
+        A rule is authored per assignment but may address any declared
+        target, so the failing column named in the error is the addressed
+        one, not the one the rule rides on.
+        """
+        assignments = [
+            _assignment("a", "Int64", _expr(_get("a"))),
+            _assignment(
+                "b",
+                "Int64",
+                _expr(_get("b")),
+                validate={"rules": [_rule("not_null", field="a")]},
+            ),
+        ]
+        assert _run([{"a": 1, "b": 2}], assignments) == [{"a": 1, "b": 2}]
+        with pytest.raises(TransformationError, match=r"column 'a'.*not_null"):
+            _run([{"a": None, "b": 2}], assignments)
+
+    def test_rule_addressing_a_nested_field_grades_it(self):
+        """A multi-token field descends into the target's declared properties."""
+        assignments = [
+            _assignment(
+                "address",
+                "Object",
+                _expr(_get("address")),
+                properties={"city": {"arrow_type": "Utf8"}},
+                validate={
+                    "rules": [_rule("min_length", field=["address", "city"], value=4)]
+                },
+            )
+        ]
+        assert _run([{"address": {"city": "Kyiv"}}], assignments) == [
+            {"address": {"city": "Kyiv"}}
+        ]
+        with pytest.raises(
+            TransformationError, match=r"\['address', 'city'\].*min_length"
+        ):
+            _run([{"address": {"city": "Ur"}}], assignments)
+
+    def test_rule_addressing_through_a_list_fails_the_element_rows(self):
+        """A `List` level is stepped through; a row fails if any element does."""
+        assignments = [
+            _assignment(
+                "lines",
+                "List",
+                _expr(_get("lines")),
+                items={
+                    "arrow_type": "Object",
+                    "properties": {"sku": {"arrow_type": "Utf8"}},
+                },
+                validate={"rules": [_rule("not_null", field=["lines", "sku"])]},
+            )
+        ]
+        clean = [{"lines": [{"sku": "A-1"}, {"sku": "A-2"}]}]
+        assert _run(clean, assignments) == clean
+        with pytest.raises(TransformationError, match=r"1 row\(s\) fail rule"):
+            _run(
+                [
+                    {"lines": [{"sku": "A-1"}]},
+                    {"lines": [{"sku": None}, {"sku": None}]},
+                ],
+                assignments,
+            )
+
+    def test_nested_rule_over_a_valueless_column_passes(self):
+        """A column carrying no value anywhere infers as Arrow's `null` type.
+
+        No `struct_field` kernel accepts it, but every deeper token addresses
+        only nulls -- so the nulls stand in for the field and the usual
+        exemptions apply, instead of the batch failing on a kernel error.
+        """
+        assignments = [
+            _assignment(
+                "lines",
+                "List",
+                _expr(_get("lines")),
+                items={
+                    "arrow_type": "Object",
+                    "properties": {"sku": {"arrow_type": "Utf8"}},
+                },
+                validate={"rules": [_rule("not_null", field=["lines", "sku"])]},
+            )
+        ]
+        records = [{"lines": None}, {"lines": []}]
+        assert _run(records, assignments) == records
+
+    def test_rule_token_the_target_does_not_declare_is_refused(self):
+        """Every token past the first must resolve through declared properties."""
+        with pytest.raises(TransformationError, match="does not resolve"):
+            _compile(
+                [
+                    _assignment(
+                        "address",
+                        "Object",
+                        _expr(_get("address")),
+                        properties={"city": {"arrow_type": "Utf8"}},
+                        validate={
+                            "rules": [_rule("not_null", field=["address", "zip"])]
+                        },
+                    )
+                ]
+            )
+
+    def test_duplicate_assignment_targets_are_refused(self):
+        """Two assignments building one field would let array position decide."""
+        with pytest.raises(TransformationError, match="duplicate target.path"):
+            _compile(
+                [
+                    _assignment("v", "Int64", _expr(_get("v"))),
+                    _assignment("v", "Int64", _expr(_get("w"))),
+                ]
+            )
 
     def test_range_bounds_come_from_the_rule_value_object(self):
         rules = [_rule("range", value={"min": 1, "max": 5})]

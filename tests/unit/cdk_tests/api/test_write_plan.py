@@ -64,6 +64,7 @@ def _document(
     headers_remove: list[str] | None = None,
     query: dict[str, Any] | None = None,
     params: dict[str, Any] | None = None,
+    contract_valid: bool = True,
 ) -> dict[str, Any]:
     """Build a write document the api-endpoint contract accepts, then dump it."""
     # The contract requires every write body to address the in-flight
@@ -117,6 +118,12 @@ def _document(
         "endpoint_id": "items",
         "operations": {"write": {mode: block}},
     }
+    if not contract_valid:
+        # The shape under test is one the contract itself now refuses at
+        # parse (RULE-ENDP-027/028), so it cannot round-trip through
+        # ApiEndpointDoc. The CDK still reads raw dicts at a trust boundary
+        # and keeps its own loud refusal; this hands it the dict directly.
+        return raw
     return dump_endpoint_document(ApiEndpointDoc.model_validate(raw))
 
 
@@ -313,6 +320,7 @@ class TestTheRequestTheStreamWillActuallySend:
             path="/Contact/{id}",
             path_params={"id": {"from_param": "id"}},
             params={"id": {"in": "path", "type": "string", "required": True}},
+            contract_valid=False,
         )
         outcome = build_write_plan(
             doc, _spec(), session_header_names=set(), resolver=_resolver()
@@ -458,6 +466,7 @@ class TestTheRequestTheStreamWillActuallySend:
                     "default": {"literal": "a/b"},
                 }
             },
+            contract_valid=False,
         )
         outcome = build_write_plan(
             doc, _spec(), session_header_names=set(), resolver=_resolver()

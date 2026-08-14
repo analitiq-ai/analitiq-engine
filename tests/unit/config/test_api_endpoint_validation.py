@@ -80,7 +80,9 @@ def _paginated_read(**overrides: Any) -> dict[str, Any]:
                 "initial": 0,
                 "increment_by": {"ref": "response.record_count"},
             },
-            "limit": {"param": "limit", "default": {"literal": 50}},
+            # A bare positive integer: the contract excludes the unboundable
+            # `{literal: N}` expression form from a page-size default.
+            "limit": {"param": "limit", "default": 50},
             "stop_when": {"empty": {"ref": "response.body.records"}},
         },
     }
