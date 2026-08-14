@@ -350,6 +350,8 @@ class GenericAPIConnector(BaseDestinationHandler):
                 resolver=resolver,
                 params=table.values,
                 controlled_by=table.controlled_by,
+                declared_params=read.get("params") or {},
+                pagination=read.get("pagination"),
             )
             if problem is not None:
                 raise ReadError(f"endpoint {endpoint_id!r}: {problem}")

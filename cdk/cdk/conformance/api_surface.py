@@ -37,7 +37,8 @@ __all__ = [
     "expression_grammar_problem",
     "fillable_at_request_time",
     "read_operations",
-    "reads_a_connection_scope",
+    "supplied_at_materialization",
+    "unsupplied_paths",
 ]
 
 TRANSPORT_CHECK = "api-read-transport-selection"
@@ -46,11 +47,19 @@ READS_CHECK = "api-has-reads"
 #: The transport type the api path materializes.
 HTTP_TRANSPORT_TYPE = "http"
 
-#: Scopes transport materialization fills in, on the trusted side: the
-#: connection document plus the secrets and auth it carries. An expression
-#: reading one cannot be resolved from a definition alone, and that says
-#: nothing about the connector.
-_CONNECTION_SCOPES = ("connection.", "secrets.", "auth.")
+#: Scopes transport materialization fills in, on the trusted side -- what
+#: ``ConnectionRuntime._build_resolution_context`` supplies at connect(): the
+#: connection document, the secrets and auth it carries, the connector's own
+#: definition, and ``runtime.connection_id``. An expression reading one
+#: cannot be resolved from a definition-only run, and that says nothing
+#: about the connector.
+_CONNECTION_SCOPES = (
+    "connection.",
+    "secrets.",
+    "auth.",
+    "connector.",
+    "runtime.connection_id",
+)
 
 #: The one scope per-request resolution supplies from a connection
 #: (``ConnectionRuntime.request_resolver``). Secrets and auth are resolved
@@ -100,15 +109,31 @@ def definition_resolver(
     return runtime.request_resolver(runtime_values=runtime_values)
 
 
-def reads_a_connection_scope(declared: Any) -> bool:
-    """Whether *declared* reads a scope only a connection document supplies.
+def unsupplied_paths(declared: Any, scopes: tuple[str, ...]) -> list[str]:
+    """Return the scope paths *declared* reads that *scopes* does not supply.
 
-    The transport-phase question: materialization resolves with the whole
-    connection document, its secrets and its auth in scope, so any of the
-    three defers. Request-time deferral is narrower -- see
+    The deferral primitive both phases share: a declaration defers exactly
+    when it reads something (``scope_paths`` is non-empty) and everything
+    it reads is supplied at that phase (this list is empty). Any path left
+    over resolves on no run at that phase, so it is judged now, by name --
+    one path outside the set must never let the ones inside it carry the
+    whole node past the check.
+    """
+    return [path for path in scope_paths(declared) if not path.startswith(scopes)]
+
+
+def supplied_at_materialization(declared: Any) -> bool:
+    """Whether transport materialization will fill *declared*, wholly.
+
+    The transport phase resolves on the trusted side with the connection
+    document, its secrets and its auth in scope -- and nothing else. A
+    node mixing one of those with any other lookup still fails
+    ``resolve_http_spec()`` at connect(), so only a node reading those
+    scopes exclusively defers. Request-time deferral is narrower -- see
     :func:`fillable_at_request_time`.
     """
-    return any(path.startswith(_CONNECTION_SCOPES) for path in scope_paths(declared))
+    paths = scope_paths(declared)
+    return bool(paths) and not unsupplied_paths(declared, _CONNECTION_SCOPES)
 
 
 def fillable_at_request_time(declared: Any) -> bool:
@@ -122,7 +147,7 @@ def fillable_at_request_time(declared: Any) -> bool:
     report, never a value to defer.
     """
     paths = scope_paths(declared)
-    return bool(paths) and all(path.startswith(_REQUEST_TIME_SCOPES) for path in paths)
+    return bool(paths) and not unsupplied_paths(declared, _REQUEST_TIME_SCOPES)
 
 
 def expression_grammar_problem(node: Any) -> str | None:
@@ -148,17 +173,22 @@ def expression_grammar_problem(node: Any) -> str | None:
 
 
 def api_base_url(target: ConformanceTarget) -> str | None:
-    """Return the base URL the default http transport declares literally.
+    """Return the base URL the default http transport settles by itself.
 
-    ``None`` when the ``base_url`` is a value expression rather than a
-    literal -- a reference resolves from the connection document, which a
-    definition-only run does not have -- and when there is no http default
-    transport to read one from at all. The read-path checks substitute a
-    stand-in origin either way, because what they certify (that a path
-    segment joins, that an off-origin link is refused) holds for whatever
-    origin the connection supplies; an absent or non-http default transport
-    is a failure in its own right, reported by
-    :func:`check_read_transport_selection`.
+    A plain string, or a value expression the definition alone resolves --
+    ``{"literal": "https://..."}`` settles the same origin production's
+    connect() resolves, and arming the link-origin guard with a stand-in
+    instead would refuse an absolute same-origin link a real run follows.
+
+    ``None`` only for what a definition-only run genuinely cannot say: an
+    expression reading a scope the connection supplies, one that is
+    malformed or does not resolve (each a transport-check finding in its
+    own right, never silently absorbed here), and a missing or non-http
+    default transport (reported by
+    :func:`check_read_transport_selection`). The read-path checks
+    substitute a stand-in origin then, because what they certify (that a
+    path segment joins, that an off-origin link is refused) holds for
+    whatever origin the connection supplies.
     """
     ref = target.definition.get("default_transport")
     block = target.declared_transports().get(ref) if isinstance(ref, str) else None
@@ -167,7 +197,16 @@ def api_base_url(target: ConformanceTarget) -> str | None:
     if block.get("transport_type") != HTTP_TRANSPORT_TYPE:
         return None
     base_url = block.get("base_url")
-    return base_url if isinstance(base_url, str) and base_url else None
+    if isinstance(base_url, str):
+        return base_url or None
+    if scope_paths(base_url) or expression_grammar_problem(base_url) is not None:
+        return None
+    try:
+        with request_spec_errors("transport base_url"):
+            resolved = definition_resolver(target).resolve(base_url)
+    except RequestSpecError:
+        return None
+    return resolved if isinstance(resolved, str) and resolved else None
 
 
 def check_read_transport_selection(target: ConformanceTarget) -> list[Violation]:
@@ -279,8 +318,26 @@ def _base_url_violations(
                 f"reaches its first request.",
             )
         ]
-    if reads_a_connection_scope(declared):
-        return []
+    paths = scope_paths(declared)
+    if paths:
+        stray = unsupplied_paths(declared, _CONNECTION_SCOPES)
+        if not stray:
+            return []
+        # Named rather than resolved: resolving over the kit's empty
+        # connection would blame the connection-supplied half of a mixed
+        # node -- the half production fills fine -- while the defect is the
+        # path no phase ever supplies.
+        return [
+            Violation(
+                TRANSPORT_CHECK,
+                f"default_transport {default_ref!r} declares no usable "
+                f"base_url ({declared!r}, which reads "
+                f"{', '.join(repr(path) for path in stray)} -- not a scope "
+                f"transport materialization supplies). The build resolves "
+                f"the whole declaration at connect(), so every connection "
+                f"fails before any stream reaches its first request.",
+            )
+        ]
     unusable = f"({declared!r})"
     try:
         with request_spec_errors("transport base_url"):
@@ -314,10 +371,11 @@ def _transport_header_violations(
     while a check reading only the base URL reports the transport usable.
 
     Each value gets the base-url treatment: grammar judged always, the
-    value deferred when the connection supplies it (secrets and auth
-    included -- transport materialization runs with both in scope),
-    resolved otherwise. A value resolving to ``None`` is fine: the build
-    drops that header rather than sending it empty.
+    value deferred only when materialization supplies everything it reads
+    (connection, secrets and auth -- and a mixed value naming any other
+    scope is refused by the stray path's name), resolved otherwise. A
+    value resolving to ``None`` is fine: the build drops that header
+    rather than sending it empty.
     """
     declared = block.get("headers")
     if declared is None:
@@ -347,7 +405,23 @@ def _transport_header_violations(
                 )
             )
             continue
-        if reads_a_connection_scope(value):
+        paths = scope_paths(value)
+        if paths:
+            stray = unsupplied_paths(value, _CONNECTION_SCOPES)
+            if not stray:
+                continue
+            violations.append(
+                Violation(
+                    TRANSPORT_CHECK,
+                    f"default_transport {default_ref!r} header {name!r} "
+                    f"({value!r}) reads "
+                    f"{', '.join(repr(path) for path in stray)} -- not a "
+                    f"scope transport materialization supplies. The build "
+                    f"resolves the whole value at connect(), so every "
+                    f"connection fails before any stream reaches its first "
+                    f"request.",
+                )
+            )
             continue
         try:
             with request_spec_errors(f"transport header {name!r}"):

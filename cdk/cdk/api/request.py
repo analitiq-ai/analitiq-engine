@@ -48,7 +48,7 @@ from ..request_binding import (
     bind_record_inputs,
     resolve_param_defaults,
 )
-from ..resolver import Resolver
+from ..resolver import Resolver, scope_paths
 from .exceptions import RequestSpecError, request_spec_errors
 
 __all__ = [
@@ -237,8 +237,37 @@ def bind_request_values(
                 name,
             )
             continue
-        resolved[name] = bound
+        resolved[name] = _sendable_value(name, bound, block=block, endpoint=endpoint)
     return resolved
+
+
+def _sendable_value(name: str, value: Any, *, block: str, endpoint: str) -> Any:
+    """Normalize one bound value to what the wire can carry, or refuse it.
+
+    The declared document is JSON, so a boolean goes out in its JSON
+    spelling: the URL builder refuses the Python object outright, and
+    ``str()`` would send ``True`` -- a spelling no JSON document contains.
+    A bare null is refused loud: unlike an expression resolving to nothing
+    (a per-connection fact the omit rule above drops), a declared null is
+    static -- it names a key nothing can ever send, on any connection. A
+    container is refused for the reason the contract demands a declared
+    wire serialization for container params: there is no one way to send
+    it, so guessing one would be the engine's guess on the provider's wire.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        raise RequestSpecError(
+            f"request.{block}.{name} for endpoint {endpoint!r} declares "
+            f"null; nothing can send it -- remove the key or declare a value"
+        )
+    if isinstance(value, (Mapping, list)):
+        raise RequestSpecError(
+            f"request.{block}.{name} for endpoint {endpoint!r} resolves to "
+            f"a {type(value).__name__}; a request value must be a scalar -- "
+            f"declare how the container serializes, or flatten it"
+        )
+    return value
 
 
 def path_placeholders(path: str) -> list[str]:
@@ -292,6 +321,8 @@ def request_block_problem(
     resolver: Resolver,
     params: Mapping[str, Any],
     controlled_by: Mapping[str, str] = MappingProxyType({}),
+    declared_params: Mapping[str, Any] = MappingProxyType({}),
+    pagination: Mapping[str, Any] | None = None,
 ) -> str | None:
     """Why this request block cannot be sent as declared, or ``None``.
 
@@ -304,6 +335,11 @@ def request_block_problem(
     judges the value that would go out rather than the spelling it was
     declared in. Both roles call this after their param table is built, so
     the values are the run's own.
+
+    ``declared_params`` and ``pagination`` are the operation's other
+    expression carriers: a param ``default`` or a pagination value reading
+    a never-request-time scope is the same silent omission a request slot's
+    would be, so the one secret-read walk covers all of them.
     """
     removals = request_block.get("headers_remove")
     if removals:
@@ -314,6 +350,9 @@ def request_block_problem(
             f"delete one. Remove the key, or move the header off the "
             f"transport's defaults."
         )
+    problem = _secret_read_problem(request_block, declared_params, pagination)
+    if problem is not None:
+        return problem
     problem = _header_map_problem(
         request_block.get("headers"),
         reserved_headers=reserved_headers,
@@ -326,6 +365,56 @@ def request_block_problem(
     if problem is not None:
         return problem
     return _controlled_placeholder_problem(request_block, controlled_by)
+
+
+#: Scopes request-time resolution never supplies, on any run and on either
+#: side of the process boundary: secret resolution happens once, engine-side,
+#: at transport materialization, and the resolved values never enter a
+#: request scope -- the sandboxed worker must not see the secret store.
+_NEVER_REQUEST_SCOPES = ("secrets.", "auth.")
+
+#: The request slots a declaration can put an expression in.
+_REQUEST_SLOTS = ("headers", "query", "body", "path_params")
+
+
+def _secret_read_problem(
+    request_block: Mapping[str, Any],
+    declared_params: Mapping[str, Any],
+    pagination: Mapping[str, Any] | None,
+) -> str | None:
+    """Why an operation slot reading a secret can never send it, or ``None``.
+
+    Not an error a run would surface: request-time resolution omits an
+    unresolved value rather than failing, so a request slot, a param
+    ``default`` or a pagination value reading ``secrets.*`` or ``auth.*``
+    builds a request WITHOUT the declared value -- every request, every
+    connection, both roles -- and the run stays green while the provider
+    sees the credential-less shape. The refusal therefore happens here,
+    where the declarations are read, naming the phase fact. One walk over
+    every expression the operation authors, so a new never-fillable spelling
+    cannot slip in through a slot the scan does not name.
+    """
+    declared = [request_block.get(slot) for slot in _REQUEST_SLOTS]
+    declared.append(declared_params)
+    declared.append(pagination)
+    reads = sorted(
+        {
+            path
+            for block in declared
+            for path in scope_paths(block)
+            if path.startswith(_NEVER_REQUEST_SCOPES)
+        }
+    )
+    if not reads:
+        return None
+    return (
+        f"the operation reads {', '.join(repr(path) for path in reads)}; "
+        f"request-time resolution never supplies secrets or auth -- they "
+        f"are resolved once, engine-side, at transport materialization -- "
+        f"so the value would be dropped from every request ever sent. "
+        f"Carry it on the transport's headers, or supply it as a "
+        f"connection parameter."
+    )
 
 
 def _header_map_problem(

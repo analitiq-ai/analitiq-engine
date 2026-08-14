@@ -332,6 +332,7 @@ def build_write_plan(
             resolver=resolver,
             params=table.values,
             controlled_by=table.controlled_by,
+            declared_params=mode_block.get("params") or {},
         )
         if problem is not None:
             return problem

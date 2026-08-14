@@ -1192,17 +1192,23 @@ class TestApiReadPathBreaks:
         assert "'page_token'" in report
         assert "controlled_by" in report
 
-    def test_a_next_value_off_the_page_scope_reads_one_page(
+    def test_a_next_value_off_the_page_scope_is_refused_at_compile(
         self, tmp_path: Path
     ) -> None:
-        """A traversal that cannot advance is a truncated read reporting success."""
+        """A reserved response sub-scope is contract-legal and page-absent.
+
+        RULE-ENDP-023 resolves only `response.body` paths; `headers`,
+        `status` and `metadata` are recognised, reserved sub-scopes it
+        leaves to the engine -- and the read path's page scope does not
+        carry them, so this next value resolves to nothing forever and the
+        traversal reads one page reporting success. The compile drive is
+        where the kit states that page-scope fact.
+        """
 
         def to_cursor(read: dict[str, Any]) -> None:
             read["pagination"] = {
                 "type": "cursor",
                 "limit": {"param": "limit", "default": {"ref": "runtime.batch_size"}},
-                # The page scope carries the body and the record count; a
-                # header is not in it, so this resolves to nothing forever.
                 "cursor": {
                     "param": "page_token",
                     "next_cursor": {"ref": "response.headers.x-next"},
@@ -1211,8 +1217,25 @@ class TestApiReadPathBreaks:
             }
 
         target = self._broken(tmp_path, "widgets", to_cursor)
-        report = _report(check_api_read_advances(target))
-        assert "stops after the first page and reports success" in report
+        report = _report(check_api_read_compiles(target))
+        assert "'response.headers.x-next'" in report
+        assert "carries only 'body', 'record_count'" in report
+
+    def test_a_stop_condition_off_the_page_scope_is_refused_at_compile(
+        self, tmp_path: Path
+    ) -> None:
+        """The stop-operand half of the same fact: `missing` on a header
+        holds at page one and the stream stops there reporting success."""
+
+        def bend(read: dict[str, Any]) -> None:
+            read["pagination"]["stop_when"] = {
+                "missing": {"ref": "response.headers.x-next"}
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "'response.headers.x-next'" in report
+        assert "resolves to nothing on every page" in report
 
     def test_pagination_params_that_reach_no_binding_read_one_page_forever(
         self, tmp_path: Path
@@ -1857,8 +1880,32 @@ class TestApiRequestBodyBreaks:
 
         target = self._broken(tmp_path, "widgets", bend)
         report = _report(check_api_read_compiles(target))
-        assert "resolved to nothing" in report
-        assert "request.body" in report
+        assert "'secrets.api_key'" in report
+        assert "never supplies secrets or auth" in report
+
+    def test_a_secret_nested_inside_a_body_is_not_silently_dropped(
+        self, tmp_path: Path
+    ) -> None:
+        """The subtler spelling: one field of a structural body reads a secret.
+
+        Request-time resolution omits an unresolved field rather than
+        failing, so production sends this body WITHOUT the declared
+        credential field, on every run -- a green pipeline and a
+        credential-less request. The declaration is the only place the
+        defect is visible.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["method"] = "POST"
+            read["request"]["body"] = {
+                "token": {"ref": "secrets.api_key"},
+                "limit": 50,
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "'secrets.api_key'" in report
+        assert "dropped from every request" in report
 
 
 class TestApiRunWithNothingToDrive:
@@ -1969,6 +2016,48 @@ class TestApiBaseUrlBreaks:
         assert "malformed" in report
         assert "'extra'" in report
 
+    def test_a_mixed_scope_base_url_is_refused_by_the_stray_path(
+        self, tmp_path: Path
+    ) -> None:
+        """One deferrable path must not carry an undeferrable one past.
+
+        The connection half resolves fine in production; the ``bogus.``
+        half fails ``resolve_http_spec()`` at connect() on every
+        connection, so the node as a whole defers on no run -- and the
+        violation names the path no phase supplies, not the half the
+        connection fills.
+        """
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(
+                base_url={
+                    "template": "https://${connection.parameters.host}/${bogus.value}"
+                }
+            ),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "'bogus.value'" in report
+        assert "'connection.parameters.host'" not in report
+
+    def test_a_statically_resolvable_base_url_arms_the_real_origin(
+        self, tmp_path: Path
+    ) -> None:
+        """A literal expression settles the same origin connect() resolves.
+
+        Arming the link-origin guard with the stand-in instead would refuse
+        an absolute same-origin link a real run follows.
+        """
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(
+                base_url={"literal": "https://static.example.test"}
+            ),
+        )
+        assert check_read_transport_selection(target) == []
+        probes, _ = api_read_path._probes(target)
+        assert probes, "the fixture's reads must still compile"
+        assert all(probe.origin == "https://static.example.test" for probe in probes)
+
 
 class TestApiTransportHeaderBreaks:
     """connect() resolves every transport header; the check judges them all."""
@@ -2017,6 +2106,29 @@ class TestApiTransportHeaderBreaks:
             ),
         )
         assert check_read_transport_selection(target) == []
+
+    def test_a_mixed_scope_header_is_refused_by_the_stray_path(
+        self, tmp_path: Path
+    ) -> None:
+        """A secrets read beside an unknown scope defers nothing.
+
+        connect() resolves the whole value; the ``bogus.`` half fails it on
+        every connection, so the header is a defect named by the path no
+        phase supplies.
+        """
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(
+                headers={
+                    "Authorization": {
+                        "template": "Bearer ${secrets.api_key}-${bogus.value}"
+                    }
+                }
+            ),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "'Authorization'" in report
+        assert "'bogus.value'" in report
 
     def test_a_base_url_scope_that_does_not_exist_does_not_stop_the_run(
         self, tmp_path: Path
@@ -2326,9 +2438,8 @@ class TestApiRequestBlockBreaks:
 
         target = self._broken(tmp_path, "widgets", bend)
         report = _report(check_api_read_compiles(target))
-        assert "{account_id}" in report
         assert "'secrets.account_id'" in report
-        assert "never in scope" in report
+        assert "never supplies secrets or auth" in report
 
     def test_a_path_placeholder_a_run_supplies_is_not_a_finding(
         self, tmp_path: Path

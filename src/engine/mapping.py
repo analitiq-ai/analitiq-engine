@@ -982,23 +982,34 @@ def _rule_label(tokens: list[str]) -> str:
 
 def _addressed_values(
     built: Mapping[str, pa.Array], tokens: list[str]
-) -> tuple[pa.Array, list[int] | None]:
-    """Return the values a rule's token path addresses, and their source rows.
+) -> tuple[pa.Array, list[int] | None, list[int]]:
+    """Return a rule's addressed values, their source rows, and null ancestors.
 
     The first token selects a built column; each later token descends into
     it -- ``struct_field`` for an ``Object`` level, and a ``List`` level is
     flattened first, with ``list_parent_indices`` composing the element ->
     batch-row map. The second element is that map, or ``None`` when no list
-    was crossed (value *i* is row *i*). A null list contributes no elements,
-    so its nested fields are never graded -- the same exemption a null value
-    gets from every rule but ``not_null``.
+    was crossed (value *i* is row *i*).
+
+    The third element is every batch row a null LIST removed from the walk:
+    ``list_flatten`` drops a null list's (nonexistent) elements, where a
+    null struct simply propagates null children -- two spellings of one
+    fact ("an ancestor of the addressed field is null") that must reach the
+    rules as one answer. The caller folds these rows into ``not_null``
+    failures and exempts them from value rules, exactly as the null
+    children the struct path yields are treated by the mask. An EMPTY list
+    is not in it: zero elements is data, and grades as such.
     """
     value = built[tokens[0]]
-    row_map: pa.Array | None = None
+    row_map: list[int] | None = None
+    null_ancestors: set[int] = set()
     for token in tokens[1:]:
         while pa.types.is_list(value.type) or pa.types.is_large_list(value.type):
-            parents = pc.list_parent_indices(value)
-            row_map = parents if row_map is None else pc.take(row_map, parents)
+            for i, absent in enumerate(pc.is_null(value).to_pylist()):
+                if absent:
+                    null_ancestors.add(i if row_map is None else row_map[i])
+            parents = pc.list_parent_indices(value).to_pylist()
+            row_map = parents if row_map is None else [row_map[i] for i in parents]
             value = pc.list_flatten(value)
         if pa.types.is_null(value.type):
             # A column that carried no value anywhere infers as Arrow's `null`
@@ -1006,7 +1017,7 @@ def _addressed_values(
             # addresses only nulls, so the null values stand in for the field.
             break
         value = pc.struct_field(value, token)
-    return value, (None if row_map is None else row_map.to_pylist())
+    return value, row_map, sorted(null_ancestors)
 
 
 def _rule_errors(built: Mapping[str, pa.Array], rule: ValidationRule) -> list[str]:
@@ -1014,26 +1025,36 @@ def _rule_errors(built: Mapping[str, pa.Array], rule: ValidationRule) -> list[st
 
     The rule becomes a boolean failure mask over the addressed values; a null
     value is exempt from every rule except ``not_null`` (mirroring the
-    per-record ``if value is not None`` guard). A malformed rule (bad regex,
-    type mismatch, a path into a value that carries no such structure) fails
+    per-record ``if value is not None`` guard), and a null LIST ancestor is
+    the same null one level up -- it fails ``not_null`` on the addressed
+    field exactly as a null struct parent's propagated null does, and is
+    exempt from value rules the same way. A malformed rule (bad regex, type
+    mismatch, a path into a value that carries no such structure) fails
     loud with a :class:`TransformationError`. When the address crossed a
     ``List``, a batch row fails if any of its elements does.
     """
     tokens = list(rule.field)
     label = _rule_label(tokens)
     try:
-        value, row_map = _addressed_values(built, tokens)
-    except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as e:
+        value, row_map, null_ancestors = _addressed_values(built, tokens)
+    except (
+        KeyError,
+        pa.ArrowInvalid,
+        pa.ArrowTypeError,
+        pa.ArrowNotImplementedError,
+    ) as e:
         raise TransformationError(
             f"column {label}: validation rule {rule.type!r} addresses a "
             f"declared field the built value does not carry: {e}"
         ) from e
     present = pc.is_valid(value)
     mask = _rule_failure_mask(value, present, rule, label)
-    if not pc.any(mask, min_count=0).as_py():
-        return []
     failing = [i for i, failed in enumerate(mask.to_pylist()) if failed]
     rows = failing if row_map is None else sorted({row_map[i] for i in failing})
+    if rule.type in ("not_null", "required"):
+        rows = sorted(set(rows) | set(null_ancestors))
+    if not rows:
+        return []
     detail = f": {rule.message}" if rule.message else ""
     return [
         f"column {label}: {len(rows)} row(s) fail rule "

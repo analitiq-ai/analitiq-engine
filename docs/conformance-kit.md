@@ -86,13 +86,18 @@ in a customer pipeline (spec
   incremental filter has bound; a definition-only run has none of the
   three, so a placeholder bound to a declared param gets a stand-in segment
   and the drives carry on. Only a placeholder nothing could ever bind is a
-  finding, and there are three of those: one with no binding at all, one
-  bound to a param the endpoint does not declare, and one bound to an
-  expression that resolves to nothing and reads no scope a connection
-  supplies. Each fails for every connection and every stream. The same
-  rule governs the request body and the transport's
-  `base_url`: resolve what a definition settles, defer what reads a
-  connection scope, refuse what nothing could fix.
+  finding: one with no binding at all, one bound to a param the endpoint
+  does not declare, and one bound to an expression no run fills — it reads
+  no scope at all, or it reads `secrets`/`auth`, which request-time
+  resolution never supplies (they resolve once, engine-side, at transport
+  materialization). Each fails for every connection and every stream. The
+  same shape governs every deferral, with the scope set matched to its
+  phase: a request slot defers only what `connection.*` supplies, the
+  transport's `base_url` and headers defer what materialization supplies
+  (connection, secrets, auth), and in both phases the node's grammar is
+  judged always, a mixed node is refused by the path no phase supplies,
+  and what a definition settles by itself is resolved rather than
+  deferred.
 - **No read declares something the path drops.** The contract is wider
   than the path in one place: a request may name its own `transport_ref`.
   The path implements no such selection — it opens one connection at

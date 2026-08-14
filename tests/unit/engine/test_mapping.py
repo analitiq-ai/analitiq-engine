@@ -844,12 +844,14 @@ class TestValidationRules:
                 assignments,
             )
 
-    def test_nested_rule_over_a_valueless_column_passes(self):
-        """A column carrying no value anywhere infers as Arrow's `null` type.
+    def test_a_null_list_ancestor_fails_not_null_like_a_null_struct_parent(self):
+        """One verdict for "an ancestor of the addressed field is null".
 
-        No `struct_field` kernel accepts it, but every deeper token addresses
-        only nulls -- so the nulls stand in for the field and the usual
-        exemptions apply, instead of the batch failing on a kernel error.
+        `list_flatten` drops a null list's elements where a null struct
+        propagates null children, so without folding the dropped rows back
+        in, the same data would pass or fail on how Arrow typed the batch.
+        Here rows 0 (null list) and 2 (null element) fail together; the
+        empty list at row 3 is data -- zero elements, nothing null.
         """
         assignments = [
             _assignment(
@@ -863,8 +865,63 @@ class TestValidationRules:
                 validate={"rules": [_rule("not_null", field=["lines", "sku"])]},
             )
         ]
-        records = [{"lines": None}, {"lines": []}]
-        assert _run(records, assignments) == records
+        with pytest.raises(TransformationError, match=r"rows \[0, 2\]"):
+            _run(
+                [
+                    {"lines": None},
+                    {"lines": [{"sku": "A-1"}]},
+                    {"lines": [{"sku": None}]},
+                    {"lines": []},
+                ],
+                assignments,
+            )
+
+    def test_a_null_list_ancestor_is_exempt_from_value_rules(self):
+        """Value rules keep the null exemption through a list level too."""
+        assignments = [
+            _assignment(
+                "lines",
+                "List",
+                _expr(_get("lines")),
+                items={
+                    "arrow_type": "Object",
+                    "properties": {"sku": {"arrow_type": "Utf8"}},
+                },
+                validate={
+                    "rules": [_rule("min_length", field=["lines", "sku"], value=3)]
+                },
+            )
+        ]
+        clean = [{"lines": None}, {"lines": [{"sku": "A-1"}]}, {"lines": []}]
+        assert _run(clean, assignments) == clean
+        with pytest.raises(TransformationError, match=r"rows \[1\]"):
+            _run(
+                [{"lines": None}, {"lines": [{"sku": "x"}]}],
+                assignments,
+            )
+
+    def test_nested_not_null_over_a_valueless_column_fails_every_row(self):
+        """A column carrying no value anywhere infers as Arrow's `null` type.
+
+        No `struct_field` kernel accepts it, but every deeper token
+        addresses only nulls -- the same "ancestor is null" fact however
+        the batch was typed, so `not_null` fails these rows exactly as it
+        does when the column arrives typed. An empty list stays data.
+        """
+        assignments = [
+            _assignment(
+                "lines",
+                "List",
+                _expr(_get("lines")),
+                items={
+                    "arrow_type": "Object",
+                    "properties": {"sku": {"arrow_type": "Utf8"}},
+                },
+                validate={"rules": [_rule("not_null", field=["lines", "sku"])]},
+            )
+        ]
+        with pytest.raises(TransformationError, match=r"rows \[0\]"):
+            _run([{"lines": None}, {"lines": []}], assignments)
 
     def test_rule_token_the_target_does_not_declare_is_refused(self):
         """Every token past the first must resolve through declared properties."""

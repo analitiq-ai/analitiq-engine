@@ -168,6 +168,13 @@ _OFF_ORIGIN_URL = "https://elsewhere.invalid/page/2"
 _RESPONSE_PREFIX = "response."
 _BODY_PREFIX = "response.body."
 
+#: What ``cdk.api.records.page_scope`` puts in the response scope. Nothing
+#: else is in it: the contract recognises ``headers``/``status``/``metadata``
+#: as reserved, engine-owned sub-scopes -- RULE-ENDP-023 resolves only
+#: ``response.body`` paths -- and the read path does not put them in the
+#: page scope, so their availability is this module's fact to state.
+_PAGE_SCOPE_KEYS = ("body", "record_count")
+
 #: "take the type the response schema declares" -- distinct from any value
 #: a drive could legitimately want planted, ``None`` included.
 _DECLARED = object()
@@ -279,6 +286,8 @@ def _compile_read(
         resolver=resolver,
         params=table.values,
         controlled_by=table.controlled_by,
+        declared_params=declared_params,
+        pagination=read.get("pagination"),
     )
     if problem is not None:
         raise ReadError(problem)
@@ -296,6 +305,10 @@ def _compile_read(
 
     origin = api_base_url(target) or _STAND_IN_ORIGIN
     pagination = read.get("pagination")
+    if isinstance(pagination, dict):
+        scope_problem = _page_scope_problem(pagination)
+        if scope_problem is not None:
+            raise ReadError(scope_problem)
     probe = _ReadProbe(
         label=label,
         read=read,
@@ -312,6 +325,38 @@ def _compile_read(
     return replace(
         probe, first=first, first_sent=_materialize_first_request(probe, first)
     )
+
+
+def _page_scope_problem(pagination: Mapping[str, Any]) -> str | None:
+    """Why a pagination reference addresses what no page carries, or ``None``.
+
+    The half of the retired reference check the contract did not take:
+    RULE-ENDP-023 resolves ``response.body`` paths against the declared
+    response schema and leaves the reserved sub-scopes (``headers``,
+    ``status``, ``metadata``) to their engine-side owner. On the read path
+    that owner is ``page_scope``, which carries ``body`` and
+    ``record_count`` and nothing else -- so a pagination value or stop
+    condition on ``response.headers`` resolves to nothing on every page
+    ever served. Absent is not neutral: a ``missing`` or ``empty``
+    condition on it holds at page one and the stream stops there reporting
+    success; an ``exists`` condition never holds and the read runs to
+    exhaustion; a next cursor or link resolves to nothing and the
+    traversal ends after one page.
+    """
+    for lookup in dict.fromkeys(scope_paths(pagination)):
+        if not lookup.startswith(_RESPONSE_PREFIX):
+            continue
+        scope = lookup[len(_RESPONSE_PREFIX) :].split(".")[0]
+        if scope not in _PAGE_SCOPE_KEYS:
+            return (
+                f"pagination reads {lookup!r}, but a read's page carries "
+                f"only {', '.join(repr(k) for k in _PAGE_SCOPE_KEYS)} under "
+                f"'response' -- the contract reserves the other response "
+                f"sub-scopes for the engine, and the read path does not put "
+                f"them in the page scope. This resolves to nothing on every "
+                f"page."
+            )
+    return None
 
 
 def _path_values(
@@ -393,18 +438,9 @@ def _unbindable_reason(name: str, binding: Any) -> str:
             f"{binding['from_param']!r}, which operations.read.params does "
             f"not declare"
         )
-    secret_reads = [
-        path for path in scope_paths(binding) if path.startswith(("secrets.", "auth."))
-    ]
-    if secret_reads:
-        return (
-            f"request.path_params binds it to {binding!r}, which reads "
-            f"{', '.join(repr(p) for p in secret_reads)}; the path is "
-            f"substituted at request time, where secrets and auth are never "
-            f"in scope -- they are resolved once, engine-side, at transport "
-            f"materialization -- so the binding is dropped and the "
-            f"placeholder never substitutes"
-        )
+    # A binding reading `secrets.*`/`auth.*` never reaches here: the shared
+    # `request_block_problem` refuses the whole request block first, naming
+    # the phase fact for every slot at once.
     return (
         f"request.path_params binds it to {binding!r}, which resolves to "
         f"nothing and reads no scope request-time resolution supplies"
@@ -503,10 +539,9 @@ def _is_connection_expression(node: Any) -> bool:
 
     Deliberately not "reads one anywhere": a nested unresolved expression
     omits its own field and the body still builds, so skipping the whole
-    materialization over one would hide every other defect beside it. And
-    request-time, not transport-time: a body reading ``secrets.*`` or
-    ``auth.*`` resolves on no run, so it is materialized here and refused
-    by the resolver rather than deferred.
+    materialization over one would hide every other defect beside it. A
+    body reading ``secrets.*`` or ``auth.*`` never reaches this deferral:
+    the shared ``request_block_problem`` refuses the request block first.
     """
     return Resolver.is_expression_node(node) and fillable_at_request_time(node)
 
@@ -664,8 +699,9 @@ def _scripted_page(
     URL string the kit invented and succeeding.
 
     A path the schema names no type for gets a scheme-shaped value instead,
-    so the traversal still runs; the reference check reports the path it
-    does not reach at all, which is the finding worth acting on.
+    so the traversal still runs; the contract (RULE-ENDP-023) refuses the
+    document whose schema does not reach the path, which is the finding
+    worth acting on.
     ``continuation`` overrides the continuation paths outright, which is how
     a drive arms the origin guard with a link the connector would never have
     declared.
@@ -1217,9 +1253,9 @@ def _operands_are_declared(probe: _ReadProbe, declared: Any) -> bool:
     a path it names no type for the kit would have to invent one, and an
     invented type is exactly what decides whether an ordering comparison
     raises -- so a condition reading such a path is not evaluated here at
-    all. Where the schema does not reach the path, the reference check
-    reports it, which is the actionable finding: declare the field, and the
-    evaluation follows.
+    all. Where the schema does not reach the path, the contract
+    (RULE-ENDP-023) refuses the document, which is the actionable finding:
+    declare the field, and the evaluation follows.
     """
     schema = _response_schema(probe)
     return all(
