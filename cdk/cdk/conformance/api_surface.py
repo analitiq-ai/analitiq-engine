@@ -23,7 +23,15 @@ from typing import Any
 
 from cdk.api.exceptions import RequestSpecError, request_spec_errors
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.resolver import Resolver, expression_node_problem, scope_paths
+from cdk.derived_functions import DEFAULT_FUNCTIONS
+from cdk.exceptions import TransportSpecError
+from cdk.resolver import (
+    ResolutionContext,
+    Resolver,
+    expression_node_problem,
+    scope_paths,
+)
+from cdk.transport_factory import resolve_http_spec
 
 from .fakes import NoSecretsResolver
 from .target import ConformanceTarget
@@ -46,25 +54,35 @@ READS_CHECK = "api-has-reads"
 #: The transport type the api path materializes.
 HTTP_TRANSPORT_TYPE = "http"
 
-#: Scopes transport materialization fills in, on the trusted side -- what
-#: ``ConnectionRuntime._build_resolution_context`` supplies at connect(): the
-#: connection document, the secrets and auth it carries, the connector's own
-#: definition, and ``runtime.connection_id``. An expression reading one
-#: cannot be resolved from a definition-only run, and that says nothing
-#: about the connector.
-_CONNECTION_SCOPES = (
-    "connection.",
-    "secrets.",
-    "auth.",
-    "connector.",
-    "runtime.connection_id",
+#: What only a CONNECTION document brings to transport materialization: its
+#: own fields, the secrets and the auth it carries. An expression reading
+#: one is deferred -- a definition-only run cannot say the value, and that
+#: says nothing about the connector.
+_TRANSPORT_DEFERRED_SCOPES = ("connection.", "secrets.", "auth.")
+
+#: The subtrees per-request resolution supplies from a connection
+#: (``ConnectionRuntime.request_resolver`` builds exactly these three --
+#: ``connection.name`` and the like exist only at materialization). Secrets
+#: and auth never reach a request-time scope: they are resolved once,
+#: engine-side, at transport materialization, so a request slot reading
+#: them resolves on no run.
+_REQUEST_TIME_SCOPES = (
+    "connection.parameters.",
+    "connection.selections.",
+    "connection.discovered.",
 )
 
-#: The one scope per-request resolution supplies from a connection
-#: (``ConnectionRuntime.request_resolver``). Secrets and auth are resolved
-#: once, engine-side, at transport materialization, and never reach a
-#: request-time scope -- a request slot reading them resolves on no run.
-_REQUEST_TIME_SCOPES = ("connection.",)
+
+def _definition_settled(path: str) -> bool:
+    """Whether the definition-only run itself supplies *path* at connect.
+
+    ``ConnectionRuntime._build_resolution_context`` puts the connector's
+    own definition and exactly the key ``runtime.connection_id`` in scope
+    -- both of which the kit has, so a value reading only these is
+    resolved here rather than deferred. Exact-key entries are matched
+    exactly: ``runtime.connection_identifier`` is a typo, not a supply.
+    """
+    return path.startswith("connector.") or path == "runtime.connection_id"
 
 
 def read_operations(target: ConformanceTarget) -> list[tuple[str, dict[str, Any]]]:
@@ -124,15 +142,35 @@ def unsupplied_paths(declared: Any, scopes: tuple[str, ...]) -> list[str]:
 def fillable_at_request_time(declared: Any) -> bool:
     """Whether a real run's request resolution could still fill *declared*.
 
-    Per-request resolution (``ConnectionRuntime.request_resolver``) supplies
-    the connection document and nothing secret, so an expression defers
-    exactly when everything it reads is ``connection.``-scoped. One reading
-    ``secrets.*`` or ``auth.*`` resolves on no run -- those scopes exist
-    only at transport materialization, engine-side -- so it is a defect to
-    report, never a value to defer.
+    Per-request resolution (``ConnectionRuntime.request_resolver``) builds
+    exactly three connection subtrees and nothing secret, so an expression
+    defers exactly when everything it reads lives under
+    ``connection.parameters/selections/discovered``. One reading
+    ``secrets.*``, ``auth.*`` -- or a connection field outside those
+    subtrees, like ``connection.name`` -- resolves on no run, so it is a
+    defect to report, never a value to defer.
     """
     paths = scope_paths(declared)
     return bool(paths) and not unsupplied_paths(declared, _REQUEST_TIME_SCOPES)
+
+
+def materialization_resolver(target: ConformanceTarget) -> Resolver:
+    """Build the transport-phase resolver a definition-only run has.
+
+    What connect() itself supplies minus the connection document: the
+    connector's own definition and ``runtime.connection_id``. A value
+    reading only these is definition-settled -- the kit resolves the same
+    answer production materialization does -- while a connection-supplied
+    scope stays absent, so resolving one raises rather than inventing a
+    value.
+    """
+    return Resolver(
+        ResolutionContext(
+            connector=target.definition,
+            runtime={"connection_id": "conformance-definition"},
+        ),
+        functions=DEFAULT_FUNCTIONS,
+    )
 
 
 def expression_grammar_problem(node: Any) -> str | None:
@@ -184,11 +222,13 @@ def api_base_url(target: ConformanceTarget) -> str | None:
     base_url = block.get("base_url")
     if isinstance(base_url, str):
         return base_url or None
-    if scope_paths(base_url) or expression_grammar_problem(base_url) is not None:
+    if expression_grammar_problem(base_url) is not None:
+        return None
+    if any(not _definition_settled(path) for path in scope_paths(base_url)):
         return None
     try:
         with request_spec_errors("transport base_url"):
-            resolved = definition_resolver(target).resolve(base_url)
+            resolved = materialization_resolver(target).resolve(base_url)
     except RequestSpecError:
         return None
     return resolved if isinstance(resolved, str) and resolved else None
@@ -244,6 +284,7 @@ def check_read_transport_selection(target: ConformanceTarget) -> list[Violation]
     else:
         violations.extend(_base_url_violations(target, default_ref, block))
         violations.extend(_transport_header_violations(target, default_ref, block))
+        violations.extend(_transport_spec_violations(target, default_ref, block))
     for label, read in read_operations(target):
         request = read.get("request")
         ref = request.get("transport_ref") if isinstance(request, Mapping) else None
@@ -304,10 +345,13 @@ def _base_url_violations(
             )
         ]
     paths = scope_paths(declared)
-    if paths:
-        stray = unsupplied_paths(declared, _CONNECTION_SCOPES)
-        if not stray:
-            return []
+    stray = [
+        path
+        for path in paths
+        if not path.startswith(_TRANSPORT_DEFERRED_SCOPES)
+        and not _definition_settled(path)
+    ]
+    if stray:
         # Named rather than resolved: resolving over the kit's empty
         # connection would blame the connection-supplied half of a mixed
         # node -- the half production fills fine -- while the defect is the
@@ -323,10 +367,14 @@ def _base_url_violations(
                 f"fails before any stream reaches its first request.",
             )
         ]
+    if any(path.startswith(_TRANSPORT_DEFERRED_SCOPES) for path in paths):
+        return []
+    # No scope paths, or only definition-settled ones: the declaration is
+    # the kit's to resolve, to the same answer production materializes.
     unusable = f"({declared!r})"
     try:
         with request_spec_errors("transport base_url"):
-            resolved = definition_resolver(target).resolve(declared)
+            resolved = materialization_resolver(target).resolve(declared)
     except RequestSpecError as err:
         resolved = None
         unusable = f"({declared!r}, which does not resolve: {err})"
@@ -391,10 +439,13 @@ def _transport_header_violations(
             )
             continue
         paths = scope_paths(value)
-        if paths:
-            stray = unsupplied_paths(value, _CONNECTION_SCOPES)
-            if not stray:
-                continue
+        stray = [
+            path
+            for path in paths
+            if not path.startswith(_TRANSPORT_DEFERRED_SCOPES)
+            and not _definition_settled(path)
+        ]
+        if stray:
             violations.append(
                 Violation(
                     TRANSPORT_CHECK,
@@ -408,9 +459,11 @@ def _transport_header_violations(
                 )
             )
             continue
+        if any(path.startswith(_TRANSPORT_DEFERRED_SCOPES) for path in paths):
+            continue
         try:
             with request_spec_errors(f"transport header {name!r}"):
-                definition_resolver(target).resolve(value)
+                materialization_resolver(target).resolve(value)
         except RequestSpecError as err:
             violations.append(
                 Violation(
@@ -423,6 +476,53 @@ def _transport_header_violations(
                 )
             )
     return violations
+
+
+#: Stands in for a transport value whose real one a connection supplies, so
+#: the spec drive below can materialize the REST of the block around it.
+_STAND_IN_SPEC_VALUE = "https://conformance.invalid"
+
+
+def _transport_spec_violations(
+    target: ConformanceTarget, default_ref: Any, block: Mapping[str, Any]
+) -> list[Violation]:
+    """Drive ``resolve_http_spec`` itself over the rest of the block.
+
+    The base-url and header ladders judge the two value-carrying fields
+    with named deferrals; this drive hands the same spec -- those fields
+    stood in where a connection supplies them -- to the engine's own
+    materialization. Every remaining field (``rate_limit``,
+    ``timeout_seconds``, and whatever the build grows next) is thereby
+    judged by the function connect() runs, not by a restatement that
+    drifts the day the build changes.
+
+    ``TypeError``/``ValueError`` ride along with ``TransportSpecError``:
+    the build coerces plain fields (``float(timeout_seconds)``,
+    ``int(max_requests)``) without wrapping, and a coercion a definition
+    fails is the same connect()-time death.
+    """
+    spec = dict(block)
+    spec["base_url"] = _STAND_IN_SPEC_VALUE
+    headers = block.get("headers")
+    if isinstance(headers, Mapping):
+        spec["headers"] = {str(name): _STAND_IN_SPEC_VALUE for name in headers}
+    elif headers is not None:
+        # The header ladder already reported the shape; stand an empty map
+        # in so the one defect does not hide the rest of the block.
+        spec["headers"] = {}
+    try:
+        resolve_http_spec(spec, resolver=materialization_resolver(target))
+    except (TransportSpecError, TypeError, ValueError) as err:
+        return [
+            Violation(
+                TRANSPORT_CHECK,
+                f"default_transport {default_ref!r} does not materialize: "
+                f"{err}. connect() runs this exact build, so every "
+                f"connection fails before any stream reaches its first "
+                f"request.",
+            )
+        ]
+    return []
 
 
 def check_api_has_reads(target: ConformanceTarget) -> list[Violation]:

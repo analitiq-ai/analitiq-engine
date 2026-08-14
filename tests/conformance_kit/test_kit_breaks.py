@@ -2058,6 +2058,63 @@ class TestApiBaseUrlBreaks:
         assert probes, "the fixture's reads must still compile"
         assert all(probe.origin == "https://static.example.test" for probe in probes)
 
+    def test_a_connector_scoped_base_url_resolves_the_real_origin(
+        self, tmp_path: Path
+    ) -> None:
+        """The kit holds the connector definition, so `connector.*` settles.
+
+        Materialization supplies the definition at connect(), so a base URL
+        derived from it resolves to the same origin production uses -- and
+        the link guard must be armed with that origin, not the stand-in.
+        """
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(
+                base_url={"template": "https://${connector.connector_id}.example.test"}
+            ),
+        )
+        assert check_read_transport_selection(target) == []
+        probes, _ = api_read_path._probes(target)
+        assert probes, "the fixture's reads must still compile"
+        connector_id = json.loads(
+            (tmp_path / "api" / "definition" / "connector.json").read_text()
+        )["connector_id"]
+        assert probes[0].origin == f"https://{connector_id}.example.test"
+
+    def test_an_exact_supplied_key_is_matched_exactly(self, tmp_path: Path) -> None:
+        """`runtime.connection_identifier` is a typo, not a supply.
+
+        Materialization puts exactly `runtime.connection_id` in scope; a
+        prefix match would certify a transport connect() fails on every
+        connection.
+        """
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(
+                base_url={"ref": "runtime.connection_identifier"}
+            ),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "'runtime.connection_identifier'" in report
+        assert "not a scope transport materialization supplies" in report
+
+    def test_the_rest_of_the_transport_spec_is_driven_not_restated(
+        self, tmp_path: Path
+    ) -> None:
+        """resolve_http_spec judges what the value ladders do not carry.
+
+        A malformed `rate_limit` fails connect() on every connection; the
+        drive hands the block to the engine's own build, so the finding
+        comes from the function rather than a field-by-field restatement.
+        """
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(rate_limit={"max_requests": 10}),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "does not materialize" in report
+        assert "rate_limit" in report
+
 
 class TestApiTransportHeaderBreaks:
     """connect() resolves every transport header; the check judges them all."""
@@ -2440,6 +2497,25 @@ class TestApiRequestBlockBreaks:
         report = _report(check_api_read_compiles(target))
         assert "'secrets.account_id'" in report
         assert "never supplies secrets or auth" in report
+
+    def test_a_connection_field_outside_the_request_subtrees_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """`connection.name` exists at materialization, not at request time.
+
+        The request resolver builds exactly parameters/selections/discovered,
+        so a binding reading any other connection field resolves on no run
+        -- deferring it would certify a placeholder production never fills.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["path"] = "/v1/accounts/{account_id}/widgets"
+            read["request"]["path_params"] = {"account_id": {"ref": "connection.name"}}
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "{account_id}" in report
+        assert "reads no scope request-time resolution supplies" in report
 
     def test_a_path_placeholder_a_run_supplies_is_not_a_finding(
         self, tmp_path: Path
