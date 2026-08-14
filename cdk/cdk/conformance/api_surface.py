@@ -37,7 +37,6 @@ __all__ = [
     "expression_grammar_problem",
     "fillable_at_request_time",
     "read_operations",
-    "supplied_at_materialization",
     "unsupplied_paths",
 ]
 
@@ -120,20 +119,6 @@ def unsupplied_paths(declared: Any, scopes: tuple[str, ...]) -> list[str]:
     whole node past the check.
     """
     return [path for path in scope_paths(declared) if not path.startswith(scopes)]
-
-
-def supplied_at_materialization(declared: Any) -> bool:
-    """Whether transport materialization will fill *declared*, wholly.
-
-    The transport phase resolves on the trusted side with the connection
-    document, its secrets and its auth in scope -- and nothing else. A
-    node mixing one of those with any other lookup still fails
-    ``resolve_http_spec()`` at connect(), so only a node reading those
-    scopes exclusively defers. Request-time deferral is narrower -- see
-    :func:`fillable_at_request_time`.
-    """
-    paths = scope_paths(declared)
-    return bool(paths) and not unsupplied_paths(declared, _CONNECTION_SCOPES)
 
 
 def fillable_at_request_time(declared: Any) -> bool:

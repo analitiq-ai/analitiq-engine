@@ -876,6 +876,35 @@ class TestValidationRules:
                 assignments,
             )
 
+    def test_null_ancestors_two_list_levels_deep_map_to_their_rows(self):
+        """The row map and the null-ancestor set compose across levels."""
+        assignments = [
+            _assignment(
+                "orders",
+                "List",
+                _expr(_get("orders")),
+                items={
+                    "arrow_type": "List",
+                    "items": {
+                        "arrow_type": "Object",
+                        "properties": {"sku": {"arrow_type": "Utf8"}},
+                    },
+                },
+                validate={"rules": [_rule("not_null", field=["orders", "sku"])]},
+            )
+        ]
+        with pytest.raises(TransformationError, match=r"rows \[0, 1, 3\]"):
+            _run(
+                [
+                    {"orders": None},
+                    {"orders": [None]},
+                    {"orders": [[{"sku": "A"}]]},
+                    {"orders": [[{"sku": None}]]},
+                    {"orders": [[]]},
+                ],
+                assignments,
+            )
+
     def test_a_null_list_ancestor_is_exempt_from_value_rules(self):
         """Value rules keep the null exemption through a list level too."""
         assignments = [

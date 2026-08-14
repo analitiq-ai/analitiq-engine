@@ -416,6 +416,29 @@ class TestTheRequestTheStreamWillActuallySend:
         assert isinstance(outcome, str)
         assert "Authorization" in outcome
 
+    def test_a_write_param_default_reading_a_secret_is_refused(self) -> None:
+        # The write call site threads its declared params into the
+        # never-fillable-scope walk: a write param default reading
+        # `secrets.*` would otherwise vanish from every write request with
+        # only a log line, run green.
+        doc = _document(
+            headers={"X-Api-Key": {"from_param": "key"}},
+            params={
+                "key": {
+                    "in": "header",
+                    "type": "string",
+                    "required": True,
+                    "default": {"ref": "secrets.api_key"},
+                }
+            },
+        )
+        outcome = build_write_plan(
+            doc, _spec(), session_header_names=set(), resolver=_resolver()
+        )
+        assert isinstance(outcome, str)
+        assert "'secrets.api_key'" in outcome
+        assert "never supplies secrets or auth" in outcome
+
     def test_a_param_bound_under_a_harmless_key_is_permitted(self) -> None:
         # The mirror image: a param CALLED Authorization that lands under
         # X-Legacy-Auth shadows nothing, so refusing it would fail a working

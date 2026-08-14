@@ -377,6 +377,130 @@ class TestABindingKeyIsAName:
         assert any("'region'" in message for message in messages)
 
 
+class TestSendableValues:
+    """What a bound value may be by the time it reaches the wire.
+
+    One sink normalizes every bound request value, so the JSON spelling of
+    a boolean, the refusal of a declared null and the refusal of a raw
+    container hold identically for headers, query and path bindings.
+    """
+
+    def test_a_json_boolean_goes_out_in_its_json_spelling(self) -> None:
+        bound = bind_request_values(
+            {"include_archived": False, "active": True},
+            params={},
+            resolver=_resolver(),
+            block="query",
+            endpoint="/items",
+        )
+        assert bound == {"include_archived": "false", "active": "true"}
+
+    def test_a_bare_declared_null_is_refused_loud(self) -> None:
+        # Static, so it names a key nothing can ever send on any
+        # connection -- unlike an expression resolving to nothing, which
+        # is a per-connection fact the omit rule drops.
+        with pytest.raises(RequestSpecError, match="declares null"):
+            bind_request_values(
+                {"cursor": None},
+                params={},
+                resolver=_resolver(),
+                block="query",
+                endpoint="/items",
+            )
+
+    def test_an_expression_resolving_to_nothing_is_still_omitted(self) -> None:
+        # The distinction the null refusal must not swallow: a literal
+        # null IS an expression resolving to nothing, and keeps the
+        # per-request omit behavior.
+        assert (
+            bind_request_values(
+                {"cursor": {"literal": None}},
+                params={},
+                resolver=_resolver(),
+                block="query",
+                endpoint="/items",
+            )
+            == {}
+        )
+
+    def test_a_container_value_is_refused_loud(self) -> None:
+        with pytest.raises(RequestSpecError, match="must be a scalar"):
+            bind_request_values(
+                {"filter": {"literal": {"status": "open"}}},
+                params={},
+                resolver=_resolver(),
+                block="query",
+                endpoint="/items",
+            )
+
+
+class TestNeverFillableScopeRefusals:
+    """A secrets/auth read anywhere in the operation is refused at the boundary.
+
+    Request-time resolution omits an unresolved value rather than failing,
+    so without this refusal a param default or pagination value reading
+    ``secrets.*`` vanishes from every request with only a log line -- run
+    green, credential-less requests.
+    """
+
+    def test_a_param_default_reading_a_secret_is_refused(self) -> None:
+        problem = request_block_problem(
+            {"query": {"key": {"from_param": "api_key"}}},
+            reserved_headers=frozenset(),
+            resolver=_resolver(),
+            params={},
+            declared_params={
+                "api_key": {
+                    "in": "query",
+                    "type": "string",
+                    "required": True,
+                    "default": {"ref": "secrets.api_key"},
+                }
+            },
+        )
+        assert problem is not None
+        assert "'secrets.api_key'" in problem
+        assert "never supplies secrets or auth" in problem
+
+    def test_a_pagination_value_reading_a_secret_is_refused(self) -> None:
+        problem = request_block_problem(
+            {},
+            reserved_headers=frozenset(),
+            resolver=_resolver(),
+            params={},
+            pagination={
+                "type": "offset",
+                "limit": {
+                    "param": "limit",
+                    "default": {"ref": "secrets.page_size"},
+                },
+            },
+        )
+        assert problem is not None
+        assert "'secrets.page_size'" in problem
+
+    def test_a_connection_read_in_a_param_default_is_not_refused(self) -> None:
+        # The refusal is about the phase, not about deferral in general:
+        # request-time resolution DOES supply the connection document.
+        assert (
+            request_block_problem(
+                {"query": {"key": {"from_param": "api_key"}}},
+                reserved_headers=frozenset(),
+                resolver=_resolver(),
+                params={},
+                declared_params={
+                    "api_key": {
+                        "in": "query",
+                        "type": "string",
+                        "required": True,
+                        "default": {"ref": "connection.parameters.api_key"},
+                    }
+                },
+            )
+            is None
+        )
+
+
 class TestRequestBlockRefusals:
     """One rule over the declared header map, and one over the path bindings."""
 
