@@ -25,6 +25,8 @@ from cdk.exceptions import TransportSpecError, UnresolvedValueError
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "REQUEST_CONNECTION_SUBTREES",
+    "RUNTIME_CONNECTION_ID",
     "DerivedFunction",
     "ResolutionContext",
     "Resolver",

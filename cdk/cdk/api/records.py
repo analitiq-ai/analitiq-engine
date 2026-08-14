@@ -36,9 +36,10 @@ logger = logging.getLogger(__name__)
 _ANCHOR = "response.body"
 
 #: The two keys a page's response scope carries, named once here and used by
-#: :func:`page_scope` and :data:`PAGE_SCOPE_KEYS` alike.
-PAGE_SCOPE_BODY = "body"
-PAGE_SCOPE_RECORD_COUNT = "record_count"
+#: :func:`page_scope` and :data:`PAGE_SCOPE_KEYS` alike. Private: the pair a
+#: caller needs is the exported tuple, not the individual names.
+_PAGE_SCOPE_BODY = "body"
+_PAGE_SCOPE_RECORD_COUNT = "record_count"
 
 
 def walk_path(data: Any, path: list[str]) -> Any:
@@ -127,7 +128,10 @@ def page_scope(page: Page) -> dict[str, Any]:
     page so ``stop_when``, ``next_cursor``, ``next_url`` and ``increment_by``
     all see the same scope.
     """
-    return {PAGE_SCOPE_BODY: page.payload, PAGE_SCOPE_RECORD_COUNT: len(page.records)}
+    return {
+        _PAGE_SCOPE_BODY: page.payload,
+        _PAGE_SCOPE_RECORD_COUNT: len(page.records),
+    }
 
 
 #: What a page's response scope carries, and nothing else -- the keys
@@ -135,7 +139,7 @@ def page_scope(page: Page) -> dict[str, Any]:
 #: declared ``response.<x>`` a page could never carry; derived from the
 #: builder rather than restated so a key the loop gains cannot fail a
 #: connector that reads it.
-PAGE_SCOPE_KEYS = (PAGE_SCOPE_BODY, PAGE_SCOPE_RECORD_COUNT)
+PAGE_SCOPE_KEYS = (_PAGE_SCOPE_BODY, _PAGE_SCOPE_RECORD_COUNT)
 
 
 def page_resolver(resolver: Resolver, page: Page | None) -> Resolver:
