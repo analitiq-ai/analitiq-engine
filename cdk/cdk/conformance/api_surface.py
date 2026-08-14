@@ -23,7 +23,7 @@ from typing import Any
 
 from cdk.api.exceptions import RequestSpecError, request_spec_errors
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.resolver import Resolver, scope_paths
+from cdk.resolver import Resolver, expression_node_problem, scope_paths
 
 from .fakes import NoSecretsResolver
 from .target import ConformanceTarget
@@ -34,6 +34,8 @@ __all__ = [
     "check_api_has_reads",
     "check_read_transport_selection",
     "definition_resolver",
+    "expression_grammar_problem",
+    "fillable_at_request_time",
     "read_operations",
     "reads_a_connection_scope",
 ]
@@ -44,10 +46,17 @@ READS_CHECK = "api-has-reads"
 #: The transport type the api path materializes.
 HTTP_TRANSPORT_TYPE = "http"
 
-#: Scopes a connection document fills in. An expression reading one cannot
-#: be resolved from a definition alone, and that says nothing about the
-#: connector.
+#: Scopes transport materialization fills in, on the trusted side: the
+#: connection document plus the secrets and auth it carries. An expression
+#: reading one cannot be resolved from a definition alone, and that says
+#: nothing about the connector.
 _CONNECTION_SCOPES = ("connection.", "secrets.", "auth.")
+
+#: The one scope per-request resolution supplies from a connection
+#: (``ConnectionRuntime.request_resolver``). Secrets and auth are resolved
+#: once, engine-side, at transport materialization, and never reach a
+#: request-time scope -- a request slot reading them resolves on no run.
+_REQUEST_TIME_SCOPES = ("connection.",)
 
 
 def read_operations(target: ConformanceTarget) -> list[tuple[str, dict[str, Any]]]:
@@ -92,8 +101,50 @@ def definition_resolver(
 
 
 def reads_a_connection_scope(declared: Any) -> bool:
-    """Whether *declared* reads a scope only a connection document supplies."""
+    """Whether *declared* reads a scope only a connection document supplies.
+
+    The transport-phase question: materialization resolves with the whole
+    connection document, its secrets and its auth in scope, so any of the
+    three defers. Request-time deferral is narrower -- see
+    :func:`fillable_at_request_time`.
+    """
     return any(path.startswith(_CONNECTION_SCOPES) for path in scope_paths(declared))
+
+
+def fillable_at_request_time(declared: Any) -> bool:
+    """Whether a real run's request resolution could still fill *declared*.
+
+    Per-request resolution (``ConnectionRuntime.request_resolver``) supplies
+    the connection document and nothing secret, so an expression defers
+    exactly when everything it reads is ``connection.``-scoped. One reading
+    ``secrets.*`` or ``auth.*`` resolves on no run -- those scopes exist
+    only at transport materialization, engine-side -- so it is a defect to
+    report, never a value to defer.
+    """
+    paths = scope_paths(declared)
+    return bool(paths) and all(path.startswith(_REQUEST_TIME_SCOPES) for path in paths)
+
+
+def expression_grammar_problem(node: Any) -> str | None:
+    """Return the first malformed expression node in *node*, or ``None``.
+
+    The shape rules are the resolver's own
+    (:func:`~cdk.resolver.expression_node_problem`), applied to a
+    declaration rather than to a resolution -- which is what lets a
+    deferred branch still be judged. A ``literal`` is opaque data, so an
+    expression spelled inside one is not one.
+    """
+    if isinstance(node, list):
+        return next((p for p in map(expression_grammar_problem, node) if p), None)
+    if not isinstance(node, Mapping):
+        return None
+    if Resolver.is_expression_node(node):
+        problem = expression_node_problem(node)
+        if problem is not None:
+            return problem
+        if "literal" in node:
+            return None
+    return next((p for p in map(expression_grammar_problem, node.values()) if p), None)
 
 
 def api_base_url(target: ConformanceTarget) -> str | None:
@@ -168,6 +219,7 @@ def check_read_transport_selection(target: ConformanceTarget) -> list[Violation]
         )
     else:
         violations.extend(_base_url_violations(target, default_ref, block))
+        violations.extend(_transport_header_violations(target, default_ref, block))
     for label, read in read_operations(target):
         request = read.get("request")
         ref = request.get("transport_ref") if isinstance(request, Mapping) else None
@@ -211,6 +263,22 @@ def _base_url_violations(
     could not say what it was missing.
     """
     declared = block.get("base_url")
+    grammar = expression_grammar_problem(declared)
+    if grammar is not None:
+        # Judged before the deferral: a malformed node is malformed whatever
+        # scope it reads, and resolve_http_spec() raises on it at connect()
+        # with any connection at all. Deferring it on the scope alone
+        # certified exactly that connector.
+        return [
+            Violation(
+                TRANSPORT_CHECK,
+                f"default_transport {default_ref!r} declares no usable "
+                f"base_url ({declared!r}, which is malformed: {grammar}). "
+                f"The transport build resolves this declaration at "
+                f"connect(), so every connection fails before any stream "
+                f"reaches its first request.",
+            )
+        ]
     if reads_a_connection_scope(declared):
         return []
     unusable = f"({declared!r})"
@@ -233,6 +301,69 @@ def _base_url_violations(
             f"but nothing else may be absent or empty.",
         )
     ]
+
+
+def _transport_header_violations(
+    target: ConformanceTarget, default_ref: Any, block: Mapping[str, Any]
+) -> list[Violation]:
+    """Judge the default transport's headers the way connect() will.
+
+    ``resolve_http_spec`` requires ``headers`` to be an object and resolves
+    every value in it before any read goes out, so a non-object block or a
+    value that cannot resolve fails the whole connector at ``connect()`` --
+    while a check reading only the base URL reports the transport usable.
+
+    Each value gets the base-url treatment: grammar judged always, the
+    value deferred when the connection supplies it (secrets and auth
+    included -- transport materialization runs with both in scope),
+    resolved otherwise. A value resolving to ``None`` is fine: the build
+    drops that header rather than sending it empty.
+    """
+    declared = block.get("headers")
+    if declared is None:
+        return []
+    if not isinstance(declared, Mapping):
+        return [
+            Violation(
+                TRANSPORT_CHECK,
+                f"default_transport {default_ref!r} declares headers as "
+                f"{declared!r}. The transport build requires an object of "
+                f"name -> value, so connect() fails before any stream "
+                f"reaches its first request.",
+            )
+        ]
+    violations: list[Violation] = []
+    for name, value in sorted(declared.items()):
+        grammar = expression_grammar_problem(value)
+        if grammar is not None:
+            violations.append(
+                Violation(
+                    TRANSPORT_CHECK,
+                    f"default_transport {default_ref!r} header {name!r} is "
+                    f"malformed ({value!r}: {grammar}). The transport build "
+                    f"resolves every header value at connect(), so every "
+                    f"connection fails before any stream reaches its first "
+                    f"request.",
+                )
+            )
+            continue
+        if reads_a_connection_scope(value):
+            continue
+        try:
+            with request_spec_errors(f"transport header {name!r}"):
+                definition_resolver(target).resolve(value)
+        except RequestSpecError as err:
+            violations.append(
+                Violation(
+                    TRANSPORT_CHECK,
+                    f"default_transport {default_ref!r} header {name!r} "
+                    f"({value!r}) does not resolve: {err}. The transport "
+                    f"build resolves every header value at connect(), and "
+                    f"nothing a connection supplies is read here, so every "
+                    f"connection fails the same way.",
+                )
+            )
+    return violations
 
 
 def check_api_has_reads(target: ConformanceTarget) -> list[Violation]:

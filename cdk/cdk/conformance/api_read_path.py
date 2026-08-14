@@ -45,11 +45,12 @@ when it bites:
   its param table from all three and substitutes the path after the
   incremental filter binds; a definition-only run has none of them, so
   demanding a value here would fail a connector the engine reads
-  correctly. Only a placeholder nothing could ever bind is a finding, and
-  there are three of those: one with no binding at all, one bound to a
-  param the endpoint does not declare, and one bound to an expression that
-  resolves to nothing and reads no scope a connection supplies. Each fails
-  for every connection and every stream.
+  correctly. Only a placeholder nothing could ever bind is a finding: one
+  with no binding at all, one bound to a param the endpoint does not
+  declare, and one bound to an expression no run fills -- either it reads
+  no scope at all, or it reads ``secrets``/``auth``, which request-time
+  resolution never supplies. Each fails for every connection and every
+  stream.
 """
 
 from __future__ import annotations
@@ -77,15 +78,16 @@ from cdk.api.response_schema import records_items_schema, resolve_field_arrow_ty
 from cdk.api.urls import join_url, same_origin
 from cdk.api.write_plan import reserved_header_names
 from cdk.exceptions import ReadError
-from cdk.resolver import Resolver, expression_node_problem, scope_paths
+from cdk.resolver import Resolver, scope_paths
 from cdk.schema_contract import SchemaContract
 from cdk.type_map import TypeMapper
 
 from .api_surface import (
     api_base_url,
     definition_resolver,
+    expression_grammar_problem,
+    fillable_at_request_time,
     read_operations,
-    reads_a_connection_scope,
 )
 from .target import ConformanceTarget
 from .violations import Violation
@@ -370,13 +372,15 @@ def _binds_at_run_time(binding: Any, declared_params: Mapping[str, Any]) -> bool
     A ``{from_param}`` naming a declared param is one: the value arrives
     from that param's default resolved against a real connection, from a
     stream's filters, or from the replication cursor. Any other expression
-    is judged the way ``base_url`` is -- deferred when it reads a scope the
-    connection supplies, refused otherwise, because nothing else will ever
-    change the answer.
+    defers only when a run's request resolution could fill it -- when
+    everything it reads is ``connection.``-scoped. The path is substituted
+    at request time, where secrets and auth are never in scope (they are
+    resolved once, engine-side, at transport materialization), so a binding
+    reading them is refused: no run ever fills it.
     """
     if isinstance(binding, Mapping) and "from_param" in binding:
         return binding["from_param"] in declared_params
-    return binding is not None and reads_a_connection_scope(binding)
+    return fillable_at_request_time(binding)
 
 
 def _unbindable_reason(name: str, binding: Any) -> str:
@@ -389,9 +393,21 @@ def _unbindable_reason(name: str, binding: Any) -> str:
             f"{binding['from_param']!r}, which operations.read.params does "
             f"not declare"
         )
+    secret_reads = [
+        path for path in scope_paths(binding) if path.startswith(("secrets.", "auth."))
+    ]
+    if secret_reads:
+        return (
+            f"request.path_params binds it to {binding!r}, which reads "
+            f"{', '.join(repr(p) for p in secret_reads)}; the path is "
+            f"substituted at request time, where secrets and auth are never "
+            f"in scope -- they are resolved once, engine-side, at transport "
+            f"materialization -- so the binding is dropped and the "
+            f"placeholder never substitutes"
+        )
     return (
         f"request.path_params binds it to {binding!r}, which resolves to "
-        f"nothing and reads no scope a connection supplies"
+        f"nothing and reads no scope request-time resolution supplies"
     )
 
 
@@ -474,7 +490,7 @@ def _materialize_first_request(
     page two against it.
     """
     body = probe.request.get("body")
-    problem = None if body is None else _expression_grammar_problem(body)
+    problem = None if body is None else expression_grammar_problem(body)
     if problem is not None:
         raise ReadError(problem)
     return _request_builder(probe).for_page(
@@ -482,36 +498,17 @@ def _materialize_first_request(
     )
 
 
-def _expression_grammar_problem(node: Any) -> str | None:
-    """Return the first malformed expression node in *node*, or ``None``.
-
-    The shape rules are the resolver's own
-    (:func:`~cdk.resolver.expression_node_problem`), applied to a
-    declaration rather than to a resolution -- which is what lets a
-    deferred branch still be judged. A ``literal`` is opaque data, so an
-    expression spelled inside one is not one.
-    """
-    if isinstance(node, list):
-        return next((p for p in map(_expression_grammar_problem, node) if p), None)
-    if not isinstance(node, Mapping):
-        return None
-    if Resolver.is_expression_node(node):
-        problem = expression_node_problem(node)
-        if problem is not None:
-            return problem
-        if "literal" in node:
-            return None
-    return next((p for p in map(_expression_grammar_problem, node.values()) if p), None)
-
-
 def _is_connection_expression(node: Any) -> bool:
-    """Whether *node* is one expression reading a scope only a connection has.
+    """Whether *node* is one expression a run's request resolution will fill.
 
     Deliberately not "reads one anywhere": a nested unresolved expression
     omits its own field and the body still builds, so skipping the whole
-    materialization over one would hide every other defect beside it.
+    materialization over one would hide every other defect beside it. And
+    request-time, not transport-time: a body reading ``secrets.*`` or
+    ``auth.*`` resolves on no run, so it is materialized here and refused
+    by the resolver rather than deferred.
     """
-    return Resolver.is_expression_node(node) and reads_a_connection_scope(node)
+    return Resolver.is_expression_node(node) and fillable_at_request_time(node)
 
 
 def _probes(

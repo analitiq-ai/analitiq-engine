@@ -1843,6 +1843,23 @@ class TestApiRequestBodyBreaks:
         target = self._broken(tmp_path, "widgets", bend)
         assert check_api_read_compiles(target) == []
 
+    def test_a_body_reading_a_secret_is_not_deferred(self, tmp_path: Path) -> None:
+        """Request-time resolution never sees secrets; the body is judged.
+
+        Deferring it the way a connection read is deferred would certify a
+        read whose body resolves on no run at all -- the request resolver's
+        scope set excludes secrets and auth by design.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["method"] = "POST"
+            read["request"]["body"] = {"ref": "secrets.api_key"}
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "resolved to nothing" in report
+        assert "request.body" in report
+
 
 class TestApiRunWithNothingToDrive:
     """A green tier 1 must mean the read path ran, not that there was none."""
@@ -1929,6 +1946,74 @@ class TestApiBaseUrlBreaks:
             tmp_path,
             lambda d: d["transports"]["api"].update(
                 base_url={"ref": "connection.parameters.host"}
+            ),
+        )
+        assert check_read_transport_selection(target) == []
+
+    def test_a_malformed_base_url_expression_is_not_deferred(
+        self, tmp_path: Path
+    ) -> None:
+        """The scope defers the VALUE; the node's grammar is judged always.
+
+        ``{"ref": ..., "extra": 1}`` raises in ``resolve_http_spec()`` with
+        any connection at all, so deferring it on the scope it reads
+        certifies a connector whose ``connect()`` cannot open a session.
+        """
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(
+                base_url={"ref": "connection.parameters.host", "extra": 1}
+            ),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "malformed" in report
+        assert "'extra'" in report
+
+
+class TestApiTransportHeaderBreaks:
+    """connect() resolves every transport header; the check judges them all."""
+
+    _bent_definition = staticmethod(TestApiTransportBreaks._bent_definition)
+
+    def test_headers_that_are_not_an_object(self, tmp_path: Path) -> None:
+        target = self._bent_definition(
+            tmp_path, lambda d: d["transports"]["api"].update(headers=[])
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "declares headers as []" in report
+
+    def test_a_malformed_header_value_expression(self, tmp_path: Path) -> None:
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(
+                headers={"X-Api-Key": {"ref": "secrets.api_key", "extra": 1}}
+            ),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "'X-Api-Key'" in report
+        assert "malformed" in report
+
+    def test_a_header_value_that_cannot_resolve_names_why(self, tmp_path: Path) -> None:
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(
+                headers={"X-Trace": {"function": "no_such_function", "input": "x"}}
+            ),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "'X-Trace'" in report
+        assert "does not resolve" in report
+
+    def test_headers_the_connection_supplies_are_clean(self, tmp_path: Path) -> None:
+        """Transport materialization has secrets and auth in scope; defer both."""
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(
+                headers={
+                    "Authorization": {"template": "Bearer ${auth.access_token}"},
+                    "X-Api-Key": {"ref": "secrets.api_key"},
+                    "X-Static": {"literal": "v1"},
+                }
             ),
         )
         assert check_read_transport_selection(target) == []
@@ -2216,7 +2301,34 @@ class TestApiRequestBlockBreaks:
         target = self._broken(tmp_path, "widgets", bend)
         report = _report(check_api_read_compiles(target))
         assert "{account_id}" in report
-        assert "resolves to nothing and reads no scope a connection supplies" in report
+        assert (
+            "resolves to nothing and reads no scope request-time resolution "
+            "supplies" in report
+        )
+
+    def test_a_path_placeholder_bound_to_a_secret_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """Secrets and auth are never request-time scopes, on any run.
+
+        The path is substituted by ``request_resolver()``, whose scope set
+        deliberately excludes them -- secret resolution happens once,
+        engine-side, at transport materialization. A binding reading them
+        is not a value the connection will supply later; it is dropped and
+        the placeholder never substitutes.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["path"] = "/v1/accounts/{account_id}/widgets"
+            read["request"]["path_params"] = {
+                "account_id": {"ref": "secrets.account_id"}
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "{account_id}" in report
+        assert "'secrets.account_id'" in report
+        assert "never in scope" in report
 
     def test_a_path_placeholder_a_run_supplies_is_not_a_finding(
         self, tmp_path: Path
