@@ -542,6 +542,22 @@ class TestNeverFillableScopeRefusals:
 class TestRequestBlockRefusals:
     """One rule over the declared header map, and one over the path bindings."""
 
+    def test_a_controlled_param_bound_under_content_type_is_refused(self) -> None:
+        # The value judge sees the pre-checkpoint table, where a loop-owned
+        # param is absent -- so without the static refusal a resumed
+        # incremental read sends the stored cursor as the media type, and
+        # fails only once a checkpoint exists.
+        problem = request_block_problem(
+            {"headers": {"Content-Type": {"from_param": "cursor"}}},
+            reserved_headers=frozenset(),
+            resolver=_resolver(),
+            params={},
+            controlled_by={"cursor": "replication"},
+        )
+        assert problem is not None
+        assert "'cursor'" in problem
+        assert "replication" in problem
+
     def test_a_declared_header_the_connection_owns_is_refused(self) -> None:
         problem = request_block_problem(
             {"headers": {"Authorization": {"literal": "Bearer x"}}},

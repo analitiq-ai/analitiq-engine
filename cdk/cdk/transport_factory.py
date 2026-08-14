@@ -915,6 +915,18 @@ def require_http_base_url(base_url: Any) -> str:
             f"http transport `base_url` must be an absolute http(s) URL; "
             f"got {base_url!r}"
         )
+    try:
+        # urlsplit defers authority validation until these are read: a
+        # non-numeric port (`https://h:abc`) or a malformed bracket host
+        # parses fine above and then dies in the HTTP client on the
+        # connector's first request.
+        parts.port
+        parts.hostname
+    except ValueError as exc:
+        raise TransportSpecError(
+            f"http transport `base_url` carries a malformed authority: "
+            f"{base_url!r} ({exc})"
+        ) from exc
     return base_url.rstrip("/")
 
 

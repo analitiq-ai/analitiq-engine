@@ -140,12 +140,22 @@ def _transport_deferral(
         elif _definition_settled(path):
             try:
                 with request_spec_errors(f"transport read {path!r}"):
-                    resolver.resolve({"ref": path})
+                    settled = resolver.resolve({"ref": path})
             except RequestSpecError:
                 problems.append(
                     f"{path!r} names nothing in the connector definition "
                     f"production materializes with"
                 )
+            else:
+                if isinstance(settled, (Mapping, list)):
+                    # Resolving is not enough: `connector.transports` resolves
+                    # -- to the whole block -- and substituting a mapping into
+                    # a template or URL dies at connect() on every connection.
+                    problems.append(
+                        f"{path!r} resolves to a whole "
+                        f"{type(settled).__name__}, not a value -- nothing "
+                        f"can substitute it"
+                    )
         else:
             problems.append(
                 f"{path!r} is not a scope transport materialization supplies"

@@ -2098,6 +2098,51 @@ class TestApiBaseUrlBreaks:
         assert "names nothing in the connector definition" in report
         assert "'connection.parameters.domain'" not in report
 
+    @pytest.mark.parametrize(
+        "declared",
+        ["https://api.example.test:abc", "https://api.example.test:99999999"],
+    )
+    def test_a_malformed_authority_is_refused(
+        self, tmp_path: Path, declared: str
+    ) -> None:
+        """urlsplit defers port validation; connect() must not.
+
+        A non-numeric or out-of-range port parses as a scheme-and-netloc URL
+        and then dies in the HTTP client on the first request.
+        """
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(base_url=declared),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "no usable base_url" in report
+        assert "malformed authority" in report
+
+    def test_a_settled_path_resolving_to_a_mapping_is_refused_in_a_mixed_node(
+        self, tmp_path: Path
+    ) -> None:
+        """Resolving is not enough: the settled value must be substitutable.
+
+        `connector.transports` resolves -- to the whole block -- and
+        substituting a mapping into the template dies at connect() on every
+        connection, while the deferred connection half would otherwise carry
+        the node past the check.
+        """
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(
+                base_url={
+                    "template": (
+                        "https://${connection.parameters.host}"
+                        "/${connector.transports}"
+                    )
+                }
+            ),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "'connector.transports'" in report
+        assert "not a value" in report
+
     def test_an_unknown_connection_field_is_refused_not_deferred(
         self, tmp_path: Path
     ) -> None:

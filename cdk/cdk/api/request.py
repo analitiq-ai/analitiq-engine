@@ -359,6 +359,7 @@ def request_block_problem(
         reserved_headers=reserved_headers,
         resolver=resolver,
         params=params,
+        controlled_by=controlled_by,
     )
     if problem is not None:
         return problem
@@ -447,6 +448,7 @@ def _header_map_problem(
     reserved_headers: frozenset[str] | set[str],
     resolver: Resolver,
     params: Mapping[str, Any],
+    controlled_by: Mapping[str, str] = MappingProxyType({}),
 ) -> str | None:
     """Why the headers this request sends may not go out, or ``None``.
 
@@ -480,6 +482,23 @@ def _header_map_problem(
     for name, value in declared.items():
         lowered = str(name).lower()
         if lowered == "content-type":
+            bound_param = (
+                value.get("from_param") if isinstance(value, Mapping) else None
+            )
+            owner = (
+                controlled_by.get(bound_param) if isinstance(bound_param, str) else None
+            )
+            if owner is not None:
+                # The value judge below sees the pre-checkpoint table, where
+                # a loop-owned param is absent -- so without this a resumed
+                # incremental read would send the stored cursor as the media
+                # type, and fail only once a checkpoint exists.
+                return (
+                    f"request.headers binds {name!r} to the param "
+                    f"{bound_param!r}, which {owner} controls: its value is "
+                    f"the loop's continuation, never the media type the "
+                    f"engine owns."
+                )
             sent = _header_value_sent(name, value, resolver, params)
             if sent is None or sent.strip().lower() == JSON_CONTENT_TYPE:
                 continue
