@@ -169,25 +169,6 @@ class TestOneRequestPerRecord:
         assert result.records_written == 1
         assert result.failed_record_ids == ("r0",)
 
-    async def test_a_record_body_reading_an_unknown_scope_fails_its_record(
-        self,
-    ) -> None:
-        # A body defect is a body defect whichever exception the resolver
-        # happened to raise inside it. This spelling used to raise KeyError,
-        # which the per-record catch did not name: it escaped land() and
-        # failed the batch, while a sibling defect raising ValueError was
-        # reported as a rejected record.
-        document = _document(
-            body={"item": {"from_input": "record"}, "tenant": {"ref": "nope.a"}}
-        )
-        session = FakeSession()
-        connector = await _connected(session, document)
-        result = await _write(connector, _ids(2))
-        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
-        assert result.records_written == 0
-        assert result.failed_record_ids == ("r0", "r1")
-        assert session.calls == []
-
 
 @pytest.mark.asyncio
 class TestOneRequestPerChunk:
@@ -211,23 +192,6 @@ class TestOneRequestPerChunk:
         result = await _write(connector, _ids(4))
         assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
         assert result.records_written == 0
-
-    async def test_a_chunk_body_reading_an_unknown_scope_is_attributed(self) -> None:
-        # Same class of defect as the selector above, and it used to leave
-        # build_write_body as a bare KeyError: the chunk loop caught
-        # (TypeError, ValueError), so this one escaped land() entirely and
-        # the base handler failed the batch with no attribution.
-        document = _document(
-            batching={"max_records": 2},
-            body={"items": {"from_input": "records"}, "tenant": {"ref": "nope.a"}},
-        )
-        session = FakeSession()
-        connector = await _connected(session, document)
-        result = await _write(connector, _ids(4))
-        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
-        assert result.records_written == 0
-        assert result.failed_record_ids == ("r0", "r1", "r2", "r3")
-        assert session.calls == []
 
     async def test_an_unbuildable_chunk_attributes_from_its_offset(self) -> None:
         document = _document(

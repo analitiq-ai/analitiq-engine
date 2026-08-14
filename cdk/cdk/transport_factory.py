@@ -895,17 +895,35 @@ class HttpTransport:
     rate_limiter: RateLimiter | None = None
 
 
+def require_http_base_url(base_url: Any) -> str:
+    """Return *base_url* as the origin the HTTP session can open, or raise.
+
+    One definition of "usable base URL", shared by this build and the
+    conformance kit's transport check: a non-empty string carrying an
+    absolute ``http``/``https`` origin. A scheme-less or non-HTTP value
+    passes a bare truthiness test and then dies in the HTTP client on the
+    connector's first request -- so it is refused here, where the message
+    can still name the field.
+    """
+    if not isinstance(base_url, str) or not base_url:
+        raise TransportSpecError(
+            "http transport `base_url` must resolve to a non-empty string"
+        )
+    parts = urllib.parse.urlsplit(base_url)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise TransportSpecError(
+            f"http transport `base_url` must be an absolute http(s) URL; "
+            f"got {base_url!r}"
+        )
+    return base_url.rstrip("/")
+
+
 def resolve_http_spec(spec: Mapping[str, Any], *, resolver: Resolver) -> dict[str, Any]:
     """Resolve an http transport spec to JSON-safe values (no objects)."""
     raw_base = spec.get("base_url")
     if raw_base is None:
         raise TransportSpecError("http transport `base_url` is required")
-    base_url = resolver.resolve(raw_base)
-    if not isinstance(base_url, str) or not base_url:
-        raise TransportSpecError(
-            "http transport `base_url` must resolve to a non-empty string"
-        )
-    base_url = base_url.rstrip("/")
+    base_url = require_http_base_url(resolver.resolve(raw_base))
 
     raw_headers = spec.get("headers") or {}
     if not isinstance(raw_headers, Mapping):

@@ -460,7 +460,7 @@ class TestNeverFillableScopeRefusals:
         )
         assert problem is not None
         assert "'secrets.api_key'" in problem
-        assert "never supplies secrets or auth" in problem
+        assert "request-time resolution never supplies" in problem
 
     def test_a_pagination_value_reading_a_secret_is_refused(self) -> None:
         problem = request_block_problem(

@@ -1214,8 +1214,16 @@ def _premature_stop(probe: _ReadProbe, declared: Any, stops: bool) -> list[Viola
     if not stops:
         return []
     evidence = _non_terminal_paths(probe)
-    lookups = set(scope_paths(declared))
-    if not lookups & evidence:
+    # An ancestor of an evidence path is evidence too: the container that
+    # HOLDS the continuation is populated exactly when its leaf is, so a
+    # condition on `response.body.pagination` deciding to stop is deciding
+    # about the same full page a condition on `...pagination.next` is.
+    matched = {
+        lookup
+        for lookup in scope_paths(declared)
+        if lookup in evidence or any(path.startswith(lookup + ".") for path in evidence)
+    }
+    if not matched:
         return []
     return [
         Violation(
@@ -1223,7 +1231,7 @@ def _premature_stop(probe: _ReadProbe, declared: Any, stops: bool) -> list[Viola
             f"endpoint {probe.label!r}: stop_when holds on a full page that "
             f"carries {_PROBE_RECORDS} records and the value the traversal "
             f"continues from. It reads "
-            f"{', '.join(sorted(repr(item) for item in lookups & evidence))}, "
+            f"{', '.join(sorted(repr(item) for item in matched))}, "
             f"so it is deciding about this page rather than about the "
             f"provider running out -- and it decides to stop. In production "
             f"the read ends after its first page and reports success. Check "

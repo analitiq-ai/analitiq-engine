@@ -1332,11 +1332,11 @@ class TestApiReadPathBreaks:
     def test_a_page_size_default_reading_an_unknown_scope_is_reported(
         self, tmp_path: Path
     ) -> None:
-        """The page size resolves at compile time and can fail the same ways.
+        """A ``limit.default`` naming a scope nothing supplies is refused.
 
-        ``build_read_strategy`` caught ``ValueError`` alone, so a
-        ``limit.default`` naming a scope that does not exist escaped as a
-        bare ``KeyError`` and took the compile check down with it.
+        The never-fillable walk names it at compile -- it used to escape
+        ``build_read_strategy`` as a bare ``KeyError`` and take the compile
+        check down with it.
         """
 
         def bend(read: dict[str, Any]) -> None:
@@ -1344,7 +1344,8 @@ class TestApiReadPathBreaks:
 
         target = self._broken(tmp_path, "widgets", bend)
         report = _report(check_api_read_compiles(target))
-        assert "Unknown resolution scope" in report
+        assert "'nosuchscope.size'" in report
+        assert "request-time resolution never supplies" in report
 
     def test_a_param_default_reading_an_unknown_scope_is_reported(
         self, tmp_path: Path
@@ -1602,6 +1603,10 @@ class TestApiStopConditionDecidesAboutTheRightThing:
         ("stem", "stop_when"),
         [
             ("invoices", {"exists": {"ref": "response.body.meta.next_token"}}),
+            # The ANCESTOR of the continuation: `meta` holds `next_token`,
+            # so it is populated exactly when its leaf is -- an exact-path
+            # evidence match would let this inverted condition through.
+            ("invoices", {"exists": {"ref": "response.body.meta"}}),
             ("events", {"exists": {"ref": "response.body.links.next"}}),
             ("widgets", {"not_empty": {"ref": "response.body.objects"}}),
             (
@@ -1847,21 +1852,32 @@ class TestApiRequestBodyBreaks:
 
     _broken = staticmethod(TestApiReadPathBreaks._broken)
 
-    def test_a_declared_body_that_resolves_to_nothing(self, tmp_path: Path) -> None:
+    def test_a_body_reading_the_response_scope_is_refused(self, tmp_path: Path) -> None:
+        """The request is built before any response exists."""
+
         def bend(read: dict[str, Any]) -> None:
             read["request"]["method"] = "POST"
             read["request"]["body"] = {"ref": "response.body.not_a_request_scope"}
 
         target = self._broken(tmp_path, "widgets", bend)
         report = _report(check_api_read_compiles(target))
-        assert "resolved to nothing" in report
+        assert "'response.body.not_a_request_scope'" in report
+        assert "request-time resolution never supplies" in report
 
-    def test_a_body_reading_the_connection_is_not_judged(self, tmp_path: Path) -> None:
-        """A definition-only run has no connection, and that is not a defect."""
+    @pytest.mark.parametrize("subtree", ["parameters", "selections", "discovered"])
+    def test_a_body_reading_the_connection_is_not_judged(
+        self, tmp_path: Path, subtree: str
+    ) -> None:
+        """A definition-only run has no connection, and that is not a defect.
+
+        All three subtrees ``request_resolver`` builds defer -- pinning only
+        one would let the other two drop from the scope set with every test
+        green while the kit falsely refuses valid connectors.
+        """
 
         def bend(read: dict[str, Any]) -> None:
             read["request"]["method"] = "POST"
-            read["request"]["body"] = {"ref": "connection.parameters.filter"}
+            read["request"]["body"] = {"ref": f"connection.{subtree}.filter"}
 
         target = self._broken(tmp_path, "widgets", bend)
         assert check_api_read_compiles(target) == []
@@ -1881,7 +1897,28 @@ class TestApiRequestBodyBreaks:
         target = self._broken(tmp_path, "widgets", bend)
         report = _report(check_api_read_compiles(target))
         assert "'secrets.api_key'" in report
-        assert "never supplies secrets or auth" in report
+        assert "request-time resolution never supplies" in report
+
+    def test_a_query_value_reading_the_connector_scope_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """`connector.*` is a definition scope, not a request-time one.
+
+        Production's request resolver never carries it, so the key is
+        dropped from every request with only a log line -- the provider
+        serves the default-versioned collection while everything reports
+        green.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"].setdefault("query", {})["v"] = {
+                "ref": "connector.api_version"
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "'connector.api_version'" in report
+        assert "request-time resolution never supplies" in report
 
     def test_a_secret_nested_inside_a_body_is_not_silently_dropped(
         self, tmp_path: Path
@@ -2016,6 +2053,68 @@ class TestApiBaseUrlBreaks:
         assert "malformed" in report
         assert "'extra'" in report
 
+    @pytest.mark.parametrize("declared", ["api.example.test", "ftp://api.example.test"])
+    def test_a_base_url_the_http_client_cannot_open_is_refused(
+        self, tmp_path: Path, declared: str
+    ) -> None:
+        """Non-empty is not usable: the session needs an absolute http(s) URL.
+
+        A scheme-less or non-HTTP origin passes a bare truthiness test and
+        then dies in the HTTP client on the connector's first request --
+        the same one definition of "usable" the transport build now
+        enforces at connect().
+        """
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(base_url=declared),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "no usable base_url" in report
+        assert "absolute http(s) URL" in report
+
+    def test_a_dead_connector_path_in_a_mixed_node_is_not_carried_past(
+        self, tmp_path: Path
+    ) -> None:
+        """Each read is judged on its own, deferring or not.
+
+        The connection half of this template defers; the typo'd connector
+        half resolves on no connection ever -- deferring the whole node on
+        the connection's account certified a connector whose connect()
+        dies every time.
+        """
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(
+                base_url={
+                    "template": (
+                        "https://${connector.conector_id}"
+                        ".${connection.parameters.domain}"
+                    )
+                }
+            ),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "'connector.conector_id'" in report
+        assert "names nothing in the connector definition" in report
+        assert "'connection.parameters.domain'" not in report
+
+    def test_a_whole_scope_read_is_refused_not_deferred(self, tmp_path: Path) -> None:
+        """`connection.parameters` is a mapping on every connection.
+
+        Deferring it certifies a field that can never resolve to the
+        scalar the transport needs -- and production would send the dict's
+        repr or die, connection after connection.
+        """
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(
+                base_url={"ref": "connection.parameters"}
+            ),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "'connection.parameters'" in report
+        assert "whole scope" in report
+
     def test_a_mixed_scope_base_url_is_refused_by_the_stray_path(
         self, tmp_path: Path
     ) -> None:
@@ -2098,6 +2197,37 @@ class TestApiBaseUrlBreaks:
         assert "'runtime.connection_identifier'" in report
         assert "not a scope transport materialization supplies" in report
 
+    def test_a_connector_path_the_definition_does_not_declare_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """A definition-settled read that resolves to nothing is a finding.
+
+        `connector.*` is verified path by path against the held definition
+        -- with base_url stood in by the spec drive, nothing else would
+        catch it, and a mixed node's connection half must never carry a
+        dead connector path past the check.
+        """
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(
+                base_url={"ref": "connector.no_such_key"}
+            ),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "no usable base_url" in report
+        assert "names nothing in the connector definition" in report
+
+    def test_the_exact_supplied_key_defers_clean(self, tmp_path: Path) -> None:
+        """The positive half of the exact match: `runtime.connection_id`
+        is per-connection, supplied at materialization, and defers."""
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(
+                base_url={"template": "https://${runtime.connection_id}.example.test"}
+            ),
+        )
+        assert check_read_transport_selection(target) == []
+
     def test_the_rest_of_the_transport_spec_is_driven_not_restated(
         self, tmp_path: Path
     ) -> None:
@@ -2114,6 +2244,24 @@ class TestApiBaseUrlBreaks:
         report = _report(check_read_transport_selection(target))
         assert "does not materialize" in report
         assert "rate_limit" in report
+
+    def test_a_coercion_the_build_overflows_on_is_still_a_finding(
+        self, tmp_path: Path
+    ) -> None:
+        """JSON can spell `1e999`; `int(inf)` raises OverflowError.
+
+        An escape here would abandon the whole transport check and every
+        finding after it -- the drive's catch has to hold the build's
+        unwrapped coercions, arithmetic included.
+        """
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(
+                rate_limit={"max_requests": 1e999, "time_window_seconds": 60}
+            ),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "does not materialize" in report
 
 
 class TestApiTransportHeaderBreaks:
@@ -2190,13 +2338,13 @@ class TestApiTransportHeaderBreaks:
     def test_a_base_url_scope_that_does_not_exist_does_not_stop_the_run(
         self, tmp_path: Path
     ) -> None:
-        """A typo in the scope name is a bare KeyError, not a resolver error.
+        """A typo in the scope name is refused, and refused by name.
 
-        ``"connectio."`` is not ``"connection."``, so nothing defers it and
-        the resolver is asked. It answers with the ``KeyError`` it raises
-        for any unknown scope, and a check that let that through would
-        report neither this defect nor the ``transport_ref`` beside it --
-        one authoring mistake hiding another.
+        ``"connectio."`` is not ``"connection."``, so it is a stray path --
+        neither deferred nor definition-settled -- and the violation names
+        it. A check that raised out instead would report neither this
+        defect nor the ``transport_ref`` beside it -- one authoring
+        mistake hiding another.
         """
         root = tmp_path / "api"
         shutil.copytree(API_REFERENCE_DIR, root)
@@ -2496,7 +2644,7 @@ class TestApiRequestBlockBreaks:
         target = self._broken(tmp_path, "widgets", bend)
         report = _report(check_api_read_compiles(target))
         assert "'secrets.account_id'" in report
-        assert "never supplies secrets or auth" in report
+        assert "request-time resolution never supplies" in report
 
     def test_a_connection_field_outside_the_request_subtrees_is_refused(
         self, tmp_path: Path
@@ -2514,8 +2662,8 @@ class TestApiRequestBlockBreaks:
 
         target = self._broken(tmp_path, "widgets", bend)
         report = _report(check_api_read_compiles(target))
-        assert "{account_id}" in report
-        assert "reads no scope request-time resolution supplies" in report
+        assert "'connection.name'" in report
+        assert "request-time resolution never supplies" in report
 
     def test_a_path_placeholder_a_run_supplies_is_not_a_finding(
         self, tmp_path: Path
@@ -2704,16 +2852,15 @@ class TestApiRequestBlockBreaks:
         report = _report(check_api_read_compiles(target))
         assert "must resolve to string or bytes" in report
 
-    def test_a_follow_up_request_reaching_an_unknown_scope_is_reported(
+    def test_an_unknown_scope_in_an_unchosen_map_entry_is_still_refused(
         self, tmp_path: Path
     ) -> None:
-        """Page two's body picks a map entry page one never resolves.
+        """A scope typo resolves on no run, whichever page selects it.
 
-        ``lookup`` resolves the entry it matched, so a bad scope inside the
-        entry keyed by the second page's offset arrives as a bare
-        ``KeyError`` -- from the request build, which reaches the resolver
-        directly rather than through the page expression resolver that wraps
-        the strategies.
+        This entry is keyed by page two's offset, so a drive that waited
+        for a request to reach it would need the traversal to get there
+        first; the never-fillable walk refuses the declaration at compile
+        instead, naming the path.
         """
 
         def bend(read: dict[str, Any]) -> None:
@@ -2725,10 +2872,9 @@ class TestApiRequestBlockBreaks:
             }
 
         target = self._broken(tmp_path, "widgets", bend)
-        assert check_api_read_compiles(target) == []
-        report = _report(check_api_read_advances(target))
-        assert "the request after the first page could not be built" in report
-        assert "Unknown resolution scope 'connectio'" in report
+        report = _report(check_api_read_compiles(target))
+        assert "'connectio.token'" in report
+        assert "request-time resolution never supplies" in report
 
     def test_a_header_the_connection_does_not_send_is_clean(
         self, tmp_path: Path

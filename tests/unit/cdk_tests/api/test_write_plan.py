@@ -437,7 +437,7 @@ class TestTheRequestTheStreamWillActuallySend:
         )
         assert isinstance(outcome, str)
         assert "'secrets.api_key'" in outcome
-        assert "never supplies secrets or auth" in outcome
+        assert "request-time resolution never supplies" in outcome
 
     def test_a_param_bound_under_a_harmless_key_is_permitted(self) -> None:
         # The mirror image: a param CALLED Authorization that lands under

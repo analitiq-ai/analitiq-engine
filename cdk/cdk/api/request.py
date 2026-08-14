@@ -367,11 +367,18 @@ def request_block_problem(
     return _controlled_placeholder_problem(request_block, controlled_by)
 
 
-#: Scopes request-time resolution never supplies, on any run and on either
-#: side of the process boundary: secret resolution happens once, engine-side,
-#: at transport materialization, and the resolved values never enter a
-#: request scope -- the sandboxed worker must not see the secret store.
-_NEVER_REQUEST_SCOPES = ("secrets.", "auth.")
+#: Everything request-time resolution supplies, as path prefixes: the three
+#: connection subtrees ``ConnectionRuntime.request_resolver`` builds, and the
+#: engine's runtime values. A read outside these -- ``secrets.*`` and
+#: ``auth.*`` (resolved once, engine-side, at transport materialization: the
+#: sandboxed worker must not see the secret store), ``connector.*``,
+#: ``connection.name``, or any other spelling -- resolves on no run.
+_REQUEST_SUPPLIED_SCOPES = (
+    "connection.parameters.",
+    "connection.selections.",
+    "connection.discovered.",
+    "runtime.",
+)
 
 #: The request slots a declaration can put an expression in.
 _REQUEST_SLOTS = ("headers", "query", "body", "path_params")
@@ -382,38 +389,47 @@ def _secret_read_problem(
     declared_params: Mapping[str, Any],
     pagination: Mapping[str, Any] | None,
 ) -> str | None:
-    """Why an operation slot reading a secret can never send it, or ``None``.
+    """Why an operation reads what no request can carry, or ``None``.
 
     Not an error a run would surface: request-time resolution omits an
     unresolved value rather than failing, so a request slot, a param
-    ``default`` or a pagination value reading ``secrets.*`` or ``auth.*``
-    builds a request WITHOUT the declared value -- every request, every
-    connection, both roles -- and the run stays green while the provider
-    sees the credential-less shape. The refusal therefore happens here,
-    where the declarations are read, naming the phase fact. One walk over
-    every expression the operation authors, so a new never-fillable spelling
-    cannot slip in through a slot the scan does not name.
+    ``default`` or a pagination value reading a scope outside
+    :data:`_REQUEST_SUPPLIED_SCOPES` builds a request WITHOUT the declared
+    value -- every request, every connection, both roles -- and the run
+    stays green while the provider sees the credential-less (or filter-less,
+    or unversioned) shape. The refusal therefore happens here, where the
+    declarations are read, naming the phase fact. One walk over every
+    expression the operation authors, so a new never-fillable spelling
+    cannot slip in through a slot the scan does not name. The pagination
+    block alone also reads ``response.*``: the page loop supplies that
+    scope, page by page.
     """
-    declared = [request_block.get(slot) for slot in _REQUEST_SLOTS]
-    declared.append(declared_params)
-    declared.append(pagination)
+
+    def unfillable(path: str, *, page: bool) -> bool:
+        if path.startswith(_REQUEST_SUPPLIED_SCOPES):
+            return False
+        return not (page and path.startswith("response."))
+
     reads = sorted(
         {
             path
-            for block in declared
+            for block in [request_block.get(slot) for slot in _REQUEST_SLOTS]
+            + [declared_params]
             for path in scope_paths(block)
-            if path.startswith(_NEVER_REQUEST_SCOPES)
+            if unfillable(path, page=False)
         }
+        | {path for path in scope_paths(pagination) if unfillable(path, page=True)}
     )
     if not reads:
         return None
     return (
-        f"the operation reads {', '.join(repr(path) for path in reads)}; "
-        f"request-time resolution never supplies secrets or auth -- they "
-        f"are resolved once, engine-side, at transport materialization -- "
-        f"so the value would be dropped from every request ever sent. "
-        f"Carry it on the transport's headers, or supply it as a "
-        f"connection parameter."
+        f"the operation reads {', '.join(repr(path) for path in reads)}, "
+        f"which request-time resolution never supplies -- it builds exactly "
+        f"connection.parameters/selections/discovered and the engine's "
+        f"runtime values; secrets and auth resolve once, engine-side, at "
+        f"transport materialization -- so the value would be dropped from "
+        f"every request ever sent. Route it through a declared param, a "
+        f"connection parameter, or the transport's headers."
     )
 
 
