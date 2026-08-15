@@ -381,6 +381,15 @@ def _path_values(
     time is the split-brain the kit deleted its response-path check to
     avoid, and it can only ever disagree with the contract.
 
+    Absent is the deferral, and absent is exactly what ``bind_request_values``
+    says: a binding whose value no definition-only run can produce resolves
+    to nothing and its key is dropped. A key that IS here carries the value
+    the definition settled, empty included -- and an empty one is a finding
+    rather than a deferral, because production substitutes that same empty
+    string and :func:`substitute_path` refuses it before the first request.
+    Standing in for it certified an endpoint whose every unfiltered read
+    fails.
+
     A deferred placeholder gets :data:`_STAND_IN_PATH_SEGMENT`, which is
     enough for every drive after this one -- they certify how the traversal
     moves, and the value inside one path segment is the same on every page.
@@ -393,8 +402,7 @@ def _path_values(
         endpoint=declared_path,
     )
     for name in path_placeholders(declared_path):
-        value = bound.get(name)
-        if value is None or not str(value):
+        if name not in bound:
             bound[name] = _STAND_IN_PATH_SEGMENT
     return bound
 
@@ -913,7 +921,7 @@ def _advance_violations(probe: _ReadProbe) -> list[Violation]:
     # read that moves. The whole prepared request is compared because a
     # body-paginated read moves in its body while its URL and query stay
     # put, and that is still a read that moves.
-    sent = (probe.first.url, probe.first_sent)
+    sent = (_wire_target(probe.first.url), probe.first_sent)
     for word, key in _DRIVEN_PAGES:
         page = _scripted_page(probe, records=_probe_records(probe, key=key), key=key)
         try:
@@ -963,7 +971,7 @@ def _advance_violations(probe: _ReadProbe) -> list[Violation]:
                     f"already handed over.",
                 )
             ]
-        if (following.url, prepared) == sent:
+        if (_wire_target(following.url), prepared) == sent:
             return [
                 Violation(
                     ADVANCE_CHECK,
@@ -978,8 +986,19 @@ def _advance_violations(probe: _ReadProbe) -> list[Violation]:
                     f"that page.",
                 )
             ]
-        sent = (following.url, prepared)
+        sent = (_wire_target(following.url), prepared)
     return []
+
+
+def _wire_target(url: str) -> str:
+    """Return the part of *url* the request actually carries.
+
+    A fragment is not sent -- the client strips it building the request
+    target -- so two next links differing only there are one request to the
+    provider. Comparing the raw strings read that as a traversal that moved,
+    and certified a read that fetches its first page forever.
+    """
+    return urlsplit(url)._replace(fragment="").geturl()
 
 
 def _refusal_violations(probe: _ReadProbe) -> list[Violation]:

@@ -632,6 +632,52 @@ class TestRequestBlockRefusals:
         assert "'cursor'" in problem
         assert "replication" in problem
 
+    def test_a_controlled_param_wrapped_in_a_function_is_refused(self) -> None:
+        # A binding is a binding at any depth. Before the first checkpoint
+        # the lookup input resolves to nothing and the header is dropped, so
+        # the value judge sees nothing to refuse; after one, the loop binds
+        # the param, the lookup falls to its `safe` value and a non-JSON
+        # media type ships with a JSON body. The contract permits the shape
+        # -- a header-placed param may be `controlled_by` -- so this is the
+        # only thing standing between it and the wire.
+        problem = request_block_problem(
+            {
+                "headers": {
+                    "Content-Type": {
+                        "function": "lookup",
+                        "input": {"from_param": "cursor"},
+                        "map": {"1": "application/json"},
+                        "safe": "text/plain",
+                    }
+                }
+            },
+            reserved_headers=frozenset(),
+            resolver=_resolver(),
+            params={},
+            controlled_by={"cursor": "replication"},
+        )
+        assert problem is not None
+        assert "'cursor'" in problem
+        assert "replication" in problem
+
+    def test_a_binding_spelled_inside_a_literal_is_data(self) -> None:
+        # The resolver hands a literal back untouched, so nothing here is a
+        # binding the loop ever fills. This value is still refused -- it is
+        # not the media type the engine sends -- but as the wrong VALUE it
+        # is, not as a loop-controlled binding it is not. The distinction
+        # matters where the literal holds a working media type, which the
+        # walk must not read as a binding at all.
+        problem = request_block_problem(
+            {"headers": {"Content-Type": {"literal": {"from_param": "cursor"}}}},
+            reserved_headers=frozenset(),
+            resolver=_resolver(),
+            params={},
+            controlled_by={"cursor": "replication"},
+        )
+        assert problem is not None
+        assert "the engine owns that header" in problem
+        assert "replication" not in problem, "a literal payload is data"
+
     def test_a_declared_content_length_is_refused(self) -> None:
         # The body is encoded after the headers are built, so no declared
         # length can be right -- and aiohttp sends the declared one rather

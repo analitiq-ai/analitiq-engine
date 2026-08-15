@@ -91,6 +91,11 @@ ENGINE_OWNED_HEADERS = frozenset({"content-type", "content-length"})
 #: One ``{name}`` placeholder in a declared path.
 _PLACEHOLDER = re.compile(r"\{([^{}]+)\}")
 
+#: The two path segments RFC 3986 resolves away rather than sends. Percent-
+#: encoding cannot protect them: ``.`` is unreserved, so an encoder returns
+#: them unchanged.
+_DOT_SEGMENTS = frozenset({".", ".."})
+
 
 @dataclass(frozen=True)
 class PreparedRequest:
@@ -305,6 +310,16 @@ def substitute_path(path: str, values: Mapping[str, Any], *, endpoint: str) -> s
     ``url_encode`` returns ``""`` for an unbound input, so the empty case is
     reachable without anyone declaring it.
 
+    A dot segment is refused for the same reason one step further on.
+    Percent-encoding does not contain ``.`` -- it is unreserved, so ``quote``
+    hands it back unchanged -- and the client's URL layer then removes the
+    dot segment per RFC 3986, which is not encoding the value but deleting
+    the segment around it: ``/accounts/{id}/items`` with ``id`` bound to
+    ``..`` is SENT as ``/items``. The request addresses a different resource
+    and succeeds there. Only ``.`` and ``..`` do this -- ``...`` and ``..a``
+    are ordinary segments, and a value carrying a slash is already encoded
+    into one segment before any of this applies.
+
     Which spans of *path* are placeholders is :func:`path_placeholders`'s
     answer, not a second reading of the pattern here.
     """
@@ -317,6 +332,14 @@ def substitute_path(path: str, values: Mapping[str, Any], *, endpoint: str) -> s
                 f"path {path!r} for endpoint {endpoint!r} has no value for the "
                 f"placeholder {{{name}}}; bind it in request.path_params to "
                 f"something that resolves to a non-empty value"
+            )
+        if segment in _DOT_SEGMENTS:
+            raise RequestSpecError(
+                f"path {path!r} for endpoint {endpoint!r} binds the "
+                f"placeholder {{{name}}} to {segment!r}, which is not a value "
+                f"but a relative-path step: the client removes it and the "
+                f"segment before it, so the request would address a different "
+                f"resource and succeed there. Bind it to a resource identifier"
             )
         # Encoding before replacing is what makes replacing by name safe:
         # ``quote`` percent-encodes braces, so no bound value can spell a
@@ -517,17 +540,16 @@ def _header_map_problem(
             # The one engine-owned header an endpoint may restate, and only
             # by declaring the value the engine already sends -- which makes
             # the collision a no-op rather than a conflict nobody can see.
-            bound_param = (
-                value.get("from_param") if isinstance(value, Mapping) else None
-            )
-            owner = (
-                controlled_by.get(bound_param) if isinstance(bound_param, str) else None
-            )
-            if owner is not None:
+            controlled = _controlled_binding(value, controlled_by)
+            if controlled is not None:
+                bound_param, owner = controlled
                 # The value judge below sees the pre-checkpoint table, where
                 # a loop-owned param is absent -- so without this a resumed
                 # incremental read would send the stored cursor as the media
-                # type, and fail only once a checkpoint exists.
+                # type, and fail only once a checkpoint exists. Anywhere
+                # inside the value, not just at its top: a `lookup` over a
+                # loop-owned param resolves to nothing before the first
+                # checkpoint too, and to its `safe` fallback after one.
                 return (
                     f"request.headers binds {name!r} to the param "
                     f"{bound_param!r}, which {owner} controls: its value is "
@@ -564,6 +586,47 @@ def _header_map_problem(
                 f"endpoint's. Remove it, or change the transport's headers."
             )
     return None
+
+
+def _controlled_binding(
+    node: Any, controlled_by: Mapping[str, str]
+) -> tuple[str, str] | None:
+    """Find a ``{from_param}`` naming a loop-owned param, or ``None``.
+
+    Anywhere inside *node*, because a binding is a binding at any depth: the
+    contract's own wiring walk reaches nested ones, so a header the contract
+    accepts can carry a loop-owned param through a ``function``'s input.
+
+    A ``literal`` payload is not walked, for the reason the resolver hands
+    one back untouched: a binding spelled inside one is data the engine
+    never resolves, so reading it as a binding would refuse a working
+    header.
+    """
+    if isinstance(node, list):
+        return next(
+            (
+                found
+                for item in node
+                if (found := _controlled_binding(item, controlled_by))
+            ),
+            None,
+        )
+    if not isinstance(node, Mapping):
+        return None
+    if "literal" in node:
+        return None
+    bound = node.get("from_param")
+    if isinstance(bound, str):
+        owner = controlled_by.get(bound)
+        return None if owner is None else (bound, owner)
+    return next(
+        (
+            found
+            for child in node.values()
+            if (found := _controlled_binding(child, controlled_by))
+        ),
+        None,
+    )
 
 
 def _header_value_sent(

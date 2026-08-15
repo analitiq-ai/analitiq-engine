@@ -2750,6 +2750,26 @@ class TestApiPositionlessSchemeBreaks:
         report = _report(check_api_read_advances(target))
         assert "the request after the second page is the request before it" in report
 
+    def test_a_link_moving_only_in_its_fragment(self, tmp_path: Path) -> None:
+        """A fragment is not on the wire, so a link that only moves there does not.
+
+        The scripted pages hand back ``#conformance-9901`` and
+        ``#conformance-9902``, two different strings and one request
+        target: the client strips the fragment building it. Comparing the
+        raw URLs read that as a traversal that moved.
+        """
+        target = self._broken(
+            tmp_path,
+            "events",
+            lambda read: read["pagination"]["link"].update(
+                next_url={
+                    "template": "/v1/events#${response.body.next_page_url}",
+                }
+            ),
+        )
+        report = _report(check_api_read_advances(target))
+        assert "the request after the second page is the request before it" in report
+
     def test_a_link_continuing_from_the_connection(self, tmp_path: Path) -> None:
         """Nothing a definition-only run resolves, so the traversal ends."""
         target = self._broken(
@@ -2945,6 +2965,62 @@ class TestApiRequestBlockBreaks:
         bend(request)
         with pytest.raises(ValidationError, match="path_params"):
             ApiEndpointDoc.model_validate(document)
+
+    def test_a_path_default_the_definition_settles_as_empty_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        """An empty value is a value, so the kit judges it rather than deferring.
+
+        Production resolves this same default to ``""`` and
+        ``substitute_path`` refuses it before the first request. Standing a
+        segment in certified an endpoint whose every unfiltered read fails
+        on the URL it builds.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["path"] = "/v1/accounts/{account_id}/widgets"
+            read["request"]["path_params"] = {
+                "account_id": {"from_param": "account_id"}
+            }
+            read["params"]["account_id"] = {
+                "in": "path",
+                "type": "string",
+                "required": True,
+                "default": {"literal": ""},
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "{account_id}" in report
+        assert "has no value for the placeholder" in report
+
+    def test_a_path_value_that_deletes_its_own_segment_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        """``..`` is not encoded away -- it is resolved away.
+
+        ``quote`` leaves a dot unchanged (it is unreserved), and the client
+        then removes the dot segment AND the one before it, so
+        ``/v1/accounts/../widgets`` is sent as ``/v1/widgets``. The request
+        addresses another resource and succeeds there.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["path"] = "/v1/accounts/{account_id}/widgets"
+            read["request"]["path_params"] = {
+                "account_id": {"from_param": "account_id"}
+            }
+            read["params"]["account_id"] = {
+                "in": "path",
+                "type": "string",
+                "required": True,
+                "default": {"literal": ".."},
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "'..'" in report
+        assert "address a different resource" in report
 
     def test_a_path_placeholder_bound_to_a_secret_is_refused(
         self, tmp_path: Path
