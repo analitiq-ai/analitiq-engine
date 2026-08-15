@@ -530,7 +530,7 @@ def _materialize_first_request(
     page two against it.
     """
     body = probe.request.get("body")
-    problem = None if body is None else expression_grammar_problem(body)
+    problem = None if body is None else expression_grammar_problem(body, probe.resolver)
     if problem is not None:
         raise ReadError(problem)
     return _request_builder(probe).for_page(

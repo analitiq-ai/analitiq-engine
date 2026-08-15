@@ -909,25 +909,62 @@ def require_http_base_url(base_url: Any) -> str:
         raise TransportSpecError(
             "http transport `base_url` must resolve to a non-empty string"
         )
-    parts = urllib.parse.urlsplit(base_url)
-    if parts.scheme not in ("http", "https") or not parts.netloc:
-        raise TransportSpecError(
-            f"http transport `base_url` must be an absolute http(s) URL; "
-            f"got {base_url!r}"
-        )
     try:
-        # urlsplit defers authority validation until these are read: a
-        # non-numeric port (`https://h:abc`) or a malformed bracket host
-        # parses fine above and then dies in the HTTP client on the
-        # connector's first request.
-        parts.port
-        parts.hostname
+        # The whole parse is guarded, not just the deferred fields: urlsplit
+        # itself raises on some authorities (`https://[abc`), and every
+        # authority fact it DOES defer (a non-numeric port, a bracket host)
+        # raises only when read. Either way the value dies in the HTTP client
+        # on the connector's first request, so it is refused here instead.
+        parts = urllib.parse.urlsplit(base_url)
+        port = parts.port
+        hostname = parts.hostname
     except ValueError as exc:
         raise TransportSpecError(
             f"http transport `base_url` carries a malformed authority: "
             f"{base_url!r} ({exc})"
         ) from exc
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise TransportSpecError(
+            f"http transport `base_url` must be an absolute http(s) URL; "
+            f"got {base_url!r}"
+        )
+    if not hostname:
+        # A netloc can carry userinfo or a port and still name no host
+        # (`https://user@`, `https://:443`): there is nowhere to connect.
+        raise TransportSpecError(
+            f"http transport `base_url` names no host; got {base_url!r}"
+        )
+    # Read so the parse is not mistaken for dead code: `port` is validated by
+    # being accessed above, which is the only way urlsplit reports it.
+    del port
     return base_url.rstrip("/")
+
+
+#: Characters an HTTP header value may not carry. A CR or LF ends the header
+#: line on the wire, so a value holding one is a request-splitting vector as
+#: well as an immediate client refusal; a NUL is rejected by the client too.
+_HEADER_FORBIDDEN = ("\r", "\n", "\0")
+
+
+def require_wire_safe_header(name: str, value: str) -> str:
+    """Return *value* if an HTTP client can send it under *name*, or raise.
+
+    The HTTP client refuses a header carrying a line break when the first
+    request is written -- after connect() reported success -- so every read
+    on the connector fails with the transport already certified. Refused
+    here instead, where the message can still name the header. Shared with
+    the conformance kit through :func:`resolve_http_spec`, so the kit
+    certifies exactly what the build accepts.
+    """
+    found = [char for char in _HEADER_FORBIDDEN if char in value]
+    if found:
+        raise TransportSpecError(
+            f"http transport header {name!r} carries "
+            f"{', '.join(repr(char) for char in found)}, which no HTTP "
+            f"client will send: a line break ends the header on the wire. "
+            f"Remove it from the declared value."
+        )
+    return value
 
 
 def resolve_http_spec(spec: Mapping[str, Any], *, resolver: Resolver) -> dict[str, Any]:
@@ -945,7 +982,7 @@ def resolve_http_spec(spec: Mapping[str, Any], *, resolver: Resolver) -> dict[st
         resolved = resolver.resolve(value)
         if resolved is None:
             continue
-        headers[str(name)] = str(resolved)
+        headers[str(name)] = require_wire_safe_header(str(name), str(resolved))
 
     timeout_seconds = spec.get("timeout_seconds")
     if timeout_seconds is None:

@@ -298,6 +298,21 @@ class Resolver:
     def context(self) -> ResolutionContext:
         return self._ctx
 
+    def knows_function(self, name: Any) -> bool:
+        """Whether this resolver would find *name* in its function registry.
+
+        The registry is engine-owned and closed, so a caller reading a
+        declaration (the conformance kit) can judge a ``function`` node
+        without resolving it -- against this resolver's own registry rather
+        than a copied list of names.
+        """
+        return isinstance(name, str) and name in self._functions
+
+    @property
+    def function_names(self) -> list[str]:
+        """The registered function names, for a message that lists them."""
+        return sorted(self._functions)
+
     def with_response(self, response: Mapping[str, Any]) -> Resolver:
         """Return a resolver whose ``response`` scope holds *response*.
 

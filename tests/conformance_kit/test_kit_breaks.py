@@ -1899,6 +1899,29 @@ class TestApiRequestBodyBreaks:
         assert "'secrets.api_key'" in report
         assert "request-time resolution never supplies" in report
 
+    def test_a_deferred_body_naming_an_unregistered_function_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """A deferred VALUE is still a judged declaration.
+
+        The body reads a request-fillable scope, so the kit withholds it
+        from the drive rather than resolving it -- and without judging the
+        function name nothing would ever run this node, while production
+        checks the registry before the input and refuses on the first
+        request.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["method"] = "POST"
+            read["request"]["body"] = {
+                "function": "does_not_exist",
+                "input": {"ref": "connection.parameters.payload"},
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "unknown derived function 'does_not_exist'" in report
+
     def test_a_query_value_reading_the_connector_scope_is_refused(
         self, tmp_path: Path
     ) -> None:
@@ -2072,6 +2095,23 @@ class TestApiBaseUrlBreaks:
         assert "no usable base_url" in report
         assert "absolute http(s) URL" in report
 
+    @pytest.mark.parametrize("declared", ["https://user@", "https://:443"])
+    def test_a_base_url_naming_no_host_is_refused(
+        self, tmp_path: Path, declared: str
+    ) -> None:
+        """A netloc can carry userinfo or a port and still name no host.
+
+        Both parse as absolute http(s) URLs with a nonempty netloc, and
+        there is nowhere for the first request to connect.
+        """
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(base_url=declared),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "no usable base_url" in report
+        assert "names no host" in report
+
     def test_a_dead_connector_path_in_a_mixed_node_is_not_carried_past(
         self, tmp_path: Path
     ) -> None:
@@ -2100,12 +2140,19 @@ class TestApiBaseUrlBreaks:
 
     @pytest.mark.parametrize(
         "declared",
-        ["https://api.example.test:abc", "https://api.example.test:99999999"],
+        [
+            "https://api.example.test:abc",
+            "https://api.example.test:99999999",
+            # urlsplit RAISES on this one rather than deferring, so the
+            # parse itself has to be inside the guard: escaping here would
+            # abandon the whole check and every finding after it.
+            "https://[abc",
+        ],
     )
     def test_a_malformed_authority_is_refused(
         self, tmp_path: Path, declared: str
     ) -> None:
-        """urlsplit defers port validation; connect() must not.
+        """urlsplit defers -- or raises; connect() must survive both.
 
         A non-numeric or out-of-range port parses as a scheme-and-netloc URL
         and then dies in the HTTP client on the first request.
@@ -2356,12 +2403,52 @@ class TestApiTransportHeaderBreaks:
         target = self._bent_definition(
             tmp_path,
             lambda d: d["transports"]["api"].update(
-                headers={"X-Trace": {"function": "no_such_function", "input": "x"}}
+                headers={
+                    # Registered, grammar-clean, and refused when it runs:
+                    # the encoder needs text, not a number.
+                    "X-Trace": {
+                        "function": "base64_encode",
+                        "input": {"literal": 5},
+                    }
+                }
             ),
         )
         report = _report(check_read_transport_selection(target))
         assert "'X-Trace'" in report
         assert "does not resolve" in report
+
+    def test_a_header_naming_an_unregistered_function_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """The registry is closed, so an unknown name resolves on no run."""
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(
+                headers={"X-Trace": {"function": "no_such_function", "input": "x"}}
+            ),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "'X-Trace'" in report
+        assert "unknown derived function 'no_such_function'" in report
+
+    def test_a_header_value_carrying_a_line_break_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """A CR or LF ends the header on the wire.
+
+        The HTTP client refuses it when the first request is written --
+        after connect() reported success -- so every read fails with the
+        transport already certified.
+        """
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(
+                headers={"X-Trace": {"literal": "one\r\nInjected: two"}}
+            ),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "does not materialize" in report
+        assert "no HTTP client will send" in report
 
     def test_headers_the_connection_supplies_are_clean(self, tmp_path: Path) -> None:
         """Transport materialization has secrets and auth in scope; defer both."""

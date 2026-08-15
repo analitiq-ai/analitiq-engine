@@ -241,7 +241,9 @@ def materialization_resolver(target: ConformanceTarget) -> Resolver:
     )
 
 
-def expression_grammar_problem(node: Any) -> str | None:
+def expression_grammar_problem(
+    node: Any, resolver: Resolver | None = None
+) -> str | None:
     """Return the first malformed expression node in *node*, or ``None``.
 
     The shape rules are the resolver's own
@@ -249,9 +251,16 @@ def expression_grammar_problem(node: Any) -> str | None:
     declaration rather than to a resolution -- which is what lets a
     deferred branch still be judged. A ``literal`` is opaque data, so an
     expression spelled inside one is not one.
+
+    Given a *resolver*, a ``function`` node's NAME is judged too, against
+    that resolver's own registry: the registry is engine-owned and closed,
+    so a name outside it resolves on no run -- and a deferred node whose
+    value the kit never resolves would otherwise carry an unknown function
+    past every check and die on the connector's first request.
     """
+    walk = lambda child: expression_grammar_problem(child, resolver)  # noqa: E731
     if isinstance(node, list):
-        return next((p for p in map(expression_grammar_problem, node) if p), None)
+        return next((p for p in map(walk, node) if p), None)
     if not isinstance(node, Mapping):
         return None
     if Resolver.is_expression_node(node):
@@ -260,7 +269,18 @@ def expression_grammar_problem(node: Any) -> str | None:
             return problem
         if "literal" in node:
             return None
-    return next((p for p in map(expression_grammar_problem, node.values()) if p), None)
+        name = node.get("function")
+        if (
+            name is not None
+            and resolver is not None
+            and not resolver.knows_function(name)
+        ):
+            return (
+                f"unknown derived function {name!r}; the registry is closed "
+                f"and engine-owned, so this resolves on no run "
+                f"(registered: {resolver.function_names})"
+            )
+    return next((p for p in map(walk, node.values()) if p), None)
 
 
 def api_base_url(target: ConformanceTarget) -> str | None:
@@ -290,7 +310,10 @@ def api_base_url(target: ConformanceTarget) -> str | None:
     base_url = block.get("base_url")
     if isinstance(base_url, str):
         return base_url or None
-    if expression_grammar_problem(base_url) is not None:
+    if (
+        expression_grammar_problem(base_url, materialization_resolver(target))
+        is not None
+    ):
         return None
     if any(not _definition_settled(path) for path in scope_paths(base_url)):
         return None
@@ -396,7 +419,7 @@ def _base_url_violations(
     could not say what it was missing.
     """
     declared = block.get("base_url")
-    grammar = expression_grammar_problem(declared)
+    grammar = expression_grammar_problem(declared, materialization_resolver(target))
     if grammar is not None:
         # Judged before the deferral: a malformed node is malformed whatever
         # scope it reads, and resolve_http_spec() raises on it at connect()
@@ -485,7 +508,7 @@ def _transport_header_violations(
         ]
     violations: list[Violation] = []
     for name, value in sorted(declared.items()):
-        grammar = expression_grammar_problem(value)
+        grammar = expression_grammar_problem(value, materialization_resolver(target))
         if grammar is not None:
             violations.append(
                 Violation(
@@ -535,22 +558,43 @@ def _transport_header_violations(
 _STAND_IN_SPEC_VALUE = "https://conformance.invalid"
 
 
+def _spec_value(target: ConformanceTarget, declared: Any) -> Any:
+    """Hand the build the real declaration, or a stand-in if it cannot judge it.
+
+    Stood in for a value a CONNECTION supplies -- a definition-only run
+    cannot say what it will be, and inventing one would make the verdict
+    the kit's -- and for one the ladders have already condemned, whose
+    finding is theirs to report in terms of the declaration rather than as
+    a second failure out of the build.
+
+    Everything else (a literal, or an expression the connector's own
+    definition settles) goes to the build as written, so the engine judges
+    the connector's actual value rather than the kit's placeholder.
+    """
+    resolver = materialization_resolver(target)
+    if expression_grammar_problem(declared, resolver) is not None:
+        return _STAND_IN_SPEC_VALUE
+    problems, defers = _transport_deferral(target, declared)
+    return _STAND_IN_SPEC_VALUE if (problems or defers) else declared
+
+
 def _transport_spec_violations(
     target: ConformanceTarget, default_ref: Any, block: Mapping[str, Any]
 ) -> list[Violation]:
-    """Drive ``resolve_http_spec`` itself over the rest of the block.
+    """Drive ``resolve_http_spec`` itself over the whole block.
 
-    The base-url and header ladders judge the two value-carrying fields
-    with named deferrals; this drive hands the same spec -- those fields
-    stood in where a connection supplies them -- to the engine's own
-    materialization. Every remaining field (``rate_limit``,
-    ``timeout_seconds``, and whatever the build grows next) is thereby
-    judged by the function connect() runs, not by a restatement that
-    drifts the day the build changes.
+    The kit does not restate what a usable transport is; it runs the build
+    connect() runs. A value stands in ONLY where a connection supplies it
+    -- everything a definition settles by itself is handed over verbatim,
+    so the engine's own rules (an absolute http(s) origin with a host, a
+    header an HTTP client will send, a coercible timeout and rate limit)
+    judge the connector's real declarations. Anything the build learns to
+    check is thereby checked here the same day, with no second statement
+    to drift.
 
-    "Every remaining field" holds for the plain-coerced ones the build has
-    today; a future field the build RESOLVES would need its own deferral
-    ladder here, exactly like base_url and headers.
+    The base-url and header ladders still run first: they name a deferred
+    value's own defect (a malformed node, a scope no phase supplies) in
+    terms of the declaration, which a stand-in would otherwise hide.
 
     ``TypeError``/``ValueError``/``ArithmeticError`` ride along with
     ``TransportSpecError``: the build coerces plain fields
@@ -559,17 +603,24 @@ def _transport_spec_violations(
     and a coercion a definition fails is the same connect()-time death.
     """
     spec = dict(block)
-    spec["base_url"] = _STAND_IN_SPEC_VALUE
+    spec["base_url"] = _spec_value(target, block.get("base_url"))
     headers = block.get("headers")
     if isinstance(headers, Mapping):
-        spec["headers"] = {str(name): _STAND_IN_SPEC_VALUE for name in headers}
+        spec["headers"] = {
+            str(name): _spec_value(target, value) for name, value in headers.items()
+        }
     elif headers is not None:
         # The header ladder already reported the shape; stand an empty map
         # in so the one defect does not hide the rest of the block.
         spec["headers"] = {}
     try:
-        resolve_http_spec(spec, resolver=materialization_resolver(target))
-    except (TransportSpecError, TypeError, ValueError, ArithmeticError) as err:
+        # The engine's own boundary converts the resolver's exception
+        # vocabulary (UnresolvedValueError and the KeyError it subclasses
+        # included), so no defect leaves as a raw traceback that would
+        # abandon the transport_ref loop after this call.
+        with request_spec_errors("transport spec"):
+            resolve_http_spec(spec, resolver=materialization_resolver(target))
+    except (RequestSpecError, ArithmeticError) as err:
         return [
             Violation(
                 TRANSPORT_CHECK,
