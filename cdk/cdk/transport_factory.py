@@ -913,11 +913,11 @@ def require_http_base_url(base_url: Any) -> str:
         # The whole parse is guarded, not just the deferred fields: urlsplit
         # itself raises on some authorities (`https://[abc`), and every
         # authority fact it DOES defer (a non-numeric port, a bracket host)
-        # raises only when read. Either way the value dies in the HTTP client
-        # on the connector's first request, so it is refused here instead.
+        # raises only when READ -- so reading the pair is the validation.
+        # Either way the value dies in the HTTP client on the connector's
+        # first request, so it is refused here instead.
         parts = urllib.parse.urlsplit(base_url)
-        port = parts.port
-        hostname = parts.hostname
+        authority = (parts.hostname, parts.port)
     except ValueError as exc:
         raise TransportSpecError(
             f"http transport `base_url` carries a malformed authority: "
@@ -928,15 +928,12 @@ def require_http_base_url(base_url: Any) -> str:
             f"http transport `base_url` must be an absolute http(s) URL; "
             f"got {base_url!r}"
         )
-    if not hostname:
+    if not authority[0]:
         # A netloc can carry userinfo or a port and still name no host
         # (`https://user@`, `https://:443`): there is nowhere to connect.
         raise TransportSpecError(
             f"http transport `base_url` names no host; got {base_url!r}"
         )
-    # Read so the parse is not mistaken for dead code: `port` is validated by
-    # being accessed above, which is the only way urlsplit reports it.
-    del port
     return base_url.rstrip("/")
 
 
