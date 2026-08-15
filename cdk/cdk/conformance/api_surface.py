@@ -151,14 +151,20 @@ def _transport_deferral(
                     f"production materializes with"
                 )
             else:
-                if isinstance(settled, (Mapping, list)):
-                    # Resolving is not enough: `connector.transports` resolves
-                    # -- to the whole block -- and substituting a mapping into
-                    # a template or URL dies at connect() on every connection.
+                if settled is None or isinstance(settled, (Mapping, list)):
+                    # Resolving is not enough, the value has to be
+                    # substitutable: `connector.transports` resolves to the
+                    # whole block, and a declared null resolves to nothing --
+                    # the strict template resolver rejects either at
+                    # connect(), on every connection.
+                    described = (
+                        "nothing (the definition declares it null)"
+                        if settled is None
+                        else f"a whole {type(settled).__name__}"
+                    )
                     problems.append(
-                        f"{path!r} resolves to a whole "
-                        f"{type(settled).__name__}, not a value -- nothing "
-                        f"can substitute it"
+                        f"{path!r} resolves to {described}, not a value -- "
+                        f"nothing can substitute it"
                     )
         else:
             problems.append(

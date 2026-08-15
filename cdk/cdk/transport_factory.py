@@ -29,6 +29,7 @@ import asyncio
 import copy
 import importlib
 import logging
+import re
 import ssl as _ssl
 import urllib.parse
 from collections.abc import Awaitable, Callable, Mapping
@@ -934,6 +935,16 @@ def require_http_base_url(base_url: Any) -> str:
         raise TransportSpecError(
             f"http transport `base_url` names no host; got {base_url!r}"
         )
+    if parts.query or parts.fragment:
+        # The endpoint path is appended to this string, so a query or
+        # fragment swallows it: `https://h/v1?t=a` + `/items` addresses
+        # `/v1` with a `t=a/items` query, on every request the connector
+        # ever sends.
+        raise TransportSpecError(
+            f"http transport `base_url` must carry no query or fragment -- "
+            f"the endpoint path is appended to it, so one swallows every "
+            f"endpoint; got {base_url!r}"
+        )
     return base_url.rstrip("/")
 
 
@@ -942,24 +953,37 @@ def require_http_base_url(base_url: Any) -> str:
 #: well as an immediate client refusal; a NUL is rejected by the client too.
 _HEADER_FORBIDDEN = ("\r", "\n", "\0")
 
+#: An HTTP field name is a token (RFC 9110 §5.1): no separators, no spaces,
+#: no control characters. The client refuses anything else when it builds
+#: the request.
+_HEADER_NAME_TOKEN = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+
 
 def require_wire_safe_header(name: str, value: str) -> str:
     """Return *value* if an HTTP client can send it under *name*, or raise.
 
-    The HTTP client refuses a header carrying a line break when the first
-    request is written -- after connect() reported success -- so every read
-    on the connector fails with the transport already certified. Refused
-    here instead, where the message can still name the header. Shared with
-    the conformance kit through :func:`resolve_http_spec`, so the kit
-    certifies exactly what the build accepts.
+    Both halves are judged, because both reach the wire: a field name that
+    is not a token and a value carrying a line break are each refused by
+    the client when the request is built -- after connect() reported
+    success -- so every read on the connector fails with the transport
+    already certified. Refused here instead, where the message can still
+    name the header. Shared with the per-request builder and, through
+    :func:`resolve_http_spec`, with the conformance kit, so one rule covers
+    every route a header takes to the wire.
     """
+    if not _HEADER_NAME_TOKEN.match(name):
+        raise TransportSpecError(
+            f"header name {name!r} is not an HTTP token: a field name "
+            f"carries no spaces, separators or control characters, so no "
+            f"HTTP client will send this one."
+        )
     found = [char for char in _HEADER_FORBIDDEN if char in value]
     if found:
         raise TransportSpecError(
-            f"http transport header {name!r} carries "
-            f"{', '.join(repr(char) for char in found)}, which no HTTP "
-            f"client will send: a line break ends the header on the wire. "
-            f"Remove it from the declared value."
+            f"header {name!r} carries "
+            f"{', '.join(repr(char) for char in found)} in its value, which "
+            f"no HTTP client will send: a line break ends the header on the "
+            f"wire. Remove it from the declared value."
         )
     return value
 

@@ -2095,6 +2095,43 @@ class TestApiBaseUrlBreaks:
         assert "no usable base_url" in report
         assert "absolute http(s) URL" in report
 
+    @pytest.mark.parametrize(
+        "declared",
+        ["https://api.example.test/v1?tenant=a", "https://api.example.test/v1#frag"],
+    )
+    def test_a_base_url_carrying_a_query_or_fragment_is_refused(
+        self, tmp_path: Path, declared: str
+    ) -> None:
+        """The endpoint path is appended to this string, so either swallows it.
+
+        `https://h/v1?t=a` + `/items` addresses `/v1` with a `t=a/items`
+        query -- every endpoint on the connector, every request.
+        """
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(base_url=declared),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "no usable base_url" in report
+        assert "no query or fragment" in report
+
+    def test_a_settled_path_declared_null_is_refused(self, tmp_path: Path) -> None:
+        """A declared null resolves to nothing, which substitutes nowhere."""
+
+        def bend(definition: dict[str, Any]) -> None:
+            definition["optional_origin"] = None
+            definition["transports"]["api"]["base_url"] = {
+                "template": (
+                    "https://${connection.parameters.host}"
+                    "/${connector.optional_origin}"
+                )
+            }
+
+        target = self._bent_definition(tmp_path, bend)
+        report = _report(check_read_transport_selection(target))
+        assert "'connector.optional_origin'" in report
+        assert "declares it null" in report
+
     @pytest.mark.parametrize("declared", ["https://user@", "https://:443"])
     def test_a_base_url_naming_no_host_is_refused(
         self, tmp_path: Path, declared: str
@@ -2430,6 +2467,20 @@ class TestApiTransportHeaderBreaks:
         report = _report(check_read_transport_selection(target))
         assert "'X-Trace'" in report
         assert "unknown derived function 'no_such_function'" in report
+
+    def test_a_header_whose_name_is_not_a_token_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """A field NAME reaches the wire too, and the client judges it."""
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(
+                headers={"Bad\nName": {"literal": "x"}}
+            ),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "does not materialize" in report
+        assert "not an HTTP token" in report
 
     def test_a_header_value_carrying_a_line_break_is_refused(
         self, tmp_path: Path

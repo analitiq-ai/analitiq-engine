@@ -10,6 +10,7 @@ from cdk.api.exceptions import RequestSpecError
 from cdk.api.request import (
     ParamTable,
     RequestBuilder,
+    bind_query_and_headers,
     bind_request_values,
     build_write_body,
     request_block_problem,
@@ -375,6 +376,41 @@ class TestABindingKeyIsAName:
         assert all("dropping" in message for message in messages)
         assert any("'tenant'" in message for message in messages)
         assert any("'region'" in message for message in messages)
+
+
+class TestEndpointHeadersAreWireSafe:
+    """An endpoint's headers take a different route to the wire than the
+    transport's, and the HTTP client judges both the same way."""
+
+    def test_a_value_carrying_a_line_break_is_refused(self) -> None:
+        with pytest.raises(RequestSpecError, match="no HTTP client will send"):
+            bind_query_and_headers(
+                params={},
+                declared_query=None,
+                declared_headers={"X-Trace": {"literal": "a\r\nInjected: b"}},
+                resolver=_resolver(),
+                endpoint="/items",
+            )
+
+    def test_a_name_that_is_not_a_token_is_refused(self) -> None:
+        with pytest.raises(RequestSpecError, match="not an HTTP token"):
+            bind_query_and_headers(
+                params={},
+                declared_query=None,
+                declared_headers={"Bad Name": {"literal": "x"}},
+                resolver=_resolver(),
+                endpoint="/items",
+            )
+
+    def test_an_ordinary_header_still_passes(self) -> None:
+        _, headers = bind_query_and_headers(
+            params={},
+            declared_query=None,
+            declared_headers={"X-Trace": {"literal": "abc"}},
+            resolver=_resolver(),
+            endpoint="/items",
+        )
+        assert headers == {"X-Trace": "abc"}
 
 
 class TestSendableValues:

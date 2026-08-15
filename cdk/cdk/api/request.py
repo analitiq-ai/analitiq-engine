@@ -49,6 +49,7 @@ from ..request_binding import (
     resolve_param_defaults,
 )
 from ..resolver import REQUEST_CONNECTION_SUBTREES, Resolver, scope_paths
+from ..transport_factory import require_wire_safe_header
 from .exceptions import RequestSpecError, request_spec_errors
 
 __all__ = [
@@ -652,16 +653,21 @@ def bind_query_and_headers(
     flight reach the wire through the ``{from_param}`` bindings inside those
     maps and through nothing else.
     """
-    headers = {
-        str(name): str(value)
-        for name, value in bind_request_values(
-            declared_headers,
-            params=params,
-            resolver=resolver,
-            block="headers",
-            endpoint=endpoint,
-        ).items()
-    }
+    # An endpoint's headers reach the wire by a different route than the
+    # transport's, and the HTTP client judges both the same way: one rule,
+    # applied wherever a header is built, so a name or value the client
+    # will refuse fails here rather than on the connector's first request.
+    with request_spec_errors(f"request.headers for endpoint {endpoint!r}"):
+        headers = {
+            str(name): require_wire_safe_header(str(name), str(value))
+            for name, value in bind_request_values(
+                declared_headers,
+                params=params,
+                resolver=resolver,
+                block="headers",
+                endpoint=endpoint,
+            ).items()
+        }
     query = bind_request_values(
         declared_query,
         params=params,
