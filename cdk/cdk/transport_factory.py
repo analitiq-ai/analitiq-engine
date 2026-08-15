@@ -957,7 +957,7 @@ _HEADER_FORBIDDEN_VALUE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
 #: An HTTP field name is a token (RFC 9110 §5.1): no separators, no spaces,
 #: no control characters. The client refuses anything else when it builds
 #: the request.
-_HEADER_NAME_TOKEN = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+_HEADER_NAME_TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 
 
 def require_wire_safe_header(name: str, value: str) -> str:
@@ -972,7 +972,10 @@ def require_wire_safe_header(name: str, value: str) -> str:
     :func:`resolve_http_spec`, with the conformance kit, so one rule covers
     every route a header takes to the wire.
     """
-    if not _HEADER_NAME_TOKEN.match(name):
+    # `fullmatch`, not `match`: Python's `$` also matches before a trailing
+    # newline, so `match` would pass "X-Foo\n" -- the request-splitting
+    # shape this refusal exists for.
+    if not _HEADER_NAME_TOKEN.fullmatch(name):
         raise TransportSpecError(
             f"header name {name!r} is not an HTTP token: a field name "
             f"carries no spaces, separators or control characters, so no "

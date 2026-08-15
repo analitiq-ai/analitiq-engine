@@ -235,6 +235,27 @@ class TestIdempotencyRefusals:
         )
         assert isinstance(outcome, str) and "collides" in outcome
 
+    def test_an_engine_owned_header_is_refused_by_the_shared_set(self) -> None:
+        # The key lands in the same header map an endpoint's own headers do,
+        # so it answers to the same engine-owned set: naming Content-Length
+        # here would send a record digest as the body length on every
+        # request, which is the framing corruption the endpoint-side rule
+        # already refuses.
+        doc = _document(idempotency={"in": "header", "name": "Content-Length"})
+        outcome = build_write_plan(
+            doc, _spec(), session_header_names=set(), resolver=_resolver()
+        )
+        assert isinstance(outcome, str) and "collides" in outcome
+
+    def test_a_name_the_client_cannot_send_is_refused(self) -> None:
+        # The key reaches the wire by a different route than the declared
+        # header map, and the client judges it the same way.
+        doc = _document(idempotency={"in": "header", "name": "Bad Key"})
+        outcome = build_write_plan(
+            doc, _spec(), session_header_names=set(), resolver=_resolver()
+        )
+        assert isinstance(outcome, str) and "not an HTTP token" in outcome
+
     def test_batching_and_idempotency_cannot_combine(self) -> None:
         # A restart re-batches records, so a per-request key over several
         # of them cannot dedup.

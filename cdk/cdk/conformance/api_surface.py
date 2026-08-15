@@ -247,9 +247,7 @@ def materialization_resolver(target: ConformanceTarget) -> Resolver:
     )
 
 
-def expression_grammar_problem(
-    node: Any, resolver: Resolver | None = None
-) -> str | None:
+def expression_grammar_problem(node: Any, resolver: Resolver) -> str | None:
     """Return the first malformed expression node in *node*, or ``None``.
 
     The shape rules are the resolver's own
@@ -258,11 +256,12 @@ def expression_grammar_problem(
     deferred branch still be judged. A ``literal`` is opaque data, so an
     expression spelled inside one is not one.
 
-    Given a *resolver*, a ``function`` node's NAME is judged too, against
-    that resolver's own registry: the registry is engine-owned and closed,
-    so a name outside it resolves on no run -- and a deferred node whose
-    value the kit never resolves would otherwise carry an unknown function
-    past every check and die on the connector's first request.
+    A ``function`` node's NAME is judged too, against the *resolver*'s own
+    registry: the registry is engine-owned and closed, so a name outside it
+    resolves on no run -- and a deferred node whose value the kit never
+    resolves would otherwise carry an unknown function past every check and
+    die on the connector's first request. The resolver is required rather
+    than defaulted, so a new caller cannot get the weaker check by omission.
     """
     walk = lambda child: expression_grammar_problem(child, resolver)  # noqa: E731
     if isinstance(node, list):
@@ -276,11 +275,7 @@ def expression_grammar_problem(
         if "literal" in node:
             return None
         name = node.get("function")
-        if (
-            name is not None
-            and resolver is not None
-            and not resolver.knows_function(name)
-        ):
+        if name is not None and not resolver.knows_function(name):
             return (
                 f"unknown derived function {name!r}; the registry is closed "
                 f"and engine-owned, so this resolves on no run "

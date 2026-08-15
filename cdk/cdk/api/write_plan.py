@@ -19,11 +19,14 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from ..exceptions import TransportSpecError
 from ..record_identity import record_digest
 from ..resolver import Resolver
+from ..transport_factory import require_wire_safe_header
 from ..types import RetrySemantics, RetryVerdict, SchemaSpec
 from .exceptions import RequestSpecError
 from .request import (
+    ENGINE_OWNED_HEADERS,
     ParamTable,
     bind_query_and_headers,
     bind_request_values,
@@ -152,7 +155,9 @@ def reserved_header_names(session_header_names: Iterable[str]) -> frozenset[str]
     endpoint's declared headers and the engine-owned idempotency key -- so
     the two cannot disagree on what is already taken.
     """
-    return frozenset({"content-type"} | {name.lower() for name in session_header_names})
+    return frozenset(
+        ENGINE_OWNED_HEADERS | {name.lower() for name in session_header_names}
+    )
 
 
 def idempotency_config_problem(
@@ -174,6 +179,14 @@ def idempotency_config_problem(
     """
     target = idempotency.get("in")
     name = str(idempotency.get("name") or "")
+    if target == "header":
+        # The key lands in the same header map an endpoint's own headers do,
+        # by a different route, so it answers to the same wire rules: a name
+        # that is not an HTTP token dies in the client on every request.
+        try:
+            require_wire_safe_header(name, "")
+        except TransportSpecError as err:
+            return f"idempotency.name is unusable as a header: {err}"
     if target == "header" and name.lower() in reserved_headers:
         # Same rule as the body reserved-field check: these headers are
         # engine-owned (Content-Type) or carry the connection's own values

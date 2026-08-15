@@ -959,9 +959,13 @@ def _addressed_values(
     null_ancestors: set[int] = set()
     for token in tokens[1:]:
         while pa.types.is_list(value.type) or pa.types.is_large_list(value.type):
-            for i, absent in enumerate(pc.is_null(value).to_pylist()):
-                if absent:
-                    null_ancestors.add(i if row_map is None else row_map[i])
+            # Same rule as the failure mask below: the scan stays out of
+            # Python unless there is something to find. A batch whose lists
+            # are all present -- the common case -- pays nothing here.
+            if value.null_count:
+                for i, absent in enumerate(pc.is_null(value).to_pylist()):
+                    if absent:
+                        null_ancestors.add(i if row_map is None else row_map[i])
             parents = pc.list_parent_indices(value).to_pylist()
             row_map = parents if row_map is None else [row_map[i] for i in parents]
             value = pc.list_flatten(value)

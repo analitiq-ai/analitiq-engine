@@ -496,10 +496,11 @@ def _request_builder(probe: _ReadProbe) -> RequestBuilder:
 def _drivable_body(probe: _ReadProbe) -> Any:
     """Return the declared body, or ``None`` where a definition cannot resolve it.
 
-    Withheld only when the body is *itself* one expression reading a scope
-    a connection supplies. That one resolves to nothing here and would be
-    refused for the single reason that says nothing about the connector. A
-    connection-scoped expression nested inside the body is kept:
+    Withheld in two cases, both about a value only a run has: the body is
+    *itself* one expression reading a scope a connection supplies, or it is
+    one param binding whose param the definition leaves empty. Either would
+    be refused for the single reason that says nothing about the connector.
+    A connection-scoped expression nested inside the body is kept:
     request-time resolution omits an unresolved field rather than failing,
     so the rest of the body still binds -- and a malformed branch beside it
     still has to be caught.
@@ -508,12 +509,14 @@ def _drivable_body(probe: _ReadProbe) -> Any:
     if body is None or _is_connection_expression(body):
         return None
     if isinstance(body, Mapping) and "from_param" in body:
-        # The whole body is one param binding, and a run fills that param
-        # from the stream's filters or the param's own default -- neither of
-        # which a definition-only run has. Driving it would refuse a
-        # connector the engine reads correctly, the same reason a path
-        # placeholder bound to a declared param gets a stand-in segment.
-        if body["from_param"] in (probe.read.get("params") or {}):
+        # Deferred on the VALUE, not the declaration -- the rule
+        # `_path_values` applies one field over. The param table already
+        # carries every declared default, so a body bound to a param that
+        # HAS one binds here and is driven; only a binding a definition-only
+        # run cannot fill (its value arrives from the stream's filters or
+        # the replication cursor) is withheld, because driving that one
+        # would refuse a connector the engine reads correctly.
+        if not str(probe.table.values.get(body["from_param"], "")):
             return None
     return body
 

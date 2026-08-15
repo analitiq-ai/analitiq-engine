@@ -68,10 +68,12 @@ logger = logging.getLogger(__name__)
 #: connection scope from these, and the conformance kit derives its
 #: transport-phase deferral from them, so the kit cannot defer a field
 #: (``connection.hostname``, say) that connect() will refuse to resolve.
-MATERIALIZATION_CONNECTION_SUBTREES = (
-    "parameters",
-    "selections",
-    "discovered",
+#: Materialization is a superset of request time by construction: everything
+#: a request may read, plus the credential-bearing blocks only the trusted
+#: side sees. Derived, so a subtree added to the request scope cannot go
+#: missing here -- which would fail a transport expression at connect() that
+#: the identical request expression resolves.
+MATERIALIZATION_CONNECTION_SUBTREES = REQUEST_CONNECTION_SUBTREES + (
     "secret_refs",
     "auth_state",
 )

@@ -392,6 +392,19 @@ class TestEndpointHeadersAreWireSafe:
                 endpoint="/items",
             )
 
+    def test_a_name_ending_in_a_line_break_is_refused(self) -> None:
+        # `$` in a Python regex also matches before a trailing newline, so a
+        # `match()` anchor passed exactly the request-splitting shape this
+        # refusal exists for.
+        with pytest.raises(RequestSpecError, match="not an HTTP token"):
+            bind_query_and_headers(
+                params={},
+                declared_query=None,
+                declared_headers={"X-Trace\n": {"literal": "x"}},
+                resolver=_resolver(),
+                endpoint="/items",
+            )
+
     def test_a_name_that_is_not_a_token_is_refused(self) -> None:
         with pytest.raises(RequestSpecError, match="not an HTTP token"):
             bind_query_and_headers(
@@ -630,7 +643,7 @@ class TestRequestBlockRefusals:
             params={},
         )
         assert problem is not None
-        assert "the engine owns" in problem
+        assert "the engine fills itself" in problem
 
     def test_a_declared_header_the_connection_owns_is_refused(self) -> None:
         problem = request_block_problem(

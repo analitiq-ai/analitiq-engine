@@ -79,6 +79,14 @@ _URL_ENCODE = "url_encode"
 #: value or a conflicting one.
 JSON_CONTENT_TYPE = "application/json"
 
+#: Headers the ENGINE fills, whatever an endpoint declares. Content-Type is
+#: the media type it sends with every JSON body; Content-Length is computed
+#: from the encoded body, after any declared header map is built. Stated
+#: once: :func:`_header_map_problem` refuses an endpoint that declares one,
+#: and ``write_plan.reserved_header_names`` keeps the idempotency key off
+#: them -- the two cannot disagree about which names are already taken.
+ENGINE_OWNED_HEADERS = frozenset({"content-type", "content-length"})
+
 #: One ``{name}`` placeholder in a declared path.
 _PLACEHOLDER = re.compile(r"\{([^{}]+)\}")
 
@@ -485,20 +493,10 @@ def _header_map_problem(
         return None
     for name, value in declared.items():
         lowered = str(name).lower()
-        if lowered == "content-length":
-            # The body is encoded after this map is built, so no declared
-            # length can be the right one -- and aiohttp keeps an explicit
-            # Content-Length rather than recomputing it, so a stale value
-            # truncates the body the provider reads and corrupts the
-            # connection's framing. Engine-owned, with no author spelling
-            # that is correct.
-            return (
-                f"request.headers declares {name!r}, which the engine owns: "
-                f"the body is encoded after the headers are built, so a "
-                f"declared length is stale by construction and the client "
-                f"sends it rather than the encoded size. Remove the header."
-            )
         if lowered == "content-type":
+            # The one engine-owned header an endpoint may restate, and only
+            # by declaring the value the engine already sends -- which makes
+            # the collision a no-op rather than a conflict nobody can see.
             bound_param = (
                 value.get("from_param") if isinstance(value, Mapping) else None
             )
@@ -524,6 +522,18 @@ def _header_map_problem(
                 f"engine owns that header: it sends {JSON_CONTENT_TYPE!r} "
                 f"with every JSON body. Declare that exact value or remove "
                 f"the header."
+            )
+        if lowered in ENGINE_OWNED_HEADERS:
+            # Every other engine-owned header has no author spelling that is
+            # correct: Content-Length is computed from the encoded body,
+            # after this map is built, and aiohttp sends a declared one
+            # rather than recomputing -- so a stale value truncates the body
+            # the provider reads and corrupts the connection's framing.
+            return (
+                f"request.headers declares {name!r}, which the engine fills "
+                f"itself after the headers are built. A declared value is "
+                f"stale by construction and the client sends it rather than "
+                f"the computed one. Remove the header."
             )
         if lowered in reserved_headers:
             return (

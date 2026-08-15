@@ -1882,6 +1882,33 @@ class TestApiRequestBodyBreaks:
         target = self._broken(tmp_path, "widgets", bend)
         assert check_api_read_compiles(target) == []
 
+    def test_a_root_body_binding_with_a_default_is_still_driven(
+        self, tmp_path: Path
+    ) -> None:
+        """Deferral is about the VALUE, not the declaration.
+
+        The param table carries every declared default, so this body binds
+        here exactly as it does in production -- withholding it on the
+        binding's shape alone would leave the body, and every defect in it,
+        uncertified.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["method"] = "POST"
+            read["request"]["body"] = {"from_param": "filter"}
+            read["params"]["filter"] = {
+                "in": "body",
+                "type": "string",
+                "required": False,
+                "default": {"literal": "status:open"},
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        assert check_api_read_compiles(target) == []
+        probes, _ = api_read_path._probes(target)
+        widgets = [p for p in probes if p.label == "widgets"]
+        assert widgets and widgets[0].first_sent.body == "status:open"
+
     def test_a_root_body_binding_a_stream_filter_supplies_is_deferred(
         self, tmp_path: Path
     ) -> None:
