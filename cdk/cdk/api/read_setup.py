@@ -88,20 +88,28 @@ def build_read_strategy(
     The page size binds here rather than in the loop: the loop has no
     page-size concept, so a read that skipped this would raise nothing and
     quietly take the provider's own default forever.
+
+    It binds into the params this adapter walks with, NOT into *table*: the
+    table is the caller's, the request builder holds the same object, and a
+    build function that silently rewrites its argument makes the page size
+    depend on the order two calls happen in. Every page carries the value
+    anyway -- it rides the ``PageRequest`` the adapter answers, which is
+    what the builder binds from.
     """
     try:
         with request_spec_errors("pagination"):
             page_size = resolve_page_size(
                 pagination, batch_size=batch_size, resolve=resolver.resolve_for_request
             )
+            base_params = dict(table.values)
             limit = (pagination or {}).get("limit") or {}
             if limit.get("param"):
-                table.values[limit["param"]] = page_size
+                base_params[limit["param"]] = page_size
 
             return build_strategy(
                 pagination,
                 url=url,
-                base_params=table.values,
+                base_params=base_params,
                 resolve=page_expression_resolver(resolver),
                 follow_url=partial(follow_url, origin=base_url),
             )

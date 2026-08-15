@@ -51,6 +51,7 @@ from ..request_binding import (
 from ..resolver import REQUEST_CONNECTION_SUBTREES, Resolver, scope_paths
 from ..transport_factory import require_wire_safe_header
 from .exceptions import RequestSpecError, request_spec_errors
+from .strategies import PRE_PAGE_VALUE_PATHS
 
 __all__ = [
     "JSON_CONTENT_TYPE",
@@ -392,6 +393,18 @@ REQUEST_SUPPLIED_CONNECTION_SCOPES = tuple(
 _REQUEST_SLOTS = ("headers", "query", "body", "path_params")
 
 
+def _pagination_value(
+    pagination: Mapping[str, Any] | None, path: tuple[str, ...]
+) -> Any:
+    """Return the declared value at *path* in the pagination block, or ``None``."""
+    node: Any = pagination
+    for key in path:
+        if not isinstance(node, Mapping):
+            return None
+        node = node.get(key)
+    return node
+
+
 def _secret_read_problem(
     request_block: Mapping[str, Any],
     declared_params: Mapping[str, Any],
@@ -411,7 +424,12 @@ def _secret_read_problem(
     expression the operation authors, so a new never-fillable spelling
     cannot slip in through a slot the scan does not name. The pagination
     block alone also reads ``response.*``: the page loop supplies that
-    scope, page by page.
+    scope, page by page -- except for the values resolved BEFORE the first
+    page exists (:data:`~cdk.api.strategies.PRE_PAGE_VALUE_PATHS`), which
+    are judged like any other request-time read. A page size reading
+    ``response.*`` resolves to nothing on every run, and ``resolve_page_size``
+    answers that by warning and taking the engine's batch size instead, so
+    the stream pages at a size nobody authored and still reports success.
     """
     # The runtime keys THIS phase supplies, read off the resolver the phase
     # built rather than restated: the read passes batch_size, the write does
@@ -426,11 +444,13 @@ def _secret_read_problem(
             return False
         return not (page and path.startswith("response."))
 
+    pre_page = [_pagination_value(pagination, path) for path in PRE_PAGE_VALUE_PATHS]
     reads = sorted(
         {
             path
             for block in [request_block.get(slot) for slot in _REQUEST_SLOTS]
             + [declared_params]
+            + pre_page
             for path in scope_paths(block)
             if unfillable(path, page=False)
         }

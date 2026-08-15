@@ -45,12 +45,11 @@ when it bites:
   its param table from all three and substitutes the path after the
   incremental filter binds; a definition-only run has none of them, so
   demanding a value here would fail a connector the engine reads
-  correctly. Only a placeholder nothing could ever bind is a finding: one
-  with no binding at all, one bound to a param the endpoint does not
-  declare, and one bound to an expression no run fills -- either it reads
-  no scope at all, or it reads ``secrets``/``auth``, which request-time
-  resolution never supplies. Each fails for every connection and every
-  stream.
+  correctly. What the binding may SAY is not read twice: a placeholder
+  with no binding, and one naming a param the endpoint does not declare,
+  are refused by ``analitiq.contracts.endpoints`` in every request map
+  before a document reaches the kit, and one reading ``secrets``/``auth``
+  by the shared ``request_block_problem`` a few lines up.
 """
 
 from __future__ import annotations
@@ -297,13 +296,7 @@ def _compile_read(
         raise ReadError(problem)
     path = substitute_path(
         declared_path,
-        _path_values(
-            declared_path,
-            request_block,
-            table=table,
-            declared_params=declared_params,
-            resolver=resolver,
-        ),
+        _path_values(declared_path, request_block, table=table, resolver=resolver),
         endpoint=declared_path,
     )
 
@@ -368,7 +361,6 @@ def _path_values(
     request_block: Mapping[str, Any],
     *,
     table: ParamTable,
-    declared_params: Mapping[str, Any],
     resolver: Resolver,
 ) -> dict[str, Any]:
     """Bind the path placeholders, standing in for what only a run supplies.
@@ -378,77 +370,33 @@ def _path_values(
     after the incremental filter has bound -- its own comment says
     substituting earlier "would refuse a read that works". A definition-only
     run has the defaults and nothing else, so a placeholder left unbound
-    here is usually a value the run supplies rather than a defect, and
-    reporting it would fail a connector the engine reads correctly.
+    here is a value the run supplies rather than a defect.
 
-    So this applies the rule the rest of the module applies to a body and to
-    a base URL: defer what a definition cannot supply, refuse only what
-    nothing could ever bind (:func:`_binds_at_run_time`). A deferred
-    placeholder gets :data:`_STAND_IN_PATH_SEGMENT`, which is enough for
-    every drive after this one -- they certify how the traversal moves, and
-    the value inside one path segment is the same on every page.
+    Deferred on the VALUE, never on the declaration -- the one rule this
+    module applies to a path, a body and a base URL alike. What the
+    declaration itself may say is the contract's:
+    ``analitiq.contracts.endpoints`` refuses a placeholder with no binding
+    and a ``{from_param}`` naming an undeclared param, in all four request
+    maps, before a document reaches the kit. Reading that here a second
+    time is the split-brain the kit deleted its response-path check to
+    avoid, and it can only ever disagree with the contract.
+
+    A deferred placeholder gets :data:`_STAND_IN_PATH_SEGMENT`, which is
+    enough for every drive after this one -- they certify how the traversal
+    moves, and the value inside one path segment is the same on every page.
     """
-    bindings = request_block.get("path_params")
     bound = bind_request_values(
-        bindings,
+        request_block.get("path_params"),
         params=table.values,
         resolver=resolver,
         block="path_params",
         endpoint=declared_path,
     )
-    declared_bindings = bindings if isinstance(bindings, Mapping) else {}
     for name in path_placeholders(declared_path):
         value = bound.get(name)
-        if value is not None and str(value):
-            continue
-        binding = declared_bindings.get(name)
-        if _binds_at_run_time(binding, declared_params):
+        if value is None or not str(value):
             bound[name] = _STAND_IN_PATH_SEGMENT
-            continue
-        raise ReadError(
-            f"path {declared_path!r} leaves the placeholder {{{name}}} "
-            f"unbound, and nothing a connection, a stream's filters or the "
-            f"replication cursor supplies could fill it: "
-            f"{_unbindable_reason(name, binding)}. Every read of this "
-            f"endpoint fails on the URL it builds."
-        )
     return bound
-
-
-def _binds_at_run_time(binding: Any, declared_params: Mapping[str, Any]) -> bool:
-    """Whether something a definition-only run lacks could still fill *binding*.
-
-    A ``{from_param}`` naming a declared param is one: the value arrives
-    from that param's default resolved against a real connection, from a
-    stream's filters, or from the replication cursor. Any other expression
-    defers only when a run's request resolution could fill it -- when
-    everything it reads is ``connection.``-scoped. The path is substituted
-    at request time, where secrets and auth are never in scope (they are
-    resolved once, engine-side, at transport materialization), so a binding
-    reading them is refused: no run ever fills it.
-    """
-    if isinstance(binding, Mapping) and "from_param" in binding:
-        return binding["from_param"] in declared_params
-    return fillable_at_request_time(binding)
-
-
-def _unbindable_reason(name: str, binding: Any) -> str:
-    """Say what the declaration does that leaves *name* with no possible value."""
-    if binding is None:
-        return f"request.path_params declares no binding for {{{name}}}"
-    if isinstance(binding, Mapping) and "from_param" in binding:
-        return (
-            f"request.path_params binds it to the param "
-            f"{binding['from_param']!r}, which operations.read.params does "
-            f"not declare"
-        )
-    # A binding reading `secrets.*`/`auth.*` never reaches here: the shared
-    # `request_block_problem` refuses the whole request block first, naming
-    # the phase fact for every slot at once.
-    return (
-        f"request.path_params binds it to {binding!r}, which resolves to "
-        f"nothing and reads no scope request-time resolution supplies"
-    )
 
 
 def _transport_header_names(target: ConformanceTarget) -> frozenset[str]:
@@ -509,13 +457,14 @@ def _drivable_body(probe: _ReadProbe) -> Any:
     if body is None or _is_connection_expression(body):
         return None
     if isinstance(body, Mapping) and "from_param" in body:
-        # Deferred on the VALUE, not the declaration -- the rule
-        # `_path_values` applies one field over. The param table already
-        # carries every declared default, so a body bound to a param that
-        # HAS one binds here and is driven; only a binding a definition-only
-        # run cannot fill (its value arrives from the stream's filters or
-        # the replication cursor) is withheld, because driving that one
-        # would refuse a connector the engine reads correctly.
+        # Deferred on the VALUE, not the declaration -- the same rule
+        # `_path_values` applies one field over, and for the same reason.
+        # The param table already carries every declared default, so a body
+        # bound to a param that HAS one binds here and is driven; only a
+        # binding a definition-only run cannot fill (its value arrives from
+        # the stream's filters or the replication cursor) is withheld,
+        # because driving that one would refuse a connector the engine
+        # reads correctly.
         if not str(probe.table.values.get(body["from_param"], "")):
             return None
     return body

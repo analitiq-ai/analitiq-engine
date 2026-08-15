@@ -29,12 +29,31 @@ from .records import walk_path
 
 __all__ = [
     "KEYSET_REFUSAL_MARKER",
+    "PRE_PAGE_VALUE_PATHS",
     "UnknownPaginationStrategy",
     "build_strategy",
     "resolve_page_size",
 ]
 
 logger = logging.getLogger(__name__)
+
+#: The declared pagination values resolved BEFORE the traversal has a page,
+#: as paths into the pagination block. ``limit.default`` is resolved by
+#: :func:`resolve_page_size` to place the page size on the first request,
+#: and ``page.increment_by`` by ``_Page.__init__`` so a page number cannot
+#: change stride mid-read. Every other declared value -- ``offset``'s
+#: increment, ``cursor``'s token, ``link``'s next URL, the stop condition --
+#: is resolved in ``advance``, against the page just served.
+#:
+#: Stated here because this module is what decides it, and read by
+#: ``cdk.api.request``'s never-fillable guard: a value in this set reading
+#: ``response.*`` resolves to nothing on every run, and ``resolve_page_size``
+#: answers that by warning and falling back to the engine's batch size --
+#: so the read silently paginates at a size the author did not ask for.
+PRE_PAGE_VALUE_PATHS: tuple[tuple[str, ...], ...] = (
+    ("limit", "default"),
+    ("page", "increment_by"),
+)
 
 #: The stable fragment of the keyset refusal below. Exported so a caller
 #: recognizing THIS refusal (the conformance kit's arming drives) matches
@@ -85,7 +104,11 @@ def _positive_step(value: Any, *, context: str) -> int:
         raise ValueError(f"pagination {context} must be an integer, got {value!r}")
     try:
         step = int(value)
-    except (TypeError, ValueError) as err:
+    except (TypeError, ValueError, ArithmeticError) as err:
+        # ArithmeticError with the other two: JSON can spell `1e400`, which
+        # parses to infinity and overflows on the way to an int. Caught here
+        # so the message names the value that did it -- the boundary above
+        # would otherwise classify it correctly and say only "pagination".
         raise ValueError(
             f"pagination {context} must be an integer, got {value!r}"
         ) from err

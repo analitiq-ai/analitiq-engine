@@ -98,7 +98,7 @@ _TRANSPORT_MAPPING_ROOTS = (
 
 
 def _transport_deferral(
-    target: ConformanceTarget, declared: Any
+    target: ConformanceTarget, declared: Any, *, drops_if_null: bool = False
 ) -> tuple[list[str], bool]:
     """Classify a transport value's reads: ``(problems, defers)``.
 
@@ -122,6 +122,14 @@ def _transport_deferral(
 
     ``defers`` is True only when nothing is a problem and at least one
     read is connection-supplied.
+
+    ``drops_if_null`` says what the BUILD does with a settled value that
+    resolves to nothing, which is the one thing the two callers disagree
+    about: ``resolve_http_spec`` skips a header whose value is ``None`` and
+    opens the connection, so an optional header pointed at a null field in
+    the definition is a working connector -- while a base URL that resolves
+    to nothing is the connect() failure this check exists to catch. Judging
+    both the strict way reported a green connector as broken.
     """
 
     def deferred(path: str) -> bool:
@@ -151,20 +159,22 @@ def _transport_deferral(
                     f"production materializes with"
                 )
             else:
-                if settled is None or isinstance(settled, (Mapping, list)):
-                    # Resolving is not enough, the value has to be
-                    # substitutable: `connector.transports` resolves to the
-                    # whole block, and a declared null resolves to nothing --
-                    # the strict template resolver rejects either at
-                    # connect(), on every connection.
-                    described = (
-                        "nothing (the definition declares it null)"
-                        if settled is None
-                        else f"a whole {type(settled).__name__}"
-                    )
+                # Resolving is not enough, the value has to be substitutable:
+                # `connector.transports` resolves to the whole block, which
+                # nothing can put in a field. A value resolving to nothing is
+                # the same dead end for a base URL, and NOT one for a header
+                # the build simply drops.
+                if isinstance(settled, (Mapping, list)):
                     problems.append(
-                        f"{path!r} resolves to {described}, not a value -- "
-                        f"nothing can substitute it"
+                        f"{path!r} resolves to a whole "
+                        f"{type(settled).__name__}, not a value -- nothing "
+                        f"can substitute it"
+                    )
+                elif settled is None and not drops_if_null:
+                    problems.append(
+                        f"{path!r} resolves to nothing (the definition "
+                        f"declares it null), not a value -- nothing can "
+                        f"substitute it"
                     )
         else:
             problems.append(
@@ -316,7 +326,13 @@ def api_base_url(target: ConformanceTarget) -> str | None:
         is not None
     ):
         return None
-    if any(not _definition_settled(path) for path in scope_paths(base_url)):
+    # The same classification the base-url ladder reports on, rather than a
+    # second reading of it: anything that does not settle from the definition
+    # alone -- deferred to a connection, or condemned -- leaves the origin to
+    # the stand-in, and a category added to the ladder cannot quietly stop
+    # arming the guard with the connector's real origin.
+    problems, defers = _transport_deferral(target, base_url)
+    if problems or defers:
         return None
     try:
         with request_spec_errors("transport base_url"):
@@ -522,7 +538,7 @@ def _transport_header_violations(
                 )
             )
             continue
-        problems, defers = _transport_deferral(target, value)
+        problems, defers = _transport_deferral(target, value, drops_if_null=True)
         if problems:
             violations.append(
                 Violation(
@@ -559,7 +575,9 @@ def _transport_header_violations(
 _STAND_IN_SPEC_VALUE = "https://conformance.invalid"
 
 
-def _spec_value(target: ConformanceTarget, declared: Any) -> Any:
+def _spec_value(
+    target: ConformanceTarget, declared: Any, *, drops_if_null: bool = False
+) -> Any:
     """Hand the build the real declaration, or a stand-in if it cannot judge it.
 
     Stood in for a value a CONNECTION supplies -- a definition-only run
@@ -570,12 +588,17 @@ def _spec_value(target: ConformanceTarget, declared: Any) -> Any:
 
     Everything else (a literal, or an expression the connector's own
     definition settles) goes to the build as written, so the engine judges
-    the connector's actual value rather than the kit's placeholder.
+    the connector's actual value rather than the kit's placeholder. A
+    header settling to nothing is one of those: the build drops it, and
+    standing a URL in for it would certify a header the connector does not
+    send (``drops_if_null``, as in :func:`_transport_deferral`).
     """
     resolver = materialization_resolver(target)
     if expression_grammar_problem(declared, resolver) is not None:
         return _STAND_IN_SPEC_VALUE
-    problems, defers = _transport_deferral(target, declared)
+    problems, defers = _transport_deferral(
+        target, declared, drops_if_null=drops_if_null
+    )
     return _STAND_IN_SPEC_VALUE if (problems or defers) else declared
 
 
@@ -596,19 +619,14 @@ def _transport_spec_violations(
     The base-url and header ladders still run first: they name a deferred
     value's own defect (a malformed node, a scope no phase supplies) in
     terms of the declaration, which a stand-in would otherwise hide.
-
-    ``TypeError``/``ValueError``/``ArithmeticError`` ride along with
-    ``TransportSpecError``: the build coerces plain fields
-    (``float(timeout_seconds)``, ``int(max_requests)``) without wrapping
-    -- JSON can spell ``1e999`` and a 400-digit integer, which overflow --
-    and a coercion a definition fails is the same connect()-time death.
     """
     spec = dict(block)
     spec["base_url"] = _spec_value(target, block.get("base_url"))
     headers = block.get("headers")
     if isinstance(headers, Mapping):
         spec["headers"] = {
-            str(name): _spec_value(target, value) for name, value in headers.items()
+            str(name): _spec_value(target, value, drops_if_null=True)
+            for name, value in headers.items()
         }
     elif headers is not None:
         # The header ladder already reported the shape; stand an empty map
@@ -617,11 +635,13 @@ def _transport_spec_violations(
     try:
         # The engine's own boundary converts the resolver's exception
         # vocabulary (UnresolvedValueError and the KeyError it subclasses
-        # included), so no defect leaves as a raw traceback that would
-        # abandon the transport_ref loop after this call.
+        # included, and the ArithmeticError an unnarrowable JSON number
+        # raises out of `float(timeout_seconds)` / `int(max_requests)`), so
+        # no defect leaves as a raw traceback that would abandon the
+        # transport_ref loop after this call.
         with request_spec_errors("transport spec"):
             resolve_http_spec(spec, resolver=materialization_resolver(target))
-    except (RequestSpecError, ArithmeticError) as err:
+    except RequestSpecError as err:
         return [
             Violation(
                 TRANSPORT_CHECK,

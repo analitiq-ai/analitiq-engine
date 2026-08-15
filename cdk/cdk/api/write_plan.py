@@ -22,7 +22,7 @@ from typing import Any, Literal
 from ..exceptions import TransportSpecError
 from ..record_identity import record_digest
 from ..resolver import Resolver
-from ..transport_factory import require_wire_safe_header
+from ..transport_factory import require_wire_safe_header_name
 from ..types import RetrySemantics, RetryVerdict, SchemaSpec
 from .exceptions import RequestSpecError
 from .request import (
@@ -182,9 +182,12 @@ def idempotency_config_problem(
     if target == "header":
         # The key lands in the same header map an endpoint's own headers do,
         # by a different route, so it answers to the same wire rules: a name
-        # that is not an HTTP token dies in the client on every request.
+        # that is not an HTTP token dies in the client on every request. The
+        # name alone is judged, and by the function that judges names -- the
+        # value here is a per-record digest the engine computes, so there is
+        # no declared one to hand over.
         try:
-            require_wire_safe_header(name, "")
+            require_wire_safe_header_name(name)
         except TransportSpecError as err:
             return f"idempotency.name is unusable as a header: {err}"
     if target == "header" and name.lower() in reserved_headers:

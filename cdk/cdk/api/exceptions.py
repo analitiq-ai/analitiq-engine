@@ -27,7 +27,9 @@ __all__ = [
 #: ``UnresolvedValueError``; the registered derived functions answer a
 #: missing field with ``ValueError`` and one of the wrong type with
 #: ``TypeError``; the ``from_param`` binder answers a malformed binding
-#: node with ``ValueError``.
+#: node with ``ValueError``; and the plain-field coercions raise
+#: ``ArithmeticError`` on a number JSON can spell but Python cannot narrow
+#: -- ``1e400`` parses to infinity, and ``int()`` of it is ``OverflowError``.
 #:
 #: Listed once, here, because this is the only place that has to know it.
 #: Every caller downstream catches :class:`RequestSpecError` alone, so the
@@ -36,6 +38,7 @@ __all__ = [
 _AUTHORING_DEFECTS = (
     TransportSpecError,
     UnresolvedValueError,
+    ArithmeticError,
     KeyError,
     TypeError,
     ValueError,

@@ -14,7 +14,12 @@ from typing import Any
 import pytest
 
 from cdk.api import GenericAPIConnector
+from cdk.api.page_loop import PaginationStrategy
+from cdk.api.read_setup import build_read_strategy
+from cdk.api.request import ParamTable
+from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.exceptions import ReadError, TransientReadError
+from cdk.resolver import ResolutionContext, Resolver
 
 from .fakes import (
     BASE_URL,
@@ -645,6 +650,30 @@ class TestPageSizeBinding:
             )
         assert session.calls == []
 
+    async def test_a_page_size_json_can_spell_but_python_cannot_narrow(self) -> None:
+        """``1e400`` parses to infinity, and ``int()`` of it overflows.
+
+        A number a JSON document can carry, so it is an authoring defect
+        like any other: it has to leave as the read error the worker
+        classifies as non-retryable, not as the raw ``OverflowError`` that
+        would tear the read down unclassified.
+        """
+        pagination = {
+            **_OFFSET,
+            "limit": {"param": "limit", "default": {"literal": float("inf")}},
+        }
+        session = FakeSession()
+        with pytest.raises(ReadError, match="limit.default"):
+            await _read(
+                session,
+                endpoint_document(
+                    pagination=pagination,
+                    params=_PAGINATION_PARAMS,
+                    request=_PAGINATION_REQUEST,
+                ),
+            )
+        assert session.calls == []
+
 
 @pytest.mark.asyncio
 class TestPaging:
@@ -1050,3 +1079,40 @@ class TestAPaginationValueKeepsItsJsonType:
         )
         await _read(session, document)
         assert session.calls[1]["data"] == b'{"after":12.5}'
+
+
+class TestBuildingTheAdapterTouchesNothingItWasGiven:
+    """The page size reaches the wire without rewriting the caller's table.
+
+    ``RequestBuilder`` holds the same ``ParamTable`` object the adapter is
+    built from, so a build that wrote the page size into it made the value
+    depend on which of the two calls happened first. It rides the
+    ``PageRequest`` instead, which is what the builder binds from anyway.
+    """
+
+    @staticmethod
+    def _strategy(table: ParamTable) -> PaginationStrategy:
+        return build_read_strategy(
+            {
+                "type": "offset",
+                "offset": {"param": "offset", "initial": 0, "increment_by": 25},
+                "limit": {"param": "limit", "default": {"literal": 25}},
+            },
+            table=table,
+            resolver=Resolver(
+                ResolutionContext(runtime={"batch_size": 100}),
+                functions=DEFAULT_FUNCTIONS,
+            ),
+            url=f"{BASE_URL}/items",
+            base_url=BASE_URL,
+            batch_size=100,
+        )
+
+    def test_the_page_size_is_on_the_first_request(self) -> None:
+        first = self._strategy(ParamTable(values={"tenant": "acme"})).first()
+        assert first.params == {"tenant": "acme", "offset": 0, "limit": 25}
+
+    def test_the_page_size_is_not_written_into_the_callers_table(self) -> None:
+        table = ParamTable(values={"tenant": "acme"})
+        self._strategy(table)
+        assert table.values == {"tenant": "acme"}

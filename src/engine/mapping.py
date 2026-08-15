@@ -936,7 +936,7 @@ def _rule_label(tokens: list[str]) -> str:
 
 def _addressed_values(
     built: Mapping[str, pa.Array], tokens: list[str]
-) -> tuple[pa.Array, list[int] | None, list[int]]:
+) -> tuple[pa.Array, pa.Array | None, list[int]]:
     """Return a rule's addressed values, their source rows, and null ancestors.
 
     The first token selects a built column; each later token descends into
@@ -944,6 +944,13 @@ def _addressed_values(
     flattened first, with ``list_parent_indices`` composing the element ->
     batch-row map. The second element is that map, or ``None`` when no list
     was crossed (value *i* is row *i*).
+
+    The map stays an Arrow array the whole way down. It is read only to
+    name rows in an error, so materialising it costs a Python int per
+    element per rule on every batch that PASSES -- the common case, and
+    exactly the per-record Python :class:`CompiledTransform` promises not
+    to do. ``pc.take`` composes one level onto the next inside Arrow, and
+    the caller takes the few indexes it actually reports.
 
     The third element is every batch row a null LIST removed from the walk:
     ``list_flatten`` drops a null list's (nonexistent) elements, where a
@@ -955,19 +962,23 @@ def _addressed_values(
     is not in it: zero elements is data, and grades as such.
     """
     value = built[tokens[0]]
-    row_map: list[int] | None = None
+    row_map: pa.Array | None = None
     null_ancestors: set[int] = set()
     for token in tokens[1:]:
         while pa.types.is_list(value.type) or pa.types.is_large_list(value.type):
             # Same rule as the failure mask below: the scan stays out of
             # Python unless there is something to find. A batch whose lists
-            # are all present -- the common case -- pays nothing here.
+            # are all present -- the common case -- pays nothing here, and
+            # one with nulls pays only for the nulls.
             if value.null_count:
-                for i, absent in enumerate(pc.is_null(value).to_pylist()):
-                    if absent:
-                        null_ancestors.add(i if row_map is None else row_map[i])
-            parents = pc.list_parent_indices(value).to_pylist()
-            row_map = parents if row_map is None else [row_map[i] for i in parents]
+                absent = pc.indices_nonzero(pc.is_null(value))
+                null_ancestors.update(
+                    absent.to_pylist()
+                    if row_map is None
+                    else _row_numbers(row_map, absent)
+                )
+            parents = pc.list_parent_indices(value)
+            row_map = parents if row_map is None else pc.take(row_map, parents)
             value = pc.list_flatten(value)
         if pa.types.is_null(value.type):
             # A column that carried no value anywhere infers as Arrow's `null`
@@ -976,6 +987,16 @@ def _addressed_values(
             break
         value = pc.struct_field(value, token)
     return value, row_map, sorted(null_ancestors)
+
+
+def _row_numbers(row_map: pa.Array, indices: pa.Array) -> list[int]:
+    """Name the batch rows *indices* address, through *row_map*.
+
+    The one place an index leaves Arrow for Python, called with the handful
+    of indexes an error actually names rather than with one per row.
+    """
+    rows: list[int] = pc.take(row_map, indices).to_pylist()
+    return rows
 
 
 def _rule_errors(built: Mapping[str, pa.Array], rule: ValidationRule) -> list[str]:
@@ -1018,9 +1039,15 @@ def _rule_errors(built: Mapping[str, pa.Array], rule: ValidationRule) -> list[st
             return []
         rows = list(ancestors)
     else:
-        failing = [i for i, failed in enumerate(mask.to_pylist()) if failed]
-        rows = failing if row_map is None else [row_map[i] for i in failing]
-        rows = sorted(set(rows) | set(ancestors))
+        failing = pc.indices_nonzero(mask)
+        rows = sorted(
+            set(
+                failing.to_pylist()
+                if row_map is None
+                else _row_numbers(row_map, failing)
+            )
+            | set(ancestors)
+        )
     detail = f": {rule.message}" if rule.message else ""
     return [
         f"column {label}: {len(rows)} row(s) fail rule "

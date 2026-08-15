@@ -18,6 +18,8 @@ from urllib.parse import urljoin
 
 import pytest
 from _pytest.outcomes import Skipped
+from analitiq.contracts.endpoints import ApiEndpointDoc
+from pydantic import ValidationError
 
 import cdk.registry
 from cdk.api import read_setup, strategies
@@ -1347,6 +1349,36 @@ class TestApiReadPathBreaks:
         assert "'nosuchscope.size'" in report
         assert "request-time resolution never supplies" in report
 
+    def test_a_page_size_default_reading_the_response_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        """The page size is resolved BEFORE the first page exists.
+
+        ``response`` is in scope for the rest of the pagination block --
+        the loop supplies it page by page -- but not for this value:
+        ``resolve_page_size`` runs before anything is sent, so the read
+        warns, takes the engine's batch size and pages at a size nobody
+        authored, reporting success the whole way.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["pagination"]["limit"]["default"] = {"ref": "response.body.page_size"}
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "'response.body.page_size'" in report
+        assert "request-time resolution never supplies" in report
+
+    def test_a_stop_condition_may_still_read_the_response(self, tmp_path: Path) -> None:
+        """The other side of that rule: per-page values keep their scope.
+
+        Guarding the whole pagination block would refuse every paginated
+        connector there is, so the narrowing has to be exactly the values
+        resolved before page one.
+        """
+        target = load_target(API_REFERENCE_DIR)
+        assert check_api_read_compiles(target) == []
+
     def test_a_param_default_reading_an_unknown_scope_is_reported(
         self, tmp_path: Path
     ) -> None:
@@ -2566,6 +2598,60 @@ class TestApiTransportHeaderBreaks:
         )
         assert check_read_transport_selection(target) == []
 
+    def test_a_timeout_no_float_can_hold_is_reported(self, tmp_path: Path) -> None:
+        """A number JSON can spell and ``float()`` cannot narrow.
+
+        ``resolve_http_spec`` coerces this field without wrapping, so the
+        overflow leaves as an ``ArithmeticError`` -- classified by the
+        engine's own request boundary, which is why this check catches one
+        class rather than keeping a list of builtins in step by hand. An
+        escaping one would abandon the transport_ref loop that runs after
+        it, losing a second, unrelated finding to the first.
+        """
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(timeout_seconds=10**400),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "does not materialize" in report
+
+    def test_an_optional_header_the_definition_leaves_null_is_clean(
+        self, tmp_path: Path
+    ) -> None:
+        """``resolve_http_spec`` drops a header resolving to nothing.
+
+        So a header pointed at a definition field declared null is a
+        connector that connects and sends one header fewer -- not a
+        finding. The same value in ``base_url`` IS one, which is why the
+        substitutability rule has to know which field it is judging: a
+        connect() that works must never fail tier 1.
+        """
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: (
+                d.update(optional_header=None),
+                d["transports"]["api"].update(
+                    headers={"X-Optional": {"ref": "connector.optional_header"}}
+                ),
+            ),
+        )
+        assert check_read_transport_selection(target) == []
+
+    def test_a_base_url_the_definition_leaves_null_is_still_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """The other side of it: nothing to connect to is nothing to defer."""
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: (
+                d.update(origin=None),
+                d["transports"]["api"].update(base_url={"ref": "connector.origin"}),
+            ),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "'connector.origin'" in report
+        assert "resolves to nothing" in report
+
     def test_a_mixed_scope_header_is_refused_by_the_stray_path(
         self, tmp_path: Path
     ) -> None:
@@ -2819,63 +2905,46 @@ class TestApiRequestBlockBreaks:
         # otherwise rewrite the URL's structure.
         assert widgets[0].url.endswith("/v1/accounts/acme%2Feu/widgets")
 
-    def test_a_path_placeholder_with_no_binding_at_all_is_reported(
-        self, tmp_path: Path
+    @pytest.mark.parametrize(
+        ("label", "bend"),
+        [
+            ("no binding at all", lambda request: request.update(path_params={})),
+            (
+                "a param the endpoint does not declare",
+                lambda request: request.update(
+                    path_params={"account_id": {"from_param": "acount"}}
+                ),
+            ),
+            (
+                "an expression that is not a binding",
+                lambda request: request.update(
+                    path_params={"account_id": {"literal": ""}}
+                ),
+            ),
+        ],
+    )
+    def test_the_contract_owns_what_a_path_binding_may_say(
+        self, label: str, bend: Any
     ) -> None:
-        """Nothing a run supplies reaches a placeholder no binding names."""
+        """The kit reads a binding's VALUE; the contract reads its declaration.
 
-        def bend(read: dict[str, Any]) -> None:
-            read["request"]["path"] = "/v1/accounts/{account_id}/widgets"
-            read["request"]["path_params"] = {}
-
-        target = self._broken(tmp_path, "widgets", bend)
-        report = _report(check_api_read_compiles(target))
-        assert "{account_id}" in report
-        assert "declares no binding" in report
-
-    def test_a_path_placeholder_bound_to_an_undeclared_param_is_reported(
-        self, tmp_path: Path
-    ) -> None:
-        """A param the endpoint never declares is in no table any run builds."""
-
-        def bend(read: dict[str, Any]) -> None:
-            read["request"]["path"] = "/v1/accounts/{account_id}/widgets"
-            read["request"]["path_params"] = {"account_id": {"from_param": "acount"}}
-            read["params"]["account"] = {
-                "in": "path",
-                "type": "string",
-                "required": True,
-                "default": {"literal": "acme"},
-            }
-
-        target = self._broken(tmp_path, "widgets", bend)
-        report = _report(check_api_read_compiles(target))
-        assert "{account_id}" in report
-        assert "'acount'" in report
-        assert "does not declare" in report
-
-    def test_a_path_placeholder_bound_to_a_dead_expression_is_reported(
-        self, tmp_path: Path
-    ) -> None:
-        """The third unbindable case: an expression no run can change.
-
-        Not a ``{from_param}`` binding and not connection-scoped, so
-        nothing a run supplies enters into it -- it resolves to nothing
-        here and resolves to nothing in production, and the URL it builds
-        addresses the collection rather than the record.
+        These three shapes used to be kit findings, and each was a second
+        answer to a question ``analitiq.contracts.endpoints`` already
+        answers -- for every request map, not just this one -- before a
+        document reaches the kit. The copies are gone; this pins the reason,
+        so the day the contract stops refusing one, this goes red and the
+        check comes back rather than the shape passing unnoticed.
         """
-
-        def bend(read: dict[str, Any]) -> None:
-            read["request"]["path"] = "/v1/accounts/{account_id}/widgets"
-            read["request"]["path_params"] = {"account_id": {"literal": ""}}
-
-        target = self._broken(tmp_path, "widgets", bend)
-        report = _report(check_api_read_compiles(target))
-        assert "{account_id}" in report
-        assert (
-            "resolves to nothing and reads no scope request-time resolution "
-            "supplies" in report
+        document = json.loads(
+            (
+                API_REFERENCE_DIR / "definition" / "endpoints" / "widgets.json"
+            ).read_text()
         )
+        request = document["operations"]["read"]["request"]
+        request["path"] = "/v1/accounts/{account_id}/widgets"
+        bend(request)
+        with pytest.raises(ValidationError, match="path_params"):
+            ApiEndpointDoc.model_validate(document)
 
     def test_a_path_placeholder_bound_to_a_secret_is_refused(
         self, tmp_path: Path

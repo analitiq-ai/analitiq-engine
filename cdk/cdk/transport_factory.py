@@ -960,6 +960,26 @@ _HEADER_FORBIDDEN_VALUE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
 _HEADER_NAME_TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 
 
+def require_wire_safe_header_name(name: str) -> str:
+    """Return *name* if an HTTP client can send a header under it, or raise.
+
+    The half of the rule a caller with no declared value can still apply:
+    the engine-owned idempotency key carries a per-record digest nobody
+    declares, but the name it lands under is the author's and reaches the
+    wire like any other.
+    """
+    # `fullmatch`, not `match`: Python's `$` also matches before a trailing
+    # newline, so `match` would pass "X-Foo\n" -- the request-splitting
+    # shape this refusal exists for.
+    if not _HEADER_NAME_TOKEN.fullmatch(name):
+        raise TransportSpecError(
+            f"header name {name!r} is not an HTTP token: a field name "
+            f"carries no spaces, separators or control characters, so no "
+            f"HTTP client will send this one."
+        )
+    return name
+
+
 def require_wire_safe_header(name: str, value: str) -> str:
     """Return *value* if an HTTP client can send it under *name*, or raise.
 
@@ -972,15 +992,7 @@ def require_wire_safe_header(name: str, value: str) -> str:
     :func:`resolve_http_spec`, with the conformance kit, so one rule covers
     every route a header takes to the wire.
     """
-    # `fullmatch`, not `match`: Python's `$` also matches before a trailing
-    # newline, so `match` would pass "X-Foo\n" -- the request-splitting
-    # shape this refusal exists for.
-    if not _HEADER_NAME_TOKEN.fullmatch(name):
-        raise TransportSpecError(
-            f"header name {name!r} is not an HTTP token: a field name "
-            f"carries no spaces, separators or control characters, so no "
-            f"HTTP client will send this one."
-        )
+    require_wire_safe_header_name(name)
     found = _HEADER_FORBIDDEN_VALUE.search(value)
     if found:
         raise TransportSpecError(
