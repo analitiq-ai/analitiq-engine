@@ -1003,12 +1003,20 @@ def _rule_errors(built: Mapping[str, pa.Array], rule: ValidationRule) -> list[st
         ) from e
     present = pc.is_valid(value)
     mask = _rule_failure_mask(value, present, rule, label)
-    failing = [i for i, failed in enumerate(mask.to_pylist()) if failed]
-    rows = failing if row_map is None else sorted({row_map[i] for i in failing})
-    if rule.type in _NULL_SENSITIVE_RULES:
-        rows = sorted(set(rows) | set(null_ancestors))
-    if not rows:
-        return []
+    # The passing path stays inside Arrow: `pc.any` answers from the mask's
+    # own buffers, where `to_pylist` would allocate a Python object per row
+    # per rule on every batch that passes -- the common case, and the hot
+    # one. Row indexes are materialised only for a rule that actually
+    # failed, or for the null ancestors a null-sensitive rule must add.
+    ancestors = null_ancestors if rule.type in _NULL_SENSITIVE_RULES else []
+    if not pc.any(mask, min_count=0).as_py():
+        if not ancestors:
+            return []
+        rows = list(ancestors)
+    else:
+        failing = [i for i, failed in enumerate(mask.to_pylist()) if failed]
+        rows = failing if row_map is None else [row_map[i] for i in failing]
+        rows = sorted(set(rows) | set(ancestors))
     detail = f": {rule.message}" if rule.message else ""
     return [
         f"column {label}: {len(rows)} row(s) fail rule "

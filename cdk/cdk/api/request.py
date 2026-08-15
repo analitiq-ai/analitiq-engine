@@ -485,6 +485,19 @@ def _header_map_problem(
         return None
     for name, value in declared.items():
         lowered = str(name).lower()
+        if lowered == "content-length":
+            # The body is encoded after this map is built, so no declared
+            # length can be the right one -- and aiohttp keeps an explicit
+            # Content-Length rather than recomputing it, so a stale value
+            # truncates the body the provider reads and corrupts the
+            # connection's framing. Engine-owned, with no author spelling
+            # that is correct.
+            return (
+                f"request.headers declares {name!r}, which the engine owns: "
+                f"the body is encoded after the headers are built, so a "
+                f"declared length is stale by construction and the client "
+                f"sends it rather than the encoded size. Remove the header."
+            )
         if lowered == "content-type":
             bound_param = (
                 value.get("from_param") if isinstance(value, Mapping) else None

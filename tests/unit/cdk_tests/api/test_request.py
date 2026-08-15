@@ -402,6 +402,31 @@ class TestEndpointHeadersAreWireSafe:
                 endpoint="/items",
             )
 
+    @pytest.mark.parametrize("char", ["\x0b", "\x1f", "\x7f"])
+    def test_any_forbidden_control_character_is_refused(self, char: str) -> None:
+        # Not just CR/LF/NUL: the client rejects the whole control range
+        # except horizontal tab when it serialises the request.
+        with pytest.raises(RequestSpecError, match="no HTTP client will send"):
+            bind_query_and_headers(
+                params={},
+                declared_query=None,
+                declared_headers={"X-Trace": {"literal": f"a{char}b"}},
+                resolver=_resolver(),
+                endpoint="/items",
+            )
+
+    def test_horizontal_tab_stays_legal_in_a_value(self) -> None:
+        # Tab IS legal whitespace in a field value; refusing it would fail a
+        # connector the client sends fine.
+        _, headers = bind_query_and_headers(
+            params={},
+            declared_query=None,
+            declared_headers={"X-Trace": {"literal": "a\tb"}},
+            resolver=_resolver(),
+            endpoint="/items",
+        )
+        assert headers == {"X-Trace": "a\tb"}
+
     def test_an_ordinary_header_still_passes(self) -> None:
         _, headers = bind_query_and_headers(
             params={},
@@ -593,6 +618,19 @@ class TestRequestBlockRefusals:
         assert problem is not None
         assert "'cursor'" in problem
         assert "replication" in problem
+
+    def test_a_declared_content_length_is_refused(self) -> None:
+        # The body is encoded after the headers are built, so no declared
+        # length can be right -- and aiohttp sends the declared one rather
+        # than recomputing, truncating the body the provider reads.
+        problem = request_block_problem(
+            {"headers": {"Content-Length": {"literal": "0"}}},
+            reserved_headers=frozenset(),
+            resolver=_resolver(),
+            params={},
+        )
+        assert problem is not None
+        assert "the engine owns" in problem
 
     def test_a_declared_header_the_connection_owns_is_refused(self) -> None:
         problem = request_block_problem(

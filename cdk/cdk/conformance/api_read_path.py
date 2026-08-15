@@ -505,7 +505,17 @@ def _drivable_body(probe: _ReadProbe) -> Any:
     still has to be caught.
     """
     body = probe.request.get("body")
-    return None if body is None or _is_connection_expression(body) else body
+    if body is None or _is_connection_expression(body):
+        return None
+    if isinstance(body, Mapping) and "from_param" in body:
+        # The whole body is one param binding, and a run fills that param
+        # from the stream's filters or the param's own default -- neither of
+        # which a definition-only run has. Driving it would refuse a
+        # connector the engine reads correctly, the same reason a path
+        # placeholder bound to a declared param gets a stand-in segment.
+        if body["from_param"] in (probe.read.get("params") or {}):
+            return None
+    return body
 
 
 def _materialize_first_request(

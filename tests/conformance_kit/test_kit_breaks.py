@@ -1882,6 +1882,30 @@ class TestApiRequestBodyBreaks:
         target = self._broken(tmp_path, "widgets", bend)
         assert check_api_read_compiles(target) == []
 
+    def test_a_root_body_binding_a_stream_filter_supplies_is_deferred(
+        self, tmp_path: Path
+    ) -> None:
+        """A run fills this param; a definition-only run cannot.
+
+        The whole body is one `{from_param}` binding whose param the
+        stream's filters (or the param's own default) supply. Driving it
+        here would refuse a connector the engine reads correctly -- the
+        same reason a path placeholder bound to a declared param gets a
+        stand-in segment instead of a finding.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["method"] = "POST"
+            read["request"]["body"] = {"from_param": "filter"}
+            read["params"]["filter"] = {
+                "in": "body",
+                "type": "string",
+                "required": False,
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        assert check_api_read_compiles(target) == []
+
     def test_a_body_reading_a_secret_is_not_deferred(self, tmp_path: Path) -> None:
         """Request-time resolution never sees secrets; the body is judged.
 

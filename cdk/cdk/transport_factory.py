@@ -948,10 +948,11 @@ def require_http_base_url(base_url: Any) -> str:
     return base_url.rstrip("/")
 
 
-#: Characters an HTTP header value may not carry. A CR or LF ends the header
-#: line on the wire, so a value holding one is a request-splitting vector as
-#: well as an immediate client refusal; a NUL is rejected by the client too.
-_HEADER_FORBIDDEN = ("\r", "\n", "\0")
+#: Characters an HTTP header value may not carry: every control character
+#: except horizontal tab, which is legal whitespace in a field value. CR and
+#: LF end the header line on the wire (a request-splitting vector as well as
+#: a client refusal); the client rejects the rest of the range outright.
+_HEADER_FORBIDDEN_VALUE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
 
 #: An HTTP field name is a token (RFC 9110 §5.1): no separators, no spaces,
 #: no control characters. The client refuses anything else when it builds
@@ -977,13 +978,13 @@ def require_wire_safe_header(name: str, value: str) -> str:
             f"carries no spaces, separators or control characters, so no "
             f"HTTP client will send this one."
         )
-    found = [char for char in _HEADER_FORBIDDEN if char in value]
+    found = _HEADER_FORBIDDEN_VALUE.search(value)
     if found:
         raise TransportSpecError(
-            f"header {name!r} carries "
-            f"{', '.join(repr(char) for char in found)} in its value, which "
-            f"no HTTP client will send: a line break ends the header on the "
-            f"wire. Remove it from the declared value."
+            f"header {name!r} carries {found.group()!r} in its value, which "
+            f"no HTTP client will send: a field value takes no control "
+            f"character but horizontal tab, and a line break ends the header "
+            f"on the wire. Remove it from the declared value."
         )
     return value
 
