@@ -40,6 +40,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy import text as _sa_text
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from yarl import URL
 
 if TYPE_CHECKING:
     import aiohttp
@@ -899,43 +900,36 @@ class HttpTransport:
 def require_http_base_url(base_url: Any) -> str:
     """Return *base_url* as the origin the HTTP session can open, or raise.
 
-    One definition of "usable base URL", shared by this build and the
-    conformance kit's transport check: a non-empty string carrying an
-    absolute ``http``/``https`` origin. A scheme-less or non-HTTP value
-    passes a bare truthiness test and then dies in the HTTP client on the
-    connector's first request -- so it is refused here, where the message
-    can still name the field.
+    Whether the string IS a URL is ``yarl``'s answer, not one this module
+    forms: it is what ``aiohttp`` parses every request URL with, so a value
+    it rejects is a value the connector could never send -- a missing host
+    behind userinfo (``https://user@``), an unclosed IPv6 literal, a port
+    that is not a number. Asking it here means this refusal cannot fall
+    behind the client, which is exactly what a hand-written authority check
+    kept doing.
+
+    Two rules are left, and both are the ENGINE's rather than URL syntax:
+    the scheme has to be one the HTTP transport opens, and the endpoint
+    path is appended to this string, so it may carry no query or fragment.
     """
     if not isinstance(base_url, str) or not base_url:
         raise TransportSpecError(
             "http transport `base_url` must resolve to a non-empty string"
         )
     try:
-        # The whole parse is guarded, not just the deferred fields: urlsplit
-        # itself raises on some authorities (`https://[abc`), and every
-        # authority fact it DOES defer (a non-numeric port, a bracket host)
-        # raises only when READ -- so reading the pair is the validation.
-        # Either way the value dies in the HTTP client on the connector's
-        # first request, so it is refused here instead.
-        parts = urllib.parse.urlsplit(base_url)
-        authority = (parts.hostname, parts.port)
+        parsed = URL(base_url)
+        host = parsed.host
     except ValueError as exc:
         raise TransportSpecError(
-            f"http transport `base_url` carries a malformed authority: "
-            f"{base_url!r} ({exc})"
+            f"http transport `base_url` is not a URL an HTTP client can "
+            f"open: {base_url!r} ({exc})"
         ) from exc
-    if parts.scheme not in ("http", "https") or not parts.netloc:
+    if parsed.scheme not in ("http", "https") or not host:
         raise TransportSpecError(
             f"http transport `base_url` must be an absolute http(s) URL; "
             f"got {base_url!r}"
         )
-    if not authority[0]:
-        # A netloc can carry userinfo or a port and still name no host
-        # (`https://user@`, `https://:443`): there is nowhere to connect.
-        raise TransportSpecError(
-            f"http transport `base_url` names no host; got {base_url!r}"
-        )
-    if parts.query or parts.fragment:
+    if parsed.query_string or parsed.fragment:
         # The endpoint path is appended to this string, so a query or
         # fragment swallows it: `https://h/v1?t=a` + `/items` addresses
         # `/v1` with a `t=a/items` query, on every request the connector

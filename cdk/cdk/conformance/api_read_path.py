@@ -58,7 +58,8 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import Any
-from urllib.parse import urlsplit
+
+from yarl import URL
 
 from cdk.api.exceptions import RequestSpecError
 from cdk.api.page_loop import Page, PageRequest, PaginationStrategy
@@ -997,8 +998,11 @@ def _wire_target(url: str) -> str:
     target -- so two next links differing only there are one request to the
     provider. Comparing the raw strings read that as a traversal that moved,
     and certified a read that fetches its first page forever.
+
+    ``yarl`` decides what "the part that is sent" means, being what builds
+    the request the engine issues.
     """
-    return urlsplit(url)._replace(fragment="").geturl()
+    return str(URL(url).with_fragment(None))
 
 
 def _refusal_violations(probe: _ReadProbe) -> list[Violation]:
@@ -1064,7 +1068,7 @@ def _origin_violations(probe: _ReadProbe) -> list[Violation]:
         # request is already reported by the advance drive; saying it twice
         # buries the message that says what to change.
         return []
-    if same_origin(urlsplit(probe.origin), urlsplit(following.url)):
+    if same_origin(probe.origin, following.url):
         return []
     return [
         Violation(

@@ -91,9 +91,13 @@ ENGINE_OWNED_HEADERS = frozenset({"content-type", "content-length"})
 #: One ``{name}`` placeholder in a declared path.
 _PLACEHOLDER = re.compile(r"\{([^{}]+)\}")
 
-#: The two path segments RFC 3986 resolves away rather than sends. Percent-
-#: encoding cannot protect them: ``.`` is unreserved, so an encoder returns
-#: them unchanged.
+#: The two path segments RFC 3986 resolves away rather than sends.
+#:
+#: The one URL rule here that is NOT delegated to ``yarl``, because yarl is
+#: what performs it: ``URL('https://h/acc') / '..'`` answers
+#: ``https://h/items``. Encoding cannot prevent it either -- ``.`` is
+#: unreserved, so ``quote`` returns it unchanged. A guard against what the
+#: library does, then, rather than a copy of a rule the library knows.
 _DOT_SEGMENTS = frozenset({".", ".."})
 
 

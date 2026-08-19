@@ -7,8 +7,6 @@ headers to any host a response body names.
 
 from __future__ import annotations
 
-from urllib.parse import urlsplit
-
 import pytest
 
 from cdk.api.urls import follow_url, join_url, same_origin
@@ -61,6 +59,18 @@ class TestFollowUrl:
         with pytest.raises(ValueError, match="expected a URL string"):
             follow_url(f"{BASE_URL}/v1", {"href": "/x"}, origin=BASE_URL)
 
-    def test_same_origin_compares_normalized_parts(self) -> None:
-        assert same_origin(urlsplit("https://a.test"), urlsplit("https://A.test:443"))
-        assert not same_origin(urlsplit("https://a.test"), urlsplit("http://a.test"))
+    @pytest.mark.parametrize(
+        ("base", "target", "shared"),
+        [
+            ("https://a.test", "https://A.test:443", True),
+            ("http://a.test:80", "http://a.test", True),
+            ("https://a.test", "http://a.test", False),
+            ("https://a.test", "https://a.test:8443", False),
+            ("https://a.test", "https://b.test", False),
+        ],
+    )
+    def test_same_origin_normalizes_case_and_default_ports(
+        self, base: str, target: str, shared: bool
+    ) -> None:
+        """The normalization is yarl's ``origin()``, not a rule of ours."""
+        assert same_origin(base, target) is shared

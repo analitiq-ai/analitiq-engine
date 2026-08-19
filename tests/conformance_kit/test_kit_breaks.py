@@ -2215,14 +2215,27 @@ class TestApiBaseUrlBreaks:
         assert "'connector.optional_origin'" in report
         assert "declares it null" in report
 
-    @pytest.mark.parametrize("declared", ["https://user@", "https://:443"])
-    def test_a_base_url_naming_no_host_is_refused(
+    @pytest.mark.parametrize(
+        "declared",
+        [
+            "https://user@",
+            "https://:443",
+            "https://api.example.test:abc",
+            "https://api.example.test:99999999",
+            "https://[abc",
+        ],
+    )
+    def test_a_base_url_no_http_client_can_open_is_refused(
         self, tmp_path: Path, declared: str
     ) -> None:
-        """A netloc can carry userinfo or a port and still name no host.
+        """Whether the string is a URL at all is yarl's answer, not ours.
 
-        Both parse as absolute http(s) URLs with a nonempty netloc, and
-        there is nowhere for the first request to connect.
+        Userinfo or a port with no host behind it, a port that is not a
+        number, an unclosed IPv6 literal: yarl refuses each, and yarl is
+        what aiohttp builds every request URL with -- so a value it refuses
+        is one the connector could never send. Asserted on the outcome
+        rather than on a phrase, because the phrasing is the library's now
+        and a hand-written copy of it is what this deleted.
         """
         target = self._bent_definition(
             tmp_path,
@@ -2230,7 +2243,7 @@ class TestApiBaseUrlBreaks:
         )
         report = _report(check_read_transport_selection(target))
         assert "no usable base_url" in report
-        assert "names no host" in report
+        assert repr(declared) in report
 
     def test_a_dead_connector_path_in_a_mixed_node_is_not_carried_past(
         self, tmp_path: Path
@@ -2258,32 +2271,21 @@ class TestApiBaseUrlBreaks:
         assert "names nothing in the connector definition" in report
         assert "'connection.parameters.domain'" not in report
 
-    @pytest.mark.parametrize(
-        "declared",
-        [
-            "https://api.example.test:abc",
-            "https://api.example.test:99999999",
-            # urlsplit RAISES on this one rather than deferring, so the
-            # parse itself has to be inside the guard: escaping here would
-            # abandon the whole check and every finding after it.
-            "https://[abc",
-        ],
-    )
-    def test_a_malformed_authority_is_refused(
-        self, tmp_path: Path, declared: str
-    ) -> None:
-        """urlsplit defers -- or raises; connect() must survive both.
+    def test_the_parse_stays_inside_the_guard(self, tmp_path: Path) -> None:
+        """A URL the parser REJECTS must not escape as a raw exception.
 
-        A non-numeric or out-of-range port parses as a scheme-and-netloc URL
-        and then dies in the HTTP client on the first request.
+        ``yarl`` raises rather than deferring on some authorities, and one
+        escaping here would abandon the whole check -- including the
+        ``transport_ref`` loop after it, whose finding is unrelated. Two
+        violations come back, not a traceback.
         """
         target = self._bent_definition(
             tmp_path,
-            lambda d: d["transports"]["api"].update(base_url=declared),
+            lambda d: d["transports"]["api"].update(base_url="https://[abc"),
         )
+        # No pytest.raises: the point is that it does NOT raise.
         report = _report(check_read_transport_selection(target))
         assert "no usable base_url" in report
-        assert "malformed authority" in report
 
     def test_a_settled_path_resolving_to_a_mapping_is_refused_in_a_mixed_node(
         self, tmp_path: Path

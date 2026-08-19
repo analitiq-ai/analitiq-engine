@@ -1,19 +1,22 @@
-"""Every rule about a URL the API path applies, with no HTTP client.
+"""Every rule about a URL the API path applies, asked of ``yarl``.
 
-Separate from :mod:`cdk.api.http` because the rules and the round trip
-have different dependency sets and different audiences. ``urllib.parse``
-is all a URL rule needs, and the refusal to follow a provider-supplied
-link off the connection's origin is a rule the conformance kit must
-certify by *executing* it -- from an install that carries the
-``conformance`` extra and no HTTP client at all. A kit that could not
-import the rule would have to copy it, and a copied rule drifts from the
-one the engine runs, which is the single failure mode the kit exists to
-prevent.
+``yarl`` is what ``aiohttp`` builds every request URL with, so it is the
+authority on what a URL means -- not a second opinion this module could
+form. Joining a path, deciding whether two URLs share an origin, resolving
+a provider's next link: each is one call here, and what the engine sends
+is what the library says.
+
+Separate from :mod:`cdk.api.http` because these rules need no HTTP client
+and no network. The conformance kit certifies them by *executing* them,
+from an install that carries no transport -- which is why ``yarl`` is a
+core dependency rather than one riding in behind ``aiohttp``. A kit that
+could not import it would have to copy the rules, and a copied rule is
+always one rule behind the client that actually sends the request.
 """
 
 from __future__ import annotations
 
-from urllib.parse import SplitResult, urljoin, urlsplit
+from yarl import URL
 
 __all__ = ["ORIGIN_REFUSAL_MARKER", "follow_url", "join_url", "same_origin"]
 
@@ -23,67 +26,64 @@ __all__ = ["ORIGIN_REFUSAL_MARKER", "follow_url", "join_url", "same_origin"]
 #: drifts.
 ORIGIN_REFUSAL_MARKER = "leaves the connection's origin"
 
-#: Scheme defaults, so ``https://host:443`` and ``https://host`` compare as
-#: the one origin they are.
-_DEFAULT_PORTS = {"http": 80, "https": 443}
-
 
 def join_url(base: str, path: str) -> str:
     """Append *path* to *base*, keeping both segments.
 
-    Not ``urljoin``: it treats a leading ``/`` on the path as
-    absolute-path-relative and drops the base's own path segment
-    (``/api/v1`` + ``/Foo`` -> ``/Foo``, not ``/api/v1/Foo``).
+    Not ``urljoin``: that treats a leading ``/`` as absolute-path-relative
+    and drops the base's own path (``/api/v1`` + ``/Foo`` -> ``/Foo``), so
+    the leading slash is stripped before the path is handed over.
+
+    ``encoded=True`` because *path* arrives already encoded --
+    :func:`~cdk.api.request.substitute_path` percent-encodes every value it
+    substitutes, so a segment holding ``a/b`` is already ``a%2Fb``. Letting
+    yarl encode it again sends ``a%252Fb``, which is a different resource.
     """
-    return base.rstrip("/") + "/" + path.lstrip("/")
+    return str(URL(base).joinpath(path.lstrip("/"), encoded=True))
 
 
-def same_origin(base: SplitResult, target: SplitResult) -> bool:
-    """Whether two split URLs share scheme, host and effective port.
+def same_origin(base: str, target: str) -> bool:
+    """Whether two URLs share scheme, host and effective port.
 
-    Compares normalized parts -- case-insensitive scheme and host, default
-    ports made explicit -- so ``https://api.example.test:443`` and
-    ``https://API.example.test`` count as the origin they are.
+    ``URL.origin()`` is the normalization -- case-folded host, default port
+    made explicit -- so ``https://API.example.test:443`` and
+    ``https://api.example.test`` are the one origin they are. Compared as
+    strings because two ``origin()`` results that render identically still
+    compare unequal when one was spelled with its default port.
     """
-    base_scheme = base.scheme.lower()
-    target_scheme = target.scheme.lower()
-    return (
-        base_scheme == target_scheme
-        and (base.hostname or "").lower() == (target.hostname or "").lower()
-        and (base.port or _DEFAULT_PORTS.get(base_scheme))
-        == (target.port or _DEFAULT_PORTS.get(target_scheme))
-    )
+    return str(URL(base).origin()) == str(URL(target).origin())
 
 
 def follow_url(current: str, target: str, *, origin: str) -> str:
     """Resolve a provider-supplied next-page URL against the page it came from.
 
-    An absolute target must stay on the connection's origin. The session
-    sends the connection's default headers -- auth included -- on every
-    request, so following a URL a response body named to another host would
-    hand those credentials to it.
+    ``URL.join`` is RFC 3986 resolution, the same one the client applies:
+    a relative target continues from the CURRENT page (so ``?page=2`` keeps
+    the endpoint path), an absolute one replaces it, and a
+    protocol-relative ``//host/p`` takes the current scheme -- which the
+    origin check below then judges like any other absolute target.
 
-    A relative target resolves against the CURRENT page URL per RFC 3986,
-    so a query-only link like ``?page=2`` continues from the endpoint path
-    instead of the connection root.
+    That check is the reason this function exists at all. The session sends
+    the connection's default headers, credentials included, on every
+    request, so following a link a response body pointed at another host
+    would hand them to it.
 
-    Classification is by parsing, never by string prefix: a target carrying
-    any scheme or authority is absolute whatever its case, and the origin
-    check then also rejects non-HTTP schemes and ambiguous
-    protocol-relative URLs loudly.
+    A target that carries its own scheme goes back verbatim: it is the
+    provider's own string, and re-rendering it could only differ from what
+    the provider asked for. Anything else -- relative, or the schemeless
+    ``//host/path`` -- goes back resolved, because that is the URL the
+    request will actually go to.
     """
     if not isinstance(target, str):
         raise ValueError(
             f"next_url resolved to a {type(target).__name__}, expected a URL string"
         )
-    parsed = urlsplit(target)
-    if not parsed.scheme and not parsed.netloc:
-        return urljoin(current, target)
-    root = urlsplit(origin)
-    if not same_origin(root, parsed):
+    link = URL(target)
+    resolved = str(URL(current).join(link))
+    if not same_origin(origin, resolved):
         raise ValueError(
             f"next_url {target!r} {ORIGIN_REFUSAL_MARKER} "
-            f"{root.scheme}://{root.netloc}; refusing to send the "
-            f"connection's headers to another host"
+            f"{URL(origin).origin()}; refusing to send the connection's "
+            f"headers to another host"
         )
-    return target
+    return target if link.scheme else resolved
