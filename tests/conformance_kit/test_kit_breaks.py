@@ -2253,6 +2253,47 @@ class TestApiBaseUrlBreaks:
         assert "no usable base_url" in report
         assert repr(declared) in report
 
+    def test_a_base_url_carrying_credentials_is_refused(self, tmp_path: Path) -> None:
+        """Basic auth comes off EACH request's URL, so page two loses it.
+
+        A provider's absolute next link omits the userinfo, and the origin
+        guard cannot notice -- ``origin()`` strips it, so both sides compare
+        equal while the credentials are gone. The read 401s on page two
+        looking like a provider fault.
+        """
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: d["transports"]["api"].update(
+                base_url="https://user:pass@api.example.test"
+            ),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "must carry no credentials" in report
+        assert "pass" not in report, "the refusal must not log the password"
+
+    def test_a_base_url_resolving_to_credentials_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """The half no document rule can reach.
+
+        The literal spelling is refused by the contract
+        (analitiq-ai/claude-code-plugins#175). A validator cannot resolve an
+        expression, so this spelling -- credentials arriving through a
+        template -- is only visible where the resolved value is, which is
+        here.
+        """
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: (
+                d.update(cred="user:pass"),
+                d["transports"]["api"].update(
+                    base_url={"template": "https://${connector.cred}@api.example.test"}
+                ),
+            ),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "must carry no credentials" in report
+
     def test_a_dead_connector_path_in_a_mixed_node_is_not_carried_past(
         self, tmp_path: Path
     ) -> None:

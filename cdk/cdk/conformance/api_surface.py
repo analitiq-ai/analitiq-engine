@@ -23,6 +23,7 @@ from typing import Any
 
 from cdk.api.exceptions import RequestSpecError, request_spec_errors
 from cdk.api.request import request_supplies
+from cdk.api.urls import redact_credentials
 from cdk.connection_runtime import (
     MATERIALIZATION_CONNECTION_SCALARS,
     MATERIALIZATION_CONNECTION_SUBTREES,
@@ -422,6 +423,10 @@ def _base_url_violations(
     could not say what it was missing.
     """
     declared = block.get("base_url")
+    # Redacted once, and used for every message below: a base URL carrying
+    # `user:pass@` puts the password in a log line otherwise -- including
+    # in the refusal that fires BECAUSE it carries one.
+    shown = redact_credentials(declared)
     grammar = unknown_function_problem(declared, materialization_resolver(target))
     if grammar is not None:
         # Judged before the deferral: a malformed node is malformed whatever
@@ -432,7 +437,7 @@ def _base_url_violations(
             Violation(
                 TRANSPORT_CHECK,
                 f"default_transport {default_ref!r} declares no usable "
-                f"base_url ({declared!r}, which is malformed: {grammar}). "
+                f"base_url ({shown!r}, which is malformed: {grammar}). "
                 f"The transport build resolves this declaration at "
                 f"connect(), so every connection fails before any stream "
                 f"reaches its first request.",
@@ -444,7 +449,7 @@ def _base_url_violations(
             Violation(
                 TRANSPORT_CHECK,
                 f"default_transport {default_ref!r} declares no usable "
-                f"base_url ({declared!r}: {'; '.join(problems)}). The build "
+                f"base_url ({shown!r}: {'; '.join(problems)}). The build "
                 f"resolves the whole declaration at connect(), so every "
                 f"connection fails before any stream reaches its first "
                 f"request.",
@@ -461,9 +466,9 @@ def _base_url_violations(
         # absolute http(s)), so the kit and connect() cannot disagree.
         require_http_base_url(resolved)
     except RequestSpecError as err:
-        unusable = f"({declared!r}, which does not resolve: {err})"
+        unusable = f"({shown!r}, which does not resolve: {err})"
     except TransportSpecError as err:
-        unusable = f"({declared!r}: {err})"
+        unusable = f"({shown!r}: {err})"
     else:
         return []
     return [

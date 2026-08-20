@@ -908,9 +908,10 @@ def require_http_base_url(base_url: Any) -> str:
     behind the client, which is exactly what a hand-written authority check
     kept doing.
 
-    Two rules are left, and both are the ENGINE's rather than URL syntax:
-    the scheme has to be one the HTTP transport opens, and the endpoint
-    path is appended to this string, so it may carry no query or fragment.
+    Three rules are left, and each is the ENGINE's rather than URL syntax:
+    the scheme has to be one the HTTP transport opens; the endpoint path is
+    appended to this string, so it may carry no query or fragment; and no
+    credentials may ride in the authority.
     """
     if not isinstance(base_url, str) or not base_url:
         raise TransportSpecError(
@@ -938,6 +939,32 @@ def require_http_base_url(base_url: Any) -> str:
             f"http transport `base_url` must carry no query or fragment -- "
             f"the endpoint path is appended to it, so one swallows every "
             f"endpoint; got {base_url!r}"
+        )
+    if parsed.user or parsed.password:
+        # aiohttp derives Basic auth from EACH request's URL, so credentials
+        # here authenticate the first request and nothing after it: a
+        # provider's absolute next link conventionally omits userinfo, and
+        # the origin guard cannot notice because `origin()` strips it --
+        # both sides compare equal while the credentials are gone. The read
+        # then 401s on page two, looking like a provider fault.
+        #
+        # The connector's own definition is the other half: a literal here
+        # is a credential in a public registry repo. `auth` and the
+        # transport's headers resolve one from `secret_refs` instead.
+        #
+        # The literal spelling is refused in the connector document itself
+        # (analitiq-ai/claude-code-plugins#175); this catches the spelling
+        # no document rule can, where an expression RESOLVED to one.
+        #
+        # Alone among the refusals here, this one does NOT quote the value:
+        # that is the password, and this message is going to a log.
+        raise TransportSpecError(
+            "http transport `base_url` must carry no credentials: aiohttp "
+            "sends them as Basic auth on the first request and on nothing "
+            "the provider links to afterwards, and a literal pair is a "
+            "secret in the connector definition. Move them to the "
+            "transport's `auth` block or its headers, resolved from "
+            "`secret_refs`"
         )
     return base_url.rstrip("/")
 

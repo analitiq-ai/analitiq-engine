@@ -7,9 +7,11 @@ headers to any host a response body names.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
-from cdk.api.urls import follow_url, join_url, same_origin
+from cdk.api.urls import follow_url, join_url, redact_credentials, same_origin
 
 from .fakes import BASE_URL
 
@@ -74,3 +76,41 @@ class TestFollowUrl:
     ) -> None:
         """The normalization is yarl's ``origin()``, not a rule of ours."""
         assert same_origin(base, target) is shared
+
+
+class TestRedactCredentials:
+    """The one site standing between a declared URL and a log line."""
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("https://user:pass@h/v1", "https://h/v1"),
+            ("https://user@h/v1", "https://h/v1"),
+            ("https://h/v1", "https://h/v1"),
+            ("https://h/v1?a=1", "https://h/v1?a=1"),
+        ],
+    )
+    def test_userinfo_is_removed_and_the_rest_is_left_alone(
+        self, value: str, expected: str
+    ) -> None:
+        assert redact_credentials(value) == expected
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            {"ref": "connection.parameters.host"},
+            None,
+            42,
+            "https://[abc",
+        ],
+    )
+    def test_anything_that_is_not_a_url_string_comes_back_untouched(
+        self, value: Any
+    ) -> None:
+        """A declaration is often an expression, and this is not a parser.
+
+        The malformed URL is here on purpose: `yarl` raises on it, and a
+        redactor that let that escape would replace a base-url finding with
+        a traceback out of the message that reports it.
+        """
+        assert redact_credentials(value) is value
