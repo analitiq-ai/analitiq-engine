@@ -22,7 +22,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from cdk.api.exceptions import RequestSpecError, request_spec_errors
-from cdk.api.request import REQUEST_SUPPLIED_CONNECTION_SCOPES
+from cdk.api.request import request_supplies
 from cdk.connection_runtime import (
     MATERIALIZATION_CONNECTION_SCALARS,
     MATERIALIZATION_CONNECTION_SUBTREES,
@@ -221,18 +221,16 @@ def definition_resolver(
 def fillable_at_request_time(declared: Any) -> bool:
     """Whether a real run's request resolution could still fill *declared*.
 
-    The subtree fact is the engine's own statement
-    (:data:`~cdk.api.request.REQUEST_SUPPLIED_CONNECTION_SCOPES`), imported
-    rather than restated: an expression defers exactly when everything it
-    reads is a connection value a run's request resolution will fill. One
-    reading ``secrets.*``, ``auth.*`` -- or a connection field outside the
-    supplied subtrees, like ``connection.name`` -- resolves on no run, so
-    it is a defect to report, never a value to defer.
+    The supply fact is the engine's own
+    (:func:`~cdk.api.request.request_supplies`), asked rather than
+    restated: an expression defers exactly when everything it reads is a
+    connection value a run's request resolution will fill. One reading
+    ``secrets.*``, ``auth.*`` -- or a connection field outside the supplied
+    subtrees, like ``connection.name`` -- resolves on no run, so it is a
+    defect to report, never a value to defer.
     """
     paths = scope_paths(declared)
-    return bool(paths) and all(
-        path.startswith(REQUEST_SUPPLIED_CONNECTION_SCOPES) for path in paths
-    )
+    return bool(paths) and all(request_supplies(path) for path in paths)
 
 
 def materialization_resolver(target: ConformanceTarget) -> Resolver:

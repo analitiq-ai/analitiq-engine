@@ -55,6 +55,7 @@ from .strategies import PRE_PAGE_VALUE_PATHS
 
 __all__ = [
     "JSON_CONTENT_TYPE",
+    "REQUEST_SUPPLIED_CONNECTION_ROOTS",
     "REQUEST_SUPPLIED_CONNECTION_SCOPES",
     "ParamTable",
     "PreparedRequest",
@@ -65,6 +66,7 @@ __all__ = [
     "param_bindings",
     "path_placeholders",
     "request_block_problem",
+    "request_supplies",
     "substitute_path",
 ]
 
@@ -402,11 +404,38 @@ def request_block_problem(
 #: The connection paths per-request resolution supplies, as prefixes --
 #: DERIVED from the subtree names ``ConnectionRuntime.request_resolver``
 #: builds its scope from, never restated, so the guard and the runtime
-#: cannot disagree about what a run will fill. The conformance kit's
-#: request-phase deferral imports this in turn.
+#: cannot disagree about what a run will fill.
 REQUEST_SUPPLIED_CONNECTION_SCOPES = tuple(
     f"connection.{subtree}." for subtree in REQUEST_CONNECTION_SUBTREES
 )
+
+#: The same subtrees as exact paths. ``request_resolver`` puts each one in
+#: scope as a whole mapping, so ``connection.parameters`` resolves to that
+#: mapping -- a body may legitimately BE it.
+REQUEST_SUPPLIED_CONNECTION_ROOTS = frozenset(
+    f"connection.{subtree}" for subtree in REQUEST_CONNECTION_SUBTREES
+)
+
+
+def request_supplies(path: str) -> bool:
+    """Whether request-time resolution puts *path* in scope.
+
+    A prefix test alone answers no for the subtree ROOT it is a prefix of:
+    ``connection.parameters`` does not start with ``connection.parameters.``
+    while being exactly what the resolver supplies. Both readers -- this
+    module's never-fillable guard and the conformance kit's deferral -- ask
+    here rather than each spelling the test, which is how the two came to
+    report a body that resolves perfectly well as one nothing can fill.
+
+    Whether the value is SENDABLE where it lands is a different rule, and
+    :func:`_sendable_value` still owns it: a whole mapping is refused in a
+    header, a query value or a path segment, and permitted in a body, which
+    is the only slot with a serialization for it.
+    """
+    return (
+        path.startswith(REQUEST_SUPPLIED_CONNECTION_SCOPES)
+        or path in REQUEST_SUPPLIED_CONNECTION_ROOTS
+    )
 
 
 #: The request slots a declaration can put an expression in.
@@ -458,7 +487,7 @@ def _secret_read_problem(
     supplied_runtime = {f"runtime.{key}" for key in resolver.context.runtime}
 
     def unfillable(path: str, *, page: bool) -> bool:
-        if path.startswith(REQUEST_SUPPLIED_CONNECTION_SCOPES):
+        if request_supplies(path):
             return False
         if path in supplied_runtime:
             return False

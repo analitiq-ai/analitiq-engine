@@ -553,6 +553,55 @@ class TestNeverFillableScopeRefusals:
         assert problem is not None
         assert "'secrets.page_size'" in problem
 
+    @pytest.mark.parametrize("subtree", ["parameters", "selections", "discovered"])
+    def test_a_subtree_root_is_supplied_not_merely_its_children(
+        self, subtree: str
+    ) -> None:
+        """``request_resolver`` puts each subtree in scope as a whole mapping.
+
+        A prefix test alone answers no for the root it is a prefix of --
+        ``connection.parameters`` does not start with
+        ``connection.parameters.`` -- so a body that IS the subtree was
+        reported as reading something no run supplies, while the resolver
+        hands it over and the serializer sends it.
+        """
+        assert (
+            request_block_problem(
+                {"body": {"ref": f"connection.{subtree}"}},
+                reserved_headers=frozenset(),
+                resolver=_resolver(),
+                params={},
+            )
+            is None
+        )
+
+    def test_a_subtree_root_in_a_scalar_slot_is_still_refused_where_it_lands(
+        self,
+    ) -> None:
+        """Supplied is not the same question as sendable.
+
+        The phase guard says the resolver fills it; the request build says a
+        query value must be a scalar. Two rules, one for each question --
+        conflating them is what made the guard lie about supply.
+        """
+        assert (
+            request_block_problem(
+                {"query": {"q": {"ref": "connection.parameters"}}},
+                reserved_headers=frozenset(),
+                resolver=_resolver(),
+                params={},
+            )
+            is None
+        )
+        with pytest.raises(RequestSpecError, match="must be a scalar"):
+            bind_query_and_headers(
+                params={},
+                declared_query={"q": {"ref": "connection.parameters"}},
+                declared_headers=None,
+                resolver=_resolver(),
+                endpoint="/items",
+            )
+
     def test_a_runtime_key_typo_is_refused_not_prefix_matched(self) -> None:
         # The engine passes exactly connection_id and batch_size; a bare
         # `runtime.` prefix match would give `runtime.batchsize` the
