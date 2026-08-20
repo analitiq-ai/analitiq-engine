@@ -70,6 +70,7 @@ from cdk.api.request import (
     PreparedRequest,
     RequestBuilder,
     bind_request_values,
+    param_bindings,
     path_placeholders,
     request_block_problem,
     substitute_path,
@@ -454,27 +455,44 @@ def _drivable_body(probe: _ReadProbe) -> Any:
     """Return the declared body, or ``None`` where a definition cannot resolve it.
 
     Withheld in two cases, both about a value only a run has: the body is
-    *itself* one expression reading a scope a connection supplies, or it is
-    one param binding whose param the definition leaves empty. Either would
-    be refused for the single reason that says nothing about the connector.
-    A connection-scoped expression nested inside the body is kept:
-    request-time resolution omits an unresolved field rather than failing,
-    so the rest of the body still binds -- and a malformed branch beside it
+    *itself* one expression reading a scope a connection supplies, or the
+    root expression binds a param the definition leaves unfilled. Either
+    would be refused for the single reason that says nothing about the
+    connector.
+
+    The ROOT is what decides it, and the whole root is read rather than its
+    top key alone. A binding wrapped in a function
+    (``base64_encode`` over a ``{from_param}``) is still the root's own
+    input: the definition cannot fill it, the function is handed nothing
+    and raises, and the connector production reads correctly fails tier 1.
+    A binding one level down inside a plain object is different and is
+    KEPT: request-time resolution omits that field rather than failing, so
+    the rest of the body still binds -- and a malformed branch beside it
     still has to be caught.
+
+    Unfilled means ABSENT, the same test :func:`_path_values` applies. The
+    param table carries every declared default, so a body bound to a param
+    that HAS one is driven; only a param whose value arrives from the
+    stream's filters or the replication cursor is withheld.
+
+    A param a LOOP owns is absent from that table too, and is NOT withheld:
+    the drive is what supplies it. Page one carries no continuation and
+    page two does, which is the whole of what the advance check is for --
+    withholding the body there would hide a body that cannot be built once
+    the loop has a value, the one defect no check stopping at the first
+    request can see.
     """
     body = probe.request.get("body")
     if body is None or _is_connection_expression(body):
         return None
-    if isinstance(body, Mapping) and "from_param" in body:
-        # Deferred on the VALUE, not the declaration -- the same rule
-        # `_path_values` applies one field over, and for the same reason.
-        # The param table already carries every declared default, so a body
-        # bound to a param that HAS one binds here and is driven; only a
-        # binding a definition-only run cannot fill (its value arrives from
-        # the stream's filters or the replication cursor) is withheld,
-        # because driving that one would refuse a connector the engine
-        # reads correctly.
-        if not str(probe.table.values.get(body["from_param"], "")):
+    if Resolver.is_expression_node(body) or (
+        isinstance(body, Mapping) and "from_param" in body
+    ):
+        table = probe.table
+        if any(
+            name not in table.values and name not in table.controlled_by
+            for name in param_bindings(body)
+        ):
             return None
     return body
 

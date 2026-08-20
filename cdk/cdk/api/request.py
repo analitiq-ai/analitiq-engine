@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from types import MappingProxyType
@@ -62,6 +62,7 @@ __all__ = [
     "bind_query_and_headers",
     "bind_request_values",
     "build_write_body",
+    "param_bindings",
     "path_placeholders",
     "request_block_problem",
     "substitute_path",
@@ -584,45 +585,47 @@ def _header_map_problem(
     return None
 
 
-def _controlled_binding(
-    node: Any, controlled_by: Mapping[str, str]
-) -> tuple[str, str] | None:
-    """Find a ``{from_param}`` naming a loop-owned param, or ``None``.
+def param_bindings(node: Any) -> Iterator[str]:
+    """Yield the param every ``{from_param}`` inside *node* names.
 
-    Anywhere inside *node*, because a binding is a binding at any depth: the
-    contract's own wiring walk reaches nested ones, so a header the contract
-    accepts can carry a loop-owned param through a ``function``'s input.
+    Anywhere inside it, because a binding is a binding at any depth: the
+    contract's own wiring walk reaches nested ones, so a declaration it
+    accepts can carry a param through a ``function``'s input. Reading only
+    the top of a value is how a rule about bindings comes to miss one.
 
     A ``literal`` payload is not walked, for the reason the resolver hands
     one back untouched: a binding spelled inside one is data the engine
-    never resolves, so reading it as a binding would refuse a working
-    header.
+    never resolves, so treating it as a binding would judge a declaration
+    on something that never happens.
+
+    One walk, because both readers ask the same question of the same
+    grammar and differ only in what they do with the answer -- one refuses a
+    loop-owned param under an engine-owned header, the other withholds a
+    body a definition-only run cannot fill.
     """
     if isinstance(node, list):
-        return next(
-            (
-                found
-                for item in node
-                if (found := _controlled_binding(item, controlled_by))
-            ),
-            None,
-        )
-    if not isinstance(node, Mapping):
-        return None
-    if "literal" in node:
-        return None
+        for item in node:
+            yield from param_bindings(item)
+        return
+    if not isinstance(node, Mapping) or "literal" in node:
+        return
     bound = node.get("from_param")
     if isinstance(bound, str):
-        owner = controlled_by.get(bound)
-        return None if owner is None else (bound, owner)
-    return next(
-        (
-            found
-            for child in node.values()
-            if (found := _controlled_binding(child, controlled_by))
-        ),
-        None,
-    )
+        yield bound
+        return
+    for child in node.values():
+        yield from param_bindings(child)
+
+
+def _controlled_binding(
+    node: Any, controlled_by: Mapping[str, str]
+) -> tuple[str, str] | None:
+    """Find a ``{from_param}`` naming a loop-owned param, or ``None``."""
+    for name in param_bindings(node):
+        owner = controlled_by.get(name)
+        if owner is not None:
+            return name, owner
+    return None
 
 
 def _header_value_sent(

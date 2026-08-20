@@ -1942,6 +1942,32 @@ class TestApiRequestBodyBreaks:
         widgets = [p for p in probes if p.label == "widgets"]
         assert widgets and widgets[0].first_sent.body == "status:open"
 
+    def test_a_root_binding_a_stream_filter_supplies_defers_through_a_function(
+        self, tmp_path: Path
+    ) -> None:
+        """A binding is the root's own input at any depth inside it.
+
+        Production takes ``filter`` from the stream's filters and encodes a
+        real string. A definition-only run has nothing to give the
+        function, so driving it reports ``base64_encode`` refusing ``None``
+        -- a finding about the kit, against a connector that works.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["method"] = "POST"
+            read["request"]["body"] = {
+                "function": "base64_encode",
+                "input": {"from_param": "filter"},
+            }
+            read["params"]["filter"] = {
+                "in": "body",
+                "type": "string",
+                "required": False,
+                "operators": ["eq"],
+            }
+
+        assert check_api_read_compiles(self._broken(tmp_path, "widgets", bend)) == []
+
     def test_a_root_body_binding_a_stream_filter_supplies_is_deferred(
         self, tmp_path: Path
     ) -> None:
