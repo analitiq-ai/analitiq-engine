@@ -86,9 +86,9 @@ from cdk.type_map import TypeMapper
 from .api_surface import (
     api_base_url,
     definition_resolver,
-    expression_grammar_problem,
     fillable_at_request_time,
     read_operations,
+    unknown_function_problem,
 )
 from .target import ConformanceTarget
 from .violations import Violation
@@ -501,7 +501,7 @@ def _materialize_first_request(
     page two against it.
     """
     body = probe.request.get("body")
-    problem = None if body is None else expression_grammar_problem(body, probe.resolver)
+    problem = None if body is None else unknown_function_problem(body, probe.resolver)
     if problem is not None:
         raise ReadError(problem)
     return _request_builder(probe).for_page(

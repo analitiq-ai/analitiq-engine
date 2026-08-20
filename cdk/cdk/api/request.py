@@ -69,11 +69,6 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-#: The derived function that percent-encodes a value. The engine encodes
-#: every substituted path segment itself, so this one inside ``path_params``
-#: encodes twice.
-_URL_ENCODE = "url_encode"
-
 #: The media type the engine sends for a JSON body. ``cdk.api.http`` adds it
 #: when a body is present and the endpoint declared none; ``write_plan``
 #: reads it to decide whether a declared Content-Type is the engine's own
@@ -400,9 +395,6 @@ def request_block_problem(
     )
     if problem is not None:
         return problem
-    problem = _path_encoding_problem(request_block)
-    if problem is not None:
-        return problem
     return _controlled_placeholder_problem(request_block, controlled_by)
 
 
@@ -668,38 +660,6 @@ def _header_value_sent(
             return None
         resolved = resolver.resolve_for_request(node)
     return None if resolved is None else str(resolved)
-
-
-def _path_encoding_problem(request_block: Mapping[str, Any]) -> str | None:
-    """Why a path binding cannot be substituted as declared, or ``None``.
-
-    :func:`substitute_path` percent-encodes every segment it substitutes, so
-    a binding that encodes the value itself sends ``a%252Fb`` where the
-    provider expects ``a%2Fb`` and answers 404.
-    """
-    bindings = request_block.get("path_params")
-    if not isinstance(bindings, Mapping):
-        return None
-    for name, binding in bindings.items():
-        if _calls_url_encode(binding):
-            return (
-                f"request.path_params binds {{{name}}} through the "
-                f"{_URL_ENCODE!r} function, which encodes the value a second "
-                f"time: the engine already percent-encodes every substituted "
-                f"path segment. Bind the raw value."
-            )
-    return None
-
-
-def _calls_url_encode(node: Any) -> bool:
-    """Whether *node* reaches the ``url_encode`` function anywhere inside it."""
-    if isinstance(node, Mapping):
-        if node.get("function") == _URL_ENCODE:
-            return True
-        return any(_calls_url_encode(child) for child in node.values())
-    if isinstance(node, list):
-        return any(_calls_url_encode(item) for item in node)
-    return False
 
 
 def _controlled_placeholder_problem(

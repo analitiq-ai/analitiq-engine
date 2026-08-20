@@ -727,20 +727,6 @@ class TestRequestBlockRefusals:
         )
         assert problem is not None and "Authorization" in problem
 
-    def test_a_path_binding_that_encodes_the_value_itself_is_refused(self) -> None:
-        problem = request_block_problem(
-            {
-                "path": "/Contact/{id}",
-                "path_params": {
-                    "id": {"function": "url_encode", "input": {"from_param": "id"}}
-                },
-            },
-            reserved_headers=frozenset(),
-            resolver=_resolver(),
-            params={},
-        )
-        assert problem is not None and "url_encode" in problem
-
     def test_a_plain_path_binding_is_permitted(self) -> None:
         assert (
             request_block_problem(

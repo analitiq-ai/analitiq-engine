@@ -31,13 +31,7 @@ from cdk.connection_runtime import (
 )
 from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.exceptions import TransportSpecError
-from cdk.resolver import (
-    RUNTIME_CONNECTION_ID,
-    ResolutionContext,
-    Resolver,
-    expression_node_problem,
-    scope_paths,
-)
+from cdk.resolver import RUNTIME_CONNECTION_ID, ResolutionContext, Resolver, scope_paths
 from cdk.transport_factory import require_http_base_url, resolve_http_spec
 
 from .fakes import NoSecretsResolver
@@ -49,9 +43,9 @@ __all__ = [
     "check_api_has_reads",
     "check_read_transport_selection",
     "definition_resolver",
-    "expression_grammar_problem",
     "fillable_at_request_time",
     "read_operations",
+    "unknown_function_problem",
 ]
 
 TRANSPORT_CHECK = "api-read-transport-selection"
@@ -257,40 +251,37 @@ def materialization_resolver(target: ConformanceTarget) -> Resolver:
     )
 
 
-def expression_grammar_problem(node: Any, resolver: Resolver) -> str | None:
-    """Return the first malformed expression node in *node*, or ``None``.
+def unknown_function_problem(node: Any, resolver: Resolver) -> str | None:
+    """Name the first ``function`` node *resolver* has no function for, or ``None``.
 
-    The shape rules are the resolver's own
-    (:func:`~cdk.resolver.expression_node_problem`), applied to a
-    declaration rather than to a resolution -- which is what lets a
-    deferred branch still be judged. A ``literal`` is opaque data, so an
-    expression spelled inside one is not one.
+    The one thing about an expression's grammar the contract does NOT
+    settle. It refuses a malformed node -- two markers, a stray sibling on
+    a ``ref``, an undocumented sibling on a ``function`` -- before a
+    document reaches the kit, so reading any of that here would be a second
+    answer to a question already answered. It does not know the function
+    REGISTRY, which is engine-owned and closed: a name outside it resolves
+    on no run, and a deferred node the kit never resolves would otherwise
+    carry the typo past every check and die on the connector's first
+    request.
 
-    A ``function`` node's NAME is judged too, against the *resolver*'s own
-    registry: the registry is engine-owned and closed, so a name outside it
-    resolves on no run -- and a deferred node whose value the kit never
-    resolves would otherwise carry an unknown function past every check and
-    die on the connector's first request. The resolver is required rather
-    than defaulted, so a new caller cannot get the weaker check by omission.
+    The whole declaration is walked, because a name can sit at any depth.
+    A ``literal`` is opaque data, so a function spelled inside one is not
+    one.
     """
-    walk = lambda child: expression_grammar_problem(child, resolver)  # noqa: E731
+    walk = lambda child: unknown_function_problem(child, resolver)  # noqa: E731
     if isinstance(node, list):
         return next((p for p in map(walk, node) if p), None)
     if not isinstance(node, Mapping):
         return None
-    if Resolver.is_expression_node(node):
-        problem = expression_node_problem(node)
-        if problem is not None:
-            return problem
-        if "literal" in node:
-            return None
-        name = node.get("function")
-        if name is not None and not resolver.knows_function(name):
-            return (
-                f"unknown derived function {name!r}; the registry is closed "
-                f"and engine-owned, so this resolves on no run "
-                f"(registered: {resolver.function_names})"
-            )
+    if "literal" in node:
+        return None
+    name = node.get("function")
+    if name is not None and not resolver.knows_function(name):
+        return (
+            f"unknown derived function {name!r}; the registry is closed "
+            f"and engine-owned, so this resolves on no run "
+            f"(registered: {resolver.function_names})"
+        )
     return next((p for p in map(walk, node.values()) if p), None)
 
 
@@ -321,10 +312,7 @@ def api_base_url(target: ConformanceTarget) -> str | None:
     base_url = block.get("base_url")
     if isinstance(base_url, str):
         return base_url or None
-    if (
-        expression_grammar_problem(base_url, materialization_resolver(target))
-        is not None
-    ):
+    if unknown_function_problem(base_url, materialization_resolver(target)) is not None:
         return None
     # The same classification the base-url ladder reports on, rather than a
     # second reading of it: anything that does not settle from the definition
@@ -436,7 +424,7 @@ def _base_url_violations(
     could not say what it was missing.
     """
     declared = block.get("base_url")
-    grammar = expression_grammar_problem(declared, materialization_resolver(target))
+    grammar = unknown_function_problem(declared, materialization_resolver(target))
     if grammar is not None:
         # Judged before the deferral: a malformed node is malformed whatever
         # scope it reads, and resolve_http_spec() raises on it at connect()
@@ -525,7 +513,7 @@ def _transport_header_violations(
         ]
     violations: list[Violation] = []
     for name, value in sorted(declared.items()):
-        grammar = expression_grammar_problem(value, materialization_resolver(target))
+        grammar = unknown_function_problem(value, materialization_resolver(target))
         if grammar is not None:
             violations.append(
                 Violation(
@@ -594,7 +582,7 @@ def _spec_value(
     send (``drops_if_null``, as in :func:`_transport_deferral`).
     """
     resolver = materialization_resolver(target)
-    if expression_grammar_problem(declared, resolver) is not None:
+    if unknown_function_problem(declared, resolver) is not None:
         return _STAND_IN_SPEC_VALUE
     problems, defers = _transport_deferral(
         target, declared, drops_if_null=drops_if_null

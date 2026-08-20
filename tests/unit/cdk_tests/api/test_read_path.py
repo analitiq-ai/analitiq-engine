@@ -351,37 +351,32 @@ class TestTheRequestTheContractDescribes:
             )
         assert session.calls == []
 
-    async def test_a_path_binding_that_encodes_the_value_itself_is_refused(
-        self,
-    ) -> None:
-        # The engine percent-encodes every segment it substitutes, so this
-        # sends a%252Fb where the provider expects a%2Fb and answers 404.
-        session = FakeSession()
-        with pytest.raises(ReadError, match="url_encode"):
-            await _read(
-                session,
-                endpoint_document(
-                    request={
-                        "method": "GET",
-                        "path": "/items/{id}",
-                        "path_params": {
-                            "id": {
-                                "function": "url_encode",
-                                "input": {"from_param": "id"},
-                            }
-                        },
-                    },
-                    params={
-                        "id": {
-                            "in": "path",
-                            "type": "string",
-                            "required": True,
-                            "default": {"literal": "a/b"},
-                        }
-                    },
-                ),
-            )
-        assert session.calls == []
+    async def test_a_path_value_is_encoded_as_exactly_one_segment(self) -> None:
+        # The engine's half of why `url_encode` in a path_params binding is
+        # a contract error (RULE-ENDP-027): the engine already does this, so
+        # a binding that encodes too would send a%252Fb. Pinned from the
+        # wire, because it is the encoding -- not the refusal -- that is the
+        # engine's to keep.
+        session = FakeSession([FakeResponse(body=_rows(0))])
+        await _read(
+            session,
+            endpoint_document(
+                request={
+                    "method": "GET",
+                    "path": "/items/{id}",
+                    "path_params": {"id": {"from_param": "id"}},
+                },
+                params={
+                    "id": {
+                        "in": "path",
+                        "type": "string",
+                        "required": True,
+                        "default": {"literal": "a/b"},
+                    }
+                },
+            ),
+        )
+        assert session.calls[0]["url"].endswith("/items/a%2Fb")
 
     async def test_a_read_removing_a_transport_header_is_refused(self) -> None:
         # The connection's defaults live on the shared session; nothing in

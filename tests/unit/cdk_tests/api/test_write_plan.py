@@ -494,14 +494,14 @@ class TestTheRequestTheStreamWillActuallySend:
         assert isinstance(plan, StreamWritePlan)
         assert plan.query == {"ref": "main"}
 
-    def test_a_path_binding_that_encodes_the_value_itself_is_rejected(self) -> None:
-        # The engine percent-encodes every substituted segment, so this one
-        # sends a%252Fb where the provider expects a%2Fb.
+    def test_a_path_value_is_encoded_as_exactly_one_segment(self) -> None:
+        # The write role's half of RULE-ENDP-027: the engine already encodes
+        # the segment, which is why a binding that encodes too is a contract
+        # error. The encoding is what stays the engine's, so that is what is
+        # pinned.
         doc = _document(
             path="/Contact/{id}",
-            path_params={
-                "id": {"function": "url_encode", "input": {"from_param": "id"}}
-            },
+            path_params={"id": {"from_param": "id"}},
             params={
                 "id": {
                     "in": "path",
@@ -510,13 +510,12 @@ class TestTheRequestTheStreamWillActuallySend:
                     "default": {"literal": "a/b"},
                 }
             },
-            contract_valid=False,
         )
-        outcome = build_write_plan(
+        plan = build_write_plan(
             doc, _spec(), session_header_names=set(), resolver=_resolver()
         )
-        assert isinstance(outcome, str)
-        assert "url_encode" in outcome and "{id}" in outcome
+        assert isinstance(plan, StreamWritePlan)
+        assert plan.endpoint == "/Contact/a%2Fb"
 
     def test_a_path_placeholder_binding_to_an_empty_value_is_rejected(self) -> None:
         # "/Contact/" addresses the whole collection: this write would PATCH

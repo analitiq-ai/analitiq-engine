@@ -18,6 +18,7 @@ from urllib.parse import urljoin
 
 import pytest
 from _pytest.outcomes import Skipped
+from analitiq.contracts.connector import HttpTransport
 from analitiq.contracts.endpoints import ApiEndpointDoc
 from pydantic import ValidationError
 
@@ -2140,25 +2141,6 @@ class TestApiBaseUrlBreaks:
         )
         assert check_read_transport_selection(target) == []
 
-    def test_a_malformed_base_url_expression_is_not_deferred(
-        self, tmp_path: Path
-    ) -> None:
-        """The scope defers the VALUE; the node's grammar is judged always.
-
-        ``{"ref": ..., "extra": 1}`` raises in ``resolve_http_spec()`` with
-        any connection at all, so deferring it on the scope it reads
-        certifies a connector whose ``connect()`` cannot open a session.
-        """
-        target = self._bent_definition(
-            tmp_path,
-            lambda d: d["transports"]["api"].update(
-                base_url={"ref": "connection.parameters.host", "extra": 1}
-            ),
-        )
-        report = _report(check_read_transport_selection(target))
-        assert "malformed" in report
-        assert "'extra'" in report
-
     @pytest.mark.parametrize("declared", ["api.example.test", "ftp://api.example.test"])
     def test_a_base_url_the_http_client_cannot_open_is_refused(
         self, tmp_path: Path, declared: str
@@ -2509,17 +2491,6 @@ class TestApiTransportHeaderBreaks:
         )
         report = _report(check_read_transport_selection(target))
         assert "declares headers as []" in report
-
-    def test_a_malformed_header_value_expression(self, tmp_path: Path) -> None:
-        target = self._bent_definition(
-            tmp_path,
-            lambda d: d["transports"]["api"].update(
-                headers={"X-Api-Key": {"ref": "secrets.api_key", "extra": 1}}
-            ),
-        )
-        report = _report(check_read_transport_selection(target))
-        assert "'X-Api-Key'" in report
-        assert "malformed" in report
 
     def test_a_header_value_that_cannot_resolve_names_why(self, tmp_path: Path) -> None:
         target = self._bent_definition(
@@ -2878,23 +2849,33 @@ class TestApiRequestBodyIsValidatedAroundConnectionValues:
         )
         assert check_api_read_compiles(target) == []
 
-    def test_a_sibling_key_beside_a_connection_reference_is_caught(
+    def test_an_unknown_function_beside_a_connection_reference_is_caught(
         self, tmp_path: Path
     ) -> None:
-        """Deferring the resolution must not defer the grammar with it.
+        """Deferring the resolution must not defer the function name with it.
 
         The value this node reads is the connection's, so a definition-only
-        run cannot produce it -- but the node is malformed whatever the
-        connection says, and the engine raises on it the first time the
-        stream runs.
+        run cannot produce it -- but the registry is engine-owned and
+        closed, so the name resolves on no connection, and the engine dies
+        on it the first time the stream runs.
+
+        The node's SHAPE is not read here: the contract refuses a malformed
+        expression dict in an endpoint request map and, since RULE-CTOR-065,
+        in a connector field a runtime resolves. The registry is the one
+        thing about an expression it cannot know.
         """
         target = self._broken(
             tmp_path,
             "widgets",
-            self._post_body({"ref": "connection.parameters.scope", "extra": 1}),
+            self._post_body(
+                {
+                    "function": "no_such_function",
+                    "input": {"ref": "connection.parameters.scope"},
+                }
+            ),
         )
         report = _report(check_api_read_compiles(target))
-        assert "must be the only key" in report
+        assert "unknown derived function 'no_such_function'" in report
 
 
 class TestApiRequestBlockBreaks:
@@ -2943,6 +2924,17 @@ class TestApiRequestBlockBreaks:
                     path_params={"account_id": {"literal": ""}}
                 ),
             ),
+            (
+                "a binding that encodes the value a second time",
+                lambda request: request.update(
+                    path_params={
+                        "account_id": {
+                            "function": "url_encode",
+                            "input": {"from_param": "account_id"},
+                        }
+                    }
+                ),
+            ),
         ],
     )
     def test_the_contract_owns_what_a_path_binding_may_say(
@@ -2964,8 +2956,50 @@ class TestApiRequestBlockBreaks:
         )
         request = document["operations"]["read"]["request"]
         request["path"] = "/v1/accounts/{account_id}/widgets"
+        document["operations"]["read"]["params"]["account_id"] = {
+            "in": "path",
+            "type": "string",
+            "required": True,
+            "default": {"literal": "acme"},
+        }
         bend(request)
         with pytest.raises(ValidationError, match="path_params"):
+            ApiEndpointDoc.model_validate(document)
+
+    @pytest.mark.parametrize(
+        ("label", "declared"),
+        [
+            ("two markers", {"ref": "secrets.a", "literal": "c"}),
+            ("a stray sibling on a ref", {"ref": "secrets.api_key", "extra": 1}),
+            ("a stray sibling on a function", {"function": "now", "bogus": 1}),
+        ],
+    )
+    def test_the_contract_owns_an_expression_nodes_shape(
+        self, label: str, declared: Any
+    ) -> None:
+        """Both places the kit used to read a node's grammar are covered.
+
+        An endpoint request map has always been (``_validate_expression_shapes``);
+        a connector field a runtime resolves is too since RULE-CTOR-065 in
+        contract 1.0.0rc22, which is what let the kit's copy go. The
+        registry check is what stays -- see
+        :func:`~cdk.conformance.api_surface.unknown_function_problem`.
+        """
+        transport = {
+            "transport_type": "http",
+            "base_url": "https://api.example.test",
+            "headers": {"X-A": declared},
+        }
+        with pytest.raises(ValidationError, match="RULE-CTOR-065"):
+            HttpTransport.model_validate(transport)
+
+        document = json.loads(
+            (
+                API_REFERENCE_DIR / "definition" / "endpoints" / "widgets.json"
+            ).read_text()
+        )
+        document["operations"]["read"]["request"]["headers"] = {"X-A": declared}
+        with pytest.raises(ValidationError, match="X-A"):
             ApiEndpointDoc.model_validate(document)
 
     def test_a_path_default_the_definition_settles_as_empty_is_reported(
