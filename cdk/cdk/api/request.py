@@ -446,6 +446,41 @@ def _pagination_value(
     return node
 
 
+def _declared_expressions(
+    request_block: Mapping[str, Any], declared_params: Mapping[str, Any]
+) -> Iterator[Any]:
+    """Yield each declared expression an operation carries, one at a time.
+
+    One at a time is the whole point. Handing a binding MAP to a scanner
+    puts the map itself in a value position, and a header, query key or
+    path param whose NAME is ``ref``, ``template`` or ``literal`` is then
+    read as an expression marker -- so the scanner answers about that one
+    key and never sees its siblings. ``ref`` is a real query parameter
+    name, and a map containing one hid an ``api_key`` reading
+    ``secrets.api_key`` from this guard entirely: request-time resolution
+    then dropped the key, silently, on every request.
+
+    :func:`bind_request_values` resolves these maps one value at a time for
+    exactly this reason, and says so. The scan has to read them the same
+    way or it is not scanning what the build will resolve.
+
+    ``request.body`` is handed over whole: it IS one value, and the
+    resolver refuses a marker with siblings there
+    (:func:`~cdk.resolver.expression_node_problem`), so the same shadowing
+    cannot arise. A param declaration is not an expression either -- only
+    its ``default`` is.
+    """
+    for slot in _REQUEST_SLOTS:
+        declared = request_block.get(slot)
+        if slot == "body" or not isinstance(declared, Mapping):
+            yield declared
+        else:
+            yield from declared.values()
+    for declaration in declared_params.values():
+        if isinstance(declaration, Mapping):
+            yield declaration.get("default")
+
+
 def _secret_read_problem(
     request_block: Mapping[str, Any],
     declared_params: Mapping[str, Any],
@@ -486,12 +521,11 @@ def _secret_read_problem(
         return not (page and path.startswith("response."))
 
     pre_page = [_pagination_value(pagination, path) for path in PRE_PAGE_VALUE_PATHS]
+    declared_values = list(_declared_expressions(request_block, declared_params))
     reads = sorted(
         {
             path
-            for block in [request_block.get(slot) for slot in _REQUEST_SLOTS]
-            + [declared_params]
-            + pre_page
+            for block in declared_values + pre_page
             for path in scope_paths(block)
             if unfillable(path, page=False)
         }

@@ -820,6 +820,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                 body = self._build_body(plan, record=record)
                 if plan.idempotency_in == "body" and key is not None:
                     body = body_with_idempotency_key(plan, body, key)
+                encoded = encode_body(body, plan.content_type)
             # Two authoring defects, one verdict: the body build answers
             # every way its declaration can fail with RequestSpecError, and
             # the engine-owned idempotency key refuses a body it cannot be
@@ -841,7 +842,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                 else None
             )
             try:
-                await self._send(plan, body, extra_headers=headers)
+                await self._send(plan, encoded, extra_headers=headers)
                 written += 1
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
                 status, category = failure_facts(err, error_map=self._error_map)
@@ -911,6 +912,7 @@ class GenericAPIConnector(BaseDestinationHandler):
             chunk = records[start : start + chunk_size]
             try:
                 body = self._build_body(plan, records=chunk)
+                encoded = encode_body(body, plan.content_type)
             except RequestSpecError as err:
                 logger.warning(
                     "failed to build body for chunk at offset %d (%d records "
@@ -928,7 +930,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                     FailureCategory.FAILURE_CATEGORY_UNSPECIFIED,
                 )
             try:
-                await self._send(plan, body)
+                await self._send(plan, encoded)
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
                 status, category = failure_facts(err, error_map=self._error_map)
                 ack_status, failure_category = write_verdict(
@@ -983,10 +985,18 @@ class GenericAPIConnector(BaseDestinationHandler):
     async def _send(
         self,
         plan: StreamWritePlan,
-        data: Any,
+        body: bytes,
         extra_headers: Mapping[str, str] | None = None,
     ) -> Any:
-        """Send one write request through the shared sender."""
+        """Send one write request through the shared sender.
+
+        Takes finished bytes. Encoding lives with the body build instead,
+        because it fails for the same reason and about the same records: a
+        form body carrying a container is one record's defect, and raising
+        it here -- outside the per-record catch, inside a block that expects
+        only transport errors -- discarded the count of everything already
+        written and let a replay send those records twice.
+        """
         if self._http is None or self.base_url is None:
             raise RuntimeError("connector not connected: no HTTP sender")
         return await self._http.send(
@@ -995,7 +1005,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                 url=join_url(self.base_url, plan.endpoint),
                 params=dict(plan.query),
                 headers={**plan.headers, **dict(extra_headers or {})},
-                body=encode_body(data, plan.content_type),
+                body=body,
                 content_type=plan.content_type,
             ),
             unwrap_page=False,

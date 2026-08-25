@@ -24,6 +24,7 @@ def _document(
     idempotency: dict[str, Any] | None = None,
     headers: dict[str, Any] | None = None,
     query: dict[str, Any] | None = None,
+    content_type: str | None = None,
 ) -> dict[str, Any]:
     request: dict[str, Any] = {
         "method": "POST",
@@ -39,6 +40,8 @@ def _document(
         request["headers"] = headers
     if query is not None:
         request["query"] = query
+    if content_type is not None:
+        request["content_type"] = content_type
     block: dict[str, Any] = {
         "request": request,
         "input": {
@@ -247,6 +250,32 @@ class TestVerdicts:
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert result.records_written == 1
         assert result.failed_record_ids == ("r1",)
+
+    async def test_a_form_encoding_failure_is_one_record_not_the_whole_batch(
+        self,
+    ) -> None:
+        """Encoding fails for one record's data, so it fails one record.
+
+        A form body carrying a container is that record's defect. Raising
+        it from inside the send -- outside the per-record catch, in a block
+        that expects only transport errors -- escaped the loop, so the
+        outer path reported zero written even though earlier records had
+        landed, and a replay sent them a second time.
+        """
+        session = FakeSession([FakeResponse(body={}), FakeResponse(body={})])
+        connector = await _connected(
+            session,
+            _document(
+                body={"payload": {"from_input": "record"}},
+                content_type="application/x-www-form-urlencoded",
+            ),
+        )
+        # `record` is the whole row, so every record's body field is a
+        # mapping -- the shape a form cannot carry.
+        result = await _write(connector, _batch(2))
+        assert result.records_written == 0
+        assert result.failed_record_ids == ("r0", "r1")
+        assert session.calls == []
 
 
 @pytest.mark.asyncio

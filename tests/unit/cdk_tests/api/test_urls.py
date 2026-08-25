@@ -12,6 +12,8 @@ from typing import Any
 import pytest
 
 from cdk.api.urls import follow_url, join_url, redact_credentials, same_origin
+from cdk.exceptions import TransportSpecError
+from cdk.transport_factory import require_http_base_url
 
 from .fakes import BASE_URL
 
@@ -78,6 +80,41 @@ class TestFollowUrl:
         assert same_origin(base, target) is shared
 
 
+class TestNoRefusalLogsAPassword:
+    """The credential rule is the LAST of four, and the other three quote.
+
+    A URL carrying `user:pass@` that fails an earlier one -- a non-http
+    scheme, a query string, an authority yarl cannot parse -- never reaches
+    the rule that exists because it carries credentials, so those messages
+    are where the password would actually escape. `connect()` logs and
+    re-wraps them.
+    """
+
+    #: Distinctive on purpose: the refusals talk ABOUT credentials, so
+    #: asserting on the word "secret" would match their own prose. This is
+    #: a string only the declared value could put in a message.
+    PASSWORD = "hunter2-do-not-log"
+
+    @pytest.mark.parametrize(
+        ("declared", "refusal"),
+        [
+            (f"https://user:{PASSWORD}@h/v1?t=a", "no query or fragment"),
+            (f"https://user:{PASSWORD}@h/v1#f", "no query or fragment"),
+            (f"ftp://user:{PASSWORD}@h", "absolute http(s) URL"),
+            (f"https://user:{PASSWORD}@[bad", "not a URL an HTTP client can open"),
+            (f"https://user:{PASSWORD}@h", "no credentials"),
+        ],
+    )
+    def test_the_password_is_absent_whichever_rule_fires(
+        self, declared: str, refusal: str
+    ) -> None:
+        with pytest.raises(TransportSpecError) as caught:
+            require_http_base_url(declared)
+        message = str(caught.value)
+        assert refusal in message
+        assert self.PASSWORD not in message
+
+
 class TestRedactCredentials:
     """The one site standing between a declared URL and a log line."""
 
@@ -97,20 +134,40 @@ class TestRedactCredentials:
 
     @pytest.mark.parametrize(
         "value",
-        [
-            {"ref": "connection.parameters.host"},
-            None,
-            42,
-            "https://[abc",
-        ],
+        [{"ref": "connection.parameters.host"}, None, 42],
     )
-    def test_anything_that_is_not_a_url_string_comes_back_untouched(
+    def test_anything_that_is_not_a_string_comes_back_untouched(
         self, value: Any
     ) -> None:
-        """A declaration is often an expression, and this is not a parser.
-
-        The malformed URL is here on purpose: `yarl` raises on it, and a
-        redactor that let that escape would replace a base-url finding with
-        a traceback out of the message that reports it.
-        """
+        """A declaration is often an expression, and this is not a parser."""
         assert redact_credentials(value) is value
+
+    @pytest.mark.parametrize(
+        "value", ["https://user:pass@[bad", "https://user@", "https://u:p@h:notaport"]
+    )
+    def test_an_unparseable_url_that_could_carry_credentials_is_not_shown(
+        self, value: str
+    ) -> None:
+        """Unparseable means the credentials cannot be found and removed.
+
+        ``https://user:secret@[bad`` raises in yarl, and the refusal that
+        reports it runs BEFORE the credential rule -- so echoing the value
+        would put the password in a message ``connect()`` logs and re-wraps.
+        Nothing can be split off safely, so nothing is shown; the exception
+        yarl raised still says what was wrong with it.
+        """
+        assert redact_credentials(value) == "<unparseable url>"
+        assert "p@" not in redact_credentials(value)
+
+    @pytest.mark.parametrize(
+        "value", ["https://api.example.test:abc", "https://[abc", "https://:443"]
+    )
+    def test_an_unparseable_url_with_no_userinfo_is_still_shown(
+        self, value: str
+    ) -> None:
+        """Userinfo cannot exist without an ``@``, so there is nothing to hide.
+
+        A typo'd port is the common failure here, and hiding the value
+        would leave the author with a refusal that does not say which URL.
+        """
+        assert redact_credentials(value) == value

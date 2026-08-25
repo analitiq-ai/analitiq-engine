@@ -49,6 +49,43 @@ class TestMediaTypeSelection:
         assert "application/xml" in problem
         assert JSON_CONTENT_TYPE in problem and FORM_CONTENT_TYPE in problem
 
+    @pytest.mark.parametrize(
+        "declared",
+        [
+            "application/json; charset=iso-8859-1",
+            "application/json; charset=utf-16",
+            'application/x-www-form-urlencoded; charset="latin-1"',
+        ],
+    )
+    def test_a_charset_the_encoder_does_not_emit_is_refused(
+        self, declared: str
+    ) -> None:
+        """The parameters are sent verbatim, so they must not be a lie.
+
+        Both encoders write UTF-8 -- orjson directly, urlencode as
+        percent-encoded UTF-8 bytes -- and nothing here transcodes. A
+        provider honouring a declared utf-16 would decode different bytes
+        than were sent.
+        """
+        problem = unsupported_media_type(declared)
+        assert problem is not None
+        assert "charset" in problem
+
+    @pytest.mark.parametrize(
+        "declared",
+        [
+            "application/json; charset=utf-8",
+            "application/json; charset=UTF-8",
+            'application/json; charset="utf-8"',
+            "application/x-www-form-urlencoded",
+        ],
+    )
+    def test_the_charset_the_encoder_does_emit_is_permitted(
+        self, declared: str
+    ) -> None:
+        """Case and quoting are the stdlib parser's problem, not a rule here."""
+        assert unsupported_media_type(declared) is None
+
 
 class TestJsonIsStillTheDefault:
     def test_no_declared_type_encodes_as_json(self) -> None:

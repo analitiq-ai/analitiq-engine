@@ -2224,17 +2224,19 @@ class TestApiBaseUrlBreaks:
         assert "declares it null" in report
 
     @pytest.mark.parametrize(
-        "declared",
+        ("declared", "quoted"),
         [
-            "https://user@",
-            "https://:443",
-            "https://api.example.test:abc",
-            "https://api.example.test:99999999",
-            "https://[abc",
+            # None of these parses, so none can be asked where its userinfo
+            # ends. Only the one that could HAVE userinfo is withheld.
+            ("https://user@", False),
+            ("https://:443", True),
+            ("https://api.example.test:abc", True),
+            ("https://api.example.test:99999999", True),
+            ("https://[abc", True),
         ],
     )
     def test_a_base_url_no_http_client_can_open_is_refused(
-        self, tmp_path: Path, declared: str
+        self, tmp_path: Path, declared: str, quoted: bool
     ) -> None:
         """Whether the string is a URL at all is yarl's answer, not ours.
 
@@ -2251,7 +2253,7 @@ class TestApiBaseUrlBreaks:
         )
         report = _report(check_read_transport_selection(target))
         assert "no usable base_url" in report
-        assert repr(declared) in report
+        assert (repr(declared) in report) is quoted
 
     def test_a_base_url_carrying_credentials_is_refused(self, tmp_path: Path) -> None:
         """Basic auth comes off EACH request's URL, so page two loses it.

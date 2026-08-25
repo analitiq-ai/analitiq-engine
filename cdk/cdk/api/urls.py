@@ -16,9 +16,12 @@ always one rule behind the client that actually sends the request.
 
 from __future__ import annotations
 
-from typing import Any
-
 from yarl import URL
+
+# Defined in the core transport module, not here: the base-url refusals
+# that must not log a password are core, and core cannot import this
+# package. Re-exported so the URL rules still read as one surface.
+from ..transport_factory import redact_credentials
 
 __all__ = [
     "ORIGIN_REFUSAL_MARKER",
@@ -33,24 +36,6 @@ __all__ = [
 #: matches the raise site's own words instead of a copied string that
 #: drifts.
 ORIGIN_REFUSAL_MARKER = "leaves the connection's origin"
-
-
-def redact_credentials(value: Any) -> Any:
-    """Return *value* with any URL userinfo removed, for putting in a message.
-
-    A base URL is quoted back to the author in several refusals, and one
-    carrying ``user:pass@`` puts the password in a log line -- including the
-    refusal that exists BECAUSE it carries one. Anything that is not a URL
-    string comes back untouched: a declaration is often an expression, and
-    a redactor is not a place to start interpreting those.
-    """
-    if not isinstance(value, str):
-        return value
-    try:
-        url = URL(value)
-    except ValueError:
-        return value
-    return str(url.with_user(None)) if url.user or url.password else value
 
 
 def join_url(base: str, path: str) -> str:

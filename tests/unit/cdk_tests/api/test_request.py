@@ -598,6 +598,51 @@ class TestNeverFillableScopeRefusals:
                 endpoint="/items",
             )
 
+    @pytest.mark.parametrize("wire_key", ["ref", "template", "literal", "function"])
+    def test_a_wire_key_named_after_a_marker_cannot_hide_its_siblings(
+        self, wire_key: str
+    ) -> None:
+        """The map's KEYS are wire names; only its values are expressions.
+
+        Scanning the whole map puts the map itself in a value position, so
+        a query parameter genuinely named ``ref`` reads as an expression
+        marker and the scan answers about that key alone -- never seeing
+        the ``api_key`` beside it. Request-time resolution then drops the
+        credential silently, on every request, which is the exact failure
+        this guard exists to prevent.
+        """
+        problem = request_block_problem(
+            {
+                "query": {
+                    wire_key: {"literal": "v"},
+                    "api_key": {"ref": "secrets.api_key"},
+                }
+            },
+            reserved_headers=frozenset(),
+            resolver=_resolver(),
+        )
+        assert problem is not None
+        assert "'secrets.api_key'" in problem
+
+    def test_a_param_named_after_a_marker_cannot_hide_another_default(self) -> None:
+        """Same shadowing, one map over: params are keyed by author names too."""
+        problem = request_block_problem(
+            {"query": {"k": {"from_param": "api_key"}}},
+            reserved_headers=frozenset(),
+            resolver=_resolver(),
+            declared_params={
+                "ref": {"in": "query", "type": "string", "required": False},
+                "api_key": {
+                    "in": "query",
+                    "type": "string",
+                    "required": True,
+                    "default": {"ref": "secrets.api_key"},
+                },
+            },
+        )
+        assert problem is not None
+        assert "'secrets.api_key'" in problem
+
     def test_a_runtime_key_typo_is_refused_not_prefix_matched(self) -> None:
         # The engine passes exactly connection_id and batch_size; a bare
         # `runtime.` prefix match would give `runtime.batchsize` the

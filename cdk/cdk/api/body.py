@@ -20,6 +20,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import date, datetime
 from decimal import Decimal
+from email.message import Message
 from typing import Any
 from urllib.parse import urlencode
 
@@ -45,6 +46,25 @@ FORM_CONTENT_TYPE = "application/x-www-form-urlencoded"
 SUPPORTED_CONTENT_TYPES = frozenset({JSON_CONTENT_TYPE, FORM_CONTENT_TYPE})
 
 
+#: The character encoding both encoders emit. ``orjson`` writes UTF-8
+#: directly and ``urlencode`` percent-encodes UTF-8 bytes, so this is not a
+#: preference -- it is what the engine produces.
+_ENCODED_CHARSET = "utf-8"
+
+
+def _parsed(content_type: str) -> Message:
+    """Parse a media type the way the stdlib does.
+
+    ``email.message.Message`` is the parser for this header: it lowercases,
+    strips whitespace, unquotes a parameter value and normalizes the
+    charset name. Splitting on ``;`` by hand gets the first of those and
+    silently misses the rest.
+    """
+    parsed = Message()
+    parsed["content-type"] = content_type
+    return parsed
+
+
 def media_type(content_type: str | None) -> str:
     """Return the media type *content_type* selects, without its parameters.
 
@@ -55,19 +75,39 @@ def media_type(content_type: str | None) -> str:
     """
     if content_type is None:
         return JSON_CONTENT_TYPE
-    return content_type.split(";", 1)[0].strip().lower()
+    return _parsed(content_type).get_content_type()
 
 
 def unsupported_media_type(content_type: str | None) -> str | None:
-    """Why the engine cannot encode a body as *content_type*, or ``None``."""
-    selected = media_type(content_type)
-    if selected in SUPPORTED_CONTENT_TYPES:
+    """Why the engine cannot encode a body as *content_type*, or ``None``.
+
+    Two things are judged, because the parameters are sent verbatim and a
+    provider is entitled to honour them. The media type has to be one there
+    is an encoder for; and a declared ``charset`` has to be the one that
+    encoder emits, because both write UTF-8 and nothing here transcodes.
+    ``application/json; charset=utf-16`` would otherwise ship UTF-8 bytes
+    under a header promising UTF-16, and a provider that believed the header
+    would decode a different payload.
+    """
+    if content_type is None:
         return None
-    return (
-        f"request.content_type {content_type!r} selects {selected!r}, which "
-        f"this engine cannot encode a body as. It encodes "
-        f"{', '.join(sorted(SUPPORTED_CONTENT_TYPES))}"
-    )
+    selected = media_type(content_type)
+    if selected not in SUPPORTED_CONTENT_TYPES:
+        return (
+            f"request.content_type {content_type!r} selects {selected!r}, "
+            f"which this engine cannot encode a body as. It encodes "
+            f"{', '.join(sorted(SUPPORTED_CONTENT_TYPES))}"
+        )
+    charset = _parsed(content_type).get_content_charset()
+    if charset is not None and charset != _ENCODED_CHARSET:
+        return (
+            f"request.content_type {content_type!r} declares charset "
+            f"{charset!r}, and the engine encodes every body as "
+            f"{_ENCODED_CHARSET}. The parameter is sent as declared, so a "
+            f"provider honouring it would decode different bytes than were "
+            f"sent. Declare {_ENCODED_CHARSET} or leave the charset off"
+        )
+    return None
 
 
 def _form_value(name: str, value: Any) -> str:

@@ -897,6 +897,34 @@ class HttpTransport:
     rate_limiter: RateLimiter | None = None
 
 
+def redact_credentials(value: Any) -> Any:
+    """Return *value* with any URL userinfo removed, for putting in a message.
+
+    A base URL is quoted back to the author in several refusals, and one
+    carrying ``user:pass@`` puts the password in a log line -- including the
+    refusal that fires BECAUSE it carries one, and every refusal that fires
+    BEFORE that one gets a chance to. Anything that is not a URL string
+    comes back untouched: a declaration is often an expression, and a
+    redactor is not a place to start interpreting those.
+    """
+    if not isinstance(value, str):
+        return value
+    try:
+        url = URL(value)
+    except ValueError:
+        # yarl will not parse it, so it cannot be asked where the userinfo
+        # ends -- and a malformed authority is exactly the shape that
+        # reaches the refusals below, before the credential rule runs.
+        #
+        # Userinfo cannot exist without an ``@``, which is the one fact
+        # needed to decide, and needs no grammar to check. Without one
+        # there is nothing to hide and the author gets to see the value
+        # that was wrong -- a typo'd port is the common case here. With
+        # one, nothing can be split off safely, so nothing is shown.
+        return "<unparseable url>" if "@" in value else value
+    return str(url.with_user(None)) if url.user or url.password else value
+
+
 def require_http_base_url(base_url: Any) -> str:
     """Return *base_url* as the origin the HTTP session can open, or raise.
 
@@ -917,18 +945,24 @@ def require_http_base_url(base_url: Any) -> str:
         raise TransportSpecError(
             "http transport `base_url` must resolve to a non-empty string"
         )
+    # Redacted once, and used by every refusal below. The credential rule is
+    # the last of them, so a URL carrying `user:pass@` that ALSO fails an
+    # earlier one -- a malformed authority, a query string -- would put the
+    # password in the message that reports it. `connect()` logs that message
+    # and re-wraps it.
+    shown = redact_credentials(base_url)
     try:
         parsed = URL(base_url)
         host = parsed.host
     except ValueError as exc:
         raise TransportSpecError(
             f"http transport `base_url` is not a URL an HTTP client can "
-            f"open: {base_url!r} ({exc})"
+            f"open: {shown!r} ({exc})"
         ) from exc
     if parsed.scheme not in ("http", "https") or not host:
         raise TransportSpecError(
             f"http transport `base_url` must be an absolute http(s) URL; "
-            f"got {base_url!r}"
+            f"got {shown!r}"
         )
     if parsed.query_string or parsed.fragment:
         # The endpoint path is appended to this string, so a query or
@@ -938,7 +972,7 @@ def require_http_base_url(base_url: Any) -> str:
         raise TransportSpecError(
             f"http transport `base_url` must carry no query or fragment -- "
             f"the endpoint path is appended to it, so one swallows every "
-            f"endpoint; got {base_url!r}"
+            f"endpoint; got {shown!r}"
         )
     if parsed.user or parsed.password:
         # aiohttp derives Basic auth from EACH request's URL, so credentials
