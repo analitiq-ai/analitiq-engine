@@ -26,7 +26,14 @@ from aiohttp_retry import ExponentialRetry, RetryClient
 
 from ..declarations import ErrorMap
 from ..rate_limiter import RateLimiter
-from .request import JSON_CONTENT_TYPE
+from .body import (
+    FORM_CONTENT_TYPE,
+    JSON_CONTENT_TYPE,
+    encode_form,
+    media_type,
+    unsupported_media_type,
+)
+from .exceptions import RequestSpecError
 from .verdicts import classify_exception, classify_status
 
 if TYPE_CHECKING:
@@ -61,6 +68,11 @@ class SignedRequest:
     params: dict[str, Any] = field(default_factory=dict)
     headers: dict[str, str] = field(default_factory=dict)
     body: bytes | None = None
+    #: The media type ``body`` was encoded as, sent as ``Content-Type``.
+    #: ``None`` means the endpoint declared none, so the body is JSON.
+    #: Carried beside the bytes rather than pre-placed in ``headers`` so a
+    #: dialect signing this request sees the same header the wire does.
+    content_type: str | None = None
 
 
 class ApiResponseError(aiohttp.ClientResponseError):
@@ -111,14 +123,28 @@ def _orjson_default(obj: Any) -> Any:
     )
 
 
-def encode_body(data: Any) -> bytes:
+def encode_body(data: Any, content_type: str | None = None) -> bytes:
     """Serialise a request body to the bytes that go on the wire.
 
-    One serialiser for both roles. ``aiohttp``'s own ``json=`` argument
-    calls the stdlib encoder, which understands neither ``datetime`` nor
-    ``Decimal``; orjson handles the first natively and the hook above
-    renders the second losslessly.
+    One serialiser for both roles, selected by what the endpoint declared.
+    JSON when it declared nothing, which is what every endpoint took before
+    ``request.content_type`` existed.
+
+    ``aiohttp``'s own ``json=`` argument calls the stdlib encoder, which
+    understands neither ``datetime`` nor ``Decimal``; orjson handles the
+    first natively and the hook above renders the second losslessly.
+
+    An unsupported media type raises rather than falling back to JSON under
+    a header claiming otherwise -- though it should not reach here:
+    ``request_block_problem`` refuses one before anything is sent, which is
+    where a deterministic defect belongs. This is what makes that true
+    rather than assumed.
     """
+    problem = unsupported_media_type(content_type)
+    if problem is not None:
+        raise RequestSpecError(problem)
+    if media_type(content_type) == FORM_CONTENT_TYPE:
+        return encode_form(data)
     return orjson.dumps(data, default=_orjson_default)
 
 
@@ -216,12 +242,18 @@ class HttpSender:
         so a provider that answers 200 with an error envelope raises here
         rather than being read as an empty page.
         """
-        if request.body is not None and not any(
-            name.lower() == "content-type" for name in request.headers
-        ):
+        if request.body is not None:
+            # The media type the endpoint declared, or JSON when it declared
+            # none. Sent unconditionally rather than only when no header
+            # says otherwise: since contract 1.0.0rc23 no header map may
+            # name Content-Type (RULE-HTTP-003), so `content_type` is the
+            # only place it can come from and there is nothing to defer to.
             request = replace(
                 request,
-                headers={**request.headers, "Content-Type": JSON_CONTENT_TYPE},
+                headers={
+                    **request.headers,
+                    "Content-Type": request.content_type or JSON_CONTENT_TYPE,
+                },
             )
         request = self._dialect.sign_request(request)
         if self._rate_limiter:

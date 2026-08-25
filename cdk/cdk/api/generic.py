@@ -396,6 +396,7 @@ class GenericAPIConnector(BaseDestinationHandler):
             endpoint=request_block["path"],
             declared_query=request_block.get("query"),
             declared_headers=request_block.get("headers"),
+            content_type=request_block.get("content_type"),
         )
 
         strategy = build_read_strategy(
@@ -491,7 +492,12 @@ class GenericAPIConnector(BaseDestinationHandler):
                 url=request.url,
                 params=prepared.query,
                 headers=prepared.headers,
-                body=None if prepared.body is None else encode_body(prepared.body),
+                body=(
+                    None
+                    if prepared.body is None
+                    else encode_body(prepared.body, prepared.content_type)
+                ),
+                content_type=prepared.content_type,
             )
             try:
                 payload = await sender.send(signed, unwrap_page=True)
@@ -990,7 +996,8 @@ class GenericAPIConnector(BaseDestinationHandler):
                 url=join_url(self.base_url, plan.endpoint),
                 params=dict(plan.query),
                 headers={**plan.headers, **dict(extra_headers or {})},
-                body=encode_body(data),
+                body=encode_body(data, plan.content_type),
+                content_type=plan.content_type,
             ),
             unwrap_page=False,
         )

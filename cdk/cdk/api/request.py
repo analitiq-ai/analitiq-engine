@@ -50,11 +50,11 @@ from ..request_binding import (
 )
 from ..resolver import REQUEST_CONNECTION_SUBTREES, Resolver, scope_paths
 from ..transport_factory import require_wire_safe_header
+from .body import unsupported_media_type
 from .exceptions import RequestSpecError, request_spec_errors
 from .strategies import PRE_PAGE_VALUE_PATHS
 
 __all__ = [
-    "JSON_CONTENT_TYPE",
     "REQUEST_SUPPLIED_CONNECTION_ROOTS",
     "REQUEST_SUPPLIED_CONNECTION_SCOPES",
     "ParamTable",
@@ -71,20 +71,6 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
-
-#: The media type the engine sends for a JSON body. ``cdk.api.http`` adds it
-#: when a body is present and the endpoint declared none; ``write_plan``
-#: reads it to decide whether a declared Content-Type is the engine's own
-#: value or a conflicting one.
-JSON_CONTENT_TYPE = "application/json"
-
-#: Headers the ENGINE fills, whatever an endpoint declares. Content-Type is
-#: the media type it sends with every JSON body; Content-Length is computed
-#: from the encoded body, after any declared header map is built. Stated
-#: once: :func:`_header_map_problem` refuses an endpoint that declares one,
-#: and ``write_plan.reserved_header_names`` keeps the idempotency key off
-#: them -- the two cannot disagree about which names are already taken.
-ENGINE_OWNED_HEADERS = frozenset({"content-type", "content-length"})
 
 #: One ``{name}`` placeholder in a declared path.
 _PLACEHOLDER = re.compile(r"\{([^{}]+)\}")
@@ -106,6 +92,11 @@ class PreparedRequest:
     query: dict[str, Any] = field(default_factory=dict)
     headers: dict[str, str] = field(default_factory=dict)
     body: Any = None
+    #: ``request.content_type``, or ``None`` for the JSON the engine sends
+    #: when an endpoint declares none. It selects the encoding and is the
+    #: header sent with it -- the two cannot disagree because one field
+    #: decides both.
+    content_type: str | None = None
 
 
 @dataclass
@@ -386,6 +377,14 @@ def request_block_problem(
             f"delete one. Remove the key, or move the header off the "
             f"transport's defaults."
         )
+    # Judged here, before anything is sent, rather than where the body is
+    # encoded: the write encodes per record inside the send, where a refusal
+    # would surface as a failed batch instead of a refused schema. The media
+    # type is the same on every record, so it settles once, with the rest of
+    # the request block.
+    problem = unsupported_media_type(request_block.get("content_type"))
+    if problem is not None:
+        return problem
     problem = _secret_read_problem(request_block, declared_params, pagination, resolver)
     if problem is not None:
         return problem
@@ -538,17 +537,20 @@ def _header_map_problem(
     judging what goes out. A param declared ``in: header`` is named by one
     of these keys, and the key is what the provider sees.
 
-    Content-Type is the engine's own: it is permitted only where the author
-    declared exactly what the engine already sends, which makes the collision
-    a no-op rather than a conflict nobody can see. What counts is the value
-    that would reach the wire, not the spelling it was declared in -- the
-    contract lets a header value be a literal or an expression, so
-    ``{"literal": "application/json"}`` sends exactly what the plain string
-    does and has to be read the same way.
+    One rule is left here, and it is the only one a document cannot settle.
+    The engine-owned names went to the contract in 1.0.0rc23 --
+    ``Content-Length`` by RULE-HTTP-002 and ``Content-Type`` by
+    RULE-HTTP-003, both case-insensitive, in every block that names a
+    header: an endpoint's ``request.headers``, a transport's,
+    ``transport_defaults`` and an ``idempotency.name``. Four routes to one
+    wire, which is why they belong somewhere that sees all four at once
+    rather than here, where the engine closed them one review round at a
+    time. The media type is ``request.content_type`` now, and
+    :mod:`cdk.api.body` is what reads it.
 
-    Every other reserved name carries the connection's values (auth and
-    friends), and the request build never sees those values -- only their
-    names -- so an endpoint re-declaring one can only shadow it.
+    What is left carries the CONNECTION's values (auth and friends), and no
+    document can know them. The request build never sees those values --
+    only their names -- so an endpoint re-declaring one can only shadow it.
 
     A name is all THAT rule ever has, which is why its refusal speaks of
     what the transport declares rather than of what a particular connection
@@ -560,49 +562,8 @@ def _header_map_problem(
     """
     if not isinstance(declared, Mapping):
         return None
-    for name, value in declared.items():
+    for name in declared:
         lowered = str(name).lower()
-        if lowered == "content-type":
-            # The one engine-owned header an endpoint may restate, and only
-            # by declaring the value the engine already sends -- which makes
-            # the collision a no-op rather than a conflict nobody can see.
-            controlled = _controlled_binding(value, controlled_by)
-            if controlled is not None:
-                bound_param, owner = controlled
-                # The value judge below sees the pre-checkpoint table, where
-                # a loop-owned param is absent -- so without this a resumed
-                # incremental read would send the stored cursor as the media
-                # type, and fail only once a checkpoint exists. Anywhere
-                # inside the value, not just at its top: a `lookup` over a
-                # loop-owned param resolves to nothing before the first
-                # checkpoint too, and to its `safe` fallback after one.
-                return (
-                    f"request.headers binds {name!r} to the param "
-                    f"{bound_param!r}, which {owner} controls: its value is "
-                    f"the loop's continuation, never the media type the "
-                    f"engine owns."
-                )
-            sent = _header_value_sent(name, value, resolver, params)
-            if sent is None or sent.strip().lower() == JSON_CONTENT_TYPE:
-                continue
-            return (
-                f"request.headers declares {name!r} as {sent!r}, and the "
-                f"engine owns that header: it sends {JSON_CONTENT_TYPE!r} "
-                f"with every JSON body. Declare that exact value or remove "
-                f"the header."
-            )
-        if lowered in ENGINE_OWNED_HEADERS:
-            # Every other engine-owned header has no author spelling that is
-            # correct: Content-Length is computed from the encoded body,
-            # after this map is built, and aiohttp sends a declared one
-            # rather than recomputing -- so a stale value truncates the body
-            # the provider reads and corrupts the connection's framing.
-            return (
-                f"request.headers declares {name!r}, which the engine fills "
-                f"itself after the headers are built. A declared value is "
-                f"stale by construction and the client sends it rather than "
-                f"the computed one. Remove the header."
-            )
         if lowered in reserved_headers:
             return (
                 f"request.headers declares {name!r}, which the connection's "
@@ -644,54 +605,6 @@ def param_bindings(node: Any) -> Iterator[str]:
         return
     for child in node.values():
         yield from param_bindings(child)
-
-
-def _controlled_binding(
-    node: Any, controlled_by: Mapping[str, str]
-) -> tuple[str, str] | None:
-    """Find a ``{from_param}`` naming a loop-owned param, or ``None``."""
-    for name in param_bindings(node):
-        owner = controlled_by.get(name)
-        if owner is not None:
-            return name, owner
-    return None
-
-
-def _header_value_sent(
-    name: str, declared: Any, resolver: Resolver, params: Mapping[str, Any]
-) -> str | None:
-    """Return the value this header would carry, or ``None`` if nothing can say.
-
-    The build's own two steps, in the build's own order: bind
-    ``{from_param}`` against the params in flight, then resolve the bound
-    node. Resolving the raw declaration instead reads a binding node as an
-    expression and refuses a connector that works -- a ``lookup`` over a
-    ``{from_param}`` input is a correct Content-Type declaration, and the
-    raw node makes it "input must resolve to a scalar; got dict".
-
-    Binding first is also what lets the rule judge a plain
-    ``{"from_param": "ct"}``: its value is the param table's, and by the
-    time this runs the table is built. Only two things are left unjudged,
-    and neither is a spelling of the media type:
-
-    * a plain literal is already the value :func:`bind_query_and_headers`
-      stringifies onto the wire, so it needs no resolving;
-    * a bound node that resolves to nothing sends no header at all --
-      ``bind_request_values`` drops the key -- so there is nothing to judge
-      and nothing to refuse.
-
-    A malformed expression leaves as a :class:`RequestSpecError` naming the
-    header, the same way the request build reports it, rather than as
-    whichever builtin the resolver happened to raise.
-    """
-    if not isinstance(declared, Mapping):
-        return str(declared)
-    with request_spec_errors(f"request.headers.{name}"):
-        node = bind_param_refs(declared, params)
-        if not Resolver.is_expression_node(node):
-            return None
-        resolved = resolver.resolve_for_request(node)
-    return None if resolved is None else str(resolved)
 
 
 def _controlled_placeholder_problem(
@@ -839,6 +752,7 @@ class RequestBuilder:
         endpoint: str,
         declared_query: Mapping[str, Any] | None = None,
         declared_headers: Mapping[str, Any] | None = None,
+        content_type: str | None = None,
     ) -> None:
         self._table = table
         # Only the contract's POST read request declares a body; a GET read
@@ -848,6 +762,7 @@ class RequestBuilder:
         self._endpoint = endpoint
         self._declared_query = declared_query
         self._declared_headers = declared_headers
+        self._content_type = content_type
 
     def for_page(
         self, page_params: Mapping[str, Any], *, sends_declared_body: bool = True
@@ -890,7 +805,12 @@ class RequestBuilder:
             body = _require_body(
                 self._resolver.resolve_for_request(bound), self._endpoint
             )
-        return PreparedRequest(query=query, headers=headers, body=body)
+        return PreparedRequest(
+            query=query,
+            headers=headers,
+            body=body,
+            content_type=self._content_type,
+        )
 
 
 def build_write_body(

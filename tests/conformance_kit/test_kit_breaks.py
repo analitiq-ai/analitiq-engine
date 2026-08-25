@@ -3034,6 +3034,38 @@ class TestApiRequestBlockBreaks:
             ApiEndpointDoc.model_validate(document)
 
     @pytest.mark.parametrize(
+        "header", ["Content-Length", "content-type", "CONTENT-TYPE"]
+    )
+    def test_the_contract_owns_the_engine_filled_headers(self, header: str) -> None:
+        """Four routes to one wire, refused in one place rather than four.
+
+        The engine guarded an endpoint's ``request.headers`` and an
+        ``idempotency.name``, and was told about a transport's headers in a
+        later review round -- one route at a time, which is the argument for
+        the rule living where all four are visible at once. Since contract
+        1.0.0rc23 they are RULE-HTTP-002 and RULE-HTTP-003, and the engine's
+        copies are gone. The media type is declared by
+        ``request.content_type`` now, which :mod:`cdk.api.body` reads.
+        """
+        with pytest.raises(ValidationError, match="RULE-HTTP-00[23]"):
+            HttpTransport.model_validate(
+                {
+                    "transport_type": "http",
+                    "base_url": "https://api.example.test",
+                    "headers": {header: "0"},
+                }
+            )
+
+        document = json.loads(
+            (
+                API_REFERENCE_DIR / "definition" / "endpoints" / "widgets.json"
+            ).read_text()
+        )
+        document["operations"]["read"]["request"]["headers"] = {header: "0"}
+        with pytest.raises(ValidationError, match="RULE-HTTP-00[23]"):
+            ApiEndpointDoc.model_validate(document)
+
+    @pytest.mark.parametrize(
         ("label", "declared"),
         [
             ("two markers", {"ref": "secrets.a", "literal": "c"}),

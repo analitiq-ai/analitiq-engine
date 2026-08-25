@@ -190,13 +190,11 @@ class TestTheRequestTheContractDescribes:
         )
         assert session.calls[0]["headers"]["X-Tenant"] == "acme"
 
-    async def test_a_content_type_derived_from_a_param_reaches_the_wire(self) -> None:
-        # The engine-owned-header rule judges what a header WOULD send, and
-        # it has to work the value out the way the build does: bind the
-        # param, then resolve. Reading the raw declaration put the binding
-        # node in the function's input position and failed this read with
-        # "input must resolve to a scalar; got dict" -- against a connector
-        # that sends exactly the engine's own value.
+    async def test_a_header_derived_from_a_param_reaches_the_wire(self) -> None:
+        # A header value is bound then resolved, in that order. Resolving
+        # the raw declaration instead puts the binding node in the
+        # function's input position and fails the read with "input must
+        # resolve to a scalar; got dict" -- against a connector that works.
         session = FakeSession([FakeResponse(body=_rows(1))])
         await _read(
             session,
@@ -205,7 +203,7 @@ class TestTheRequestTheContractDescribes:
                     "method": "GET",
                     "path": "/items",
                     "headers": {
-                        "Content-Type": {
+                        "X-Format": {
                             "function": "lookup",
                             "input": {"from_param": "fmt"},
                             "map": {"json": "application/json"},
@@ -222,7 +220,7 @@ class TestTheRequestTheContractDescribes:
                 },
             ),
         )
-        assert session.calls[0]["headers"]["Content-Type"] == "application/json"
+        assert session.calls[0]["headers"]["X-Format"] == "application/json"
 
     async def test_a_stream_filter_naming_no_declared_param_is_refused(self) -> None:
         # The filter's value used to sit in the param table with nothing
@@ -1074,6 +1072,62 @@ class TestAPaginationValueKeepsItsJsonType:
         )
         await _read(session, document)
         assert session.calls[1]["data"] == b'{"after":12.5}'
+
+
+@pytest.mark.asyncio
+class TestTheDeclaredMediaType:
+    """``request.content_type`` selects the encoding AND the header sent."""
+
+    @staticmethod
+    def _document(**request_over: Any) -> dict[str, Any]:
+        return endpoint_document(
+            request={
+                "method": "POST",
+                "path": "/items",
+                "body": {"grant_type": {"literal": "client_credentials"}},
+                **request_over,
+            }
+        )
+
+    async def test_a_body_defaults_to_json(self) -> None:
+        session = FakeSession([FakeResponse(body=_rows(0))])
+        await _read(session, self._document())
+        assert session.calls[0]["data"] == b'{"grant_type":"client_credentials"}'
+        assert session.calls[0]["headers"]["Content-Type"] == "application/json"
+
+    async def test_a_form_endpoint_sends_form_bytes_under_its_own_header(self) -> None:
+        # The field exists because this is common for REST POST bodies, and
+        # before it the engine sent JSON regardless and the provider refused.
+        session = FakeSession([FakeResponse(body=_rows(0))])
+        await _read(
+            session,
+            self._document(content_type="application/x-www-form-urlencoded"),
+        )
+        assert session.calls[0]["data"] == b"grant_type=client_credentials"
+        assert (
+            session.calls[0]["headers"]["Content-Type"]
+            == "application/x-www-form-urlencoded"
+        )
+
+    async def test_declared_parameters_reach_the_wire_verbatim(self) -> None:
+        # The parameters describe the bytes, so they select nothing -- but
+        # what the author declared is what is sent.
+        session = FakeSession([FakeResponse(body=_rows(0))])
+        await _read(
+            session, self._document(content_type="application/json; charset=utf-8")
+        )
+        assert (
+            session.calls[0]["headers"]["Content-Type"]
+            == "application/json; charset=utf-8"
+        )
+
+    async def test_a_media_type_the_engine_cannot_encode_fails_before_sending(
+        self,
+    ) -> None:
+        session = FakeSession()
+        with pytest.raises(ReadError, match="cannot encode"):
+            await _read(session, self._document(content_type="application/xml"))
+        assert session.calls == []
 
 
 class TestBuildingTheAdapterTouchesNothingItWasGiven:

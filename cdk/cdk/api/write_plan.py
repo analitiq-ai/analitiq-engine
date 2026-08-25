@@ -26,7 +26,6 @@ from ..transport_factory import require_wire_safe_header_name
 from ..types import RetrySemantics, RetryVerdict, SchemaSpec
 from .exceptions import RequestSpecError
 from .request import (
-    ENGINE_OWNED_HEADERS,
     ParamTable,
     bind_query_and_headers,
     bind_request_values,
@@ -88,6 +87,9 @@ class StreamWritePlan:
     #: ``request.body``, or ``None`` when the endpoint declares no template
     #: and the record itself is the body.
     body_spec: Any | None = None
+    #: ``request.content_type``. Selects the body encoding and is sent as
+    #: the header; ``None`` means the endpoint declared none, so JSON.
+    content_type: str | None = None
     #: Where the engine-owned per-record idempotency key lands ("header" or
     #: "body") and the name it lands under. ``None`` means the endpoint
     #: declares no key. The VALUE is always engine-owned -- the author
@@ -149,15 +151,20 @@ def collect_input_field_names(mode_block: Mapping[str, Any]) -> set[str]:
 
 
 def reserved_header_names(session_header_names: Iterable[str]) -> frozenset[str]:
-    """Header names an endpoint may not declare: engine-owned, or the connection's own.
+    """Header names an endpoint may not declare: the CONNECTION's own.
 
     One set, read by both things that land in the same header map -- the
     endpoint's declared headers and the engine-owned idempotency key -- so
     the two cannot disagree on what is already taken.
+
+    The engine-owned names are no longer in it. ``Content-Length`` and
+    ``Content-Type`` are static facts about a document, and since contract
+    1.0.0rc23 it refuses them in every block that names a header
+    (RULE-HTTP-002 / RULE-HTTP-003) -- this one, an ``idempotency.name``,
+    included. What is left is what no document can know: the header names
+    THIS connection's transport resolved to something.
     """
-    return frozenset(
-        ENGINE_OWNED_HEADERS | {name.lower() for name in session_header_names}
-    )
+    return frozenset(name.lower() for name in session_header_names)
 
 
 def idempotency_config_problem(
@@ -359,6 +366,7 @@ def build_write_plan(
             method=request.get("method", "POST"),
             json_fields=collect_json_fields(mode_block),
             body_spec=request.get("body"),
+            content_type=request.get("content_type"),
             params=table.values,
             write_mode_key=mode_key,
         )

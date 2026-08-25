@@ -64,6 +64,7 @@ def _document(
     headers_remove: list[str] | None = None,
     query: dict[str, Any] | None = None,
     params: dict[str, Any] | None = None,
+    content_type: str | None = None,
     contract_valid: bool = True,
 ) -> dict[str, Any]:
     """Build a write document the api-endpoint contract accepts, then dump it."""
@@ -84,6 +85,8 @@ def _document(
         request["headers_remove"] = headers_remove
     if query is not None:
         request["query"] = query
+    if content_type is not None:
+        request["content_type"] = content_type
     block: dict[str, Any] = {
         "request": request,
         "input": {
@@ -235,18 +238,6 @@ class TestIdempotencyRefusals:
         )
         assert isinstance(outcome, str) and "collides" in outcome
 
-    def test_an_engine_owned_header_is_refused_by_the_shared_set(self) -> None:
-        # The key lands in the same header map an endpoint's own headers do,
-        # so it answers to the same engine-owned set: naming Content-Length
-        # here would send a record digest as the body length on every
-        # request, which is the framing corruption the endpoint-side rule
-        # already refuses.
-        doc = _document(idempotency={"in": "header", "name": "Content-Length"})
-        outcome = build_write_plan(
-            doc, _spec(), session_header_names=set(), resolver=_resolver()
-        )
-        assert isinstance(outcome, str) and "collides" in outcome
-
     def test_a_name_the_client_cannot_send_is_refused(self) -> None:
         # The key reaches the wire by a different route than the declared
         # header map, and the client judges it the same way.
@@ -309,6 +300,35 @@ class TestTheRequestTheStreamWillActuallySend:
     keyed on a record id POSTed to the literal ``/Contact/{id}``, and every
     declared header was dropped.
     """
+
+    def test_the_declared_media_type_reaches_the_plan(self) -> None:
+        # It selects the body encoding and is sent as the header; one field
+        # decides both, so the two cannot disagree.
+        doc = _document(content_type="application/x-www-form-urlencoded")
+        plan = build_write_plan(
+            doc, _spec(), session_header_names=set(), resolver=_resolver()
+        )
+        assert isinstance(plan, StreamWritePlan)
+        assert plan.content_type == "application/x-www-form-urlencoded"
+
+    def test_declaring_none_leaves_the_plan_on_json(self) -> None:
+        plan = build_write_plan(
+            _document(), _spec(), session_header_names=set(), resolver=_resolver()
+        )
+        assert isinstance(plan, StreamWritePlan)
+        assert plan.content_type is None
+
+    def test_a_media_type_the_engine_cannot_encode_refuses_the_schema(self) -> None:
+        # Refused at the handshake, not per record inside the send, where it
+        # would surface as a failed batch rather than a refused schema.
+        outcome = build_write_plan(
+            _document(content_type="application/xml"),
+            _spec(),
+            session_header_names=set(),
+            resolver=_resolver(),
+        )
+        assert isinstance(outcome, str)
+        assert "cannot encode" in outcome
 
     def test_a_path_placeholder_is_substituted_into_the_plans_endpoint(self) -> None:
         doc = _document(
@@ -547,60 +567,6 @@ class TestTheRequestTheStreamWillActuallySend:
         )
         assert isinstance(outcome, str)
         assert "headers_remove" in outcome
-
-    def test_a_declared_content_type_matching_what_the_engine_sends_is_permitted(
-        self,
-    ) -> None:
-        # The collision is a no-op: the sender skips its own injection when
-        # the request already carries a Content-Type.
-        doc = _document(headers={"Content-Type": "application/json"})
-        plan = build_write_plan(
-            doc, _spec(), session_header_names=set(), resolver=_resolver()
-        )
-        assert isinstance(plan, StreamWritePlan)
-        assert plan.headers == {"Content-Type": "application/json"}
-
-    def test_a_content_type_declared_as_an_expression_is_permitted(self) -> None:
-        # The contract lets a header value be a literal or an expression,
-        # and both spellings send the same media type. Judging the shape
-        # instead of the value refused this one and told the author to
-        # declare the value they had already declared.
-        doc = _document(headers={"Content-Type": {"literal": "application/json"}})
-        plan = build_write_plan(
-            doc, _spec(), session_header_names=set(), resolver=_resolver()
-        )
-        assert isinstance(plan, StreamWritePlan)
-        assert plan.headers == {"Content-Type": "application/json"}
-
-    def test_a_content_type_the_param_table_supplies_is_judged(self) -> None:
-        # The param table is built before the request block is judged, so
-        # this value is known here. Deferring it accepted the stream and
-        # then sent 'Content-Type: text/xml' with a JSON body -- refused by
-        # nobody, at any point.
-        doc = _document(
-            headers={"Content-Type": {"from_param": "ct"}},
-            params={
-                "ct": {
-                    "in": "header",
-                    "type": "string",
-                    "required": False,
-                    "default": {"literal": "text/xml"},
-                }
-            },
-        )
-        outcome = build_write_plan(
-            doc, _spec(), session_header_names=set(), resolver=_resolver()
-        )
-        assert isinstance(outcome, str)
-        assert "text/xml" in outcome
-
-    def test_a_conflicting_content_type_is_rejected(self) -> None:
-        doc = _document(headers={"Content-Type": "application/xml"})
-        outcome = build_write_plan(
-            doc, _spec(), session_header_names=set(), resolver=_resolver()
-        )
-        assert isinstance(outcome, str)
-        assert "application/json" in outcome
 
     def test_a_declared_header_the_connection_owns_is_rejected(self) -> None:
         # The request build never sees the connection's header values, only
