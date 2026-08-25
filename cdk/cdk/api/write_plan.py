@@ -355,7 +355,6 @@ def build_write_plan(
             request,
             reserved_headers=reserved,
             resolver=resolver,
-            params=table.values,
             controlled_by=table.controlled_by,
             declared_params=mode_block.get("params") or {},
         )

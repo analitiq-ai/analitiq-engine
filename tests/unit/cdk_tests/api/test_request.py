@@ -522,7 +522,6 @@ class TestNeverFillableScopeRefusals:
             {"query": {"key": {"from_param": "api_key"}}},
             reserved_headers=frozenset(),
             resolver=_resolver(),
-            params={},
             declared_params={
                 "api_key": {
                     "in": "query",
@@ -541,7 +540,6 @@ class TestNeverFillableScopeRefusals:
             {},
             reserved_headers=frozenset(),
             resolver=_resolver(),
-            params={},
             pagination={
                 "type": "offset",
                 "limit": {
@@ -570,7 +568,6 @@ class TestNeverFillableScopeRefusals:
                 {"body": {"ref": f"connection.{subtree}"}},
                 reserved_headers=frozenset(),
                 resolver=_resolver(),
-                params={},
             )
             is None
         )
@@ -589,7 +586,6 @@ class TestNeverFillableScopeRefusals:
                 {"query": {"q": {"ref": "connection.parameters"}}},
                 reserved_headers=frozenset(),
                 resolver=_resolver(),
-                params={},
             )
             is None
         )
@@ -610,7 +606,6 @@ class TestNeverFillableScopeRefusals:
             {"query": {"limit": {"ref": "runtime.batchsize"}}},
             reserved_headers=frozenset(),
             resolver=_resolver(),
-            params={},
         )
         assert problem is not None
         assert "'runtime.batchsize'" in problem
@@ -623,7 +618,6 @@ class TestNeverFillableScopeRefusals:
                 {"query": {"limit": {"ref": "runtime.batch_size"}}},
                 reserved_headers=frozenset(),
                 resolver=_resolver(batch_size=37),
-                params={},
             )
             is None
         )
@@ -635,7 +629,6 @@ class TestNeverFillableScopeRefusals:
             {"query": {"limit": {"ref": "runtime.batch_size"}}},
             reserved_headers=frozenset(),
             resolver=_resolver(),
-            params={},
         )
         assert problem is not None
         assert "'runtime.batch_size'" in problem
@@ -648,7 +641,6 @@ class TestNeverFillableScopeRefusals:
                 {"query": {"key": {"from_param": "api_key"}}},
                 reserved_headers=frozenset(),
                 resolver=_resolver(),
-                params={},
                 declared_params={
                     "api_key": {
                         "in": "query",
@@ -670,7 +662,6 @@ class TestRequestBlockRefusals:
             {"headers": {"Authorization": {"literal": "Bearer x"}}},
             reserved_headers=frozenset({"authorization"}),
             resolver=_resolver(),
-            params={},
         )
         assert problem is not None and "request.headers declares" in problem
 
@@ -684,7 +675,6 @@ class TestRequestBlockRefusals:
                 {"headers": {"X-Legacy-Auth": {"from_param": "Authorization"}}},
                 reserved_headers=frozenset({"authorization"}),
                 resolver=_resolver(),
-                params={},
             )
             is None
         )
@@ -697,7 +687,6 @@ class TestRequestBlockRefusals:
             {"headers": {"Authorization": {"from_param": "tok"}}},
             reserved_headers=frozenset({"authorization"}),
             resolver=_resolver(),
-            params={},
         )
         assert problem is not None and "Authorization" in problem
 
@@ -710,7 +699,6 @@ class TestRequestBlockRefusals:
                 },
                 reserved_headers=frozenset(),
                 resolver=_resolver(),
-                params={},
             )
             is None
         )
@@ -731,7 +719,6 @@ class TestRequestBlockRefusals:
             },
             reserved_headers=frozenset(),
             resolver=_resolver(),
-            params={},
             controlled_by={"since": loop},
         )
         assert problem is not None

@@ -289,7 +289,6 @@ def _compile_read(
         request_block,
         reserved_headers=_transport_header_names(target),
         resolver=resolver,
-        params=table.values,
         controlled_by=table.controlled_by,
         declared_params=declared_params,
         pagination=read.get("pagination"),

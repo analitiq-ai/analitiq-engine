@@ -46,7 +46,7 @@ SUPPORTED_CONTENT_TYPES = frozenset({JSON_CONTENT_TYPE, FORM_CONTENT_TYPE})
 
 
 def media_type(content_type: str | None) -> str:
-    """The media type *content_type* selects, without its parameters.
+    """Return the media type *content_type* selects, without its parameters.
 
     ``application/json; charset=utf-8`` selects the same encoder as
     ``application/json``: the parameters describe the bytes, not which

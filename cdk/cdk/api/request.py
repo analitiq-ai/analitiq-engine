@@ -346,7 +346,6 @@ def request_block_problem(
     *,
     reserved_headers: frozenset[str] | set[str],
     resolver: Resolver,
-    params: Mapping[str, Any],
     controlled_by: Mapping[str, str] = MappingProxyType({}),
     declared_params: Mapping[str, Any] = MappingProxyType({}),
     pagination: Mapping[str, Any] | None = None,
@@ -357,11 +356,9 @@ def request_block_problem(
     the values: a loop-owned param HAS no value here, which is exactly what
     :func:`_controlled_placeholder_problem` judges.
 
-    ``params`` and ``resolver`` are what the request build itself uses, in
-    the order it uses them -- bind, then resolve -- so the header rule below
-    judges the value that would go out rather than the spelling it was
-    declared in. Both roles call this after their param table is built, so
-    the values are the run's own.
+    ``resolver`` is the one the request build itself resolves through, so
+    the never-fillable walk judges what this phase actually supplies rather
+    than a restatement of it.
 
     ``declared_params`` and ``pagination`` are the operation's other
     expression carriers: a param ``default`` or a pagination value reading
@@ -389,11 +386,7 @@ def request_block_problem(
     if problem is not None:
         return problem
     problem = _header_map_problem(
-        request_block.get("headers"),
-        reserved_headers=reserved_headers,
-        resolver=resolver,
-        params=params,
-        controlled_by=controlled_by,
+        request_block.get("headers"), reserved_headers=reserved_headers
     )
     if problem is not None:
         return problem
@@ -523,12 +516,7 @@ def _secret_read_problem(
 
 
 def _header_map_problem(
-    declared: Any,
-    *,
-    reserved_headers: frozenset[str] | set[str],
-    resolver: Resolver,
-    params: Mapping[str, Any],
-    controlled_by: Mapping[str, str] = MappingProxyType({}),
+    declared: Any, *, reserved_headers: frozenset[str] | set[str]
 ) -> str | None:
     """Why the headers this request sends may not go out, or ``None``.
 

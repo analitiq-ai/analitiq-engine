@@ -348,7 +348,6 @@ class GenericAPIConnector(BaseDestinationHandler):
                 request_block,
                 reserved_headers=reserved_header_names(self._session_header_names),
                 resolver=resolver,
-                params=table.values,
                 controlled_by=table.controlled_by,
                 declared_params=read.get("params") or {},
                 pagination=read.get("pagination"),
