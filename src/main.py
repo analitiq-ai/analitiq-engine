@@ -219,6 +219,12 @@ async def run_destination_mode() -> None:
     endpoint_refs: dict[str, dict[str, Any]] = {}
     stream_endpoints: dict[str, dict[str, Any]] = {}
     stream_conflict_keys: dict[str, list[str]] = {}
+    #: stream_id -> the write mode this stream selected. The bootstrap
+    #: resolves only that mode's transport: an endpoint offering insert and
+    #: upsert through different transports would otherwise ship the unused
+    #: mode's credentials to the worker, and fail the run outright when
+    #: that mode's transport needs one this connection does not carry.
+    stream_write_modes: dict[str, str] = {}
     for stream in stream_configs:
         for dest in stream.destinations:
             if dest.connection_ref != dest_connection_id:
@@ -237,6 +243,7 @@ async def run_destination_mode() -> None:
                     f"Stream {stream_id!r} destination has unknown write.mode "
                     f"{mode_value!r}; expected one of {[m.value for m in WriteMode]}"
                 ) from e
+            stream_write_modes[stream_id] = str(mode_value)
             stream_endpoints[stream_id] = dump_endpoint_document(dest.endpoint_document)
             stream_conflict_keys[stream_id] = list(
                 dest.write.get("conflict_keys") or []
@@ -262,6 +269,7 @@ async def run_destination_mode() -> None:
     handler.set_endpoint_refs(endpoint_refs)
     handler.set_stream_endpoints(stream_endpoints)
     handler.set_stream_conflict_keys(stream_conflict_keys)
+    handler.set_stream_write_modes(stream_write_modes)
     await handler.connect(runtime)
 
     server = DestinationGRPCServer(handler, port=grpc_port)

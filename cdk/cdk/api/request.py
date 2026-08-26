@@ -399,16 +399,20 @@ def substitute_path(path: str, values: Mapping[str, Any], *, endpoint: str) -> s
 ROLE_OPERATIONS = {"source": ("read",), "destination": ("write",)}
 
 
-def endpoint_transport_refs(document: Any, *, role: str) -> set[str]:
-    """Name every transport *role*'s operations in *document* dispatch through.
+def endpoint_transport_refs(
+    document: Any, *, role: str, write_modes: Iterable[str] | None = None
+) -> set[str]:
+    """Name every transport this run's operations in *document* dispatch through.
 
-    The read's for a source, every write mode's for a destination. Scoped
-    to the role because the transports named here are the ones whose
-    specs -- credentials resolved into them -- travel to that worker, and
-    whose origins widen what its requests may reach. A source given the
-    write side's transports is handed secrets it never sends and an
-    allowlist wider than its own requests, and fails at bootstrap if one
-    of them needs a credential this run does not carry.
+    The read's for a source, and for a destination the write modes in
+    *write_modes* -- the modes its streams actually selected -- or every
+    declared mode when the caller cannot say. Scoped, because the
+    transports named here are the ones whose specs (credentials resolved
+    into them) travel to that worker and whose origins widen what its
+    requests may reach. A worker given an operation it never executes is
+    handed secrets it never sends and an allowlist wider than its own
+    requests, and the bootstrap fails outright if that operation's
+    transport needs a credential this run does not carry.
 
     Read twice from two sides of the process boundary and answered here
     once: the trusted shell asks so it can resolve those transports while
@@ -430,13 +434,12 @@ def endpoint_transport_refs(document: Any, *, role: str) -> set[str]:
     blocks: list[Any] = []
     for name in ROLE_OPERATIONS.get(role, ()):
         block = operations.get(name)
-        # ``write`` is a map of modes, ``read`` a block: a role's entry is
-        # whichever the contract puts under that name.
-        blocks.extend(
-            block.values()
-            if name == "write" and isinstance(block, Mapping)
-            else [block]
-        )
+        if name != "write":
+            # ``read`` is one block; ``write`` is a map of modes.
+            blocks.append(block)
+        elif isinstance(block, Mapping):
+            selected = list(write_modes) if write_modes is not None else list(block)
+            blocks.extend(block.get(mode) for mode in selected)
     refs: set[str] = set()
     for block in blocks:
         if not isinstance(block, Mapping):

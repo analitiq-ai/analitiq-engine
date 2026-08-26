@@ -50,6 +50,7 @@ async def build_bootstrap(
     endpoint_refs: dict[str, Any] | None = None,
     stream_endpoints: dict[str, Any] | None = None,
     stream_conflict_keys: dict[str, list[str]] | None = None,
+    stream_write_modes: dict[str, str] | None = None,
     source_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve *runtime* and assemble the worker bootstrap for *role*.
@@ -64,18 +65,23 @@ async def build_bootstrap(
     this payload can never be opened there -- and the shell is the last
     side that can resolve one.
 
-    Scoped to *role*, because a resolved spec carries the credentials
-    resolved into it and its origin widens what the worker may reach. A
-    source worker handed the write side's transports would be given
-    secrets it never sends, and would fail here if one of them needed a
-    credential this run does not carry.
+    Scoped to *role* and, for a destination, to the write mode each
+    stream selected: a resolved spec carries the credentials resolved into
+    it and its origin widens what the worker may reach. A worker handed an
+    operation it never executes is given secrets it never sends, and fails
+    here if that operation's transport needs a credential this run does
+    not carry.
     """
-    documents = [*(stream_endpoints or {}).values()]
-    if source_config:
-        documents.append(source_config.get("endpoint_document"))
     transport_refs: set[str] = set()
-    for document in documents:
-        transport_refs |= endpoint_transport_refs(document, role=role)
+    for stream_id, document in (stream_endpoints or {}).items():
+        mode = (stream_write_modes or {}).get(stream_id)
+        transport_refs |= endpoint_transport_refs(
+            document, role=role, write_modes=[mode] if mode else None
+        )
+    if source_config:
+        transport_refs |= endpoint_transport_refs(
+            source_config.get("endpoint_document"), role=role
+        )
     connection_payload = await runtime.resolve_spec(transport_refs=transport_refs)
     return {
         "role": role,

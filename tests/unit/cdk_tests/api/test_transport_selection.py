@@ -338,6 +338,52 @@ class TestHeadersAreJudgedAgainstTheTransportInUse:
         assert files.calls[0]["headers"]["Authorization"] == "Bearer attacker"
 
 
+class TestHeadersMustBeSafeOnEveryTransportAPageMayUse:
+    """A read's header map is bound once and sent on every page.
+
+    A followed link can move a page onto another transport, so a name that
+    is free on the opening transport and owned by the one a link lands on
+    would silently override that transport's credential at the second
+    origin.
+    """
+
+    @staticmethod
+    def _document(*, paginated: bool) -> dict[str, Any]:
+        pagination = (
+            {"type": "link", "link": {"next_url": {"ref": "response.body.links.next"}}}
+            if paginated
+            else None
+        )
+        return endpoint_document(
+            request={
+                "method": "GET",
+                "path": "/items",
+                "headers": {"X-Files-Key": {"literal": "endpoint"}},
+            },
+            pagination=pagination,
+        )
+
+    async def test_a_link_read_may_not_shadow_a_continuation_transports_header(
+        self,
+    ) -> None:
+        default, files = FakeSession([]), FakeSession([])
+        files.headers["X-Files-Key"] = "connection"
+        runtime = runtime_with(default, transports={"files": (files, FILES_URL)})
+
+        with pytest.raises(ReadError, match="request.headers declares"):
+            await _read(runtime, self._document(paginated=True))
+
+    async def test_a_read_that_cannot_follow_links_keeps_the_header(self) -> None:
+        """Its pages never leave the transport it opened, so nothing collides."""
+        default, files = FakeSession([_page()]), FakeSession([])
+        files.headers["X-Files-Key"] = "connection"
+        runtime = runtime_with(default, transports={"files": (files, FILES_URL)})
+
+        await _read(runtime, self._document(paginated=False))
+
+        assert default.calls[0]["headers"]["X-Files-Key"] == "endpoint"
+
+
 class TestOpeningATransportIsSerialised:
     async def test_concurrent_first_use_opens_one_sender_and_one_session(
         self,

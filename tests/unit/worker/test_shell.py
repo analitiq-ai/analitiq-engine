@@ -162,6 +162,43 @@ class TestBuildBootstrap:
         )
         assert refs == {"files"}
 
+    async def test_a_destination_resolves_only_the_mode_its_stream_selected(
+        self, tmp_path
+    ):
+        """An unused mode's transport is credentials the worker never sends."""
+        document = {
+            "operations": {
+                "write": {
+                    "insert": {"request": {"transport_ref": "bulk"}},
+                    "upsert": {"request": {"transport_ref": "single"}},
+                }
+            }
+        }
+        refs = await self._refs_for(
+            tmp_path,
+            "destination",
+            stream_endpoints={"items": document},
+            stream_write_modes={"items": "upsert"},
+        )
+        assert refs == {"single"}
+
+    async def test_a_destination_told_no_mode_resolves_every_declared_one(
+        self, tmp_path
+    ):
+        """Nothing said which, so nothing may be left unopenable."""
+        document = {
+            "operations": {
+                "write": {
+                    "insert": {"request": {"transport_ref": "bulk"}},
+                    "upsert": {"request": {"transport_ref": "single"}},
+                }
+            }
+        }
+        refs = await self._refs_for(
+            tmp_path, "destination", stream_endpoints={"items": document}
+        )
+        assert refs == {"bulk", "single"}
+
     async def test_a_role_resolves_only_the_transports_its_own_side_dispatches(
         self, tmp_path
     ):
