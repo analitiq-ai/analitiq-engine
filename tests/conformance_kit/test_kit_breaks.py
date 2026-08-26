@@ -40,7 +40,7 @@ from cdk.conformance import (
 )
 from cdk.conformance import target as target_module
 from cdk.conformance import violation_report
-from cdk.conformance.api_surface import api_origins
+from cdk.conformance.api_surface import api_base_url
 from cdk.conformance.target import (
     ConformanceSetupError,
     ConformanceTarget,
@@ -1617,10 +1617,11 @@ class TestApiReadPathBreaks:
         document.write_text(json.dumps(parsed))
         target = load_target(root)
 
-        # The read that names 'files' is armed with it; a sibling that
-        # names nothing is not, because its own run would not resolve it.
-        assert "https://files.example.invalid" in api_origins(target, "files")
-        assert "https://files.example.invalid" not in api_origins(target)
+        # The read that names 'files' compiles against it; a sibling that
+        # names nothing compiles against the default, so the guard each
+        # one arms is its own transport's.
+        assert api_base_url(target, "files") == "https://files.example.invalid"
+        assert api_base_url(target) != "https://files.example.invalid"
 
     def test_a_read_naming_the_default_transport_is_not_a_finding(
         self, tmp_path: Path
@@ -1963,8 +1964,8 @@ class TestApiRefusalDrivesAreArmed:
     _broken = staticmethod(TestApiReadPathBreaks._broken)
 
     @staticmethod
-    def _following_link(current: str, target: str, *, origins: frozenset[str]) -> str:
-        """``follow_url`` with the declared-origin refusal taken out."""
+    def _following_link(current: str, target: str, *, origin: str) -> str:
+        """``follow_url`` with the transport-origin refusal taken out."""
         return urljoin(current, target)
 
     @pytest.mark.parametrize(

@@ -16,8 +16,6 @@ always one rule behind the client that actually sends the request.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-
 from yarl import URL
 
 # Defined in the core transport module, not here: the base-url refusals
@@ -27,7 +25,6 @@ from ..transport_factory import redact_credentials
 
 __all__ = [
     "ORIGIN_REFUSAL_MARKER",
-    "declared_origins",
     "follow_url",
     "join_url",
     "origin_of",
@@ -68,27 +65,14 @@ def origin_of(url: str) -> str:
     default port.
 
     One spelling of the reduction, and public because more than the guard
-    needs it: a followed link is dispatched through the transport whose
-    origin it lands on, so the set the guard is built from, the URL it is
-    probed with, and the map that selects a transport all reduce the same
-    way. A set built one way and probed another is a guard that answers on
-    spelling.
+    needs it: a transport reduces its base URL this way when it is opened,
+    and the guard reduces each URL it judges. Reducing one of them
+    differently is a guard that answers on spelling.
     """
     return str(URL(url).origin())
 
 
-def declared_origins(base_urls: Iterable[str]) -> frozenset[str]:
-    """Reduce the transports' base URLs to the origins they permit.
-
-    Normalized through :meth:`yarl.URL.origin`, the same normalization
-    :func:`same_origin` compares by, so membership is decided on what a
-    reader of the wire sees rather than on how a base URL happened to be
-    spelled.
-    """
-    return frozenset(origin_of(base) for base in base_urls if base)
-
-
-def require_declared_origin(url: str, *, origins: frozenset[str]) -> None:
+def require_declared_origin(url: str, *, origin: str) -> None:
     """Refuse a URL that lands off the origin of the transport in use.
 
     The one containment rule the api path applies, asked in both roles and
@@ -108,18 +92,14 @@ def require_declared_origin(url: str, *, origins: frozenset[str]) -> None:
     correct answer: those headers are the endpoint's, bound once, and they
     belong to the origin they were written for.
 
-    ``origins`` is a set because the guard is armed by a caller that knows
-    which transport is in use, and the reduction to origins is this
-    module's; today every caller arms it with one.
-
     A correctness guard, deliberately not a security boundary: what bounds
     authored connector code is the worker's egress policy, the secrets
     model and registry admission, none of which this replaces.
     """
-    if origin_of(url) in origins:
+    if origin_of(url) == origin_of(origin):
         return
     raise ValueError(
-        f"{url!r} {ORIGIN_REFUSAL_MARKER} {sorted(origins)}. The session "
+        f"{url!r} {ORIGIN_REFUSAL_MARKER} {origin_of(origin)}. The session "
         f"sending this request carries that transport's credentials and "
         f"the endpoint's headers were declared for that host, so there is "
         f"nothing correct to send here. Give the operation that reads this "
@@ -128,7 +108,7 @@ def require_declared_origin(url: str, *, origins: frozenset[str]) -> None:
     )
 
 
-def follow_url(current: str, target: str, *, origins: frozenset[str]) -> str:
+def follow_url(current: str, target: str, *, origin: str) -> str:
     """Resolve a provider-supplied next-page URL against the page it came from.
 
     ``URL.join`` is RFC 3986 resolution, the same one the client applies:
@@ -153,5 +133,5 @@ def follow_url(current: str, target: str, *, origins: frozenset[str]) -> str:
         )
     link = URL(target)
     resolved = str(URL(current).join(link))
-    require_declared_origin(resolved, origins=origins)
+    require_declared_origin(resolved, origin=origin)
     return target if link.scheme else resolved

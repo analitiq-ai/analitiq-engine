@@ -26,7 +26,7 @@ from typing import Any
 
 from cdk.api.exceptions import RequestSpecError, request_spec_errors
 from cdk.api.request import request_supplies
-from cdk.api.urls import declared_origins, redact_credentials
+from cdk.api.urls import redact_credentials
 from cdk.connection_runtime import (
     MATERIALIZATION_CONNECTION_SCALARS,
     MATERIALIZATION_CONNECTION_SUBTREES,
@@ -48,7 +48,6 @@ from .violations import Violation
 
 __all__ = [
     "api_base_url",
-    "api_origins",
     "check_api_has_reads",
     "STAND_IN_ORIGIN",
     "check_read_transport_selection",
@@ -329,22 +328,6 @@ def dispatch_transport_refs(target: ConformanceTarget) -> list[str]:
         if isinstance(ref, str) and ref in transports and ref not in refs:
             refs.append(ref)
     return refs
-
-
-def api_origins(
-    target: ConformanceTarget, transport_ref: str | None = None
-) -> frozenset[str]:
-    """Return the origins ONE read's containment guard is armed with.
-
-    The origin of the transport that read dispatches through, and nothing
-    else: every page of a read goes out on that transport, so a link off
-    its origin is one the engine refuses. Arming the kit with any other
-    transport's origin certifies a link production rejects.
-
-    A transport whose base URL a definition-only run cannot settle
-    contributes the stand-in the read checks compile against.
-    """
-    return declared_origins([api_base_url(target, transport_ref) or STAND_IN_ORIGIN])
 
 
 def api_base_url(

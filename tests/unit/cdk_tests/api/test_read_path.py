@@ -17,7 +17,6 @@ from cdk.api import GenericAPIConnector
 from cdk.api.page_loop import PaginationStrategy
 from cdk.api.read_setup import build_read_strategy
 from cdk.api.request import ParamTable
-from cdk.api.urls import declared_origins
 from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.exceptions import ReadError, TransientReadError
 from cdk.resolver import ResolutionContext, Resolver
@@ -1155,7 +1154,7 @@ class TestBuildingTheAdapterTouchesNothingItWasGiven:
                 functions=DEFAULT_FUNCTIONS,
             ),
             url=f"{BASE_URL}/items",
-            origins=declared_origins([BASE_URL]),
+            origin=BASE_URL,
             batch_size=100,
         )
 

@@ -80,7 +80,7 @@ from cdk.api.request import (
 )
 from cdk.api.response_schema import records_items_schema, resolve_field_arrow_type
 from cdk.api.strategies import KEYSET_REFUSAL_MARKER
-from cdk.api.urls import ORIGIN_REFUSAL_MARKER, declared_origins, join_url
+from cdk.api.urls import ORIGIN_REFUSAL_MARKER, join_url, origin_of
 from cdk.api.write_plan import reserved_header_names
 from cdk.exceptions import ReadError
 from cdk.resolver import Resolver, scope_paths
@@ -90,7 +90,6 @@ from cdk.type_map import TypeMapper
 from .api_surface import (
     STAND_IN_ORIGIN,
     api_base_url,
-    api_origins,
     definition_resolver,
     fillable_at_request_time,
     read_operations,
@@ -243,7 +242,6 @@ class _ReadProbe:
     pagination: dict[str, Any] | None
     url: str
     origin: str
-    origins: frozenset[str]
     table: ParamTable
     resolver: Resolver
     first: PageRequest
@@ -256,7 +254,7 @@ class _ReadProbe:
             table=self.table,
             resolver=self.resolver,
             url=self.url,
-            origins=self.origins,
+            origin=self.origin,
             batch_size=_PROBE_BATCH_SIZE,
         )
 
@@ -323,7 +321,6 @@ def _compile_read(
         pagination=pagination if isinstance(pagination, dict) else None,
         url=join_url(origin, path),
         origin=origin,
-        origins=api_origins(target, request_block.get("transport_ref")),
         table=table,
         resolver=resolver,
         first=PageRequest(""),
@@ -424,11 +421,11 @@ def _declared_header_names(
     """Name the headers one transport of this connector declares.
 
     The kit's answer to the question the engine answers from a
-    materialized connection (``ConnectionRuntime.transport_header_names``);
-    WHICH transports a given read must answer to is
-    :func:`~cdk.api.request.reserved_names_for_read`'s, so the two sides
-    cannot come to disagree about the rule while differing about where the
-    names come from.
+    materialized connection (``ConnectionRuntime.transport_header_names``).
+    WHICH transport a read answers to is not a question either side
+    decides: every page of a read goes out on the one its
+    ``request.transport_ref`` names, so both look up that one and nothing
+    else.
 
     The engine reserves the names its session carries, which is what the
     transport declares once each value has resolved: a header resolving to
@@ -1112,8 +1109,8 @@ def _origin_violations(probe: _ReadProbe) -> list[Violation]:
     declaration is. What is asserted is the invariant rather than the
     mechanism: handed a next link on another host, the traversal either
     refuses it or answers a URL still on the origin of the transport the
-    read dispatches through -- ``cdk.api.urls.declared_origins`` being the
-    judge, the same reduction ``follow_url`` compares by. A declaration
+    read dispatches through -- ``cdk.api.urls.origin_of`` being the judge,
+    the same reduction ``follow_url`` compares by. A declaration
     that writes the URL around the
     provider's value (``{"template": "/v1/events?after=${...}"}``) lands in
     the second arm: the result is relative, resolves against the page it
@@ -1128,7 +1125,7 @@ def _origin_violations(probe: _ReadProbe) -> list[Violation]:
     expected = (
         f"a next link on a host no transport declares must be refused: the "
         f"session sends the connection's headers, credentials included, on "
-        f"every request, and {sorted(probe.origins)} are the only origins "
+        f"every request, and {origin_of(probe.origin)} is the only origin "
         f"they belong to"
     )
     try:
@@ -1150,13 +1147,13 @@ def _origin_violations(probe: _ReadProbe) -> list[Violation]:
         # request is already reported by the advance drive; saying it twice
         # buries the message that says what to change.
         return []
-    if declared_origins([following.url]) <= probe.origins:
+    if origin_of(following.url) == origin_of(probe.origin):
         return []
     return [
         Violation(
             ADVANCE_CHECK,
             f"endpoint {probe.label!r}: advancing answered {following.url!r}, "
-            f"which is not on {sorted(probe.origins)}. {expected}.",
+            f"which is not on {origin_of(probe.origin)}. {expected}.",
         )
     ]
 

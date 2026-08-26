@@ -310,14 +310,6 @@ class TestTheRuntimeRefusesWhatItCannotOpen:
         with pytest.raises(TransportSpecError, match=r"this run resolved \['api'\]"):
             await runtime.http_transport("oauth")
 
-    async def test_the_base_urls_are_keyed_by_ref_so_a_link_can_select_one(
-        self,
-    ) -> None:
-        runtime = runtime_with(
-            FakeSession([]), transports={"files": (FakeSession([]), FILES_URL)}
-        )
-        assert runtime.http_transport_base_urls == {"api": BASE_URL, "files": FILES_URL}
-
     def test_header_names_are_read_per_transport_without_opening_one(self) -> None:
         """What an operation's own headers are judged against, and whose."""
         files = FakeSession([])

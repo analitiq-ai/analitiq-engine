@@ -658,28 +658,6 @@ class ConnectionRuntime:
             )
         return self._default_transport_ref
 
-    @property
-    def http_transport_base_urls(self) -> dict[str, str]:
-        """Each http transport this run may dispatch through, ref -> base URL.
-
-        What the api path builds its containment guard and its
-        origin-to-transport map from. Keyed by ref rather than flattened
-        to a set of URLs because a followed link is dispatched through the
-        transport whose origin it lands on, and a set cannot say which
-        transport that is.
-
-        Read from the resolved SPECS rather than from the opened
-        transports, so the set is whole from the first request rather than
-        growing as sessions open -- a guard that widens as the run goes is
-        a guard that answers differently depending on request order.
-        """
-        return {
-            ref: str(spec["base_url"])
-            for ref, spec in self._transport_specs.items()
-            if spec.get("transport_type") == HTTP_TRANSPORT_TYPE
-            and spec.get("base_url")
-        }
-
     def transport_header_names(self, transport_ref: str | None = None) -> set[str]:
         """Return the header names a transport sends, lowercased, without opening it.
 

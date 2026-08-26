@@ -118,7 +118,6 @@ class _Dispatch:
     dispatch cannot accidentally use the default's anything.
     """
 
-    ref: str
     sender: HttpSender
     base_url: str
     origin: str
@@ -264,7 +263,6 @@ class GenericAPIConnector(BaseDestinationHandler):
                 return dispatch
             transport = await runtime.http_transport(transport_ref)
             dispatch = _Dispatch(
-                ref=ref,
                 sender=HttpSender(
                     session=transport.session,
                     rate_limiter=transport.rate_limiter,
@@ -508,7 +506,7 @@ class GenericAPIConnector(BaseDestinationHandler):
             table=table,
             resolver=resolver,
             url=full_url,
-            origins=frozenset({dispatch.origin}),
+            origin=dispatch.origin,
             batch_size=batch_size,
         )
 
@@ -1122,7 +1120,7 @@ class GenericAPIConnector(BaseDestinationHandler):
         # provider's string, so this holds by construction today -- and
         # asserting it here is what keeps that true when the path stops
         # being the only thing that decides where a write lands.
-        require_declared_origin(url, origins=frozenset({dispatch.origin}))
+        require_declared_origin(url, origin=dispatch.origin)
         return await dispatch.sender.send(
             SignedRequest(
                 method=plan.method,
