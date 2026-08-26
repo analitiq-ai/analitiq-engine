@@ -29,6 +29,7 @@ import asyncio
 import copy
 import importlib
 import logging
+import re
 import ssl as _ssl
 import urllib.parse
 from collections.abc import Awaitable, Callable, Mapping
@@ -39,6 +40,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy import text as _sa_text
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from yarl import URL
 
 if TYPE_CHECKING:
     import aiohttp
@@ -895,17 +897,174 @@ class HttpTransport:
     rate_limiter: RateLimiter | None = None
 
 
+def redact_credentials(value: Any) -> Any:
+    """Return *value* with any URL userinfo removed, for putting in a message.
+
+    A base URL is quoted back to the author in several refusals, and one
+    carrying ``user:pass@`` puts the password in a log line -- including the
+    refusal that fires BECAUSE it carries one, and every refusal that fires
+    BEFORE that one gets a chance to. Anything that is not a URL string
+    comes back untouched: a declaration is often an expression, and a
+    redactor is not a place to start interpreting those.
+    """
+    if not isinstance(value, str):
+        return value
+    try:
+        url = URL(value)
+    except ValueError:
+        # yarl will not parse it, so it cannot be asked where the userinfo
+        # ends -- and a malformed authority is exactly the shape that
+        # reaches the refusals below, before the credential rule runs.
+        #
+        # Userinfo cannot exist without an ``@``, which is the one fact
+        # needed to decide, and needs no grammar to check. Without one
+        # there is nothing to hide and the author gets to see the value
+        # that was wrong -- a typo'd port is the common case here. With
+        # one, nothing can be split off safely, so nothing is shown.
+        return "<unparseable url>" if "@" in value else value
+    return str(url.with_user(None)) if url.user or url.password else value
+
+
+def require_http_base_url(base_url: Any) -> str:
+    """Return *base_url* as the origin the HTTP session can open, or raise.
+
+    Whether the string IS a URL is ``yarl``'s answer, not one this module
+    forms: it is what ``aiohttp`` parses every request URL with, so a value
+    it rejects is a value the connector could never send -- a missing host
+    behind userinfo (``https://user@``), an unclosed IPv6 literal, a port
+    that is not a number. Asking it here means this refusal cannot fall
+    behind the client, which is exactly what a hand-written authority check
+    kept doing.
+
+    Three rules are left, and each is the ENGINE's rather than URL syntax:
+    the scheme has to be one the HTTP transport opens; the endpoint path is
+    appended to this string, so it may carry no query or fragment; and no
+    credentials may ride in the authority.
+    """
+    if not isinstance(base_url, str) or not base_url:
+        raise TransportSpecError(
+            "http transport `base_url` must resolve to a non-empty string"
+        )
+    # Redacted once, and used by every refusal below. The credential rule is
+    # the last of them, so a URL carrying `user:pass@` that ALSO fails an
+    # earlier one -- a malformed authority, a query string -- would put the
+    # password in the message that reports it. `connect()` logs that message
+    # and re-wraps it.
+    shown = redact_credentials(base_url)
+    try:
+        parsed = URL(base_url)
+        host = parsed.host
+    except ValueError as exc:
+        raise TransportSpecError(
+            f"http transport `base_url` is not a URL an HTTP client can "
+            f"open: {shown!r} ({exc})"
+        ) from exc
+    if parsed.scheme not in ("http", "https") or not host:
+        raise TransportSpecError(
+            f"http transport `base_url` must be an absolute http(s) URL; "
+            f"got {shown!r}"
+        )
+    if parsed.query_string or parsed.fragment:
+        # The endpoint path is appended to this string, so a query or
+        # fragment swallows it: `https://h/v1?t=a` + `/items` addresses
+        # `/v1` with a `t=a/items` query, on every request the connector
+        # ever sends.
+        raise TransportSpecError(
+            f"http transport `base_url` must carry no query or fragment -- "
+            f"the endpoint path is appended to it, so one swallows every "
+            f"endpoint; got {shown!r}"
+        )
+    if parsed.user or parsed.password:
+        # aiohttp derives Basic auth from EACH request's URL, so credentials
+        # here authenticate the first request and nothing after it: a
+        # provider's absolute next link conventionally omits userinfo, and
+        # the origin guard cannot notice because `origin()` strips it --
+        # both sides compare equal while the credentials are gone. The read
+        # then 401s on page two, looking like a provider fault.
+        #
+        # The connector's own definition is the other half: a literal here
+        # is a credential in a public registry repo. `auth` and the
+        # transport's headers resolve one from `secret_refs` instead.
+        #
+        # The literal spelling is refused in the connector document itself
+        # (analitiq-ai/claude-code-plugins#175); this catches the spelling
+        # no document rule can, where an expression RESOLVED to one.
+        #
+        # Alone among the refusals here, this one does NOT quote the value:
+        # that is the password, and this message is going to a log.
+        raise TransportSpecError(
+            "http transport `base_url` must carry no credentials: aiohttp "
+            "sends them as Basic auth on the first request and on nothing "
+            "the provider links to afterwards, and a literal pair is a "
+            "secret in the connector definition. Move them to the "
+            "transport's `auth` block or its headers, resolved from "
+            "`secret_refs`"
+        )
+    return base_url.rstrip("/")
+
+
+#: Characters an HTTP header value may not carry: every control character
+#: except horizontal tab, which is legal whitespace in a field value. CR and
+#: LF end the header line on the wire (a request-splitting vector as well as
+#: a client refusal); the client rejects the rest of the range outright.
+_HEADER_FORBIDDEN_VALUE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
+
+#: An HTTP field name is a token (RFC 9110 §5.1): no separators, no spaces,
+#: no control characters. The client refuses anything else when it builds
+#: the request.
+_HEADER_NAME_TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+
+
+def require_wire_safe_header_name(name: str) -> str:
+    """Return *name* if an HTTP client can send a header under it, or raise.
+
+    The half of the rule a caller with no declared value can still apply:
+    the engine-owned idempotency key carries a per-record digest nobody
+    declares, but the name it lands under is the author's and reaches the
+    wire like any other.
+    """
+    # `fullmatch`, not `match`: Python's `$` also matches before a trailing
+    # newline, so `match` would pass "X-Foo\n" -- the request-splitting
+    # shape this refusal exists for.
+    if not _HEADER_NAME_TOKEN.fullmatch(name):
+        raise TransportSpecError(
+            f"header name {name!r} is not an HTTP token: a field name "
+            f"carries no spaces, separators or control characters, so no "
+            f"HTTP client will send this one."
+        )
+    return name
+
+
+def require_wire_safe_header(name: str, value: str) -> str:
+    """Return *value* if an HTTP client can send it under *name*, or raise.
+
+    Both halves are judged, because both reach the wire: a field name that
+    is not a token and a value carrying a line break are each refused by
+    the client when the request is built -- after connect() reported
+    success -- so every read on the connector fails with the transport
+    already certified. Refused here instead, where the message can still
+    name the header. Shared with the per-request builder and, through
+    :func:`resolve_http_spec`, with the conformance kit, so one rule covers
+    every route a header takes to the wire.
+    """
+    require_wire_safe_header_name(name)
+    found = _HEADER_FORBIDDEN_VALUE.search(value)
+    if found:
+        raise TransportSpecError(
+            f"header {name!r} carries {found.group()!r} in its value, which "
+            f"no HTTP client will send: a field value takes no control "
+            f"character but horizontal tab, and a line break ends the header "
+            f"on the wire. Remove it from the declared value."
+        )
+    return value
+
+
 def resolve_http_spec(spec: Mapping[str, Any], *, resolver: Resolver) -> dict[str, Any]:
     """Resolve an http transport spec to JSON-safe values (no objects)."""
     raw_base = spec.get("base_url")
     if raw_base is None:
         raise TransportSpecError("http transport `base_url` is required")
-    base_url = resolver.resolve(raw_base)
-    if not isinstance(base_url, str) or not base_url:
-        raise TransportSpecError(
-            "http transport `base_url` must resolve to a non-empty string"
-        )
-    base_url = base_url.rstrip("/")
+    base_url = require_http_base_url(resolver.resolve(raw_base))
 
     raw_headers = spec.get("headers") or {}
     if not isinstance(raw_headers, Mapping):
@@ -915,7 +1074,7 @@ def resolve_http_spec(spec: Mapping[str, Any], *, resolver: Resolver) -> dict[st
         resolved = resolver.resolve(value)
         if resolved is None:
             continue
-        headers[str(name)] = str(resolved)
+        headers[str(name)] = require_wire_safe_header(str(name), str(resolved))
 
     timeout_seconds = spec.get("timeout_seconds")
     if timeout_seconds is None:

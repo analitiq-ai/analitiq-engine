@@ -24,7 +24,6 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
-from functools import partial
 from typing import Any
 
 import aiohttp
@@ -37,7 +36,7 @@ from ..base_handler import (
     LandingBatch,
 )
 from ..connection_runtime import ConnectionRuntime
-from ..exceptions import ReadError, TransportSpecError
+from ..exceptions import ReadError
 from ..json_utils import decode_json_fields
 from ..resolver import Resolver
 from ..schema_contract import SchemaContract
@@ -49,30 +48,28 @@ from ..types import (
     SchemaSpec,
 )
 from .dialects import ApiDialect
-from .exceptions import ConnectorConnectionError
+from .exceptions import ConnectorConnectionError, RequestSpecError
 from .http import (
     DEFAULT_MAX_RETRIES,
     HttpSender,
     SignedRequest,
     encode_body,
     failure_facts,
-    follow_url,
-    join_url,
 )
-from .page_loop import (
-    Fetch,
-    Page,
-    PageLoop,
-    PageRequest,
-    PaginationStrategy,
-    StopCondition,
-)
-from .predicates import evaluate_predicate
-from .records import extract_records, page_scope
+from .page_loop import Fetch, Page, PageLoop, PageRequest
+from .read_setup import build_read_strategy, stop_condition
+from .records import extract_records
 from .replication import cursor_param_for, effective_start
-from .request import ParamTable, RequestBuilder, build_write_body
+from .request import (
+    ParamTable,
+    RequestBuilder,
+    bind_request_values,
+    build_write_body,
+    request_block_problem,
+    substitute_path,
+)
 from .response_schema import apply_read_type_map, records_items_schema
-from .strategies import Resolve, build_strategy, resolve_page_size
+from .urls import join_url
 from .verdicts import declared_retry_statuses, read_verdict, write_verdict
 from .write_plan import (
     WRITE_MODE_KEYS,
@@ -80,17 +77,13 @@ from .write_plan import (
     body_with_idempotency_key,
     build_write_plan,
     content_idempotency_key,
+    reserved_header_names,
     write_mode_block,
 )
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["GenericAPIConnector"]
-
-#: Failures resolving a declared expression against a page. They are
-#: authoring or data defects, and each becomes a read error naming what
-#: was being resolved.
-_RESOLUTION_FAILURES = (ValueError, KeyError, TransportSpecError)
 
 
 @dataclass(frozen=True)
@@ -328,7 +321,6 @@ class GenericAPIConnector(BaseDestinationHandler):
 
         request_block = read["request"]
         method = request_block["method"]
-        full_url = join_url(self.base_url, request_block["path"])
         records_ref = read["response"]["records"]["ref"]
         pagination = read.get("pagination")
 
@@ -341,31 +333,72 @@ class GenericAPIConnector(BaseDestinationHandler):
         # page size.
         resolver = runtime.request_resolver(runtime_values={"batch_size": batch_size})
 
-        table = ParamTable.for_read(
-            read.get("params") or {},
-            resolver,
-            filters=stream_source.get("filters") or [],
-        )
-        replication_block = stream_source.get("replication") or {}
-        cursor_field = replication_block.get("cursor_field")
-        if replication_block.get("method") == "incremental":
-            await self._bind_incremental_filter(
-                table.values,
-                read.get("replication"),
-                replication_block,
-                checkpoint=checkpoint,
-                stream_name=stream_name,
-                partition=partition,
+        # One try over every declaration this plan resolves -- the param
+        # defaults and the path bindings. All of them leave the request
+        # build as one classified error, and all of them mean the same
+        # thing here: a read that cannot address its own URL, or fill its
+        # own params, never heals on a retry.
+        try:
+            table = ParamTable.for_read(
+                read.get("params") or {},
+                resolver,
+                filters=stream_source.get("filters") or [],
             )
+            problem = request_block_problem(
+                request_block,
+                reserved_headers=reserved_header_names(self._session_header_names),
+                resolver=resolver,
+                controlled_by=table.controlled_by,
+                declared_params=read.get("params") or {},
+                pagination=read.get("pagination"),
+            )
+            if problem is not None:
+                raise ReadError(f"endpoint {endpoint_id!r}: {problem}")
+
+            replication_block = stream_source.get("replication") or {}
+            cursor_field = replication_block.get("cursor_field")
+            if replication_block.get("method") == "incremental":
+                await self._bind_incremental_filter(
+                    table.values,
+                    read.get("replication"),
+                    replication_block,
+                    checkpoint=checkpoint,
+                    stream_name=stream_name,
+                    partition=partition,
+                )
+
+            # Substituted here, after the incremental filter has written the
+            # cursor into the table: a path bound to an ordinary param the
+            # filter overrides must see the value this run uses. A
+            # placeholder bound to a param either loop OWNS is refused
+            # above -- neither loop has produced a value at this point, and
+            # the path is substituted once.
+            path = substitute_path(
+                request_block["path"],
+                bind_request_values(
+                    request_block.get("path_params"),
+                    params=table.values,
+                    resolver=resolver,
+                    block="path_params",
+                    endpoint=endpoint_id,
+                ),
+                endpoint=endpoint_id,
+            )
+        except RequestSpecError as err:
+            raise ReadError(f"endpoint {endpoint_id!r}: {err}") from err
+        full_url = join_url(self.base_url, path)
 
         builder = RequestBuilder(
             table,
             raw_body=request_block.get("body"),
             resolver=resolver,
             endpoint=request_block["path"],
+            declared_query=request_block.get("query"),
+            declared_headers=request_block.get("headers"),
+            content_type=request_block.get("content_type"),
         )
 
-        strategy = self._build_strategy(
+        strategy = build_read_strategy(
             pagination,
             table=table,
             resolver=resolver,
@@ -380,52 +413,11 @@ class GenericAPIConnector(BaseDestinationHandler):
                 fetch=self._fetcher(
                     self._http, builder, method=method, records_ref=records_ref
                 ),
-                stop_when=self._stop_condition(
-                    (pagination or {}).get("stop_when"), resolver
-                ),
+                stop_when=stop_condition((pagination or {}).get("stop_when"), resolver),
             ),
             schema=schema_contract,
             cursor_field=cursor_field,
         )
-
-    def _build_strategy(
-        self,
-        pagination: dict[str, Any] | None,
-        *,
-        table: ParamTable,
-        resolver: Resolver,
-        url: str,
-        base_url: str,
-        batch_size: int,
-    ) -> PaginationStrategy:
-        """Build the paging adapter, binding the page size it walks with.
-
-        The page size binds here rather than in the loop: the loop has no
-        page-size concept, so a read that skipped this would raise nothing
-        and quietly take the provider's own default forever.
-        """
-        try:
-            page_size = resolve_page_size(
-                pagination, batch_size=batch_size, resolve=resolver.resolve_for_request
-            )
-            limit = (pagination or {}).get("limit") or {}
-            if limit.get("param"):
-                table.values[limit["param"]] = page_size
-
-            return build_strategy(
-                pagination,
-                url=url,
-                base_params=table.values,
-                resolve=self._page_expression_resolver(resolver),
-                follow_url=partial(follow_url, origin=base_url),
-            )
-        except ValueError as err:
-            # An unknown scheme, a page size that cannot advance, a step
-            # that is not a whole number: authoring defects the loop cannot
-            # run at all. They are deterministic, so they must reach the
-            # worker as a read error rather than as a bare ValueError it
-            # would classify as worth retrying.
-            raise ReadError(f"pagination could not be set up: {err}") from err
 
     async def _read_pages(
         self,
@@ -477,43 +469,6 @@ class GenericAPIConnector(BaseDestinationHandler):
             # type cannot hold. None of them heals on a retry.
             raise ReadError(f"read failed after {batch_count} batches: {err}") from err
 
-    @staticmethod
-    def _page_resolver(resolver: Resolver, page: Page | None) -> Resolver:
-        """Give the resolver the page's body as its ``response`` scope."""
-        return resolver if page is None else resolver.with_response(page_scope(page))
-
-    def _page_expression_resolver(self, resolver: Resolver) -> Resolve:
-        """Adapt the read's resolver to what a strategy asks of it."""
-
-        def resolve(expr: Any, page: Page | None) -> Any:
-            try:
-                return self._page_resolver(resolver, page).resolve_for_request(expr)
-            except _RESOLUTION_FAILURES as err:
-                raise ReadError(
-                    f"pagination expression failed to resolve: {err}"
-                ) from err
-
-        return resolve
-
-    def _stop_condition(self, declared: Any, resolver: Resolver) -> StopCondition:
-        """Adapt the declared stop condition to what the loop asks of it."""
-
-        def stop_when(page: Page) -> bool:
-            if declared is None:
-                # No pagination block, so the strategy already ends the
-                # traversal after its one page.
-                return False
-            try:
-                return evaluate_predicate(
-                    declared, self._page_resolver(resolver, page).resolve_for_request
-                )
-            except _RESOLUTION_FAILURES as err:
-                raise ReadError(
-                    f"pagination stop_when failed to evaluate: {err}"
-                ) from err
-
-        return stop_when
-
     def _fetcher(
         self,
         sender: HttpSender,
@@ -525,21 +480,23 @@ class GenericAPIConnector(BaseDestinationHandler):
         """Build the loop's fetch: one request, one page."""
 
         async def fetch(request: PageRequest) -> Page:
-            if request.sends_declared_body:
-                try:
-                    query, body = builder.for_page(request.params)
-                except ValueError as err:
-                    raise ReadError(f"request body could not be built: {err}") from err
-            else:
-                # A provider-supplied continuation carries its own query in
-                # the URL and takes no declared body, so nothing is rebuilt.
-                query, body = dict(request.params), None
+            try:
+                prepared = builder.for_page(
+                    request.params, sends_declared_body=request.sends_declared_body
+                )
+            except RequestSpecError as err:
+                raise ReadError(f"request could not be built: {err}") from err
             signed = SignedRequest(
                 method=method,
                 url=request.url,
-                params=query,
-                headers={},
-                body=None if body is None else encode_body(body),
+                params=prepared.query,
+                headers=prepared.headers,
+                body=(
+                    None
+                    if prepared.body is None
+                    else encode_body(prepared.body, prepared.content_type)
+                ),
+                content_type=prepared.content_type,
             )
             try:
                 payload = await sender.send(signed, unwrap_page=True)
@@ -683,8 +640,16 @@ class GenericAPIConnector(BaseDestinationHandler):
                 f"no preloaded endpoint document for stream_id={stream_id!r}; "
                 f"call set_stream_endpoints() before the gRPC server starts",
             )
+        if self._write_resolver is None:
+            return self._reject_schema(
+                stream_id,
+                "schema configured before connect() built the request resolver",
+            )
         outcome = build_write_plan(
-            doc, schema_spec, session_header_names=self._session_header_names
+            doc,
+            schema_spec,
+            session_header_names=self._session_header_names,
+            resolver=self._write_resolver,
         )
         if isinstance(outcome, str):
             return self._reject_schema(stream_id, outcome)
@@ -855,7 +820,13 @@ class GenericAPIConnector(BaseDestinationHandler):
                 body = self._build_body(plan, record=record)
                 if plan.idempotency_in == "body" and key is not None:
                     body = body_with_idempotency_key(plan, body, key)
-            except (TypeError, ValueError) as err:
+                encoded = encode_body(body, plan.content_type)
+            # Two authoring defects, one verdict: the body build answers
+            # every way its declaration can fail with RequestSpecError, and
+            # the engine-owned idempotency key refuses a body it cannot be
+            # added to with ValueError. Both are deterministic and both
+            # concern this one record.
+            except (RequestSpecError, ValueError) as err:
                 logger.warning(
                     "failed to build body for record %s: %s: %s",
                     record_ids[index],
@@ -871,7 +842,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                 else None
             )
             try:
-                await self._send(plan, body, extra_headers=headers)
+                await self._send(plan, encoded, extra_headers=headers)
                 written += 1
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
                 status, category = failure_facts(err, error_map=self._error_map)
@@ -941,7 +912,8 @@ class GenericAPIConnector(BaseDestinationHandler):
             chunk = records[start : start + chunk_size]
             try:
                 body = self._build_body(plan, records=chunk)
-            except (TypeError, ValueError) as err:
+                encoded = encode_body(body, plan.content_type)
+            except RequestSpecError as err:
                 logger.warning(
                     "failed to build body for chunk at offset %d (%d records "
                     "%s...): %s: %s",
@@ -958,7 +930,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                     FailureCategory.FAILURE_CATEGORY_UNSPECIFIED,
                 )
             try:
-                await self._send(plan, body)
+                await self._send(plan, encoded)
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
                 status, category = failure_facts(err, error_map=self._error_map)
                 ack_status, failure_category = write_verdict(
@@ -1000,7 +972,11 @@ class GenericAPIConnector(BaseDestinationHandler):
         return build_write_body(
             body_spec=plan.body_spec,
             endpoint=plan.endpoint,
-            params=ParamTable.for_write(plan.params_spec, self._write_resolver).values,
+            # Resolved once at the schema handshake: write params read only
+            # what ``request_resolver`` supplies (the connection subtrees and
+            # the runtime values -- never secrets), so re-resolving them per
+            # record and per chunk could only produce the same values again.
+            params=plan.params,
             resolver=self._write_resolver,
             record=record,
             records=records,
@@ -1009,19 +985,28 @@ class GenericAPIConnector(BaseDestinationHandler):
     async def _send(
         self,
         plan: StreamWritePlan,
-        data: Any,
+        body: bytes,
         extra_headers: Mapping[str, str] | None = None,
     ) -> Any:
-        """Send one write request through the shared sender."""
+        """Send one write request through the shared sender.
+
+        Takes finished bytes. Encoding lives with the body build instead,
+        because it fails for the same reason and about the same records: a
+        form body carrying a container is one record's defect, and raising
+        it here -- outside the per-record catch, inside a block that expects
+        only transport errors -- discarded the count of everything already
+        written and let a replay send those records twice.
+        """
         if self._http is None or self.base_url is None:
             raise RuntimeError("connector not connected: no HTTP sender")
         return await self._http.send(
             SignedRequest(
                 method=plan.method,
                 url=join_url(self.base_url, plan.endpoint),
-                params={},
-                headers=dict(extra_headers or {}),
-                body=encode_body(data),
+                params=dict(plan.query),
+                headers={**plan.headers, **dict(extra_headers or {})},
+                body=body,
+                content_type=plan.content_type,
             ),
             unwrap_page=False,
         )

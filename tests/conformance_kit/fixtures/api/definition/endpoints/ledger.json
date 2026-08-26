@@ -1,0 +1,72 @@
+{
+  "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
+  "endpoint_id": "ledger",
+  "display_name": "Ledger entries (keyset-paginated)",
+  "description": "The traversal continues from the last row's ordering value, so a page without one has no next request.",
+  "operations": {
+    "read": {
+      "request": {
+        "method": "GET",
+        "path": "/v1/ledger/entries",
+        "query": {
+          "count": { "from_param": "count" },
+          "after_sequence": { "from_param": "after_sequence" }
+        }
+      },
+      "params": {
+        "count": {
+          "in": "query",
+          "type": "integer",
+          "required": false,
+          "controlled_by": "pagination"
+        },
+        "after_sequence": {
+          "in": "query",
+          "type": "integer",
+          "required": false,
+          "controlled_by": "pagination"
+        }
+      },
+      "pagination": {
+        "type": "keyset",
+        "limit": {
+          "param": "count",
+          "default": { "ref": "runtime.batch_size" },
+          "max": 1000
+        },
+        "keyset": {
+          "param": "after_sequence",
+          "order_by_field": "sequence",
+          "initial": 0
+        },
+        "stop_when": {
+          "lt": [
+            { "ref": "response.record_count" },
+            { "ref": "runtime.batch_size" }
+          ]
+        }
+      },
+      "response": {
+        "records": { "ref": "response.body.entries" },
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "entries": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "sequence": { "type": "integer" },
+                  "account": { "type": "string" },
+                  "amount": { "type": "number" },
+                  "posted_at": { "type": "string", "format": "date-time" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

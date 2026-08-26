@@ -1,49 +1,120 @@
 """Everything between the declared params and the bytes on the wire.
 
 One param table serves both roles: the read builds it from
-``operations.read.params`` and layers the pagination exclusion, the
-declared placements and the stream's filter overrides on top; the write
-builds it from ``operations.write.<mode>.params``. Both resolve defaults
-through the same CDK helper, so an unresolved default is omitted and
-warned about identically.
+``operations.read.params`` and layers the pagination exclusion and the
+stream's filter overrides on top; the write builds it from
+``operations.write.<mode>.params``. Both resolve defaults through the same
+CDK helper, so an unresolved default is omitted and warned about
+identically.
+
+The contract's three request binding maps -- ``headers``, ``query`` and
+``path_params`` -- share one grammar, so they share one reader
+(:func:`bind_request_values`). Where a bound value lands is the only thing
+that differs between them, and that is the caller's business.
+
+Those three maps are also the ONLY route from a declared param to the
+wire. The contract requires every declared param to be referenced by
+exactly one binding, in the map its ``in`` names, so the param name is the
+endpoint's internal handle and the binding-map KEY is the wire name. A
+second route that emitted params under their own names sent every value
+twice -- the second time under a name the provider never declared, which
+for a secret-valued param put a credential on the query string. ``in`` is
+a consistency fact the contract already checks, not a routing mechanism,
+so nothing here reads it.
+
+Every way a declaration here fails to become a request leaves as one
+:class:`~cdk.api.exceptions.RequestSpecError`. This module is where the
+resolver's exception vocabulary stops: past it, the read, the write and
+the conformance kit each catch a single class and say what a failure means
+for them.
 
 The request builder is a named unit rather than a closure so a page's
-``(query, body)`` can be tested without a session.
+:class:`PreparedRequest` can be tested without a session.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+import logging
+import re
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Any
+from urllib.parse import quote
 
 from ..request_binding import (
     bind_param_refs,
     bind_record_inputs,
     resolve_param_defaults,
 )
-from ..resolver import Resolver
+from ..resolver import REQUEST_CONNECTION_SUBTREES, Resolver, scope_paths
+from ..transport_factory import require_wire_safe_header
+from .body import unsupported_media_type
+from .exceptions import RequestSpecError, request_spec_errors
+from .strategies import PRE_PAGE_VALUE_PATHS
 
-__all__ = ["ParamTable", "RequestBuilder", "build_write_body"]
+__all__ = [
+    "REQUEST_SUPPLIED_CONNECTION_ROOTS",
+    "REQUEST_SUPPLIED_CONNECTION_SCOPES",
+    "ParamTable",
+    "PreparedRequest",
+    "RequestBuilder",
+    "bind_query_and_headers",
+    "bind_request_values",
+    "build_write_body",
+    "param_bindings",
+    "path_placeholders",
+    "request_block_problem",
+    "request_supplies",
+    "substitute_path",
+]
 
-#: Where a declared param lands. The raw contract key is ``in`` -- reading
-#: it as ``location`` (the model's Python attribute name) finds nothing and
-#: silently places every param in the query string.
-_PLACEMENT_KEY = "in"
+logger = logging.getLogger(__name__)
+
+#: One ``{name}`` placeholder in a declared path.
+_PLACEHOLDER = re.compile(r"\{([^{}]+)\}")
+
+#: The two path segments RFC 3986 resolves away rather than sends.
+#:
+#: The one URL rule here that is NOT delegated to ``yarl``, because yarl is
+#: what performs it: ``URL('https://h/acc') / '..'`` answers
+#: ``https://h/items``. Encoding cannot prevent it either -- ``.`` is
+#: unreserved, so ``quote`` returns it unchanged. A guard against what the
+#: library does, then, rather than a copy of a rule the library knows.
+_DOT_SEGMENTS = frozenset({".", ".."})
+
+
+@dataclass(frozen=True)
+class PreparedRequest:
+    """One page's request: the query string, the headers, and the body."""
+
+    query: dict[str, Any] = field(default_factory=dict)
+    headers: dict[str, str] = field(default_factory=dict)
+    body: Any = None
+    #: ``request.content_type``, or ``None`` for the JSON the engine sends
+    #: when an endpoint declares none. It selects the encoding and is the
+    #: header sent with it -- the two cannot disagree because one field
+    #: decides both.
+    content_type: str | None = None
 
 
 @dataclass
 class ParamTable:
-    """The declared params' resolved values, and where each one lands.
+    """The declared params' resolved values.
 
-    ``values`` is the single table a page request materialises from: the
-    body's ``from_param`` binding reads it whole, and the query string
-    takes everything not declared ``in: body``.
+    ``values`` is the single table a request materialises from: every
+    ``{from_param}`` binding in the three request maps reads it, and that
+    is the only way a param reaches the wire.
     """
 
     values: dict[str, Any] = field(default_factory=dict)
-    placements: dict[str, str] = field(default_factory=dict)
+    #: Every param a loop owns, mapped to the loop that owns it
+    #: (``controlled_by``). Read by exactly one caller:
+    #: :func:`request_block_problem`, which refuses a path placeholder bound
+    #: to one -- see :func:`_controlled_placeholder_problem` for why both
+    #: loops are the same defect there.
+    controlled_by: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def for_read(
@@ -59,24 +130,40 @@ class ParamTable:
         out of the defaults: their loops set them, and a resolved default
         would be overwritten on the first page anyway -- or worse, survive
         as a stale value the loop never touched.
+
+        A filter names a param, and a param reaches the provider only
+        through a request binding that names it in turn. One naming no
+        declared param therefore narrows nothing: the stream reads the whole
+        collection while reporting success, which for a filter is a
+        correctness failure rather than a slow read. Nothing in the contract
+        links a filter to a param declaration, so this is the only place it
+        can be caught, and it is caught loudly.
         """
         uncontrolled = {
             name: decl
             for name, decl in declared.items()
             if isinstance(decl, Mapping) and not decl.get("controlled_by")
         }
-        table = cls(
-            values=resolve_param_defaults(uncontrolled, resolver),
-            placements={
-                name: decl[_PLACEMENT_KEY]
-                for name, decl in declared.items()
-                if isinstance(decl, Mapping) and decl.get(_PLACEMENT_KEY)
-            },
-        )
+        # A default is a declared expression like any other, so a defect in
+        # one leaves through the same door the binding maps use rather than
+        # as whichever builtin the resolver happened to raise.
+        with request_spec_errors("a read param's declared default"):
+            values = resolve_param_defaults(uncontrolled, resolver)
+        table = cls(values=values, controlled_by=_controlled_by(declared))
         for declared_filter in filters:
             target = declared_filter.get("field")
+            if not target:
+                continue
+            if target not in declared:
+                raise RequestSpecError(
+                    f"the stream filters on {target!r}, which "
+                    f"operations.read.params does not declare, so nothing "
+                    f"can send it: the filter narrows nothing and the stream "
+                    f"reads the whole collection. Declared params: "
+                    f"{sorted(declared)}"
+                )
             value = declared_filter.get("value")
-            if target and value is not None:
+            if value is not None:
                 table.values[target] = value
         return table
 
@@ -88,14 +175,544 @@ class ParamTable:
         ``from_param`` bindings, not stream filters, so nothing is layered
         on top.
         """
-        return cls(
-            values=resolve_param_defaults(declared, resolver, context="write param"),
-            placements={
-                name: decl[_PLACEMENT_KEY]
-                for name, decl in declared.items()
-                if isinstance(decl, Mapping) and decl.get(_PLACEMENT_KEY)
-            },
+        with request_spec_errors("a write param's declared default"):
+            values = resolve_param_defaults(declared, resolver, context="write param")
+        return cls(values=values, controlled_by=_controlled_by(declared))
+
+
+def _controlled_by(declared: Mapping[str, Any]) -> dict[str, str]:
+    """Map each declared param a loop owns to the loop that owns it."""
+    return {
+        name: str(decl["controlled_by"])
+        for name, decl in declared.items()
+        if isinstance(decl, Mapping) and decl.get("controlled_by")
+    }
+
+
+def bind_request_values(
+    # Typed ``Any`` on purpose: the document is raw JSON at this point, so
+    # "not an object" is a real state to refuse rather than one the
+    # annotation can rule out.
+    declared: Any,
+    *,
+    params: Mapping[str, Any],
+    resolver: Resolver,
+    block: str,
+    endpoint: str,
+) -> dict[str, Any]:
+    """Resolve one declared request map (headers / query / path_params).
+
+    The three blocks share one grammar, so they share one reader: bind
+    ``{from_param}`` against the params in flight, then run the value
+    expressions under the per-request policy (an unresolved value omits its
+    key rather than going out raw).
+
+    Each declared VALUE is resolved on its own. Handing the whole map to the
+    resolver would put the map itself in a value position, and a header,
+    query or path-param whose NAME is ``ref``, ``template``, ``literal`` or
+    ``function`` would then be read as an expression marker -- ``ref`` is a
+    real query parameter name, so that mis-read breaks a working endpoint
+    with an error no caller classifies.
+
+    Resolving one key at a time is also what lets the failure name that
+    key: every defect leaves here as a :class:`RequestSpecError` saying
+    which block, which key and which endpoint.
+    """
+    if declared is None:
+        return {}
+    if not isinstance(declared, Mapping):
+        raise RequestSpecError(
+            f"request.{block} for endpoint {endpoint!r} must be a JSON object, "
+            f"got {type(declared).__name__}"
         )
+    resolved: dict[str, Any] = {}
+    for name, value in declared.items():
+        with request_spec_errors(f"request.{block}.{name} for endpoint {endpoint!r}"):
+            # ``bind_param_refs`` turns a ``{from_param}`` node into a
+            # ``{literal}`` one, so the omit rule below has to judge the
+            # BOUND node: a binding whose param has no value is exactly the
+            # case the rule exists for, and reading the raw declaration
+            # instead would send the key with a null value.
+            node = bind_param_refs(value, params)
+            bound = resolver.resolve_for_request(node)
+        if bound is None and Resolver.is_expression_node(node):
+            # The per-request policy: an expression with nothing to resolve
+            # omits its key rather than going onto the wire raw.
+            logger.warning(
+                "request.%s for endpoint %r: dropping %r -- its expression "
+                "resolved to nothing",
+                block,
+                endpoint,
+                name,
+            )
+            continue
+        resolved[name] = _sendable_value(name, bound, block=block, endpoint=endpoint)
+    return resolved
+
+
+def _sendable_value(name: str, value: Any, *, block: str, endpoint: str) -> Any:
+    """Normalize one bound value to what the wire can carry, or refuse it.
+
+    The declared document is JSON, so a boolean goes out in its JSON
+    spelling: the URL builder refuses the Python object outright, and
+    ``str()`` would send ``True`` -- a spelling no JSON document contains.
+    A bare null is refused loud: unlike an expression resolving to nothing
+    (a per-connection fact the omit rule above drops), a declared null is
+    static -- it names a key nothing can ever send, on any connection. A
+    container is refused for the reason the contract demands a declared
+    wire serialization for container params: there is no one way to send
+    it, so guessing one would be the engine's guess on the provider's wire.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        raise RequestSpecError(
+            f"request.{block}.{name} for endpoint {endpoint!r} declares "
+            f"null; nothing can send it -- remove the key or declare a value"
+        )
+    if isinstance(value, (Mapping, list)):
+        raise RequestSpecError(
+            f"request.{block}.{name} for endpoint {endpoint!r} resolves to "
+            f"a {type(value).__name__}; a request value must be a scalar -- "
+            f"declare how the container serializes, or flatten it"
+        )
+    return value
+
+
+def path_placeholders(path: str) -> list[str]:
+    """Name every ``{name}`` placeholder in a declared path, in order.
+
+    The one reader of :data:`_PLACEHOLDER`. Substitution, the refusals
+    below and the conformance kit all ask this rather than each carrying a
+    pattern of its own -- a second pattern is a second answer to "what is a
+    placeholder", and the two would disagree the day the grammar moves.
+    """
+    return _PLACEHOLDER.findall(path)
+
+
+def substitute_path(path: str, values: Mapping[str, Any], *, endpoint: str) -> str:
+    """Replace every ``{name}`` in *path* with its bound value.
+
+    Each value is percent-encoded as a single path segment: it crosses a
+    trust boundary (config or provider data), and a value carrying ``/``,
+    ``?`` or ``#`` would otherwise rewrite the URL's structure.
+
+    An empty segment is refused alongside a missing one. ``/Contact/{id}``
+    with an empty ``id`` addresses the whole collection: a read then fetches
+    every record instead of one, and a PUT or PATCH targets the collection.
+    ``url_encode`` returns ``""`` for an unbound input, so the empty case is
+    reachable without anyone declaring it.
+
+    A dot segment is refused for the same reason one step further on.
+    Percent-encoding does not contain ``.`` -- it is unreserved, so ``quote``
+    hands it back unchanged -- and the client's URL layer then removes the
+    dot segment per RFC 3986, which is not encoding the value but deleting
+    the segment around it: ``/accounts/{id}/items`` with ``id`` bound to
+    ``..`` is SENT as ``/items``. The request addresses a different resource
+    and succeeds there. Only ``.`` and ``..`` do this -- ``...`` and ``..a``
+    are ordinary segments, and a value carrying a slash is already encoded
+    into one segment before any of this applies.
+
+    Which spans of *path* are placeholders is :func:`path_placeholders`'s
+    answer, not a second reading of the pattern here.
+    """
+    substituted = path
+    for name in path_placeholders(path):
+        value = values.get(name)
+        segment = "" if value is None else str(value)
+        if not segment:
+            raise RequestSpecError(
+                f"path {path!r} for endpoint {endpoint!r} has no value for the "
+                f"placeholder {{{name}}}; bind it in request.path_params to "
+                f"something that resolves to a non-empty value"
+            )
+        if segment in _DOT_SEGMENTS:
+            raise RequestSpecError(
+                f"path {path!r} for endpoint {endpoint!r} binds the "
+                f"placeholder {{{name}}} to {segment!r}, which is not a value "
+                f"but a relative-path step: the client removes it and the "
+                f"segment before it, so the request would address a different "
+                f"resource and succeed there. Bind it to a resource identifier"
+            )
+        # Encoding before replacing is what makes replacing by name safe:
+        # ``quote`` percent-encodes braces, so no bound value can spell a
+        # placeholder for a later turn of this loop to substitute again.
+        substituted = substituted.replace(f"{{{name}}}", quote(segment, safe=""))
+    return substituted
+
+
+def request_block_problem(
+    request_block: Mapping[str, Any],
+    *,
+    reserved_headers: frozenset[str] | set[str],
+    resolver: Resolver,
+    controlled_by: Mapping[str, str] = MappingProxyType({}),
+    declared_params: Mapping[str, Any] = MappingProxyType({}),
+    pagination: Mapping[str, Any] | None = None,
+) -> str | None:
+    """Why this request block cannot be sent as declared, or ``None``.
+
+    ``controlled_by`` is a fact about the declarations rather than about
+    the values: a loop-owned param HAS no value here, which is exactly what
+    :func:`_controlled_placeholder_problem` judges.
+
+    ``resolver`` is the one the request build itself resolves through, so
+    the never-fillable walk judges what this phase actually supplies rather
+    than a restatement of it.
+
+    ``declared_params`` and ``pagination`` are the operation's other
+    expression carriers: a param ``default`` or a pagination value reading
+    a never-request-time scope is the same silent omission a request slot's
+    would be, so the one secret-read walk covers all of them.
+    """
+    removals = request_block.get("headers_remove")
+    if removals:
+        return (
+            f"request.headers_remove {list(removals)} cannot be honoured: the "
+            f"connection's default headers live on the shared HTTP session, "
+            f"and a per-request header can only add to or override them, never "
+            f"delete one. Remove the key, or move the header off the "
+            f"transport's defaults."
+        )
+    # Judged here, before anything is sent, rather than where the body is
+    # encoded: the write encodes per record inside the send, where a refusal
+    # would surface as a failed batch instead of a refused schema. The media
+    # type is the same on every record, so it settles once, with the rest of
+    # the request block.
+    problem = unsupported_media_type(request_block.get("content_type"))
+    if problem is not None:
+        return problem
+    problem = _secret_read_problem(request_block, declared_params, pagination, resolver)
+    if problem is not None:
+        return problem
+    problem = _header_map_problem(
+        request_block.get("headers"), reserved_headers=reserved_headers
+    )
+    if problem is not None:
+        return problem
+    return _controlled_placeholder_problem(request_block, controlled_by)
+
+
+#: The connection paths per-request resolution supplies, as prefixes --
+#: DERIVED from the subtree names ``ConnectionRuntime.request_resolver``
+#: builds its scope from, never restated, so the guard and the runtime
+#: cannot disagree about what a run will fill.
+REQUEST_SUPPLIED_CONNECTION_SCOPES = tuple(
+    f"connection.{subtree}." for subtree in REQUEST_CONNECTION_SUBTREES
+)
+
+#: The same subtrees as exact paths. ``request_resolver`` puts each one in
+#: scope as a whole mapping, so ``connection.parameters`` resolves to that
+#: mapping -- a body may legitimately BE it.
+REQUEST_SUPPLIED_CONNECTION_ROOTS = frozenset(
+    f"connection.{subtree}" for subtree in REQUEST_CONNECTION_SUBTREES
+)
+
+
+def request_supplies(path: str) -> bool:
+    """Whether request-time resolution puts *path* in scope.
+
+    A prefix test alone answers no for the subtree ROOT it is a prefix of:
+    ``connection.parameters`` does not start with ``connection.parameters.``
+    while being exactly what the resolver supplies. Both readers -- this
+    module's never-fillable guard and the conformance kit's deferral -- ask
+    here rather than each spelling the test, which is how the two came to
+    report a body that resolves perfectly well as one nothing can fill.
+
+    Whether the value is SENDABLE where it lands is a different rule, and
+    :func:`_sendable_value` still owns it: a whole mapping is refused in a
+    header, a query value or a path segment, and permitted in a body, which
+    is the only slot with a serialization for it.
+    """
+    return (
+        path.startswith(REQUEST_SUPPLIED_CONNECTION_SCOPES)
+        or path in REQUEST_SUPPLIED_CONNECTION_ROOTS
+    )
+
+
+#: The request slots a declaration can put an expression in.
+_REQUEST_SLOTS = ("headers", "query", "body", "path_params")
+
+
+def _pagination_value(
+    pagination: Mapping[str, Any] | None, path: tuple[str, ...]
+) -> Any:
+    """Return the declared value at *path* in the pagination block, or ``None``."""
+    node: Any = pagination
+    for key in path:
+        if not isinstance(node, Mapping):
+            return None
+        node = node.get(key)
+    return node
+
+
+def _declared_expressions(
+    request_block: Mapping[str, Any], declared_params: Mapping[str, Any]
+) -> Iterator[Any]:
+    """Yield each declared expression an operation carries, one at a time.
+
+    One at a time is the whole point. Handing a binding MAP to a scanner
+    puts the map itself in a value position, and a header, query key or
+    path param whose NAME is ``ref``, ``template`` or ``literal`` is then
+    read as an expression marker -- so the scanner answers about that one
+    key and never sees its siblings. ``ref`` is a real query parameter
+    name, and a map containing one hid an ``api_key`` reading
+    ``secrets.api_key`` from this guard entirely: request-time resolution
+    then dropped the key, silently, on every request.
+
+    :func:`bind_request_values` resolves these maps one value at a time for
+    exactly this reason, and says so. The scan has to read them the same
+    way or it is not scanning what the build will resolve.
+
+    ``request.body`` is handed over whole: it IS one value, and the
+    resolver refuses a marker with siblings there
+    (:func:`~cdk.resolver.expression_node_problem`), so the same shadowing
+    cannot arise. A param declaration is not an expression either -- only
+    its ``default`` is.
+    """
+    for slot in _REQUEST_SLOTS:
+        declared = request_block.get(slot)
+        if slot == "body" or not isinstance(declared, Mapping):
+            yield declared
+        else:
+            yield from declared.values()
+    for declaration in declared_params.values():
+        if isinstance(declaration, Mapping):
+            yield declaration.get("default")
+
+
+def _secret_read_problem(
+    request_block: Mapping[str, Any],
+    declared_params: Mapping[str, Any],
+    pagination: Mapping[str, Any] | None,
+    resolver: Resolver,
+) -> str | None:
+    """Why an operation reads what no request can carry, or ``None``.
+
+    Not an error a run would surface: request-time resolution omits an
+    unresolved value rather than failing, so a request slot, a param
+    ``default`` or a pagination value reading what request-time resolution
+    does not supply builds a request WITHOUT the declared
+    value -- every request, every connection, both roles -- and the run
+    stays green while the provider sees the credential-less (or filter-less,
+    or unversioned) shape. The refusal therefore happens here, where the
+    declarations are read, naming the phase fact. One walk over every
+    expression the operation authors, so a new never-fillable spelling
+    cannot slip in through a slot the scan does not name. The pagination
+    block alone also reads ``response.*``: the page loop supplies that
+    scope, page by page -- except for the values resolved BEFORE the first
+    page exists (:data:`~cdk.api.strategies.PRE_PAGE_VALUE_PATHS`), which
+    are judged like any other request-time read. A page size reading
+    ``response.*`` resolves to nothing on every run, and ``resolve_page_size``
+    answers that by warning and taking the engine's batch size instead, so
+    the stream pages at a size nobody authored and still reports success.
+    """
+    # The runtime keys THIS phase supplies, read off the resolver the phase
+    # built rather than restated: the read passes batch_size, the write does
+    # not, and a key outside the set (`runtime.batchsize`, or batch_size on
+    # a write) is a typo that would be warn-and-omitted forever.
+    supplied_runtime = {f"runtime.{key}" for key in resolver.context.runtime}
+
+    def unfillable(path: str, *, page: bool) -> bool:
+        if request_supplies(path):
+            return False
+        if path in supplied_runtime:
+            return False
+        return not (page and path.startswith("response."))
+
+    pre_page = [_pagination_value(pagination, path) for path in PRE_PAGE_VALUE_PATHS]
+    declared_values = list(_declared_expressions(request_block, declared_params))
+    reads = sorted(
+        {
+            path
+            for block in declared_values + pre_page
+            for path in scope_paths(block)
+            if unfillable(path, page=False)
+        }
+        | {path for path in scope_paths(pagination) if unfillable(path, page=True)}
+    )
+    if not reads:
+        return None
+    # The message names what IS supplied from the same tuples the check
+    # reads, so an author is never told to use a scope the guard refuses.
+    supplied = ", ".join(
+        [scope.rstrip(".") for scope in REQUEST_SUPPLIED_CONNECTION_SCOPES]
+        + sorted(supplied_runtime)
+    )
+    return (
+        f"the operation reads {', '.join(repr(path) for path in reads)}, "
+        f"which request-time resolution never supplies -- it builds exactly "
+        f"{supplied}; secrets and auth resolve once, engine-side, at "
+        f"transport materialization -- so the value would be dropped from "
+        f"every request ever sent. Route it through a declared param, a "
+        f"connection parameter, or the transport's headers."
+    )
+
+
+def _header_map_problem(
+    declared: Any, *, reserved_headers: frozenset[str] | set[str]
+) -> str | None:
+    """Why the headers this request sends may not go out, or ``None``.
+
+    ``request.headers`` is the whole header map an endpoint can declare:
+    its keys are the only names that reach the wire, so judging them is
+    judging what goes out. A param declared ``in: header`` is named by one
+    of these keys, and the key is what the provider sees.
+
+    One rule is left here, and it is the only one a document cannot settle.
+    The engine-owned names went to the contract in 1.0.0rc23 --
+    ``Content-Length`` by RULE-HTTP-002 and ``Content-Type`` by
+    RULE-HTTP-003, both case-insensitive, in every block that names a
+    header: an endpoint's ``request.headers``, a transport's,
+    ``transport_defaults`` and an ``idempotency.name``. Four routes to one
+    wire, which is why they belong somewhere that sees all four at once
+    rather than here, where the engine closed them one review round at a
+    time. The media type is ``request.content_type`` now, and
+    :mod:`cdk.api.body` is what reads it.
+
+    What is left carries the CONNECTION's values (auth and friends), and no
+    document can know them. The request build never sees those values --
+    only their names -- so an endpoint re-declaring one can only shadow it.
+
+    A name is all THAT rule ever has, which is why its refusal speaks of
+    what the transport declares rather than of what a particular connection
+    sends. The two differ: a transport header whose value resolves to
+    nothing is dropped, so one connection sends it and another does not.
+    Permitting the endpoint's copy for the connections that drop it would
+    make the shadowing depend on a connection document nobody reads while
+    authoring the endpoint.
+    """
+    if not isinstance(declared, Mapping):
+        return None
+    for name in declared:
+        lowered = str(name).lower()
+        if lowered in reserved_headers:
+            return (
+                f"request.headers declares {name!r}, which the connection's "
+                f"transport declares. An endpoint cannot shadow a header the "
+                f"connection sends, and whether a given connection fills this "
+                f"one in is the connection's business rather than the "
+                f"endpoint's. Remove it, or change the transport's headers."
+            )
+    return None
+
+
+def param_bindings(node: Any) -> Iterator[str]:
+    """Yield the param every ``{from_param}`` inside *node* names.
+
+    Anywhere inside it, because a binding is a binding at any depth: the
+    contract's own wiring walk reaches nested ones, so a declaration it
+    accepts can carry a param through a ``function``'s input. Reading only
+    the top of a value is how a rule about bindings comes to miss one.
+
+    A ``literal`` payload is not walked, for the reason the resolver hands
+    one back untouched: a binding spelled inside one is data the engine
+    never resolves, so treating it as a binding would judge a declaration
+    on something that never happens.
+
+    One walk, because both readers ask the same question of the same
+    grammar and differ only in what they do with the answer -- one refuses a
+    loop-owned param under an engine-owned header, the other withholds a
+    body a definition-only run cannot fill.
+    """
+    if isinstance(node, list):
+        for item in node:
+            yield from param_bindings(item)
+        return
+    if not isinstance(node, Mapping) or "literal" in node:
+        return
+    bound = node.get("from_param")
+    if isinstance(bound, str):
+        yield bound
+        return
+    for child in node.values():
+        yield from param_bindings(child)
+
+
+def _controlled_placeholder_problem(
+    request_block: Mapping[str, Any], controlled_by: Mapping[str, str]
+) -> str | None:
+    """Why a path placeholder cannot be substituted, or ``None``.
+
+    A loop-owned param has no value when the path is substituted, and the
+    path is substituted once, before the first request. Both loops leave the
+    placeholder empty there, so both are the same authoring defect:
+
+    * pagination produces its first value from page one's response, so
+      freezing it into the URL would read one page forever;
+    * replication produces its value from the stored cursor, which does not
+      exist on the first run and is never consulted at all by a
+      full-refresh stream. The read fails on the URL it builds, blaming a
+      binding that is correct, and then succeeds on the next run -- a
+      document that works or not depending on stored state.
+
+    Refused deterministically at plan time for both, because the value a
+    loop owns is a position in a traversal and a position cannot address a
+    resource.
+    """
+    path = request_block.get("path")
+    if not isinstance(path, str) or not controlled_by:
+        return None
+    bindings = request_block.get("path_params")
+    if not isinstance(bindings, Mapping):
+        return None
+    for name in path_placeholders(path):
+        binding = bindings.get(name)
+        if not isinstance(binding, Mapping):
+            continue
+        source = binding.get("from_param")
+        controller = controlled_by.get(source) if isinstance(source, str) else None
+        if controller is not None:
+            return (
+                f"path {path!r} binds the placeholder {{{name}}} to the param "
+                f"{source!r}, which the {controller} loop owns; the path is "
+                f"substituted once, before that loop has a value, so a "
+                f"loop-owned value can never address this resource. Bind the "
+                f"placeholder to a param the connection or the stream fills, "
+                f"and let the {controller} loop keep {source!r} in a request "
+                f"binding"
+            )
+    return None
+
+
+def bind_query_and_headers(
+    *,
+    params: Mapping[str, Any],
+    declared_query: Any,
+    declared_headers: Any,
+    resolver: Resolver,
+    endpoint: str,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Build the query string and the header map one request sends.
+
+    Both roles call this, and both send exactly the keys the endpoint's
+    ``request.query`` and ``request.headers`` maps declare -- the params in
+    flight reach the wire through the ``{from_param}`` bindings inside those
+    maps and through nothing else.
+    """
+    # An endpoint's headers reach the wire by a different route than the
+    # transport's, and the HTTP client judges both the same way: one rule,
+    # applied wherever a header is built, so a name or value the client
+    # will refuse fails here rather than on the connector's first request.
+    with request_spec_errors(f"request.headers for endpoint {endpoint!r}"):
+        headers = {
+            str(name): require_wire_safe_header(str(name), str(value))
+            for name, value in bind_request_values(
+                declared_headers,
+                params=params,
+                resolver=resolver,
+                block="headers",
+                endpoint=endpoint,
+            ).items()
+        }
+    query = bind_request_values(
+        declared_query,
+        params=params,
+        resolver=resolver,
+        block="query",
+        endpoint=endpoint,
+    )
+    return query, headers
 
 
 def _require_body(body: Any, endpoint: str) -> Any:
@@ -155,6 +772,9 @@ class RequestBuilder:
         raw_body: Any | None,
         resolver: Resolver,
         endpoint: str,
+        declared_query: Mapping[str, Any] | None = None,
+        declared_headers: Mapping[str, Any] | None = None,
+        content_type: str | None = None,
     ) -> None:
         self._table = table
         # Only the contract's POST read request declares a body; a GET read
@@ -162,30 +782,56 @@ class RequestBuilder:
         self._raw_body = raw_body
         self._resolver = resolver
         self._endpoint = endpoint
+        self._declared_query = declared_query
+        self._declared_headers = declared_headers
+        self._content_type = content_type
 
-    def for_page(self, page_params: Mapping[str, Any]) -> tuple[dict[str, Any], Any]:
-        """Return the ``(query, body)`` for a page's full param table.
+    def for_page(
+        self, page_params: Mapping[str, Any], *, sends_declared_body: bool = True
+    ) -> PreparedRequest:
+        """Return what one page actually sends: query, headers and body.
 
         Built per page, not once: a body-paginated endpoint must see the
         values the pagination loop set (limit, offset, cursor) rather than
         their initial values frozen at the first request.
+
+        ``sends_declared_body`` is False on a provider-supplied continuation,
+        which the contract says replaces the whole request: the URL carries
+        its own query, so this one sends none and takes no declared body.
+        The endpoint's headers still go out -- they describe how this
+        connection talks to the provider, not which page is being asked for.
         """
-        query = {
-            name: value
-            for name, value in page_params.items()
-            if self._table.placements.get(name) != "body"
-        }
-        if self._raw_body is None:
-            return query, None
-        bound = bind_param_refs(
-            self._raw_body,
-            {
-                name: _body_number(name, value, self._endpoint)
-                for name, value in page_params.items()
-            },
+        # A link continuation arrives with no params of its own, so the
+        # bindings read the table too: a header bound to a declared param
+        # must carry the same value on page two as on page one.
+        binding_params = {**self._table.values, **page_params}
+        query, headers = bind_query_and_headers(
+            params=binding_params,
+            # A continuation replaces the whole request, query string
+            # included, so the endpoint's own query map does not apply to it.
+            declared_query=self._declared_query if sends_declared_body else None,
+            declared_headers=self._declared_headers,
+            resolver=self._resolver,
+            endpoint=self._endpoint,
         )
-        return query, _require_body(
-            self._resolver.resolve_for_request(bound), self._endpoint
+        if self._raw_body is None or not sends_declared_body:
+            return PreparedRequest(query=query, headers=headers, body=None)
+        with request_spec_errors(f"request.body for endpoint {self._endpoint!r}"):
+            bound = bind_param_refs(
+                self._raw_body,
+                {
+                    name: _body_number(name, value, self._endpoint)
+                    for name, value in page_params.items()
+                },
+            )
+            body = _require_body(
+                self._resolver.resolve_for_request(bound), self._endpoint
+            )
+        return PreparedRequest(
+            query=query,
+            headers=headers,
+            body=body,
+            content_type=self._content_type,
         )
 
 
@@ -205,9 +851,18 @@ def build_write_body(
     ``from_input`` nodes to the record data, then resolve the value
     expressions -- an unresolved expression omits its field rather than
     going onto the wire raw.
+
+    Inside the same boundary the read's body build sits behind: one defect
+    class in a declared body -- an unknown scope, a conflicting pair of
+    markers, a function handed the wrong type, a binding with siblings --
+    used to leave here as four different exceptions, and the write's catch
+    sites classified two of them as a rejected record and let the other two
+    tear down the batch. What went wrong inside a body cannot decide what
+    the failure MEANS.
     """
     if body_spec is None:
         return record if record is not None else records
-    bound = bind_param_refs(body_spec, dict(params))
-    bound = bind_record_inputs(bound, record=record, records=records)
-    return _require_body(resolver.resolve_for_request(bound), endpoint)
+    with request_spec_errors(f"request.body for endpoint {endpoint!r}"):
+        bound = bind_param_refs(body_spec, dict(params))
+        bound = bind_record_inputs(bound, record=record, records=records)
+        return _require_body(resolver.resolve_for_request(bound), endpoint)

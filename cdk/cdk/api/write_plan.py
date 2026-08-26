@@ -15,12 +15,24 @@ idempotency means promising exactly-once while never sending the key.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from ..exceptions import TransportSpecError
 from ..record_identity import record_digest
+from ..resolver import Resolver
+from ..transport_factory import require_wire_safe_header_name
 from ..types import RetrySemantics, RetryVerdict, SchemaSpec
+from .body import FORM_CONTENT_TYPE, media_type
+from .exceptions import RequestSpecError
+from .request import (
+    ParamTable,
+    bind_query_and_headers,
+    bind_request_values,
+    request_block_problem,
+    substitute_path,
+)
 
 __all__ = [
     "WRITE_MODE_KEYS",
@@ -31,6 +43,7 @@ __all__ = [
     "collect_json_fields",
     "content_idempotency_key",
     "idempotency_config_problem",
+    "reserved_header_names",
     "retry_verdict",
     "write_mode_block",
 ]
@@ -49,8 +62,20 @@ class StreamWritePlan:
     concurrent schema handshakes cannot clobber each other.
     """
 
+    #: ``request.path`` with its ``{name}`` placeholders already substituted
+    #: -- the path every request for this stream goes to.
     endpoint: str = ""
     method: str = "POST"
+    #: ``request.headers`` and ``request.query``, resolved once: write
+    #: params read only what ``request_resolver`` supplies (the connection
+    #: subtrees and the runtime values -- never secrets, which resolve
+    #: engine-side at materialization), so nothing in either map can vary
+    #: per record.
+    headers: dict[str, str] = field(default_factory=dict)
+    query: dict[str, Any] = field(default_factory=dict)
+    #: The declared write params' resolved values, feeding the body's
+    #: ``from_param`` bindings.
+    params: dict[str, Any] = field(default_factory=dict)
     #: ``batching.max_records`` -- the provider's per-request maximum.
     #: ``None`` means the endpoint declares no batching block, so every
     #: record is sent as its own request.
@@ -63,9 +88,9 @@ class StreamWritePlan:
     #: ``request.body``, or ``None`` when the endpoint declares no template
     #: and the record itself is the body.
     body_spec: Any | None = None
-    #: ``params`` -- declared write params whose resolved defaults feed the
-    #: body's ``from_param`` bindings.
-    params_spec: dict[str, Any] = field(default_factory=dict)
+    #: ``request.content_type``. Selects the body encoding and is sent as
+    #: the header; ``None`` means the endpoint declared none, so JSON.
+    content_type: str | None = None
     #: Where the engine-owned per-record idempotency key lands ("header" or
     #: "body") and the name it lands under. ``None`` means the endpoint
     #: declares no key. The VALUE is always engine-owned -- the author
@@ -126,6 +151,23 @@ def collect_input_field_names(mode_block: Mapping[str, Any]) -> set[str]:
     return names
 
 
+def reserved_header_names(session_header_names: Iterable[str]) -> frozenset[str]:
+    """Header names an endpoint may not declare: the CONNECTION's own.
+
+    One set, read by both things that land in the same header map -- the
+    endpoint's declared headers and the engine-owned idempotency key -- so
+    the two cannot disagree on what is already taken.
+
+    The engine-owned names are no longer in it. ``Content-Length`` and
+    ``Content-Type`` are static facts about a document, and since contract
+    1.0.0rc23 it refuses them in every block that names a header
+    (RULE-HTTP-002 / RULE-HTTP-003) -- this one, an ``idempotency.name``,
+    included. What is left is what no document can know: the header names
+    THIS connection's transport resolved to something.
+    """
+    return frozenset(name.lower() for name in session_header_names)
+
+
 def idempotency_config_problem(
     idempotency: Mapping[str, Any],
     batching: Mapping[str, Any] | None,
@@ -145,6 +187,17 @@ def idempotency_config_problem(
     """
     target = idempotency.get("in")
     name = str(idempotency.get("name") or "")
+    if target == "header":
+        # The key lands in the same header map an endpoint's own headers do,
+        # by a different route, so it answers to the same wire rules: a name
+        # that is not an HTTP token dies in the client on every request. The
+        # name alone is judged, and by the function that judges names -- the
+        # value here is a per-record digest the engine computes, so there is
+        # no declared one to hand over.
+        try:
+            require_wire_safe_header_name(name)
+        except TransportSpecError as err:
+            return f"idempotency.name is unusable as a header: {err}"
     if target == "header" and name.lower() in reserved_headers:
         # Same rule as the body reserved-field check: these headers are
         # engine-owned (Content-Type) or carry the connection's own values
@@ -268,6 +321,7 @@ def build_write_plan(
     schema_spec: SchemaSpec,
     *,
     session_header_names: set[str],
+    resolver: Resolver,
 ) -> StreamWritePlan | str:
     """Build the plan for a stream, or return why the schema is refused.
 
@@ -294,20 +348,77 @@ def build_write_plan(
         )
 
     request = mode_block.get("request") or {}
-    plan = StreamWritePlan(
-        endpoint=request.get("path", ""),
-        method=request.get("method", "POST"),
-        json_fields=collect_json_fields(mode_block),
-        body_spec=request.get("body"),
-        params_spec=dict(mode_block.get("params") or {}),
-        write_mode_key=mode_key,
-    )
+    endpoint_id = str(doc.get("endpoint_id", "<unnamed>"))
+    reserved = reserved_header_names(session_header_names)
+    try:
+        table = ParamTable.for_write(mode_block.get("params") or {}, resolver)
+        problem = request_block_problem(
+            request,
+            reserved_headers=reserved,
+            resolver=resolver,
+            controlled_by=table.controlled_by,
+            declared_params=mode_block.get("params") or {},
+        )
+        if problem is not None:
+            return problem
+
+        plan = StreamWritePlan(
+            method=request.get("method", "POST"),
+            json_fields=collect_json_fields(mode_block),
+            body_spec=request.get("body"),
+            content_type=request.get("content_type"),
+            params=table.values,
+            write_mode_key=mode_key,
+        )
+        plan.endpoint = substitute_path(
+            request.get("path", ""),
+            bind_request_values(
+                request.get("path_params"),
+                params=table.values,
+                resolver=resolver,
+                block="path_params",
+                endpoint=endpoint_id,
+            ),
+            endpoint=endpoint_id,
+        )
+        # The same binder the read role's pages go through, so a declared
+        # query key or header reaches the wire whichever role sends it.
+        plan.query, plan.headers = bind_query_and_headers(
+            params=table.values,
+            declared_query=request.get("query"),
+            declared_headers=request.get("headers"),
+            resolver=resolver,
+            endpoint=endpoint_id,
+        )
+    except RequestSpecError as err:
+        # An unbound placeholder, a param default reading a scope nothing
+        # fills, a malformed binding map: the stream can never send a
+        # correct request, so the schema handshake refuses it with a reason
+        # the ack carries. Letting one of these out instead would tear down
+        # the whole gRPC stream over one stream's defective document.
+        return str(err)
 
     # A present batching block IS the multi-record case and carries
     # ``max_records`` (>= 2, contract-guaranteed); absence means one request
     # per record.
     batching = mode_block.get("batching")
     if batching is not None:
+        if media_type(plan.content_type) == FORM_CONTENT_TYPE:
+            # A batched body binds `records`, which is a list, and a form
+            # carries flat name/value pairs -- so every chunk this stream
+            # ever builds fails encoding, deterministically, before
+            # anything is sent. The two are incompatible by shape rather
+            # than by data, so the handshake refuses the stream instead of
+            # advertising one that cannot write a batch.
+            return (
+                f"operations.write declares batching and content_type "
+                f"{plan.content_type!r}: a batched body sends the records "
+                f"as a list, and {FORM_CONTENT_TYPE} carries only flat "
+                f"name/value pairs, so no chunk of this stream could ever "
+                f"be encoded. Drop the batching block to send one record "
+                f"per request, or declare a content_type that carries "
+                f"structure"
+            )
         plan.max_records = batching.get("max_records")
 
     idempotency = mode_block.get("idempotency")
@@ -316,7 +427,10 @@ def build_write_plan(
             idempotency,
             batching,
             plan,
-            reserved_headers={"content-type"} | session_header_names,
+            # The endpoint's own headers join the reserved set: the
+            # engine-owned key must not be layered over a header this
+            # endpoint declares either.
+            reserved_headers=reserved | {name.lower() for name in plan.headers},
             declared_input_fields=collect_input_field_names(mode_block),
         )
         if problem is not None:

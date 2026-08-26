@@ -40,7 +40,12 @@ if TYPE_CHECKING:
 from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.exceptions import TransportSpecError
 from cdk.rate_limiter import RateLimiter
-from cdk.resolver import ResolutionContext, Resolver
+from cdk.resolver import (
+    REQUEST_CONNECTION_SUBTREES,
+    RUNTIME_CONNECTION_ID,
+    ResolutionContext,
+    Resolver,
+)
 from cdk.secrets.exceptions import PlaceholderExpansionError, SecretNotFoundError
 from cdk.secrets.protocol import SecretsResolver
 from cdk.sql.exceptions import TlsVerificationError
@@ -57,6 +62,28 @@ from cdk.type_map import InvalidTypeMapError, TypeMapper, UnmappedTypeError
 from cdk.types import EndpointScope
 
 logger = logging.getLogger(__name__)
+
+#: The connection-document fields transport materialization puts in scope --
+#: the ONE statement of this fact. ``_build_resolution_context`` builds the
+#: connection scope from these, and the conformance kit derives its
+#: transport-phase deferral from them, so the kit cannot defer a field
+#: (``connection.hostname``, say) that connect() will refuse to resolve.
+#: Materialization is a superset of request time by construction: everything
+#: a request may read, plus the credential-bearing blocks only the trusted
+#: side sees. Derived, so a subtree added to the request scope cannot go
+#: missing here -- which would fail a transport expression at connect() that
+#: the identical request expression resolves.
+MATERIALIZATION_CONNECTION_SUBTREES = REQUEST_CONNECTION_SUBTREES + (
+    "secret_refs",
+    "auth_state",
+)
+MATERIALIZATION_CONNECTION_SCALARS = ("name", "status")
+
+#: The non-connection scopes materialization also fills: the resolved secret
+#: store and the connection's auth block (``_build_resolution_context``'s
+#: ``secrets=`` / ``auth=`` arguments). Stated here beside the builder so the
+#: kit's transport deferral derives from it instead of restating it.
+MATERIALIZATION_SECRET_SCOPES = ("secrets", "auth")
 
 
 # Connection-JSON blocks that must never cross into a worker: secret
@@ -394,14 +421,13 @@ class ConnectionRuntime:
         means the same expression behaves the same wherever the connector
         executes.
         """
-        runtime_scope: dict[str, Any] = {"connection_id": self._connection_id}
+        runtime_scope: dict[str, Any] = {RUNTIME_CONNECTION_ID: self._connection_id}
         if runtime_values:
             runtime_scope.update(runtime_values)
         context = ResolutionContext(
             connection={
-                "parameters": dict(self._raw_config.get("parameters") or {}),
-                "selections": dict(self._raw_config.get("selections") or {}),
-                "discovered": dict(self._raw_config.get("discovered") or {}),
+                key: dict(self._raw_config.get(key) or {})
+                for key in REQUEST_CONNECTION_SUBTREES
             },
             runtime=runtime_scope,
         )
@@ -941,24 +967,25 @@ class ConnectionRuntime:
         self, secrets: Mapping[str, Any]
     ) -> ResolutionContext:
         """Assemble a typed :class:`ResolutionContext` from the connection JSON."""
-        connection_scope = {
-            "parameters": dict(self._raw_config.get("parameters") or {}),
-            "selections": dict(self._raw_config.get("selections") or {}),
-            "discovered": dict(self._raw_config.get("discovered") or {}),
-            "secret_refs": dict(self._raw_config.get("secret_refs") or {}),
-            "auth_state": dict(self._raw_config.get("auth_state") or {}),
-            # Top-level fields that connector value expressions may
-            # reference directly (e.g. ``connection.name`` for logging
-            # decorators). Address fields live in transports.
-            "name": self._raw_config.get("name"),
-            "status": self._raw_config.get("status"),
+        connection_scope: dict[str, Any] = {
+            key: dict(self._raw_config.get(key) or {})
+            for key in MATERIALIZATION_CONNECTION_SUBTREES
         }
+        # Top-level scalar fields that connector value expressions may
+        # reference directly (e.g. ``connection.name`` for logging
+        # decorators). Address fields live in transports.
+        connection_scope.update(
+            {
+                key: self._raw_config.get(key)
+                for key in MATERIALIZATION_CONNECTION_SCALARS
+            }
+        )
         return ResolutionContext(
             connector=self._connector_definition or {},
             connection=connection_scope,
             secrets=dict(secrets),
             auth=dict(self._raw_config.get("auth") or {}),
-            runtime={"connection_id": self._connection_id},
+            runtime={RUNTIME_CONNECTION_ID: self._connection_id},
         )
 
     def _merge_secrets_into_config(self, secrets: Mapping[str, Any]) -> dict[str, Any]:

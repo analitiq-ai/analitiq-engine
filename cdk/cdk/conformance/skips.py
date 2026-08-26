@@ -19,6 +19,37 @@ from cdk.sql.dialects import SqlDialect, dialect_overrides
 
 from .target import ConformanceTarget
 
+#: Kinds the live tier has no round trip for, and why not. A kind listed
+#: here is *inapplicable* to tier 2, which is a different statement from
+#: "the checks were never written": the kit's rule is that a kind it cannot
+#: assess fails rather than passes, and an api connector fully covered at
+#: tier 1 must not carry a permanent red for a tier that can never mean
+#: anything for it.
+NO_LIVE_TIER = {
+    "api": (
+        "the live tier's value is a round trip against the real provider. A "
+        "public CI carries no provider credentials, and a stub HTTP server "
+        "would certify the connector's own fixtures rather than the provider "
+        "-- worse than nothing, because it reads green. Kind 'api' is "
+        "assessed at tier 1, where the read path is executed from the "
+        "endpoint documents"
+    ),
+}
+
+
+def require_live_tier(target: ConformanceTarget) -> None:
+    """Skip the calling test when the live tier cannot mean anything here.
+
+    Stated once, at the tier's own applicability gate, rather than inside
+    :func:`~cdk.conformance.applicability.check_kind_applicability`: the
+    gate exists to catch a kind nothing assesses, and an exemption living
+    inside it would clear tier 1 for the same kind the day its checks were
+    deleted.
+    """
+    reason = NO_LIVE_TIER.get(target.kind)
+    if reason:
+        pytest.skip(f"no live tier for connector kind {target.kind!r}: {reason}")
+
 
 def require_write_role(target: ConformanceTarget) -> None:
     """Skip the calling test when the write-path checks do not apply."""

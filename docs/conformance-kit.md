@@ -60,10 +60,61 @@ in a customer pipeline (spec
   `read(write(x)) == x` is deliberately **not** asserted: most systems
   have no unsigned or 8-bit types, so `Int8 -> SMALLINT -> Int16` is
   correct authoring, not a defect.
-- **The read path compiles.** The CDK's QueryBuilder resolves the
-  connector's dialect flavour (`sqlalchemy_registry_name`) against the
-  connector's own installed requirements, and cursor reads order by the
-  cursor field — the precondition for monotonic checkpoints.
+- **The read path compiles.** For a database, the CDK's QueryBuilder
+  resolves the connector's dialect flavour (`sqlalchemy_registry_name`)
+  against the connector's own installed requirements, and cursor reads
+  order by the cursor field — the precondition for monotonic checkpoints.
+- **The api read path runs, with nothing sent.** An api read compiles into
+  a `PageRequest` the way a database read compiles into SQL, so each
+  endpoint document is driven as far as a definition can be driven: the
+  first request is built — path placeholders substituted, declared query
+  and headers bound — a scripted page is advanced past, the request *after*
+  that page is built too, the author's `stop_when` is evaluated against the
+  page, and the declared records become an Arrow schema. Every drive goes
+  through `build_read_strategy`, `RequestBuilder` and `stop_condition` —
+  the same functions the read itself calls — so a paging scheme with
+  nowhere to go, a next link the engine's own `follow_url` refuses, a body
+  that binds on page one and not on page two, or a stop condition that
+  raises mid-traversal fails here rather than in a pipeline. Nothing is
+  fetched and no HTTP client is needed, which is why the `conformance`
+  extra pulls no transport.
+
+  What a definition cannot supply is deferred rather than guessed at or
+  reported. The engine fills a path placeholder from a param default
+  resolved against a real connection, from the stream's filters, or from
+  the replication cursor, and substitutes the path only once the
+  incremental filter has bound; a definition-only run has none of the
+  three, so a placeholder bound to a declared param gets a stand-in segment
+  and the drives carry on. Only a placeholder nothing could ever bind is a
+  finding: one with no binding at all, one bound to a param the endpoint
+  does not declare, and one bound to an expression no run fills — it reads
+  no scope at all, or it reads `secrets`/`auth`, which request-time
+  resolution never supplies (they resolve once, engine-side, at transport
+  materialization). Each fails for every connection and every stream. The
+  same shape governs every deferral, with the scope set matched to its
+  phase: a request slot defers only what `connection.*` supplies, the
+  transport's `base_url` and headers defer what materialization supplies
+  (connection, secrets, auth), and in both phases the node's grammar is
+  judged always, a mixed node is refused by the path no phase supplies,
+  and what a definition settles by itself is resolved rather than
+  deferred.
+- **No read declares something the path drops.** The contract is wider
+  than the path in one place: a request may name its own `transport_ref`.
+  The path implements no such selection — it opens one connection at
+  connect time and dispatches every read through it — and the failure is
+  silent, since the request still goes out, against the wrong origin with
+  the wrong headers. There is no execution to drive, so it is reported
+  from the declaration.
+- **There is a read to drive, on a transport that can open.** Every api
+  check iterates the read operations, so a connector shipping none — or
+  only write-only endpoints — would satisfy all of them by having nothing
+  to fail, and the applicability gate would not notice because those
+  modules do apply to the kind. That is the kit's own founding rule one
+  level down, so it is a failure. So is a `default_transport` that is
+  absent, is not `http`, or whose `base_url` does not resolve to a
+  non-empty string when it reads no connection scope: every read opens
+  that one transport at connect time, and without it no stream reaches its
+  first request.
 
 **Tier 2 — live tests** (`cdk.conformance.tier2`, the connector's
 system as a CI service container): all three write modes end-to-end
@@ -82,22 +133,30 @@ contract tier).
 Cloud warehouses with no containerizable server (Snowflake, BigQuery,
 Redshift) run tier 1 only; that is an accepted residual risk.
 
+There is no live tier for `kind: api`, and that is a statement about the
+tier rather than a gap in it. The live tier's whole value is a round trip
+against the real system: a public CI carries no provider credentials, and
+a stub HTTP server would certify the connector's own fixtures rather than
+the provider — worse than nothing, because it reads green. So an api
+connector's tier-2 run skips, naming that reason, and the applicability
+gate below does not fire. Kind `api` is assessed in full at tier 1, where
+the read path is executed.
+
 ## What it cannot assess, it does not pass
 
-Every behavioural check in both tiers applies to `kind: database` — each
-one renders SQL through a dialect or drives the write primitive. Pointed
-at a connector of any other kind, the suite would collect nothing but
-skips and still exit zero, reporting *not assessed* as *passed*. That is
-the one outcome a required status check must never produce, and the fix
-belongs in the kit rather than in a kind branch in every connector
-repo's CI.
+Every behavioural check gates itself on the connector kinds it applies
+to. Pointed at a connector of a kind nothing covers, the suite would
+collect nothing but skips and still exit zero, reporting *not assessed*
+as *passed*. That is the one outcome a required status check must never
+produce, and the fix belongs in the kit rather than in a kind branch in
+every connector repo's CI.
 
 So a run that collects no check for its target's kind fails, naming it:
 
 ```
 [kind-applicability] no check in this run applies to connector kind
-'api', so this connector is ungated: the checks collected here apply to
-kind 'database'.
+'file', so this connector is ungated: the checks collected here apply to
+kind 'api', 'database'.
 ```
 
 A check module states the kinds it applies to once (`APPLIES_TO_KINDS`),
@@ -129,8 +188,13 @@ connector that registers a different class per role is refused at load,
 because a split there is how the two directions drift apart while the
 suite stays green. A kind the CDK ships no default for resolves no class
 and its class-level checks skip, so a genuinely new kind loads rather
-than failing. A kind whose transport is not installed fails naming the
-extra to install. The flags come from an
+than failing. A kind whose default the install carries no transport for
+resolves no class either, and the reason travels on the target so a check
+that needs the class reports "not installed here" naming the extra —
+rather than skipping as though the kind were inapplicable. The api checks
+never ask for the class: they read the endpoint documents and drive the
+CDK's own read path, so they answer the same verdict whether or not a
+connector package is installed. The flags come from an
 options plugin loaded explicitly (`-p cdk.conformance.plugin` — it is
 deliberately not a `pytest11` entry point, so installing the CDK never
 changes unrelated pytest runs); each option doubles as an environment
@@ -195,6 +259,11 @@ jobs:
           --live-connection ci/live-connection.json
 ```
 
+An api connector's job is the tier-1 step alone, and it needs no service
+container and no `[api]` extra: the suite carries no live tier for the
+kind, and the checks it does carry run from the definition with no HTTP
+client installed.
+
 Systems without a service container drop the tier-2 step; the tier-1
 step is mandatory in every connector repo whose kind the suite assesses. A job that *does* provision
 a container should also set `ANALITIQ_CONFORMANCE_REQUIRE_LIVE=1`
@@ -218,3 +287,27 @@ service container job in `ci.yml`; and `test_kit_breaks.py` proves that
 a bent hook signature, a private-internal override, an
 undeclared-capability use, and a declared-but-unimplemented capability
 each fail with a message naming the offending member.
+
+An api-shaped reference connector (one endpoint document per paging
+scheme) does the same job for the api drives: a bent document must fail
+the drive that executes it — an unknown paging scheme, a path placeholder
+nothing could bind, a header the connection's transport declares, a stop
+condition written the wrong way round, a body that builds on page one and
+not on page two. The
+clean cases are pinned just as hard, because a check that fails a correct
+connector is the more expensive defect: a link the connector derives into
+a relative URL, a base URL the connection supplies, a path segment a
+stream's filters supply, a stop operand the response schema reaches but
+types only through composition.
+
+A refusal the engine itself enforces needs one test more. Every connector
+the kit ships passes the origin guard and the keyset guard, because the
+engine refuses before the kit can judge — so "the check found nothing"
+says the same thing whether the drive ran or was never armed, which is
+the silent non-coverage the drives exist to remove. Each of those drives
+is therefore also pointed at a traversal whose guard has been taken out
+from under it, and required to report. What replaces a guard still reads
+what the drive planted — the link stand-in follows the URL it was handed,
+and the keyset stand-in substitutes a value only where the record carried
+none — so taking the planting away fails those tests, which is the whole
+point of writing them.

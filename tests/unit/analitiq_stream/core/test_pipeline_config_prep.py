@@ -25,7 +25,6 @@ from analitiq.contracts.endpoint_identity import derive_db_endpoint_id
 from cdk.declarations import ConnectorDeclarationError
 from cdk.types import EndpointScope
 from src.config.schema_validator import BundleValidationError, ContractValidationError
-from src.engine.exceptions import TransformationError
 from src.engine.mapping import MappingDocument, compile_mapping
 from src.engine.pipeline_config_prep import PipelineConfigPrep, _split_stream_ref
 
@@ -458,7 +457,9 @@ class TestStreamMappingReachesTheTransform:
                                 ],
                             },
                         },
-                        "validate": {"rules": [{"type": "not_null", "field": "city"}]},
+                        "validate": {
+                            "rules": [{"type": "not_null", "field": ["city"]}]
+                        },
                     },
                 ],
             },
@@ -481,9 +482,10 @@ class TestStreamMappingReachesTheTransform:
     ) -> None:
         """The document is read at the boundary, not first used mid-run.
 
-        A rule naming another column passes contract validation -- `field` is
-        just a non-empty string there -- so the engine's own read is what
-        refuses it, and it does so before the run starts.
+        A rule addressing a target no assignment declares is refused by the
+        stream contract, which config prep validates against before the
+        engine parses the mapping -- so the failure surfaces here, before
+        the run starts, never mid-batch.
         """
         self._write_mapping(
             pipeline_tree,
@@ -496,7 +498,7 @@ class TestStreamMappingReachesTheTransform:
                             "expression": {"op": "get", "path": ["city"]},
                         },
                         "validate": {
-                            "rules": [{"type": "not_null", "field": "elsewhere"}]
+                            "rules": [{"type": "not_null", "field": ["elsewhere"]}]
                         },
                     },
                 ],
@@ -504,7 +506,7 @@ class TestStreamMappingReachesTheTransform:
         )
 
         prep = PipelineConfigPrep()
-        with pytest.raises(TransformationError, match="cannot select another column"):
+        with pytest.raises(ContractValidationError, match="names no assignment target"):
             prep.create_config()
 
 
@@ -605,12 +607,16 @@ class TestStreamVersionParsing:
 
     def test_source_replication_is_typed(self, pipeline_tree: Path) -> None:
         """A stream source's replication block is parsed into a typed
-        ReplicationConfig on the resolved source (engine-internal view)."""
+        ReplicationConfig on the resolved source (engine-internal view).
+
+        No ``tie_breaker_fields`` here: the fixture source is connector-scoped
+        (API), and the contract reserves that field for database sources
+        (RULE-STRM-014), so it carries through as ``None``.
+        """
         stream_doc = _stream_doc(STREAM_ID)
         stream_doc["source"]["replication"] = {
             "method": "incremental",
             "cursor_field": "updated_at",
-            "tie_breaker_fields": ["id"],
         }
         _write_json(
             pipeline_tree / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json",
@@ -625,7 +631,7 @@ class TestStreamVersionParsing:
         assert src.replication is not None
         assert src.replication.method == "incremental"
         assert src.replication.cursor_field == "updated_at"
-        assert src.replication.tie_breaker_fields == ["id"]
+        assert src.replication.tie_breaker_fields is None
 
 
 # ---------------------------------------------------------------------------
@@ -811,17 +817,22 @@ class TestCreateConfigErrorPaths:
         (source vs destination) is malformed. The stream contract requires
         endpoint_ref on both sides, so this surfaces at contract validation."""
         stream_doc = _stream_doc(STREAM_ID)
-        location = "source" if side == "source" else "destinations/0"
         if side == "source":
             del stream_doc["source"]["endpoint_ref"]
+            # The source's endpoint_ref is a plain required field.
+            expected = "source/endpoint_ref"
         else:
             del stream_doc["destinations"][0]["endpoint_ref"]
+            # The destination SHAPE is selected by endpoint_ref.scope, so a
+            # ref-less destination fails at the union's discriminator, anchored
+            # at the destination entry and naming the selecting key.
+            expected = "destinations/0: endpoint_ref.scope"
         _write_json(
             pipeline_tree / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json",
             stream_doc,
         )
         prep = PipelineConfigPrep()
-        with pytest.raises(ContractValidationError, match=f"{location}/endpoint_ref"):
+        with pytest.raises(ContractValidationError, match=expected):
             prep.create_config()
 
     @pytest.mark.parametrize("kind", ["", None])

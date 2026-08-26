@@ -52,6 +52,7 @@ The engine's ``error_strategy`` -- not this module -- decides retry vs DLQ.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -79,6 +80,12 @@ from .exceptions import TransformationError
 
 # A compiled expression: given the source batch, return one value column.
 _ExprFn = Callable[[pa.RecordBatch], pa.Array]
+
+# The rules a null answers rather than skips: every other rule exempts a null
+# value (mirroring the per-record ``if value is not None`` guard), and these
+# are the ones a null LIST ancestor must fail too. Named once, so a rule type
+# added to the mask without the ancestor fold cannot silently exempt itself.
+_NULL_SENSITIVE_RULES: Final[frozenset[str]] = frozenset({"not_null", "required"})
 
 
 # ---------------------------------------------------------------------------
@@ -151,32 +158,34 @@ class MappingAssignment(StrictModel):
                 )
         return data
 
-    @model_validator(mode="after")
-    def _rules_name_this_assignment_target(self) -> MappingAssignment:
-        """Refuse a validation rule that names a field other than this target.
-
-        A rule's ``field`` restates the mapped output column it guards, and the
-        block the rule sits in already fixes that column: ``validate`` is
-        per-assignment, and the transform applies its rules to the value this
-        assignment builds. A rule naming a different column is two answers to
-        one question -- so it is refused by name rather than quietly enforced
-        against the target.
-        """
-        for rule in self.validation.rules if self.validation else ():
-            if rule.field != self.target.path:
-                raise ValueError(
-                    f"validation rule {rule.type!r} names field {rule.field!r}, "
-                    f"but rules in this block validate the assignment's own "
-                    f"target {self.target.path!r}; a rule cannot select "
-                    f"another column"
-                )
-        return self
-
 
 class MappingDocument(StrictModel):
     """A stream's mapping, closed at every level."""
 
     assignments: list[MappingAssignment] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _assignment_targets_unique(self) -> MappingDocument:
+        """Refuse two assignments building one field.
+
+        Not a contract mirror -- this guard has its own engine-side job: the
+        transform keys built columns by ``target.path``
+        (:meth:`CompiledTransform.run`'s ``built`` dict), so a duplicate
+        would silently collapse to the last assignment's column and grade
+        rules against it. The contract's ``StreamMapping`` refuses the same
+        shape upstream (RULE-STRM-002); rule-field resolution, by contrast,
+        is enforced there alone -- a stray rule that slipped past a
+        different pin fails loud at run time when its head token misses the
+        ``built`` dict.
+        """
+        counts = Counter(a.target.path for a in self.assignments)
+        dups = sorted(path for path, count in counts.items() if count > 1)
+        if dups:
+            raise ValueError(
+                f"assignments declare duplicate target.path values {dups!r}; "
+                f"each destination field is built by exactly one assignment"
+            )
+        return self
 
     @classmethod
     def parse(cls, document: Mapping[str, Any]) -> MappingDocument:
@@ -232,13 +241,12 @@ def build_output_schema(assignments: list[MappingAssignment]) -> pa.Schema:
 
 @dataclass(frozen=True, slots=True)
 class _Step:
-    """One compiled assignment: how to build, type, and validate a column."""
+    """One compiled assignment: how to build and type a column."""
 
     field: pa.Field
     build: _ExprFn
     is_const: bool
     is_json: bool
-    validate: Validation | None
 
 
 class CompiledTransform:
@@ -249,9 +257,15 @@ class CompiledTransform:
     round-trip.
     """
 
-    def __init__(self, output_schema: pa.Schema, steps: list[_Step]) -> None:
+    def __init__(
+        self,
+        output_schema: pa.Schema,
+        steps: list[_Step],
+        rules: list[ValidationRule],
+    ) -> None:
         self.output_schema = output_schema
         self._steps = steps
+        self._rules = rules
 
     def run(self, batch: pa.RecordBatch) -> pa.RecordBatch:
         """Apply the transform to *batch*, returning the output batch.
@@ -260,18 +274,22 @@ class CompiledTransform:
         validation rule fails on any row, any conversion is rejected, or a
         non-nullable column ends up with nulls. The error names the column and
         (for validation) the offending rows.
+
+        Every column is built before any rule runs: a rule's ``field`` may
+        address any declared target, not just its own assignment's, so
+        validation needs the whole record the assignments build together.
+        Rules run against the built (pre-conversion) values, exactly as they
+        did when each rule was bound to its own column.
         """
-        arrays: list[pa.Array] = []
         errors: list[str] = []
+        built = {step.field.name: step.build(batch) for step in self._steps}
 
+        for rule in self._rules:
+            errors.extend(_rule_errors(built, rule))
+
+        arrays: list[pa.Array] = []
         for step in self._steps:
-            value = step.build(batch)
-
-            if step.validate is not None:
-                errors.extend(_run_validation(value, step.validate, step.field))
-
-            array = self._coerce(value, step)
-
+            array = self._coerce(built[step.field.name], step)
             if not step.field.nullable and array.null_count > 0:
                 errors.append(
                     f"column {step.field.name!r}: {array.null_count} null "
@@ -334,10 +352,18 @@ def compile_mapping(document: MappingDocument) -> CompiledTransform:
                 build=build,
                 is_const=is_const,
                 is_json=is_json,
-                validate=assignment.validation,
             )
         )
-    return CompiledTransform(output_schema, steps)
+    # Rules are held per transform rather than per step: a rule's `field`
+    # addresses any declared target (document-checked at parse), so it is
+    # resolved against the built record, not its own assignment's column.
+    rules = [
+        rule
+        for assignment in assignments
+        if assignment.validation is not None
+        for rule in assignment.validation.rules
+    ]
+    return CompiledTransform(output_schema, steps, rules)
 
 
 def _compile_value(
@@ -897,40 +923,143 @@ _FUNCTION_CATALOG: dict[str, dict[int, Callable[..., pa.Array]]] = {
 # ---------------------------------------------------------------------------
 
 
-def _run_validation(
-    value: pa.Array, validation: Validation, field: pa.Field
-) -> list[str]:
-    """Return one error string per failing rule, or ``[]`` if every row passes.
+def _rule_label(tokens: list[str]) -> str:
+    """How an error names the addressed field: the token array's spelling.
 
-    Each rule becomes a boolean failure mask over the batch; a null value is
-    exempt from every rule except ``not_null`` (mirroring the per-record
-    ``if value is not None`` guard). A malformed rule (bad regex, type mismatch)
-    fails loud with a :class:`TransformationError`.
-
-    Rules run against *field* -- the assignment's own target column. A rule's
-    ``field`` is not consulted here because ``MappingAssignment`` has already
-    refused any rule naming a different column, so the two cannot disagree.
+    A single token reads as the column name it is; a nested address is
+    reported as the token list, never joined by a dot -- this contract spells
+    nesting one token at a time, and an error message is a place authors
+    copy from.
     """
-    errors: list[str] = []
-    present = pc.is_valid(value)
+    return repr(tokens[0]) if len(tokens) == 1 else repr(list(tokens))
 
-    for rule in validation.rules:
-        mask = _rule_failure_mask(value, present, rule, field)
-        if pc.any(mask, min_count=0).as_py():
-            rows = [i for i, failed in enumerate(mask.to_pylist()) if failed]
-            detail = f": {rule.message}" if rule.message else ""
-            errors.append(
-                f"column {field.name!r}: {len(rows)} row(s) fail rule "
-                f"{rule.type!r}{detail} (rows {rows[:5]})"
+
+def _addressed_values(
+    built: Mapping[str, pa.Array], tokens: list[str]
+) -> tuple[pa.Array, pa.Array | None, list[int]]:
+    """Return a rule's addressed values, their source rows, and null ancestors.
+
+    The first token selects a built column; each later token descends into
+    it -- ``struct_field`` for an ``Object`` level, and a ``List`` level is
+    flattened first, with ``list_parent_indices`` composing the element ->
+    batch-row map. The second element is that map, or ``None`` when no list
+    was crossed (value *i* is row *i*).
+
+    The map stays an Arrow array the whole way down. It is read only to
+    name rows in an error, so materialising it costs a Python int per
+    element per rule on every batch that PASSES -- the common case, and
+    exactly the per-record Python :class:`CompiledTransform` promises not
+    to do. ``pc.take`` composes one level onto the next inside Arrow, and
+    the caller takes the few indexes it actually reports.
+
+    The third element is every batch row a null LIST removed from the walk:
+    ``list_flatten`` drops a null list's (nonexistent) elements, where a
+    null struct simply propagates null children -- two spellings of one
+    fact ("an ancestor of the addressed field is null") that must reach the
+    rules as one answer. The caller folds these rows into ``not_null``
+    failures and exempts them from value rules, exactly as the null
+    children the struct path yields are treated by the mask. An EMPTY list
+    is not in it: zero elements is data, and grades as such.
+    """
+    value = built[tokens[0]]
+    row_map: pa.Array | None = None
+    null_ancestors: set[int] = set()
+    for token in tokens[1:]:
+        while pa.types.is_list(value.type) or pa.types.is_large_list(value.type):
+            # Same rule as the failure mask below: the scan stays out of
+            # Python unless there is something to find. A batch whose lists
+            # are all present -- the common case -- pays nothing here, and
+            # one with nulls pays only for the nulls.
+            if value.null_count:
+                absent = pc.indices_nonzero(pc.is_null(value))
+                null_ancestors.update(
+                    absent.to_pylist()
+                    if row_map is None
+                    else _row_numbers(row_map, absent)
+                )
+            parents = pc.list_parent_indices(value)
+            row_map = parents if row_map is None else pc.take(row_map, parents)
+            value = pc.list_flatten(value)
+        if pa.types.is_null(value.type):
+            # A column that carried no value anywhere infers as Arrow's `null`
+            # type, which no `struct_field` kernel accepts. Every deeper token
+            # addresses only nulls, so the null values stand in for the field.
+            break
+        value = pc.struct_field(value, token)
+    return value, row_map, sorted(null_ancestors)
+
+
+def _row_numbers(row_map: pa.Array, indices: pa.Array) -> list[int]:
+    """Name the batch rows *indices* address, through *row_map*.
+
+    The one place an index leaves Arrow for Python, called with the handful
+    of indexes an error actually names rather than with one per row.
+    """
+    rows: list[int] = pc.take(row_map, indices).to_pylist()
+    return rows
+
+
+def _rule_errors(built: Mapping[str, pa.Array], rule: ValidationRule) -> list[str]:
+    """Return the error for *rule* over the built record, or ``[]`` on pass.
+
+    The rule becomes a boolean failure mask over the addressed values; a null
+    value is exempt from every rule except ``not_null`` (mirroring the
+    per-record ``if value is not None`` guard), and a null LIST ancestor is
+    the same null one level up -- it fails ``not_null`` on the addressed
+    field exactly as a null struct parent's propagated null does, and is
+    exempt from value rules the same way. A malformed rule (bad regex, type
+    mismatch, a path into a value that carries no such structure) fails
+    loud with a :class:`TransformationError`. When the address crossed a
+    ``List``, a batch row fails if any of its elements does.
+    """
+    tokens = list(rule.field)
+    label = _rule_label(tokens)
+    try:
+        value, row_map, null_ancestors = _addressed_values(built, tokens)
+    except (
+        KeyError,
+        pa.ArrowInvalid,
+        pa.ArrowTypeError,
+        pa.ArrowNotImplementedError,
+    ) as e:
+        raise TransformationError(
+            f"column {label}: validation rule {rule.type!r} addresses a "
+            f"declared field the built value does not carry: {e}"
+        ) from e
+    present = pc.is_valid(value)
+    mask = _rule_failure_mask(value, present, rule, label)
+    # The passing path stays inside Arrow: `pc.any` answers from the mask's
+    # own buffers, where `to_pylist` would allocate a Python object per row
+    # per rule on every batch that passes -- the common case, and the hot
+    # one. Row indexes are materialised only for a rule that actually
+    # failed, or for the null ancestors a null-sensitive rule must add.
+    ancestors = null_ancestors if rule.type in _NULL_SENSITIVE_RULES else []
+    if not pc.any(mask, min_count=0).as_py():
+        if not ancestors:
+            return []
+        rows = list(ancestors)
+    else:
+        failing = pc.indices_nonzero(mask)
+        rows = sorted(
+            set(
+                failing.to_pylist()
+                if row_map is None
+                else _row_numbers(row_map, failing)
             )
-    return errors
+            | set(ancestors)
+        )
+    detail = f": {rule.message}" if rule.message else ""
+    return [
+        f"column {label}: {len(rows)} row(s) fail rule "
+        f"{rule.type!r}{detail} (rows {rows[:5]})"
+    ]
 
 
 def _rule_failure_mask(
     value: pa.Array,
     present: pa.Array,
     rule: ValidationRule,
-    field: pa.Field,
+    label: str,
 ) -> pa.Array:
     """Compute the boolean failure mask for one validation rule.
 
@@ -942,7 +1071,7 @@ def _rule_failure_mask(
 
     try:
         match rule.type:
-            case "not_null" | "required":
+            case rule_type if rule_type in _NULL_SENSITIVE_RULES:
                 return pc.is_null(value)
             case "min_length":
                 length = pc.utf8_length(_string_form(value))
@@ -956,32 +1085,32 @@ def _rule_failure_mask(
                 )
                 return failing(pc.invert(matched))
             case "range":
-                return _range_failure_mask(value, present, rule, field)
+                return _range_failure_mask(value, present, rule, label)
             case "in_list":
                 return failing(
                     pc.invert(pc.is_in(value, value_set=pa.array(rule.value)))
                 )
     except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as e:
         raise TransformationError(
-            f"column {field.name!r}: validation rule {rule.type!r} is "
+            f"column {label}: validation rule {rule.type!r} is "
             f"invalid for a {value.type} column: {e}"
         ) from e
     # Reached only if the contract's rule-type vocabulary grows and this match
     # does not: a rule the engine cannot enforce must fail, never pass silently.
     raise TransformationError(
-        f"column {field.name!r}: validation rule type {rule.type!r} has no "
+        f"column {label}: validation rule type {rule.type!r} has no "
         f"engine implementation"
     )
 
 
 def _range_failure_mask(
-    value: pa.Array, present: pa.Array, rule: ValidationRule, field: pa.Field
+    value: pa.Array, present: pa.Array, rule: ValidationRule, label: str
 ) -> pa.Array:
     """Fail rows outside the bounds carried in the rule's ``value`` object."""
     bounds = rule.value
     if not isinstance(bounds, Mapping) or not {"min", "max"} & set(bounds):
         raise TransformationError(
-            f"column {field.name!r}: validation rule 'range' needs a value "
+            f"column {label}: validation rule 'range' needs a value "
             f"object carrying 'min' and/or 'max'; got {bounds!r}"
         )
     fail = pa.array([False] * len(value))

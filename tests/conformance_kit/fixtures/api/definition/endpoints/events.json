@@ -1,0 +1,66 @@
+{
+  "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
+  "endpoint_id": "events",
+  "display_name": "Events (link-paginated)",
+  "description": "The provider puts the next page's URL in each body, so the traversal follows links and the origin guard is the rule that matters.",
+  "operations": {
+    "read": {
+      "request": {
+        "method": "GET",
+        "path": "/v1/events",
+        "query": {
+          "page_size": { "from_param": "page_size" }
+        }
+      },
+      "params": {
+        "page_size": {
+          "in": "query",
+          "type": "integer",
+          "required": false,
+          "controlled_by": "pagination"
+        }
+      },
+      "pagination": {
+        "type": "link",
+        "limit": {
+          "param": "page_size",
+          "default": { "ref": "runtime.batch_size" },
+          "max": 200
+        },
+        "link": {
+          "next_url": { "ref": "response.body.links.next" }
+        },
+        "stop_when": {
+          "missing": { "ref": "response.body.links.next" }
+        }
+      },
+      "response": {
+        "records": { "ref": "response.body.data" },
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "links": {
+              "type": "object",
+              "properties": {
+                "next": { "type": ["string", "null"] }
+              }
+            },
+            "data": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": { "type": "string" },
+                  "kind": { "type": "string" },
+                  "occurred_on": { "type": "string", "format": "date" },
+                  "payload": { "type": "object" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

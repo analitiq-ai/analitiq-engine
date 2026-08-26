@@ -245,16 +245,20 @@ behaviour.
 ```json
 "validate": {
   "rules": [
-    { "type": "not_null", "field": "id", "message": "id must be present" },
-    { "type": "min_length", "field": "id", "value": 1 }
+    { "type": "not_null", "field": ["id"], "message": "id must be present" },
+    { "type": "min_length", "field": ["address", "city"], "value": 1 }
   ]
 }
 ```
 
-A rule's `field` names the mapped output column it guards, and the block it
-sits in already fixes that column: `validate` is per-assignment, so a rule's
-`field` must be the assignment's own `target.path`. A rule naming any other
-column is refused by name — it does not select a different column to validate.
+A rule's `field` is an ordered token array addressing the mapped output it
+guards. The first token names any `target.path` the mapping declares — rules
+are authored per assignment but grade the record the assignments build
+together — and each later token names a field declared under that target's
+`properties`, descending through `items` for a `List` (a row fails when any
+of its list elements does). A token that resolves to nothing is refused by
+name at parse; a token is one field name, so a `.` inside it is part of that
+name, never nesting.
 
 Implemented rule types, each compiled to a vectorized boolean mask over the
 batch. A null value is exempt from every rule except `not_null`:

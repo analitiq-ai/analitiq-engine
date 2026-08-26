@@ -80,7 +80,9 @@ def _paginated_read(**overrides: Any) -> dict[str, Any]:
                 "initial": 0,
                 "increment_by": {"ref": "response.record_count"},
             },
-            "limit": {"param": "limit", "default": {"literal": 50}},
+            # A bare positive integer: the contract excludes the unboundable
+            # `{literal: N}` expression form from a page-size default.
+            "limit": {"param": "limit", "default": 50},
             "stop_when": {"empty": {"ref": "response.body.records"}},
         },
     }
@@ -134,6 +136,30 @@ class TestTheDocumentMustDeclareWhatItBinds:
         read = _paginated_read()
         del read["pagination"]["stop_when"]
         with pytest.raises(ContractValidationError):
+            validate("api-endpoint", _document(read))
+
+    def test_a_pagination_body_path_must_resolve_against_the_schema(self) -> None:
+        # RULE-ENDP-023 -- the rule the conformance kit's page-reference
+        # check was retired in favour of. The engine leans on the contract
+        # to refuse a response path the declared schema does not reach (a
+        # `missing` condition on it holds at page one and the stream stops
+        # there reporting success), so a contract bump that narrowed the
+        # rule must go red here, not in production row counts.
+        read = _paginated_read()
+        read["pagination"]["stop_when"] = {"empty": {"ref": "response.body.recrods"}}
+        with pytest.raises(
+            ContractValidationError, match="does not resolve in response.schema"
+        ):
+            validate("api-endpoint", _document(read))
+
+    def test_a_misspelled_response_sub_scope_is_refused(self) -> None:
+        # The other half of RULE-ENDP-023: an unrecognised sub-scope is a
+        # typo wearing a reserved scope's shape, refused rather than skipped.
+        read = _paginated_read()
+        read["pagination"]["stop_when"] = {"empty": {"ref": "response.bodyy.records"}}
+        with pytest.raises(
+            ContractValidationError, match="response sub-scope 'bodyy' is not one of"
+        ):
             validate("api-endpoint", _document(read))
 
 

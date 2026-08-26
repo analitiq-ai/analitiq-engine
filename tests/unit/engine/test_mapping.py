@@ -53,8 +53,13 @@ def _const_node(value):
 
 
 def _rule(rule_type, field="v", **extra):
-    """A validation rule in the contract's spelling."""
-    return {"type": rule_type, "field": field, **extra}
+    """A validation rule in the contract's spelling.
+
+    ``field`` is the contract's ordered token array; a plain string is a
+    convenience for the common single-token address.
+    """
+    tokens = [field] if isinstance(field, str) else list(field)
+    return {"type": rule_type, "field": tokens, **extra}
 
 
 def _target(name, arrow_type, nullable=True, **extra):
@@ -764,14 +769,225 @@ class TestValidationRules:
             )
         ]
 
-    def test_rule_naming_another_column_is_refused(self):
-        """The rule's `field` restates the assignment's target; it cannot pick.
+    def test_rule_naming_an_undeclared_target_fails_loud_at_run(self):
+        """Rule-field resolution is the contract's check, made once upstream.
 
-        Applying such a rule to the target regardless would validate a column
-        the author did not name, silently.
+        The engine does not restate it -- a stray rule that slipped past a
+        different pin must still fail loud when its head token misses the
+        built record, never grade nothing and read as a pass.
         """
-        with pytest.raises(TransformationError, match="cannot select another column"):
-            _compile(self._validated([_rule("not_null", field="some_other_column")]))
+        with pytest.raises(TransformationError, match="the built value does not carry"):
+            _run(
+                [{"v": 1}],
+                self._validated([_rule("not_null", field="some_other_column")]),
+            )
+
+    def test_rule_naming_another_declared_target_grades_that_column(self):
+        """Rules grade the record the assignments build together.
+
+        A rule is authored per assignment but may address any declared
+        target, so the failing column named in the error is the addressed
+        one, not the one the rule rides on.
+        """
+        assignments = [
+            _assignment("a", "Int64", _expr(_get("a"))),
+            _assignment(
+                "b",
+                "Int64",
+                _expr(_get("b")),
+                validate={"rules": [_rule("not_null", field="a")]},
+            ),
+        ]
+        assert _run([{"a": 1, "b": 2}], assignments) == [{"a": 1, "b": 2}]
+        with pytest.raises(TransformationError, match=r"column 'a'.*not_null"):
+            _run([{"a": None, "b": 2}], assignments)
+
+    def test_rule_addressing_a_nested_field_grades_it(self):
+        """A multi-token field descends into the target's declared properties."""
+        assignments = [
+            _assignment(
+                "address",
+                "Object",
+                _expr(_get("address")),
+                properties={"city": {"arrow_type": "Utf8"}},
+                validate={
+                    "rules": [_rule("min_length", field=["address", "city"], value=4)]
+                },
+            )
+        ]
+        assert _run([{"address": {"city": "Kyiv"}}], assignments) == [
+            {"address": {"city": "Kyiv"}}
+        ]
+        with pytest.raises(
+            TransformationError, match=r"\['address', 'city'\].*min_length"
+        ):
+            _run([{"address": {"city": "Ur"}}], assignments)
+
+    def test_rule_addressing_through_a_list_fails_the_element_rows(self):
+        """A `List` level is stepped through; a row fails if any element does."""
+        assignments = [
+            _assignment(
+                "lines",
+                "List",
+                _expr(_get("lines")),
+                items={
+                    "arrow_type": "Object",
+                    "properties": {"sku": {"arrow_type": "Utf8"}},
+                },
+                validate={"rules": [_rule("not_null", field=["lines", "sku"])]},
+            )
+        ]
+        clean = [{"lines": [{"sku": "A-1"}, {"sku": "A-2"}]}]
+        assert _run(clean, assignments) == clean
+        with pytest.raises(TransformationError, match=r"1 row\(s\) fail rule"):
+            _run(
+                [
+                    {"lines": [{"sku": "A-1"}]},
+                    {"lines": [{"sku": None}, {"sku": None}]},
+                ],
+                assignments,
+            )
+
+    def test_a_null_list_ancestor_fails_not_null_like_a_null_struct_parent(self):
+        """One verdict for "an ancestor of the addressed field is null".
+
+        `list_flatten` drops a null list's elements where a null struct
+        propagates null children, so without folding the dropped rows back
+        in, the same data would pass or fail on how Arrow typed the batch.
+        Here rows 0 (null list) and 2 (null element) fail together; the
+        empty list at row 3 is data -- zero elements, nothing null.
+        """
+        assignments = [
+            _assignment(
+                "lines",
+                "List",
+                _expr(_get("lines")),
+                items={
+                    "arrow_type": "Object",
+                    "properties": {"sku": {"arrow_type": "Utf8"}},
+                },
+                validate={"rules": [_rule("not_null", field=["lines", "sku"])]},
+            )
+        ]
+        with pytest.raises(TransformationError, match=r"rows \[0, 2\]"):
+            _run(
+                [
+                    {"lines": None},
+                    {"lines": [{"sku": "A-1"}]},
+                    {"lines": [{"sku": None}]},
+                    {"lines": []},
+                ],
+                assignments,
+            )
+
+    def test_null_ancestors_two_list_levels_deep_map_to_their_rows(self):
+        """The row map and the null-ancestor set compose across levels."""
+        assignments = [
+            _assignment(
+                "orders",
+                "List",
+                _expr(_get("orders")),
+                items={
+                    "arrow_type": "List",
+                    "items": {
+                        "arrow_type": "Object",
+                        "properties": {"sku": {"arrow_type": "Utf8"}},
+                    },
+                },
+                validate={"rules": [_rule("not_null", field=["orders", "sku"])]},
+            )
+        ]
+        with pytest.raises(TransformationError, match=r"rows \[0, 1, 3\]"):
+            _run(
+                [
+                    {"orders": None},
+                    {"orders": [None]},
+                    {"orders": [[{"sku": "A"}]]},
+                    {"orders": [[{"sku": None}]]},
+                    {"orders": [[]]},
+                ],
+                assignments,
+            )
+
+    def test_a_null_list_ancestor_is_exempt_from_value_rules(self):
+        """Value rules keep the null exemption through a list level too."""
+        assignments = [
+            _assignment(
+                "lines",
+                "List",
+                _expr(_get("lines")),
+                items={
+                    "arrow_type": "Object",
+                    "properties": {"sku": {"arrow_type": "Utf8"}},
+                },
+                validate={
+                    "rules": [_rule("min_length", field=["lines", "sku"], value=3)]
+                },
+            )
+        ]
+        clean = [{"lines": None}, {"lines": [{"sku": "A-1"}]}, {"lines": []}]
+        assert _run(clean, assignments) == clean
+        with pytest.raises(TransformationError, match=r"rows \[1\]"):
+            _run(
+                [{"lines": None}, {"lines": [{"sku": "x"}]}],
+                assignments,
+            )
+
+    def test_nested_not_null_over_a_valueless_column_fails_every_row(self):
+        """A column carrying no value anywhere infers as Arrow's `null` type.
+
+        No `struct_field` kernel accepts it, but every deeper token
+        addresses only nulls -- the same "ancestor is null" fact however
+        the batch was typed, so `not_null` fails these rows exactly as it
+        does when the column arrives typed. An empty list stays data.
+        """
+        assignments = [
+            _assignment(
+                "lines",
+                "List",
+                _expr(_get("lines")),
+                items={
+                    "arrow_type": "Object",
+                    "properties": {"sku": {"arrow_type": "Utf8"}},
+                },
+                validate={"rules": [_rule("not_null", field=["lines", "sku"])]},
+            )
+        ]
+        with pytest.raises(TransformationError, match=r"rows \[0\]"):
+            _run([{"lines": None}, {"lines": []}], assignments)
+
+    def test_rule_token_the_target_does_not_declare_fails_loud_at_run(self):
+        """The nested half of the same upstream check: no silent grade.
+
+        A token past the first that the built struct does not carry raises
+        out of the field walk and is classified, never treated as an
+        all-pass rule over nothing.
+        """
+        with pytest.raises(TransformationError, match="the built value does not carry"):
+            _run(
+                [{"address": {"city": "Kyiv"}}],
+                [
+                    _assignment(
+                        "address",
+                        "Object",
+                        _expr(_get("address")),
+                        properties={"city": {"arrow_type": "Utf8"}},
+                        validate={
+                            "rules": [_rule("not_null", field=["address", "zip"])]
+                        },
+                    )
+                ],
+            )
+
+    def test_duplicate_assignment_targets_are_refused(self):
+        """Two assignments building one field would let array position decide."""
+        with pytest.raises(TransformationError, match="duplicate target.path"):
+            _compile(
+                [
+                    _assignment("v", "Int64", _expr(_get("v"))),
+                    _assignment("v", "Int64", _expr(_get("w"))),
+                ]
+            )
 
     def test_range_bounds_come_from_the_rule_value_object(self):
         rules = [_rule("range", value={"min": 1, "max": 5})]

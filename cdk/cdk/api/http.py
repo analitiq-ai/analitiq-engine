@@ -1,4 +1,4 @@
-"""One HTTP round trip, and every rule about a URL.
+"""One HTTP round trip: what it sends, and what its answer means.
 
 The read role and the write role each had their own request method, and
 they disagreed about things no author chose: what counts as success, which
@@ -7,8 +7,8 @@ whether a non-JSON body is diagnosable. :class:`HttpSender` is the one
 round trip both roles make, so those answers are given once.
 
 This is the only module in the package that imports an HTTP client, which
-is what keeps the loop, the strategies, the predicates and the verdicts
-testable without one.
+is what keeps the loop, the strategies, the predicates, the verdicts and
+the URL rules (:mod:`cdk.api.urls`) testable without one.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ import logging
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
-from urllib.parse import SplitResult, urljoin, urlsplit
 
 import aiohttp
 import orjson
@@ -27,6 +26,14 @@ from aiohttp_retry import ExponentialRetry, RetryClient
 
 from ..declarations import ErrorMap
 from ..rate_limiter import RateLimiter
+from .body import (
+    FORM_CONTENT_TYPE,
+    JSON_CONTENT_TYPE,
+    encode_form,
+    media_type,
+    unsupported_media_type,
+)
+from .exceptions import RequestSpecError
 from .verdicts import classify_exception, classify_status
 
 if TYPE_CHECKING:
@@ -38,20 +45,13 @@ __all__ = [
     "SignedRequest",
     "encode_body",
     "failure_facts",
-    "follow_url",
-    "join_url",
     "loads_preserving_decimals",
-    "same_origin",
 ]
 
 logger = logging.getLogger(__name__)
 
 #: Retry attempts used when the connection declares no ``max_retries``.
 DEFAULT_MAX_RETRIES = 3
-
-#: Scheme defaults, so ``https://host:443`` and ``https://host`` compare as
-#: the one origin they are.
-_DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
 @dataclass(frozen=True)
@@ -68,6 +68,11 @@ class SignedRequest:
     params: dict[str, Any] = field(default_factory=dict)
     headers: dict[str, str] = field(default_factory=dict)
     body: bytes | None = None
+    #: The media type ``body`` was encoded as, sent as ``Content-Type``.
+    #: ``None`` means the endpoint declared none, so the body is JSON.
+    #: Carried beside the bytes rather than pre-placed in ``headers`` so a
+    #: dialect signing this request sees the same header the wire does.
+    content_type: str | None = None
 
 
 class ApiResponseError(aiohttp.ClientResponseError):
@@ -83,67 +88,6 @@ class ApiResponseError(aiohttp.ClientResponseError):
     def __init__(self, *args: Any, declared_category: str | None = None, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.declared_category = declared_category
-
-
-def join_url(base: str, path: str) -> str:
-    """Append *path* to *base*, keeping both segments.
-
-    Not ``urljoin``: it treats a leading ``/`` on the path as
-    absolute-path-relative and drops the base's own path segment
-    (``/api/v1`` + ``/Foo`` -> ``/Foo``, not ``/api/v1/Foo``).
-    """
-    return base.rstrip("/") + "/" + path.lstrip("/")
-
-
-def same_origin(base: SplitResult, target: SplitResult) -> bool:
-    """Whether two split URLs share scheme, host and effective port.
-
-    Compares normalized parts -- case-insensitive scheme and host, default
-    ports made explicit -- so ``https://api.example.test:443`` and
-    ``https://API.example.test`` count as the origin they are.
-    """
-    base_scheme = base.scheme.lower()
-    target_scheme = target.scheme.lower()
-    return (
-        base_scheme == target_scheme
-        and (base.hostname or "").lower() == (target.hostname or "").lower()
-        and (base.port or _DEFAULT_PORTS.get(base_scheme))
-        == (target.port or _DEFAULT_PORTS.get(target_scheme))
-    )
-
-
-def follow_url(current: str, target: str, *, origin: str) -> str:
-    """Resolve a provider-supplied next-page URL against the page it came from.
-
-    An absolute target must stay on the connection's origin. The session
-    sends the connection's default headers -- auth included -- on every
-    request, so following a URL a response body named to another host would
-    hand those credentials to it.
-
-    A relative target resolves against the CURRENT page URL per RFC 3986,
-    so a query-only link like ``?page=2`` continues from the endpoint path
-    instead of the connection root.
-
-    Classification is by parsing, never by string prefix: a target carrying
-    any scheme or authority is absolute whatever its case, and the origin
-    check then also rejects non-HTTP schemes and ambiguous
-    protocol-relative URLs loudly.
-    """
-    if not isinstance(target, str):
-        raise ValueError(
-            f"next_url resolved to a {type(target).__name__}, expected a URL string"
-        )
-    parsed = urlsplit(target)
-    if not parsed.scheme and not parsed.netloc:
-        return urljoin(current, target)
-    root = urlsplit(origin)
-    if not same_origin(root, parsed):
-        raise ValueError(
-            f"next_url {target!r} leaves the connection's origin "
-            f"{root.scheme}://{root.netloc}; refusing to send the "
-            f"connection's headers to another host"
-        )
-    return target
 
 
 def loads_preserving_decimals(payload: str) -> Any:
@@ -179,14 +123,28 @@ def _orjson_default(obj: Any) -> Any:
     )
 
 
-def encode_body(data: Any) -> bytes:
+def encode_body(data: Any, content_type: str | None = None) -> bytes:
     """Serialise a request body to the bytes that go on the wire.
 
-    One serialiser for both roles. ``aiohttp``'s own ``json=`` argument
-    calls the stdlib encoder, which understands neither ``datetime`` nor
-    ``Decimal``; orjson handles the first natively and the hook above
-    renders the second losslessly.
+    One serialiser for both roles, selected by what the endpoint declared.
+    JSON when it declared nothing, which is what every endpoint took before
+    ``request.content_type`` existed.
+
+    ``aiohttp``'s own ``json=`` argument calls the stdlib encoder, which
+    understands neither ``datetime`` nor ``Decimal``; orjson handles the
+    first natively and the hook above renders the second losslessly.
+
+    An unsupported media type raises rather than falling back to JSON under
+    a header claiming otherwise -- though it should not reach here:
+    ``request_block_problem`` refuses one before anything is sent, which is
+    where a deterministic defect belongs. This is what makes that true
+    rather than assumed.
     """
+    problem = unsupported_media_type(content_type)
+    if problem is not None:
+        raise RequestSpecError(problem)
+    if media_type(content_type) == FORM_CONTENT_TYPE:
+        return encode_form(data)
     return orjson.dumps(data, default=_orjson_default)
 
 
@@ -284,12 +242,18 @@ class HttpSender:
         so a provider that answers 200 with an error envelope raises here
         rather than being read as an empty page.
         """
-        if request.body is not None and not any(
-            name.lower() == "content-type" for name in request.headers
-        ):
+        if request.body is not None:
+            # The media type the endpoint declared, or JSON when it declared
+            # none. Sent unconditionally rather than only when no header
+            # says otherwise: since contract 1.0.0rc23 no header map may
+            # name Content-Type (RULE-HTTP-003), so `content_type` is the
+            # only place it can come from and there is nothing to defer to.
             request = replace(
                 request,
-                headers={**request.headers, "Content-Type": "application/json"},
+                headers={
+                    **request.headers,
+                    "Content-Type": request.content_type or JSON_CONTENT_TYPE,
+                },
             )
         request = self._dialect.sign_request(request)
         if self._rate_limiter:
