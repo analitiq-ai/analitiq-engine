@@ -96,9 +96,9 @@ from .api_surface import (
     api_base_url,
     api_origins,
     definition_resolver,
-    dispatch_transport_refs,
     fillable_at_request_time,
     read_operations,
+    run_transport_refs,
     unknown_function_problem,
 )
 from .target import ConformanceTarget
@@ -300,7 +300,9 @@ def _compile_read(
                 request_block,
                 read.get("pagination"),
                 names_for=partial(_declared_header_names, target),
-                dispatchable_refs=dispatch_transport_refs(target),
+                dispatchable_refs=run_transport_refs(
+                    target, request_block.get("transport_ref")
+                ),
             )
         ),
         resolver=resolver,

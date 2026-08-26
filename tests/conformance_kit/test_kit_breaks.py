@@ -1552,6 +1552,45 @@ class TestApiReadPathBreaks:
             "reserved too"
         )
 
+    def test_a_sibling_reads_transport_is_not_reserved_against_this_one(
+        self, tmp_path: Path
+    ) -> None:
+        """A source run resolves one endpoint's transports, so the kit does too.
+
+        The mirror of the origin scoping: armed with every read's
+        transports, the kit REFUSES a header production accepts, which
+        fails a valid connector package at tier 1.
+        """
+        root = tmp_path / "api"
+        shutil.copytree(API_REFERENCE_DIR, root)
+        connector = root / "definition" / "connector.json"
+        definition = json.loads(connector.read_text())
+        definition["transports"]["files"] = {
+            "transport_type": "http",
+            "base_url": "https://files.example.invalid",
+            "headers": {"X-Files-Key": "k"},
+        }
+        connector.write_text(json.dumps(definition))
+        # One read dispatches through 'files'...
+        widgets = root / "definition" / "endpoints" / "widgets.json"
+        parsed = json.loads(widgets.read_text())
+        parsed["operations"]["read"]["request"]["transport_ref"] = "files"
+        widgets.write_text(json.dumps(parsed))
+        # ...while a SIBLING link read declares that transport's header name.
+        # Its own run never resolves 'files', so nothing collides.
+        events = root / "definition" / "endpoints" / "events.json"
+        parsed = json.loads(events.read_text())
+        parsed["operations"]["read"]["request"]["headers"] = {
+            "X-Files-Key": {"literal": "mine"}
+        }
+        events.write_text(json.dumps(parsed))
+
+        violations = check_api_read_compiles(load_target(root))
+        assert not any("X-Files-Key" in v.message for v in violations), (
+            f"a sibling read's transport is not in this read's run: "
+            f"{[v.message for v in violations]}"
+        )
+
     def test_a_probe_is_armed_with_its_own_reads_origins_not_its_siblings(
         self, tmp_path: Path
     ) -> None:

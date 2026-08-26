@@ -54,6 +54,7 @@ __all__ = [
     "check_read_transport_selection",
     "definition_resolver",
     "dispatch_transport_refs",
+    "run_transport_refs",
     "fillable_at_request_time",
     "read_operations",
     "unknown_function_problem",
@@ -331,6 +332,30 @@ def dispatch_transport_refs(target: ConformanceTarget) -> list[str]:
     return refs
 
 
+def run_transport_refs(
+    target: ConformanceTarget, transport_ref: str | None = None
+) -> list[str]:
+    """Return the transports ONE read's run resolves: the default and its own.
+
+    A source worker's bootstrap carries a single endpoint document, so it
+    resolves ``default_transport`` plus that endpoint's
+    ``request.transport_ref`` and nothing else -- a sibling endpoint's
+    transport is not in the run at all.
+
+    Every per-read check asks here rather than each deriving it: armed
+    with more, the kit refuses headers production accepts and certifies
+    links it rejects; armed with less, the reverse. Both have happened,
+    which is why it is one function.
+
+    Not to be confused with :func:`dispatch_transport_refs`, which is
+    every transport ANY read dispatches through -- the right set for
+    certifying that each of them materializes, and the wrong one for
+    judging a single read.
+    """
+    refs = [target.definition.get("default_transport"), transport_ref]
+    return list(dict.fromkeys(ref for ref in refs if isinstance(ref, str)))
+
+
 def api_origins(
     target: ConformanceTarget, transport_ref: str | None = None
 ) -> frozenset[str]:
@@ -352,10 +377,9 @@ def api_origins(
     A transport whose base URL a definition-only run cannot settle
     contributes the stand-in the read checks compile against.
     """
-    refs = [target.definition.get("default_transport"), transport_ref]
     return declared_origins(
         api_base_url(target, ref) or STAND_IN_ORIGIN
-        for ref in dict.fromkeys(r for r in refs if isinstance(r, str))
+        for ref in run_transport_refs(target, transport_ref)
     )
 
 
