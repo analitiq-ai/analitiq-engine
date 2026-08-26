@@ -255,8 +255,8 @@ class TestTheRuntimeRefusesWhatItCannotOpen:
         with pytest.raises(TransportSpecError, match=r"this run resolved \['api'\]"):
             await runtime.http_transport("oauth")
 
-    async def test_the_declared_origins_are_every_resolved_transports(self) -> None:
+    async def test_the_declared_base_urls_are_every_resolved_transports(self) -> None:
         runtime = runtime_with(
             FakeSession([]), transports={"files": (FakeSession([]), FILES_URL)}
         )
-        assert runtime.declared_origins == {BASE_URL, FILES_URL}
+        assert runtime.declared_base_urls == {BASE_URL, FILES_URL}

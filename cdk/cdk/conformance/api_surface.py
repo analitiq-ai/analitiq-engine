@@ -36,7 +36,11 @@ from cdk.connection_runtime import (
 from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.exceptions import TransportSpecError
 from cdk.resolver import RUNTIME_CONNECTION_ID, ResolutionContext, Resolver, scope_paths
-from cdk.transport_factory import require_http_base_url, resolve_http_spec
+from cdk.transport_factory import (
+    HTTP_TRANSPORT_TYPE,
+    require_http_base_url,
+    resolve_http_spec,
+)
 
 from .fakes import NoSecretsResolver
 from .target import ConformanceTarget
@@ -57,9 +61,6 @@ __all__ = [
 
 TRANSPORT_CHECK = "api-read-transport-selection"
 READS_CHECK = "api-has-reads"
-
-#: The transport type the api path materializes.
-HTTP_TRANSPORT_TYPE = "http"
 
 #: What only a CONNECTION brings to transport materialization: exactly the
 #: connection-document fields ``_build_resolution_context`` puts in scope

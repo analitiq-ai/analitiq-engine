@@ -887,6 +887,13 @@ def _ping_adbc(conn: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
+#: The ``transport_type`` an api operation dispatches over. Named beside
+#: the kind that registers it, so the runtime deciding whether a block can
+#: open a session, the resolver stamping the spec, and the conformance
+#: check reading a declaration all compare against one string.
+HTTP_TRANSPORT_TYPE = "http"
+
+
 @dataclass(frozen=True)
 class HttpTransport:
     """Materialized HTTP transport ready for ``aiohttp`` requests."""
@@ -1099,7 +1106,7 @@ def resolve_http_spec(spec: Mapping[str, Any], *, resolver: Resolver) -> dict[st
             }
 
     return {
-        "transport_type": "http",
+        "transport_type": HTTP_TRANSPORT_TYPE,
         "base_url": base_url,
         "headers": headers,
         "timeout_seconds": float(timeout_seconds),
@@ -1234,7 +1241,9 @@ register_transport_kind(
     "adbc", resolve_spec=resolve_adbc_spec, build_from_spec=build_adbc_from_spec
 )
 register_transport_kind(
-    "http", resolve_spec=resolve_http_spec, build_from_spec=build_http_from_spec
+    HTTP_TRANSPORT_TYPE,
+    resolve_spec=resolve_http_spec,
+    build_from_spec=build_http_from_spec,
 )
 
 

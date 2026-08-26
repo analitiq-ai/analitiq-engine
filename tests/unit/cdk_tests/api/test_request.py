@@ -520,6 +520,7 @@ class TestNeverFillableScopeRefusals:
     def test_a_param_default_reading_a_secret_is_refused(self) -> None:
         problem = request_block_problem(
             {"query": {"key": {"from_param": "api_key"}}},
+            endpoint="items",
             reserved_headers=frozenset(),
             resolver=_resolver(),
             declared_params={
@@ -538,6 +539,7 @@ class TestNeverFillableScopeRefusals:
     def test_a_pagination_value_reading_a_secret_is_refused(self) -> None:
         problem = request_block_problem(
             {},
+            endpoint="items",
             reserved_headers=frozenset(),
             resolver=_resolver(),
             pagination={
@@ -566,6 +568,7 @@ class TestNeverFillableScopeRefusals:
         assert (
             request_block_problem(
                 {"body": {"ref": f"connection.{subtree}"}},
+                endpoint="items",
                 reserved_headers=frozenset(),
                 resolver=_resolver(),
             )
@@ -584,6 +587,7 @@ class TestNeverFillableScopeRefusals:
         assert (
             request_block_problem(
                 {"query": {"q": {"ref": "connection.parameters"}}},
+                endpoint="items",
                 reserved_headers=frozenset(),
                 resolver=_resolver(),
             )
@@ -618,6 +622,7 @@ class TestNeverFillableScopeRefusals:
                     "api_key": {"ref": "secrets.api_key"},
                 }
             },
+            endpoint="items",
             reserved_headers=frozenset(),
             resolver=_resolver(),
         )
@@ -628,6 +633,7 @@ class TestNeverFillableScopeRefusals:
         """Same shadowing, one map over: params are keyed by author names too."""
         problem = request_block_problem(
             {"query": {"k": {"from_param": "api_key"}}},
+            endpoint="items",
             reserved_headers=frozenset(),
             resolver=_resolver(),
             declared_params={
@@ -649,6 +655,7 @@ class TestNeverFillableScopeRefusals:
         # warn-and-omit fate this walk exists to refuse.
         problem = request_block_problem(
             {"query": {"limit": {"ref": "runtime.batchsize"}}},
+            endpoint="items",
             reserved_headers=frozenset(),
             resolver=_resolver(),
         )
@@ -661,6 +668,7 @@ class TestNeverFillableScopeRefusals:
         assert (
             request_block_problem(
                 {"query": {"limit": {"ref": "runtime.batch_size"}}},
+                endpoint="items",
                 reserved_headers=frozenset(),
                 resolver=_resolver(batch_size=37),
             )
@@ -672,6 +680,7 @@ class TestNeverFillableScopeRefusals:
         # write role's shape -- is a value that never arrives on this phase.
         problem = request_block_problem(
             {"query": {"limit": {"ref": "runtime.batch_size"}}},
+            endpoint="items",
             reserved_headers=frozenset(),
             resolver=_resolver(),
         )
@@ -684,6 +693,7 @@ class TestNeverFillableScopeRefusals:
         assert (
             request_block_problem(
                 {"query": {"key": {"from_param": "api_key"}}},
+                endpoint="items",
                 reserved_headers=frozenset(),
                 resolver=_resolver(),
                 declared_params={
@@ -705,6 +715,7 @@ class TestRequestBlockRefusals:
     def test_a_declared_header_the_connection_owns_is_refused(self) -> None:
         problem = request_block_problem(
             {"headers": {"Authorization": {"literal": "Bearer x"}}},
+            endpoint="items",
             reserved_headers=frozenset({"authorization"}),
             resolver=_resolver(),
         )
@@ -718,6 +729,7 @@ class TestRequestBlockRefusals:
         assert (
             request_block_problem(
                 {"headers": {"X-Legacy-Auth": {"from_param": "Authorization"}}},
+                endpoint="items",
                 reserved_headers=frozenset({"authorization"}),
                 resolver=_resolver(),
             )
@@ -730,6 +742,7 @@ class TestRequestBlockRefusals:
         # the provider sees.
         problem = request_block_problem(
             {"headers": {"Authorization": {"from_param": "tok"}}},
+            endpoint="items",
             reserved_headers=frozenset({"authorization"}),
             resolver=_resolver(),
         )
@@ -742,6 +755,7 @@ class TestRequestBlockRefusals:
                     "path": "/Contact/{id}",
                     "path_params": {"id": {"from_param": "id"}},
                 },
+                endpoint="items",
                 reserved_headers=frozenset(),
                 resolver=_resolver(),
             )
@@ -762,6 +776,7 @@ class TestRequestBlockRefusals:
                 "path": "/items/{since}",
                 "path_params": {"since": {"from_param": "since"}},
             },
+            endpoint="items",
             reserved_headers=frozenset(),
             resolver=_resolver(),
             controlled_by={"since": loop},

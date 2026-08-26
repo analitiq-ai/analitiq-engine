@@ -40,7 +40,6 @@ from ..exceptions import ReadError, TransportSpecError
 from ..json_utils import decode_json_fields
 from ..resolver import Resolver
 from ..schema_contract import SchemaContract
-from ..transport_factory import HttpTransport
 from ..types import (
     AckStatus,
     CheckpointStore,
@@ -156,6 +155,9 @@ class GenericAPIConnector(BaseDestinationHandler):
         #: Every origin a request of this connection may reach. Read once
         #: at connect, because the set is the run's and cannot widen.
         self._origins: frozenset[str] = frozenset()
+        #: The connection's retry budget, read once so every sender this
+        #: connector opens gets the one the connection declared.
+        self._max_retries: int = DEFAULT_MAX_RETRIES
         self.dialect: ApiDialect | None = None
         # None rather than "": join_url("", "/v1/x") answers "/v1/x", a
         # relative URL the client rejects with an unhelpful error instead of
@@ -187,13 +189,15 @@ class GenericAPIConnector(BaseDestinationHandler):
             # nowhere else.
             self.dialect = self.dialect_class.for_runtime(runtime)
             await runtime.materialize()
-            self.base_url = runtime.base_url
-            self._origins = declared_origins(runtime.declared_origins)
-            self._http = self._build_sender(
-                await runtime.http_transport(),
-                max_retries=runtime.raw_config.get("max_retries", DEFAULT_MAX_RETRIES),
+            self._origins = declared_origins(runtime.declared_base_urls)
+            self._max_retries = runtime.raw_config.get(
+                "max_retries", DEFAULT_MAX_RETRIES
             )
-            self._senders[runtime.default_transport_ref] = self._http
+            # Through the same call every later request goes through, so
+            # the default transport is opened, wrapped and cached in one
+            # place: a second construction site here is a second sender
+            # over the one session, and a second connection pool with it.
+            self._http, self.base_url = await self._dispatch_through(None)
             self._session_header_names = {k.lower() for k in runtime.session.headers}
             # A write body has no batch-size concept, so this resolver is
             # built once; a read builds its own per call with the engine's
@@ -205,47 +209,38 @@ class GenericAPIConnector(BaseDestinationHandler):
             logger.error("failed to connect to API: %s", err)
             raise ConnectorConnectionError(f"API connection failed: {err}") from err
 
-    def _build_sender(
-        self, transport: HttpTransport, *, max_retries: int
-    ) -> HttpSender:
-        """Wrap one materialized transport in the round trip both roles make.
-
-        The dialect, the retry statuses and the retry count are the
-        connection's, not the transport's: they describe how this provider
-        answers, which does not change because a second origin serves the
-        documents.
-        """
-        if self.dialect is None:  # pragma: no cover — set in connect()
-            raise RuntimeError("connector not connected: no dialect")
-        return HttpSender(
-            session=transport.session,
-            rate_limiter=transport.rate_limiter,
-            dialect=self.dialect,
-            retry_statuses=declared_retry_statuses(self.dialect.error_map),
-            max_retries=max_retries,
-        )
-
     async def _dispatch_through(
         self, transport_ref: str | None
     ) -> tuple[HttpSender, str]:
         """Return the sender and base URL an operation dispatches through.
 
-        The one place ``request.transport_ref`` becomes a session. A ref
-        the run did not resolve is refused by the runtime, by name -- the
-        alternative, falling back to the default, is the silent failure
-        this path exists to end: the request goes out on the wrong origin
-        with the wrong headers and the provider answers it.
+        The one place ``request.transport_ref`` becomes a session --
+        ``connect()`` opens the default through it too, so there is one
+        construction site rather than one per role plus one for the
+        default. A ref the run did not resolve is refused by the runtime,
+        by name; the alternative, falling back to the default, is the
+        silent failure this path exists to end: the request goes out on
+        the wrong origin with the wrong headers and the provider answers
+        it.
+
+        The dialect, the retry statuses and the retry budget are the
+        connection's, not the transport's: they describe how this provider
+        answers, which does not change because a second origin serves the
+        documents.
         """
-        runtime = self._runtime
-        if runtime is None or not self._connected:
+        runtime, dialect = self._runtime, self.dialect
+        if runtime is None or dialect is None:
             raise RuntimeError("connector not connected: no HTTP sender")
         transport = await runtime.http_transport(transport_ref)
         ref = transport_ref or runtime.default_transport_ref
         sender = self._senders.get(ref)
         if sender is None:
-            sender = self._build_sender(
-                transport,
-                max_retries=runtime.raw_config.get("max_retries", DEFAULT_MAX_RETRIES),
+            sender = HttpSender(
+                session=transport.session,
+                rate_limiter=transport.rate_limiter,
+                dialect=dialect,
+                retry_statuses=declared_retry_statuses(dialect.error_map),
+                max_retries=self._max_retries,
             )
             self._senders[ref] = sender
         return sender, transport.base_url

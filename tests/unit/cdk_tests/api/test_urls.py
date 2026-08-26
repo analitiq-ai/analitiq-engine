@@ -17,7 +17,6 @@ from cdk.api.urls import (
     join_url,
     redact_credentials,
     require_declared_origin,
-    same_origin,
 )
 from cdk.exceptions import TransportSpecError
 from cdk.transport_factory import require_http_base_url
@@ -116,7 +115,7 @@ class TestFollowUrl:
             follow_url(f"{BASE_URL}/v1", {"href": "/x"}, origins=ONE_ORIGIN)
 
     @pytest.mark.parametrize(
-        ("base", "target", "shared"),
+        ("declared", "target", "permitted"),
         [
             ("https://a.test", "https://A.test:443", True),
             ("http://a.test:80", "http://a.test", True),
@@ -125,11 +124,22 @@ class TestFollowUrl:
             ("https://a.test", "https://b.test", False),
         ],
     )
-    def test_same_origin_normalizes_case_and_default_ports(
-        self, base: str, target: str, shared: bool
+    def test_membership_normalizes_case_and_default_ports(
+        self, declared: str, target: str, permitted: bool
     ) -> None:
-        """The normalization is yarl's ``origin()``, not a rule of ours."""
-        assert same_origin(base, target) is shared
+        """The normalization is yarl's ``origin()``, not a rule of ours.
+
+        Asked of the guard rather than of a comparison helper, because the
+        set the guard is built from and the URL it is probed with have to
+        normalize the same way -- which is the whole reason one reduction
+        serves both.
+        """
+        origins = declared_origins([declared])
+        if permitted:
+            require_declared_origin(target, origins=origins)
+        else:
+            with pytest.raises(ValueError, match=REFUSAL):
+                require_declared_origin(target, origins=origins)
 
 
 class TestNoRefusalLogsAPassword:

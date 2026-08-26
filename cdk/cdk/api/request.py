@@ -259,6 +259,19 @@ def bind_request_values(
                     str(name), bound, style, endpoint=endpoint
                 )
             for wire_name, wire_value in spelled.items():
+                if wire_name in resolved:
+                    # A deepObject or an exploded object writes key names
+                    # of its own, so it can land on one the map already
+                    # declared. Whichever won, the other would be dropped
+                    # without a word -- the exact silence honouring the
+                    # key map exists to end.
+                    raise RequestSpecError(
+                        f"request.{block}.{name} for endpoint {endpoint!r} "
+                        f"serializes to {wire_name!r}, which this request "
+                        f"already sends; one of the two would be dropped "
+                        f"silently. Rename the key, or declare a style "
+                        f"that keeps its own name"
+                    )
                 resolved[wire_name] = (
                     [
                         _sendable_value(wire_name, item, block=block, endpoint=endpoint)
@@ -417,10 +430,10 @@ def request_block_problem(
     *,
     reserved_headers: frozenset[str] | set[str],
     resolver: Resolver,
+    endpoint: str,
     controlled_by: Mapping[str, str] = MappingProxyType({}),
     declared_params: Mapping[str, Any] = MappingProxyType({}),
     pagination: Mapping[str, Any] | None = None,
-    endpoint: str = "<unnamed>",
 ) -> str | None:
     """Why this request block cannot be sent as declared, or ``None``.
 

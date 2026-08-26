@@ -110,10 +110,10 @@ class TestWhatIsRefused:
         """The registry is closed engine-side: the schema types style as a string."""
         problem = request_block_problem(
             {"query": {"tags": {"from_param": "tags"}}},
+            endpoint="items",
             reserved_headers=frozenset(),
             resolver=Resolver(ResolutionContext()),
             declared_params=_param("array", "matrix", True),
-            endpoint="items",
         )
         assert problem is not None
         assert "'matrix'" in problem
@@ -123,10 +123,10 @@ class TestWhatIsRefused:
         """OpenAPI leaves deepObject on explode=false with no spelling at all."""
         problem = request_block_problem(
             {"query": {"tags": {"from_param": "tags"}}},
+            endpoint="items",
             reserved_headers=frozenset(),
             resolver=Resolver(ResolutionContext()),
             declared_params=_param("object", "deepObject", False),
-            endpoint="items",
         )
         assert problem is not None
         assert "undefined" in problem
@@ -139,6 +139,33 @@ class TestWhatIsRefused:
         """OpenAPI stops at one level, so there is nothing to send."""
         with pytest.raises(RequestSpecError, match="nested"):
             _sent("array", "form", True, ["a", ["b"]])
+
+    def test_a_style_writing_a_key_the_request_already_sends_is_refused(
+        self,
+    ) -> None:
+        """One of the two would go out and the other vanish, unremarked."""
+        declared = {
+            "status": {"literal": "open"},
+            "filter": {"from_param": "tags"},
+        }
+        params = {
+            "tags": {
+                "in": "query",
+                "type": "object",
+                "required": False,
+                "style": "form",
+                "explode": True,
+            }
+        }
+        with pytest.raises(RequestSpecError, match="already sends"):
+            bind_query_and_headers(
+                params={"tags": {"status": "closed"}},
+                declared_query=declared,
+                declared_headers=None,
+                resolver=Resolver(ResolutionContext()),
+                endpoint="items",
+                query_styles=declared_query_styles(declared, params),
+            )
 
     def test_a_container_under_a_key_no_param_owns_keeps_the_old_refusal(
         self,

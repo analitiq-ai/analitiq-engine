@@ -50,6 +50,7 @@ from cdk.secrets.exceptions import PlaceholderExpansionError, SecretNotFoundErro
 from cdk.secrets.protocol import SecretsResolver
 from cdk.sql.exceptions import TlsVerificationError
 from cdk.transport_factory import (
+    HTTP_TRANSPORT_TYPE,
     AdbcTransport,
     HttpTransport,
     SqlAlchemyTransport,
@@ -581,7 +582,7 @@ class ConnectionRuntime:
         if opened is not None:
             return opened
         spec = self._transport_specs[ref]
-        if spec.get("transport_type") != "http":
+        if spec.get("transport_type") != HTTP_TRANSPORT_TYPE:
             raise TransportSpecError(
                 f"connection {self._connection_id!r}: transport {ref!r} "
                 f"declares transport_type {spec.get('transport_type')!r}; an "
@@ -614,15 +615,13 @@ class ConnectionRuntime:
         return self._default_transport_ref
 
     @property
-    def declared_origins(self) -> frozenset[str]:
-        """Every origin this run's requests are allowed to reach.
+    def declared_base_urls(self) -> frozenset[str]:
+        """The base URL of every http transport this run may dispatch through.
 
-        The origins of the transports the request path may dispatch
-        through -- the default and whatever an operation names. A URL the
-        request path produces, a provider-supplied next-page link
-        included, has to land on one of them: the session sends this
-        connection's credentials, and a link that leaves the set hands
-        them to a host the connector never declared.
+        What the api path's containment guard is armed with, once reduced
+        to origins -- the reduction being a URL rule, so it belongs to
+        :mod:`cdk.api.urls` and not to this module, which is core and
+        cannot import that package.
 
         Read from the resolved SPECS rather than from the opened
         transports, so the set is whole from the first request rather than
@@ -632,7 +631,8 @@ class ConnectionRuntime:
         return frozenset(
             str(spec["base_url"])
             for spec in self._transport_specs.values()
-            if spec.get("transport_type") == "http" and spec.get("base_url")
+            if spec.get("transport_type") == HTTP_TRANSPORT_TYPE
+            and spec.get("base_url")
         )
 
     def _apply_transport(self, transport: Any) -> None:

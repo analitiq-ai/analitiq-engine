@@ -32,7 +32,6 @@ __all__ = [
     "join_url",
     "redact_credentials",
     "require_declared_origin",
-    "same_origin",
 ]
 
 #: The stable fragment of the off-origin refusal below. Exported so a
@@ -67,17 +66,12 @@ def _origin(url: str) -> str:
     identically still compare unequal when one was spelled with its
     default port.
 
-    One spelling of the reduction, so the pairwise comparison and the
-    declared-set membership below cannot come to normalize differently --
-    a set built one way and probed another is a guard that answers on
+    One spelling of the reduction, so the set the guard is built from and
+    the URL it is probed with cannot come to normalize differently -- a
+    set built one way and probed another is a guard that answers on
     spelling.
     """
     return str(URL(url).origin())
-
-
-def same_origin(base: str, target: str) -> bool:
-    """Whether two URLs share scheme, host and effective port."""
-    return _origin(base) == _origin(target)
 
 
 def declared_origins(base_urls: Iterable[str]) -> frozenset[str]:
