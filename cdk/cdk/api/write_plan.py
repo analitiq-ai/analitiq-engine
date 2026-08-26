@@ -329,6 +329,90 @@ def content_idempotency_key(record: Mapping[str, Any]) -> str:
     return record_digest(dict(record))
 
 
+def _selected_mode(
+    doc: Mapping[str, Any], schema_spec: SchemaSpec
+) -> tuple[str, Mapping[str, Any]] | str:
+    """Return the write block this schema selects, or why it cannot be served.
+
+    Two ways a stream asks for something the api path does not have: a
+    write mode outside the contract's closed map, and a mode the document
+    declares no block for. Both are refusals the ack carries rather than
+    exceptions, so they answer in the same currency as the rest of the
+    handshake.
+    """
+    mode_key = WRITE_MODE_KEYS.get(schema_spec.write_mode)
+    if mode_key is None:
+        return (
+            f"API destination does not support write_mode="
+            f"{schema_spec.write_mode}; valid api-endpoint modes are "
+            f"{sorted(WRITE_MODE_KEYS.values())}"
+        )
+    mode_block = write_mode_block(doc, mode_key)
+    if mode_block is None:
+        write = (doc.get("operations") or {}).get("write")
+        available = sorted(write) if write else None
+        return (
+            f"endpoint document does not define an operations.write.{mode_key} "
+            f"block; write modes present: {available}"
+        )
+    return mode_key, mode_block
+
+
+def _batching_problem(plan: StreamWritePlan) -> str | None:
+    """Why this stream cannot batch as declared, or ``None``.
+
+    A batched body binds ``records``, which is a list, and a form carries
+    flat name/value pairs -- so every chunk this stream ever builds fails
+    encoding, deterministically, before anything is sent. The two are
+    incompatible by shape rather than by data, so the handshake refuses
+    the stream instead of advertising one that cannot write a batch.
+    """
+    if media_type(plan.content_type) != FORM_CONTENT_TYPE:
+        return None
+    return (
+        f"operations.write declares batching and content_type "
+        f"{plan.content_type!r}: a batched body sends the records as a "
+        f"list, and {FORM_CONTENT_TYPE} carries only flat name/value "
+        f"pairs, so no chunk of this stream could ever be encoded. Drop "
+        f"the batching block to send one record per request, or declare a "
+        f"content_type that carries structure"
+    )
+
+
+def _apply_idempotency(
+    plan: StreamWritePlan,
+    mode_block: Mapping[str, Any],
+    batching: Mapping[str, Any] | None,
+    *,
+    reserved: frozenset[str],
+) -> str | None:
+    """Record where the engine-owned idempotency key lands, or why it cannot.
+
+    The author declares placement only -- the VALUE is always the
+    engine's -- so what can go wrong is where it would land: a header the
+    connection or the endpoint already sends, a name the client cannot
+    put on the wire, a body field the record already carries.
+    """
+    idempotency = mode_block.get("idempotency")
+    if idempotency is None:
+        return None
+    problem = idempotency_config_problem(
+        idempotency,
+        batching,
+        plan,
+        # The endpoint's own headers join the reserved set: the
+        # engine-owned key must not be layered over a header this
+        # endpoint declares either.
+        reserved_headers=reserved | {name.lower() for name in plan.headers},
+        declared_input_fields=collect_input_field_names(mode_block),
+    )
+    if problem is not None:
+        return problem
+    plan.idempotency_in = idempotency.get("in")
+    plan.idempotency_name = idempotency.get("name", "")
+    return None
+
+
 def build_write_plan(
     doc: Mapping[str, Any],
     schema_spec: SchemaSpec,
@@ -351,22 +435,10 @@ def build_write_plan(
     transport's, which is the wrong one for a stream that writes somewhere
     else.
     """
-    mode_key = WRITE_MODE_KEYS.get(schema_spec.write_mode)
-    if mode_key is None:
-        return (
-            f"API destination does not support write_mode="
-            f"{schema_spec.write_mode}; valid api-endpoint modes are "
-            f"{sorted(WRITE_MODE_KEYS.values())}"
-        )
-
-    mode_block = write_mode_block(doc, mode_key)
-    if mode_block is None:
-        write = (doc.get("operations") or {}).get("write")
-        available = sorted(write) if write else None
-        return (
-            f"endpoint document does not define an operations.write.{mode_key} "
-            f"block; write modes present: {available}"
-        )
+    selected = _selected_mode(doc, schema_spec)
+    if isinstance(selected, str):
+        return selected
+    mode_key, mode_block = selected
 
     request = mode_block.get("request") or {}
     endpoint_id = str(doc.get("endpoint_id", "<unnamed>"))
@@ -436,40 +508,14 @@ def build_write_plan(
     # per record.
     batching = mode_block.get("batching")
     if batching is not None:
-        if media_type(plan.content_type) == FORM_CONTENT_TYPE:
-            # A batched body binds `records`, which is a list, and a form
-            # carries flat name/value pairs -- so every chunk this stream
-            # ever builds fails encoding, deterministically, before
-            # anything is sent. The two are incompatible by shape rather
-            # than by data, so the handshake refuses the stream instead of
-            # advertising one that cannot write a batch.
-            return (
-                f"operations.write declares batching and content_type "
-                f"{plan.content_type!r}: a batched body sends the records "
-                f"as a list, and {FORM_CONTENT_TYPE} carries only flat "
-                f"name/value pairs, so no chunk of this stream could ever "
-                f"be encoded. Drop the batching block to send one record "
-                f"per request, or declare a content_type that carries "
-                f"structure"
-            )
-        plan.max_records = batching.get("max_records")
-
-    idempotency = mode_block.get("idempotency")
-    if idempotency is not None:
-        problem = idempotency_config_problem(
-            idempotency,
-            batching,
-            plan,
-            # The endpoint's own headers join the reserved set: the
-            # engine-owned key must not be layered over a header this
-            # endpoint declares either.
-            reserved_headers=reserved | {name.lower() for name in plan.headers},
-            declared_input_fields=collect_input_field_names(mode_block),
-        )
+        problem = _batching_problem(plan)
         if problem is not None:
             return problem
-        plan.idempotency_in = idempotency.get("in")
-        plan.idempotency_name = idempotency.get("name", "")
+        plan.max_records = batching.get("max_records")
+
+    problem = _apply_idempotency(plan, mode_block, batching, reserved=reserved)
+    if problem is not None:
+        return problem
 
     plan.retry_verdict = retry_verdict(mode_key, plan)
     return plan
