@@ -331,18 +331,31 @@ def dispatch_transport_refs(target: ConformanceTarget) -> list[str]:
     return refs
 
 
-def api_origins(target: ConformanceTarget) -> frozenset[str]:
-    """Return the origins the read path's containment guard is armed with.
+def api_origins(
+    target: ConformanceTarget, transport_ref: str | None = None
+) -> frozenset[str]:
+    """Return the origins ONE read's containment guard is armed with.
 
-    Every dispatchable transport's base URL, reduced to origins. A
-    transport whose base URL a definition-only run cannot settle
-    contributes the stand-in the read checks compile against, so the guard
-    the kit drives is armed exactly the way a real run's is: with the set,
-    never with one member of it.
+    The default transport's origin and, when the read names one, that
+    transport's -- which is exactly the set a source run has. A source
+    worker's bootstrap carries a single endpoint document, so it resolves
+    the default plus that endpoint's ``transport_ref`` and nothing else: a
+    sibling endpoint's transport is not in the run and its origin is not
+    in the guard.
+
+    Armed target-wide instead, the kit would certify a link that
+    production refuses -- an endpoint whose next link lands on a SIBLING
+    endpoint's origin would pass here and die after its first page. The
+    kit arms the guard the way the run arms it, or it certifies a
+    different engine.
+
+    A transport whose base URL a definition-only run cannot settle
+    contributes the stand-in the read checks compile against.
     """
+    refs = [target.definition.get("default_transport"), transport_ref]
     return declared_origins(
         api_base_url(target, ref) or STAND_IN_ORIGIN
-        for ref in dispatch_transport_refs(target)
+        for ref in dict.fromkeys(r for r in refs if isinstance(r, str))
     )
 
 

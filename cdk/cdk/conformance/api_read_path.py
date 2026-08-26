@@ -35,14 +35,14 @@ when it bites:
   the connector's. Its records are shaped the same way, plus the keyset
   ordering field, which is planted because the engine walks the provider's
   raw record and not the declared schema.
-* the origins the link guard is armed with are the literal ``base_url``
-  of every transport the connector's reads dispatch through, with a
-  stand-in for each one the definition expresses as a reference the
-  connection document supplies. The set, not the one the read started on:
-  that is what a run arms the guard with, and pinning the probe to a
-  single member would certify a refusal the engine does not make. What the
-  guard certifies -- that a link handed to the traversal is either refused
-  or resolved back onto a declared origin -- holds either way.
+* the origins the link guard is armed with are THIS read's: the default
+  transport's ``base_url`` and, when the read names one, that
+  transport's, with a stand-in for each the definition expresses as a
+  reference the connection document supplies. Exactly the set a source
+  run has, because a source worker's bootstrap carries one endpoint
+  document and resolves the default plus that endpoint's ref. Arming the
+  probe with every read's transports instead would certify a link onto a
+  sibling endpoint's origin that production refuses after page one.
 * a path placeholder whose value the connection, a stream's filters or the
   replication cursor supplies gets a stand-in segment. The engine builds
   its param table from all three and substitutes the path after the
@@ -323,7 +323,7 @@ def _compile_read(
         pagination=pagination if isinstance(pagination, dict) else None,
         url=join_url(origin, path),
         origin=origin,
-        origins=api_origins(target),
+        origins=api_origins(target, request_block.get("transport_ref")),
         table=table,
         resolver=resolver,
         first=PageRequest(""),

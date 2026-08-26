@@ -55,6 +55,7 @@ from .http import (
     SignedRequest,
     encode_body,
     failure_facts,
+    query_pairs,
 )
 from .page_loop import Fetch, Page, PageLoop, PageRequest
 from .query_style import declared_query_styles
@@ -657,7 +658,7 @@ class GenericAPIConnector(BaseDestinationHandler):
             signed = SignedRequest(
                 method=method,
                 url=request.url,
-                params=prepared.query,
+                params=query_pairs(prepared.query),
                 headers=prepared.headers,
                 body=(
                     None
@@ -1182,7 +1183,7 @@ class GenericAPIConnector(BaseDestinationHandler):
             SignedRequest(
                 method=plan.method,
                 url=url,
-                params=dict(plan.query),
+                params=query_pairs(plan.query),
                 headers={**plan.headers, **dict(extra_headers or {})},
                 body=body,
                 content_type=plan.content_type,

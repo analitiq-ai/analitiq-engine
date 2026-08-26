@@ -67,7 +67,12 @@ class SignedRequest:
 
     method: str
     url: str
-    params: dict[str, Any] = field(default_factory=dict)
+    #: The query as the ORDERED PAIRS the wire carries, not as a mapping.
+    #: An exploded array repeats its name (``tags=a&tags=b``), which a
+    #: mapping cannot hold and a canonicalizing signature would therefore
+    #: sign in a shape the request never takes -- the hook is promised the
+    #: final request, so the flattening happens before it, not after.
+    params: list[tuple[str, Any]] = field(default_factory=list)
     headers: dict[str, str] = field(default_factory=dict)
     body: bytes | None = None
     #: The media type ``body`` was encoded as, sent as ``Content-Type``.
@@ -162,15 +167,18 @@ def query_value(value: Any) -> Any:
 
 
 def query_pairs(query: Mapping[str, Any]) -> list[tuple[str, Any]]:
-    """Flatten the built query into the name/value pairs the client sends.
+    """Flatten the built query into the name/value pairs the wire carries.
 
     A key holding a list is the one query serialization that repeats a
     name (an exploded ``form`` array: ``tags=a&tags=b``), and a mapping
     cannot hold the same key twice -- so the repetition lives as a list
-    until here, where the client takes pairs and a list would raise. The
-    expansion is this layer's because the encoding is: what to send is
-    decided in :mod:`cdk.api.query_style`, how it is spelled on the wire
-    is ``yarl``'s.
+    from the moment the style decides it until here.
+
+    Called when the request is ASSEMBLED, before the dialect signs it:
+    :attr:`SignedRequest.params` is promised to be the request that goes
+    out, and a signature canonicalized over ``{"tags": ["a", "b"]}``
+    covers a shape the wire never carries. What to send is decided in
+    :mod:`cdk.api.query_style`; how each value is spelled is ``yarl``'s.
     """
     return [
         (name, query_value(item))
@@ -282,7 +290,7 @@ class HttpSender:
         async with self._client.request(
             method=request.method,
             url=request.url,
-            params=query_pairs(request.params),
+            params=request.params,
             data=request.body,
             headers=request.headers or None,
         ) as response:

@@ -182,6 +182,12 @@ def serialize_query_value(
     request is the caller's -- this module decides only WHICH names carry
     WHICH values.
 
+    A delimited style refuses an entry containing its own delimiter: the
+    separator is structural, the client encodes the joined result as a
+    single value, and no encoding applied afterwards can say which
+    delimiters were data. ``['a,b', 'c']`` and ``['a', 'b,c']`` would
+    otherwise both go out as ``tags=a,b,c``.
+
     ``sendable`` is the caller's rule for what one value may be on the
     wire, and every value returned here has been through it. It is passed
     in rather than restated because there is exactly one such rule
@@ -227,7 +233,22 @@ def serialize_query_value(
         if isinstance(value, Mapping)
         else [str(sendable(key, item)) for _, item in items]
     )
-    return {key: _DELIMITERS[style.style].join(parts)}
+    delimiter = _DELIMITERS[style.style]
+    for part in parts:
+        if delimiter in part:
+            raise RequestSpecError(
+                f"request.query[{key!r}] for endpoint {endpoint!r} declares "
+                f"style {style.style!r}, which separates entries with "
+                f"{delimiter!r}, and one entry ({part!r}) contains that "
+                f"character. Joined, the provider reads a different "
+                f"collection than the one declared and answers it. The "
+                f"delimiter is structural here and the client encodes the "
+                f"joined string as one value, so there is no encoding that "
+                f"puts the boundary back -- send this param with style "
+                f"'form' and explode=true, which repeats the name and "
+                f"encodes each value on its own"
+            )
+    return {key: delimiter.join(parts)}
 
 
 def _flat_items(key: str, value: Any, *, endpoint: str) -> list[tuple[str, Any]]:

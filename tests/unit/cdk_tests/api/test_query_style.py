@@ -119,6 +119,41 @@ class TestOneRuleForWhatAValueMayBe:
             _sent("array", "form", False, ["a", None])
 
 
+class TestADelimiterCannotBeData:
+    """A structural delimiter inside a value has no encoding that survives.
+
+    yarl sends a joined `a,b,c` verbatim and encodes the whole string as
+    one value, so a comma that was data is indistinguishable from one that
+    was a separator -- and pre-encoding the component is double-encoded to
+    `%252C`. The boundary is unrecoverable, so the value is refused.
+    """
+
+    @pytest.mark.parametrize(
+        ("style", "entry"),
+        [("form", "a,b"), ("spaceDelimited", "a b"), ("pipeDelimited", "a|b")],
+    )
+    def test_an_entry_carrying_its_own_delimiter_is_refused(
+        self, style: str, entry: str
+    ) -> None:
+        with pytest.raises(RequestSpecError, match="contains that character"):
+            _sent("array", style, False, [entry, "c"])
+
+    def test_the_message_names_the_style_that_can_send_it(self) -> None:
+        with pytest.raises(RequestSpecError, match="explode=true"):
+            _sent("array", "form", False, ["a,b"])
+
+    def test_exploding_the_same_value_sends_it_intact(self) -> None:
+        """The remedy works: a repeated name encodes each value on its own."""
+        assert _sent("array", "form", True, ["a,b", "c"]) == [
+            ("tags", "a,b"),
+            ("tags", "c"),
+        ]
+
+    def test_an_object_entry_carrying_the_delimiter_is_refused_too(self) -> None:
+        with pytest.raises(RequestSpecError, match="contains that character"):
+            _sent("object", "form", False, {"a": "x,y"})
+
+
 class TestWhatIsRefused:
     def test_a_style_the_engine_does_not_serialize_is_named_at_plan_time(
         self,

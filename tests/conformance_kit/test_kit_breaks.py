@@ -40,6 +40,7 @@ from cdk.conformance import (
 )
 from cdk.conformance import target as target_module
 from cdk.conformance import violation_report
+from cdk.conformance.api_surface import api_origins
 from cdk.conformance.target import (
     ConformanceSetupError,
     ConformanceTarget,
@@ -1486,6 +1487,35 @@ class TestApiReadPathBreaks:
         assert "transport 'files'" in report
         assert "no usable base_url" in report
         assert "widgets" in report, "the finding must name the reads it stops"
+
+    def test_a_probe_is_armed_with_its_own_reads_origins_not_its_siblings(
+        self, tmp_path: Path
+    ) -> None:
+        """A source run resolves one endpoint's transports, so the kit does too.
+
+        Armed target-wide, a link onto a SIBLING endpoint's origin would
+        pass here and be refused in production after page one -- the kit
+        certifying an engine that does not exist.
+        """
+        root = tmp_path / "api"
+        shutil.copytree(API_REFERENCE_DIR, root)
+        connector = root / "definition" / "connector.json"
+        definition = json.loads(connector.read_text())
+        definition["transports"]["files"] = {
+            "transport_type": "http",
+            "base_url": "https://files.example.invalid",
+        }
+        connector.write_text(json.dumps(definition))
+        document = root / "definition" / "endpoints" / "widgets.json"
+        parsed = json.loads(document.read_text())
+        parsed["operations"]["read"]["request"]["transport_ref"] = "files"
+        document.write_text(json.dumps(parsed))
+        target = load_target(root)
+
+        # The read that names 'files' is armed with it; a sibling that
+        # names nothing is not, because its own run would not resolve it.
+        assert "https://files.example.invalid" in api_origins(target, "files")
+        assert "https://files.example.invalid" not in api_origins(target)
 
     def test_a_read_naming_the_default_transport_is_not_a_finding(
         self, tmp_path: Path
