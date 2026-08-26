@@ -19,7 +19,7 @@ from cdk.api.http import (
 )
 from cdk.declarations import parse_declared_error_map
 
-from .fakes import BASE_URL, FakeResponse, FakeSession
+from .fakes import BASE_URL, FakeResponse, FakeSession, sent_query
 
 pytestmark = pytest.mark.unit
 
@@ -211,7 +211,7 @@ class TestSend:
             ),
             unwrap_page=True,
         )
-        assert session.calls[0]["params"] == {"since": "1.50"}
+        assert sent_query(session.calls[0]) == {"since": "1.50"}
 
     async def test_the_transport_re_attempts_a_retryable_status(self) -> None:
         session = FakeSession(

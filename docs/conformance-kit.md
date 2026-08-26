@@ -98,23 +98,27 @@ in a customer pipeline (spec
   judged always, a mixed node is refused by the path no phase supplies,
   and what a definition settles by itself is resolved rather than
   deferred.
-- **No read declares something the path drops.** The contract is wider
-  than the path in one place: a request may name its own `transport_ref`.
-  The path implements no such selection — it opens one connection at
-  connect time and dispatches every read through it — and the failure is
-  silent, since the request still goes out, against the wrong origin with
-  the wrong headers. There is no execution to drive, so it is reported
-  from the declaration.
-- **There is a read to drive, on a transport that can open.** Every api
+- **There is a read to drive, on transports that can open.** Every api
   check iterates the read operations, so a connector shipping none — or
   only write-only endpoints — would satisfy all of them by having nothing
   to fail, and the applicability gate would not notice because those
   modules do apply to the kind. That is the kit's own founding rule one
-  level down, so it is a failure. So is a `default_transport` that is
-  absent, is not `http`, or whose `base_url` does not resolve to a
-  non-empty string when it reads no connection scope: every read opens
-  that one transport at connect time, and without it no stream reaches its
-  first request.
+  level down, so it is a failure.
+
+  So is a transport a read dispatches through that is not `http`, or
+  whose `base_url` does not resolve to a non-empty string when it reads
+  no connection scope — the `default_transport` and every transport a
+  request's `transport_ref` names. The two differ in what they stop, and
+  the finding says which: the default is opened at connect time, so no
+  stream reaches its first request without it, while a named one is
+  opened by the first read that dispatches through it and stops exactly
+  those reads.
+
+  Whether a named `transport_ref` resolves to a transport the sibling
+  connector.json declares is *not* checked here. It is decidable from the
+  two documents alone, which makes it the package validator's
+  `endpoint-transport-ref`; a second, differently worded verdict would
+  give the author two findings for one defect.
 
 **Tier 2 — live tests** (`cdk.conformance.tier2`, the connector's
 system as a CI service container): all three write modes end-to-end

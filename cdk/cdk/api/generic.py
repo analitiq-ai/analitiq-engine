@@ -36,10 +36,11 @@ from ..base_handler import (
     LandingBatch,
 )
 from ..connection_runtime import ConnectionRuntime
-from ..exceptions import ReadError
+from ..exceptions import ReadError, TransportSpecError
 from ..json_utils import decode_json_fields
 from ..resolver import Resolver
 from ..schema_contract import SchemaContract
+from ..transport_factory import HttpTransport
 from ..types import (
     AckStatus,
     CheckpointStore,
@@ -57,6 +58,7 @@ from .http import (
     failure_facts,
 )
 from .page_loop import Fetch, Page, PageLoop, PageRequest
+from .query_style import declared_query_styles
 from .read_setup import build_read_strategy, stop_condition
 from .records import extract_records
 from .replication import cursor_param_for, effective_start
@@ -69,7 +71,7 @@ from .request import (
     substitute_path,
 )
 from .response_schema import apply_read_type_map, records_items_schema
-from .urls import join_url
+from .urls import declared_origins, join_url, require_declared_origin
 from .verdicts import declared_retry_statuses, read_verdict, write_verdict
 from .write_plan import (
     WRITE_MODE_KEYS,
@@ -145,6 +147,15 @@ class GenericAPIConnector(BaseDestinationHandler):
         """Construct an unconnected connector; both worker entry points do ``cls()``."""
         self._runtime: ConnectionRuntime | None = None
         self._http: HttpSender | None = None
+        # One sender per transport an operation dispatches through, keyed
+        # by the transport's own ref (the default under its own name, so a
+        # request omitting the key and one naming the default share it).
+        # Built on first use; a connector whose operations name nothing
+        # holds exactly the one entry ``connect()`` put there.
+        self._senders: dict[str, HttpSender] = {}
+        #: Every origin a request of this connection may reach. Read once
+        #: at connect, because the set is the run's and cannot widen.
+        self._origins: frozenset[str] = frozenset()
         self.dialect: ApiDialect | None = None
         # None rather than "": join_url("", "/v1/x") answers "/v1/x", a
         # relative URL the client rejects with an unhelpful error instead of
@@ -177,13 +188,12 @@ class GenericAPIConnector(BaseDestinationHandler):
             self.dialect = self.dialect_class.for_runtime(runtime)
             await runtime.materialize()
             self.base_url = runtime.base_url
-            self._http = HttpSender(
-                session=runtime.session,
-                rate_limiter=runtime.rate_limiter,
-                dialect=self.dialect,
-                retry_statuses=declared_retry_statuses(self.dialect.error_map),
+            self._origins = declared_origins(runtime.declared_origins)
+            self._http = self._build_sender(
+                await runtime.http_transport(),
                 max_retries=runtime.raw_config.get("max_retries", DEFAULT_MAX_RETRIES),
             )
+            self._senders[runtime.default_transport_ref] = self._http
             self._session_header_names = {k.lower() for k in runtime.session.headers}
             # A write body has no batch-size concept, so this resolver is
             # built once; a read builds its own per call with the engine's
@@ -195,10 +205,58 @@ class GenericAPIConnector(BaseDestinationHandler):
             logger.error("failed to connect to API: %s", err)
             raise ConnectorConnectionError(f"API connection failed: {err}") from err
 
+    def _build_sender(
+        self, transport: HttpTransport, *, max_retries: int
+    ) -> HttpSender:
+        """Wrap one materialized transport in the round trip both roles make.
+
+        The dialect, the retry statuses and the retry count are the
+        connection's, not the transport's: they describe how this provider
+        answers, which does not change because a second origin serves the
+        documents.
+        """
+        if self.dialect is None:  # pragma: no cover — set in connect()
+            raise RuntimeError("connector not connected: no dialect")
+        return HttpSender(
+            session=transport.session,
+            rate_limiter=transport.rate_limiter,
+            dialect=self.dialect,
+            retry_statuses=declared_retry_statuses(self.dialect.error_map),
+            max_retries=max_retries,
+        )
+
+    async def _dispatch_through(
+        self, transport_ref: str | None
+    ) -> tuple[HttpSender, str]:
+        """Return the sender and base URL an operation dispatches through.
+
+        The one place ``request.transport_ref`` becomes a session. A ref
+        the run did not resolve is refused by the runtime, by name -- the
+        alternative, falling back to the default, is the silent failure
+        this path exists to end: the request goes out on the wrong origin
+        with the wrong headers and the provider answers it.
+        """
+        runtime = self._runtime
+        if runtime is None or not self._connected:
+            raise RuntimeError("connector not connected: no HTTP sender")
+        transport = await runtime.http_transport(transport_ref)
+        ref = transport_ref or runtime.default_transport_ref
+        sender = self._senders.get(ref)
+        if sender is None:
+            sender = self._build_sender(
+                transport,
+                max_retries=runtime.raw_config.get("max_retries", DEFAULT_MAX_RETRIES),
+            )
+            self._senders[ref] = sender
+        return sender, transport.base_url
+
     async def disconnect(self) -> None:
         """Close the sender and release the runtime reference. Idempotent."""
-        if self._http is not None:
-            await self._http.close()
+        # Every sender, not just the default: a named transport opened for
+        # one endpoint owns a retry client and a connector pool of its own.
+        for sender in self._senders.values():
+            await sender.close()
+        self._senders.clear()
         if self._runtime is not None:
             # Idempotent, so closing after the retry client already closed
             # the session is safe.
@@ -217,6 +275,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                 # teardown's own.
                 pass
         self._http = None
+        self._origins = frozenset()
         self._connected = False
 
     async def health_check(self) -> bool:
@@ -351,6 +410,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                 controlled_by=table.controlled_by,
                 declared_params=read.get("params") or {},
                 pagination=read.get("pagination"),
+                endpoint=endpoint_id,
             )
             if problem is not None:
                 raise ReadError(f"endpoint {endpoint_id!r}: {problem}")
@@ -386,7 +446,18 @@ class GenericAPIConnector(BaseDestinationHandler):
             )
         except RequestSpecError as err:
             raise ReadError(f"endpoint {endpoint_id!r}: {err}") from err
-        full_url = join_url(self.base_url, path)
+
+        # The transport this read dispatches through -- the one the request
+        # block names, or the connection's default. Opened here rather than
+        # at connect(), so a connector whose reads name nothing opens the
+        # one session it always opened.
+        try:
+            sender, transport_base_url = await self._dispatch_through(
+                request_block.get("transport_ref")
+            )
+        except TransportSpecError as err:
+            raise ReadError(f"endpoint {endpoint_id!r}: {err}") from err
+        full_url = join_url(transport_base_url, path)
 
         builder = RequestBuilder(
             table,
@@ -396,6 +467,9 @@ class GenericAPIConnector(BaseDestinationHandler):
             declared_query=request_block.get("query"),
             declared_headers=request_block.get("headers"),
             content_type=request_block.get("content_type"),
+            query_styles=declared_query_styles(
+                request_block.get("query"), read.get("params") or {}
+            ),
         )
 
         strategy = build_read_strategy(
@@ -403,7 +477,7 @@ class GenericAPIConnector(BaseDestinationHandler):
             table=table,
             resolver=resolver,
             url=full_url,
-            base_url=self.base_url,
+            origins=self._origins,
             batch_size=batch_size,
         )
 
@@ -411,7 +485,7 @@ class GenericAPIConnector(BaseDestinationHandler):
             loop=PageLoop(
                 strategy,
                 fetch=self._fetcher(
-                    self._http, builder, method=method, records_ref=records_ref
+                    sender, builder, method=method, records_ref=records_ref
                 ),
                 stop_when=stop_condition((pagination or {}).get("stop_when"), resolver),
             ),
@@ -997,12 +1071,18 @@ class GenericAPIConnector(BaseDestinationHandler):
         only transport errors -- discarded the count of everything already
         written and let a replay send those records twice.
         """
-        if self._http is None or self.base_url is None:
-            raise RuntimeError("connector not connected: no HTTP sender")
-        return await self._http.send(
+        sender, transport_base_url = await self._dispatch_through(plan.transport_ref)
+        url = join_url(transport_base_url, plan.endpoint)
+        # The same containment rule the read's next-page links answer to.
+        # A write builds its URL from a declared path rather than from a
+        # provider's string, so this holds by construction today -- and
+        # asserting it here is what keeps that true when the path stops
+        # being the only thing that decides where a write lands.
+        require_declared_origin(url, origins=self._origins)
+        return await sender.send(
             SignedRequest(
                 method=plan.method,
-                url=join_url(self.base_url, plan.endpoint),
+                url=url,
                 params=dict(plan.query),
                 headers={**plan.headers, **dict(extra_headers or {})},
                 body=body,

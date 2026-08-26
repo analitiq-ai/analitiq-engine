@@ -80,7 +80,7 @@ def build_read_strategy(
     table: ParamTable,
     resolver: Resolver,
     url: str,
-    base_url: str,
+    origins: frozenset[str],
     batch_size: int,
 ) -> PaginationStrategy:
     """Build the paging adapter, binding the page size it walks with.
@@ -95,6 +95,13 @@ def build_read_strategy(
     depend on the order two calls happen in. Every page carries the value
     anyway -- it rides the ``PageRequest`` the adapter answers, which is
     what the builder binds from.
+
+    ``origins`` arms the containment guard with every origin the
+    connector declares a transport for -- not with the origin THIS read
+    dispatches through. A provider that answers from one host and links
+    its next page to another it declares is one connector, and pinning
+    the link to the request's own transport would refuse a page the
+    connector is entitled to read.
     """
     try:
         with request_spec_errors("pagination"):
@@ -111,7 +118,7 @@ def build_read_strategy(
                 url=url,
                 base_params=base_params,
                 resolve=page_expression_resolver(resolver),
-                follow_url=partial(follow_url, origin=base_url),
+                follow_url=partial(follow_url, origins=origins),
             )
     except RequestSpecError as err:
         # An unknown scheme, a page size that cannot advance, a step that

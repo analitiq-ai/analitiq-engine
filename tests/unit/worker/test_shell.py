@@ -92,7 +92,10 @@ class TestBuildBootstrap:
         runtime.connector_id = "postgres"
         runtime.connection_id = "my-pg"
         runtime.resolve_spec = AsyncMock(
-            return_value={"connection_id": "my-pg", "transport_spec": {"dsn": "x"}}
+            return_value={
+                "connection_id": "my-pg",
+                "transport_specs": {"database": {"dsn": "x"}},
+            }
         )
 
         bootstrap = await build_bootstrap(
@@ -105,7 +108,7 @@ class TestBuildBootstrap:
         assert bootstrap["role"] == "source"
         assert bootstrap["kind"] == "database"
         assert bootstrap["connector_id"] == "postgres"
-        assert bootstrap["connection"]["transport_spec"] == {"dsn": "x"}
+        assert bootstrap["connection"]["transport_specs"] == {"database": {"dsn": "x"}}
         assert bootstrap["type_maps"]["connector"] == {
             "rules": _RULES,
             "write_rules": None,
@@ -113,3 +116,68 @@ class TestBuildBootstrap:
         assert bootstrap["source_config"] == {"stream_source": {}}
         # The whole bootstrap is JSON-safe — it crosses the stdin pipe.
         assert json.loads(json.dumps(bootstrap)) == bootstrap
+
+    async def test_the_transports_the_operations_name_are_resolved(self, tmp_path):
+        """The worker has no secret store, so the shell resolves what it needs.
+
+        A transport whose spec does not travel in this payload can never be
+        opened on the other side -- and the alternative, resolving every
+        transport the connector declares, fails a data read on the auth
+        credentials it never uses.
+        """
+        connectors = tmp_path / "connectors"
+        connections = tmp_path / "connections"
+        _write_definition(connectors / "sevdesk", rules=_RULES)
+        connections.mkdir()
+
+        runtime = MagicMock()
+        runtime.connector_type = "api"
+        runtime.connector_id = "sevdesk"
+        runtime.connection_id = "my-api"
+        runtime.resolve_spec = AsyncMock(return_value={"connection_id": "my-api"})
+
+        await build_bootstrap(
+            runtime,
+            role="source",
+            connectors_dir=connectors,
+            connections_dir=connections,
+            source_config={
+                "endpoint_document": {
+                    "operations": {
+                        "read": {"request": {"transport_ref": "files"}},
+                    }
+                }
+            },
+            stream_endpoints={
+                "items": {
+                    "operations": {
+                        "write": {"insert": {"request": {"transport_ref": "uploads"}}}
+                    }
+                }
+            },
+        )
+        (_call,) = runtime.resolve_spec.await_args_list
+        assert _call.kwargs["transport_refs"] == {"files", "uploads"}
+
+    async def test_a_run_naming_no_transport_asks_for_none(self, tmp_path):
+        """A single-transport connector costs what it always cost."""
+        connectors = tmp_path / "connectors"
+        connections = tmp_path / "connections"
+        _write_definition(connectors / "postgres", rules=_RULES)
+        connections.mkdir()
+
+        runtime = MagicMock()
+        runtime.connector_type = "database"
+        runtime.connector_id = "postgres"
+        runtime.connection_id = "my-pg"
+        runtime.resolve_spec = AsyncMock(return_value={"connection_id": "my-pg"})
+
+        await build_bootstrap(
+            runtime,
+            role="source",
+            connectors_dir=connectors,
+            connections_dir=connections,
+            source_config={"stream_source": {}},
+        )
+        (_call,) = runtime.resolve_spec.await_args_list
+        assert _call.kwargs["transport_refs"] == set()

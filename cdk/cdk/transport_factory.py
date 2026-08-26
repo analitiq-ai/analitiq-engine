@@ -32,7 +32,7 @@ import logging
 import re
 import ssl as _ssl
 import urllib.parse
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Union
 
@@ -1243,6 +1243,41 @@ register_transport_kind(
 # ---------------------------------------------------------------------------
 
 
+def resolve_transport_specs(
+    connector: Mapping[str, Any],
+    *,
+    transport_refs: Iterable[str] = (),
+    context: ResolutionContext,
+) -> tuple[str, dict[str, dict[str, Any]]]:
+    """Resolve the transports one run may dispatch through, keyed by ref.
+
+    Returns the default transport's own ref and the resolved specs for it
+    plus every ref in *transport_refs* -- the transports an operation's
+    ``request.transport_ref`` names. Resolution happens here, all at once,
+    because it is the last moment the secrets are in reach: the connection
+    scrubs them the instant materialization is done, so a transport whose
+    spec was not resolved by then can never be opened. Building the live
+    session stays lazy, which is what keeps a single-transport connector
+    costing exactly what it cost before per-operation selection existed.
+
+    The set is the run's, not the connector's. A connector may declare
+    transports the request path never dispatches through -- the auth,
+    login and discovery origins a connection is SET UP over -- whose
+    values are the control plane's and whose secrets a run's connection
+    blob need not carry at all. Resolving those here would fail a
+    perfectly good data read on a credential it never uses.
+    """
+    default_ref, _ = _select_transport(connector, None)
+    resolved: dict[str, dict[str, Any]] = {}
+    for ref in (default_ref, *transport_refs):
+        if ref in resolved:
+            continue
+        resolved[ref] = resolve_transport_spec(
+            connector, transport_ref=ref, context=context
+        )
+    return default_ref, resolved
+
+
 def resolve_transport_spec(
     connector: Mapping[str, Any],
     *,
@@ -1285,17 +1320,3 @@ async def build_transport_from_spec(
             f"registered: {registered_transport_kinds()}"
         )
     return await kind.build_from_spec(resolved, sql_dialect=sql_dialect)
-
-
-async def build_transport(
-    connector: Mapping[str, Any],
-    *,
-    transport_ref: str | None = None,
-    context: ResolutionContext,
-    sql_dialect: Any = None,
-) -> Transport:
-    """Resolve and build in one step (in-process path: control-plane, tests)."""
-    resolved = resolve_transport_spec(
-        connector, transport_ref=transport_ref, context=context
-    )
-    return await build_transport_from_spec(resolved, sql_dialect=sql_dialect)

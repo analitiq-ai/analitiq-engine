@@ -1457,17 +1457,67 @@ class TestApiReadPathBreaks:
         assert "'geometry'" in report
         assert "read type-map" in report
 
-    def test_a_read_asking_for_a_transport_the_path_will_not_open(
+    def test_a_named_transport_that_cannot_be_opened_names_the_reads(
         self, tmp_path: Path
     ) -> None:
+        """A read dispatches through what it names, so that block is judged too.
+
+        And judged for the endpoints that name it: a defect in a named
+        transport stops exactly those reads, while the default's stops
+        every stream at connect(). A message quoting the larger
+        consequence for both would send the author looking for a
+        connection that never breaks.
+        """
+        root = tmp_path / "api"
+        shutil.copytree(API_REFERENCE_DIR, root)
+        connector = root / "definition" / "connector.json"
+        definition = json.loads(connector.read_text())
+        definition["transports"]["files"] = {
+            "transport_type": "http",
+            "base_url": {"literal": ""},
+        }
+        connector.write_text(json.dumps(definition))
+        document = root / "definition" / "endpoints" / "widgets.json"
+        parsed = json.loads(document.read_text())
+        parsed["operations"]["read"]["request"]["transport_ref"] = "files"
+        document.write_text(json.dumps(parsed))
+
+        report = _report(check_read_transport_selection(load_target(root)))
+        assert "transport 'files'" in report
+        assert "no usable base_url" in report
+        assert "widgets" in report, "the finding must name the reads it stops"
+
+    def test_a_read_naming_the_default_transport_is_not_a_finding(
+        self, tmp_path: Path
+    ) -> None:
+        """Naming the default by name is the same transport, not a second one.
+
+        The shape a real connector ships: every endpoint spells out the
+        ``transport_ref`` it dispatches through, and it is the default.
+        """
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            lambda read: read["request"].update(transport_ref="api"),
+        )
+        assert check_read_transport_selection(target) == []
+
+    def test_a_read_naming_an_undeclared_transport_is_left_to_the_validator(
+        self, tmp_path: Path
+    ) -> None:
+        """Decidable from the two documents alone, so the kit does not restate it.
+
+        ``endpoint-transport-ref`` in the package validator refuses an
+        endpoint naming a transport its sibling connector.json does not
+        declare. A second, differently worded verdict here would give the
+        author two findings for one defect.
+        """
         target = self._broken(
             tmp_path,
             "widgets",
             lambda read: read["request"].update(transport_ref="oauth"),
         )
-        report = _report(check_read_transport_selection(target))
-        assert "'oauth'" in report
-        assert "default_transport" in report
+        assert check_read_transport_selection(target) == []
 
 
 class TestApiScriptedPageTakesTheDeclaredTypes:
@@ -1690,8 +1740,8 @@ class TestApiOriginGuardCoversEveryLinkDeclaration:
     """Handed an off-origin link, a link read refuses it or stays on origin.
 
     The invariant, not the mechanism: the drive plants the off-origin URL
-    at the continuation path and lets ``follow_url`` and ``same_origin`` --
-    the engine's own functions -- decide. Every declaration shape gets the
+    at the continuation path and lets ``follow_url`` and the declared-origin
+    set -- the engine's own functions -- decide. Every declaration shape gets the
     drive, so none of them can go uncertified.
     """
 
@@ -1738,7 +1788,7 @@ class TestApiOriginGuardCoversEveryLinkDeclaration:
         """A function's result is a relative segment, so it stays on the origin.
 
         There is no reading of the declaration that says so: only running it
-        and asking ``same_origin`` about the answer. Demanding a refusal
+        and asking the declared-origin set about the answer. Demanding a refusal
         here -- because a function's result is "unconstrained" -- reports a
         violation against a connector whose next request provably cannot
         leave the origin.
@@ -1778,8 +1828,8 @@ class TestApiRefusalDrivesAreArmed:
     _broken = staticmethod(TestApiReadPathBreaks._broken)
 
     @staticmethod
-    def _following_link(current: str, target: str, *, origin: str) -> str:
-        """``follow_url`` with the origin refusal taken out."""
+    def _following_link(current: str, target: str, *, origins: frozenset[str]) -> str:
+        """``follow_url`` with the declared-origin refusal taken out."""
         return urljoin(current, target)
 
     @pytest.mark.parametrize(
@@ -2792,24 +2842,27 @@ class TestApiTransportHeaderBreaks:
         ``"connectio."`` is not ``"connection."``, so it is a stray path --
         neither deferred nor definition-settled -- and the violation names
         it. A check that raised out instead would report neither this
-        defect nor the ``transport_ref`` beside it -- one authoring
-        mistake hiding another.
+        defect nor the second transport's beside it -- one authoring
+        mistake hiding another, in a different block.
         """
         root = tmp_path / "api"
         shutil.copytree(API_REFERENCE_DIR, root)
         connector = root / "definition" / "connector.json"
         definition = json.loads(connector.read_text())
         definition["transports"]["api"]["base_url"] = {"ref": "connectio.base_url"}
+        definition["transports"]["files"] = {
+            "transport_type": "http",
+            "base_url": {"ref": "nowhere.base_url"},
+        }
         connector.write_text(json.dumps(definition))
         document = root / "definition" / "endpoints" / "widgets.json"
         parsed = json.loads(document.read_text())
-        parsed["operations"]["read"]["request"]["transport_ref"] = "other"
+        parsed["operations"]["read"]["request"]["transport_ref"] = "files"
         document.write_text(json.dumps(parsed))
 
         report = _report(check_read_transport_selection(load_target(root)))
-        assert "no usable base_url" in report
         assert "connectio" in report
-        assert "transport_ref 'other'" in report, "the arm after it still ran"
+        assert "nowhere" in report, "the transport after it was still judged"
 
     def test_a_transport_header_the_connection_supplies_is_not_resolved(
         self, tmp_path: Path

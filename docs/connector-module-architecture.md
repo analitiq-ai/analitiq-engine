@@ -236,7 +236,7 @@ Clickhouse?"** If yes, it's vendor-specific and belongs in the connector; if no,
 it's generic and can live in the CDK. By that test, the CDK holds:
 
 1. the **contract** — the operation Protocols (below),
-2. the **transport families** — `build_transport()` + `ConnectionRuntime`
+2. the **transport families** — `transport_factory` + `ConnectionRuntime`
    (*the connection plumbing — SQLAlchemy, ADBC, HTTP — into which a connector
    plugs its **own** driver*),
 3. the **`SecretsResolver`** ABC (credential fetching seam),

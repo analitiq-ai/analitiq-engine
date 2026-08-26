@@ -8,10 +8,11 @@ statuses and bodies a test wants and record what was actually sent.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.secrets import InMemorySecretsResolver
+from cdk.transport_factory import HttpTransport
 
 BASE_URL = "https://api.example.test"
 
@@ -82,14 +83,27 @@ class FakeSession:
         self.closed = True
 
 
+#: The ref the default transport is registered under below. Named, because
+#: a request declaring ``transport_ref`` on the default transport (which is
+#: what a real connector's endpoints do) has to reach the same session.
+DEFAULT_TRANSPORT_REF = "api"
+
+
 def runtime_with(
     session: FakeSession,
     *,
     parameters: dict[str, Any] | None = None,
     error_map: dict[str, Any] | None = None,
     base_url: str = BASE_URL,
+    rate_limiter: Any = None,
+    transports: dict[str, tuple[FakeSession, str]] | None = None,
 ) -> ConnectionRuntime:
-    """Build a runtime whose HTTP transport is already materialized."""
+    """Build a runtime whose HTTP transports are already materialized.
+
+    ``transports`` registers further named transports as
+    ``ref -> (session, base_url)``, already open -- the shape a run has
+    once the bootstrap resolved their specs and a request opened them.
+    """
     runtime = ConnectionRuntime(
         raw_config={"host": base_url, "parameters": parameters or {}},
         connection_id="test-conn",
@@ -98,11 +112,46 @@ def runtime_with(
         driver=None,
         resolver=InMemorySecretsResolver({}),
     )
+    opened = {DEFAULT_TRANSPORT_REF: (session, base_url), **(transports or {})}
+    runtime._transport_specs = {
+        ref: {
+            "transport_type": "http",
+            "base_url": url,
+            "headers": {},
+            "timeout_seconds": 30.0,
+            "rate_limit": None,
+        }
+        for ref, (_session, url) in opened.items()
+    }
+    runtime._http_transports = {
+        ref: HttpTransport(
+            session=cast(Any, transport_session),
+            base_url=url,
+            headers={},
+            # The declared ceiling belongs to the transport block, so a
+            # named transport paces independently of the default.
+            rate_limiter=rate_limiter if ref == DEFAULT_TRANSPORT_REF else None,
+        )
+        for ref, (transport_session, url) in opened.items()
+    }
+    runtime._default_transport_ref = DEFAULT_TRANSPORT_REF
     runtime._session = session
     runtime._base_url = base_url
+    runtime._rate_limiter = rate_limiter
     runtime._materialized = True
     runtime._declared_error_map = error_map
     return runtime
+
+
+def sent_query(call: dict[str, Any]) -> dict[str, Any]:
+    """The query one recorded call sent, keyed by name.
+
+    The client takes name/value PAIRS, because a query may repeat a name
+    (an exploded ``form`` array sends ``tags=a&tags=b``), so that is what
+    the fake records. A test asking about one key wants a mapping, and a
+    test about repetition reads the pairs directly.
+    """
+    return dict(call["params"])
 
 
 class FakeCheckpoint:

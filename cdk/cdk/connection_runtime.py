@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy.engine import Engine
@@ -53,10 +53,9 @@ from cdk.transport_factory import (
     AdbcTransport,
     HttpTransport,
     SqlAlchemyTransport,
-    build_transport,
     build_transport_from_spec,
     merged_transports,
-    resolve_transport_spec,
+    resolve_transport_specs,
 )
 from cdk.type_map import InvalidTypeMapError, TypeMapper, UnmappedTypeError
 from cdk.types import EndpointScope
@@ -221,8 +220,17 @@ class ConnectionRuntime:
 
         # Worker-side pre-resolved payload (set by from_resolved_payload):
         # materialize() builds straight from these and never loads secrets.
-        self._pre_resolved_transport: dict[str, Any] | None = None
+        self._pre_resolved_transports: dict[str, dict[str, Any]] | None = None
+        self._pre_resolved_default_ref: str | None = None
         self._pre_resolved_config: dict[str, Any] | None = None
+
+        # Every transport this run may dispatch through, resolved to
+        # JSON-safe values by materialize() and keyed by its declared ref.
+        # Resolved all at once because secrets are in reach only until
+        # materialization ends; opened one at a time, on first use.
+        self._transport_specs: dict[str, dict[str, Any]] = {}
+        self._default_transport_ref: str | None = None
+        self._http_transports: dict[str, HttpTransport] = {}
 
         # Transport state — set by materialize()
         self._materialized = False
@@ -437,7 +445,9 @@ class ConnectionRuntime:
     # Materialization
     # ------------------------------------------------------------------
 
-    async def materialize(self, *, sql_dialect: Any = None) -> None:
+    async def materialize(
+        self, *, sql_dialect: Any = None, transport_refs: Iterable[str] = ()
+    ) -> None:
         """Resolve secrets, build the resolution context, build the transport.
 
         Two ways in:
@@ -456,19 +466,27 @@ class ConnectionRuntime:
 
         Connectors without a ``transports`` block (file/s3/stdout) expose
         ``resolved_config`` directly — they have no shared transport.
+
+        ``transport_refs`` names the non-default transports this run's
+        operations dispatch through (their ``request.transport_ref``).
+        Their specs resolve here, with the default's, because this is the
+        last moment the secrets exist; :meth:`http_transport` opens each
+        one when a request first asks for it. Nothing else is resolved: a
+        connector's auth or discovery transports belong to connection
+        setup, and a run that never dispatches through one must not fail
+        on a credential it does not use.
         """
         if self._materialized:
             return
 
         if (
-            self._pre_resolved_transport is not None
+            self._pre_resolved_transports is not None
             or self._pre_resolved_config is not None
         ):
-            if self._pre_resolved_transport is not None:
-                transport = await build_transport_from_spec(
-                    self._pre_resolved_transport, sql_dialect=sql_dialect
-                )
-                self._apply_transport(transport)
+            if self._pre_resolved_transports is not None:
+                self._transport_specs = copy.deepcopy(self._pre_resolved_transports)
+                self._default_transport_ref = self._pre_resolved_default_ref
+                await self._open_default_transport(sql_dialect=sql_dialect)
             else:
                 self._resolved_config = copy.deepcopy(self._pre_resolved_config)
             self._materialized = True
@@ -483,23 +501,139 @@ class ConnectionRuntime:
         if has_transports and definition is not None:
             context = self._build_resolution_context(secrets)
             try:
-                transport = await build_transport(
+                (
+                    self._default_transport_ref,
+                    self._transport_specs,
+                ) = resolve_transport_specs(
                     definition,
+                    transport_refs=transport_refs,
                     context=context,
-                    sql_dialect=sql_dialect,
                 )
-            except Exception:
+            finally:
+                # Scrubbed the moment resolution is done, whichever way it
+                # went: past this point every value a transport needs is in
+                # the resolved specs, so nothing downstream has a reason to
+                # read a secret again.
                 self._scrub_secrets()
-                raise
-
-            self._apply_transport(transport)
-            self._scrub_secrets()
+            await self._open_default_transport(sql_dialect=sql_dialect)
         else:
             # file/s3/stdout connectors: expose ``resolved_config``
             # directly. They have no transports block by design.
             self._resolved_config = self._merge_secrets_into_config(secrets)
 
         self._materialized = True
+
+    async def _open_default_transport(self, *, sql_dialect: Any = None) -> None:
+        """Build the default transport's live objects from its resolved spec.
+
+        Opened eagerly, because every consumer of a materialized runtime
+        asks for the default -- the SQL engine, the base URL, the health
+        check -- and an api connector with no per-operation selection asks
+        for nothing else. The named ones open on first use.
+        """
+        ref = self._default_transport_ref
+        if ref is None:  # pragma: no cover — defensive
+            raise TransportSpecError(
+                f"connection {self._connection_id!r} resolved no default "
+                f"transport to open"
+            )
+        transport = await build_transport_from_spec(
+            self._transport_specs[ref], sql_dialect=sql_dialect
+        )
+        self._apply_transport(transport)
+        if isinstance(transport, HttpTransport):
+            self._http_transports[ref] = transport
+
+    async def http_transport(self, transport_ref: str | None = None) -> HttpTransport:
+        """Return the HTTP transport an operation dispatches through.
+
+        ``None`` is the default transport, which materialization already
+        opened. A named one is opened here, once, on the first request
+        that asks for it, and reused by every later one -- so a connector
+        that names no transport opens exactly the one session it always
+        opened.
+
+        A ref this run did not resolve is refused by name. It reaches here
+        only two ways, and both are defects rather than conditions to
+        absorb: an operation naming a transport the connector does not
+        declare (which the package validator refuses at authoring time),
+        or one the bootstrap failed to collect. Dispatching through the
+        default instead is the silent failure this whole path exists to
+        end -- the request would go out on the wrong origin with the wrong
+        headers, and the provider would answer it.
+        """
+        if not self._materialized:
+            raise RuntimeError(
+                "http_transport() called before materialize(); no transport "
+                "spec has been resolved yet"
+            )
+        ref = transport_ref or self._default_transport_ref
+        if ref is None or ref not in self._transport_specs:
+            raise TransportSpecError(
+                f"connection {self._connection_id!r}: no resolved transport "
+                f"{ref!r}; this run resolved {sorted(self._transport_specs)}. "
+                f"An operation naming a transport the connector does not "
+                f"declare cannot be dispatched -- it would otherwise go out "
+                f"on the default transport's origin with the default "
+                f"transport's headers."
+            )
+        opened = self._http_transports.get(ref)
+        if opened is not None:
+            return opened
+        spec = self._transport_specs[ref]
+        if spec.get("transport_type") != "http":
+            raise TransportSpecError(
+                f"connection {self._connection_id!r}: transport {ref!r} "
+                f"declares transport_type {spec.get('transport_type')!r}; an "
+                f"api operation dispatches over HTTP and there is no session "
+                f"to open from this block"
+            )
+        transport = await build_transport_from_spec(spec)
+        if not isinstance(transport, HttpTransport):  # pragma: no cover
+            raise TransportSpecError(
+                f"connection {self._connection_id!r}: transport {ref!r} built "
+                f"a {type(transport).__name__}, not an HttpTransport"
+            )
+        self._http_transports[ref] = transport
+        return transport
+
+    @property
+    def default_transport_ref(self) -> str:
+        """The ref of the transport an operation naming none dispatches through.
+
+        Named rather than implied, because the per-operation sender cache
+        keys on it: a request omitting ``transport_ref`` and one naming
+        the default by name are the same transport, and two cache entries
+        for it would open the connection's session twice.
+        """
+        if not self._materialized or self._default_transport_ref is None:
+            raise RuntimeError(
+                "default_transport_ref not available: call materialize() "
+                "first or wrong connector_type"
+            )
+        return self._default_transport_ref
+
+    @property
+    def declared_origins(self) -> frozenset[str]:
+        """Every origin this run's requests are allowed to reach.
+
+        The origins of the transports the request path may dispatch
+        through -- the default and whatever an operation names. A URL the
+        request path produces, a provider-supplied next-page link
+        included, has to land on one of them: the session sends this
+        connection's credentials, and a link that leaves the set hands
+        them to a host the connector never declared.
+
+        Read from the resolved SPECS rather than from the opened
+        transports, so the set is whole from the first request rather than
+        growing as sessions open -- a guard that widens as the run goes is
+        a guard that answers differently depending on request order.
+        """
+        return frozenset(
+            str(spec["base_url"])
+            for spec in self._transport_specs.values()
+            if spec.get("transport_type") == "http" and spec.get("base_url")
+        )
 
     def _apply_transport(self, transport: Any) -> None:
         """Wire a built transport's objects onto this runtime."""
@@ -531,14 +665,22 @@ class ConnectionRuntime:
     # Worker bootstrap: resolve on the trusted side, build in the worker
     # ------------------------------------------------------------------
 
-    async def resolve_spec(self) -> dict[str, Any]:
+    async def resolve_spec(
+        self, *, transport_refs: Iterable[str] = ()
+    ) -> dict[str, Any]:
         """Resolve this connection into a JSON-safe worker payload.
 
-        Runs on the trusted side. Loads secrets, resolves the connector's
-        transport spec (or the plain config for transport-less kinds), and
-        returns a payload with values only — no constructed objects, no
-        secret-store handle. The payload is what a connector worker receives
-        in its launch bootstrap; rebuild with :meth:`from_resolved_payload`.
+        Runs on the trusted side. Loads secrets, resolves the transports
+        this run dispatches through (or the plain config for
+        transport-less kinds), and returns a payload with values only — no
+        constructed objects, no secret-store handle. The payload is what a
+        connector worker receives in its launch bootstrap; rebuild with
+        :meth:`from_resolved_payload`.
+
+        ``transport_refs`` is the same run-scoped set
+        :meth:`materialize` takes: the worker has no secret store, so a
+        transport whose spec does not travel in this payload can never be
+        opened there.
         """
         secrets = await self._load_secrets()
         self._validate_connection_contract(secrets)
@@ -560,7 +702,8 @@ class ConnectionRuntime:
                 for key, value in self._raw_config.items()
                 if key not in _SECRET_BEARING_CONFIG_KEYS
             },
-            "transport_spec": None,
+            "transport_specs": None,
+            "default_transport_ref": None,
             "resolved_config": None,
             # Declared SQL capabilities travel with the payload so the
             # worker-side facade consumes the same declaration the engine
@@ -574,11 +717,13 @@ class ConnectionRuntime:
         if has_transports and definition is not None:
             context = self._build_resolution_context(secrets)
             try:
-                payload["transport_spec"] = resolve_transport_spec(
-                    definition, context=context
+                default_ref, specs = resolve_transport_specs(
+                    definition, transport_refs=transport_refs, context=context
                 )
             finally:
                 self._scrub_secrets()
+            payload["transport_specs"] = specs
+            payload["default_transport_ref"] = default_ref
         else:
             payload["resolved_config"] = self._merge_secrets_into_config(secrets)
         return payload
@@ -609,9 +754,12 @@ class ConnectionRuntime:
             connector_type_mapper=connector_type_mapper,
             connection_type_mapper=connection_type_mapper,
         )
-        runtime._pre_resolved_transport = (
-            dict(payload["transport_spec"]) if payload.get("transport_spec") else None
+        runtime._pre_resolved_transports = (
+            {str(ref): dict(spec) for ref, spec in payload["transport_specs"].items()}
+            if payload.get("transport_specs")
+            else None
         )
+        runtime._pre_resolved_default_ref = payload.get("default_transport_ref")
         runtime._pre_resolved_config = (
             dict(payload["resolved_config"]) if payload.get("resolved_config") else None
         )
@@ -832,14 +980,22 @@ class ConnectionRuntime:
                     )
                 self._sync_engine = None
         finally:
-            if self._session is not None:
+            # Every session this run opened, not just the default one: a
+            # named transport opened on first use owns a connector pool of
+            # its own, and one left behind leaks it for the rest of the
+            # process.
+            for ref, transport in self._http_transports.items():
                 try:
-                    await self._session.close()
+                    await transport.session.close()
                 except Exception as e:
                     logger.error(
-                        f"Failed to close session for {self._connection_id}: {e}"
+                        f"Failed to close session {ref!r} for "
+                        f"{self._connection_id}: {e}"
                     )
-                self._session = None
+            self._http_transports.clear()
+            self._transport_specs = {}
+            self._default_transport_ref = None
+            self._session = None
             self._base_url = None
             self._rate_limiter = None
             self._resolved_config = None

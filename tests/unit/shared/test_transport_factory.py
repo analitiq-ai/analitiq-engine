@@ -3,7 +3,7 @@
 These cover transport selection + spec resolution
 (:func:`resolve_transport_spec`, which now dispatches to the per-kind
 resolve phase and returns the JSON-safe worker payload) and the kind
-registry (register / unregister / dispatch via :func:`build_transport`,
+registry (register / unregister / dispatch via the two phases,
 where each kind is a resolve/build pair). The live engine/session probes
 that require a database / HTTP endpoint are not exercised here.
 """
@@ -17,7 +17,7 @@ import pytest
 from cdk.exceptions import TransportSpecError
 from cdk.resolver import ResolutionContext
 from cdk.transport_factory import (
-    build_transport,
+    build_transport_from_spec,
     register_transport_kind,
     registered_transport_kinds,
     resolve_http_spec,
@@ -166,7 +166,7 @@ class TestTransportKindRegistry:
 
     def test_register_rejects_non_callable_phases(self):
         # Non-callable phases fail loudly at registration so the bug is
-        # near the registration site, not deep in build_transport.
+        # near the registration site, not deep in the dispatch.
         with pytest.raises(TypeError, match="callable"):
             register_transport_kind(
                 "test_bad",
@@ -201,8 +201,9 @@ class TestTransportKindRegistry:
     @pytest.mark.asyncio
     async def test_register_build_unregister_cycle(self):
         # Full lifecycle: a plugin-style registration teaches the engine a
-        # new kind; build_transport runs its resolve phase then its build
-        # phase; unregister cleans up; afterwards the kind is rejected.
+        # new kind; the resolve phase renders the spec and the build phase
+        # constructs from it; unregister cleans up; afterwards the kind is
+        # rejected.
         sentinel = object()
         resolve_phase = MagicMock(
             return_value={"transport_type": "test_kind", "marker": "value"}
@@ -222,7 +223,9 @@ class TestTransportKindRegistry:
                 },
             }
             ctx = ResolutionContext(connector=connector)
-            result = await build_transport(connector, context=ctx)
+            result = await build_transport_from_spec(
+                resolve_transport_spec(connector, context=ctx)
+            )
             assert result is sentinel
             resolve_phase.assert_called_once()
             build_phase.assert_awaited_once()
@@ -240,7 +243,7 @@ class TestTransportKindRegistry:
         }
         ctx = ResolutionContext(connector=connector)
         with pytest.raises(NotImplementedError, match="Unsupported transport_type"):
-            await build_transport(connector, context=ctx)
+            resolve_transport_spec(connector, context=ctx)
 
 
 # ---------------------------------------------------------------------------

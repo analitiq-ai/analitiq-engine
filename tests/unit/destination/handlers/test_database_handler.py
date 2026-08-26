@@ -41,9 +41,13 @@ def _connector_def(driver: str = "postgresql+asyncpg") -> dict:
         "default_transport": "database",
         "transports": {
             "database": {
-                "kind": "sqlalchemy",
+                "transport_type": "sqlalchemy",
                 "driver": driver,
-                "dsn": {"template": f"{driver}://u:p@h:5432/d"},
+                "dsn": {
+                    "kind": "url_template",
+                    "template": f"{driver}://u:p@h:5432/d",
+                    "bindings": {},
+                },
             }
         },
     }
@@ -66,7 +70,7 @@ def _patch_transport(*, engine=None, side_effect=None):
     """Patch build_transport with a mocked SqlAlchemyTransport result."""
     if side_effect is not None:
         return patch(
-            "cdk.connection_runtime.build_transport",
+            "cdk.connection_runtime.build_transport_from_spec",
             new=AsyncMock(side_effect=side_effect),
         )
     transport = SqlAlchemyTransport(
@@ -76,7 +80,7 @@ def _patch_transport(*, engine=None, side_effect=None):
         is_async=True,
     )
     return patch(
-        "cdk.connection_runtime.build_transport",
+        "cdk.connection_runtime.build_transport_from_spec",
         new=AsyncMock(return_value=transport),
     )
 
@@ -176,9 +180,13 @@ class TestDatabaseHandlerConnect:
                 "default_transport": "database",
                 "transports": {
                     "database": {
-                        "kind": "sqlalchemy",
+                        "transport_type": "sqlalchemy",
                         "driver": "sqlite+aiosqlite",
-                        "dsn": {"template": "sqlite+aiosqlite:///:memory:"},
+                        "dsn": {
+                            "kind": "url_template",
+                            "template": "sqlite+aiosqlite:///:memory:",
+                            "bindings": {},
+                        },
                     }
                 },
             },
@@ -192,7 +200,7 @@ class TestDatabaseHandlerConnect:
             is_async=True,
         )
         with patch(
-            "cdk.connection_runtime.build_transport",
+            "cdk.connection_runtime.build_transport_from_spec",
             new=AsyncMock(return_value=transport),
         ):
             await handler.connect(runtime)

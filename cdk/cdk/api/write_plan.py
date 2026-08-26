@@ -26,6 +26,7 @@ from ..transport_factory import require_wire_safe_header_name
 from ..types import RetrySemantics, RetryVerdict, SchemaSpec
 from .body import FORM_CONTENT_TYPE, media_type
 from .exceptions import RequestSpecError
+from .query_style import declared_query_styles
 from .request import (
     ParamTable,
     bind_query_and_headers,
@@ -66,6 +67,12 @@ class StreamWritePlan:
     #: -- the path every request for this stream goes to.
     endpoint: str = ""
     method: str = "POST"
+    #: ``request.transport_ref`` -- the transport this stream's writes
+    #: dispatch through, or ``None`` for the connection's default. The
+    #: path above is relative to THAT transport's base URL, so the two
+    #: travel together: a plan carrying one without the other addresses a
+    #: resource on the wrong origin.
+    transport_ref: str | None = None
     #: ``request.headers`` and ``request.query``, resolved once: write
     #: params read only what ``request_resolver`` supplies (the connection
     #: subtrees and the runtime values -- never secrets, which resolve
@@ -358,12 +365,14 @@ def build_write_plan(
             resolver=resolver,
             controlled_by=table.controlled_by,
             declared_params=mode_block.get("params") or {},
+            endpoint=endpoint_id,
         )
         if problem is not None:
             return problem
 
         plan = StreamWritePlan(
             method=request.get("method", "POST"),
+            transport_ref=request.get("transport_ref"),
             json_fields=collect_json_fields(mode_block),
             body_spec=request.get("body"),
             content_type=request.get("content_type"),
@@ -389,6 +398,9 @@ def build_write_plan(
             declared_headers=request.get("headers"),
             resolver=resolver,
             endpoint=endpoint_id,
+            query_styles=declared_query_styles(
+                request.get("query"), mode_block.get("params") or {}
+            ),
         )
     except RequestSpecError as err:
         # An unbound placeholder, a param default reading a scope nothing

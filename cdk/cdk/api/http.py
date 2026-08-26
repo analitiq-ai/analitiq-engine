@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -46,6 +47,7 @@ __all__ = [
     "encode_body",
     "failure_facts",
     "loads_preserving_decimals",
+    "query_pairs",
 ]
 
 logger = logging.getLogger(__name__)
@@ -159,6 +161,24 @@ def query_value(value: Any) -> Any:
     return str(value) if isinstance(value, Decimal) else value
 
 
+def query_pairs(query: Mapping[str, Any]) -> list[tuple[str, Any]]:
+    """Flatten the built query into the name/value pairs the client sends.
+
+    A key holding a list is the one query serialization that repeats a
+    name (an exploded ``form`` array: ``tags=a&tags=b``), and a mapping
+    cannot hold the same key twice -- so the repetition lives as a list
+    until here, where the client takes pairs and a list would raise. The
+    expansion is this layer's because the encoding is: what to send is
+    decided in :mod:`cdk.api.query_style`, how it is spelled on the wire
+    is ``yarl``'s.
+    """
+    return [
+        (name, query_value(item))
+        for name, value in query.items()
+        for item in (value if isinstance(value, list) else [value])
+    ]
+
+
 def failure_facts(
     exc: BaseException, *, error_map: ErrorMap | None
 ) -> tuple[int | None, str | None]:
@@ -262,7 +282,7 @@ class HttpSender:
         async with self._client.request(
             method=request.method,
             url=request.url,
-            params={name: query_value(value) for name, value in request.params.items()},
+            params=query_pairs(request.params),
             data=request.body,
             headers=request.headers or None,
         ) as response:

@@ -13,6 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from cdk.api.request import endpoint_transport_refs
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.type_map.loader import connector_definition_dir, read_raw_type_maps
 
@@ -56,8 +57,20 @@ async def build_bootstrap(
     The returned dict carries resolved credentials in its values: hand it
     to ``spawn_worker`` (which writes it once to the child's stdin) and
     never log it.
+
+    The endpoint documents are read for one thing before they are packed:
+    which transports this run's operations dispatch through. A worker
+    holds no secret store, so a transport whose spec does not travel in
+    this payload can never be opened there -- and the shell is the last
+    side that can resolve one.
     """
-    connection_payload = await runtime.resolve_spec()
+    documents = [*(stream_endpoints or {}).values()]
+    if source_config:
+        documents.append(source_config.get("endpoint_document"))
+    transport_refs: set[str] = set()
+    for document in documents:
+        transport_refs |= endpoint_transport_refs(document)
+    connection_payload = await runtime.resolve_spec(transport_refs=transport_refs)
     return {
         "role": role,
         "kind": runtime.connector_type,

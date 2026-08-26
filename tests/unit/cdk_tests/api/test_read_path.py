@@ -17,6 +17,7 @@ from cdk.api import GenericAPIConnector
 from cdk.api.page_loop import PaginationStrategy
 from cdk.api.read_setup import build_read_strategy
 from cdk.api.request import ParamTable
+from cdk.api.urls import declared_origins
 from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.exceptions import ReadError, TransientReadError
 from cdk.resolver import ResolutionContext, Resolver
@@ -28,6 +29,7 @@ from .fakes import (
     FakeSession,
     endpoint_document,
     runtime_with,
+    sent_query,
     stream_source,
 )
 
@@ -166,7 +168,7 @@ class TestTheRequestTheContractDescribes:
         # Encoded as one segment: the value crosses a trust boundary, and a
         # slash in it would otherwise rewrite the URL's structure.
         assert session.calls[0]["url"] == f"{BASE_URL}/items/a%2Fb"
-        assert session.calls[0]["params"] == {}
+        assert sent_query(session.calls[0]) == {}
 
     async def test_a_declared_header_reaches_the_wire(self) -> None:
         session = FakeSession([FakeResponse(body=_rows(1))])
@@ -320,7 +322,7 @@ class TestTheRequestTheContractDescribes:
                 }
             ),
         )
-        assert session.calls[0]["params"]["ref"] == "main"
+        assert sent_query(session.calls[0])["ref"] == "main"
 
     async def test_a_path_placeholder_binding_to_an_empty_value_is_refused(
         self,
@@ -565,7 +567,7 @@ class TestPageSizeBinding:
             ),
             batch_size=100,
         )
-        assert session.calls[0]["params"]["limit"] == 25
+        assert sent_query(session.calls[0])["limit"] == 25
 
     async def test_the_runtime_batch_size_reference_resolves(self) -> None:
         # It resolves only from the read's own resolver: a second one built
@@ -587,7 +589,7 @@ class TestPageSizeBinding:
             ),
             batch_size=7,
         )
-        assert session.calls[0]["params"]["limit"] == 7
+        assert sent_query(session.calls[0])["limit"] == 7
 
     async def test_an_authored_literal_beats_the_engines_batch_size(self) -> None:
         pagination = {
@@ -606,7 +608,7 @@ class TestPageSizeBinding:
             ),
             batch_size=100,
         )
-        assert session.calls[0]["params"]["limit"] == 5
+        assert sent_query(session.calls[0])["limit"] == 5
 
     async def test_without_a_limit_block_no_page_size_is_sent(self) -> None:
         # The engine binds what the document declares. Guessing a page-size
@@ -624,7 +626,7 @@ class TestPageSizeBinding:
             ),
             batch_size=10,
         )
-        assert "limit" not in session.calls[0]["params"]
+        assert "limit" not in sent_query(session.calls[0])
 
     async def test_a_page_size_that_is_not_a_positive_integer_fails_first(self) -> None:
         pagination = {
@@ -686,7 +688,7 @@ class TestPaging:
                 request=_PAGINATION_REQUEST,
             ),
         )
-        assert [call["params"]["skip"] for call in session.calls] == [0, 3, 5]
+        assert [sent_query(call)["skip"] for call in session.calls] == [0, 3, 5]
         assert [batch.num_rows for batch in batches] == [3, 2]
 
     async def test_a_short_page_does_not_end_the_traversal(self) -> None:
@@ -733,7 +735,7 @@ class TestPaging:
         }
         body = {**_rows(2), "next": "https://evil.test/steal"}
         session = FakeSession([FakeResponse(body=body)])
-        with pytest.raises(ReadError, match="leaves the connection's origin"):
+        with pytest.raises(ReadError, match="leaves the connection's declared origins"):
             await _read(session, endpoint_document(pagination=pagination))
 
     async def test_a_relative_link_continues_from_the_current_page(self) -> None:
@@ -787,7 +789,7 @@ class TestIncremental:
             ),
             checkpoint=FakeCheckpoint({"cursor": "2026-07-31T12:00:00Z"}),
         )
-        assert session.calls[0]["params"]["since"] == "2026-07-31T11:59:00Z"
+        assert sent_query(session.calls[0])["since"] == "2026-07-31T11:59:00Z"
 
     async def test_the_cursor_advances_from_each_pages_last_record(self) -> None:
         checkpoint = FakeCheckpoint({"cursor": "1"})
@@ -825,7 +827,7 @@ class TestIncremental:
             ),
             checkpoint=FakeCheckpoint(None),
         )
-        assert "since" not in session.calls[0]["params"]
+        assert "since" not in sent_query(session.calls[0])
 
 
 @pytest.mark.asyncio
@@ -1023,7 +1025,7 @@ class TestAFollowedLinkReplacesTheWholeRequest:
         )
         await _read(session, self._document())
         assert session.calls[1]["data"] is None
-        assert session.calls[1]["params"] == {}
+        assert sent_query(session.calls[1]) == {}
         # The next URL replaces the request, not the connection: a page-two
         # request that drops the endpoint's headers is a different request
         # from the one page one certified.
@@ -1153,7 +1155,7 @@ class TestBuildingTheAdapterTouchesNothingItWasGiven:
                 functions=DEFAULT_FUNCTIONS,
             ),
             url=f"{BASE_URL}/items",
-            base_url=BASE_URL,
+            origins=declared_origins([BASE_URL]),
             batch_size=100,
         )
 

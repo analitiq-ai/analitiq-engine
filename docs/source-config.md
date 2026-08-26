@@ -256,9 +256,13 @@ PG_PASSWORD=... PIPELINE_ID=my-pipeline docker compose run --rm source_engine
 **File:** `connectors/{connector_id}/definition/connector.json`
 
 The connector defines `connector_type`, `connection_contract`,
-`derived` values, and one or more `transports`. The runtime selects a
-transport by `default_transport` (or per-endpoint override) and resolves
-its expression tree via the spec resolver.
+`derived` values, and one or more `transports`. An operation dispatches
+through the transport its `request.transport_ref` names, or through
+`default_transport` when it names none; the runtime resolves that
+transport's expression tree via the spec resolver. Every URL a request
+produces — a next-page link included — must land on the origin of a
+transport the run dispatches through, so a link off that set is refused
+rather than sent with the connection's credentials.
 
 Connector types accepted by the runtime: `api`, `database`, `file`,
 `s3`, `stdout`. The destination handler registry maps these directly

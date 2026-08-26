@@ -52,6 +52,12 @@ from ..resolver import REQUEST_CONNECTION_SUBTREES, Resolver, scope_paths
 from ..transport_factory import require_wire_safe_header
 from .body import unsupported_media_type
 from .exceptions import RequestSpecError, request_spec_errors
+from .query_style import (
+    QueryStyle,
+    declared_query_styles,
+    serialize_query_value,
+    unserializable_style_problem,
+)
 from .strategies import PRE_PAGE_VALUE_PATHS
 
 __all__ = [
@@ -63,6 +69,7 @@ __all__ = [
     "bind_query_and_headers",
     "bind_request_values",
     "build_write_body",
+    "endpoint_transport_refs",
     "param_bindings",
     "path_placeholders",
     "request_block_problem",
@@ -199,6 +206,7 @@ def bind_request_values(
     resolver: Resolver,
     block: str,
     endpoint: str,
+    styles: Mapping[str, QueryStyle] = MappingProxyType({}),
 ) -> dict[str, Any]:
     """Resolve one declared request map (headers / query / path_params).
 
@@ -217,6 +225,13 @@ def bind_request_values(
     Resolving one key at a time is also what lets the failure name that
     key: every defect leaves here as a :class:`RequestSpecError` saying
     which block, which key and which endpoint.
+
+    ``styles`` carries the declared wire serialization of the query keys
+    that have one (:func:`~cdk.api.query_style.declared_query_styles`).
+    A collection is sendable exactly where one says how, which is why the
+    query is the only block that passes any: the contract requires the
+    declaration on a query param and defines it nowhere else, so a
+    container in a header or a path segment keeps the refusal below.
     """
     if declared is None:
         return {}
@@ -235,6 +250,26 @@ def bind_request_values(
             # instead would send the key with a null value.
             node = bind_param_refs(value, params)
             bound = resolver.resolve_for_request(node)
+        style = styles.get(str(name))
+        if style is not None and bound is not None:
+            with request_spec_errors(
+                f"request.{block}.{name} for endpoint {endpoint!r}"
+            ):
+                spelled = serialize_query_value(
+                    str(name), bound, style, endpoint=endpoint
+                )
+            for wire_name, wire_value in spelled.items():
+                resolved[wire_name] = (
+                    [
+                        _sendable_value(wire_name, item, block=block, endpoint=endpoint)
+                        for item in wire_value
+                    ]
+                    if isinstance(wire_value, list)
+                    else _sendable_value(
+                        wire_name, wire_value, block=block, endpoint=endpoint
+                    )
+                )
+            continue
         if bound is None and Resolver.is_expression_node(node):
             # The per-request policy: an expression with nothing to resolve
             # omits its key rather than going onto the wire raw.
@@ -341,6 +376,42 @@ def substitute_path(path: str, values: Mapping[str, Any], *, endpoint: str) -> s
     return substituted
 
 
+def endpoint_transport_refs(document: Any) -> set[str]:
+    """Name every transport the operations in *document* dispatch through.
+
+    The read's and every write mode's ``request.transport_ref``. Read
+    twice from two sides of the process boundary and answered here once:
+    the trusted shell asks so it can resolve those transports while the
+    secrets are still in reach, and the connector asks so it dispatches
+    through the one the operation named. A second reading of the key is a
+    second answer, and the two disagreeing means a request resolved
+    against one transport and sent on another.
+
+    The document is raw JSON -- it arrives from the bootstrap, not from a
+    parsed model -- so every level is shape-checked rather than assumed.
+    A document with no transport_ref anywhere answers the empty set, which
+    is what a single-transport connector always answers.
+    """
+    operations = (
+        (document or {}).get("operations") if isinstance(document, Mapping) else None
+    )
+    if not isinstance(operations, Mapping):
+        return set()
+    blocks: list[Any] = [operations.get("read")]
+    write = operations.get("write")
+    if isinstance(write, Mapping):
+        blocks.extend(write.values())
+    refs: set[str] = set()
+    for block in blocks:
+        if not isinstance(block, Mapping):
+            continue
+        request = block.get("request")
+        ref = request.get("transport_ref") if isinstance(request, Mapping) else None
+        if isinstance(ref, str) and ref:
+            refs.add(ref)
+    return refs
+
+
 def request_block_problem(
     request_block: Mapping[str, Any],
     *,
@@ -349,6 +420,7 @@ def request_block_problem(
     controlled_by: Mapping[str, str] = MappingProxyType({}),
     declared_params: Mapping[str, Any] = MappingProxyType({}),
     pagination: Mapping[str, Any] | None = None,
+    endpoint: str = "<unnamed>",
 ) -> str | None:
     """Why this request block cannot be sent as declared, or ``None``.
 
@@ -390,7 +462,32 @@ def request_block_problem(
     )
     if problem is not None:
         return problem
+    problem = _query_style_problem(request_block, declared_params, endpoint)
+    if problem is not None:
+        return problem
     return _controlled_placeholder_problem(request_block, controlled_by)
+
+
+def _query_style_problem(
+    request_block: Mapping[str, Any],
+    declared_params: Mapping[str, Any],
+    endpoint: str,
+) -> str | None:
+    """Why a declared query serialization cannot be sent, or ``None``.
+
+    The pair is defined or it is not, on every connection and for every
+    value, so it is settled with the rest of the block rather than on the
+    first page whose value happens to be a collection -- which for a
+    param the pagination or replication loop fills would be page two of a
+    read that already committed rows.
+    """
+    for key, style in declared_query_styles(
+        request_block.get("query"), declared_params
+    ).items():
+        problem = unserializable_style_problem(key, style, endpoint=endpoint)
+        if problem is not None:
+            return problem
+    return None
 
 
 #: The connection paths per-request resolution supplies, as prefixes --
@@ -682,6 +779,7 @@ def bind_query_and_headers(
     declared_headers: Any,
     resolver: Resolver,
     endpoint: str,
+    query_styles: Mapping[str, QueryStyle] = MappingProxyType({}),
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Build the query string and the header map one request sends.
 
@@ -689,6 +787,12 @@ def bind_query_and_headers(
     ``request.query`` and ``request.headers`` maps declare -- the params in
     flight reach the wire through the ``{from_param}`` bindings inside those
     maps and through nothing else.
+
+    Exactly the keys, with one exception the contract names: a key whose
+    param declares a ``style`` that writes its own names -- ``deepObject``,
+    or an exploded object -- sends those instead of the key it was
+    declared under. That IS the declared spelling, which is what
+    ``style`` and ``explode`` exist to say.
     """
     # An endpoint's headers reach the wire by a different route than the
     # transport's, and the HTTP client judges both the same way: one rule,
@@ -711,6 +815,7 @@ def bind_query_and_headers(
         resolver=resolver,
         block="query",
         endpoint=endpoint,
+        styles=query_styles,
     )
     return query, headers
 
@@ -775,6 +880,7 @@ class RequestBuilder:
         declared_query: Mapping[str, Any] | None = None,
         declared_headers: Mapping[str, Any] | None = None,
         content_type: str | None = None,
+        query_styles: Mapping[str, QueryStyle] = MappingProxyType({}),
     ) -> None:
         self._table = table
         # Only the contract's POST read request declares a body; a GET read
@@ -785,6 +891,7 @@ class RequestBuilder:
         self._declared_query = declared_query
         self._declared_headers = declared_headers
         self._content_type = content_type
+        self._query_styles = query_styles
 
     def for_page(
         self, page_params: Mapping[str, Any], *, sends_declared_body: bool = True
@@ -813,6 +920,7 @@ class RequestBuilder:
             declared_headers=self._declared_headers,
             resolver=self._resolver,
             endpoint=self._endpoint,
+            query_styles=self._query_styles,
         )
         if self._raw_body is None or not sends_declared_body:
             return PreparedRequest(query=query, headers=headers, body=None)
