@@ -16,10 +16,11 @@ from cdk.api.http import (
     encode_body,
     failure_facts,
     loads_preserving_decimals,
+    query_pairs,
 )
 from cdk.declarations import parse_declared_error_map
 
-from .fakes import BASE_URL, FakeResponse, FakeSession
+from .fakes import BASE_URL, FakeResponse, FakeSession, sent_query
 
 pytestmark = pytest.mark.unit
 
@@ -203,15 +204,47 @@ class TestSend:
         assert headers["Content-Type"] == "application/json"
 
     async def test_a_decimal_param_goes_as_its_exact_string(self) -> None:
-        # yarl truncates a Decimal in a query string.
+        # yarl truncates a Decimal in a query string. Assembled the way
+        # both roles assemble one: the pairs are built -- and rendered --
+        # before the dialect signs, because the hook is promised the
+        # request that actually goes out.
         session = FakeSession([FakeResponse(body={})])
         await _sender(session).send(
             SignedRequest(
-                method="GET", url=f"{BASE_URL}/items", params={"since": Decimal("1.50")}
+                method="GET",
+                url=f"{BASE_URL}/items",
+                params=query_pairs({"since": Decimal("1.50")}),
             ),
             unwrap_page=True,
         )
-        assert session.calls[0]["params"] == {"since": "1.50"}
+        assert sent_query(session.calls[0]) == {"since": "1.50"}
+
+    async def test_an_exploded_array_reaches_the_dialect_as_repeated_pairs(
+        self,
+    ) -> None:
+        """The signing hook sees the shape the wire carries, not a mapping.
+
+        A canonicalizing signature over ``{"tags": ["a", "b"]}`` covers a
+        request that never goes out: the wire sends ``tags=a&tags=b``.
+        """
+        signed: list[SignedRequest] = []
+
+        class _RecordingDialect(ApiDialect):
+            def sign_request(self, request: SignedRequest) -> SignedRequest:
+                signed.append(request)
+                return request
+
+        session = FakeSession([FakeResponse(body={})])
+        await _sender(session, dialect=_RecordingDialect()).send(
+            SignedRequest(
+                method="GET",
+                url=f"{BASE_URL}/items",
+                params=query_pairs({"tags": ["a", "b"]}),
+            ),
+            unwrap_page=True,
+        )
+        assert signed[0].params == [("tags", "a"), ("tags", "b")]
+        assert session.calls[0]["params"] == [("tags", "a"), ("tags", "b")]
 
     async def test_the_transport_re_attempts_a_retryable_status(self) -> None:
         session = FakeSession(

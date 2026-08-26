@@ -37,7 +37,11 @@ def _db_connector(slug: str = "pg") -> dict:
             "database": {
                 "transport_type": "sqlalchemy",
                 "driver": "postgresql+asyncpg",
-                "dsn": {"template": "postgresql+asyncpg://u:p@h:5432/d"},
+                "dsn": {
+                    "kind": "url_template",
+                    "template": "postgresql+asyncpg://u:p@h:5432/d",
+                    "bindings": {},
+                },
             }
         },
     }
@@ -155,7 +159,7 @@ class TestConnectionRuntimeMaterialize:
             connector_definition=_db_connector(),
         )
         with patch(
-            "cdk.connection_runtime.build_transport",
+            "cdk.connection_runtime.build_transport_from_spec",
             new=AsyncMock(return_value=transport),
         ) as mock_build:
             await runtime.materialize()
@@ -182,7 +186,7 @@ class TestConnectionRuntimeMaterialize:
             connector_definition=_api_connector(),
         )
         with patch(
-            "cdk.connection_runtime.build_transport",
+            "cdk.connection_runtime.build_transport_from_spec",
             new=AsyncMock(return_value=transport),
         ):
             await runtime.materialize()
@@ -331,7 +335,7 @@ class TestConnectionRuntimeSyncEngine:
         engine = MagicMock()
         runtime = self._materializable_runtime()
         with patch(
-            "cdk.connection_runtime.build_transport",
+            "cdk.connection_runtime.build_transport_from_spec",
             new=AsyncMock(return_value=self._sync_transport(engine)),
         ):
             await runtime.materialize()
@@ -354,7 +358,7 @@ class TestConnectionRuntimeSyncEngine:
         )
         runtime = self._materializable_runtime()
         with patch(
-            "cdk.connection_runtime.build_transport",
+            "cdk.connection_runtime.build_transport_from_spec",
             new=AsyncMock(return_value=transport),
         ):
             await runtime.materialize()
@@ -367,7 +371,7 @@ class TestConnectionRuntimeSyncEngine:
         engine = MagicMock()
         runtime = self._materializable_runtime()
         with patch(
-            "cdk.connection_runtime.build_transport",
+            "cdk.connection_runtime.build_transport_from_spec",
             new=AsyncMock(return_value=self._sync_transport(engine)),
         ):
             await runtime.materialize()
@@ -395,7 +399,7 @@ class TestConnectionRuntimeClose:
             connector_definition=_db_connector(),
         )
         with patch(
-            "cdk.connection_runtime.build_transport",
+            "cdk.connection_runtime.build_transport_from_spec",
             new=AsyncMock(return_value=transport),
         ):
             await runtime.materialize()
@@ -420,7 +424,7 @@ class TestConnectionRuntimeClose:
             connector_definition=_api_connector(),
         )
         with patch(
-            "cdk.connection_runtime.build_transport",
+            "cdk.connection_runtime.build_transport_from_spec",
             new=AsyncMock(return_value=transport),
         ):
             await runtime.materialize()
@@ -446,7 +450,7 @@ class TestConnectionRuntimeClose:
             connector_definition=_db_connector(),
         )
         with patch(
-            "cdk.connection_runtime.build_transport",
+            "cdk.connection_runtime.build_transport_from_spec",
             new=AsyncMock(return_value=transport),
         ):
             await runtime.materialize()
@@ -575,7 +579,7 @@ class TestScrubResolvedConfig:
             connector_definition=_db_connector(),
         )
         with patch(
-            "cdk.connection_runtime.build_transport",
+            "cdk.connection_runtime.build_transport_from_spec",
             new=AsyncMock(return_value=transport),
         ):
             await runtime.materialize()

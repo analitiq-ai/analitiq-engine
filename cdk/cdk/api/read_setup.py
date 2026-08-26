@@ -80,7 +80,7 @@ def build_read_strategy(
     table: ParamTable,
     resolver: Resolver,
     url: str,
-    base_url: str,
+    origin: str,
     batch_size: int,
 ) -> PaginationStrategy:
     """Build the paging adapter, binding the page size it walks with.
@@ -95,6 +95,14 @@ def build_read_strategy(
     depend on the order two calls happen in. Every page carries the value
     anyway -- it rides the ``PageRequest`` the adapter answers, which is
     what the builder binds from.
+
+    ``origin`` arms the containment guard with the origin of the
+    transport THIS read dispatches through, which is where every page of
+    it goes out: the session carries that transport's credentials, and
+    the endpoint's own ``request.headers`` were declared for that host.
+    A next link off it is refused rather than followed, because there is
+    nothing correct to send to another origin -- an endpoint's
+    declaration belongs to the host it was written for.
     """
     try:
         with request_spec_errors("pagination"):
@@ -111,7 +119,7 @@ def build_read_strategy(
                 url=url,
                 base_params=base_params,
                 resolve=page_expression_resolver(resolver),
-                follow_url=partial(follow_url, origin=base_url),
+                follow_url=partial(follow_url, origin=origin),
             )
     except RequestSpecError as err:
         # An unknown scheme, a page size that cannot advance, a step that

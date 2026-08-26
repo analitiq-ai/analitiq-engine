@@ -42,12 +42,15 @@ class TestConnect:
         assert connector.base_url == BASE_URL
         assert connector._http is not None
 
-    async def test_the_runtimes_rate_limiter_is_the_one_used(self) -> None:
-        runtime = runtime_with(FakeSession())
-        runtime._rate_limiter = RateLimiter(max_requests=10, time_window=60)
+    async def test_the_transports_rate_limiter_is_the_one_used(self) -> None:
+        # The declared ceiling is a fact about the transport block, so the
+        # sender opened over a transport paces with that transport's limiter
+        # -- a second transport has its own, or none.
+        limiter = RateLimiter(max_requests=10, time_window=60)
+        runtime = runtime_with(FakeSession(), rate_limiter=limiter)
         connector = GenericAPIConnector()
         await connector.connect(runtime)
-        assert connector._http._rate_limiter is runtime.rate_limiter
+        assert connector._http._rate_limiter is limiter
 
     @pytest.mark.parametrize(
         "config", [{"invalid": "config"}, {"parameters": {}}], ids=["junk", "no-host"]

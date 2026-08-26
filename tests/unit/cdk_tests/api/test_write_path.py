@@ -11,7 +11,7 @@ import pytest
 from cdk.api import GenericAPIConnector
 from cdk.types import AckStatus, Cursor, RetrySemantics, SchemaSpec, WriteMode
 
-from .fakes import BASE_URL, FakeResponse, FakeSession, runtime_with
+from .fakes import BASE_URL, FakeResponse, FakeSession, runtime_with, sent_query
 
 pytestmark = pytest.mark.unit
 
@@ -169,7 +169,7 @@ class TestTheDeclaredRequestReachesTheWire:
             session, _document(query={"dry_run": {"literal": "false"}})
         )
         await _write(connector, _batch(1))
-        assert session.calls[0]["params"] == {"dry_run": "false"}
+        assert sent_query(session.calls[0]) == {"dry_run": "false"}
 
     async def test_the_declared_headers_reach_the_wire_on_a_chunked_write(self) -> None:
         # The chunked path takes no per-record extra headers, so a plan that

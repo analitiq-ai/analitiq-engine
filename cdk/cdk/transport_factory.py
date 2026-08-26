@@ -32,7 +32,7 @@ import logging
 import re
 import ssl as _ssl
 import urllib.parse
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Union
 
@@ -887,6 +887,13 @@ def _ping_adbc(conn: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
+#: The ``transport_type`` an api operation dispatches over. Named beside
+#: the kind that registers it, so the runtime deciding whether a block can
+#: open a session, the resolver stamping the spec, and the conformance
+#: check reading a declaration all compare against one string.
+HTTP_TRANSPORT_TYPE = "http"
+
+
 @dataclass(frozen=True)
 class HttpTransport:
     """Materialized HTTP transport ready for ``aiohttp`` requests."""
@@ -1099,7 +1106,7 @@ def resolve_http_spec(spec: Mapping[str, Any], *, resolver: Resolver) -> dict[st
             }
 
     return {
-        "transport_type": "http",
+        "transport_type": HTTP_TRANSPORT_TYPE,
         "base_url": base_url,
         "headers": headers,
         "timeout_seconds": float(timeout_seconds),
@@ -1234,13 +1241,50 @@ register_transport_kind(
     "adbc", resolve_spec=resolve_adbc_spec, build_from_spec=build_adbc_from_spec
 )
 register_transport_kind(
-    "http", resolve_spec=resolve_http_spec, build_from_spec=build_http_from_spec
+    HTTP_TRANSPORT_TYPE,
+    resolve_spec=resolve_http_spec,
+    build_from_spec=build_http_from_spec,
 )
 
 
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+
+
+def resolve_transport_specs(
+    connector: Mapping[str, Any],
+    *,
+    transport_refs: Iterable[str] = (),
+    context: ResolutionContext,
+) -> tuple[str, dict[str, dict[str, Any]]]:
+    """Resolve the transports one run may dispatch through, keyed by ref.
+
+    Returns the default transport's own ref and the resolved specs for it
+    plus every ref in *transport_refs* -- the transports an operation's
+    ``request.transport_ref`` names. Resolution happens here, all at once,
+    because it is the last moment the secrets are in reach: the connection
+    scrubs them the instant materialization is done, so a transport whose
+    spec was not resolved by then can never be opened. Building the live
+    session stays lazy, which is what keeps a single-transport connector
+    costing exactly what it cost before per-operation selection existed.
+
+    The set is the run's, not the connector's. A connector may declare
+    transports the request path never dispatches through -- the auth,
+    login and discovery origins a connection is SET UP over -- whose
+    values are the control plane's and whose secrets a run's connection
+    blob need not carry at all. Resolving those here would fail a
+    perfectly good data read on a credential it never uses.
+    """
+    default_ref, _ = _select_transport(connector, None)
+    resolved: dict[str, dict[str, Any]] = {}
+    for ref in (default_ref, *transport_refs):
+        if ref in resolved:
+            continue
+        resolved[ref] = resolve_transport_spec(
+            connector, transport_ref=ref, context=context
+        )
+    return default_ref, resolved
 
 
 def resolve_transport_spec(
@@ -1285,17 +1329,3 @@ async def build_transport_from_spec(
             f"registered: {registered_transport_kinds()}"
         )
     return await kind.build_from_spec(resolved, sql_dialect=sql_dialect)
-
-
-async def build_transport(
-    connector: Mapping[str, Any],
-    *,
-    transport_ref: str | None = None,
-    context: ResolutionContext,
-    sql_dialect: Any = None,
-) -> Transport:
-    """Resolve and build in one step (in-process path: control-plane, tests)."""
-    resolved = resolve_transport_spec(
-        connector, transport_ref=transport_ref, context=context
-    )
-    return await build_transport_from_spec(resolved, sql_dialect=sql_dialect)

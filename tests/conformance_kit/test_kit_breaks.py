@@ -40,6 +40,7 @@ from cdk.conformance import (
 )
 from cdk.conformance import target as target_module
 from cdk.conformance import violation_report
+from cdk.conformance.api_surface import api_base_url
 from cdk.conformance.target import (
     ConformanceSetupError,
     ConformanceTarget,
@@ -1457,17 +1458,202 @@ class TestApiReadPathBreaks:
         assert "'geometry'" in report
         assert "read type-map" in report
 
-    def test_a_read_asking_for_a_transport_the_path_will_not_open(
+    def test_a_named_transport_that_cannot_be_opened_names_the_reads(
         self, tmp_path: Path
     ) -> None:
+        """A read dispatches through what it names, so that block is judged too.
+
+        And judged for the endpoints that name it: a defect in a named
+        transport stops exactly those reads, while the default's stops
+        every stream at connect(). A message quoting the larger
+        consequence for both would send the author looking for a
+        connection that never breaks.
+        """
+        root = tmp_path / "api"
+        shutil.copytree(API_REFERENCE_DIR, root)
+        connector = root / "definition" / "connector.json"
+        definition = json.loads(connector.read_text())
+        definition["transports"]["files"] = {
+            "transport_type": "http",
+            "base_url": {"literal": ""},
+        }
+        connector.write_text(json.dumps(definition))
+        document = root / "definition" / "endpoints" / "widgets.json"
+        parsed = json.loads(document.read_text())
+        parsed["operations"]["read"]["request"]["transport_ref"] = "files"
+        document.write_text(json.dumps(parsed))
+
+        report = _report(check_read_transport_selection(load_target(root)))
+        assert "transport 'files'" in report
+        assert "no usable base_url" in report
+        assert "widgets" in report, "the finding must name the reads it stops"
+
+    def test_a_read_is_judged_against_its_own_transports_headers(
+        self, tmp_path: Path
+    ) -> None:
+        """An endpoint can only shadow the credential of the session it opens.
+
+        Judged against the default's names, the kit certifies a shadowing
+        defect on a read that names another transport, and invents one for
+        a header the transport it actually uses never sends.
+        """
+        root = tmp_path / "api"
+        shutil.copytree(API_REFERENCE_DIR, root)
+        connector = root / "definition" / "connector.json"
+        definition = json.loads(connector.read_text())
+        definition["transports"]["files"] = {
+            "transport_type": "http",
+            "base_url": "https://files.example.invalid",
+            "headers": {"X-Files-Key": "k"},
+        }
+        connector.write_text(json.dumps(definition))
+        document = root / "definition" / "endpoints" / "widgets.json"
+        parsed = json.loads(document.read_text())
+        read = parsed["operations"]["read"]
+        read["request"]["transport_ref"] = "files"
+        # Shadows the transport this read actually opens.
+        read["request"]["headers"] = {"X-Files-Key": {"literal": "attacker"}}
+        document.write_text(json.dumps(parsed))
+
+        report = _report(check_api_read_compiles(load_target(root)))
+        assert "X-Files-Key" in report, "the named transport's own header is reserved"
+
+    def test_a_read_is_judged_against_only_its_own_transports_headers(
+        self, tmp_path: Path
+    ) -> None:
+        """Every page goes out on one transport, so one transport's names apply.
+
+        Not the default's when the read names another, and not a
+        sibling's: the kit reserves what production reserves, or it
+        refuses connectors the engine runs.
+        """
+        root = tmp_path / "api"
+        shutil.copytree(API_REFERENCE_DIR, root)
+        connector = root / "definition" / "connector.json"
+        definition = json.loads(connector.read_text())
+        definition["transports"]["api"]["headers"]["X-Default-Key"] = "k"
+        definition["transports"]["files"] = {
+            "transport_type": "http",
+            "base_url": "https://files.example.invalid",
+            "headers": {"X-Files-Key": "k"},
+        }
+        connector.write_text(json.dumps(definition))
+        document = root / "definition" / "endpoints" / "events.json"
+        parsed = json.loads(document.read_text())
+        read = parsed["operations"]["read"]
+        read["request"]["transport_ref"] = "files"
+        read["request"]["headers"] = {
+            # Owned by the transport this read opens -- a defect.
+            "X-Files-Key": {"literal": "endpoint"},
+            # Owned only by a transport it never opens -- not its collision.
+            "X-Default-Key": {"literal": "endpoint"},
+        }
+        document.write_text(json.dumps(parsed))
+
+        report = _report(check_api_read_compiles(load_target(root)))
+        assert "X-Files-Key" in report
+        assert "X-Default-Key" not in report
+
+    def test_a_sibling_reads_transport_is_not_reserved_against_this_one(
+        self, tmp_path: Path
+    ) -> None:
+        """A source run resolves one endpoint's transports, so the kit does too.
+
+        The mirror of the origin scoping: armed with every read's
+        transports, the kit REFUSES a header production accepts, which
+        fails a valid connector package at tier 1.
+        """
+        root = tmp_path / "api"
+        shutil.copytree(API_REFERENCE_DIR, root)
+        connector = root / "definition" / "connector.json"
+        definition = json.loads(connector.read_text())
+        definition["transports"]["files"] = {
+            "transport_type": "http",
+            "base_url": "https://files.example.invalid",
+            "headers": {"X-Files-Key": "k"},
+        }
+        connector.write_text(json.dumps(definition))
+        # One read dispatches through 'files'...
+        widgets = root / "definition" / "endpoints" / "widgets.json"
+        parsed = json.loads(widgets.read_text())
+        parsed["operations"]["read"]["request"]["transport_ref"] = "files"
+        widgets.write_text(json.dumps(parsed))
+        # ...while a SIBLING link read declares that transport's header name.
+        # Its own run never resolves 'files', so nothing collides.
+        events = root / "definition" / "endpoints" / "events.json"
+        parsed = json.loads(events.read_text())
+        parsed["operations"]["read"]["request"]["headers"] = {
+            "X-Files-Key": {"literal": "mine"}
+        }
+        events.write_text(json.dumps(parsed))
+
+        violations = check_api_read_compiles(load_target(root))
+        assert not any("X-Files-Key" in v.message for v in violations), (
+            f"a sibling read's transport is not in this read's run: "
+            f"{[v.message for v in violations]}"
+        )
+
+    def test_a_probe_is_armed_with_its_own_reads_origins_not_its_siblings(
+        self, tmp_path: Path
+    ) -> None:
+        """A source run resolves one endpoint's transports, so the kit does too.
+
+        Armed target-wide, a link onto a SIBLING endpoint's origin would
+        pass here and be refused in production after page one -- the kit
+        certifying an engine that does not exist.
+        """
+        root = tmp_path / "api"
+        shutil.copytree(API_REFERENCE_DIR, root)
+        connector = root / "definition" / "connector.json"
+        definition = json.loads(connector.read_text())
+        definition["transports"]["files"] = {
+            "transport_type": "http",
+            "base_url": "https://files.example.invalid",
+        }
+        connector.write_text(json.dumps(definition))
+        document = root / "definition" / "endpoints" / "widgets.json"
+        parsed = json.loads(document.read_text())
+        parsed["operations"]["read"]["request"]["transport_ref"] = "files"
+        document.write_text(json.dumps(parsed))
+        target = load_target(root)
+
+        # The read that names 'files' compiles against it; a sibling that
+        # names nothing compiles against the default, so the guard each
+        # one arms is its own transport's.
+        assert api_base_url(target, "files") == "https://files.example.invalid"
+        assert api_base_url(target) != "https://files.example.invalid"
+
+    def test_a_read_naming_the_default_transport_is_not_a_finding(
+        self, tmp_path: Path
+    ) -> None:
+        """Naming the default by name is the same transport, not a second one.
+
+        The shape a real connector ships: every endpoint spells out the
+        ``transport_ref`` it dispatches through, and it is the default.
+        """
+        target = self._broken(
+            tmp_path,
+            "widgets",
+            lambda read: read["request"].update(transport_ref="api"),
+        )
+        assert check_read_transport_selection(target) == []
+
+    def test_a_read_naming_an_undeclared_transport_is_left_to_the_validator(
+        self, tmp_path: Path
+    ) -> None:
+        """Decidable from the two documents alone, so the kit does not restate it.
+
+        ``endpoint-transport-ref`` in the package validator refuses an
+        endpoint naming a transport its sibling connector.json does not
+        declare. A second, differently worded verdict here would give the
+        author two findings for one defect.
+        """
         target = self._broken(
             tmp_path,
             "widgets",
             lambda read: read["request"].update(transport_ref="oauth"),
         )
-        report = _report(check_read_transport_selection(target))
-        assert "'oauth'" in report
-        assert "default_transport" in report
+        assert check_read_transport_selection(target) == []
 
 
 class TestApiScriptedPageTakesTheDeclaredTypes:
@@ -1690,8 +1876,8 @@ class TestApiOriginGuardCoversEveryLinkDeclaration:
     """Handed an off-origin link, a link read refuses it or stays on origin.
 
     The invariant, not the mechanism: the drive plants the off-origin URL
-    at the continuation path and lets ``follow_url`` and ``same_origin`` --
-    the engine's own functions -- decide. Every declaration shape gets the
+    at the continuation path and lets ``follow_url`` and the declared-origin
+    set -- the engine's own functions -- decide. Every declaration shape gets the
     drive, so none of them can go uncertified.
     """
 
@@ -1738,7 +1924,7 @@ class TestApiOriginGuardCoversEveryLinkDeclaration:
         """A function's result is a relative segment, so it stays on the origin.
 
         There is no reading of the declaration that says so: only running it
-        and asking ``same_origin`` about the answer. Demanding a refusal
+        and asking the declared-origin set about the answer. Demanding a refusal
         here -- because a function's result is "unconstrained" -- reports a
         violation against a connector whose next request provably cannot
         leave the origin.
@@ -1779,7 +1965,7 @@ class TestApiRefusalDrivesAreArmed:
 
     @staticmethod
     def _following_link(current: str, target: str, *, origin: str) -> str:
-        """``follow_url`` with the origin refusal taken out."""
+        """``follow_url`` with the transport-origin refusal taken out."""
         return urljoin(current, target)
 
     @pytest.mark.parametrize(
@@ -2792,24 +2978,27 @@ class TestApiTransportHeaderBreaks:
         ``"connectio."`` is not ``"connection."``, so it is a stray path --
         neither deferred nor definition-settled -- and the violation names
         it. A check that raised out instead would report neither this
-        defect nor the ``transport_ref`` beside it -- one authoring
-        mistake hiding another.
+        defect nor the second transport's beside it -- one authoring
+        mistake hiding another, in a different block.
         """
         root = tmp_path / "api"
         shutil.copytree(API_REFERENCE_DIR, root)
         connector = root / "definition" / "connector.json"
         definition = json.loads(connector.read_text())
         definition["transports"]["api"]["base_url"] = {"ref": "connectio.base_url"}
+        definition["transports"]["files"] = {
+            "transport_type": "http",
+            "base_url": {"ref": "nowhere.base_url"},
+        }
         connector.write_text(json.dumps(definition))
         document = root / "definition" / "endpoints" / "widgets.json"
         parsed = json.loads(document.read_text())
-        parsed["operations"]["read"]["request"]["transport_ref"] = "other"
+        parsed["operations"]["read"]["request"]["transport_ref"] = "files"
         document.write_text(json.dumps(parsed))
 
         report = _report(check_read_transport_selection(load_target(root)))
-        assert "no usable base_url" in report
         assert "connectio" in report
-        assert "transport_ref 'other'" in report, "the arm after it still ran"
+        assert "nowhere" in report, "the transport after it was still judged"
 
     def test_a_transport_header_the_connection_supplies_is_not_resolved(
         self, tmp_path: Path

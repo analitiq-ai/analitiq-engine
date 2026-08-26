@@ -35,11 +35,12 @@ when it bites:
   the connector's. Its records are shaped the same way, plus the keyset
   ordering field, which is planted because the engine walks the provider's
   raw record and not the declared schema.
-* the origin the link guard is armed with is the default transport's
-  literal ``base_url``, or a stand-in when the definition expresses it as
-  a reference the connection document supplies. What the guard certifies
-  -- that a link handed to the traversal is either refused or resolved
-  back onto that origin -- holds for either.
+* the origin the link guard is armed with is that of the transport THIS
+  read dispatches through -- its ``request.transport_ref``, or the
+  default when it names none -- with a stand-in when the definition
+  expresses the base URL as a reference the connection document supplies.
+  Containment is per-transport, so arming the probe with any other
+  transport's origin would certify a link production refuses.
 * a path placeholder whose value the connection, a stream's filters or the
   replication cursor supplies gets a stand-in segment. The engine builds
   its param table from all three and substitutes the path after the
@@ -64,6 +65,7 @@ from yarl import URL
 from cdk.api.body import FORM_CONTENT_TYPE, encode_form, media_type
 from cdk.api.exceptions import RequestSpecError
 from cdk.api.page_loop import Page, PageRequest, PaginationStrategy
+from cdk.api.query_style import declared_query_styles
 from cdk.api.read_setup import build_read_strategy, stop_condition
 from cdk.api.records import PAGE_SCOPE_KEYS, split_records_ref
 from cdk.api.request import (
@@ -78,7 +80,7 @@ from cdk.api.request import (
 )
 from cdk.api.response_schema import records_items_schema, resolve_field_arrow_type
 from cdk.api.strategies import KEYSET_REFUSAL_MARKER
-from cdk.api.urls import ORIGIN_REFUSAL_MARKER, join_url, same_origin
+from cdk.api.urls import ORIGIN_REFUSAL_MARKER, join_url, origin_of
 from cdk.api.write_plan import reserved_header_names
 from cdk.exceptions import ReadError
 from cdk.resolver import Resolver, scope_paths
@@ -86,6 +88,7 @@ from cdk.schema_contract import SchemaContract
 from cdk.type_map import TypeMapper
 
 from .api_surface import (
+    STAND_IN_ORIGIN,
     api_base_url,
     definition_resolver,
     fillable_at_request_time,
@@ -154,9 +157,6 @@ _PROBE_KEY_VALUE = 9901
 #: A drive comparing those requests would then read every correct cursor,
 #: link and keyset connector as one that cannot move.
 _DRIVEN_PAGES = (("first", _PROBE_KEY_VALUE), ("second", _PROBE_KEY_VALUE + 1))
-
-#: Stands in for a ``base_url`` the definition expresses as a reference.
-_STAND_IN_ORIGIN = "https://conformance.invalid"
 
 #: Stands in for a path segment only a connection, a stream's filters or the
 #: replication cursor supplies. Distinctive on purpose: it appears verbatim
@@ -254,7 +254,7 @@ class _ReadProbe:
             table=self.table,
             resolver=self.resolver,
             url=self.url,
-            base_url=self.origin,
+            origin=self.origin,
             batch_size=_PROBE_BATCH_SIZE,
         )
 
@@ -288,11 +288,14 @@ def _compile_read(
     table = ParamTable.for_read(declared_params, resolver)
     problem = request_block_problem(
         request_block,
-        reserved_headers=_transport_header_names(target),
+        reserved_headers=reserved_header_names(
+            _declared_header_names(target, request_block.get("transport_ref"))
+        ),
         resolver=resolver,
         controlled_by=table.controlled_by,
         declared_params=declared_params,
         pagination=read.get("pagination"),
+        endpoint=label,
     )
     if problem is not None:
         raise ReadError(problem)
@@ -302,7 +305,10 @@ def _compile_read(
         endpoint=declared_path,
     )
 
-    origin = api_base_url(target) or _STAND_IN_ORIGIN
+    # The transport THIS read dispatches through, so the compiled URL is
+    # the one the engine builds; the guard is armed with every origin the
+    # connector declares a dispatchable transport for.
+    origin = api_base_url(target, request_block.get("transport_ref")) or STAND_IN_ORIGIN
     pagination = read.get("pagination")
     if isinstance(pagination, dict):
         scope_problem = _page_scope_problem(pagination)
@@ -409,8 +415,17 @@ def _path_values(
     return bound
 
 
-def _transport_header_names(target: ConformanceTarget) -> frozenset[str]:
-    """Name the headers an endpoint of this connector may not declare.
+def _declared_header_names(
+    target: ConformanceTarget, transport_ref: str | None = None
+) -> frozenset[str]:
+    """Name the headers one transport of this connector declares.
+
+    The kit's answer to the question the engine answers from a
+    materialized connection (``ConnectionRuntime.transport_header_names``).
+    WHICH transport a read answers to is not a question either side
+    decides: every page of a read goes out on the one its
+    ``request.transport_ref`` names, so both look up that one and nothing
+    else.
 
     The engine reserves the names its session carries, which is what the
     transport declares once each value has resolved: a header resolving to
@@ -426,13 +441,11 @@ def _transport_header_names(target: ConformanceTarget) -> frozenset[str]:
     empty would make a credential-shadowing defect appear only for the
     connections that fill it in.
     """
-    ref = target.definition.get("default_transport")
+    ref = transport_ref or target.definition.get("default_transport")
     block = target.declared_transports().get(ref) if isinstance(ref, str) else None
     declared = block.get("headers") if isinstance(block, Mapping) else None
     names = declared if isinstance(declared, Mapping) else {}
-    # The engine's own set builder, so the engine-owned names it adds are
-    # reserved here too rather than named a second time.
-    return reserved_header_names(str(name) for name in names)
+    return frozenset(str(name) for name in names)
 
 
 def _request_builder(probe: _ReadProbe) -> RequestBuilder:
@@ -452,6 +465,9 @@ def _request_builder(probe: _ReadProbe) -> RequestBuilder:
         declared_query=probe.request.get("query"),
         declared_headers=probe.request.get("headers"),
         content_type=probe.request.get("content_type"),
+        query_styles=declared_query_styles(
+            probe.request.get("query"), probe.read.get("params") or {}
+        ),
     )
 
 
@@ -1092,9 +1108,10 @@ def _origin_violations(probe: _ReadProbe) -> list[Violation]:
     Every link-paginated read gets this drive, whatever shape the
     declaration is. What is asserted is the invariant rather than the
     mechanism: handed a next link on another host, the traversal either
-    refuses it or answers a URL still on the connection's origin --
-    ``cdk.api.urls.same_origin`` being the judge, the same function
-    ``follow_url`` uses. A declaration that writes the URL around the
+    refuses it or answers a URL still on the origin of the transport the
+    read dispatches through -- ``cdk.api.urls.origin_of`` being the judge,
+    the same reduction ``follow_url`` compares by. A declaration
+    that writes the URL around the
     provider's value (``{"template": "/v1/events?after=${...}"}``) lands in
     the second arm: the result is relative, resolves against the page it
     came from, and stays put. Classifying the declaration instead -- by
@@ -1106,9 +1123,10 @@ def _origin_violations(probe: _ReadProbe) -> list[Violation]:
         probe, records=_probe_records(probe), continuation=_OFF_ORIGIN_URL
     )
     expected = (
-        f"a next link on another host must be refused: the session sends the "
-        f"connection's headers, credentials included, on every request, and "
-        f"{probe.origin!r} is the only origin they belong to"
+        f"a next link on a host no transport declares must be refused: the "
+        f"session sends the connection's headers, credentials included, on "
+        f"every request, and {origin_of(probe.origin)} is the only origin "
+        f"they belong to"
     )
     try:
         following = probe.strategy().advance(page)
@@ -1129,13 +1147,13 @@ def _origin_violations(probe: _ReadProbe) -> list[Violation]:
         # request is already reported by the advance drive; saying it twice
         # buries the message that says what to change.
         return []
-    if same_origin(probe.origin, following.url):
+    if origin_of(following.url) == origin_of(probe.origin):
         return []
     return [
         Violation(
             ADVANCE_CHECK,
             f"endpoint {probe.label!r}: advancing answered {following.url!r}, "
-            f"which is not on {probe.origin!r}. {expected}.",
+            f"which is not on {origin_of(probe.origin)}. {expected}.",
         )
     ]
 

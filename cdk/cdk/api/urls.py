@@ -27,15 +27,16 @@ __all__ = [
     "ORIGIN_REFUSAL_MARKER",
     "follow_url",
     "join_url",
+    "origin_of",
     "redact_credentials",
-    "same_origin",
+    "require_declared_origin",
 ]
 
 #: The stable fragment of the off-origin refusal below. Exported so a
 #: caller recognizing THIS refusal (the conformance kit's origin guard)
 #: matches the raise site's own words instead of a copied string that
 #: drifts.
-ORIGIN_REFUSAL_MARKER = "leaves the connection's origin"
+ORIGIN_REFUSAL_MARKER = "leaves its transport's origin"
 
 
 def join_url(base: str, path: str) -> str:
@@ -53,16 +54,58 @@ def join_url(base: str, path: str) -> str:
     return str(URL(base).joinpath(path.lstrip("/"), encoded=True))
 
 
-def same_origin(base: str, target: str) -> bool:
-    """Whether two URLs share scheme, host and effective port.
+def origin_of(url: str) -> str:
+    """Reduce *url* to its comparable origin: scheme, host and effective port.
 
-    ``URL.origin()`` is the normalization -- case-folded host, default port
-    made explicit -- so ``https://API.example.test:443`` and
-    ``https://api.example.test`` are the one origin they are. Compared as
-    strings because two ``origin()`` results that render identically still
-    compare unequal when one was spelled with its default port.
+    ``URL.origin()`` is the normalization -- case-folded host, default
+    port made explicit -- so ``https://API.example.test:443`` and
+    ``https://api.example.test`` reduce to the one origin they are.
+    Rendered as a string because two ``origin()`` results that render
+    identically still compare unequal when one was spelled with its
+    default port.
+
+    One spelling of the reduction, and public because more than the guard
+    needs it: a transport reduces its base URL this way when it is opened,
+    and the guard reduces each URL it judges. Reducing one of them
+    differently is a guard that answers on spelling.
     """
-    return str(URL(base).origin()) == str(URL(target).origin())
+    return str(URL(url).origin())
+
+
+def require_declared_origin(url: str, *, origin: str) -> None:
+    """Refuse a URL that lands off the origin of the transport in use.
+
+    The one containment rule the api path applies, asked in both roles and
+    at both moments a URL comes into existence: the path a request is
+    built for, and the link a provider hands back for the next page.
+
+    Per-transport, because that is what an operation actually has: the
+    session carries THAT transport's credentials, and the endpoint's own
+    ``request.headers`` were declared for that host. A read on
+    ``files.example.com`` is contained to it and a read on
+    ``api.example.com`` to that -- one system with two origins is two
+    transports, each entire.
+
+    What this refuses is a single endpoint paginating across hosts. A
+    traversal that changed transport mid-read would have to decide what to
+    send of the ENDPOINT's declaration at the second host, and there is no
+    correct answer: those headers are the endpoint's, bound once, and they
+    belong to the origin they were written for.
+
+    A correctness guard, deliberately not a security boundary: what bounds
+    authored connector code is the worker's egress policy, the secrets
+    model and registry admission, none of which this replaces.
+    """
+    if origin_of(url) == origin_of(origin):
+        return
+    raise ValueError(
+        f"{url!r} {ORIGIN_REFUSAL_MARKER} {origin_of(origin)}. The session "
+        f"sending this request carries that transport's credentials and "
+        f"the endpoint's headers were declared for that host, so there is "
+        f"nothing correct to send here. Give the operation that reads this "
+        f"origin its own endpoint with request.transport_ref naming the "
+        f"transport that declares it"
+    )
 
 
 def follow_url(current: str, target: str, *, origin: str) -> str:
@@ -74,10 +117,9 @@ def follow_url(current: str, target: str, *, origin: str) -> str:
     protocol-relative ``//host/p`` takes the current scheme -- which the
     origin check below then judges like any other absolute target.
 
-    That check is the reason this function exists at all. The session sends
-    the connection's default headers, credentials included, on every
-    request, so following a link a response body pointed at another host
-    would hand them to it.
+    That check is the reason this function exists at all, and it is
+    :func:`require_declared_origin`'s -- one rule, asked here and on the
+    write path, rather than a read-path copy of it.
 
     A target that carries its own scheme goes back verbatim: it is the
     provider's own string, and re-rendering it could only differ from what
@@ -91,10 +133,5 @@ def follow_url(current: str, target: str, *, origin: str) -> str:
         )
     link = URL(target)
     resolved = str(URL(current).join(link))
-    if not same_origin(origin, resolved):
-        raise ValueError(
-            f"next_url {target!r} {ORIGIN_REFUSAL_MARKER} "
-            f"{URL(origin).origin()}; refusing to send the connection's "
-            f"headers to another host"
-        )
+    require_declared_origin(resolved, origin=origin)
     return target if link.scheme else resolved

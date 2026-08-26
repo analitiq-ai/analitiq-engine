@@ -92,7 +92,10 @@ class TestBuildBootstrap:
         runtime.connector_id = "postgres"
         runtime.connection_id = "my-pg"
         runtime.resolve_spec = AsyncMock(
-            return_value={"connection_id": "my-pg", "transport_spec": {"dsn": "x"}}
+            return_value={
+                "connection_id": "my-pg",
+                "transport_specs": {"database": {"dsn": "x"}},
+            }
         )
 
         bootstrap = await build_bootstrap(
@@ -105,7 +108,7 @@ class TestBuildBootstrap:
         assert bootstrap["role"] == "source"
         assert bootstrap["kind"] == "database"
         assert bootstrap["connector_id"] == "postgres"
-        assert bootstrap["connection"]["transport_spec"] == {"dsn": "x"}
+        assert bootstrap["connection"]["transport_specs"] == {"database": {"dsn": "x"}}
         assert bootstrap["type_maps"]["connector"] == {
             "rules": _RULES,
             "write_rules": None,
@@ -113,3 +116,123 @@ class TestBuildBootstrap:
         assert bootstrap["source_config"] == {"stream_source": {}}
         # The whole bootstrap is JSON-safe — it crosses the stdin pipe.
         assert json.loads(json.dumps(bootstrap)) == bootstrap
+
+    #: One document declaring both sides, each naming its own transport.
+    _BOTH_SIDES = {
+        "operations": {
+            "read": {"request": {"transport_ref": "files"}},
+            "write": {"insert": {"request": {"transport_ref": "uploads"}}},
+        }
+    }
+
+    async def _refs_for(self, tmp_path, role, **documents):
+        connectors = tmp_path / "connectors"
+        connections = tmp_path / "connections"
+        _write_definition(connectors / "sevdesk", rules=_RULES)
+        connections.mkdir()
+
+        runtime = MagicMock()
+        runtime.connector_type = "api"
+        runtime.connector_id = "sevdesk"
+        runtime.connection_id = "my-api"
+        runtime.resolve_spec = AsyncMock(return_value={"connection_id": "my-api"})
+
+        await build_bootstrap(
+            runtime,
+            role=role,
+            connectors_dir=connectors,
+            connections_dir=connections,
+            **documents,
+        )
+        (call,) = runtime.resolve_spec.await_args_list
+        return call.kwargs["transport_refs"]
+
+    async def test_the_transports_the_operations_name_are_resolved(self, tmp_path):
+        """The worker has no secret store, so the shell resolves what it needs.
+
+        A transport whose spec does not travel in this payload can never be
+        opened on the other side -- and the alternative, resolving every
+        transport the connector declares, fails a data read on the auth
+        credentials it never uses.
+        """
+        refs = await self._refs_for(
+            tmp_path,
+            "source",
+            source_config={"endpoint_document": self._BOTH_SIDES},
+        )
+        assert refs == {"files"}
+
+    async def test_a_destination_resolves_only_the_mode_its_stream_selected(
+        self, tmp_path
+    ):
+        """An unused mode's transport is credentials the worker never sends."""
+        document = {
+            "operations": {
+                "write": {
+                    "insert": {"request": {"transport_ref": "bulk"}},
+                    "upsert": {"request": {"transport_ref": "single"}},
+                }
+            }
+        }
+        refs = await self._refs_for(
+            tmp_path,
+            "destination",
+            stream_endpoints={"items": document},
+            stream_write_modes={"items": "upsert"},
+        )
+        assert refs == {"single"}
+
+    async def test_a_destination_told_no_mode_resolves_every_declared_one(
+        self, tmp_path
+    ):
+        """Nothing said which, so nothing may be left unopenable."""
+        document = {
+            "operations": {
+                "write": {
+                    "insert": {"request": {"transport_ref": "bulk"}},
+                    "upsert": {"request": {"transport_ref": "single"}},
+                }
+            }
+        }
+        refs = await self._refs_for(
+            tmp_path, "destination", stream_endpoints={"items": document}
+        )
+        assert refs == {"bulk", "single"}
+
+    async def test_a_role_resolves_only_the_transports_its_own_side_dispatches(
+        self, tmp_path
+    ):
+        """A resolved spec carries credentials and widens an allowlist.
+
+        Handing a source the write side's transports gives it secrets it
+        never sends and an origin its requests may then reach -- and fails
+        the bootstrap outright when one needs a credential this run does
+        not carry.
+        """
+        refs = await self._refs_for(
+            tmp_path, "destination", stream_endpoints={"items": self._BOTH_SIDES}
+        )
+        assert refs == {"uploads"}
+
+    async def test_a_run_naming_no_transport_asks_for_none(self, tmp_path):
+        """A single-transport connector costs what it always cost."""
+        connectors = tmp_path / "connectors"
+        connections = tmp_path / "connections"
+        _write_definition(connectors / "postgres", rules=_RULES)
+        connections.mkdir()
+
+        runtime = MagicMock()
+        runtime.connector_type = "database"
+        runtime.connector_id = "postgres"
+        runtime.connection_id = "my-pg"
+        runtime.resolve_spec = AsyncMock(return_value={"connection_id": "my-pg"})
+
+        await build_bootstrap(
+            runtime,
+            role="source",
+            connectors_dir=connectors,
+            connections_dir=connections,
+            source_config={"stream_source": {}},
+        )
+        (call,) = runtime.resolve_spec.await_args_list
+        assert call.kwargs["transport_refs"] == set()

@@ -256,9 +256,35 @@ PG_PASSWORD=... PIPELINE_ID=my-pipeline docker compose run --rm source_engine
 **File:** `connectors/{connector_id}/definition/connector.json`
 
 The connector defines `connector_type`, `connection_contract`,
-`derived` values, and one or more `transports`. The runtime selects a
-transport by `default_transport` (or per-endpoint override) and resolves
-its expression tree via the spec resolver.
+`derived` values, and one or more `transports`. An operation dispatches
+through the transport its `request.transport_ref` names, or through
+`default_transport` when it names none; the runtime resolves that
+transport's expression tree via the spec resolver.
+
+Everything that follows from a transport travels with it — the session,
+the base URL, the rate limiter, and the header names the connection owns
+(which is what an operation's own `request.headers` may not shadow). An
+operation is judged and sent against **its** transport's facts, never the
+default's.
+
+Every URL an operation produces — a next-page link included — must land on
+the origin of **the transport that operation dispatches through**. A link
+off that origin is refused rather than sent, because the session carries
+that transport's credentials and the endpoint's own `request.headers` were
+declared for that host.
+
+Containment is per-transport, not per-connection: a read on `files` is
+contained to the files origin and may not follow a link back to the api
+origin, and vice versa. This is what makes the file-download shape work —
+one system, two origins — while keeping one credential, one header map and
+one rate limiter describing a whole read.
+
+What it does not support is a single endpoint paginating across hosts. A
+traversal that changed transport mid-read would have to decide what to do
+with the endpoint's own declared headers at the second host, and there is
+no correct answer: they are the endpoint's, bound once, and they belong to
+the origin they were written for. Such a link is refused, loudly, naming
+the origin the read is contained to.
 
 Connector types accepted by the runtime: `api`, `database`, `file`,
 `s3`, `stdout`. The destination handler registry maps these directly

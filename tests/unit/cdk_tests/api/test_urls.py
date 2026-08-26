@@ -11,13 +11,31 @@ from typing import Any
 
 import pytest
 
-from cdk.api.urls import follow_url, join_url, redact_credentials, same_origin
+from cdk.api.urls import (
+    follow_url,
+    join_url,
+    origin_of,
+    redact_credentials,
+    require_declared_origin,
+)
 from cdk.exceptions import TransportSpecError
 from cdk.transport_factory import require_http_base_url
 
 from .fakes import BASE_URL
 
 pytestmark = pytest.mark.unit
+
+#: The origin an operation on the default transport is contained to.
+#: There is no plural form: a request goes out on ONE transport, and that
+#: transport's origin is the only one its credentials belong to.
+ORIGIN = BASE_URL
+
+#: A second transport's origin -- the file-download shape, one system
+#: serving records and documents from two hosts. Each is its own
+#: containment, reached by the endpoint that names its transport.
+FILES_ORIGIN = "https://files.example.test/v2"
+
+REFUSAL = "leaves its transport's origin"
 
 
 class TestJoinUrl:
@@ -27,44 +45,78 @@ class TestJoinUrl:
         assert join_url("https://x/api/v1/", "items") == "https://x/api/v1/items"
 
 
+class TestTransportOriginContainment:
+    """The guard both roles apply: a URL lands on its transport's origin."""
+
+    def test_a_url_on_the_transports_origin_passes(self) -> None:
+        require_declared_origin(f"{BASE_URL}/v1/items", origin=ORIGIN)
+
+    def test_each_transport_is_its_own_containment(self) -> None:
+        # One system, two origins: each reached by the endpoint that names
+        # its transport, and neither permitted from the other.
+        require_declared_origin(f"{FILES_ORIGIN}/doc.pdf", origin=FILES_ORIGIN)
+        with pytest.raises(ValueError, match=REFUSAL):
+            require_declared_origin(f"{FILES_ORIGIN}/doc.pdf", origin=ORIGIN)
+        with pytest.raises(ValueError, match=REFUSAL):
+            require_declared_origin(f"{BASE_URL}/v1/items", origin=FILES_ORIGIN)
+
+    def test_a_url_off_it_is_refused(self) -> None:
+        with pytest.raises(ValueError, match=REFUSAL):
+            require_declared_origin("https://evil.test/steal", origin=ORIGIN)
+
+    def test_the_guard_takes_a_base_url_and_compares_origins(self) -> None:
+        """A transport's base URL carries a path; only the origin is compared."""
+        require_declared_origin("https://a.test/other", origin="https://a.test/api/v1")
+        assert origin_of("https://a.test/api/v1") == "https://a.test"
+
+
 class TestFollowUrl:
     def test_a_relative_target_joins_the_current_page(self) -> None:
         # A query-only link continues from the endpoint path, not the
         # connection root.
         assert (
-            follow_url(f"{BASE_URL}/v1/items", "?page=2", origin=BASE_URL)
+            follow_url(f"{BASE_URL}/v1/items", "?page=2", origin=ORIGIN)
             == f"{BASE_URL}/v1/items?page=2"
         )
 
     def test_an_absolute_same_origin_target_is_followed(self) -> None:
         target = f"{BASE_URL}/v1/items?page=2"
-        assert follow_url(f"{BASE_URL}/v1/items", target, origin=BASE_URL) == target
+        assert follow_url(f"{BASE_URL}/v1/items", target, origin=ORIGIN) == target
 
     def test_equivalent_origin_spellings_are_the_same_origin(self) -> None:
         target = "https://API.example.test:443/v1/items?page=2"
-        assert follow_url(f"{BASE_URL}/v1/items", target, origin=BASE_URL) == target
+        assert follow_url(f"{BASE_URL}/v1/items", target, origin=ORIGIN) == target
+
+    def test_a_link_onto_another_transports_origin_is_refused(self) -> None:
+        # The connector may declare a transport for that host; this read
+        # does not dispatch through it, and its credentials and headers
+        # are not the ones to send there.
+        with pytest.raises(ValueError, match=REFUSAL):
+            follow_url(
+                f"{BASE_URL}/v1/items",
+                "https://files.example.test/v2/export/1",
+                origin=ORIGIN,
+            )
 
     def test_a_cross_origin_target_is_refused(self) -> None:
         # The session sends the connection's auth headers on every request.
-        with pytest.raises(ValueError, match="leaves the connection's origin"):
-            follow_url(
-                f"{BASE_URL}/v1/items", "https://evil.test/steal", origin=BASE_URL
-            )
+        with pytest.raises(ValueError, match=REFUSAL):
+            follow_url(f"{BASE_URL}/v1/items", "https://evil.test/steal", origin=ORIGIN)
 
     def test_an_uppercase_scheme_still_classifies_as_absolute(self) -> None:
-        with pytest.raises(ValueError, match="leaves the connection's origin"):
-            follow_url(f"{BASE_URL}/v1/items", "HTTPS://evil.test/x", origin=BASE_URL)
+        with pytest.raises(ValueError, match=REFUSAL):
+            follow_url(f"{BASE_URL}/v1/items", "HTTPS://evil.test/x", origin=ORIGIN)
 
     def test_a_protocol_relative_target_is_refused(self) -> None:
-        with pytest.raises(ValueError, match="leaves the connection's origin"):
-            follow_url(f"{BASE_URL}/v1/items", "//evil.test/x", origin=BASE_URL)
+        with pytest.raises(ValueError, match=REFUSAL):
+            follow_url(f"{BASE_URL}/v1/items", "//evil.test/x", origin=ORIGIN)
 
     def test_a_non_string_target_is_refused(self) -> None:
         with pytest.raises(ValueError, match="expected a URL string"):
-            follow_url(f"{BASE_URL}/v1", {"href": "/x"}, origin=BASE_URL)
+            follow_url(f"{BASE_URL}/v1", {"href": "/x"}, origin=ORIGIN)
 
     @pytest.mark.parametrize(
-        ("base", "target", "shared"),
+        ("declared", "target", "permitted"),
         [
             ("https://a.test", "https://A.test:443", True),
             ("http://a.test:80", "http://a.test", True),
@@ -73,11 +125,21 @@ class TestFollowUrl:
             ("https://a.test", "https://b.test", False),
         ],
     )
-    def test_same_origin_normalizes_case_and_default_ports(
-        self, base: str, target: str, shared: bool
+    def test_membership_normalizes_case_and_default_ports(
+        self, declared: str, target: str, permitted: bool
     ) -> None:
-        """The normalization is yarl's ``origin()``, not a rule of ours."""
-        assert same_origin(base, target) is shared
+        """The normalization is yarl's ``origin()``, not a rule of ours.
+
+        Asked of the guard rather than of a comparison helper, because the
+        set the guard is built from and the URL it is probed with have to
+        normalize the same way -- which is the whole reason one reduction
+        serves both.
+        """
+        if permitted:
+            require_declared_origin(target, origin=declared)
+        else:
+            with pytest.raises(ValueError, match=REFUSAL):
+                require_declared_origin(target, origin=declared)
 
 
 class TestNoRefusalLogsAPassword:

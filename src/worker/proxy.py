@@ -130,6 +130,7 @@ class WorkerProxyHandler(BaseDestinationHandler):
         self._endpoint_refs: dict[str, Any] = {}
         self._stream_endpoints: dict[str, Any] = {}
         self._stream_conflict_keys: dict[str, list[str]] = {}
+        self._stream_write_modes: dict[str, str] = {}
         self._handle: WorkerHandle | None = None
         self._control: DestinationGRPCClient | None = None
         # One forwarded StreamRecords stream per stream_id. The client caches
@@ -183,6 +184,15 @@ class WorkerProxyHandler(BaseDestinationHandler):
             k: list(v) for k, v in stream_conflict_keys.items()
         }
 
+    def set_stream_write_modes(self, stream_write_modes: Mapping[str, str]) -> None:
+        """Record stream_id -> selected write mode for the worker bootstrap.
+
+        The bootstrap resolves only that mode's transport, so an endpoint
+        offering insert and upsert through different transports never
+        ships the unused mode's credentials to the worker.
+        """
+        self._stream_write_modes = dict(stream_write_modes)
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -198,6 +208,7 @@ class WorkerProxyHandler(BaseDestinationHandler):
             endpoint_refs=self._endpoint_refs,
             stream_endpoints=self._stream_endpoints,
             stream_conflict_keys=self._stream_conflict_keys,
+            stream_write_modes=self._stream_write_modes,
         )
         self._handle = await spawn_worker(bootstrap, label=self._label)
         control = DestinationGRPCClient(target=self._handle.target)

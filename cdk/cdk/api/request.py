@@ -39,6 +39,7 @@ import re
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
+from functools import partial
 from types import MappingProxyType
 from typing import Any
 from urllib.parse import quote
@@ -52,17 +53,25 @@ from ..resolver import REQUEST_CONNECTION_SUBTREES, Resolver, scope_paths
 from ..transport_factory import require_wire_safe_header
 from .body import unsupported_media_type
 from .exceptions import RequestSpecError, request_spec_errors
+from .query_style import (
+    QueryStyle,
+    declared_query_styles,
+    serialize_query_value,
+    unserializable_style_problem,
+)
 from .strategies import PRE_PAGE_VALUE_PATHS
 
 __all__ = [
     "REQUEST_SUPPLIED_CONNECTION_ROOTS",
     "REQUEST_SUPPLIED_CONNECTION_SCOPES",
+    "ROLE_OPERATIONS",
     "ParamTable",
     "PreparedRequest",
     "RequestBuilder",
     "bind_query_and_headers",
     "bind_request_values",
     "build_write_body",
+    "endpoint_transport_refs",
     "param_bindings",
     "path_placeholders",
     "request_block_problem",
@@ -199,6 +208,7 @@ def bind_request_values(
     resolver: Resolver,
     block: str,
     endpoint: str,
+    styles: Mapping[str, QueryStyle] = MappingProxyType({}),
 ) -> dict[str, Any]:
     """Resolve one declared request map (headers / query / path_params).
 
@@ -217,6 +227,13 @@ def bind_request_values(
     Resolving one key at a time is also what lets the failure name that
     key: every defect leaves here as a :class:`RequestSpecError` saying
     which block, which key and which endpoint.
+
+    ``styles`` carries the declared wire serialization of the query keys
+    that have one (:func:`~cdk.api.query_style.declared_query_styles`).
+    A collection is sendable exactly where one says how, which is why the
+    query is the only block that passes any: the contract requires the
+    declaration on a query param and defines it nowhere else, so a
+    container in a header or a path segment keeps the refusal below.
     """
     if declared is None:
         return {}
@@ -235,7 +252,20 @@ def bind_request_values(
             # instead would send the key with a null value.
             node = bind_param_refs(value, params)
             bound = resolver.resolve_for_request(node)
-        if bound is None and Resolver.is_expression_node(node):
+        sendable = partial(_sendable_value, block=block, endpoint=endpoint)
+        style = styles.get(str(name))
+        if style is not None and bound is not None:
+            # A declared style is the one thing that turns one key into
+            # several, so it is the only branch that produces more than a
+            # single pair. What it produces still goes through the one
+            # insertion below.
+            with request_spec_errors(
+                f"request.{block}.{name} for endpoint {endpoint!r}"
+            ):
+                spelled = serialize_query_value(
+                    str(name), bound, style, endpoint=endpoint, sendable=sendable
+                )
+        elif bound is None and Resolver.is_expression_node(node):
             # The per-request policy: an expression with nothing to resolve
             # omits its key rather than going onto the wire raw.
             logger.warning(
@@ -246,7 +276,29 @@ def bind_request_values(
                 name,
             )
             continue
-        resolved[name] = _sendable_value(name, bound, block=block, endpoint=endpoint)
+        else:
+            spelled = {name: sendable(name, bound)}
+        # One insertion site, whichever branch produced the pairs, and it
+        # does one thing: guard the name. Each branch has already put its
+        # values through the sendable rule, so a list here is the exploded
+        # array that means "this name repeats" -- never a container that
+        # slipped past the scalar refusal. Two insertion sites is how the
+        # collision refusal came to depend on which key the document
+        # happened to declare first.
+        for wire_name, wire_value in spelled.items():
+            if wire_name in resolved:
+                # A deepObject or an exploded object writes key names of
+                # its own, so it can land on one the map already declared.
+                # Whichever won, the other would be dropped without a word
+                # -- the exact silence honouring the key map exists to end.
+                raise RequestSpecError(
+                    f"request.{block}.{name} for endpoint {endpoint!r} "
+                    f"sends {wire_name!r}, which this request already "
+                    f"carries; one of the two would be dropped silently. "
+                    f"Rename the key, or declare a style that keeps its "
+                    f"own name"
+                )
+            resolved[wire_name] = wire_value
     return resolved
 
 
@@ -341,11 +393,70 @@ def substitute_path(path: str, values: Mapping[str, Any], *, endpoint: str) -> s
     return substituted
 
 
+#: Which operations a worker in each role executes, and so which
+#: ``transport_ref`` values that role's run can dispatch through. Named
+#: here because the shell packs a document for one role at a time.
+ROLE_OPERATIONS = {"source": ("read",), "destination": ("write",)}
+
+
+def endpoint_transport_refs(
+    document: Any, *, role: str, write_modes: Iterable[str] | None = None
+) -> set[str]:
+    """Name every transport this run's operations in *document* dispatch through.
+
+    The read's for a source, and for a destination the write modes in
+    *write_modes* -- the modes its streams actually selected -- or every
+    declared mode when the caller cannot say. Scoped, because the
+    transports named here are the ones whose specs (credentials resolved
+    into them) travel to that worker and whose origins widen what its
+    requests may reach. A worker given an operation it never executes is
+    handed secrets it never sends and an allowlist wider than its own
+    requests, and the bootstrap fails outright if that operation's
+    transport needs a credential this run does not carry.
+
+    Read twice from two sides of the process boundary and answered here
+    once: the trusted shell asks so it can resolve those transports while
+    the secrets are still in reach, and the connector asks so it
+    dispatches through the one the operation named. A second reading of
+    the key is a second answer, and the two disagreeing means a request
+    resolved against one transport and sent on another.
+
+    The document is raw JSON -- it arrives from the bootstrap, not from a
+    parsed model -- so every level is shape-checked rather than assumed.
+    A document with no transport_ref anywhere answers the empty set, which
+    is what a single-transport connector always answers.
+    """
+    operations = (
+        (document or {}).get("operations") if isinstance(document, Mapping) else None
+    )
+    if not isinstance(operations, Mapping):
+        return set()
+    blocks: list[Any] = []
+    for name in ROLE_OPERATIONS.get(role, ()):
+        block = operations.get(name)
+        if name != "write":
+            # ``read`` is one block; ``write`` is a map of modes.
+            blocks.append(block)
+        elif isinstance(block, Mapping):
+            selected = list(write_modes) if write_modes is not None else list(block)
+            blocks.extend(block.get(mode) for mode in selected)
+    refs: set[str] = set()
+    for block in blocks:
+        if not isinstance(block, Mapping):
+            continue
+        request = block.get("request")
+        ref = request.get("transport_ref") if isinstance(request, Mapping) else None
+        if isinstance(ref, str) and ref:
+            refs.add(ref)
+    return refs
+
+
 def request_block_problem(
     request_block: Mapping[str, Any],
     *,
     reserved_headers: frozenset[str] | set[str],
     resolver: Resolver,
+    endpoint: str,
     controlled_by: Mapping[str, str] = MappingProxyType({}),
     declared_params: Mapping[str, Any] = MappingProxyType({}),
     pagination: Mapping[str, Any] | None = None,
@@ -390,7 +501,32 @@ def request_block_problem(
     )
     if problem is not None:
         return problem
+    problem = _query_style_problem(request_block, declared_params, endpoint)
+    if problem is not None:
+        return problem
     return _controlled_placeholder_problem(request_block, controlled_by)
+
+
+def _query_style_problem(
+    request_block: Mapping[str, Any],
+    declared_params: Mapping[str, Any],
+    endpoint: str,
+) -> str | None:
+    """Why a declared query serialization cannot be sent, or ``None``.
+
+    The pair is defined or it is not, on every connection and for every
+    value, so it is settled with the rest of the block rather than on the
+    first page whose value happens to be a collection -- which for a
+    param the pagination or replication loop fills would be page two of a
+    read that already committed rows.
+    """
+    for key, style in declared_query_styles(
+        request_block.get("query"), declared_params
+    ).items():
+        problem = unserializable_style_problem(key, style, endpoint=endpoint)
+        if problem is not None:
+            return problem
+    return None
 
 
 #: The connection paths per-request resolution supplies, as prefixes --
@@ -682,6 +818,7 @@ def bind_query_and_headers(
     declared_headers: Any,
     resolver: Resolver,
     endpoint: str,
+    query_styles: Mapping[str, QueryStyle] = MappingProxyType({}),
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Build the query string and the header map one request sends.
 
@@ -689,6 +826,12 @@ def bind_query_and_headers(
     ``request.query`` and ``request.headers`` maps declare -- the params in
     flight reach the wire through the ``{from_param}`` bindings inside those
     maps and through nothing else.
+
+    Exactly the keys, with one exception the contract names: a key whose
+    param declares a ``style`` that writes its own names -- ``deepObject``,
+    or an exploded object -- sends those instead of the key it was
+    declared under. That IS the declared spelling, which is what
+    ``style`` and ``explode`` exist to say.
     """
     # An endpoint's headers reach the wire by a different route than the
     # transport's, and the HTTP client judges both the same way: one rule,
@@ -711,6 +854,7 @@ def bind_query_and_headers(
         resolver=resolver,
         block="query",
         endpoint=endpoint,
+        styles=query_styles,
     )
     return query, headers
 
@@ -775,6 +919,7 @@ class RequestBuilder:
         declared_query: Mapping[str, Any] | None = None,
         declared_headers: Mapping[str, Any] | None = None,
         content_type: str | None = None,
+        query_styles: Mapping[str, QueryStyle] = MappingProxyType({}),
     ) -> None:
         self._table = table
         # Only the contract's POST read request declares a body; a GET read
@@ -785,6 +930,7 @@ class RequestBuilder:
         self._declared_query = declared_query
         self._declared_headers = declared_headers
         self._content_type = content_type
+        self._query_styles = query_styles
 
     def for_page(
         self, page_params: Mapping[str, Any], *, sends_declared_body: bool = True
@@ -813,6 +959,7 @@ class RequestBuilder:
             declared_headers=self._declared_headers,
             resolver=self._resolver,
             endpoint=self._endpoint,
+            query_styles=self._query_styles,
         )
         if self._raw_body is None or not sends_declared_body:
             return PreparedRequest(query=query, headers=headers, body=None)

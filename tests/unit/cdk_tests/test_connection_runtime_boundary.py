@@ -73,7 +73,8 @@ class TestResolveSpec:
         assert payload["connection_id"] == "my-file"
         assert payload["connector_id"] == "filedrop"
         assert payload["connector_type"] == "file"
-        assert payload["transport_spec"] is None
+        assert payload["transport_specs"] is None
+        assert payload["default_transport_ref"] is None
         # Secrets arrive as resolved values, not references.
         assert payload["resolved_config"]["API_TOKEN"] == "tok-123"
 
@@ -82,7 +83,11 @@ class TestResolveSpec:
         payload = await runtime.resolve_spec()
 
         assert json.loads(json.dumps(payload)) == payload
-        spec = payload["transport_spec"]
+        # The default transport travels under its own ref: the worker has no
+        # secret store, so a transport whose spec is not in this payload can
+        # never be opened there.
+        assert payload["default_transport_ref"] == "api"
+        spec = payload["transport_specs"]["api"]
         assert spec["transport_type"] == "http"
         assert spec["headers"]["Authorization"] == "Bearer tok-123"
         assert payload["resolved_config"] is None
@@ -168,7 +173,7 @@ class TestWorkerSideRuntime:
                 "connection_config": {
                     "secret_refs": {"API_TOKEN": "sidecar:API_TOKEN"}
                 },
-                "transport_spec": None,
+                "transport_specs": None,
                 "resolved_config": None,
             }
         )
@@ -186,7 +191,7 @@ class TestWorkerSideRuntime:
                 "connector_id": "filedrop",
                 "connector_type": "file",
                 "connection_config": {"path": "/tmp/out"},
-                "transport_spec": None,
+                "transport_specs": None,
                 "resolved_config": None,
             }
         )

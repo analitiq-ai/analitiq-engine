@@ -1,15 +1,18 @@
-"""The transport every read opens, and whether a read may open it at all.
+"""The transports a read opens, and whether each one can be opened.
 
-One place is left where the published contract is wider than the CDK's api
-path: ``request.transport_ref``. The path opens ``default_transport`` at
-connect time and dispatches every read through it, so a request naming
-another transport goes out against the wrong origin with the wrong headers
--- and still succeeds. There is no execution to drive there, so reading the
-declaration is the only way to report it.
+Nothing is read and discarded here any more. A read dispatches through the
+transport its ``request.transport_ref`` names, or through
+``default_transport`` when it names none, and the check follows: every
+transport this connector's reads dispatch through has to exist, be HTTP,
+and carry a base URL and headers that resolve to something a session can
+be built on.
 
-The rest of the block is about the transport itself: it has to exist, be
-HTTP, and carry a base URL that resolves to something a session can be
-built on.
+Whether a named ref resolves to a DECLARED transport is settled before the
+kit sees the document -- it is decidable from the connector.json and the
+endpoint file alone, which is the package validator's
+``endpoint-transport-ref``. What is left for an executing kit is the half
+no document pair can answer: that the block behind the name actually
+materializes, driven through the engine's own build.
 
 Also home to the readers both api modules share, so "which endpoints does
 this connector read" and "what resolver does a definition-only run resolve
@@ -33,7 +36,11 @@ from cdk.connection_runtime import (
 from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.exceptions import TransportSpecError
 from cdk.resolver import RUNTIME_CONNECTION_ID, ResolutionContext, Resolver, scope_paths
-from cdk.transport_factory import require_http_base_url, resolve_http_spec
+from cdk.transport_factory import (
+    HTTP_TRANSPORT_TYPE,
+    require_http_base_url,
+    resolve_http_spec,
+)
 
 from .fakes import NoSecretsResolver
 from .target import ConformanceTarget
@@ -42,8 +49,10 @@ from .violations import Violation
 __all__ = [
     "api_base_url",
     "check_api_has_reads",
+    "STAND_IN_ORIGIN",
     "check_read_transport_selection",
     "definition_resolver",
+    "dispatch_transport_refs",
     "fillable_at_request_time",
     "read_operations",
     "unknown_function_problem",
@@ -51,9 +60,6 @@ __all__ = [
 
 TRANSPORT_CHECK = "api-read-transport-selection"
 READS_CHECK = "api-has-reads"
-
-#: The transport type the api path materializes.
-HTTP_TRANSPORT_TYPE = "http"
 
 #: What only a CONNECTION brings to transport materialization: exactly the
 #: connection-document fields ``_build_resolution_context`` puts in scope
@@ -303,8 +309,31 @@ def unknown_function_problem(node: Any, resolver: Resolver) -> str | None:
     return next((p for p in map(walk, node.values()) if p), None)
 
 
-def api_base_url(target: ConformanceTarget) -> str | None:
-    """Return the base URL the default http transport settles by itself.
+def dispatch_transport_refs(target: ConformanceTarget) -> list[str]:
+    """Every transport this connector's reads dispatch through, default first.
+
+    The default, because a read naming nothing goes out on it, plus every
+    ``request.transport_ref`` a read names. A named ref the connector does
+    not declare is left out rather than reported: that is decidable from
+    the two documents alone and the package validator already refuses it,
+    and a kit restating it would give the author a second, differently
+    worded verdict on one defect.
+    """
+    transports = target.declared_transports()
+    default_ref = target.definition.get("default_transport")
+    refs = [default_ref] if isinstance(default_ref, str) else []
+    for _label, read in read_operations(target):
+        request = read.get("request")
+        ref = request.get("transport_ref") if isinstance(request, Mapping) else None
+        if isinstance(ref, str) and ref in transports and ref not in refs:
+            refs.append(ref)
+    return refs
+
+
+def api_base_url(
+    target: ConformanceTarget, transport_ref: str | None = None
+) -> str | None:
+    """Return the base URL an http transport settles by itself.
 
     A plain string, or a value expression the definition alone resolves --
     ``{"literal": "https://..."}`` settles the same origin production's
@@ -315,13 +344,15 @@ def api_base_url(target: ConformanceTarget) -> str | None:
     expression reading a scope the connection supplies, one that is
     malformed or does not resolve (each a transport-check finding in its
     own right, never silently absorbed here), and a missing or non-http
-    default transport (reported by
-    :func:`check_read_transport_selection`). The read-path checks
-    substitute a stand-in origin then, because what they certify (that a
-    path segment joins, that an off-origin link is refused) holds for
-    whatever origin the connection supplies.
+    transport (reported by :func:`check_read_transport_selection`). The
+    read-path checks substitute a stand-in origin then, because what they
+    certify (that a path segment joins, that an off-origin link is
+    refused) holds for whatever origin the connection supplies.
+
+    ``transport_ref`` names the transport to read; ``None`` is the
+    connector's default, which is the one a read naming none opens.
     """
-    ref = target.definition.get("default_transport")
+    ref = transport_ref or target.definition.get("default_transport")
     block = target.declared_transports().get(ref) if isinstance(ref, str) else None
     if not isinstance(block, Mapping):
         return None
@@ -349,77 +380,98 @@ def api_base_url(target: ConformanceTarget) -> str | None:
 
 
 def check_read_transport_selection(target: ConformanceTarget) -> list[Violation]:
-    """Certify that the one transport every read opens exists and is HTTP.
+    """Certify that every transport a read opens exists and is HTTP.
 
-    ``connect()`` materializes ``default_transport`` with no
-    ``transport_ref`` and every read goes out on it, which makes two
-    demands on the definition.
+    A read dispatches through the transport its ``transport_ref`` names,
+    or through ``default_transport`` when it names none, so each of them
+    makes the same demand on the definition: it must be an http block that
+    materializes.
 
-    It must name an http transport. A connector whose default is absent, or
-    points at a block of another type, materializes no session and no base
-    URL, so every read fails at ``connect()`` -- before a stream reads a
-    row. Reported here rather than tolerated, because the read-path checks
+    The default is judged whether a read names it or not. A connector
+    whose default is absent, or points at a block of another type,
+    materializes no session and no base URL at ``connect()`` -- before a
+    stream reads a row -- and every read that names nothing goes out on
+    it. Reported here rather than tolerated, because the read-path checks
     substitute a stand-in origin to certify what they are about, and a
     silent stand-in for a transport that does not exist would let a
     connector that cannot connect at all pass tier 1.
 
-    And nothing may ask for another. The contract lets a request name the
-    transport it dispatches through
-    (``operations.read.request.transport_ref``), which is contract-valid
-    and unexecutable -- and unexecutable silently, since the request still
-    succeeds against the wrong origin with the wrong headers.
+    A named one is judged for the endpoints that name it, so the finding
+    says which reads stop rather than reading as a defect in a block
+    nothing uses.
     """
     violations: list[Violation] = []
-    default_ref = target.definition.get("default_transport")
     transports = target.declared_transports()
-    block = transports.get(default_ref) if isinstance(default_ref, str) else None
-    if not isinstance(block, Mapping):
-        violations.append(
+    default_ref = target.definition.get("default_transport")
+    if not isinstance(default_ref, str) or not isinstance(
+        transports.get(default_ref), Mapping
+    ):
+        return [
             Violation(
                 TRANSPORT_CHECK,
                 f"connector.json names default_transport {default_ref!r}, "
                 f"which is not one of the declared transports "
-                f"{sorted(transports)}. Every read opens the default "
-                f"transport at connect time, so no stream on this connector "
+                f"{sorted(transports)}. Every read naming no transport_ref "
+                f"opens it at connect time, so no stream on this connector "
                 f"reaches its first request.",
             )
-        )
-    elif block.get("transport_type") != HTTP_TRANSPORT_TYPE:  # noqa: SIM114
-        violations.append(
-            Violation(
-                TRANSPORT_CHECK,
-                f"default_transport {default_ref!r} declares transport_type "
-                f"{block.get('transport_type')!r}, not "
-                f"{HTTP_TRANSPORT_TYPE!r}. An api connector's reads go out on "
-                f"an HTTP session built from this block; there is no session "
-                f"and no base URL to read from without one.",
+        ]
+    for ref in dispatch_transport_refs(target):
+        block = transports[ref]
+        stops = _stops(target, ref, default_ref)
+        if block.get("transport_type") != HTTP_TRANSPORT_TYPE:
+            violations.append(
+                Violation(
+                    TRANSPORT_CHECK,
+                    f"transport {ref!r} declares transport_type "
+                    f"{block.get('transport_type')!r}, not "
+                    f"{HTTP_TRANSPORT_TYPE!r}. An api read goes out on an "
+                    f"HTTP session built from this block; there is no "
+                    f"session and no base URL to read from without one, so "
+                    f"{stops}.",
+                )
             )
-        )
-    else:
-        violations.extend(_base_url_violations(target, default_ref, block))
-        violations.extend(_transport_header_violations(target, default_ref, block))
-        violations.extend(_transport_spec_violations(target, default_ref, block))
-    for label, read in read_operations(target):
-        request = read.get("request")
-        ref = request.get("transport_ref") if isinstance(request, Mapping) else None
-        if ref is None or ref == default_ref:
             continue
-        violations.append(
-            Violation(
-                TRANSPORT_CHECK,
-                f"endpoint {label!r}: the read requests transport_ref {ref!r}, "
-                f"but the api path opens one connection at connect time and "
-                f"dispatches every read through default_transport "
-                f"({default_ref!r}). This read would go out on the wrong "
-                f"origin with the wrong headers and still succeed. Move the "
-                f"endpoint onto the default transport, or split the connector.",
-            )
-        )
+        violations.extend(_base_url_violations(target, ref, block, stops=stops))
+        violations.extend(_transport_header_violations(target, ref, block, stops=stops))
+        violations.extend(_transport_spec_violations(target, ref, block, stops=stops))
     return violations
 
 
+def _stops(target: ConformanceTarget, ref: str, default_ref: Any) -> str:
+    """Say what a transport that cannot materialize stops, for one message.
+
+    The default is opened at ``connect()``, so a defect in it stops every
+    stream on the connection before any of them reaches a first request. A
+    named one is opened by the first read that dispatches through it, so a
+    defect in that one stops exactly those endpoints and leaves the rest
+    of the connector reading. The two are different sizes of failure, and
+    a message that quoted the larger one for both would send an author
+    looking for a connection that never breaks.
+
+    One phrase for every ladder below, so a finding about a named
+    transport cannot inherit the default's consequences from whichever
+    branch happened to raise it.
+    """
+    if ref == default_ref:
+        return (
+            "every connection fails at connect(), before any stream reaches "
+            "its first request"
+        )
+    named = sorted(
+        label
+        for label, read in read_operations(target)
+        if isinstance(read.get("request"), Mapping)
+        and read["request"].get("transport_ref") == ref
+    )
+    return (
+        f"the reads that dispatch through it ({', '.join(named)}) fail on "
+        f"their first request"
+    )
+
+
 def _base_url_violations(
-    target: ConformanceTarget, default_ref: Any, block: Mapping[str, Any]
+    target: ConformanceTarget, ref: str, block: Mapping[str, Any], *, stops: str
 ) -> list[Violation]:
     """Resolve the declared base URL and require a non-empty string.
 
@@ -434,8 +486,8 @@ def _base_url_violations(
     Resolving is what makes the classification matter: every way a
     declaration can be malformed arrives here as an exception, and one that
     escaped would not merely lose the base-url finding -- it would abandon
-    the ``transport_ref`` loop that runs after it, so a second, unrelated
-    defect would go unreported because of the first. That is why this
+    the per-transport loop this runs inside, so a second, unrelated defect
+    would go unreported because of the first. That is why this
     catches the engine's own resolution boundary rather than a list of
     exception types kept in step by hand: the list here once named both
     ``UnresolvedValueError`` and the ``KeyError`` it subclasses, and still
@@ -455,11 +507,10 @@ def _base_url_violations(
         return [
             Violation(
                 TRANSPORT_CHECK,
-                f"default_transport {default_ref!r} declares no usable "
+                f"transport {ref!r} declares no usable "
                 f"base_url ({shown!r}, which is malformed: {grammar}). "
-                f"The transport build resolves this declaration at "
-                f"connect(), so every connection fails before any stream "
-                f"reaches its first request.",
+                f"The transport build resolves this declaration when the "
+                f"transport is opened, so {stops}.",
             )
         ]
     problems, defers = _transport_deferral(target, declared)
@@ -467,11 +518,10 @@ def _base_url_violations(
         return [
             Violation(
                 TRANSPORT_CHECK,
-                f"default_transport {default_ref!r} declares no usable "
+                f"transport {ref!r} declares no usable "
                 f"base_url ({shown!r}: {'; '.join(problems)}). The build "
-                f"resolves the whole declaration at connect(), so every "
-                f"connection fails before any stream reaches its first "
-                f"request.",
+                f"resolves the whole declaration when the transport is "
+                f"opened, so {stops}.",
             )
         ]
     if defers:
@@ -493,10 +543,10 @@ def _base_url_violations(
     return [
         Violation(
             TRANSPORT_CHECK,
-            f"default_transport {default_ref!r} declares no usable base_url "
+            f"transport {ref!r} declares no usable base_url "
             f"{unusable}. The transport build requires one that resolves to "
-            f"an absolute http(s) URL, so connect() fails before any stream "
-            f"reaches its first request. A reference the connection supplies "
+            f"an absolute http(s) URL, so {stops}. A reference the "
+            f"connection supplies "
             f"is fine -- a definition-only run cannot say what it will be -- "
             f"but nothing else may be absent, empty or schemeless.",
         )
@@ -504,7 +554,7 @@ def _base_url_violations(
 
 
 def _transport_header_violations(
-    target: ConformanceTarget, default_ref: Any, block: Mapping[str, Any]
+    target: ConformanceTarget, ref: str, block: Mapping[str, Any], *, stops: str
 ) -> list[Violation]:
     """Judge the default transport's headers the way connect() will.
 
@@ -527,10 +577,9 @@ def _transport_header_violations(
         return [
             Violation(
                 TRANSPORT_CHECK,
-                f"default_transport {default_ref!r} declares headers as "
+                f"transport {ref!r} declares headers as "
                 f"{declared!r}. The transport build requires an object of "
-                f"name -> value, so connect() fails before any stream "
-                f"reaches its first request.",
+                f"name -> value, so {stops}.",
             )
         ]
     violations: list[Violation] = []
@@ -540,11 +589,10 @@ def _transport_header_violations(
             violations.append(
                 Violation(
                     TRANSPORT_CHECK,
-                    f"default_transport {default_ref!r} header {name!r} is "
+                    f"transport {ref!r} header {name!r} is "
                     f"malformed ({value!r}: {grammar}). The transport build "
-                    f"resolves every header value at connect(), so every "
-                    f"connection fails before any stream reaches its first "
-                    f"request.",
+                    f"resolves every header value when the transport is "
+                    f"opened, so {stops}.",
                 )
             )
             continue
@@ -553,11 +601,10 @@ def _transport_header_violations(
             violations.append(
                 Violation(
                     TRANSPORT_CHECK,
-                    f"default_transport {default_ref!r} header {name!r} "
+                    f"transport {ref!r} header {name!r} "
                     f"({value!r}: {'; '.join(problems)}). The build "
-                    f"resolves the whole value at connect(), so every "
-                    f"connection fails before any stream reaches its first "
-                    f"request.",
+                    f"resolves the whole value when the transport is "
+                    f"opened, so {stops}.",
                 )
             )
             continue
@@ -570,19 +617,22 @@ def _transport_header_violations(
             violations.append(
                 Violation(
                     TRANSPORT_CHECK,
-                    f"default_transport {default_ref!r} header {name!r} "
+                    f"transport {ref!r} header {name!r} "
                     f"({value!r}) does not resolve: {err}. The transport "
-                    f"build resolves every header value at connect(), and "
-                    f"nothing a connection supplies is read here, so every "
-                    f"connection fails the same way.",
+                    f"build resolves every header value when the transport "
+                    f"is opened, and nothing a connection supplies is read "
+                    f"here, so {stops} on every connection alike.",
                 )
             )
     return violations
 
 
-#: Stands in for a transport value whose real one a connection supplies, so
-#: the spec drive below can materialize the REST of the block around it.
-_STAND_IN_SPEC_VALUE = "https://conformance.invalid"
+#: Stands in for a transport value whose real one a connection supplies:
+#: the origin the read checks compile against, and the value the spec
+#: drive below materializes the REST of a block around. One name for one
+#: stand-in, so a URL appearing in a message means the same thing whichever
+#: check put it there.
+STAND_IN_ORIGIN = "https://conformance.invalid"
 
 
 def _spec_value(
@@ -605,15 +655,15 @@ def _spec_value(
     """
     resolver = materialization_resolver(target)
     if unknown_function_problem(declared, resolver) is not None:
-        return _STAND_IN_SPEC_VALUE
+        return STAND_IN_ORIGIN
     problems, defers = _transport_deferral(
         target, declared, drops_if_null=drops_if_null
     )
-    return _STAND_IN_SPEC_VALUE if (problems or defers) else declared
+    return STAND_IN_ORIGIN if (problems or defers) else declared
 
 
 def _transport_spec_violations(
-    target: ConformanceTarget, default_ref: Any, block: Mapping[str, Any]
+    target: ConformanceTarget, ref: str, block: Mapping[str, Any], *, stops: str
 ) -> list[Violation]:
     """Drive ``resolve_http_spec`` itself over the whole block.
 
@@ -648,17 +698,15 @@ def _transport_spec_violations(
         # included, and the ArithmeticError an unnarrowable JSON number
         # raises out of `float(timeout_seconds)` / `int(max_requests)`), so
         # no defect leaves as a raw traceback that would abandon the
-        # transport_ref loop after this call.
+        # per-transport loop this runs inside.
         with request_spec_errors("transport spec"):
             resolve_http_spec(spec, resolver=materialization_resolver(target))
     except RequestSpecError as err:
         return [
             Violation(
                 TRANSPORT_CHECK,
-                f"default_transport {default_ref!r} does not materialize: "
-                f"{err}. connect() runs this exact build, so every "
-                f"connection fails before any stream reaches its first "
-                f"request.",
+                f"transport {ref!r} does not materialize: "
+                f"{err}. Opening it runs this exact build, so {stops}.",
             )
         ]
     return []

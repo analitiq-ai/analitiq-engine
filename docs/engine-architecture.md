@@ -352,12 +352,29 @@ Each connection loaded by `PipelineConfigPrep` becomes a
     (`resolve_sqlalchemy_spec`, `resolve_http_spec`) validate as they
     go — `resolve_http_spec` rejects a half-specified `rate_limit`,
     which needs both `max_requests` and `time_window_seconds`.
+  - `resolve_transport_specs` — the same, for the whole set a run may
+    dispatch through: the default plus every transport an operation's
+    `request.transport_ref` names. Resolved together because it is the
+    last moment the secrets are in reach; the connection scrubs them as
+    soon as materialization ends, so a transport whose spec was not
+    resolved by then can never be opened. Which refs those are is
+    derived from the run's endpoint documents by
+    `src/worker/shell.build_bootstrap` (via
+    `cdk.api.request.endpoint_transport_refs`), never by resolving every
+    transport the connector declares — a connector's auth, login and
+    discovery transports belong to connection setup, and their secrets
+    need not be in a run's connection blob at all.
   - `build_transport_from_spec` — connector side. Dispatches on
     `transport_type` to the per-kind builder
     (`build_sqlalchemy_from_spec`, `build_adbc_from_spec`,
-    `build_http_from_spec`) that assembles the live transport.
-  - `build_transport` — both steps in one call, for the in-process
-    paths (control-plane, tests).
+    `build_http_from_spec`) that assembles the live transport. The
+    default is built at `materialize()`; a named one is built by
+    `ConnectionRuntime.http_transport(ref)` on the first request that
+    asks for it, so a single-transport connector opens exactly the one
+    session it always opened. Both that build and the api connector's
+    sender cache are guarded per ref: two streams reaching a transport
+    together would otherwise each open a session, and the loser would be
+    a connection pool nothing closes.
   - `ca_ssl_context` — builds a verifying `ssl.SSLContext` from a PEM CA
     bundle; the shared helper behind connector packages' own
     `build_tls_connect_arg`.
@@ -368,6 +385,15 @@ Expression resolution (`ref`, `template`, `literal`, `function`) is
 provided by `cdk/cdk/resolver.py`; the `function` registry is in
 `cdk/cdk/derived_functions.py` (`lookup`, `basic_auth`,
 `base64_encode`, `url_encode`).
+
+The other engine-owned closed registry on the request path is query
+serialization (`cdk/cdk/api/query_style.py`). The published schema
+requires `style` and `explode` on a query param typed `array` or
+`object` but types `style` as a plain string, so the set the engine can
+actually spell is closed here: `form`, `spaceDelimited`, `pipeDelimited`
+and `deepObject`, in the explode combinations OpenAPI defines. A style
+outside it — or a combination OpenAPI leaves undefined — is refused with
+the rest of the request block, before a page is fetched.
 
 ## Source Connector Layer
 
