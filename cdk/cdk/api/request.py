@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from functools import partial
@@ -73,7 +73,6 @@ __all__ = [
     "build_write_body",
     "endpoint_transport_refs",
     "param_bindings",
-    "reserved_names_for_read",
     "path_placeholders",
     "request_block_problem",
     "request_supplies",
@@ -450,41 +449,6 @@ def endpoint_transport_refs(
         if isinstance(ref, str) and ref:
             refs.add(ref)
     return refs
-
-
-def reserved_names_for_read(
-    request_block: Mapping[str, Any],
-    pagination: Mapping[str, Any] | None,
-    *,
-    names_for: Callable[[str | None], Iterable[str]],
-    dispatchable_refs: Iterable[str],
-) -> set[str]:
-    """Return the header names a read's own map may not shadow.
-
-    Its transport's, and -- when the read can follow links -- every other
-    transport it may be dispatched through. The header map is bound ONCE
-    for the read and sent on every page, while a followed link may move a
-    page onto another transport, so a name free on the opening transport
-    and owned by the one a link lands on would silently override that
-    transport's credential at the second origin.
-
-    Only when the read can follow links: every other paging scheme
-    re-requests the same URL, so its pages never leave the transport the
-    read opened, and reserving a sibling's names for one of those would
-    refuse a header it can send perfectly well.
-
-    ``names_for`` and ``dispatchable_refs`` are the caller's, because the
-    two callers hold different things -- the engine a materialized
-    connection, the conformance kit a definition it has not opened. The
-    RULE is one function all the same: it drifted between them twice, and
-    each time the kit certified a header the engine refuses.
-    """
-    names = set(names_for(request_block.get("transport_ref")))
-    follows_links = isinstance(pagination, Mapping) and pagination.get("type") == "link"
-    if follows_links:
-        for ref in dispatchable_refs:
-            names |= set(names_for(ref))
-    return names
 
 
 def request_block_problem(

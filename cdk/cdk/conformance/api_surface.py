@@ -54,7 +54,6 @@ __all__ = [
     "check_read_transport_selection",
     "definition_resolver",
     "dispatch_transport_refs",
-    "run_transport_refs",
     "fillable_at_request_time",
     "read_operations",
     "unknown_function_problem",
@@ -332,55 +331,20 @@ def dispatch_transport_refs(target: ConformanceTarget) -> list[str]:
     return refs
 
 
-def run_transport_refs(
-    target: ConformanceTarget, transport_ref: str | None = None
-) -> list[str]:
-    """Return the transports ONE read's run resolves: the default and its own.
-
-    A source worker's bootstrap carries a single endpoint document, so it
-    resolves ``default_transport`` plus that endpoint's
-    ``request.transport_ref`` and nothing else -- a sibling endpoint's
-    transport is not in the run at all.
-
-    Every per-read check asks here rather than each deriving it: armed
-    with more, the kit refuses headers production accepts and certifies
-    links it rejects; armed with less, the reverse. Both have happened,
-    which is why it is one function.
-
-    Not to be confused with :func:`dispatch_transport_refs`, which is
-    every transport ANY read dispatches through -- the right set for
-    certifying that each of them materializes, and the wrong one for
-    judging a single read.
-    """
-    refs = [target.definition.get("default_transport"), transport_ref]
-    return list(dict.fromkeys(ref for ref in refs if isinstance(ref, str)))
-
-
 def api_origins(
     target: ConformanceTarget, transport_ref: str | None = None
 ) -> frozenset[str]:
     """Return the origins ONE read's containment guard is armed with.
 
-    The default transport's origin and, when the read names one, that
-    transport's -- which is exactly the set a source run has. A source
-    worker's bootstrap carries a single endpoint document, so it resolves
-    the default plus that endpoint's ``transport_ref`` and nothing else: a
-    sibling endpoint's transport is not in the run and its origin is not
-    in the guard.
-
-    Armed target-wide instead, the kit would certify a link that
-    production refuses -- an endpoint whose next link lands on a SIBLING
-    endpoint's origin would pass here and die after its first page. The
-    kit arms the guard the way the run arms it, or it certifies a
-    different engine.
+    The origin of the transport that read dispatches through, and nothing
+    else: every page of a read goes out on that transport, so a link off
+    its origin is one the engine refuses. Arming the kit with any other
+    transport's origin certifies a link production rejects.
 
     A transport whose base URL a definition-only run cannot settle
     contributes the stand-in the read checks compile against.
     """
-    return declared_origins(
-        api_base_url(target, ref) or STAND_IN_ORIGIN
-        for ref in run_transport_refs(target, transport_ref)
-    )
+    return declared_origins([api_base_url(target, transport_ref) or STAND_IN_ORIGIN])
 
 
 def api_base_url(

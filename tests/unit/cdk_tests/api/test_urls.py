@@ -32,7 +32,7 @@ ONE_ORIGIN = declared_origins([BASE_URL])
 #: one system serving records and documents from two hosts.
 TWO_ORIGINS = declared_origins([BASE_URL, "https://files.example.test/v2"])
 
-REFUSAL = "leaves the connection's declared origins"
+REFUSAL = "leaves its transport's origin"
 
 
 class TestJoinUrl:

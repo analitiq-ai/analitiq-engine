@@ -735,7 +735,7 @@ class TestPaging:
         }
         body = {**_rows(2), "next": "https://evil.test/steal"}
         session = FakeSession([FakeResponse(body=body)])
-        with pytest.raises(ReadError, match="leaves the connection's declared origins"):
+        with pytest.raises(ReadError, match="leaves its transport's origin"):
             await _read(session, endpoint_document(pagination=pagination))
 
     async def test_a_relative_link_continues_from_the_current_page(self) -> None:

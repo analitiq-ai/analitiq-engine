@@ -68,11 +68,10 @@ from .request import (
     bind_request_values,
     build_write_body,
     request_block_problem,
-    reserved_names_for_read,
     substitute_path,
 )
 from .response_schema import apply_read_type_map, records_items_schema
-from .urls import declared_origins, join_url, origin_of, require_declared_origin
+from .urls import join_url, origin_of, require_declared_origin
 from .verdicts import declared_retry_statuses, read_verdict, write_verdict
 from .write_plan import (
     WRITE_MODE_KEYS,
@@ -179,14 +178,7 @@ class GenericAPIConnector(BaseDestinationHandler):
         #: concurrently; without this each builds a sender and a retry
         #: client, and the loser is never closed.
         self._dispatch_lock = asyncio.Lock()
-        #: Which transports serve which origin, for dispatching a followed
-        #: link through the transport that declares where it lands. A list
-        #: because two transports may share an origin (one system, two
-        #: paths on one host) -- see :meth:`_dispatch_for_link`.
-        self._refs_by_origin: dict[str, list[str]] = {}
-        #: Every origin a request of this connection may reach. Read once
-        #: at connect, because the set is the run's and cannot widen.
-        self._origins: frozenset[str] = frozenset()
+
         #: The connection's retry budget, read once so every sender this
         #: connector opens gets the one the connection declared.
         self._max_retries: int = DEFAULT_MAX_RETRIES
@@ -220,11 +212,6 @@ class GenericAPIConnector(BaseDestinationHandler):
             # nowhere else.
             self.dialect = self.dialect_class.for_runtime(runtime)
             await runtime.materialize()
-            by_ref = runtime.http_transport_base_urls
-            self._origins = declared_origins(by_ref.values())
-            self._refs_by_origin = {}
-            for ref, base_url in by_ref.items():
-                self._refs_by_origin.setdefault(origin_of(base_url), []).append(ref)
             self._max_retries = runtime.raw_config.get(
                 "max_retries", DEFAULT_MAX_RETRIES
             )
@@ -291,43 +278,6 @@ class GenericAPIConnector(BaseDestinationHandler):
             self._dispatches[ref] = dispatch
             return dispatch
 
-    async def _dispatch_for_link(self, url: str, current: _Dispatch) -> _Dispatch:
-        """Return what a followed link goes out on.
-
-        *current* when the link stays on the origin the read is already on,
-        and otherwise the transport that declares where it lands.
-
-        Containment permits a link onto any declared origin, which is what
-        makes the file-download shape readable -- and it is exactly why the
-        page after it cannot keep the sender the read started on. That
-        would hand the api transport's credentials to the documents host
-        and send none of the headers that host was declared with: the leak
-        the origin guard exists to prevent, walked through the widened
-        gate.
-
-        Staying put when the origin is unchanged is not an optimisation
-        but the answer: a connector may declare two transports on one host
-        (one system, two paths), and a link back to the origin the read is
-        already on is that read continuing, not a change of transport.
-        When it IS a change and the origin has more than one declared
-        transport, there is no reading of the link that says which -- so it
-        is refused rather than guessed.
-        """
-        origin = origin_of(url)
-        if origin == current.origin:
-            return current
-        refs = self._refs_by_origin.get(origin, [])
-        if len(refs) != 1:
-            raise ValueError(
-                f"next_url {url!r} lands on {origin}, which "
-                f"{len(refs)} declared transports serve ({sorted(refs)}); "
-                f"nothing in the link says which one's credentials and "
-                f"headers it should be fetched with. Give the origin one "
-                f"transport, or keep the continuation on "
-                f"{current.origin}"
-            )
-        return await self._dispatch_through(refs[0])
-
     async def disconnect(self) -> None:
         """Close the sender and release the runtime reference. Idempotent."""
         # Every sender, not just the default: a named transport opened for
@@ -353,8 +303,6 @@ class GenericAPIConnector(BaseDestinationHandler):
                 # teardown's own.
                 pass
         self._http = None
-        self._origins = frozenset()
-        self._refs_by_origin = {}
         self._connected = False
 
     async def health_check(self) -> bool:
@@ -489,12 +437,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                 # session is opened to judge a declaration, and never from
                 # the default's when the read goes out elsewhere.
                 reserved_headers=reserved_header_names(
-                    reserved_names_for_read(
-                        request_block,
-                        pagination,
-                        names_for=runtime.transport_header_names,
-                        dispatchable_refs=runtime.http_transport_base_urls,
-                    )
+                    runtime.transport_header_names(request_block.get("transport_ref"))
                 ),
                 resolver=resolver,
                 controlled_by=table.controlled_by,
@@ -565,7 +508,7 @@ class GenericAPIConnector(BaseDestinationHandler):
             table=table,
             resolver=resolver,
             url=full_url,
-            origins=self._origins,
+            origins=frozenset({dispatch.origin}),
             batch_size=batch_size,
         )
 
@@ -633,7 +576,7 @@ class GenericAPIConnector(BaseDestinationHandler):
 
     def _fetcher(
         self,
-        opening: _Dispatch,
+        dispatch: _Dispatch,
         builder: RequestBuilder,
         *,
         method: str,
@@ -641,20 +584,14 @@ class GenericAPIConnector(BaseDestinationHandler):
     ) -> Fetch:
         """Build the loop's fetch: one request, one page.
 
-        *opening* is what the endpoint's own request goes out on. Each page
-        re-selects from the URL it is actually fetching, because a
-        provider's next link may land on another transport this connector
-        declares -- and a page fetched through the transport the read
-        STARTED on would send that host the wrong credentials.
+        Every page of a read goes out on the transport the read
+        dispatches through -- the traversal never changes transport, which
+        is what lets one header map, one credential and one rate limiter
+        describe the whole read. A link off that transport's origin is
+        refused before it is fetched, by the guard the strategy carries.
         """
 
         async def fetch(request: PageRequest) -> Page:
-            try:
-                dispatch = await self._dispatch_for_link(request.url, opening)
-            except (TransportSpecError, ValueError) as err:
-                raise ReadError(
-                    f"next page {request.url!r} could not be dispatched: {err}"
-                ) from err
             try:
                 prepared = builder.for_page(
                     request.params, sends_declared_body=request.sends_declared_body
@@ -1185,7 +1122,7 @@ class GenericAPIConnector(BaseDestinationHandler):
         # provider's string, so this holds by construction today -- and
         # asserting it here is what keeps that true when the path stops
         # being the only thing that decides where a write lands.
-        require_declared_origin(url, origins=self._origins)
+        require_declared_origin(url, origins=frozenset({dispatch.origin}))
         return await dispatch.sender.send(
             SignedRequest(
                 method=plan.method,

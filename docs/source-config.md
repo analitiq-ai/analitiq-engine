@@ -267,22 +267,24 @@ the base URL, the rate limiter, and the header names the connection owns
 operation is judged and sent against **its** transport's facts, never the
 default's.
 
-Every URL a request produces — a next-page link included — must land on
-the origin of a transport the run dispatches through, so a link off that
-set is refused rather than sent with the connection's credentials. A link
-that lands on a *different* declared origin is fetched through the
-transport that declares it, not through the one the read started on;
-where two transports share that origin the link is refused, because
-nothing in it says which one's credentials to use.
+Every URL an operation produces — a next-page link included — must land on
+the origin of **the transport that operation dispatches through**. A link
+off that origin is refused rather than sent, because the session carries
+that transport's credentials and the endpoint's own `request.headers` were
+declared for that host.
 
-The run's set is `default_transport` plus every transport an operation's
-`request.transport_ref` names — not every entry in `transports`. A
-connector's auth, login and discovery transports belong to connection
-setup and are never resolved for a data run, whose connection blob need
-not even carry their credentials. So a transport that links point into
-has to be named by the operation whose links go there; one nothing
-dispatches through is not part of the run, and a link into it is refused
-with that as the reason.
+Containment is per-transport, not per-connection: a read on `files` is
+contained to the files origin and may not follow a link back to the api
+origin, and vice versa. This is what makes the file-download shape work —
+one system, two origins — while keeping one credential, one header map and
+one rate limiter describing a whole read.
+
+What it does not support is a single endpoint paginating across hosts. A
+traversal that changed transport mid-read would have to decide what to do
+with the endpoint's own declared headers at the second host, and there is
+no correct answer: they are the endpoint's, bound once, and they belong to
+the origin they were written for. Such a link is refused, loudly, naming
+the origin the read is contained to.
 
 Connector types accepted by the runtime: `api`, `database`, `file`,
 `s3`, `stdout`. The destination handler registry maps these directly

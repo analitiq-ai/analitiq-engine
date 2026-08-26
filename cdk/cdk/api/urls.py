@@ -39,7 +39,7 @@ __all__ = [
 #: caller recognizing THIS refusal (the conformance kit's origin guard)
 #: matches the raise site's own words instead of a copied string that
 #: drifts.
-ORIGIN_REFUSAL_MARKER = "leaves the connection's declared origins"
+ORIGIN_REFUSAL_MARKER = "leaves its transport's origin"
 
 
 def join_url(base: str, path: str) -> str:
@@ -89,46 +89,42 @@ def declared_origins(base_urls: Iterable[str]) -> frozenset[str]:
 
 
 def require_declared_origin(url: str, *, origins: frozenset[str]) -> None:
-    """Refuse a URL that lands outside the transports the connector declares.
+    """Refuse a URL that lands off the origin of the transport in use.
 
     The one containment rule the api path applies, asked in both roles and
     at both moments a URL comes into existence: the path a request is
-    built for, and the link a provider hands back for the next page. The
-    session sends this connection's credentials on every request, so a URL
-    off the declared set would hand them to a host the connector never
-    named.
+    built for, and the link a provider hands back for the next page.
 
-    Declared-set membership rather than a single origin, because one
-    system is not always one origin: a provider serving its documents from
-    ``files.example.com`` and its records from ``api.example.com`` is one
-    connector with two declared transports, and pinning to the transport
-    the request started on refuses the second while certifying nothing
-    extra. A connector declaring one transport has a set of one, which is
-    exactly the rule it had before.
+    Per-transport, because that is what an operation actually has: the
+    session carries THAT transport's credentials, and the endpoint's own
+    ``request.headers`` were declared for that host. A read on
+    ``files.example.com`` is contained to it and a read on
+    ``api.example.com`` to that -- one system with two origins is two
+    transports, each entire.
+
+    What this refuses is a single endpoint paginating across hosts. A
+    traversal that changed transport mid-read would have to decide what to
+    send of the ENDPOINT's declaration at the second host, and there is no
+    correct answer: those headers are the endpoint's, bound once, and they
+    belong to the origin they were written for.
+
+    ``origins`` is a set because the guard is armed by a caller that knows
+    which transport is in use, and the reduction to origins is this
+    module's; today every caller arms it with one.
 
     A correctness guard, deliberately not a security boundary: what bounds
     authored connector code is the worker's egress policy, the secrets
     model and registry admission, none of which this replaces.
-
-    The set is the transports this RUN dispatches through, which is the
-    default plus the ones its operations name -- not every transport the
-    connector.json declares. A connector can therefore declare a
-    transport for an origin and still be refused here, and the refusal
-    says so: the remedy is to have an operation name that transport,
-    which is what puts it in the run. Resolving every declared transport
-    instead would fail a data run on the credentials of the auth and
-    discovery transports it never dispatches through.
     """
     if origin_of(url) in origins:
         return
     raise ValueError(
-        f"{url!r} {ORIGIN_REFUSAL_MARKER} {sorted(origins)}. No transport "
-        f"this run dispatches through serves that origin, so nothing says "
-        f"which credentials and headers to send it -- and the connection's "
-        f"own belong to the origins above. If the connector declares a "
-        f"transport for it, an operation has to name it in "
-        f"request.transport_ref: a transport nothing dispatches through is "
-        f"not part of the run"
+        f"{url!r} {ORIGIN_REFUSAL_MARKER} {sorted(origins)}. The session "
+        f"sending this request carries that transport's credentials and "
+        f"the endpoint's headers were declared for that host, so there is "
+        f"nothing correct to send here. Give the operation that reads this "
+        f"origin its own endpoint with request.transport_ref naming the "
+        f"transport that declares it"
     )
 
 

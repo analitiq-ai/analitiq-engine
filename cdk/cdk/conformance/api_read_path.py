@@ -35,14 +35,12 @@ when it bites:
   the connector's. Its records are shaped the same way, plus the keyset
   ordering field, which is planted because the engine walks the provider's
   raw record and not the declared schema.
-* the origins the link guard is armed with are THIS read's: the default
-  transport's ``base_url`` and, when the read names one, that
-  transport's, with a stand-in for each the definition expresses as a
-  reference the connection document supplies. Exactly the set a source
-  run has, because a source worker's bootstrap carries one endpoint
-  document and resolves the default plus that endpoint's ref. Arming the
-  probe with every read's transports instead would certify a link onto a
-  sibling endpoint's origin that production refuses after page one.
+* the origin the link guard is armed with is that of the transport THIS
+  read dispatches through -- its ``request.transport_ref``, or the
+  default when it names none -- with a stand-in when the definition
+  expresses the base URL as a reference the connection document supplies.
+  Containment is per-transport, so arming the probe with any other
+  transport's origin would certify a link production refuses.
 * a path placeholder whose value the connection, a stream's filters or the
   replication cursor supplies gets a stand-in segment. The engine builds
   its param table from all three and substitutes the path after the
@@ -60,7 +58,6 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from functools import partial
 from typing import Any
 
 from yarl import URL
@@ -79,7 +76,6 @@ from cdk.api.request import (
     param_bindings,
     path_placeholders,
     request_block_problem,
-    reserved_names_for_read,
     substitute_path,
 )
 from cdk.api.response_schema import records_items_schema, resolve_field_arrow_type
@@ -98,7 +94,6 @@ from .api_surface import (
     definition_resolver,
     fillable_at_request_time,
     read_operations,
-    run_transport_refs,
     unknown_function_problem,
 )
 from .target import ConformanceTarget
@@ -296,14 +291,7 @@ def _compile_read(
     problem = request_block_problem(
         request_block,
         reserved_headers=reserved_header_names(
-            reserved_names_for_read(
-                request_block,
-                read.get("pagination"),
-                names_for=partial(_declared_header_names, target),
-                dispatchable_refs=run_transport_refs(
-                    target, request_block.get("transport_ref")
-                ),
-            )
+            _declared_header_names(target, request_block.get("transport_ref"))
         ),
         resolver=resolver,
         controlled_by=table.controlled_by,
@@ -1123,9 +1111,10 @@ def _origin_violations(probe: _ReadProbe) -> list[Violation]:
     Every link-paginated read gets this drive, whatever shape the
     declaration is. What is asserted is the invariant rather than the
     mechanism: handed a next link on another host, the traversal either
-    refuses it or answers a URL still on one of the connection's declared
-    origins -- ``cdk.api.urls.declared_origins`` being the judge, the same
-    reduction ``follow_url`` compares by. A declaration that writes the URL around the
+    refuses it or answers a URL still on the origin of the transport the
+    read dispatches through -- ``cdk.api.urls.declared_origins`` being the
+    judge, the same reduction ``follow_url`` compares by. A declaration
+    that writes the URL around the
     provider's value (``{"template": "/v1/events?after=${...}"}``) lands in
     the second arm: the result is relative, resolves against the page it
     came from, and stays put. Classifying the declaration instead -- by

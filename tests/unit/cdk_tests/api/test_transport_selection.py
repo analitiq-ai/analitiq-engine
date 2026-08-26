@@ -206,182 +206,49 @@ class TestContainment:
             },
         )
 
-    async def test_a_link_onto_a_second_transport_is_fetched_through_it(
-        self,
-    ) -> None:
-        """One system, two origins -- and the page goes out on the right one.
+    async def test_a_link_off_the_reads_own_transport_is_refused(self) -> None:
+        """Every page of a read goes out on the transport the read opened.
 
-        Widening containment to the declared set is what lets this link be
-        followed at all. Fetching it through the transport the read
-        STARTED on would hand the api credential to the documents host and
-        send none of the headers that host was declared with -- the leak
-        the origin guard exists to prevent, walked through the widened
-        gate.
+        The alternative -- switching transport mid-traversal -- has no
+        answer for what the ENDPOINT declared: its `request.headers` are
+        the endpoint's, bound once, and there is nothing correct to send
+        the second host. Containment is per-transport for that reason.
         """
         default = FakeSession([self._linked(f"{FILES_URL}/items?page=2")])
-        files = FakeSession([self._linked(None)])
-        default.headers["Authorization"] = "Bearer api-token"
-        files.headers["Authorization"] = "Bearer files-token"
-        runtime = runtime_with(default, transports={"files": (files, FILES_URL)})
-
-        await _read(runtime, self._link_document())
-
-        assert len(default.calls) == 1, "the read's own request, and no more"
-        assert files.calls[0]["url"] == f"{FILES_URL}/items?page=2"
-
-    async def test_a_link_back_onto_the_reads_own_origin_stays_put(self) -> None:
-        """Not a change of transport: the read continuing where it already is."""
-        default = FakeSession(
-            [self._linked(f"{BASE_URL}/items?page=2"), self._linked(None)]
-        )
         runtime = runtime_with(
             default, transports={"files": (FakeSession([]), FILES_URL)}
         )
 
-        await _read(runtime, self._link_document())
-
-        assert default.calls[1]["url"] == f"{BASE_URL}/items?page=2"
-
-    async def test_a_link_onto_an_origin_two_transports_serve_is_refused(
-        self,
-    ) -> None:
-        """Nothing in the link says which transport's credentials to use."""
-        default = FakeSession([self._linked("https://twin.example.test/v2/items")])
-        runtime = runtime_with(
-            default,
-            transports={
-                "one": (FakeSession([]), "https://twin.example.test/a"),
-                "two": (FakeSession([]), "https://twin.example.test/b"),
-            },
-        )
-
-        with pytest.raises(ReadError, match="2 declared transports serve"):
+        with pytest.raises(ReadError, match="leaves its transport's origin"):
             await _read(runtime, self._link_document())
 
-    async def test_a_next_link_off_every_declared_origin_is_still_refused(
+    async def test_a_read_on_a_named_transport_is_contained_to_ITS_origin(
         self,
     ) -> None:
-        default = FakeSession(
-            [
-                FakeResponse(
-                    body={
-                        "records": [{"id": 1, "name": "n1"}],
-                        "links": {"next": "https://evil.test/steal"},
-                    }
-                )
-            ]
+        """Per-transport, not per-connection: the default's origin is not its."""
+        default = FakeSession([])
+        files = FakeSession([self._linked(f"{BASE_URL}/items?page=2")])
+        runtime = runtime_with(default, transports={"files": (files, FILES_URL)})
+        document = self._link_document()
+        document["operations"]["read"]["request"]["transport_ref"] = "files"
+
+        with pytest.raises(ReadError, match="leaves its transport's origin"):
+            await _read(runtime, document)
+        assert default.calls == [], "the read must not reach the default's origin"
+
+    async def test_a_link_within_the_reads_own_transport_is_followed(self) -> None:
+        files = FakeSession(
+            [self._linked(f"{FILES_URL}/items?page=2"), self._linked(None)]
         )
         runtime = runtime_with(
-            default, transports={"files": (FakeSession([]), FILES_URL)}
+            FakeSession([]), transports={"files": (files, FILES_URL)}
         )
-        document = endpoint_document(
-            request={"method": "GET", "path": "/items"},
-            pagination={
-                "type": "link",
-                "link": {"next_url": {"ref": "response.body.links.next"}},
-            },
-        )
+        document = self._link_document()
+        document["operations"]["read"]["request"]["transport_ref"] = "files"
 
-        with pytest.raises(ReadError, match="leaves the connection's declared origins"):
-            await _read(runtime, document)
+        await _read(runtime, document)
 
-
-class TestHeadersAreJudgedAgainstTheTransportInUse:
-    """An operation's headers answer to the transport it goes out on.
-
-    Judging them against the default's names lets an endpoint on a named
-    transport shadow that transport's credential, and refuses one for a
-    header the transport it uses never sends. Both directions are the same
-    defect: a fact about transport B read off transport A.
-    """
-
-    @staticmethod
-    def _shadowing(transport_ref: str) -> dict[str, Any]:
-        return endpoint_document(
-            request={
-                "method": "GET",
-                "path": "/items",
-                "transport_ref": transport_ref,
-                "headers": {"Authorization": {"from_param": "token"}},
-            },
-            params={
-                "token": {
-                    "in": "header",
-                    "type": "string",
-                    "required": True,
-                    "default": {"literal": "Bearer attacker"},
-                }
-            },
-        )
-
-    async def test_shadowing_the_named_transports_own_credential_is_refused(
-        self,
-    ) -> None:
-        default, files = FakeSession([]), FakeSession([])
-        files.headers["Authorization"] = "Bearer files-token"
-        runtime = runtime_with(default, transports={"files": (files, FILES_URL)})
-
-        with pytest.raises(ReadError, match="request.headers declares"):
-            await _read(runtime, self._shadowing("files"))
-        assert files.calls == [], "the request must not have gone out"
-
-    async def test_a_header_only_the_default_sends_does_not_refuse_a_read_elsewhere(
-        self,
-    ) -> None:
-        """The other direction: A's names must not judge an endpoint on B."""
-        default, files = FakeSession([]), FakeSession([_page()])
-        default.headers["Authorization"] = "Bearer api-token"
-        runtime = runtime_with(default, transports={"files": (files, FILES_URL)})
-
-        await _read(runtime, self._shadowing("files"))
-
-        assert files.calls[0]["headers"]["Authorization"] == "Bearer attacker"
-
-
-class TestHeadersMustBeSafeOnEveryTransportAPageMayUse:
-    """A read's header map is bound once and sent on every page.
-
-    A followed link can move a page onto another transport, so a name that
-    is free on the opening transport and owned by the one a link lands on
-    would silently override that transport's credential at the second
-    origin.
-    """
-
-    @staticmethod
-    def _document(*, paginated: bool) -> dict[str, Any]:
-        pagination = (
-            {"type": "link", "link": {"next_url": {"ref": "response.body.links.next"}}}
-            if paginated
-            else None
-        )
-        return endpoint_document(
-            request={
-                "method": "GET",
-                "path": "/items",
-                "headers": {"X-Files-Key": {"literal": "endpoint"}},
-            },
-            pagination=pagination,
-        )
-
-    async def test_a_link_read_may_not_shadow_a_continuation_transports_header(
-        self,
-    ) -> None:
-        default, files = FakeSession([]), FakeSession([])
-        files.headers["X-Files-Key"] = "connection"
-        runtime = runtime_with(default, transports={"files": (files, FILES_URL)})
-
-        with pytest.raises(ReadError, match="request.headers declares"):
-            await _read(runtime, self._document(paginated=True))
-
-    async def test_a_read_that_cannot_follow_links_keeps_the_header(self) -> None:
-        """Its pages never leave the transport it opened, so nothing collides."""
-        default, files = FakeSession([_page()]), FakeSession([])
-        files.headers["X-Files-Key"] = "connection"
-        runtime = runtime_with(default, transports={"files": (files, FILES_URL)})
-
-        await _read(runtime, self._document(paginated=False))
-
-        assert default.calls[0]["headers"]["X-Files-Key"] == "endpoint"
+        assert files.calls[1]["url"] == f"{FILES_URL}/items?page=2"
 
 
 class TestAWriteTransportIsJudgedAtTheHandshake:
