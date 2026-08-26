@@ -1942,6 +1942,44 @@ class TestApiRequestBodyBreaks:
         widgets = [p for p in probes if p.label == "widgets"]
         assert widgets and widgets[0].first_sent.body == "status:open"
 
+    @pytest.mark.parametrize(
+        ("label", "body", "refusal"),
+        [
+            ("a nested field", {"filter": {"literal": {"a": 1}}}, "flat name/value"),
+            ("a body that is not an object", {"literal": "raw"}, "must be an object"),
+        ],
+    )
+    def test_a_form_body_the_encoder_refuses_is_reported(
+        self, tmp_path: Path, label: str, body: dict[str, Any], refusal: str
+    ) -> None:
+        """The kit encodes a form body, because the read encodes it too.
+
+        A form carries flat name/value pairs, so these two raise before
+        every request the stream would make -- while the request BUILD
+        accepts them, which is where the drive used to stop. The encoder
+        lives in ``cdk.api.body`` precisely so a transport-free install can
+        reach it; leaving it undriven was the gap.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["method"] = "POST"
+            read["request"]["content_type"] = "application/x-www-form-urlencoded"
+            read["request"]["body"] = body
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert refusal in report
+
+    def test_a_flat_form_body_is_clean(self, tmp_path: Path) -> None:
+        """The other side: a form endpoint the engine can send is certified."""
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["method"] = "POST"
+            read["request"]["content_type"] = "application/x-www-form-urlencoded"
+            read["request"]["body"] = {"grant_type": {"literal": "client_credentials"}}
+
+        assert check_api_read_compiles(self._broken(tmp_path, "widgets", bend)) == []
+
     def test_a_root_binding_a_stream_filter_supplies_defers_through_a_function(
         self, tmp_path: Path
     ) -> None:

@@ -61,6 +61,7 @@ from typing import Any
 
 from yarl import URL
 
+from cdk.api.body import FORM_CONTENT_TYPE, encode_form, media_type
 from cdk.api.exceptions import RequestSpecError
 from cdk.api.page_loop import Page, PageRequest, PaginationStrategy
 from cdk.api.read_setup import build_read_strategy, stop_condition
@@ -437,8 +438,11 @@ def _transport_header_names(target: ConformanceTarget) -> frozenset[str]:
 def _request_builder(probe: _ReadProbe) -> RequestBuilder:
     """Build the request builder the read itself constructs for this endpoint.
 
-    Same arguments the engine passes, declared query and headers included:
-    a builder given less would certify a request the engine does not build.
+    Same arguments the engine passes -- declared query, headers and media
+    type included: a builder given less certifies a request the engine does
+    not build. ``content_type`` was the one left off, so the prepared
+    request the drives compare carried JSON's ``None`` whatever the
+    endpoint declared.
     """
     return RequestBuilder(
         probe.table,
@@ -447,6 +451,7 @@ def _request_builder(probe: _ReadProbe) -> RequestBuilder:
         endpoint=str(probe.request.get("path")),
         declared_query=probe.request.get("query"),
         declared_headers=probe.request.get("headers"),
+        content_type=probe.request.get("content_type"),
     )
 
 
@@ -513,6 +518,18 @@ def _materialize_first_request(
     "connection.x", "extra": 1}`` is an authoring defect the engine raises
     on the first time the stream runs.
 
+    A form body is then ENCODED, because the read encodes it one line
+    later and the encoder refuses shapes the build accepts: a form carries
+    flat name/value pairs, so a body that is not an object, or that nests
+    one, raises before every request the stream would make. Stopping at the
+    built body certified that read.
+
+    Only the form encoder, and not because JSON matters less -- because
+    ``orjson`` is the transport's, and this suite runs from an install that
+    carries none (``test_package_surface``). The form encoder was put in
+    :mod:`cdk.api.body` for exactly this reach; leaving it undriven was the
+    gap, not the placement.
+
     The built request is kept rather than thrown away: it is the only
     record of what page one actually sends, and the advance drive compares
     page two against it.
@@ -521,9 +538,14 @@ def _materialize_first_request(
     problem = None if body is None else unknown_function_problem(body, probe.resolver)
     if problem is not None:
         raise ReadError(problem)
-    return _request_builder(probe).for_page(
+    prepared = _request_builder(probe).for_page(
         first.params, sends_declared_body=first.sends_declared_body
     )
+    if prepared.body is not None and media_type(prepared.content_type) == (
+        FORM_CONTENT_TYPE
+    ):
+        encode_form(prepared.body)
+    return prepared
 
 
 def _is_connection_expression(node: Any) -> bool:
