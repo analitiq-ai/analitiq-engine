@@ -275,6 +275,15 @@ transport that declares it, not through the one the read started on;
 where two transports share that origin the link is refused, because
 nothing in it says which one's credentials to use.
 
+The run's set is `default_transport` plus every transport an operation's
+`request.transport_ref` names — not every entry in `transports`. A
+connector's auth, login and discovery transports belong to connection
+setup and are never resolved for a data run, whose connection blob need
+not even carry their credentials. So a transport that links point into
+has to be named by the operation whose links go there; one nothing
+dispatches through is not part of the run, and a link into it is refused
+with that as the reason.
+
 Connector types accepted by the runtime: `api`, `database`, `file`,
 `s3`, `stdout`. The destination handler registry maps these directly
 (see `destination-config.md`).

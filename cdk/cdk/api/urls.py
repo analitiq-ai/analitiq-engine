@@ -109,12 +109,26 @@ def require_declared_origin(url: str, *, origins: frozenset[str]) -> None:
     A correctness guard, deliberately not a security boundary: what bounds
     authored connector code is the worker's egress policy, the secrets
     model and registry admission, none of which this replaces.
+
+    The set is the transports this RUN dispatches through, which is the
+    default plus the ones its operations name -- not every transport the
+    connector.json declares. A connector can therefore declare a
+    transport for an origin and still be refused here, and the refusal
+    says so: the remedy is to have an operation name that transport,
+    which is what puts it in the run. Resolving every declared transport
+    instead would fail a data run on the credentials of the auth and
+    discovery transports it never dispatches through.
     """
     if origin_of(url) in origins:
         return
     raise ValueError(
-        f"{url!r} {ORIGIN_REFUSAL_MARKER} {sorted(origins)}; refusing to "
-        f"send the connection's headers to a host no transport declares"
+        f"{url!r} {ORIGIN_REFUSAL_MARKER} {sorted(origins)}. No transport "
+        f"this run dispatches through serves that origin, so nothing says "
+        f"which credentials and headers to send it -- and the connection's "
+        f"own belong to the origins above. If the connector declares a "
+        f"transport for it, an operation has to name it in "
+        f"request.transport_ref: a transport nothing dispatches through is "
+        f"not part of the run"
     )
 
 

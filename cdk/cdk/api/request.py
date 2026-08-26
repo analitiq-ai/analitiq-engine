@@ -64,6 +64,7 @@ from .strategies import PRE_PAGE_VALUE_PATHS
 __all__ = [
     "REQUEST_SUPPLIED_CONNECTION_ROOTS",
     "REQUEST_SUPPLIED_CONNECTION_SCOPES",
+    "ROLE_OPERATIONS",
     "ParamTable",
     "PreparedRequest",
     "RequestBuilder",
@@ -392,16 +393,29 @@ def substitute_path(path: str, values: Mapping[str, Any], *, endpoint: str) -> s
     return substituted
 
 
-def endpoint_transport_refs(document: Any) -> set[str]:
-    """Name every transport the operations in *document* dispatch through.
+#: Which operations a worker in each role executes, and so which
+#: ``transport_ref`` values that role's run can dispatch through. Named
+#: here because the shell packs a document for one role at a time.
+ROLE_OPERATIONS = {"source": ("read",), "destination": ("write",)}
 
-    The read's and every write mode's ``request.transport_ref``. Read
-    twice from two sides of the process boundary and answered here once:
-    the trusted shell asks so it can resolve those transports while the
-    secrets are still in reach, and the connector asks so it dispatches
-    through the one the operation named. A second reading of the key is a
-    second answer, and the two disagreeing means a request resolved
-    against one transport and sent on another.
+
+def endpoint_transport_refs(document: Any, *, role: str) -> set[str]:
+    """Name every transport *role*'s operations in *document* dispatch through.
+
+    The read's for a source, every write mode's for a destination. Scoped
+    to the role because the transports named here are the ones whose
+    specs -- credentials resolved into them -- travel to that worker, and
+    whose origins widen what its requests may reach. A source given the
+    write side's transports is handed secrets it never sends and an
+    allowlist wider than its own requests, and fails at bootstrap if one
+    of them needs a credential this run does not carry.
+
+    Read twice from two sides of the process boundary and answered here
+    once: the trusted shell asks so it can resolve those transports while
+    the secrets are still in reach, and the connector asks so it
+    dispatches through the one the operation named. A second reading of
+    the key is a second answer, and the two disagreeing means a request
+    resolved against one transport and sent on another.
 
     The document is raw JSON -- it arrives from the bootstrap, not from a
     parsed model -- so every level is shape-checked rather than assumed.
@@ -413,10 +427,16 @@ def endpoint_transport_refs(document: Any) -> set[str]:
     )
     if not isinstance(operations, Mapping):
         return set()
-    blocks: list[Any] = [operations.get("read")]
-    write = operations.get("write")
-    if isinstance(write, Mapping):
-        blocks.extend(write.values())
+    blocks: list[Any] = []
+    for name in ROLE_OPERATIONS.get(role, ()):
+        block = operations.get(name)
+        # ``write`` is a map of modes, ``read`` a block: a role's entry is
+        # whichever the contract puts under that name.
+        blocks.extend(
+            block.values()
+            if name == "write" and isinstance(block, Mapping)
+            else [block]
+        )
     refs: set[str] = set()
     for block in blocks:
         if not isinstance(block, Mapping):

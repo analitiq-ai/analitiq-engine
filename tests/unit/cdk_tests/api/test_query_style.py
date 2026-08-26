@@ -223,11 +223,60 @@ class TestWhatIsRefused:
             )
 
 
+class TestAStyleMustSpellTheDeclaredType:
+    """A defined pair can still say nothing about the type it is declared on."""
+
+    @pytest.mark.parametrize(
+        ("kind", "style", "explode"),
+        [
+            ("object", "spaceDelimited", False),
+            ("object", "pipeDelimited", False),
+            ("array", "deepObject", True),
+        ],
+    )
+    def test_a_style_that_does_not_spell_that_type_is_refused_at_plan_time(
+        self, kind: str, style: str, explode: bool
+    ) -> None:
+        problem = request_block_problem(
+            {"query": {"tags": {"from_param": "tags"}}},
+            endpoint="items",
+            reserved_headers=frozenset(),
+            resolver=Resolver(ResolutionContext()),
+            declared_params=_param(kind, style, explode),
+        )
+        assert problem is not None
+        assert f"typed {kind!r}" in problem
+        assert "no spelling" in problem
+
+    @pytest.mark.parametrize(
+        ("kind", "style", "explode"),
+        [
+            ("array", "spaceDelimited", False),
+            ("array", "form", True),
+            ("object", "form", False),
+            ("object", "deepObject", True),
+        ],
+    )
+    def test_a_style_that_does_spell_it_passes(
+        self, kind: str, style: str, explode: bool
+    ) -> None:
+        assert (
+            request_block_problem(
+                {"query": {"tags": {"from_param": "tags"}}},
+                endpoint="items",
+                reserved_headers=frozenset(),
+                resolver=Resolver(ResolutionContext()),
+                declared_params=_param(kind, style, explode),
+            )
+            is None
+        )
+
+
 class TestStyleLookup:
     def test_only_a_bare_from_param_binding_carries_a_style(self) -> None:
         params = _param("array", "form", True)
         assert declared_query_styles({"tags": {"from_param": "tags"}}, params) == {
-            "tags": QueryStyle("form", True)
+            "tags": QueryStyle("array", "form", True)
         }
         # A function over the param produces a value no single param owns.
         assert (

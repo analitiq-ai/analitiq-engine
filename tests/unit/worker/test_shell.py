@@ -117,14 +117,15 @@ class TestBuildBootstrap:
         # The whole bootstrap is JSON-safe — it crosses the stdin pipe.
         assert json.loads(json.dumps(bootstrap)) == bootstrap
 
-    async def test_the_transports_the_operations_name_are_resolved(self, tmp_path):
-        """The worker has no secret store, so the shell resolves what it needs.
+    #: One document declaring both sides, each naming its own transport.
+    _BOTH_SIDES = {
+        "operations": {
+            "read": {"request": {"transport_ref": "files"}},
+            "write": {"insert": {"request": {"transport_ref": "uploads"}}},
+        }
+    }
 
-        A transport whose spec does not travel in this payload can never be
-        opened on the other side -- and the alternative, resolving every
-        transport the connector declares, fails a data read on the auth
-        credentials it never uses.
-        """
+    async def _refs_for(self, tmp_path, role, **documents):
         connectors = tmp_path / "connectors"
         connections = tmp_path / "connections"
         _write_definition(connectors / "sevdesk", rules=_RULES)
@@ -138,26 +139,43 @@ class TestBuildBootstrap:
 
         await build_bootstrap(
             runtime,
-            role="source",
+            role=role,
             connectors_dir=connectors,
             connections_dir=connections,
-            source_config={
-                "endpoint_document": {
-                    "operations": {
-                        "read": {"request": {"transport_ref": "files"}},
-                    }
-                }
-            },
-            stream_endpoints={
-                "items": {
-                    "operations": {
-                        "write": {"insert": {"request": {"transport_ref": "uploads"}}}
-                    }
-                }
-            },
+            **documents,
         )
-        (_call,) = runtime.resolve_spec.await_args_list
-        assert _call.kwargs["transport_refs"] == {"files", "uploads"}
+        (call,) = runtime.resolve_spec.await_args_list
+        return call.kwargs["transport_refs"]
+
+    async def test_the_transports_the_operations_name_are_resolved(self, tmp_path):
+        """The worker has no secret store, so the shell resolves what it needs.
+
+        A transport whose spec does not travel in this payload can never be
+        opened on the other side -- and the alternative, resolving every
+        transport the connector declares, fails a data read on the auth
+        credentials it never uses.
+        """
+        refs = await self._refs_for(
+            tmp_path,
+            "source",
+            source_config={"endpoint_document": self._BOTH_SIDES},
+        )
+        assert refs == {"files"}
+
+    async def test_a_role_resolves_only_the_transports_its_own_side_dispatches(
+        self, tmp_path
+    ):
+        """A resolved spec carries credentials and widens an allowlist.
+
+        Handing a source the write side's transports gives it secrets it
+        never sends and an origin its requests may then reach -- and fails
+        the bootstrap outright when one needs a credential this run does
+        not carry.
+        """
+        refs = await self._refs_for(
+            tmp_path, "destination", stream_endpoints={"items": self._BOTH_SIDES}
+        )
+        assert refs == {"uploads"}
 
     async def test_a_run_naming_no_transport_asks_for_none(self, tmp_path):
         """A single-transport connector costs what it always cost."""
@@ -179,5 +197,5 @@ class TestBuildBootstrap:
             connections_dir=connections,
             source_config={"stream_source": {}},
         )
-        (_call,) = runtime.resolve_spec.await_args_list
-        assert _call.kwargs["transport_refs"] == set()
+        (call,) = runtime.resolve_spec.await_args_list
+        assert call.kwargs["transport_refs"] == set()

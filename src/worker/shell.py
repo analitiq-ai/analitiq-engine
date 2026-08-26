@@ -63,13 +63,19 @@ async def build_bootstrap(
     holds no secret store, so a transport whose spec does not travel in
     this payload can never be opened there -- and the shell is the last
     side that can resolve one.
+
+    Scoped to *role*, because a resolved spec carries the credentials
+    resolved into it and its origin widens what the worker may reach. A
+    source worker handed the write side's transports would be given
+    secrets it never sends, and would fail here if one of them needed a
+    credential this run does not carry.
     """
     documents = [*(stream_endpoints or {}).values()]
     if source_config:
         documents.append(source_config.get("endpoint_document"))
     transport_refs: set[str] = set()
     for document in documents:
-        transport_refs |= endpoint_transport_refs(document)
+        transport_refs |= endpoint_transport_refs(document, role=role)
     connection_payload = await runtime.resolve_spec(transport_refs=transport_refs)
     return {
         "role": role,
