@@ -304,15 +304,32 @@ class GenericAPIConnector(BaseDestinationHandler):
         self._connected = False
 
     async def health_check(self) -> bool:
-        """Report whether the API answers at all.
+        """Report whether every host this connector will use answers.
 
-        A 404 on the base URL still means the API answered, which is the
+        A 404 on a base URL still means the API answered, which is the
         question; only a server error or no answer at all is unhealthy.
+
+        Every host, not just the connection's default: once streams are
+        configured, the records go to the transports their write plans
+        name, and a readiness probe of the default alone reports SERVING
+        while the host that will actually receive them is down. So the
+        probe follows the same selection the writes do -- the distinct
+        transports the configured plans dispatch through, and the default
+        when nothing is configured yet, which is what a source has and
+        what a destination has before its first handshake.
         """
         if self._http is None or not self._connected or self.base_url is None:
             return False
+        refs = {plan.transport_ref for plan in self._streams.values()} or {None}
         try:
-            return await self._http.probe(self.base_url) < 500
+            for ref in refs:
+                dispatch = await self._dispatch_through(ref)
+                if await dispatch.sender.probe(dispatch.base_url) >= 500:
+                    return False
+            return True
+        except TransportSpecError as err:
+            logger.warning("API health check: %s", err)
+            return False
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             logger.warning(
                 "API health check failed: %s: %s",

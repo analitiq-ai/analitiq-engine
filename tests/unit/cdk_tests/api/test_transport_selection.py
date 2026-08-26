@@ -279,6 +279,48 @@ class TestAWriteTransportIsJudgedAtTheHandshake:
         assert "sqlalchemy" in (connector.last_schema_rejection or "")
 
 
+class TestReadinessFollowsTheWrites:
+    async def test_health_probes_the_transport_the_configured_stream_uses(
+        self,
+    ) -> None:
+        """SERVING must not mean "the default answered" once streams are set.
+
+        The records go where the write plans dispatch, so a probe of the
+        default alone reports ready while the host that will receive them
+        is down.
+        """
+        default = FakeSession([])
+        # The retry client re-attempts a 500, so the host stays down for
+        # every attempt it makes.
+        files = FakeSession([FakeResponse(status=500, body={}) for _ in range(5)])
+        connector = GenericAPIConnector()
+        connector.set_stream_endpoints(
+            {"items": TestWriteDispatch._write_document("files")}
+        )
+        runtime = runtime_with(default, transports={"files": (files, FILES_URL)})
+        await connector.connect(runtime)
+        assert await connector.configure_schema(
+            SchemaSpec(
+                stream_id="items",
+                version=1,
+                write_mode=WriteMode.WRITE_MODE_INSERT,
+                ack_timeout_seconds=30,
+            )
+        ), connector.last_schema_rejection
+
+        assert await connector.health_check() is False
+        assert default.calls == [], "the default is not what this stream writes to"
+
+    async def test_with_no_streams_configured_the_default_is_probed(self) -> None:
+        """What a source has, and a destination before its first handshake."""
+        default = FakeSession([FakeResponse(status=404, body={})])
+        connector = GenericAPIConnector()
+        await connector.connect(runtime_with(default))
+
+        assert await connector.health_check() is True, "404 means it answered"
+        assert default.calls[0]["url"] == BASE_URL
+
+
 class TestOpeningATransportIsSerialised:
     async def test_concurrent_first_use_opens_one_sender_and_one_session(
         self,

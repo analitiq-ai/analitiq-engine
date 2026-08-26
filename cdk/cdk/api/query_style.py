@@ -215,7 +215,15 @@ def serialize_query_value(
         )
     if not isinstance(value, (list, Mapping)):
         return {key: sendable(key, value)}
-    if not isinstance(value, kinds):
+    # Judged against the param's DECLARED type, not against what the style
+    # is able to spell: ``form`` spells both, so comparing with the
+    # style's kinds lets a value the run supplies -- a stream filter, a
+    # loop -- arrive as the other collection and be spelled that way. An
+    # exploded object writes its own property names, so an array-typed
+    # param handed an object would replace the declared wire key with
+    # whatever keys the value happened to carry.
+    declared_kind = _KINDS.get(style.type)
+    if declared_kind is not None and not isinstance(value, declared_kind):
         return _refuse_kind(key, value, style, endpoint=endpoint)
     # One spelling per style family, because each answers a different
     # question about names: deepObject writes them out, an exploded value
@@ -324,15 +332,13 @@ def _flat_items(key: str, value: Any, *, endpoint: str) -> list[tuple[str, Any]]
 def _refuse_kind(
     key: str, value: Any, style: QueryStyle, *, endpoint: str
 ) -> dict[str, Any]:
-    """Refuse a value of a kind this style does not serialize."""
-    kinds = _DEFINED[(style.style, style.explode)]
-    serializes = " and ".join(
-        "an object" if kind is Mapping else "an array" for kind in kinds
-    )
+    """Refuse a value whose shape is not the one the param declares."""
     raise RequestSpecError(
         f"request.query[{key!r}] for endpoint {endpoint!r} resolves to "
         f"{'an object' if isinstance(value, Mapping) else 'an array'}, and "
-        f"the param declares style {style.style!r} with "
-        f"explode={style.explode}, which serializes {serializes}. Declare "
-        f"the style that matches the value's shape"
+        f"the param it binds declares type {style.type!r}. The declared "
+        f"type is what the wire shape was settled from -- sending the "
+        f"other one spells a different request than the endpoint "
+        f"describes, and under an exploded style a different set of keys. "
+        f"Fix the value, or declare the type it actually has"
     )

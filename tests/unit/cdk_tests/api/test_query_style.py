@@ -182,9 +182,30 @@ class TestWhatIsRefused:
         assert problem is not None
         assert "undefined" in problem
 
-    def test_a_value_of_the_wrong_shape_for_its_style_is_refused(self) -> None:
-        with pytest.raises(RequestSpecError, match="serializes an object"):
+    def test_a_value_of_the_wrong_shape_for_its_type_is_refused(self) -> None:
+        with pytest.raises(RequestSpecError, match="declares type 'object'"):
             _sent("object", "deepObject", True, ["a", "b"])
+
+    @pytest.mark.parametrize(
+        ("kind", "explode", "value"),
+        [
+            ("array", True, {"a": "1"}),
+            ("array", False, {"a": "1"}),
+            ("object", True, ["a"]),
+            ("object", False, ["a"]),
+        ],
+    )
+    def test_form_does_not_let_a_runtime_value_change_the_wire_shape(
+        self, kind: str, explode: bool, value: Any
+    ) -> None:
+        """`form` spells both shapes, so only the DECLARED type may decide.
+
+        A stream filter or a loop supplies the value; accepting whichever
+        collection arrives lets an exploded object replace the declared
+        wire key with whatever property names it happened to carry.
+        """
+        with pytest.raises(RequestSpecError, match=f"declares type {kind!r}"):
+            _sent(kind, "form", explode, value)
 
     def test_a_nested_collection_is_refused(self) -> None:
         """OpenAPI stops at one level, so there is nothing to send."""
