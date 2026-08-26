@@ -384,6 +384,34 @@ class TestHeadersMustBeSafeOnEveryTransportAPageMayUse:
         assert default.calls[0]["headers"]["X-Files-Key"] == "endpoint"
 
 
+class TestAWriteTransportIsJudgedAtTheHandshake:
+    async def test_a_non_http_write_transport_refuses_the_schema(self) -> None:
+        """Not at the first non-empty batch, after the stream was accepted."""
+        connector = GenericAPIConnector()
+        runtime = runtime_with(FakeSession([]))
+        # A declared transport of another kind: an api operation has no
+        # session to open from it.
+        runtime._transport_specs["warehouse"] = {
+            "transport_type": "sqlalchemy",
+            "dsn": "postgresql+asyncpg://h/d",
+        }
+        connector.set_stream_endpoints(
+            {"items": TestWriteDispatch._write_document("warehouse")}
+        )
+        await connector.connect(runtime)
+
+        accepted = await connector.configure_schema(
+            SchemaSpec(
+                stream_id="items",
+                version=1,
+                write_mode=WriteMode.WRITE_MODE_INSERT,
+                ack_timeout_seconds=30,
+            )
+        )
+        assert not accepted
+        assert "sqlalchemy" in (connector.last_schema_rejection or "")
+
+
 class TestOpeningATransportIsSerialised:
     async def test_concurrent_first_use_opens_one_sender_and_one_session(
         self,

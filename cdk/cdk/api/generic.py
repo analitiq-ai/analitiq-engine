@@ -68,6 +68,7 @@ from .request import (
     bind_request_values,
     build_write_body,
     request_block_problem,
+    reserved_names_for_read,
     substitute_path,
 )
 from .response_schema import apply_read_type_map, records_items_schema
@@ -290,36 +291,6 @@ class GenericAPIConnector(BaseDestinationHandler):
             self._dispatches[ref] = dispatch
             return dispatch
 
-    @staticmethod
-    def _names_this_read_may_not_declare(
-        runtime: ConnectionRuntime,
-        request_block: Mapping[str, Any],
-        pagination: Mapping[str, Any] | None,
-    ) -> set[str]:
-        """Return the header names this read's own map may not shadow.
-
-        Its transport's, and -- when the read can follow links -- every
-        other transport in the run's too. The header map is bound ONCE for
-        the read and sent on every page, while a followed link may move
-        the page onto another transport, so a name that is free on the
-        opening transport and owned by the one a link lands on would
-        silently override that transport's credential at the second
-        origin.
-
-        Only when the read can follow links: every other paging scheme
-        re-requests the same URL, so its pages never leave the transport
-        the read opened, and reserving a sibling transport's names for one
-        of those would refuse a header the read can send perfectly well.
-        """
-        names = set(runtime.transport_header_names(request_block.get("transport_ref")))
-        follows_links = (
-            isinstance(pagination, Mapping) and pagination.get("type") == "link"
-        )
-        if follows_links:
-            for ref in runtime.http_transport_base_urls:
-                names |= runtime.transport_header_names(ref)
-        return names
-
     async def _dispatch_for_link(self, url: str, current: _Dispatch) -> _Dispatch:
         """Return what a followed link goes out on.
 
@@ -518,8 +489,11 @@ class GenericAPIConnector(BaseDestinationHandler):
                 # session is opened to judge a declaration, and never from
                 # the default's when the read goes out elsewhere.
                 reserved_headers=reserved_header_names(
-                    self._names_this_read_may_not_declare(
-                        runtime, request_block, pagination
+                    reserved_names_for_read(
+                        request_block,
+                        pagination,
+                        names_for=runtime.transport_header_names,
+                        dispatchable_refs=runtime.http_transport_base_urls,
                     )
                 ),
                 resolver=resolver,
@@ -855,6 +829,7 @@ class GenericAPIConnector(BaseDestinationHandler):
             # only build_write_plan knows which mode block, and so which
             # transport_ref, this schema selects.
             header_names_for=runtime.transport_header_names,
+            transport_problem=runtime.transport_problem,
             resolver=self._write_resolver,
         )
         if isinstance(outcome, str):

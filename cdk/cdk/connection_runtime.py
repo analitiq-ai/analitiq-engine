@@ -575,27 +575,16 @@ class ConnectionRuntime:
                 "http_transport() called before materialize(); no transport "
                 "spec has been resolved yet"
             )
-        ref = transport_ref or self._default_transport_ref
-        if ref is None or ref not in self._transport_specs:
-            raise TransportSpecError(
-                f"connection {self._connection_id!r}: no resolved transport "
-                f"{ref!r}; this run resolved {sorted(self._transport_specs)}. "
-                f"An operation naming a transport the connector does not "
-                f"declare cannot be dispatched -- it would otherwise go out "
-                f"on the default transport's origin with the default "
-                f"transport's headers."
-            )
+        problem = self.transport_problem(transport_ref)
+        if problem is not None:
+            raise TransportSpecError(problem)
+        # transport_problem() answered None, so the ref resolves and its
+        # spec is an http one -- both narrowings below rest on that.
+        ref = str(transport_ref or self._default_transport_ref)
         opened = self._http_transports.get(ref)
         if opened is not None:
             return opened
         spec = self._transport_specs[ref]
-        if spec.get("transport_type") != HTTP_TRANSPORT_TYPE:
-            raise TransportSpecError(
-                f"connection {self._connection_id!r}: transport {ref!r} "
-                f"declares transport_type {spec.get('transport_type')!r}; an "
-                f"api operation dispatches over HTTP and there is no session "
-                f"to open from this block"
-            )
         async with self._http_transport_lock:
             # Read again under the lock: whoever held it may have been
             # opening this very ref, and building a second session for it
@@ -611,6 +600,47 @@ class ConnectionRuntime:
                 )
             self._http_transports[ref] = transport
             return transport
+
+    def transport_problem(self, transport_ref: str | None = None) -> str | None:
+        """Say why an operation cannot dispatch through *transport_ref*, or ``None``.
+
+        The one statement of it, asked by everything that needs the
+        answer: :meth:`http_transport` raises it when a request tries to
+        go out, and the schema handshake returns it as the reason a stream
+        is refused. A write whose transport cannot be opened must be
+        refused AT the handshake -- accepting the schema and failing the
+        first non-empty batch turns an authoring defect into a fatal batch
+        after the engine was told the stream was ready.
+
+        Two ways a ref fails, and both are defects rather than conditions
+        to absorb: the run did not resolve it (an operation naming a
+        transport the connector does not declare, which the package
+        validator refuses at authoring time, or one the bootstrap failed
+        to collect), or it is not HTTP, which an api operation cannot
+        dispatch over at all. Falling back to the default instead is the
+        silent failure this whole path exists to end -- the request would
+        go out on the wrong origin with the wrong headers, and the
+        provider would answer it.
+        """
+        ref = transport_ref or self._default_transport_ref
+        if ref is None or ref not in self._transport_specs:
+            return (
+                f"connection {self._connection_id!r}: no resolved transport "
+                f"{ref!r}; this run resolved {sorted(self._transport_specs)}. "
+                f"An operation naming a transport the connector does not "
+                f"declare cannot be dispatched -- it would otherwise go out "
+                f"on the default transport's origin with the default "
+                f"transport's headers."
+            )
+        declared_type = self._transport_specs[ref].get("transport_type")
+        if declared_type != HTTP_TRANSPORT_TYPE:
+            return (
+                f"connection {self._connection_id!r}: transport {ref!r} "
+                f"declares transport_type {declared_type!r}; an api "
+                f"operation dispatches over HTTP and there is no session "
+                f"to open from this block"
+            )
+        return None
 
     @property
     def default_transport_ref(self) -> str:

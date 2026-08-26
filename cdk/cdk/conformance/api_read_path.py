@@ -60,6 +60,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import Any
 
 from yarl import URL
@@ -78,6 +79,7 @@ from cdk.api.request import (
     param_bindings,
     path_placeholders,
     request_block_problem,
+    reserved_names_for_read,
     substitute_path,
 )
 from cdk.api.response_schema import records_items_schema, resolve_field_arrow_type
@@ -94,6 +96,7 @@ from .api_surface import (
     api_base_url,
     api_origins,
     definition_resolver,
+    dispatch_transport_refs,
     fillable_at_request_time,
     read_operations,
     unknown_function_problem,
@@ -292,8 +295,13 @@ def _compile_read(
     table = ParamTable.for_read(declared_params, resolver)
     problem = request_block_problem(
         request_block,
-        reserved_headers=_transport_header_names(
-            target, request_block.get("transport_ref")
+        reserved_headers=reserved_header_names(
+            reserved_names_for_read(
+                request_block,
+                read.get("pagination"),
+                names_for=partial(_declared_header_names, target),
+                dispatchable_refs=dispatch_transport_refs(target),
+            )
         ),
         resolver=resolver,
         controlled_by=table.controlled_by,
@@ -420,17 +428,17 @@ def _path_values(
     return bound
 
 
-def _transport_header_names(
+def _declared_header_names(
     target: ConformanceTarget, transport_ref: str | None = None
 ) -> frozenset[str]:
-    """Name the headers a read of this connector may not declare.
+    """Name the headers one transport of this connector declares.
 
-    Of the transport THAT read dispatches through, because that is the
-    session whose names the engine reserves: an endpoint on a named
-    transport can only shadow that transport's credential, and a header
-    owned solely by a default it never opens is not its to collide with.
-    Reading the default's names for every read certifies a shadowing
-    defect on one endpoint and invents one on another.
+    The kit's answer to the question the engine answers from a
+    materialized connection (``ConnectionRuntime.transport_header_names``);
+    WHICH transports a given read must answer to is
+    :func:`~cdk.api.request.reserved_names_for_read`'s, so the two sides
+    cannot come to disagree about the rule while differing about where the
+    names come from.
 
     The engine reserves the names its session carries, which is what the
     transport declares once each value has resolved: a header resolving to
@@ -450,9 +458,7 @@ def _transport_header_names(
     block = target.declared_transports().get(ref) if isinstance(ref, str) else None
     declared = block.get("headers") if isinstance(block, Mapping) else None
     names = declared if isinstance(declared, Mapping) else {}
-    # The engine's own set builder, so the engine-owned names it adds are
-    # reserved here too rather than named a second time.
-    return reserved_header_names(str(name) for name in names)
+    return frozenset(str(name) for name in names)
 
 
 def _request_builder(probe: _ReadProbe) -> RequestBuilder:

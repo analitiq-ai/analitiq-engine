@@ -334,6 +334,7 @@ def build_write_plan(
     schema_spec: SchemaSpec,
     *,
     header_names_for: Callable[[str | None], Iterable[str]],
+    transport_problem: Callable[[str | None], str | None],
     resolver: Resolver,
 ) -> StreamWritePlan | str:
     """Build the plan for a stream, or return why the schema is refused.
@@ -343,11 +344,12 @@ def build_write_plan(
     config, which is what lets the caller declare one failure category for
     all of them.
 
-    ``header_names_for`` is asked, not told: only this function knows
-    which mode block the schema selects, and so which ``transport_ref``
-    the stream's writes dispatch through. A caller passing one set for the
-    whole document would be passing the default transport's, which is the
-    wrong set for a stream that writes somewhere else.
+    ``header_names_for`` and ``transport_problem`` are asked, not told:
+    only this function knows which mode block the schema selects, and so
+    which ``transport_ref`` the stream's writes dispatch through. A caller
+    passing one answer for the whole document would be passing the default
+    transport's, which is the wrong one for a stream that writes somewhere
+    else.
     """
     mode_key = WRITE_MODE_KEYS.get(schema_spec.write_mode)
     if mode_key is None:
@@ -368,6 +370,13 @@ def build_write_plan(
 
     request = mode_block.get("request") or {}
     endpoint_id = str(doc.get("endpoint_id", "<unnamed>"))
+    # Refused HERE, not when the first non-empty batch tries to send: a
+    # transport that cannot be opened is an authoring defect, and
+    # accepting the schema for it turns that defect into a fatal batch
+    # after the engine was told the stream was ready to write.
+    problem = transport_problem(request.get("transport_ref"))
+    if problem is not None:
+        return problem
     reserved = reserved_header_names(header_names_for(request.get("transport_ref")))
     try:
         table = ParamTable.for_write(mode_block.get("params") or {}, resolver)

@@ -145,7 +145,11 @@ class TestRawKeysAreTheOnesThatArrive:
             idempotency={"in": "header", "name": "Idempotency-Key"},
         )
         plan = build_write_plan(
-            doc, _spec(), header_names_for=lambda _ref: set(), resolver=_resolver()
+            doc,
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
         )
         assert isinstance(plan, StreamWritePlan)
         assert plan.idempotency_in == "header"
@@ -155,7 +159,11 @@ class TestRawKeysAreTheOnesThatArrive:
         # ``schema_`` on the model, ``schema`` in the document.
         doc = _document()
         plan = build_write_plan(
-            doc, _spec(), header_names_for=lambda _ref: set(), resolver=_resolver()
+            doc,
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
         )
         assert isinstance(plan, StreamWritePlan)
         assert plan.json_fields == {"payload"}
@@ -163,7 +171,11 @@ class TestRawKeysAreTheOnesThatArrive:
     def test_the_request_and_batching_survive_the_round_trip(self) -> None:
         doc = _document(batching={"max_records": 50})
         plan = build_write_plan(
-            doc, _spec(), header_names_for=lambda _ref: set(), resolver=_resolver()
+            doc,
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
         )
         assert isinstance(plan, StreamWritePlan)
         assert (plan.method, plan.endpoint, plan.max_records) == ("POST", "/items", 50)
@@ -200,6 +212,7 @@ class TestModeDispatch:
             _document(),
             _spec(WriteMode.WRITE_MODE_TRUNCATE_INSERT),
             header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
             resolver=_resolver(),
         )
         assert isinstance(outcome, str)
@@ -210,6 +223,7 @@ class TestModeDispatch:
             _document(mode="upsert"),
             _spec(),
             header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
             resolver=_resolver(),
         )
         assert isinstance(outcome, str)
@@ -234,6 +248,7 @@ class TestIdempotencyRefusals:
             doc,
             _spec(),
             header_names_for=lambda _ref: {"authorization"},
+            transport_problem=lambda _ref: None,
             resolver=_resolver(),
         )
         assert isinstance(outcome, str) and "collides" in outcome
@@ -243,7 +258,11 @@ class TestIdempotencyRefusals:
         # header map, and the client judges it the same way.
         doc = _document(idempotency={"in": "header", "name": "Bad Key"})
         outcome = build_write_plan(
-            doc, _spec(), header_names_for=lambda _ref: set(), resolver=_resolver()
+            doc,
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
         )
         assert isinstance(outcome, str) and "not an HTTP token" in outcome
 
@@ -306,7 +325,11 @@ class TestTheRequestTheStreamWillActuallySend:
         # decides both, so the two cannot disagree.
         doc = _document(content_type="application/x-www-form-urlencoded")
         plan = build_write_plan(
-            doc, _spec(), header_names_for=lambda _ref: set(), resolver=_resolver()
+            doc,
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
         )
         assert isinstance(plan, StreamWritePlan)
         assert plan.content_type == "application/x-www-form-urlencoded"
@@ -316,6 +339,7 @@ class TestTheRequestTheStreamWillActuallySend:
             _document(),
             _spec(),
             header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
             resolver=_resolver(),
         )
         assert isinstance(plan, StreamWritePlan)
@@ -337,6 +361,7 @@ class TestTheRequestTheStreamWillActuallySend:
             ),
             _spec(),
             header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
             resolver=_resolver(),
         )
         assert isinstance(outcome, str)
@@ -348,6 +373,7 @@ class TestTheRequestTheStreamWillActuallySend:
             _document(content_type="application/x-www-form-urlencoded"),
             _spec(),
             header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
             resolver=_resolver(),
         )
         assert isinstance(plan, StreamWritePlan)
@@ -360,6 +386,7 @@ class TestTheRequestTheStreamWillActuallySend:
             _document(content_type="application/xml"),
             _spec(),
             header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
             resolver=_resolver(),
         )
         assert isinstance(outcome, str)
@@ -382,6 +409,7 @@ class TestTheRequestTheStreamWillActuallySend:
             doc,
             _spec(),
             header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
             resolver=_resolver(contact="c-9"),
         )
         assert isinstance(plan, StreamWritePlan)
@@ -399,7 +427,11 @@ class TestTheRequestTheStreamWillActuallySend:
             contract_valid=False,
         )
         outcome = build_write_plan(
-            doc, _spec(), header_names_for=lambda _ref: set(), resolver=_resolver()
+            doc,
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
         )
         assert isinstance(outcome, str)
         assert "{id}" in outcome and "path_params" in outcome
@@ -421,6 +453,7 @@ class TestTheRequestTheStreamWillActuallySend:
             doc,
             _spec(),
             header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
             resolver=_resolver(tenant="acme"),
         )
         assert isinstance(plan, StreamWritePlan)
@@ -453,7 +486,11 @@ class TestTheRequestTheStreamWillActuallySend:
         )
         resolver = _resolver(tenant="acme")
         plan = build_write_plan(
-            doc, _spec(), header_names_for=lambda _ref: set(), resolver=resolver
+            doc,
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=resolver,
         )
         assert isinstance(plan, StreamWritePlan)
 
@@ -490,6 +527,7 @@ class TestTheRequestTheStreamWillActuallySend:
             doc,
             _spec(),
             header_names_for=lambda _ref: {"authorization"},
+            transport_problem=lambda _ref: None,
             resolver=_resolver(),
         )
         assert isinstance(outcome, str)
@@ -512,7 +550,11 @@ class TestTheRequestTheStreamWillActuallySend:
             },
         )
         outcome = build_write_plan(
-            doc, _spec(), header_names_for=lambda _ref: set(), resolver=_resolver()
+            doc,
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
         )
         assert isinstance(outcome, str)
         assert "'secrets.api_key'" in outcome
@@ -537,6 +579,7 @@ class TestTheRequestTheStreamWillActuallySend:
             doc,
             _spec(),
             header_names_for=lambda _ref: {"authorization"},
+            transport_problem=lambda _ref: None,
             resolver=_resolver(),
         )
         assert isinstance(plan, StreamWritePlan)
@@ -547,7 +590,11 @@ class TestTheRequestTheStreamWillActuallySend:
         # reads the key as an expression marker and the endpoint breaks.
         doc = _document(query={"ref": {"literal": "main"}})
         plan = build_write_plan(
-            doc, _spec(), header_names_for=lambda _ref: set(), resolver=_resolver()
+            doc,
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
         )
         assert isinstance(plan, StreamWritePlan)
         assert plan.query == {"ref": "main"}
@@ -570,7 +617,11 @@ class TestTheRequestTheStreamWillActuallySend:
             },
         )
         plan = build_write_plan(
-            doc, _spec(), header_names_for=lambda _ref: set(), resolver=_resolver()
+            doc,
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
         )
         assert isinstance(plan, StreamWritePlan)
         assert plan.endpoint == "/Contact/a%2Fb"
@@ -591,7 +642,11 @@ class TestTheRequestTheStreamWillActuallySend:
             },
         )
         outcome = build_write_plan(
-            doc, _spec(), header_names_for=lambda _ref: set(), resolver=_resolver()
+            doc,
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
         )
         assert isinstance(outcome, str)
         assert "{id}" in outcome
@@ -601,7 +656,11 @@ class TestTheRequestTheStreamWillActuallySend:
         # per-request header can add or override, never delete.
         doc = _document(headers_remove=["Authorization"])
         outcome = build_write_plan(
-            doc, _spec(), header_names_for=lambda _ref: set(), resolver=_resolver()
+            doc,
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
         )
         assert isinstance(outcome, str)
         assert "headers_remove" in outcome
@@ -614,6 +673,7 @@ class TestTheRequestTheStreamWillActuallySend:
             doc,
             _spec(),
             header_names_for=lambda _ref: {"authorization"},
+            transport_problem=lambda _ref: None,
             resolver=_resolver(),
         )
         assert isinstance(outcome, str)
@@ -643,7 +703,11 @@ class TestTheRequestTheStreamWillActuallySend:
             },
         }
         outcome = build_write_plan(
-            doc, _spec(), header_names_for=lambda _ref: set(), resolver=_resolver()
+            doc,
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
         )
         assert isinstance(outcome, str) and "collides" in outcome
 
@@ -668,6 +732,7 @@ class TestRetryVerdicts:
             _document(),
             _spec(),
             header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
             resolver=_resolver(),
         )
         assert isinstance(plan, StreamWritePlan)

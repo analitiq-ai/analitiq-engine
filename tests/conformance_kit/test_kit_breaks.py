@@ -1518,6 +1518,40 @@ class TestApiReadPathBreaks:
         report = _report(check_api_read_compiles(load_target(root)))
         assert "X-Files-Key" in report, "the named transport's own header is reserved"
 
+    def test_a_link_read_is_judged_against_every_transport_it_may_follow_into(
+        self, tmp_path: Path
+    ) -> None:
+        """The kit and the engine ask ONE function which names are reserved.
+
+        A link-paginated read opening a named transport may follow a link
+        back to the default, so a header colliding only with the default
+        is a defect -- and one the kit certified while production refused
+        it, twice, before the rule became a single shared function.
+        """
+        root = tmp_path / "api"
+        shutil.copytree(API_REFERENCE_DIR, root)
+        connector = root / "definition" / "connector.json"
+        definition = json.loads(connector.read_text())
+        definition["transports"]["api"]["headers"]["X-Default-Key"] = "k"
+        definition["transports"]["files"] = {
+            "transport_type": "http",
+            "base_url": "https://files.example.invalid",
+        }
+        connector.write_text(json.dumps(definition))
+        # 'events' is the link-paginated read in the reference connector.
+        document = root / "definition" / "endpoints" / "events.json"
+        parsed = json.loads(document.read_text())
+        read = parsed["operations"]["read"]
+        read["request"]["transport_ref"] = "files"
+        read["request"]["headers"] = {"X-Default-Key": {"literal": "endpoint"}}
+        document.write_text(json.dumps(parsed))
+
+        report = _report(check_api_read_compiles(load_target(root)))
+        assert "X-Default-Key" in report, (
+            "a link read may land on the default transport, so its names are "
+            "reserved too"
+        )
+
     def test_a_probe_is_armed_with_its_own_reads_origins_not_its_siblings(
         self, tmp_path: Path
     ) -> None:
