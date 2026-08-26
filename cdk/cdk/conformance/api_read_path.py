@@ -292,7 +292,9 @@ def _compile_read(
     table = ParamTable.for_read(declared_params, resolver)
     problem = request_block_problem(
         request_block,
-        reserved_headers=_transport_header_names(target),
+        reserved_headers=_transport_header_names(
+            target, request_block.get("transport_ref")
+        ),
         resolver=resolver,
         controlled_by=table.controlled_by,
         declared_params=declared_params,
@@ -418,8 +420,17 @@ def _path_values(
     return bound
 
 
-def _transport_header_names(target: ConformanceTarget) -> frozenset[str]:
-    """Name the headers an endpoint of this connector may not declare.
+def _transport_header_names(
+    target: ConformanceTarget, transport_ref: str | None = None
+) -> frozenset[str]:
+    """Name the headers a read of this connector may not declare.
+
+    Of the transport THAT read dispatches through, because that is the
+    session whose names the engine reserves: an endpoint on a named
+    transport can only shadow that transport's credential, and a header
+    owned solely by a default it never opens is not its to collide with.
+    Reading the default's names for every read certifies a shadowing
+    defect on one endpoint and invents one on another.
 
     The engine reserves the names its session carries, which is what the
     transport declares once each value has resolved: a header resolving to
@@ -435,7 +446,7 @@ def _transport_header_names(target: ConformanceTarget) -> frozenset[str]:
     empty would make a credential-shadowing defect appear only for the
     connections that fill it in.
     """
-    ref = target.definition.get("default_transport")
+    ref = transport_ref or target.definition.get("default_transport")
     block = target.declared_transports().get(ref) if isinstance(ref, str) else None
     declared = block.get("headers") if isinstance(block, Mapping) else None
     names = declared if isinstance(declared, Mapping) else {}

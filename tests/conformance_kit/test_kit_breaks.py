@@ -1488,6 +1488,36 @@ class TestApiReadPathBreaks:
         assert "no usable base_url" in report
         assert "widgets" in report, "the finding must name the reads it stops"
 
+    def test_a_read_is_judged_against_its_own_transports_headers(
+        self, tmp_path: Path
+    ) -> None:
+        """An endpoint can only shadow the credential of the session it opens.
+
+        Judged against the default's names, the kit certifies a shadowing
+        defect on a read that names another transport, and invents one for
+        a header the transport it actually uses never sends.
+        """
+        root = tmp_path / "api"
+        shutil.copytree(API_REFERENCE_DIR, root)
+        connector = root / "definition" / "connector.json"
+        definition = json.loads(connector.read_text())
+        definition["transports"]["files"] = {
+            "transport_type": "http",
+            "base_url": "https://files.example.invalid",
+            "headers": {"X-Files-Key": "k"},
+        }
+        connector.write_text(json.dumps(definition))
+        document = root / "definition" / "endpoints" / "widgets.json"
+        parsed = json.loads(document.read_text())
+        read = parsed["operations"]["read"]
+        read["request"]["transport_ref"] = "files"
+        # Shadows the transport this read actually opens.
+        read["request"]["headers"] = {"X-Files-Key": {"literal": "attacker"}}
+        document.write_text(json.dumps(parsed))
+
+        report = _report(check_api_read_compiles(load_target(root)))
+        assert "X-Files-Key" in report, "the named transport's own header is reserved"
+
     def test_a_probe_is_armed_with_its_own_reads_origins_not_its_siblings(
         self, tmp_path: Path
     ) -> None:
