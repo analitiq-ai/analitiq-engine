@@ -318,6 +318,38 @@ class TestTheRequestTheStreamWillActuallySend:
         assert isinstance(plan, StreamWritePlan)
         assert plan.content_type is None
 
+    def test_batching_and_form_encoding_refuses_the_schema(self) -> None:
+        """Incompatible by shape, so it is settled before any batch is built.
+
+        A batched body binds `records`, which is a list, and a form carries
+        flat name/value pairs -- so every chunk this stream could ever build
+        fails encoding. Accepting the handshake advertises a stream that
+        cannot write a batch, and the failure then arrives per batch
+        instead of once, at configure time.
+        """
+        outcome = build_write_plan(
+            _document(
+                batching={"max_records": 50},
+                content_type="application/x-www-form-urlencoded",
+            ),
+            _spec(),
+            session_header_names=set(),
+            resolver=_resolver(),
+        )
+        assert isinstance(outcome, str)
+        assert "batching" in outcome and "flat name/value pairs" in outcome
+
+    def test_a_form_write_without_batching_is_accepted(self) -> None:
+        """One record per request is the shape a form can carry."""
+        plan = build_write_plan(
+            _document(content_type="application/x-www-form-urlencoded"),
+            _spec(),
+            session_header_names=set(),
+            resolver=_resolver(),
+        )
+        assert isinstance(plan, StreamWritePlan)
+        assert plan.max_records is None
+
     def test_a_media_type_the_engine_cannot_encode_refuses_the_schema(self) -> None:
         # Refused at the handshake, not per record inside the send, where it
         # would surface as a failed batch rather than a refused schema.

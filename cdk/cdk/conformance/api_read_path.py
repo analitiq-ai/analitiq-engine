@@ -538,9 +538,28 @@ def _materialize_first_request(
     problem = None if body is None else unknown_function_problem(body, probe.resolver)
     if problem is not None:
         raise ReadError(problem)
-    prepared = _request_builder(probe).for_page(
-        first.params, sends_declared_body=first.sends_declared_body
+    return _encoded(
+        _request_builder(probe).for_page(
+            first.params, sends_declared_body=first.sends_declared_body
+        )
     )
+
+
+def _encoded(prepared: PreparedRequest) -> PreparedRequest:
+    """Certify that the built body can become bytes, and hand it back.
+
+    Every request the read issues goes through ``encode_body`` one line
+    after it is built, so every request a drive builds goes through this.
+    The first one and the ones after it: a cursor or keyset value is absent
+    on page one and arrives from the response on page two, so a form body
+    can be flat when it compiles and nested once the loop has a value --
+    and only the drive past a page ever sees that.
+
+    Only the form encoder runs, and not because JSON matters less:
+    ``orjson`` is the transport's and this suite runs from an install that
+    carries none (``test_package_surface``). ``cdk.api.body`` holds the
+    form encoder for exactly this reach.
+    """
     if prepared.body is not None and media_type(prepared.content_type) == (
         FORM_CONTENT_TYPE
     ):
@@ -997,8 +1016,11 @@ def _advance_violations(probe: _ReadProbe) -> list[Violation]:
                 )
             ]
         try:
-            prepared = builder.for_page(
-                following.params, sends_declared_body=following.sends_declared_body
+            prepared = _encoded(
+                builder.for_page(
+                    following.params,
+                    sends_declared_body=following.sends_declared_body,
+                )
             )
         except RequestSpecError as err:
             return [

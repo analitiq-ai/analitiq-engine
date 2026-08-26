@@ -24,6 +24,7 @@ from ..record_identity import record_digest
 from ..resolver import Resolver
 from ..transport_factory import require_wire_safe_header_name
 from ..types import RetrySemantics, RetryVerdict, SchemaSpec
+from .body import FORM_CONTENT_TYPE, media_type
 from .exceptions import RequestSpecError
 from .request import (
     ParamTable,
@@ -402,6 +403,22 @@ def build_write_plan(
     # per record.
     batching = mode_block.get("batching")
     if batching is not None:
+        if media_type(plan.content_type) == FORM_CONTENT_TYPE:
+            # A batched body binds `records`, which is a list, and a form
+            # carries flat name/value pairs -- so every chunk this stream
+            # ever builds fails encoding, deterministically, before
+            # anything is sent. The two are incompatible by shape rather
+            # than by data, so the handshake refuses the stream instead of
+            # advertising one that cannot write a batch.
+            return (
+                f"operations.write declares batching and content_type "
+                f"{plan.content_type!r}: a batched body sends the records "
+                f"as a list, and {FORM_CONTENT_TYPE} carries only flat "
+                f"name/value pairs, so no chunk of this stream could ever "
+                f"be encoded. Drop the batching block to send one record "
+                f"per request, or declare a content_type that carries "
+                f"structure"
+            )
         plan.max_records = batching.get("max_records")
 
     idempotency = mode_block.get("idempotency")

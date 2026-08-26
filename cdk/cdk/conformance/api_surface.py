@@ -92,6 +92,23 @@ _TRANSPORT_MAPPING_ROOTS = (
 )
 
 
+def _is_the_whole_value(declared: Any, path: str) -> bool:
+    """Whether *declared* is exactly ``{"ref": path}`` and nothing more.
+
+    The null-dropping rule is about a header WHOSE VALUE is nothing, and
+    that is only what ``{"ref": ...}`` resolving to null produces. A
+    template is resolved substitution by substitution and strictly: a null
+    inside ``"Bearer ${connector.optional}-${connection.parameters.token}"``
+    raises at connect() rather than dropping the header, so it is a defect
+    on every connection however the rest of the template resolves.
+    """
+    return (
+        isinstance(declared, Mapping)
+        and set(declared) == {"ref"}
+        and declared["ref"] == path
+    )
+
+
 def _transport_deferral(
     target: ConformanceTarget, declared: Any, *, drops_if_null: bool = False
 ) -> tuple[list[str], bool]:
@@ -165,7 +182,9 @@ def _transport_deferral(
                         f"{type(settled).__name__}, not a value -- nothing "
                         f"can substitute it"
                     )
-                elif settled is None and not drops_if_null:
+                elif settled is None and not (
+                    drops_if_null and _is_the_whole_value(declared, path)
+                ):
                     problems.append(
                         f"{path!r} resolves to nothing (the definition "
                         f"declares it null), not a value -- nothing can "

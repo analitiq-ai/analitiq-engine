@@ -2695,6 +2695,35 @@ class TestApiTransportHeaderBreaks:
         report = _report(check_read_transport_selection(target))
         assert "does not materialize" in report
 
+    def test_a_null_inside_a_deferred_header_template_is_reported(
+        self, tmp_path: Path
+    ) -> None:
+        """Dropping a null header is about the whole VALUE being nothing.
+
+        A template is resolved substitution by substitution and strictly,
+        so a null inside one raises at connect() rather than dropping the
+        header -- on every connection, whatever the deferred half of the
+        template resolves to. Excusing it because the header as a whole
+        "may be dropped" certified a connector that cannot connect.
+        """
+        target = self._bent_definition(
+            tmp_path,
+            lambda d: (
+                d.update(optional=None),
+                d["transports"]["api"].update(
+                    headers={
+                        "Authorization": {
+                            "template": "Bearer ${connector.optional}-"
+                            "${connection.parameters.token}"
+                        }
+                    }
+                ),
+            ),
+        )
+        report = _report(check_read_transport_selection(target))
+        assert "'connector.optional'" in report
+        assert "declares it null" in report
+
     def test_an_optional_header_the_definition_leaves_null_is_clean(
         self, tmp_path: Path
     ) -> None:
@@ -3462,6 +3491,43 @@ class TestApiRequestBlockBreaks:
             ),
         )
         assert check_api_read_compiles(target) == []
+
+    def test_a_follow_up_form_body_that_only_nests_on_page_two(
+        self, tmp_path: Path
+    ) -> None:
+        """The first request encodes; so must the ones after it.
+
+        A form body flat on page one can nest once the loop supplies its
+        value -- the cursor is absent when the read compiles and arrives
+        from the response afterwards. Production encodes the follow-up
+        before sending it and refuses, having already yielded page one's
+        records, and nothing that encodes only the first request sees it.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["request"]["method"] = "POST"
+            read["request"]["content_type"] = "application/x-www-form-urlencoded"
+            # The continuation the provider hands back is an OBJECT, which
+            # the response schema is entitled to declare -- so the scripted
+            # page carries one and page two's token is a mapping.
+            meta = read["response"]["schema"]["properties"]["meta"]
+            meta["properties"]["next_token"] = {
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+            }
+            # The token binds in the BODY, not the query: bound to a query
+            # key the scalar rule refuses the dict one map earlier, which
+            # is a different rule doing a different job. `page_token` is
+            # controlled_by pagination, so it is absent when the read
+            # compiles and that object once the loop has advanced.
+            read["params"]["page_token"]["in"] = "body"
+            read["request"]["query"].pop("pageToken", None)
+            read["request"]["body"] = {"cursor": {"from_param": "page_token"}}
+
+        target = self._broken(tmp_path, "invoices", bend)
+        assert check_api_read_compiles(target) == []
+        report = _report(check_api_read_advances(target))
+        assert "flat name/value" in report
 
     def test_a_follow_up_request_whose_body_cannot_be_built(
         self, tmp_path: Path
