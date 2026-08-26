@@ -30,8 +30,13 @@ from typing import Any
 
 from .exceptions import RequestSpecError
 
+#: The caller's rule for what one value may be on the wire, passed in
+#: rather than restated here -- see :func:`serialize_query_value`.
+Sendable = Callable[[str, Any], Any]
+
 __all__ = [
     "QueryStyle",
+    "Sendable",
     "declared_query_styles",
     "serialize_query_value",
     "unserializable_style_problem",
@@ -171,7 +176,7 @@ def serialize_query_value(
     style: QueryStyle,
     *,
     endpoint: str,
-    sendable: Callable[[str, Any], Any],
+    sendable: Sendable,
 ) -> dict[str, Any]:
     """Spell one collection value as the query keys it sends.
 
@@ -212,42 +217,82 @@ def serialize_query_value(
         return {key: sendable(key, value)}
     if not isinstance(value, kinds):
         return _refuse_kind(key, value, style, endpoint=endpoint)
+    # One spelling per style family, because each answers a different
+    # question about names: deepObject writes them out, an exploded value
+    # either writes them or repeats one, and a delimited style keeps the
+    # one name and renders the entries into it.
     items = _flat_items(key, value, endpoint=endpoint)
+    named_itself = isinstance(value, Mapping)
     if style.style == "deepObject":
-        return {
-            f"{key}[{name}]": sendable(f"{key}[{name}]", item) for name, item in items
-        }
+        return _deep_object(key, items, sendable)
     if style.explode:
-        # An exploded object writes its own property names; an exploded
-        # array repeats the key it was declared under, which is the one
-        # shape that returns a list -- a mapping cannot hold a name twice.
-        if isinstance(value, Mapping):
-            return {name: sendable(name, item) for name, item in items}
-        return {key: [sendable(key, item) for _, item in items]}
-    # A delimited style renders the entries itself, so it asks what each
-    # may be on the wire before joining them. A non-exploded object
-    # flattens to name,value,name,value -- OpenAPI's own spelling, and the
-    # reason `form` is the only style that takes one.
+        return _exploded(key, items, sendable, named_itself=named_itself)
+    return _delimited(
+        key, items, sendable, style=style, endpoint=endpoint, named_itself=named_itself
+    )
+
+
+def _deep_object(
+    key: str, items: list[tuple[str, Any]], sendable: Sendable
+) -> dict[str, Any]:
+    """Spell an object as one key per property: ``filter[status]=open``."""
+    return {f"{key}[{name}]": sendable(f"{key}[{name}]", item) for name, item in items}
+
+
+def _exploded(
+    key: str, items: list[tuple[str, Any]], sendable: Sendable, *, named_itself: bool
+) -> dict[str, Any]:
+    """Spell a collection with one name per entry.
+
+    An exploded object writes its own property names; an exploded array
+    repeats the key it was declared under, which is the one shape here
+    that answers with a list -- a mapping cannot hold a name twice, so the
+    repetition has to survive until the client takes pairs.
+    """
+    if named_itself:
+        return {name: sendable(name, item) for name, item in items}
+    return {key: [sendable(key, item) for _, item in items]}
+
+
+def _delimited(
+    key: str,
+    items: list[tuple[str, Any]],
+    sendable: Sendable,
+    *,
+    style: QueryStyle,
+    endpoint: str,
+    named_itself: bool,
+) -> dict[str, Any]:
+    """Spell a collection as one key holding its entries, joined.
+
+    The style renders the entries itself, so it asks what each may be on
+    the wire before joining them. A non-exploded object flattens to
+    name,value,name,value -- OpenAPI's own spelling, and the reason
+    ``form`` is the only style that takes one.
+
+    An entry carrying the delimiter is refused: the separator is
+    structural, the client encodes the joined result as a single value,
+    and no encoding applied afterwards can say which delimiters were data.
+    """
+    delimiter = _DELIMITERS[style.style]
     parts = (
         [part for name, item in items for part in (name, str(sendable(key, item)))]
-        if isinstance(value, Mapping)
+        if named_itself
         else [str(sendable(key, item)) for _, item in items]
     )
-    delimiter = _DELIMITERS[style.style]
-    for part in parts:
-        if delimiter in part:
-            raise RequestSpecError(
-                f"request.query[{key!r}] for endpoint {endpoint!r} declares "
-                f"style {style.style!r}, which separates entries with "
-                f"{delimiter!r}, and one entry ({part!r}) contains that "
-                f"character. Joined, the provider reads a different "
-                f"collection than the one declared and answers it. The "
-                f"delimiter is structural here and the client encodes the "
-                f"joined string as one value, so there is no encoding that "
-                f"puts the boundary back -- send this param with style "
-                f"'form' and explode=true, which repeats the name and "
-                f"encodes each value on its own"
-            )
+    carrying = next((part for part in parts if delimiter in part), None)
+    if carrying is not None:
+        raise RequestSpecError(
+            f"request.query[{key!r}] for endpoint {endpoint!r} declares "
+            f"style {style.style!r}, which separates entries with "
+            f"{delimiter!r}, and one entry ({carrying!r}) contains that "
+            f"character. Joined, the provider reads a different collection "
+            f"than the one declared and answers it. The delimiter is "
+            f"structural here and the client encodes the joined string as "
+            f"one value, so there is no encoding that puts the boundary "
+            f"back -- send this param with style 'form' and explode=true, "
+            f"which repeats the name and encodes each value on its own"
+        )
     return {key: delimiter.join(parts)}
 
 
