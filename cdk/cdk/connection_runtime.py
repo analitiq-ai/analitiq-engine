@@ -232,6 +232,13 @@ class ConnectionRuntime:
         self._transport_specs: dict[str, dict[str, Any]] = {}
         self._default_transport_ref: str | None = None
         self._http_transports: dict[str, HttpTransport] = {}
+        # One runtime is shared by every stream on the connection, so two
+        # streams reaching a named transport for the first time do so
+        # concurrently. Without this each would build a session, both would
+        # write the cache, and the loser would be a live connection pool
+        # nothing holds a reference to -- never closed, and pacing outside
+        # the rate limiter the winner shares.
+        self._http_transport_lock = asyncio.Lock()
 
         # Transport state — set by materialize()
         self._materialized = False
@@ -589,14 +596,21 @@ class ConnectionRuntime:
                 f"api operation dispatches over HTTP and there is no session "
                 f"to open from this block"
             )
-        transport = await build_transport_from_spec(spec)
-        if not isinstance(transport, HttpTransport):  # pragma: no cover
-            raise TransportSpecError(
-                f"connection {self._connection_id!r}: transport {ref!r} built "
-                f"a {type(transport).__name__}, not an HttpTransport"
-            )
-        self._http_transports[ref] = transport
-        return transport
+        async with self._http_transport_lock:
+            # Read again under the lock: whoever held it may have been
+            # opening this very ref, and building a second session for it
+            # would strand the first.
+            opened = self._http_transports.get(ref)
+            if opened is not None:
+                return opened
+            transport = await build_transport_from_spec(spec)
+            if not isinstance(transport, HttpTransport):  # pragma: no cover
+                raise TransportSpecError(
+                    f"connection {self._connection_id!r}: transport {ref!r} "
+                    f"built a {type(transport).__name__}, not an HttpTransport"
+                )
+            self._http_transports[ref] = transport
+            return transport
 
     @property
     def default_transport_ref(self) -> str:
@@ -615,25 +629,47 @@ class ConnectionRuntime:
         return self._default_transport_ref
 
     @property
-    def declared_base_urls(self) -> frozenset[str]:
-        """The base URL of every http transport this run may dispatch through.
+    def http_transport_base_urls(self) -> dict[str, str]:
+        """Each http transport this run may dispatch through, ref -> base URL.
 
-        What the api path's containment guard is armed with, once reduced
-        to origins -- the reduction being a URL rule, so it belongs to
-        :mod:`cdk.api.urls` and not to this module, which is core and
-        cannot import that package.
+        What the api path builds its containment guard and its
+        origin-to-transport map from. Keyed by ref rather than flattened
+        to a set of URLs because a followed link is dispatched through the
+        transport whose origin it lands on, and a set cannot say which
+        transport that is.
 
         Read from the resolved SPECS rather than from the opened
         transports, so the set is whole from the first request rather than
         growing as sessions open -- a guard that widens as the run goes is
         a guard that answers differently depending on request order.
         """
-        return frozenset(
-            str(spec["base_url"])
-            for spec in self._transport_specs.values()
+        return {
+            ref: str(spec["base_url"])
+            for ref, spec in self._transport_specs.items()
             if spec.get("transport_type") == HTTP_TRANSPORT_TYPE
             and spec.get("base_url")
-        )
+        }
+
+    def transport_header_names(self, transport_ref: str | None = None) -> set[str]:
+        """Return the header names a transport sends, lowercased, without opening it.
+
+        The names a connection owns on the transport an operation
+        dispatches through -- which is what decides whether that
+        operation's own ``request.headers`` may name one. Read from the
+        resolved spec, not from a live session, for two reasons: the
+        schema handshake that asks is deliberately await-free, and a
+        connector should not open a connection pool to answer a question
+        about a declaration.
+
+        An unresolved ref answers the empty set rather than raising. The
+        refusal for one belongs to the dispatch that tries to send
+        through it, where it can say the request never went out; raising
+        here would report a transport defect as a header defect.
+        """
+        ref = transport_ref or self._default_transport_ref
+        spec = self._transport_specs.get(ref or "", {})
+        headers = spec.get("headers")
+        return {str(name).lower() for name in headers} if headers else set()
 
     def _apply_transport(self, transport: Any) -> None:
         """Wire a built transport's objects onto this runtime."""

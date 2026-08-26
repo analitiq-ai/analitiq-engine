@@ -103,6 +103,22 @@ class TestObjects:
         ]
 
 
+class TestOneRuleForWhatAValueMayBe:
+    """A value lands the same way inside a collection as it does alone."""
+
+    def test_a_boolean_entry_takes_its_json_spelling(self) -> None:
+        # str() would send Python's `True`, a spelling no JSON document
+        # contains -- and the same value sent alone goes out as `true`.
+        assert _sent("array", "form", False, [True, False]) == [("tags", "true,false")]
+
+    def test_an_exploded_boolean_entry_takes_it_too(self) -> None:
+        assert _sent("array", "form", True, [True]) == [("tags", "true")]
+
+    def test_a_null_entry_is_refused_like_a_declared_null(self) -> None:
+        with pytest.raises(RequestSpecError, match="declares null"):
+            _sent("array", "form", False, ["a", None])
+
+
 class TestWhatIsRefused:
     def test_a_style_the_engine_does_not_serialize_is_named_at_plan_time(
         self,
@@ -157,7 +173,7 @@ class TestWhatIsRefused:
                 "explode": True,
             }
         }
-        with pytest.raises(RequestSpecError, match="already sends"):
+        with pytest.raises(RequestSpecError, match="already carries"):
             bind_query_and_headers(
                 params={"tags": {"status": "closed"}},
                 declared_query=declared,
@@ -166,6 +182,32 @@ class TestWhatIsRefused:
                 endpoint="items",
                 query_styles=declared_query_styles(declared, params),
             )
+
+    def test_the_collision_is_refused_whichever_order_it_is_declared_in(
+        self,
+    ) -> None:
+        """Insertion is one site, so the refusal cannot turn on declaration order."""
+        params = {
+            "tags": {
+                "in": "query",
+                "type": "object",
+                "required": False,
+                "style": "form",
+                "explode": True,
+            }
+        }
+        plain_first = {"status": {"literal": "open"}, "filter": {"from_param": "tags"}}
+        styled_first = {"filter": {"from_param": "tags"}, "status": {"literal": "open"}}
+        for declared in (plain_first, styled_first):
+            with pytest.raises(RequestSpecError, match="already carries"):
+                bind_query_and_headers(
+                    params={"tags": {"status": "closed"}},
+                    declared_query=declared,
+                    declared_headers=None,
+                    resolver=Resolver(ResolutionContext()),
+                    endpoint="items",
+                    query_styles=declared_query_styles(declared, params),
+                )
 
     def test_a_container_under_a_key_no_param_owns_keeps_the_old_refusal(
         self,

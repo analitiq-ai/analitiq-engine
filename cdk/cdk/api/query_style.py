@@ -24,7 +24,7 @@ serialize named beside them.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -126,15 +126,30 @@ def unserializable_style_problem(
 
 
 def serialize_query_value(
-    key: str, value: Any, style: QueryStyle, *, endpoint: str
+    key: str,
+    value: Any,
+    style: QueryStyle,
+    *,
+    endpoint: str,
+    sendable: Callable[[str, Any], Any],
 ) -> dict[str, Any]:
     """Spell one collection value as the query keys it sends.
 
     Returns the keys and values that go on the wire: one key holding a
     list where the style repeats the name, several keys where it writes
     them out, and one key holding a joined string otherwise. Expanding
-    into pairs is :mod:`cdk.api.http`'s job -- this decides WHAT is sent,
-    the client layer decides how it is encoded.
+    into pairs is :mod:`cdk.api.http`'s job, and putting them in the
+    request is the caller's -- this module decides only WHICH names carry
+    WHICH values.
+
+    ``sendable`` is the caller's rule for what one value may be on the
+    wire, and every value returned here has been through it. It is passed
+    in rather than restated because there is exactly one such rule
+    (:func:`~cdk.api.request._sendable_value`) and a second one here would
+    send ``True,False`` where the same authored ``true`` goes out alone as
+    ``true`` -- one value landing two ways depending on whether it sat in
+    a collection. A null entry has no spelling at all, and the caller's
+    rule is what refuses it.
 
     A scalar under a collection param comes back untouched: a param typed
     ``array`` whose value resolved to one element is still one value, and
@@ -148,24 +163,29 @@ def serialize_query_value(
             unserializable_style_problem(key, style, endpoint=endpoint) or ""
         )
     if not isinstance(value, (list, Mapping)):
-        return {key: value}
+        return {key: sendable(key, value)}
     if not isinstance(value, kinds):
         return _refuse_kind(key, value, style, endpoint=endpoint)
     items = _flat_items(key, value, endpoint=endpoint)
     if style.style == "deepObject":
-        return {f"{key}[{name}]": item for name, item in items}
+        return {
+            f"{key}[{name}]": sendable(f"{key}[{name}]", item) for name, item in items
+        }
     if style.explode:
         # An exploded object writes its own property names; an exploded
-        # array repeats the key it was declared under.
+        # array repeats the key it was declared under, which is the one
+        # shape that returns a list -- a mapping cannot hold a name twice.
         if isinstance(value, Mapping):
-            return dict(items)
-        return {key: [item for _, item in items]}
-    # A non-exploded object flattens to name,value,name,value -- OpenAPI's
-    # own spelling, and the reason `form` is the only style that takes one.
+            return {name: sendable(name, item) for name, item in items}
+        return {key: [sendable(key, item) for _, item in items]}
+    # A delimited style renders the entries itself, so it asks what each
+    # may be on the wire before joining them. A non-exploded object
+    # flattens to name,value,name,value -- OpenAPI's own spelling, and the
+    # reason `form` is the only style that takes one.
     parts = (
-        [part for name, item in items for part in (name, str(item))]
+        [part for name, item in items for part in (name, str(sendable(key, item)))]
         if isinstance(value, Mapping)
-        else [str(item) for _, item in items]
+        else [str(sendable(key, item)) for _, item in items]
     )
     return {key: _DELIMITERS[style.style].join(parts)}
 

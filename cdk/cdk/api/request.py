@@ -39,6 +39,7 @@ import re
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
+from functools import partial
 from types import MappingProxyType
 from typing import Any
 from urllib.parse import quote
@@ -250,40 +251,20 @@ def bind_request_values(
             # instead would send the key with a null value.
             node = bind_param_refs(value, params)
             bound = resolver.resolve_for_request(node)
+        sendable = partial(_sendable_value, block=block, endpoint=endpoint)
         style = styles.get(str(name))
         if style is not None and bound is not None:
+            # A declared style is the one thing that turns one key into
+            # several, so it is the only branch that produces more than a
+            # single pair. What it produces still goes through the one
+            # insertion below.
             with request_spec_errors(
                 f"request.{block}.{name} for endpoint {endpoint!r}"
             ):
                 spelled = serialize_query_value(
-                    str(name), bound, style, endpoint=endpoint
+                    str(name), bound, style, endpoint=endpoint, sendable=sendable
                 )
-            for wire_name, wire_value in spelled.items():
-                if wire_name in resolved:
-                    # A deepObject or an exploded object writes key names
-                    # of its own, so it can land on one the map already
-                    # declared. Whichever won, the other would be dropped
-                    # without a word -- the exact silence honouring the
-                    # key map exists to end.
-                    raise RequestSpecError(
-                        f"request.{block}.{name} for endpoint {endpoint!r} "
-                        f"serializes to {wire_name!r}, which this request "
-                        f"already sends; one of the two would be dropped "
-                        f"silently. Rename the key, or declare a style "
-                        f"that keeps its own name"
-                    )
-                resolved[wire_name] = (
-                    [
-                        _sendable_value(wire_name, item, block=block, endpoint=endpoint)
-                        for item in wire_value
-                    ]
-                    if isinstance(wire_value, list)
-                    else _sendable_value(
-                        wire_name, wire_value, block=block, endpoint=endpoint
-                    )
-                )
-            continue
-        if bound is None and Resolver.is_expression_node(node):
+        elif bound is None and Resolver.is_expression_node(node):
             # The per-request policy: an expression with nothing to resolve
             # omits its key rather than going onto the wire raw.
             logger.warning(
@@ -294,7 +275,29 @@ def bind_request_values(
                 name,
             )
             continue
-        resolved[name] = _sendable_value(name, bound, block=block, endpoint=endpoint)
+        else:
+            spelled = {name: sendable(name, bound)}
+        # One insertion site, whichever branch produced the pairs, and it
+        # does one thing: guard the name. Each branch has already put its
+        # values through the sendable rule, so a list here is the exploded
+        # array that means "this name repeats" -- never a container that
+        # slipped past the scalar refusal. Two insertion sites is how the
+        # collision refusal came to depend on which key the document
+        # happened to declare first.
+        for wire_name, wire_value in spelled.items():
+            if wire_name in resolved:
+                # A deepObject or an exploded object writes key names of
+                # its own, so it can land on one the map already declared.
+                # Whichever won, the other would be dropped without a word
+                # -- the exact silence honouring the key map exists to end.
+                raise RequestSpecError(
+                    f"request.{block}.{name} for endpoint {endpoint!r} "
+                    f"sends {wire_name!r}, which this request already "
+                    f"carries; one of the two would be dropped silently. "
+                    f"Rename the key, or declare a style that keeps its "
+                    f"own name"
+                )
+            resolved[wire_name] = wire_value
     return resolved
 
 

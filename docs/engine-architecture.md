@@ -371,7 +371,10 @@ Each connection loaded by `PipelineConfigPrep` becomes a
     default is built at `materialize()`; a named one is built by
     `ConnectionRuntime.http_transport(ref)` on the first request that
     asks for it, so a single-transport connector opens exactly the one
-    session it always opened.
+    session it always opened. Both that build and the api connector's
+    sender cache are guarded per ref: two streams reaching a transport
+    together would otherwise each open a session, and the loser would be
+    a connection pool nothing closes.
   - `ca_ssl_context` — builds a verifying `ssl.SSLContext` from a PEM CA
     bundle; the shared helper behind connector packages' own
     `build_tls_connect_arg`.

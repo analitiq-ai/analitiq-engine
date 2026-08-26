@@ -103,6 +103,10 @@ def runtime_with(
     ``transports`` registers further named transports as
     ``ref -> (session, base_url)``, already open -- the shape a run has
     once the bootstrap resolved their specs and a request opened them.
+
+    A session's own ``headers`` are the transport's: the spec they were
+    resolved from carries the same names, which is what an operation's
+    declared headers are judged against.
     """
     runtime = ConnectionRuntime(
         raw_config={"host": base_url, "parameters": parameters or {}},
@@ -117,17 +121,17 @@ def runtime_with(
         ref: {
             "transport_type": "http",
             "base_url": url,
-            "headers": {},
+            "headers": dict(transport_session.headers),
             "timeout_seconds": 30.0,
             "rate_limit": None,
         }
-        for ref, (_session, url) in opened.items()
+        for ref, (transport_session, url) in opened.items()
     }
     runtime._http_transports = {
         ref: HttpTransport(
             session=cast(Any, transport_session),
             base_url=url,
-            headers={},
+            headers=dict(transport_session.headers),
             # The declared ceiling belongs to the transport block, so a
             # named transport paces independently of the default.
             rate_limiter=rate_limiter if ref == DEFAULT_TRANSPORT_REF else None,

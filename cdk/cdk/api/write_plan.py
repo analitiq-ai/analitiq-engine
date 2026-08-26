@@ -15,7 +15,7 @@ idempotency means promising exactly-once while never sending the key.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -158,7 +158,7 @@ def collect_input_field_names(mode_block: Mapping[str, Any]) -> set[str]:
     return names
 
 
-def reserved_header_names(session_header_names: Iterable[str]) -> frozenset[str]:
+def reserved_header_names(transport_header_names: Iterable[str]) -> frozenset[str]:
     """Header names an endpoint may not declare: the CONNECTION's own.
 
     One set, read by both things that land in the same header map -- the
@@ -171,8 +171,14 @@ def reserved_header_names(session_header_names: Iterable[str]) -> frozenset[str]
     (RULE-HTTP-002 / RULE-HTTP-003) -- this one, an ``idempotency.name``,
     included. What is left is what no document can know: the header names
     THIS connection's transport resolved to something.
+
+    Which transport: the one the operation being judged dispatches
+    through. A connector may own ``Authorization`` on one and nothing on
+    another, so a set taken from the default would let an endpoint shadow
+    a named transport's credential while refusing a header the transport
+    it actually uses never sends.
     """
-    return frozenset(name.lower() for name in session_header_names)
+    return frozenset(name.lower() for name in transport_header_names)
 
 
 def idempotency_config_problem(
@@ -327,7 +333,7 @@ def build_write_plan(
     doc: Mapping[str, Any],
     schema_spec: SchemaSpec,
     *,
-    session_header_names: set[str],
+    header_names_for: Callable[[str | None], Iterable[str]],
     resolver: Resolver,
 ) -> StreamWritePlan | str:
     """Build the plan for a stream, or return why the schema is refused.
@@ -336,6 +342,12 @@ def build_write_plan(
     rejection is a defect in the endpoint document or the stream's write
     config, which is what lets the caller declare one failure category for
     all of them.
+
+    ``header_names_for`` is asked, not told: only this function knows
+    which mode block the schema selects, and so which ``transport_ref``
+    the stream's writes dispatch through. A caller passing one set for the
+    whole document would be passing the default transport's, which is the
+    wrong set for a stream that writes somewhere else.
     """
     mode_key = WRITE_MODE_KEYS.get(schema_spec.write_mode)
     if mode_key is None:
@@ -356,7 +368,7 @@ def build_write_plan(
 
     request = mode_block.get("request") or {}
     endpoint_id = str(doc.get("endpoint_id", "<unnamed>"))
-    reserved = reserved_header_names(session_header_names)
+    reserved = reserved_header_names(header_names_for(request.get("transport_ref")))
     try:
         table = ParamTable.for_write(mode_block.get("params") or {}, resolver)
         problem = request_block_problem(

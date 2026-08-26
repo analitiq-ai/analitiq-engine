@@ -259,10 +259,21 @@ The connector defines `connector_type`, `connection_contract`,
 `derived` values, and one or more `transports`. An operation dispatches
 through the transport its `request.transport_ref` names, or through
 `default_transport` when it names none; the runtime resolves that
-transport's expression tree via the spec resolver. Every URL a request
-produces — a next-page link included — must land on the origin of a
-transport the run dispatches through, so a link off that set is refused
-rather than sent with the connection's credentials.
+transport's expression tree via the spec resolver.
+
+Everything that follows from a transport travels with it — the session,
+the base URL, the rate limiter, and the header names the connection owns
+(which is what an operation's own `request.headers` may not shadow). An
+operation is judged and sent against **its** transport's facts, never the
+default's.
+
+Every URL a request produces — a next-page link included — must land on
+the origin of a transport the run dispatches through, so a link off that
+set is refused rather than sent with the connection's credentials. A link
+that lands on a *different* declared origin is fetched through the
+transport that declares it, not through the one the read started on;
+where two transports share that origin the link is refused, because
+nothing in it says which one's credentials to use.
 
 Connector types accepted by the runtime: `api`, `database`, `file`,
 `s3`, `stdout`. The destination handler registry maps these directly

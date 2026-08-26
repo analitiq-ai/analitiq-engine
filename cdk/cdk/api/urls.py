@@ -30,6 +30,7 @@ __all__ = [
     "declared_origins",
     "follow_url",
     "join_url",
+    "origin_of",
     "redact_credentials",
     "require_declared_origin",
 ]
@@ -56,7 +57,7 @@ def join_url(base: str, path: str) -> str:
     return str(URL(base).joinpath(path.lstrip("/"), encoded=True))
 
 
-def _origin(url: str) -> str:
+def origin_of(url: str) -> str:
     """Reduce *url* to its comparable origin: scheme, host and effective port.
 
     ``URL.origin()`` is the normalization -- case-folded host, default
@@ -66,9 +67,11 @@ def _origin(url: str) -> str:
     identically still compare unequal when one was spelled with its
     default port.
 
-    One spelling of the reduction, so the set the guard is built from and
-    the URL it is probed with cannot come to normalize differently -- a
-    set built one way and probed another is a guard that answers on
+    One spelling of the reduction, and public because more than the guard
+    needs it: a followed link is dispatched through the transport whose
+    origin it lands on, so the set the guard is built from, the URL it is
+    probed with, and the map that selects a transport all reduce the same
+    way. A set built one way and probed another is a guard that answers on
     spelling.
     """
     return str(URL(url).origin())
@@ -82,7 +85,7 @@ def declared_origins(base_urls: Iterable[str]) -> frozenset[str]:
     reader of the wire sees rather than on how a base URL happened to be
     spelled.
     """
-    return frozenset(_origin(base) for base in base_urls if base)
+    return frozenset(origin_of(base) for base in base_urls if base)
 
 
 def require_declared_origin(url: str, *, origins: frozenset[str]) -> None:
@@ -107,7 +110,7 @@ def require_declared_origin(url: str, *, origins: frozenset[str]) -> None:
     authored connector code is the worker's egress policy, the secrets
     model and registry admission, none of which this replaces.
     """
-    if _origin(url) in origins:
+    if origin_of(url) in origins:
         return
     raise ValueError(
         f"{url!r} {ORIGIN_REFUSAL_MARKER} {sorted(origins)}; refusing to "
