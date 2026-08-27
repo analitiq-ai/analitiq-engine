@@ -14,10 +14,14 @@ type as ``TypeError``. The servicer's clauses match
 neither, so ``StreamRecords`` re-raised and every other stream sharing the
 connection died with one stream's typo.
 
-A defect the published schema can decide from the document alone never
-gets that far: parsing refuses it, so the handshake answers only for the
-defects that turn on a runtime fact. The two sets are kept apart below so
-neither quietly stops being tested.
+A defect the published schema can decide from the document alone is
+refused earlier, by the parse at registration -- but it lands on the same
+ack. Registration runs before the gRPC server exists, so it records the
+parse failure against its stream instead of raising, and the handshake is
+where that stream hears about it while its neighbours sync. The two sets
+are kept apart below so neither quietly stops being tested: one proves the
+contract still decides these documents, the other proves the decision
+reaches one ack rather than the process exit code.
 """
 
 from __future__ import annotations
@@ -86,18 +90,26 @@ def _document(
     }
 
 
-async def _ack(document: dict[str, Any]) -> Any:
+async def _connector(documents: dict[str, dict[str, Any]]) -> GenericAPIConnector:
     connector = GenericAPIConnector()
-    connector.set_stream_endpoints({"items": document})
+    connector.set_stream_endpoints(documents)
     await connector.connect(runtime_with(FakeSession()))
+    return connector
+
+
+async def _ack_for(connector: GenericAPIConnector, stream_id: str) -> Any:
     return await DestinationServicer(connector, MagicMock())._handle_schema_message(
         SchemaMessage(
-            stream_id="items",
+            stream_id=stream_id,
             version=1,
             write_mode=_INSERT,
             ack_timeout_seconds=30,
         )
     )
+
+
+async def _ack(document: dict[str, Any]) -> Any:
+    return await _ack_for(await _connector({"items": document}), "items")
 
 
 #: Defects no document can be judged on alone: each one turns on which
@@ -170,10 +182,37 @@ class TestOneStreamsDocumentDefectStaysOnItsOwnAck:
 
 
 @pytest.mark.parametrize("defect", sorted(_STATIC_DEFECTS), ids=sorted(_STATIC_DEFECTS))
-class TestADocumentDefectTheContractDecidesNeverReachesAHandshake:
+class TestADocumentDefectTheContractDecidesStillLandsOnOneAck:
     def test_the_published_schema_refuses_the_document(self, defect: str) -> None:
         # Nothing about these needs a run: the ack path above is the
         # residue left once the contract has had its say, and it stays
         # honest only while the contract keeps catching these four.
         with pytest.raises(ValidationError):
             ApiEndpointDoc.model_validate(_document(**_STATIC_DEFECTS[defect]))
+
+    @pytest.mark.asyncio
+    async def test_registration_does_not_kill_the_worker(self, defect: str) -> None:
+        # set_stream_endpoints runs from the worker entry point, before
+        # DestinationGRPCServer is constructed. A raise there is a process
+        # exit and the engine sees a dead worker -- not one rejected
+        # stream -- so the refusal has to wait for an ack to ride on.
+        connector = await _connector(
+            {"items": _document(**_STATIC_DEFECTS[defect]), "other": _document()}
+        )
+        ack = await _ack_for(connector, "items")
+        assert not ack.accepted
+        assert ack.stream_id == "items"
+        assert ack.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
+        # The parse failure itself, not the "you never registered it"
+        # message the same missing entry would otherwise produce.
+        assert "ApiEndpointDoc" in ack.message
+        assert "call set_stream_endpoints" not in ack.message
+
+    @pytest.mark.asyncio
+    async def test_the_other_streams_on_the_worker_still_configure(
+        self, defect: str
+    ) -> None:
+        connector = await _connector(
+            {"items": _document(**_STATIC_DEFECTS[defect]), "other": _document()}
+        )
+        assert (await _ack_for(connector, "other")).accepted

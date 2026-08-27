@@ -382,6 +382,13 @@ class GenericSQLConnector(BaseDestinationHandler):
         # at startup.
         self._stream_endpoints: dict[str, DatabaseEndpointDoc] = {}
 
+        # Stream-id -> why that stream's document did not parse. Held here
+        # rather than raised at startup: set_stream_endpoints() runs before
+        # the gRPC server exists, so a raise there kills the worker and
+        # every other stream on it. configure_schema() is the first point
+        # with a per-stream ack to put the reason on.
+        self._stream_endpoint_problems: dict[str, str] = {}
+
         # Stream-id -> upsert conflict keys (the stream's validated
         # ``write.conflict_keys``). Populated by set_stream_conflict_keys()
         # at startup; absent/empty means INSERT mode.
@@ -417,26 +424,30 @@ class GenericSQLConnector(BaseDestinationHandler):
         the wire.
 
         The engine hands authored JSON across the worker boundary, so each
-        document is parsed here: the connector process is untrusted, and a
-        document that does not satisfy the published contract must be
-        refused at registration — before any state is stored or any DDL is
-        built — rather than surfacing later as a missing key deep in the
-        write path. The parse is also what makes every field below a named
+        document is parsed here: the connector process is untrusted, storage
+        stays typed, and the parse is what makes every field below a named
         attribute instead of a dict lookup.
+
+        A parse failure is recorded against its own stream, never raised.
+        This runs from the worker entry point before the gRPC server is
+        constructed, so raising would exit the process and the engine would
+        see a dead worker instead of a rejected stream -- taking down every
+        other stream this worker serves for one malformed document. The
+        stream keeps its failure until ``configure_schema`` can raise it
+        where the SchemaAck exists.
         """
         parsed: dict[str, DatabaseEndpointDoc] = {}
+        problems: dict[str, str] = {}
         for sid, doc in stream_endpoints.items():
             try:
                 parsed[sid] = DatabaseEndpointDoc.model_validate(doc)
             except ValidationError as err:
-                # SchemaConfigurationError, not the bare ValidationError:
-                # the gRPC layer classifies this type as deterministic and
-                # surfaces it in the SchemaAck instead of retrying it.
-                raise SchemaConfigurationError(
+                problems[sid] = (
                     f"stream {sid!r}: endpoint document does not satisfy "
                     f"DatabaseEndpointDoc: {err}"
-                ) from err
+                )
         self._stream_endpoints = parsed
+        self._stream_endpoint_problems = problems
 
     def set_stream_conflict_keys(
         self, stream_conflict_keys: Mapping[str, list[str]]
@@ -963,6 +974,16 @@ class GenericSQLConnector(BaseDestinationHandler):
             return False
 
         stream_id = schema_spec.stream_id
+        # Before the "never registered" branch: a stream whose document was
+        # registered but did not parse is absent from _stream_endpoints too,
+        # and telling its author to call set_stream_endpoints() would name
+        # the wrong defect. SchemaConfigurationError, not a bare False: the
+        # servicer translates this type into a rejected SchemaAck carrying
+        # the parse failure verbatim, which is the reason worth reporting.
+        problem = self._stream_endpoint_problems.get(stream_id)
+        if problem is not None:
+            raise SchemaConfigurationError(problem)
+
         endpoint_doc = self._stream_endpoints.get(stream_id)
         if endpoint_doc is None:
             logger.error(

@@ -3,9 +3,10 @@
 Two rules, both structural. The transport lives in one module and the
 connector that drives it, so the loop, the strategies, the predicates and
 the verdicts stay testable -- and importable -- without an HTTP client.
-And nothing here imports a contract model: the engine validates the
-document before it crosses the boundary, and this package navigates the
-already-validated document raw.
+And the predicate walker evaluates a stop condition without importing the
+contract's predicate models: everything else here reads the document as
+the models it parsed into, but a branch selected by ``isinstance`` would
+drag all seventeen of them into the one module that must stay a walk.
 """
 
 from __future__ import annotations
@@ -71,15 +72,28 @@ def test_only_the_connector_produces_arrow() -> None:
     )
 
 
-def test_no_module_imports_a_contract_model() -> None:
-    # The engine validates the document against the published contract
-    # before anything here reads it, so this package navigates it raw --
-    # dispatching on the raw discriminator key, never by isinstance over
-    # seventeen models.
+#: The predicate walk and the helper that feeds it the authored form. Both,
+#: because the promise holds only end to end: a contract import in either
+#: puts the seventeen predicate models back on the stop condition's path.
+_PREDICATE_WALK = (
+    _PACKAGE / "predicates.py",
+    _PACKAGE.parent / "json_utils.py",
+)
+
+
+def test_the_predicate_walk_imports_no_contract_model() -> None:
+    # A stop condition is a one-key mapping whose key names the operator,
+    # exactly as the contract's own union serialises -- so evaluating one is
+    # a walk over the authored form, not a branch by isinstance over the
+    # seventeen predicate models. This is the promise predicates.py's
+    # docstring makes; every other module here reads the parsed models.
     offenders = [
-        path.name for path in _modules() if "analitiq" in _imported_roots(path)
+        path.name for path in _PREDICATE_WALK if "analitiq" in _imported_roots(path)
     ]
-    assert not offenders, f"cdk.api must not import contract models: {offenders}"
+    assert not offenders, (
+        "the stop condition is evaluated in its authored form, so no contract "
+        f"model may reach it: {offenders}"
+    )
 
 
 def test_the_connector_is_not_imported_eagerly() -> None:

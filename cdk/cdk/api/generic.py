@@ -225,6 +225,12 @@ class GenericAPIConnector(BaseDestinationHandler):
         # an unused attribute a tool can find, rather than a key nobody can
         # prove is unread.
         self._stream_endpoints: dict[str, ApiEndpointDoc] = {}
+        # Stream-id -> why that stream's document did not parse. Held here
+        # rather than raised at registration: set_stream_endpoints() runs
+        # before the gRPC server exists, so a raise there kills the worker
+        # and every other stream on it. configure_schema() is the first
+        # point with a per-stream ack to put the reason on.
+        self._stream_endpoint_problems: dict[str, str] = {}
         self._write_resolver: Resolver | None = None
         self.last_schema_rejection: str | None = None
 
@@ -735,23 +741,31 @@ class GenericAPIConnector(BaseDestinationHandler):
         """Register each stream's contract endpoint document.
 
         The engine hands authored JSON across the worker boundary, so the
-        signature stays dict-in and each document is parsed here -- refused
-        at registration, before any plan is built, rather than surfacing
-        later as a missing key deep in the write path.
+        signature stays dict-in and each document is parsed here: storage
+        stays typed, and a document that cannot satisfy the contract is
+        caught now rather than surfacing later as a missing attribute deep
+        in the write path.
+
+        A parse failure is recorded against its own stream, never raised.
+        This runs from the worker entry point before the gRPC server is
+        constructed, so raising would exit the process and the engine would
+        see a dead worker instead of a rejected stream -- taking down every
+        other stream this worker serves for one malformed document. The
+        stream keeps its failure until ``configure_schema`` can answer with
+        it on that stream's SchemaAck.
         """
         parsed: dict[str, ApiEndpointDoc] = {}
+        problems: dict[str, str] = {}
         for stream_id, document in stream_endpoints.items():
             try:
                 parsed[stream_id] = ApiEndpointDoc.model_validate(document)
             except ValidationError as err:
-                # TransportSpecError, not the bare ValidationError: the
-                # worker classifies this type as deterministic instead of
-                # retrying a document that will never parse.
-                raise TransportSpecError(
+                problems[stream_id] = (
                     f"stream {stream_id!r}: endpoint document does not "
                     f"satisfy ApiEndpointDoc: {err}"
-                ) from err
+                )
         self._stream_endpoints = parsed
+        self._stream_endpoint_problems = problems
 
     @property
     def connector_type(self) -> str:
@@ -817,6 +831,14 @@ class GenericAPIConnector(BaseDestinationHandler):
         # read window is race-free only while this method stays await-free.
         self.last_schema_rejection = None
         self.last_schema_failure_category = FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+
+        # Before the "never registered" branch: a stream whose document was
+        # registered but did not parse is absent from _stream_endpoints too,
+        # and telling its author to call set_stream_endpoints() would name
+        # the wrong defect.
+        problem = self._stream_endpoint_problems.get(stream_id)
+        if problem is not None:
+            return self._reject_schema(stream_id, problem)
 
         doc = self._stream_endpoints.get(stream_id)
         if doc is None:

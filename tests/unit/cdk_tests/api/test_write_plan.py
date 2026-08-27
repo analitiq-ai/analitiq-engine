@@ -657,33 +657,20 @@ class TestTheRequestTheStreamWillActuallySend:
         self,
     ) -> None:
         # One reserved set: the engine-owned key must not be layered over a
-        # header this endpoint declares either. Hand-written, like the rest
-        # of the second-line-of-defence rules -- the contract rejects this
-        # document too, so a valid one cannot reach the check.
-        doc = {
-            "endpoint_id": "items",
-            "operations": {
-                "write": {
-                    "insert": {
-                        "request": {
-                            "method": "POST",
-                            "path": "/items",
-                            "headers": {"Idempotency-Key": {"literal": "authored"}},
-                            "body": {"item": {"from_input": "record"}},
-                        },
-                        "idempotency": {"in": "header", "name": "Idempotency-Key"},
-                    }
-                }
-            },
-        }
-        outcome = build_write_plan(
-            doc,
-            _spec(),
-            header_names_for=lambda _ref: set(),
-            transport_problem=lambda _ref: None,
-            resolver=_resolver(),
+        # header this endpoint declares either. Put to the rule directly,
+        # because the contract rejects such a document too -- no document
+        # build_write_plan will parse can carry this collision to the check.
+        plan = StreamWritePlan(headers={"Idempotency-Key": "authored"})
+        problem = idempotency_config_problem(
+            Idempotency.model_validate({"in": "header", "name": "Idempotency-Key"}),
+            None,
+            plan,
+            # The set the caller folds the endpoint's own declared headers
+            # into; nothing connection-owned is needed to make this collide.
+            reserved_headers={name.lower() for name in plan.headers},
+            declared_input_fields=set(),
         )
-        assert isinstance(outcome, str) and "collides" in outcome
+        assert problem is not None and "collides" in problem
 
 
 class TestRetryVerdicts:

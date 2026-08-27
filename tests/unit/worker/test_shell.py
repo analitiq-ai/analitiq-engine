@@ -20,6 +20,59 @@ from src.worker.shell import build_bootstrap, read_type_map_payloads
 _RULES = [{"match": "exact", "native": "BIGINT", "canonical": "Int64"}]
 _WRITE_RULES = [{"match": "exact", "canonical": "Int64", "native": "BIGINT"}]
 
+#: One record field, spelled the way the contract requires a schema to spell
+#: one. Shared by both sides so the documents below stay about transports.
+_FIELDS = {"id": {"type": "integer", "native_type": "integer", "arrow_type": "Int64"}}
+
+
+def _read_operation(transport_ref):
+    """A read operation dispatching through *transport_ref*."""
+    return {
+        "request": {"method": "GET", "path": "/items", "transport_ref": transport_ref},
+        "response": {
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "records": {
+                        "type": "array",
+                        "items": {"type": "object", "properties": _FIELDS},
+                    }
+                },
+            },
+            "records": {"ref": "response.body.records"},
+        },
+    }
+
+
+def _write_operation(transport_ref, *, mode="insert"):
+    """A write operation of *mode* dispatching through *transport_ref*."""
+    block = {
+        "request": {
+            "method": "POST",
+            "path": "/items",
+            "transport_ref": transport_ref,
+            "body": {"item": {"from_input": "record"}},
+        },
+        "input": {"schema": {"type": "object", "properties": _FIELDS}},
+    }
+    if mode == "upsert":
+        block["conflict_keys"] = ["id"]
+    return block
+
+
+def _api_document(operations):
+    """An endpoint document carrying *operations*, in wire form.
+
+    Wire form and complete, because ``build_bootstrap`` parses what it is
+    handed before it reads a transport off it: a skeleton naming only the
+    transports would never reach the read this test is about.
+    """
+    return {
+        "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
+        "endpoint_id": "items",
+        "operations": operations,
+    }
+
 
 def _write_definition(base, *, rules=None, write_rules=None):
     definition = base / "definition"
@@ -118,12 +171,12 @@ class TestBuildBootstrap:
         assert json.loads(json.dumps(bootstrap)) == bootstrap
 
     #: One document declaring both sides, each naming its own transport.
-    _BOTH_SIDES = {
-        "operations": {
-            "read": {"request": {"transport_ref": "files"}},
-            "write": {"insert": {"request": {"transport_ref": "uploads"}}},
+    _BOTH_SIDES = _api_document(
+        {
+            "read": _read_operation("files"),
+            "write": {"insert": _write_operation("uploads")},
         }
-    }
+    )
 
     async def _refs_for(self, tmp_path, role, **documents):
         connectors = tmp_path / "connectors"
@@ -166,14 +219,14 @@ class TestBuildBootstrap:
         self, tmp_path
     ):
         """An unused mode's transport is credentials the worker never sends."""
-        document = {
-            "operations": {
+        document = _api_document(
+            {
                 "write": {
-                    "insert": {"request": {"transport_ref": "bulk"}},
-                    "upsert": {"request": {"transport_ref": "single"}},
+                    "insert": _write_operation("bulk"),
+                    "upsert": _write_operation("single", mode="upsert"),
                 }
             }
-        }
+        )
         refs = await self._refs_for(
             tmp_path,
             "destination",
@@ -186,14 +239,14 @@ class TestBuildBootstrap:
         self, tmp_path
     ):
         """Nothing said which, so nothing may be left unopenable."""
-        document = {
-            "operations": {
+        document = _api_document(
+            {
                 "write": {
-                    "insert": {"request": {"transport_ref": "bulk"}},
-                    "upsert": {"request": {"transport_ref": "single"}},
+                    "insert": _write_operation("bulk"),
+                    "upsert": _write_operation("single", mode="upsert"),
                 }
             }
-        }
+        )
         refs = await self._refs_for(
             tmp_path, "destination", stream_endpoints={"items": document}
         )

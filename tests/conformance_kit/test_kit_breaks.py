@@ -32,6 +32,7 @@ from cdk.conformance import (
     check_api_read_stop_condition,
     check_api_record_schema,
     check_declaration_consistency,
+    check_endpoint_documents,
     check_override_surface,
     check_read_transport_selection,
     check_type_map_grammar,
@@ -1139,14 +1140,19 @@ class TestAKindDefaultWithoutItsExtra:
 
 
 class TestApiReadPathBreaks:
-    """A bent api endpoint document fails the drives that execute it.
+    """A bent api endpoint document does not pass tier 1.
 
     Each break here is one an author makes and a green suite would ship:
     a paging scheme with nowhere to go reads one page and reports success,
     a stop condition reading nothing off the page never ends a traversal,
     and a records ref addressing an undeclared field fails on the first
-    response. None of them raises anywhere before the read runs, which is
-    why the kit has to drive the read to find them.
+    response. WHICH check names one follows from what the document alone
+    settles. Everything the published contract can decide from the
+    document is refused at load by ``endpoint-document-contract``, and the
+    drives then report only that they did not assess the endpoint -- the
+    kit does not restate a rule the contract already owns. What is left
+    needs the read compiled or a page scripted, and only driving the read
+    finds it.
     """
 
     @staticmethod
@@ -1163,23 +1169,47 @@ class TestApiReadPathBreaks:
     def test_an_unknown_paging_scheme_names_the_contracts_union(
         self, tmp_path: Path
     ) -> None:
+        """The paging vocabulary is the contract's, and the contract names it.
+
+        ``build_strategy`` used to answer this from a table of its own. The
+        document never reaches that table now -- the discriminated union
+        refuses the tag at load, naming the five it could have been -- and
+        the compile drive says only that it assessed nothing here, which is
+        what keeps a refused document from reading as a clean one.
+        """
         target = self._broken(
             tmp_path, "widgets", lambda read: read["pagination"].update(type="seek")
         )
-        report = _report(check_api_read_compiles(target))
+        report = _report(check_endpoint_documents(target))
         assert "'seek'" in report
         assert "'offset'" in report, "the message must name the union it is not in"
+        assert "were not read" in _report(check_api_read_compiles(target))
 
     def test_a_cursor_param_with_a_default_ships_on_the_first_request(
         self, tmp_path: Path
     ) -> None:
-        """The first page has nothing to continue from, so it sends no token."""
+        """The first page has nothing to continue from, so it sends no token.
+
+        A cursor param carrying a declared default is resolved into the
+        param table before the loop touches it, and a cursor -- alone among
+        the five schemes -- sets no token on the first request, so the stale
+        default survives onto the wire and asks the provider to resume from
+        a position it never issued. The contract settles it a step earlier
+        and for all five: a param pagination references must declare
+        ``controlled_by``, and a controlled param's default never enters the
+        table at all.
+        """
 
         def to_cursor(read: dict[str, Any]) -> None:
             read["params"]["page_token"] = {
                 "in": "query",
                 "type": "string",
+                "required": False,
                 "default": {"literal": "start"},
+            }
+            read["request"]["query"]["page_token"] = {"from_param": "page_token"}
+            read["response"]["schema"]["properties"]["next_token"] = {
+                "type": ["string", "null"]
             }
             read["pagination"] = {
                 "type": "cursor",
@@ -1192,9 +1222,10 @@ class TestApiReadPathBreaks:
             }
 
         target = self._broken(tmp_path, "widgets", to_cursor)
-        report = _report(check_api_read_compiles(target))
+        report = _report(check_endpoint_documents(target))
         assert "'page_token'" in report
         assert "controlled_by" in report
+        assert "were not read" in _report(check_api_read_compiles(target))
 
     def test_a_next_value_off_the_page_scope_is_refused_at_compile(
         self, tmp_path: Path
@@ -1210,6 +1241,22 @@ class TestApiReadPathBreaks:
         """
 
         def to_cursor(read: dict[str, Any]) -> None:
+            # Everything but the next value is what a working cursor read
+            # declares: the token is a param of its own, bound in the query
+            # and owned by the loop, and the response schema declares the
+            # field the stop condition reads. The contract settles all of
+            # that, so leaving any of it out would refuse the document for a
+            # reason this test is not about.
+            read["params"]["page_token"] = {
+                "in": "query",
+                "type": "string",
+                "required": False,
+                "controlled_by": "pagination",
+            }
+            read["request"]["query"]["page_token"] = {"from_param": "page_token"}
+            read["response"]["schema"]["properties"]["next_token"] = {
+                "type": ["string", "null"]
+            }
             read["pagination"] = {
                 "type": "cursor",
                 "limit": {"param": "limit", "default": {"ref": "runtime.batch_size"}},
@@ -1221,6 +1268,7 @@ class TestApiReadPathBreaks:
             }
 
         target = self._broken(tmp_path, "widgets", to_cursor)
+        assert check_endpoint_documents(target) == [], "the contract leaves this one"
         report = _report(check_api_read_compiles(target))
         assert "'response.headers.x-next'" in report
         assert "carries only 'body', 'record_count'" in report
@@ -1250,48 +1298,69 @@ class TestApiReadPathBreaks:
         ``request.headers`` or ``request.body``. Strip the query map and the
         offset strategy still counts rows -- ``advance`` answers a
         ``PageRequest`` whose params differ from page one's -- while every
-        request built from it is byte-for-byte the first one. A drive
-        comparing the param tables reports nothing here and certifies a
-        connector that fetches page one until the provider gets bored.
+        request built from it is byte-for-byte the first one, so the read
+        fetches page one until the provider gets bored.
+
+        Which map binds which param is decidable from the document alone,
+        so the contract is what refuses it, and it refuses it by the param
+        that reaches nothing rather than by the traversal that goes
+        nowhere. The drive's job here is only to not call the endpoint
+        clean.
         """
         target = self._broken(
             tmp_path, "widgets", lambda read: read["request"].pop("query")
         )
-        report = _report(check_api_read_advances(target))
-        assert (
-            "the request after the first page is the request before it again" in report
-        )
-        assert "request.query" in report, "the report must name the missing sink"
+        report = _report(check_endpoint_documents(target))
+        assert "'limit'" in report, "the report must name the unbound param"
+        assert "not referenced by any request binding" in report
+        assert "were not read" in _report(check_api_read_advances(target))
 
     def test_a_step_that_cannot_advance_is_reported_before_the_yield(
         self, tmp_path: Path
     ) -> None:
+        """A zero step counts nothing, so the traversal re-reads page one.
+
+        The drive used to catch it on the first ``advance``. A literal step
+        is a number in the document, so the contract types it out of the
+        document instead, and the endpoint never reaches a drive.
+        """
         target = self._broken(
             tmp_path,
             "widgets",
             lambda read: read["pagination"]["offset"].update(increment_by=0),
         )
-        report = _report(check_api_read_advances(target))
-        assert "must be positive" in report
+        report = _report(check_endpoint_documents(target))
+        assert "increment_by" in report
+        assert "greater than or equal to 1" in report
+        assert "were not read" in _report(check_api_read_advances(target))
 
-    def test_a_keyset_ordering_field_the_schema_omits_is_not_a_finding(
+    def test_a_keyset_ordering_field_the_schema_leaves_untyped_is_not_a_finding(
         self, tmp_path: Path
     ) -> None:
         """The engine walks the provider's record, not the declared schema.
 
         ``extract_records`` hands the strategy the raw response objects, so
-        ordering by a field the provider sends and the response schema does
-        not declare reads perfectly well. A check asserting otherwise would
-        fail a working connector, which is why the ordering field is planted
-        rather than sampled.
+        the ordering value the traversal continues from is whatever the
+        provider sent, not whatever the schema described. That is why the
+        drive PLANTS the ordering field instead of sampling it, and a record
+        shape that hands the drive no value there must not be a finding.
+
+        A node carrying no ``type`` is the contract-valid way to be handed
+        nothing: it may compose its type through ``allOf``/``anyOf``/``$ref``,
+        the sampler refuses to guess one, and the field drops out of the
+        scripted record. Omitting the field outright is no longer available
+        to state it -- the contract requires ``order_by_field`` to be
+        declared in the record shape, and refuses the document before any
+        drive sees it.
         """
         target = self._broken(
             tmp_path,
             "ledger",
             lambda read: read["response"]["schema"]["properties"]["entries"]["items"][
                 "properties"
-            ].pop("sequence"),
+            ].update(sequence={"description": "the position the provider orders by"}),
         )
+        assert check_endpoint_documents(target) == [], "declared, just untyped"
         assert check_api_read_advances(target) == []
 
     def test_a_next_url_function_handed_the_wrong_type_is_reported(
@@ -1338,18 +1407,23 @@ class TestApiReadPathBreaks:
     ) -> None:
         """A ``limit.default`` naming a scope nothing supplies is refused.
 
-        The never-fillable walk names it at compile -- it used to escape
-        ``build_read_strategy`` as a bare ``KeyError`` and take the compile
-        check down with it.
+        A scope name is a closed vocabulary and a ref is a string in the
+        document, so the contract is what reads it -- and it names the
+        scopes the leading token is not among. The never-fillable walk still
+        owns the harder half next door: a REAL scope that no request-time
+        resolution fills.
         """
 
         def bend(read: dict[str, Any]) -> None:
             read["pagination"]["limit"]["default"] = {"ref": "nosuchscope.size"}
 
         target = self._broken(tmp_path, "widgets", bend)
-        report = _report(check_api_read_compiles(target))
+        report = _report(check_endpoint_documents(target))
         assert "'nosuchscope.size'" in report
-        assert "request-time resolution never supplies" in report
+        assert (
+            "runtime|request|response" in report
+        ), "the message must name the scopes it is not among"
+        assert "were not read" in _report(check_api_read_compiles(target))
 
     def test_a_page_size_default_reading_the_response_is_reported(
         self, tmp_path: Path
@@ -1364,9 +1438,15 @@ class TestApiReadPathBreaks:
         """
 
         def bend(read: dict[str, Any]) -> None:
+            # Declared, because the contract resolves every pagination
+            # `response.body` path against the response schema and would
+            # otherwise refuse the document for a field that is missing
+            # rather than for a value that arrives too late.
+            read["response"]["schema"]["properties"]["page_size"] = {"type": "integer"}
             read["pagination"]["limit"]["default"] = {"ref": "response.body.page_size"}
 
         target = self._broken(tmp_path, "widgets", bend)
+        assert check_endpoint_documents(target) == [], "a real field, read too early"
         report = _report(check_api_read_compiles(target))
         assert "'response.body.page_size'" in report
         assert "request-time resolution never supplies" in report
@@ -1386,22 +1466,29 @@ class TestApiReadPathBreaks:
     ) -> None:
         """A default is a declared expression, and fails the same ways.
 
-        The param table is built before any binding map is read, so a defect
-        here escaped ahead of every classified site and took the compile
-        check -- and the three checks waiting on its probes -- with it.
+        Wherever the ref sits -- a pagination limit, a param default, a
+        request binding -- an unknown leading token is the same defect and
+        gets the same answer, which is the whole reason it belongs to the
+        contract rather than to whichever site happened to resolve it
+        first.
         """
 
         def bend(read: dict[str, Any]) -> None:
-            read.setdefault("params", {})["tag"] = {
+            read["params"]["tag"] = {
                 "in": "query",
                 "type": "string",
                 "required": False,
                 "default": {"ref": "nosuchscope.tag"},
             }
+            # Bound, because a declared param no request map references is
+            # a different defect with a message of its own.
+            read["request"]["query"]["tag"] = {"from_param": "tag"}
 
         target = self._broken(tmp_path, "widgets", bend)
-        report = _report(check_api_read_compiles(target))
-        assert "Unknown resolution scope" in report
+        report = _report(check_endpoint_documents(target))
+        assert "'nosuchscope.tag'" in report
+        assert "not a known resolution scope" in report
+        assert "were not read" in _report(check_api_read_compiles(target))
 
     def test_a_stop_condition_reading_nothing_off_the_page(
         self, tmp_path: Path
@@ -1415,11 +1502,20 @@ class TestApiReadPathBreaks:
         assert "reads nothing under 'response'" in report
 
     def test_a_missing_stop_condition(self, tmp_path: Path) -> None:
+        """A traversal with nothing to stop it runs until the provider does.
+
+        The stop-condition check used to say "declares no stop_when". A
+        required field's absence is the plainest thing a document can be
+        judged on alone, so the contract says it now and the check reports
+        only that this endpoint went unassessed.
+        """
         target = self._broken(
             tmp_path, "widgets", lambda read: read["pagination"].pop("stop_when")
         )
-        report = _report(check_api_read_stop_condition(target))
-        assert "declares no stop_when" in report
+        report = _report(check_endpoint_documents(target))
+        assert "stop_when" in report
+        assert "Field required" in report
+        assert "were not read" in _report(check_api_read_stop_condition(target))
 
     def test_a_stop_condition_that_cannot_compare_its_operands(
         self, tmp_path: Path
@@ -1437,14 +1533,22 @@ class TestApiReadPathBreaks:
     def test_a_records_ref_the_response_schema_does_not_declare(
         self, tmp_path: Path
     ) -> None:
+        """A records ref addressing nothing fails on the first response.
+
+        The record-schema check used to walk the ref against the declared
+        properties itself. Both halves of that walk are in the document, so
+        the contract does it -- naming the segment the traversal died on --
+        and the check reports only that it read no schema here.
+        """
         target = self._broken(
             tmp_path,
             "widgets",
             lambda read: read["response"]["records"].update(ref="response.body.items"),
         )
-        report = _report(check_api_record_schema(target))
+        report = _report(check_endpoint_documents(target))
         assert "'items'" in report
-        assert "not declared under properties" in report
+        assert "is not declared" in report
+        assert "were not read" in _report(check_api_record_schema(target))
 
     def test_a_json_type_the_read_map_has_no_rule_for(self, tmp_path: Path) -> None:
         target = self._broken(
@@ -1716,16 +1820,19 @@ class TestApiScriptedPageTakesTheDeclaredTypes:
         report = _report(check_api_read_stop_condition(target))
         assert "cannot compare str with int" in report
 
-    def test_an_operand_the_schema_declares_without_a_type_is_not_evaluated(
+    def test_an_operand_the_schema_declares_without_a_type_is_refused(
         self, tmp_path: Path
     ) -> None:
         """Reaching the node is not the same as knowing what it holds.
 
-        A property node carrying no ``type`` is contract-valid -- it may
-        compose its type through ``allOf``/``anyOf``/``$ref``. The kit has
-        no value to script there, and a guessed string is exactly what
-        decides whether the ordering comparison raises, so the condition is
-        left unevaluated instead of failing a working connector.
+        The kit has no value to script at an untyped node, and a guessed
+        string is exactly what decides whether the ordering comparison
+        raises -- so the kit refuses to guess, and used to leave the
+        condition unevaluated rather than fail a connector it could not
+        judge. Unevaluated is not judged either, and a pagination operand
+        nothing can type is a real defect: the contract now requires a
+        pagination reference to resolve to a node that declares its type,
+        so the document is refused and nobody has to guess.
         """
 
         def bend(read: dict[str, Any]) -> None:
@@ -1737,7 +1844,10 @@ class TestApiScriptedPageTakesTheDeclaredTypes:
             )
 
         target = self._broken(tmp_path, "widgets", bend)
-        assert check_api_read_stop_condition(target) == []
+        report = _report(check_endpoint_documents(target))
+        assert "'response.body.total'" in report
+        assert "declares no `type`" in report
+        assert "were not read" in _report(check_api_read_stop_condition(target))
 
 
 class TestApiChecksSayWhenTheyDroveNothing:
@@ -1754,9 +1864,19 @@ class TestApiChecksSayWhenTheyDroveNothing:
     def test_a_read_that_does_not_compile_is_reported_by_every_check(
         self, tmp_path: Path
     ) -> None:
+        # A stop condition on a reserved response sub-scope: contract-legal,
+        # so the document parses and there IS a read, and page-absent, so the
+        # compile drive refuses it. A document the contract refuses would
+        # test the other message -- "not read" rather than "not driven" --
+        # which is what TestACompileFindingBelongsToTheCheckThatOwnsIt pins.
         target = self._broken(
-            tmp_path, "widgets", lambda read: read["pagination"].update(type="seek")
+            tmp_path,
+            "widgets",
+            lambda read: read["pagination"].update(
+                stop_when={"missing": {"ref": "response.headers.x-next"}}
+            ),
         )
+        assert check_endpoint_documents(target) == []
         for check in (
             check_api_read_advances,
             check_api_read_stop_condition,
@@ -1766,35 +1886,45 @@ class TestApiChecksSayWhenTheyDroveNothing:
             assert "api-read-compiles" in report, check.__name__
 
 
-class TestACompileFindingBelongsToTheCompileCheck:
+class TestACompileFindingBelongsToTheCheckThatOwnsIt:
     """What one check finds must not turn up in the report of another.
 
-    The compiled probes are shared between four checks, and the compile
-    check has findings of its own to add to them. Sharing the mutable list
-    makes those findings arrive in three other checks as "N endpoint(s)
-    were not driven" -- said about endpoints that compiled and were driven
-    -- and makes the same check answer differently the second time it is
-    called.
+    Two findings travel between checks, and each has one meaning it must
+    keep. "Not driven" is said of an endpoint whose read the compile drive
+    refused; "not read" is said of a document the published contract
+    refused, one step earlier, so there was no read to drive. A document
+    stopped at the load door must never come back as a read that would not
+    compile: the author would go looking for a request the kit never got
+    as far as building.
+
+    The compiled probes are shared between four checks, which is how they
+    would blur. Sharing a mutable list would make one check's own findings
+    arrive in the other three as "N endpoint(s) were not driven" -- said
+    about endpoints that compiled and were driven -- and would make the
+    same check answer differently the second time it is called.
     """
 
     _broken = staticmethod(TestApiReadPathBreaks._broken)
 
     @staticmethod
     def _stale_cursor_default(read: dict[str, Any]) -> None:
-        """A cursor param carrying a default: a compile finding, not a crash."""
+        """A cursor param carrying a default: refused at load, not a crash."""
         read["params"]["page_token"].pop("controlled_by")
         read["params"]["page_token"]["default"] = {"literal": "start"}
 
-    def test_a_read_that_compiled_is_never_reported_as_undriven(
+    def test_a_document_the_contract_refuses_is_never_reported_as_undriven(
         self, tmp_path: Path
     ) -> None:
         target = self._broken(tmp_path, "invoices", self._stale_cursor_default)
-        assert "'page_token'" in _report(check_api_read_compiles(target))
+        assert "'page_token'" in _report(check_endpoint_documents(target))
         for check in (
+            check_api_read_compiles,
             check_api_read_advances,
             check_api_read_stop_condition,
         ):
-            assert "not driven" not in _messages(check(target)), check.__name__
+            messages = _messages(check(target))
+            assert "not driven" not in messages, check.__name__
+            assert "were not read" in messages, check.__name__
 
     def test_a_check_answers_the_same_thing_every_time_it_is_called(
         self, tmp_path: Path
@@ -2072,16 +2202,23 @@ class TestApiRequestBodyBreaks:
     _broken = staticmethod(TestApiReadPathBreaks._broken)
 
     def test_a_body_reading_the_response_scope_is_refused(self, tmp_path: Path) -> None:
-        """The request is built before any response exists."""
+        """The request is built before any response exists.
+
+        A ``response.*`` ref inside a request map says so on the face of the
+        document -- no run, no resolver and no page needed -- so the
+        contract refuses it and the compile drive keeps only the harder
+        half: a scope that IS a request-time scope and still fills nothing.
+        """
 
         def bend(read: dict[str, Any]) -> None:
             read["request"]["method"] = "POST"
             read["request"]["body"] = {"ref": "response.body.not_a_request_scope"}
 
         target = self._broken(tmp_path, "widgets", bend)
-        report = _report(check_api_read_compiles(target))
+        report = _report(check_endpoint_documents(target))
         assert "'response.body.not_a_request_scope'" in report
-        assert "request-time resolution never supplies" in report
+        assert "before the response exists" in report
+        assert "were not read" in _report(check_api_read_compiles(target))
 
     @pytest.mark.parametrize("subtree", ["parameters", "selections", "discovered"])
     def test_a_body_reading_the_connection_is_not_judged(
@@ -3081,13 +3218,18 @@ class TestApiPositionlessSchemeBreaks:
         ``#conformance-9902``, two different strings and one request
         target: the client strips the fragment building it. Comparing the
         raw URLs read that as a traversal that moved.
+
+        The template reads the endpoint's own declared next-link field: the
+        contract resolves every pagination ``response.body`` path against
+        the response schema, so a field invented here would be refused for
+        not existing rather than driven for not moving.
         """
         target = self._broken(
             tmp_path,
             "events",
             lambda read: read["pagination"]["link"].update(
                 next_url={
-                    "template": "/v1/events#${response.body.next_page_url}",
+                    "template": "/v1/events#${response.body.links.next}",
                 }
             ),
         )
@@ -3150,9 +3292,22 @@ class TestApiRequestBodyIsValidatedAroundConnectionValues:
     _broken = staticmethod(TestApiReadPathBreaks._broken)
 
     @staticmethod
-    def _post_body(spec: dict[str, Any]) -> Any:
+    def _post_body(spec: dict[str, Any], *, binds_offset: bool = False) -> Any:
+        """Make the read a POST carrying *spec* as its body.
+
+        ``binds_offset`` moves the paging param out of ``request.query``
+        and re-declares it ``in: body`` for a *spec* that binds it. A param
+        is bound by exactly one request map and the map has to agree with
+        the param's own ``in``, both of which the contract checks, so a
+        body binding ``offset`` beside the query's own binding is refused
+        at load for two reasons none of these tests is about.
+        """
+
         def bend(read: dict[str, Any]) -> None:
             read["request"]["method"] = "POST"
+            if binds_offset:
+                read["params"]["offset"]["in"] = "body"
+                read["request"]["query"].pop("offset")
             read["request"]["body"] = spec
 
         return bend
@@ -3168,7 +3323,8 @@ class TestApiRequestBodyIsValidatedAroundConnectionValues:
                     "scope": {"ref": "connection.parameters.scope"},
                     "page": {"from_param": "offset"},
                     "broken": {"ref": 123},
-                }
+                },
+                binds_offset=True,
             ),
         )
         report = _report(check_api_read_compiles(target))
@@ -3184,7 +3340,8 @@ class TestApiRequestBodyIsValidatedAroundConnectionValues:
                 {
                     "scope": {"ref": "connection.parameters.scope"},
                     "page": {"from_param": "offset"},
-                }
+                },
+                binds_offset=True,
             ),
         )
         assert check_api_read_compiles(target) == []
@@ -3451,6 +3608,14 @@ class TestApiRequestBlockBreaks:
         engine-side, at transport materialization. A binding reading them
         is not a value the connection will supply later; it is dropped and
         the placeholder never substitutes.
+
+        The kit used to say that from the resolved value. It cannot get
+        that far now, and does not need to: a path placeholder binds a
+        declared param and nothing else, so the contract refuses the
+        expression on sight -- see
+        :meth:`test_the_contract_owns_what_a_path_binding_may_say` for the
+        rule. What this keeps is the verdict: a connector routing a secret
+        through its path does not pass tier 1.
         """
 
         def bend(read: dict[str, Any]) -> None:
@@ -3460,9 +3625,10 @@ class TestApiRequestBlockBreaks:
             }
 
         target = self._broken(tmp_path, "widgets", bend)
-        report = _report(check_api_read_compiles(target))
-        assert "'secrets.account_id'" in report
-        assert "request-time resolution never supplies" in report
+        report = _report(check_endpoint_documents(target))
+        assert "path_params['account_id']" in report
+        assert "from_param" in report
+        assert "were not read" in _report(check_api_read_compiles(target))
 
     def test_a_connection_field_outside_the_request_subtrees_is_refused(
         self, tmp_path: Path
@@ -3472,6 +3638,12 @@ class TestApiRequestBlockBreaks:
         The request resolver builds exactly parameters/selections/discovered,
         so a binding reading any other connection field resolves on no run
         -- deferring it would certify a placeholder production never fills.
+
+        In a PATH the contract gets there first, for the same reason it
+        does with a secret: the only expression a placeholder may bind is a
+        declared param. The never-fillable walk still answers this scope
+        wherever an expression is legal -- see
+        :meth:`test_an_unknown_scope_in_an_unchosen_map_entry_is_still_refused`.
         """
 
         def bend(read: dict[str, Any]) -> None:
@@ -3479,9 +3651,10 @@ class TestApiRequestBlockBreaks:
             read["request"]["path_params"] = {"account_id": {"ref": "connection.name"}}
 
         target = self._broken(tmp_path, "widgets", bend)
-        report = _report(check_api_read_compiles(target))
-        assert "'connection.name'" in report
-        assert "request-time resolution never supplies" in report
+        report = _report(check_endpoint_documents(target))
+        assert "path_params['account_id']" in report
+        assert "from_param" in report
+        assert "were not read" in _report(check_api_read_compiles(target))
 
     def test_a_path_placeholder_a_run_supplies_is_not_a_finding(
         self, tmp_path: Path
@@ -3535,13 +3708,22 @@ class TestApiRequestBlockBreaks:
     def test_a_path_placeholder_the_pagination_loop_owns_is_refused(
         self, tmp_path: Path
     ) -> None:
-        """A per-page value can never reach a path substituted once per read."""
+        """A per-page value can never reach a path substituted once per read.
+
+        Declared ``in: path`` and bound only there, so the document says
+        exactly one coherent thing and the contract passes it: which map
+        binds a param is the contract's, whether the value can ARRIVE in
+        time is the kit's.
+        """
 
         def bend(read: dict[str, Any]) -> None:
             read["request"]["path"] = "/v1/widgets/{offset}"
+            read["request"]["query"].pop("offset")
+            read["params"]["offset"].update({"in": "path", "required": True})
             read["request"]["path_params"] = {"offset": {"from_param": "offset"}}
 
         target = self._broken(tmp_path, "widgets", bend)
+        assert check_endpoint_documents(target) == [], "coherent, and still impossible"
         report = _report(check_api_read_compiles(target))
         assert "'offset'" in report
         assert "pagination loop owns" in report
@@ -3683,6 +3865,11 @@ class TestApiRequestBlockBreaks:
 
         def bend(read: dict[str, Any]) -> None:
             read["request"]["method"] = "POST"
+            # The paging param moves into the body with its binding: the
+            # contract refuses a param bound in two maps, or bound in one
+            # its own `in` does not name.
+            read["params"]["offset"]["in"] = "body"
+            read["request"]["query"].pop("offset")
             read["request"]["body"] = {
                 "function": "lookup",
                 "input": {"from_param": "offset"},
@@ -3697,14 +3884,30 @@ class TestApiRequestBlockBreaks:
     def test_a_header_the_connection_does_not_send_is_clean(
         self, tmp_path: Path
     ) -> None:
-        target = self._broken(
-            tmp_path,
-            "widgets",
-            lambda read: read["request"].update(
-                headers={"X-Tenant": {"from_param": "tenant"}},
-                query={"page[limit]": {"from_param": "limit"}},
-            ),
-        )
+        """A declared param no definition-only run fills is a deferral.
+
+        ``tenant`` carries no default, so the header drops out of the
+        compiled request -- exactly as it would on a connection that leaves
+        it unset -- and the read is judged on what it declared, not on what
+        this run could resolve. The bracketed query key rides along because
+        a wire name is not an identifier.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            # Declared, because a header binding naming no param is refused
+            # at load: the contract owns which params a request map may name.
+            read["params"]["tenant"] = {
+                "in": "header",
+                "type": "string",
+                "required": False,
+            }
+            read["request"]["headers"] = {"X-Tenant": {"from_param": "tenant"}}
+            read["request"]["query"]["page[limit]"] = read["request"]["query"].pop(
+                "limit"
+            )
+
+        target = self._broken(tmp_path, "widgets", bend)
+        assert check_endpoint_documents(target) == []
         assert check_api_read_compiles(target) == []
 
     def test_a_follow_up_form_body_that_only_nests_on_page_two(
@@ -3756,6 +3959,10 @@ class TestApiRequestBlockBreaks:
 
         def bend(read: dict[str, Any]) -> None:
             read["request"]["method"] = "POST"
+            # As above: the paging param is bound in the body now, so its
+            # `in` says body and the query no longer binds it.
+            read["params"]["offset"]["in"] = "body"
+            read["request"]["query"].pop("offset")
             read["request"]["body"] = {
                 "function": "lookup",
                 "input": {"from_param": "offset"},

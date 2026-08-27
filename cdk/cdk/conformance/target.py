@@ -259,9 +259,9 @@ def _load_endpoints(
         try:
             endpoints[path.stem] = model.model_validate(raw)
         except ValidationError as err:
-            problems[path.stem] = (
-                f"{path.name} does not satisfy {model.__name__}: {err}"
-            )
+            problems[
+                path.stem
+            ] = f"{path.name} does not satisfy {model.__name__}: {err}"
     return endpoints, problems
 
 

@@ -89,11 +89,13 @@ def _assert_suite_passed(
 
 #: Every tier-1 check that applies to kind 'api': four read-path drives
 #: (the page-reference check moved into the contract as RULE-ENDP-023),
-#: two surface checks, and the kind-agnostic scaffolding. Pinned to the
-#: exact count, not a floor: a loose floor lets a whole check module be
-#: deleted without a skip line to notice, which is the same "not assessed
-#: reads as passed" failure one level down.
-API_TIER1_EXPECTED_PASSED = 12
+#: two surface checks, and the kind-agnostic scaffolding -- which now
+#: includes the endpoint-document contract check, since the kit parses
+#: every document it loads. Pinned to the exact count, not a floor: a
+#: loose floor lets a whole check module be deleted without a skip line
+#: to notice, which is the same "not assessed reads as passed" failure
+#: one level down.
+API_TIER1_EXPECTED_PASSED = 13
 
 #: The check modules a run against an api connector must actually execute.
 API_CHECK_MODULES = ("test_api_read_path.py", "test_api_surface.py")

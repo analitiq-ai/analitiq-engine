@@ -24,7 +24,6 @@ from cdk.sql.generic import GenericSQLConnector, _StreamState
 from cdk.type_map import TypeMapper
 from cdk.type_map.rules import parse_rules
 
-
 # A fixed, timezone-aware emit instant for write_batch/send_batch calls; the
 # engine stamps this per batch (issue #353). Value is arbitrary for sinks
 # that ignore it.
@@ -215,49 +214,50 @@ class TestEndpointRefDispatch:
 class TestColumnDefStrictness:
     """A malformed column must be refused loudly rather than silently
     dropped from the DDL. The contract makes both shapes unrepresentable,
-    so the refusal now happens where the document is registered -- before
-    any state is stored or any DDL is built -- and carries the stream id
-    the engine needs to reject the right schema.
+    so the document never parses -- but registration runs before the gRPC
+    server exists, so it holds that failure against its own stream and the
+    stream's schema handshake is where it is refused, naming both the
+    stream id the engine needs and the field that broke.
     """
 
-    def test_unnamed_column_raises(self):
-        """A column without a name is refused when the document registers."""
+    async def _refusal(self, columns) -> str:
+        from cdk.types import SchemaSpec, WriteMode
 
         handler = GenericSQLConnector()
+        handler._connected = True
+        handler.set_stream_endpoints({"s1": _endpoint_json(columns, table="t")})
         with pytest.raises(SchemaConfigurationError) as err:
-            handler.set_stream_endpoints(
-                {
-                    "s1": _endpoint_json(
-                        [
-                            {"native_type": "BIGINT", "arrow_type": "Int64"},
-                            {
-                                "name": "valid",
-                                "native_type": "BIGINT",
-                                "arrow_type": "Int64",
-                            },
-                        ],
-                        table="t",
-                    )
-                }
+            await handler.configure_schema(
+                SchemaSpec(
+                    stream_id="s1",
+                    version=1,
+                    write_mode=WriteMode.WRITE_MODE_INSERT,
+                    ack_timeout_seconds=30,
+                )
             )
-        assert "s1" in str(err.value)
-        assert "name" in str(err.value)
+        return str(err.value)
 
-    def test_column_without_arrow_type_raises(self):
+    @pytest.mark.asyncio
+    async def test_unnamed_column_is_refused(self):
+        """A column without a name never reaches DDL."""
+
+        message = await self._refusal(
+            [
+                {"native_type": "BIGINT", "arrow_type": "Int64"},
+                {"name": "valid", "native_type": "BIGINT", "arrow_type": "Int64"},
+            ]
+        )
+        assert "s1" in message
+        assert "name" in message
+
+    @pytest.mark.asyncio
+    async def test_column_without_arrow_type_is_refused(self):
         # native_type alone is not enough: DDL consumes the stored
         # arrow_type (the same declaration the schema contract casts
         # with), never the read map.
-        handler = GenericSQLConnector()
-        with pytest.raises(SchemaConfigurationError) as err:
-            handler.set_stream_endpoints(
-                {
-                    "s1": _endpoint_json(
-                        [{"name": "id", "native_type": "BIGINT"}], table="t"
-                    )
-                }
-            )
-        assert "s1" in str(err.value)
-        assert "arrow_type" in str(err.value)
+        message = await self._refusal([{"name": "id", "native_type": "BIGINT"}])
+        assert "s1" in message
+        assert "arrow_type" in message
 
 
 class TestWriteBatchFatalOnTypeMapError:
@@ -945,6 +945,83 @@ class TestConfigureSchemaErrorPropagation:
                     stream_id="s1",
                     version=1,
                     write_mode=99,
+                    ack_timeout_seconds=30,
+                )
+            )
+
+
+class TestAMalformedEndpointDocumentRejectsOneStream:
+    """``set_stream_endpoints`` runs from the worker entry point, before the
+    gRPC server is constructed. A document that cannot satisfy the contract
+    is therefore held against its own stream and reported at the handshake:
+    raising at registration would exit the process, and the engine would see
+    a dead worker instead of one rejected stream."""
+
+    def _handler(self) -> GenericSQLConnector:
+        handler = _stage_capable(GenericSQLConnector())
+        handler._connected = True
+        handler._runtime = _runtime(connector_mapper=_mapper("pg"))
+        handler.set_endpoint_refs(
+            {
+                sid: {
+                    "scope": "connector",
+                    "connection_id": "pg",
+                    "endpoint_id": "events",
+                }
+                for sid in ("bad", "good")
+            }
+        )
+        handler.set_stream_endpoints(
+            {
+                # No database_object: the contract requires one, so this
+                # document never becomes a DatabaseEndpointDoc.
+                "bad": {
+                    "$schema": DATABASE_ENDPOINT_SCHEMA_URL,
+                    "endpoint_id": "events",
+                    "columns": [],
+                },
+                "good": _endpoint_json(
+                    [{"name": "id", "native_type": "BIGINT", "arrow_type": "Int64"}],
+                    table="events",
+                    primary_keys=["id"],
+                ),
+            }
+        )
+        return handler
+
+    @pytest.mark.asyncio
+    async def test_the_handshake_carries_the_parse_failure(self):
+        from cdk.types import SchemaSpec, WriteMode
+
+        with pytest.raises(SchemaConfigurationError) as caught:
+            await self._handler().configure_schema(
+                SchemaSpec(
+                    stream_id="bad",
+                    version=1,
+                    write_mode=WriteMode.WRITE_MODE_INSERT,
+                    ack_timeout_seconds=30,
+                )
+            )
+        # The servicer turns SchemaConfigurationError into a rejected ack
+        # for this stream alone. The message must be the parse failure, not
+        # the "you never registered it" text the same missing entry would
+        # otherwise produce.
+        assert "DatabaseEndpointDoc" in str(caught.value)
+        assert "call set_stream_endpoints" not in str(caught.value)
+
+    @pytest.mark.asyncio
+    async def test_every_other_stream_on_the_handler_still_configures(self):
+        from unittest.mock import patch
+
+        from cdk.types import SchemaSpec, WriteMode
+
+        handler = self._handler()
+        with patch.object(GenericSQLConnector, "_ensure_tables_exist", AsyncMock()):
+            assert await handler.configure_schema(
+                SchemaSpec(
+                    stream_id="good",
+                    version=1,
+                    write_mode=WriteMode.WRITE_MODE_INSERT,
                     ack_timeout_seconds=30,
                 )
             )

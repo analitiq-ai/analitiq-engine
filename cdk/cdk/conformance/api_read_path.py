@@ -1247,9 +1247,7 @@ def check_api_read_stop_condition(target: ConformanceTarget) -> list[Violation]:
     for probe in probes:
         if probe.pagination is None:
             continue
-        violations.extend(
-            _stop_condition_violations(probe, probe.pagination.stop_when)
-        )
+        violations.extend(_stop_condition_violations(probe, probe.pagination.stop_when))
     return violations
 
 

@@ -159,9 +159,7 @@ class ParamTable:
         can be caught, and it is caught loudly.
         """
         uncontrolled = {
-            name: decl
-            for name, decl in declared.items()
-            if decl.controlled_by is None
+            name: decl for name, decl in declared.items() if decl.controlled_by is None
         }
         # A default is a declared expression like any other, so a defect in
         # one leaves through the same door the binding maps use rather than
