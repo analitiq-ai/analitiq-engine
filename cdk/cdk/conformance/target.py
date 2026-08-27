@@ -15,7 +15,10 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from importlib import metadata
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
+
+from analitiq.contracts.endpoints import ApiEndpointDoc, DatabaseEndpointDoc
+from pydantic import ValidationError
 
 from cdk._extras import MissingExtraError
 from cdk.registry import (
@@ -37,8 +40,35 @@ from cdk.type_map.exceptions import InvalidTypeMapError
 from cdk.type_map.loader import build_type_mapper, read_raw_type_maps
 from cdk.type_map.mapper import TypeMapper
 
+from .violations import Violation
+
 CONNECTOR_DEFINITION_FILENAME = "connector.json"
 ENDPOINT_DIRECTORY_NAME = "endpoints"
+
+#: A connector ships one of these two per endpoint file.
+EndpointDocument = ApiEndpointDoc | DatabaseEndpointDoc
+
+ENDPOINT_DOCUMENT_CHECK = "endpoint-document-contract"
+
+
+def schema_url_of(model: type[EndpointDocument]) -> str:
+    """Return the ``$schema`` URL *model*'s contract pins it to.
+
+    The models already carry it, as a one-member ``Literal`` on
+    ``schema_url``. Reading it back out of the model is what keeps the
+    suite from holding a kind table of its own: a table would be a second
+    answer to "which contract governs this document", and the two
+    disagree the day a variant is added.
+    """
+    return str(get_args(model.model_fields["schema_url"].annotation)[0])
+
+
+#: The published endpoint-document variants, by the ``$schema`` each pins.
+#: The document's own ``$schema`` is what selects one, the same fact the
+#: engine validates every artifact against.
+ENDPOINT_MODELS: dict[str, type[EndpointDocument]] = {
+    schema_url_of(model): model for model in (ApiEndpointDoc, DatabaseEndpointDoc)
+}
 
 
 class ConformanceSetupError(Exception):
@@ -60,10 +90,12 @@ class ConformanceTarget:
     for a kind the CDK ships no default for.
 
     ``endpoints`` holds the connector's endpoint documents keyed by file
-    stem, empty for a connector that ships none. They are read as plain
-    JSON: their structure is validated against the published contract
-    before the engine sees them, and the checks here assert what the CDK
-    can execute from a structurally valid document.
+    stem, empty for a connector that ships none. Each one is the parsed
+    contract model, because that is what the CDK functions the checks
+    drive now take: the kit does not go through the connector's own
+    funnels, so it is the kit that has to produce the model the engine
+    would. ``endpoint_problems`` holds the documents that did not parse,
+    which :func:`check_endpoint_documents` reports.
     """
 
     root: Path
@@ -81,7 +113,10 @@ class ConformanceTarget:
     class_unavailable: str | None = None
     #: Endpoint documents by file stem. Defaulted because every field
     #: after ``class_unavailable`` must be.
-    endpoints: dict[str, dict[str, Any]] = field(default_factory=dict)
+    endpoints: dict[str, EndpointDocument] = field(default_factory=dict)
+    #: Why each endpoint file the connector ships is not among them, by the
+    #: same file stem.
+    endpoint_problems: dict[str, str] = field(default_factory=dict)
 
     def declared_transports(self) -> dict[str, dict[str, Any]]:
         """Return transport blocks with ``transport_defaults`` merged.
@@ -176,24 +211,80 @@ def _load_definition(definition_dir: Path) -> dict[str, Any]:
     )
 
 
-def _load_endpoints(definition_dir: Path) -> dict[str, dict[str, Any]]:
-    """Read every endpoint document under ``<definition_dir>/endpoints``.
+def _load_endpoints(
+    definition_dir: Path,
+) -> tuple[dict[str, EndpointDocument], dict[str, str]]:
+    """Read and parse every endpoint document under ``<definition_dir>/endpoints``.
 
-    Fail-loud on a file that does not parse or is not a JSON object: an
-    unreadable endpoint is not an absent one, and silently dropping it
-    would turn a broken document into a connector with fewer endpoints to
-    check -- the kit reporting a smaller surface as a clean one. Absence
-    of the directory itself is fine; a connector may ship none, and the
-    api checks fail on that themselves rather than here, where no kind is
-    known yet.
+    Answers the documents that satisfy the published contract and, beside
+    them, why each of the others does not. Parsing happens here because
+    the kit drives ``cdk.api`` directly rather than through the
+    connector's own funnels, so nothing else on this path would produce
+    the model those functions take.
+
+    A document the contract refuses is a FINDING
+    (:func:`check_endpoint_documents`), not a setup error and not a
+    document that vanishes: dropping it silently would turn a broken
+    document into a connector with fewer endpoints to check -- the kit
+    reporting a smaller surface as a clean one -- while raising would
+    replace the whole run's verdict with one file's defect and hide every
+    other endpoint's.
+
+    A file that is not JSON, or not a JSON object, stays fail-loud. There
+    is no endpoint to report a finding about: nothing has been read that
+    could name one, and the fix is to the file rather than to anything the
+    checks assess.
+
+    Absence of the directory itself is fine; a connector may ship none, and
+    the api checks fail on that themselves rather than here, where no kind
+    is known yet.
     """
     endpoint_dir = definition_dir / ENDPOINT_DIRECTORY_NAME
     if not endpoint_dir.is_dir():
-        return {}
-    return {
-        path.stem: _load_json_object(path, "endpoint document")
-        for path in sorted(endpoint_dir.glob("*.json"))
-    }
+        return {}, {}
+    endpoints: dict[str, EndpointDocument] = {}
+    problems: dict[str, str] = {}
+    for path in sorted(endpoint_dir.glob("*.json")):
+        raw = _load_json_object(path, "endpoint document")
+        declared_schema = raw.get("$schema")
+        model = ENDPOINT_MODELS.get(str(declared_schema))
+        if model is None:
+            problems[path.stem] = (
+                f"{path.name} declares $schema {declared_schema!r}, which "
+                f"names none of the published endpoint contracts "
+                f"({', '.join(sorted(ENDPOINT_MODELS))}); nothing can say "
+                f"which contract governs this document"
+            )
+            continue
+        try:
+            endpoints[path.stem] = model.model_validate(raw)
+        except ValidationError as err:
+            problems[path.stem] = (
+                f"{path.name} does not satisfy {model.__name__}: {err}"
+            )
+    return endpoints, problems
+
+
+def check_endpoint_documents(target: ConformanceTarget) -> list[Violation]:
+    """Certify that every endpoint document the connector ships parses.
+
+    The engine validates each document against the published contract
+    before a stream reads a row, so one it refuses is a connector that
+    cannot run. The kit would otherwise report that as silence: an
+    unparsed document carries no read operation, no response block and no
+    pagination, so every api check passes it by having nothing to drive --
+    a green run over an endpoint nothing assessed.
+    """
+    return [
+        Violation(
+            ENDPOINT_DOCUMENT_CHECK,
+            f"endpoint document {stem!r}: {problem}. Every check here drives "
+            f"the parsed document, so this endpoint is not assessed at all, "
+            f"and the engine refuses it the same way before its first "
+            f"request.",
+        )
+        for stem, problem in sorted(target.endpoint_problems.items())
+    ]
 
 
 def _resolve_definition_dir(root: Path) -> Path:
@@ -403,6 +494,7 @@ def load_target(
     connector_class, class_unavailable = _resolve_connector_class(
         connector_id, kind, class_path
     )
+    endpoints, endpoint_problems = _load_endpoints(definition_dir)
     return ConformanceTarget(
         root=root,
         definition_dir=definition_dir,
@@ -413,5 +505,6 @@ def load_target(
         type_mapper=_load_type_mapper(definition_dir, connector_id),
         connector_class=connector_class,
         class_unavailable=class_unavailable,
-        endpoints=_load_endpoints(definition_dir),
+        endpoints=endpoints,
+        endpoint_problems=endpoint_problems,
     )

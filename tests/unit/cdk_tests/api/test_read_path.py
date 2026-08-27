@@ -12,6 +12,8 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from analitiq.contracts.endpoints import Pagination
+from pydantic import TypeAdapter
 
 from cdk.api import GenericAPIConnector
 from cdk.api.page_loop import PaginationStrategy
@@ -27,12 +29,15 @@ from .fakes import (
     FakeResponse,
     FakeSession,
     endpoint_document,
+    endpoint_json,
     runtime_with,
     sent_query,
     stream_source,
 )
 
 pytestmark = pytest.mark.unit
+
+_PAGINATION: TypeAdapter[Any] = TypeAdapter(Pagination)
 
 
 async def _read(
@@ -43,9 +48,10 @@ async def _read(
     checkpoint: FakeCheckpoint | None = None,
     batch_size: int = 100,
     error_map: dict[str, Any] | None = None,
+    parameters: dict[str, Any] | None = None,
 ) -> list[Any]:
     connector = GenericAPIConnector()
-    runtime = runtime_with(session, error_map=error_map)
+    runtime = runtime_with(session, error_map=error_map, parameters=parameters)
     batches = []
     async for batch in connector.read_batches(
         runtime,
@@ -86,6 +92,40 @@ _PAGINATION_REQUEST = {
     "query": {"skip": {"from_param": "skip"}, "limit": {"from_param": "limit"}},
 }
 
+#: A next-URL read. ``next`` is declared in the response schema because
+#: every ``response.body.<path>`` a document names is resolved against it:
+#: an undeclared one is the typo that stops paging after one page while the
+#: run still reports success.
+_LINK_PAGINATION = {
+    "type": "link",
+    "link": {"next_url": {"ref": "response.body.next"}},
+    "stop_when": {"missing": {"ref": "response.body.next"}},
+}
+
+_NEXT_LINK_FIELD = {"next": {"type": "string"}}
+
+#: A record field carrying a fractional value, for the tests about what
+#: survives the lossless parse. Declared twice over because the two
+#: questions want opposite widths: the Arrow test asks what a declared
+#: scale does to the value, and the keyset tests ask what survives to the
+#: next request, so theirs is wide enough that the Arrow cast rescales
+#: nothing and the token is judged on its own digits.
+_WIDE_AMOUNT = {
+    "amount": {
+        "type": "number",
+        "native_type": "numeric",
+        "arrow_type": "Decimal128(38, 19)",
+    }
+}
+
+_DECIMAL_AMOUNT = {
+    "amount": {
+        "type": "number",
+        "native_type": "numeric",
+        "arrow_type": "Decimal128(18, 2)",
+    }
+}
+
 _PAGINATION_PARAMS = {
     "skip": {
         "in": "query",
@@ -100,6 +140,12 @@ _PAGINATION_PARAMS = {
         "controlled_by": "pagination",
     },
 }
+
+
+def _link_document(**shape: Any) -> dict[str, Any]:
+    return endpoint_document(
+        pagination=_LINK_PAGINATION, response_fields=_NEXT_LINK_FIELD, **shape
+    )
 
 
 @pytest.mark.asyncio
@@ -181,7 +227,7 @@ class TestTheRequestTheContractDescribes:
                 },
                 params={
                     "tenant": {
-                        "in": "query",
+                        "in": "header",
                         "type": "string",
                         "required": False,
                         "default": {"literal": "acme"},
@@ -460,46 +506,77 @@ class TestTheRequestTheContractDescribes:
         assert session.calls == []
 
 
-#: One authoring defect per request block, each raising a different thing
-#: out of the resolver: conflicting expression markers and an unknown
-#: derived function raise ``TransportSpecError``, a scope that does not
-#: exist raises ``KeyError``, a function handed the wrong type raises
-#: ``TypeError``. The read used to catch ``ValueError`` at both the path
-#: substitution and the request build, so three of the four escaped the
-#: connector as raw builtins the worker classified by accident.
+#: One authoring defect per request block that the CONTRACT accepts and the
+#: resolver refuses: an unregistered derived function raises
+#: ``TransportSpecError``, one handed the wrong type raises ``TypeError``.
+#: A function name is provider vocabulary the contract cannot close over, so
+#: these reach the resolver on a document that parsed cleanly -- which is
+#: what makes them the resolver's to classify. The read used to catch
+#: ``ValueError`` at both the path substitution and the request build, so
+#: the ``TypeError`` escaped the connector as a raw builtin the worker
+#: classified by accident.
 _DECLARATION_DEFECTS = {
-    "a header with conflicting markers": {
-        "headers": {"X-T": {"ref": "connection.parameters.a", "template": "b"}}
-    },
-    "a header reading a scope that does not exist": {
-        "headers": {"X-T": {"ref": "nosuchscope.a"}}
-    },
     "a query value calling an unregistered function": {
         "query": {"q": {"function": "nope", "input": {"literal": 1}}}
     },
     "a query value handing a function the wrong type": {
         "query": {"q": {"function": "base64_encode", "input": {"literal": 5}}}
     },
-    "a path binding reading a scope that does not exist": {
-        "path": "/items/{id}",
-        "path_params": {"id": {"ref": "nosuchscope.id"}},
-    },
-    "a path binding calling an unregistered function": {
-        "path": "/items/{id}",
-        "path_params": {"id": {"function": "nope", "input": {"literal": 1}}},
-    },
 }
 
-#: The same class one step earlier: a param's declared default is resolved
-#: before any binding map is read, so a defect there escaped ahead of every
-#: catch site the read has.
-_DEFECTIVE_PARAM = {
-    "tag": {
-        "in": "query",
-        "type": "string",
-        "required": False,
-        "default": {"ref": "nosuchscope.tag"},
-    }
+#: The same failure a step earlier, in the shapes the CONTRACT itself
+#: refuses: two expression markers in one node, a leading token that is no
+#: resolution scope, a path binding that is not ``{from_param}``, and a
+#: param default reading a scope that does not exist. None of these can
+#: reach the resolver any more -- the worker parses the document it is
+#: handed before it reads a field off it -- so what they pin down now is
+#: that the parse refusal leaves as the same ``ReadError``, and not as the
+#: bare ``ValidationError`` the worker would classify as retryable and
+#: re-run against a document that can never parse.
+_UNPARSEABLE_DOCUMENTS = {
+    "a header with conflicting markers": {
+        "request": {
+            "method": "GET",
+            "path": "/items",
+            "headers": {"X-T": {"ref": "connection.parameters.a", "template": "b"}},
+        }
+    },
+    "a header reading a scope that does not exist": {
+        "request": {
+            "method": "GET",
+            "path": "/items",
+            "headers": {"X-T": {"ref": "nosuchscope.a"}},
+        }
+    },
+    "a path binding reading a scope that does not exist": {
+        "request": {
+            "method": "GET",
+            "path": "/items/{id}",
+            "path_params": {"id": {"ref": "nosuchscope.id"}},
+        }
+    },
+    "a path binding calling an unregistered function": {
+        "request": {
+            "method": "GET",
+            "path": "/items/{id}",
+            "path_params": {"id": {"function": "nope", "input": {"literal": 1}}},
+        }
+    },
+    "a param default reading a scope that does not exist": {
+        "request": {
+            "method": "GET",
+            "path": "/items",
+            "query": {"tag": {"from_param": "tag"}},
+        },
+        "params": {
+            "tag": {
+                "in": "query",
+                "type": "string",
+                "required": False,
+                "default": {"ref": "nosuchscope.tag"},
+            }
+        },
+    },
 }
 
 
@@ -511,10 +588,10 @@ class TestADeclarationDefectReachesTheCallerAsOneError:
     """Every way a declaration fails to resolve leaves the read as ReadError.
 
     The worker fails a stream deterministically on ``ReadError`` and would
-    retry a bare ``KeyError`` or ``TypeError`` to exhaustion. Classifying
-    at the resolution boundary is what makes one ``except`` at each caller
-    correct; enumerating the resolver's exception types at each catch site
-    instead left a different one uncaught at each site.
+    retry a bare ``TypeError`` to exhaustion. Classifying at the resolution
+    boundary is what makes one ``except`` at each caller correct;
+    enumerating the resolver's exception types at each catch site instead
+    left a different one uncaught at each site.
     """
 
     async def test_the_read_fails_with_a_read_error(self, defect: str) -> None:
@@ -533,21 +610,33 @@ class TestADeclarationDefectReachesTheCallerAsOneError:
 
 
 @pytest.mark.asyncio
-class TestAParamDefaultIsADeclarationLikeAnyOther:
-    async def test_a_defective_default_fails_the_read_with_a_read_error(self) -> None:
+@pytest.mark.parametrize(
+    "defect", sorted(_UNPARSEABLE_DOCUMENTS), ids=sorted(_UNPARSEABLE_DOCUMENTS)
+)
+class TestADocumentTheContractRefusesLeavesAsTheSameError:
+    """The boundary parse is a refusal like any other, in the same vocabulary.
+
+    The worker runs untrusted, AI-authored connector code and is handed the
+    endpoint document as JSON, so it parses before it reads. That parse
+    catches the defects below without the resolver ever seeing them -- but
+    only if what it raises is the read's own error class. A ``ReadError``
+    fails the stream deterministically and names the endpoint; the
+    ``ValidationError`` underneath it is an unrecognized exception the
+    worker would retry to exhaustion against a document that cannot parse
+    on any attempt.
+    """
+
+    async def test_the_read_fails_with_a_read_error(self, defect: str) -> None:
         session = FakeSession([FakeResponse(body=_rows(1))])
         with pytest.raises(ReadError):
-            await _read(
-                session,
-                endpoint_document(
-                    request={
-                        "method": "GET",
-                        "path": "/items",
-                        "query": {"tag": {"from_param": "tag"}},
-                    },
-                    params=_DEFECTIVE_PARAM,
-                ),
-            )
+            await _read(session, endpoint_json(**_UNPARSEABLE_DOCUMENTS[defect]))
+
+    async def test_nothing_reaches_the_provider(self, defect: str) -> None:
+        # A document the worker could not parse describes no request, so
+        # there is nothing correct to send.
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        with pytest.raises(ReadError):
+            await _read(session, endpoint_json(**_UNPARSEABLE_DOCUMENTS[defect]))
         assert session.calls == []
 
 
@@ -593,7 +682,7 @@ class TestPageSizeBinding:
     async def test_an_authored_literal_beats_the_engines_batch_size(self) -> None:
         pagination = {
             **_OFFSET,
-            "limit": {"param": "limit", "default": {"literal": 5}},
+            "limit": {"param": "limit", "default": 5},
         }
         session = FakeSession(
             [FakeResponse(body=_rows(1)), FakeResponse(body=_rows(0))]
@@ -627,44 +716,52 @@ class TestPageSizeBinding:
         )
         assert "limit" not in sent_query(session.calls[0])
 
+    #: A page size the contract cannot refuse: the bare-integer spelling is
+    #: bounded above zero, so a bad size can only arrive as an expression the
+    #: connection answers at run time. That is the case this engine-side
+    #: guard exists for, and the only one still reachable.
+    _RESOLVED_PAGE_SIZE = {
+        **_OFFSET,
+        "limit": {
+            "param": "limit",
+            "default": {"ref": "connection.parameters.page_size"},
+        },
+    }
+
     async def test_a_page_size_that_is_not_a_positive_integer_fails_first(self) -> None:
-        pagination = {
-            **_OFFSET,
-            "limit": {"param": "limit", "default": {"literal": 0}},
-        }
         session = FakeSession()
         with pytest.raises(ReadError, match="limit.default"):
             await _read(
                 session,
                 endpoint_document(
-                    pagination=pagination,
+                    pagination=self._RESOLVED_PAGE_SIZE,
                     params=_PAGINATION_PARAMS,
                     request=_PAGINATION_REQUEST,
                 ),
+                parameters={"page_size": 0},
             )
         assert session.calls == []
 
     async def test_a_page_size_json_can_spell_but_python_cannot_narrow(self) -> None:
         """``1e400`` parses to infinity, and ``int()`` of it overflows.
 
-        A number a JSON document can carry, so it is an authoring defect
-        like any other: it has to leave as the read error the worker
-        classifies as non-retryable, not as the raw ``OverflowError`` that
-        would tear the read down unclassified.
+        A number the connection document can carry -- it is ordinary JSON,
+        not the endpoint contract, so nothing bounds it before it resolves
+        -- which makes it an authoring defect like any other: it has to
+        leave as the read error the worker classifies as non-retryable, not
+        as the raw ``OverflowError`` that would tear the read down
+        unclassified.
         """
-        pagination = {
-            **_OFFSET,
-            "limit": {"param": "limit", "default": {"literal": float("inf")}},
-        }
         session = FakeSession()
         with pytest.raises(ReadError, match="limit.default"):
             await _read(
                 session,
                 endpoint_document(
-                    pagination=pagination,
+                    pagination=self._RESOLVED_PAGE_SIZE,
                     params=_PAGINATION_PARAMS,
                     request=_PAGINATION_REQUEST,
                 ),
+                parameters={"page_size": float("inf")},
             )
         assert session.calls == []
 
@@ -721,35 +818,27 @@ class TestPaging:
                 pagination=pagination,
                 params=_PAGINATION_PARAMS,
                 request=_PAGINATION_REQUEST,
+                response_fields={"has_more": {"type": "boolean"}},
             ),
         )
         assert len(batches) == 1
         assert len(session.calls) == 1
 
     async def test_a_link_page_leaving_the_origin_is_refused(self) -> None:
-        pagination = {
-            "type": "link",
-            "link": {"next_url": {"ref": "response.body.next"}},
-            "stop_when": {"missing": {"ref": "response.body.next"}},
-        }
-        body = {**_rows(2), "next": "https://evil.test/steal"}
-        session = FakeSession([FakeResponse(body=body)])
+        session = FakeSession(
+            [FakeResponse(body={**_rows(2), "next": "https://evil.test/steal"})]
+        )
         with pytest.raises(ReadError, match="leaves its transport's origin"):
-            await _read(session, endpoint_document(pagination=pagination))
+            await _read(session, _link_document())
 
     async def test_a_relative_link_continues_from_the_current_page(self) -> None:
-        pagination = {
-            "type": "link",
-            "link": {"next_url": {"ref": "response.body.next"}},
-            "stop_when": {"missing": {"ref": "response.body.next"}},
-        }
         session = FakeSession(
             [
                 FakeResponse(body={**_rows(1), "next": "?page=2"}),
                 FakeResponse(body=_rows(0)),
             ]
         )
-        await _read(session, endpoint_document(pagination=pagination))
+        await _read(session, _link_document())
         assert session.calls[1]["url"] == f"{BASE_URL}/items?page=2"
 
 
@@ -887,12 +976,7 @@ class TestFailures:
 @pytest.mark.asyncio
 class TestDecimalPrecision:
     async def test_a_fractional_value_survives_into_arrow(self) -> None:
-        document = endpoint_document()
-        properties = document["operations"]["read"]["response"]["schema"]["properties"]
-        properties["records"]["items"]["properties"]["amount"] = {
-            "type": "number",
-            "arrow_type": "Decimal128(18, 2)",
-        }
+        document = endpoint_document(record_fields=_DECIMAL_AMOUNT)
         session = FakeSession(
             [FakeResponse(text='{"records": [{"id": 1, "name": "a", "amount": 1.50}]}')]
         )
@@ -919,6 +1003,7 @@ class TestDecimalPrecision:
                 "keyset": {"param": "since", "order_by_field": "amount"},
                 "stop_when": {"empty": {"ref": "response.body.records"}},
             },
+            record_fields=_WIDE_AMOUNT,
         )
 
     async def test_a_keyset_key_goes_back_as_the_number_it_arrived_as(self) -> None:
@@ -982,12 +1067,7 @@ class TestAFollowedLinkReplacesTheWholeRequest:
     """
 
     def _document(self) -> dict[str, Any]:
-        return endpoint_document(
-            pagination={
-                "type": "link",
-                "link": {"next_url": {"ref": "response.body.next"}},
-                "stop_when": {"missing": {"ref": "response.body.next"}},
-            },
+        return _link_document(
             params={
                 "since": {
                     "in": "body",
@@ -1047,6 +1127,7 @@ class TestAPaginationValueKeepsItsJsonType:
                 },
                 "stop_when": {"missing": {"ref": "response.body.next"}},
             },
+            response_fields=_NEXT_LINK_FIELD,
             params={
                 "after": {
                     "in": "body",
@@ -1143,11 +1224,14 @@ class TestBuildingTheAdapterTouchesNothingItWasGiven:
     @staticmethod
     def _strategy(table: ParamTable) -> PaginationStrategy:
         return build_read_strategy(
-            {
-                "type": "offset",
-                "offset": {"param": "offset", "initial": 0, "increment_by": 25},
-                "limit": {"param": "limit", "default": {"literal": 25}},
-            },
+            _PAGINATION.validate_python(
+                {
+                    "type": "offset",
+                    "offset": {"param": "offset", "initial": 0, "increment_by": 25},
+                    "limit": {"param": "limit", "default": 25},
+                    "stop_when": {"empty": {"ref": "response.body.records"}},
+                }
+            ),
             table=table,
             resolver=Resolver(
                 ResolutionContext(runtime={"batch_size": 100}),

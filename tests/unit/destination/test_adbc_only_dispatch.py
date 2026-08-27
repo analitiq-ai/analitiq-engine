@@ -28,11 +28,32 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pyarrow as pa
 import pytest
+from analitiq.contracts.endpoints import (
+    DATABASE_ENDPOINT_SCHEMA_URL,
+    DatabaseEndpointDoc,
+)
 
 from cdk.sql._adbc_utils import _is_fatal_adbc_error, _reclassify_as_fatal
 from cdk.sql.capabilities import SqlCapabilities
 from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.generic import AdbcConfigurationError, GenericSQLConnector, _StreamState
+
+
+def _endpoint_doc(columns, *, table, schema):
+    """A contract-valid database endpoint document naming the DDL target.
+
+    ``_StreamState`` resolves the address on its own field; the document
+    names the same object so the fixture cannot describe a table the DDL
+    never touches.
+    """
+    return DatabaseEndpointDoc.model_validate(
+        {
+            "$schema": DATABASE_ENDPOINT_SCHEMA_URL,
+            "endpoint_id": table,
+            "database_object": {"name": table, "schema": schema},
+            "columns": columns,
+        }
+    )
 
 
 def _caps(**overrides) -> SqlCapabilities:
@@ -363,8 +384,8 @@ class TestAdbcDdlBuilders:
         h = _bound_handler(_FixtureConnector)
         state = _StreamState(
             address=h.dialect.table_address("orders", schema="analytics"),
-            endpoint_document={
-                "columns": [
+            endpoint_document=_endpoint_doc(
+                [
                     {
                         "name": "id",
                         "native_type": "BIGINT",
@@ -378,7 +399,9 @@ class TestAdbcDdlBuilders:
                         "nullable": True,
                     },
                 ],
-            },
+                table="orders",
+                schema="analytics",
+            ),
             primary_keys=["id"],
         )
         ddl = self._build_target_ddl(h, state, _TypeMapperStub())
@@ -403,8 +426,8 @@ class TestAdbcDdlBuilders:
         h = _bound_handler(_FixtureConnector)
         state = _StreamState(
             address=h.dialect.table_address("orders", schema="analytics"),
-            endpoint_document={
-                "columns": [
+            endpoint_document=_endpoint_doc(
+                [
                     {
                         "name": "id",
                         "native_type": "BIGINT",
@@ -418,7 +441,9 @@ class TestAdbcDdlBuilders:
                         "nullable": True,
                     },
                 ],
-            },
+                table="orders",
+                schema="analytics",
+            ),
             primary_keys=["id"],
         )
         ddl = self._build_target_ddl(h, state, _TypeMapperStub())
@@ -455,16 +480,18 @@ class TestAdbcDdlBuilders:
             address=h.dialect.table_address("events", schema="public"),
             write_mode="insert",
             primary_keys=[],  # keyless
-            endpoint_document={
-                "columns": [
+            endpoint_document=_endpoint_doc(
+                [
                     {
                         "name": "payload",
                         "native_type": "TEXT",
                         "arrow_type": "Utf8",
                         "nullable": True,
                     }
-                ]
-            },
+                ],
+                table="events",
+                schema="public",
+            ),
         )
         # Use _identity_columns (as production code does in _ensure_tables_exist)
         # not state.primary_keys — for keyless insert this returns [_record_hash].

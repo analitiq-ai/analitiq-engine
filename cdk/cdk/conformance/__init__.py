@@ -54,7 +54,12 @@ from .applicability import check_kind_applicability
 from .declaration import check_declaration_consistency
 from .roundtrip import check_type_map_grammar, check_type_map_round_trip
 from .surface import check_override_surface, sanctioned_dialect_surface
-from .target import ConformanceSetupError, ConformanceTarget, load_target
+from .target import (
+    ConformanceSetupError,
+    ConformanceTarget,
+    check_endpoint_documents,
+    load_target,
+)
 from .violations import Violation, violation_report
 
 __all__ = [
@@ -67,6 +72,7 @@ __all__ = [
     "check_api_read_stop_condition",
     "check_api_record_schema",
     "check_declaration_consistency",
+    "check_endpoint_documents",
     "check_kind_applicability",
     "check_override_surface",
     "check_read_transport_selection",

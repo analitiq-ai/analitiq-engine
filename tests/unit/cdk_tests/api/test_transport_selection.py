@@ -197,12 +197,26 @@ class TestContainment:
         )
 
     @staticmethod
-    def _link_document() -> dict[str, Any]:
+    def _link_document(transport_ref: str | None = None) -> dict[str, Any]:
+        request: dict[str, Any] = {"method": "GET", "path": "/items"}
+        if transport_ref is not None:
+            request["transport_ref"] = transport_ref
         return endpoint_document(
-            request={"method": "GET", "path": "/items"},
+            request=request,
             pagination={
                 "type": "link",
                 "link": {"next_url": {"ref": "response.body.links.next"}},
+                "stop_when": {"missing": {"ref": "response.body.links.next"}},
+            },
+            # Declared because the contract resolves every
+            # `response.body.<path>` the document names against this
+            # schema, and an undeclared next link stops the traversal
+            # after one page with the run still reporting success.
+            response_fields={
+                "links": {
+                    "type": "object",
+                    "properties": {"next": {"type": "string"}},
+                }
             },
         )
 
@@ -229,11 +243,8 @@ class TestContainment:
         default = FakeSession([])
         files = FakeSession([self._linked(f"{BASE_URL}/items?page=2")])
         runtime = runtime_with(default, transports={"files": (files, FILES_URL)})
-        document = self._link_document()
-        document["operations"]["read"]["request"]["transport_ref"] = "files"
-
         with pytest.raises(ReadError, match="leaves its transport's origin"):
-            await _read(runtime, document)
+            await _read(runtime, self._link_document("files"))
         assert default.calls == [], "the read must not reach the default's origin"
 
     async def test_a_link_within_the_reads_own_transport_is_followed(self) -> None:
@@ -243,10 +254,7 @@ class TestContainment:
         runtime = runtime_with(
             FakeSession([]), transports={"files": (files, FILES_URL)}
         )
-        document = self._link_document()
-        document["operations"]["read"]["request"]["transport_ref"] = "files"
-
-        await _read(runtime, document)
+        await _read(runtime, self._link_document("files"))
 
         assert files.calls[1]["url"] == f"{FILES_URL}/items?page=2"
 

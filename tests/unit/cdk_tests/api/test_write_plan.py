@@ -1,26 +1,26 @@
 """The write plan, built from documents the contract actually validated.
 
-Every document here goes through ``ApiEndpointDoc`` and back out through
-the engine's own dump, so the keys the plan reads are the keys that arrive
-in production. A hand-written dict would let a raw-key mistake ship green:
-the test author writes ``in`` in one place, the code reads ``location`` in
-another, and neither notices while idempotency silently promises
-exactly-once and never sends the key.
-
-The contract models are imported here and NOT in the module under test:
-tests may prove coverage against the contract, ``cdk`` may not import it.
+Every document here is authored in wire form and parsed by
+``ApiEndpointDoc``, so the plan is built from the same object production
+builds it from. A hand-written dict would let an alias mistake ship green:
+the test author writes ``in``, the plan reads ``location``, and neither
+notices while idempotency silently promises exactly-once and never sends
+the key.
 """
 
 from __future__ import annotations
 
-import ast
-from pathlib import Path
 from typing import Any
 
 import pytest
-from analitiq.contracts.endpoints import ApiEndpointDoc
+from analitiq.contracts.endpoints import (
+    ApiEndpointDoc,
+    Batching,
+    Idempotency,
+    WriteOperation,
+)
+from pydantic import ValidationError
 
-import cdk.api
 from cdk.api.request import ParamTable, RequestBuilder
 from cdk.api.write_plan import (
     StreamWritePlan,
@@ -35,7 +35,6 @@ from cdk.api.write_plan import (
 from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.resolver import ResolutionContext, Resolver
 from cdk.types import RetrySemantics, SchemaSpec, WriteMode
-from src.models.resolved import dump_endpoint_document
 
 pytestmark = pytest.mark.unit
 
@@ -65,9 +64,8 @@ def _document(
     query: dict[str, Any] | None = None,
     params: dict[str, Any] | None = None,
     content_type: str | None = None,
-    contract_valid: bool = True,
-) -> dict[str, Any]:
-    """Build a write document the api-endpoint contract accepts, then dump it."""
+) -> ApiEndpointDoc:
+    """Author a write document in wire form and parse it as production does."""
     # The contract requires every write body to address the in-flight
     # record(s), so a document that declares none cannot be authored.
     if body is None:
@@ -121,13 +119,7 @@ def _document(
         "endpoint_id": "items",
         "operations": {"write": {mode: block}},
     }
-    if not contract_valid:
-        # The shape under test is one the contract itself now refuses at
-        # parse (RULE-ENDP-027/028), so it cannot round-trip through
-        # ApiEndpointDoc. The CDK still reads raw dicts at a trust boundary
-        # and keeps its own loud refusal; this hands it the dict directly.
-        return raw
-    return dump_endpoint_document(ApiEndpointDoc.model_validate(raw))
+    return ApiEndpointDoc.model_validate(raw)
 
 
 def _spec(mode: WriteMode = WriteMode.WRITE_MODE_INSERT) -> SchemaSpec:
@@ -136,8 +128,17 @@ def _spec(mode: WriteMode = WriteMode.WRITE_MODE_INSERT) -> SchemaSpec:
     )
 
 
-class TestRawKeysAreTheOnesThatArrive:
-    def test_the_idempotency_placement_survives_the_round_trip(self) -> None:
+class TestTheAliasedFieldsAreReadFromTheAuthoredDocument:
+    """Wire name in, attribute out, on the fields where the two differ.
+
+    The static guard that used to sit here -- no module may name a model
+    attribute in a string literal -- argued the opposite rule and is gone
+    with it. It is no longer the guard that matters either: reading a
+    document key off a parsed model raises ``AttributeError`` on the first
+    call, so the silent-None failure it was written against cannot ship.
+    """
+
+    def test_the_idempotency_placement_is_read_through_its_alias(self) -> None:
         # The model spells this field ``location``; the document spells it
         # ``in``. Reading the wrong one answers None, the placement check
         # never fires, and the ack still promises exactly-once.
@@ -155,7 +156,7 @@ class TestRawKeysAreTheOnesThatArrive:
         assert plan.idempotency_in == "header"
         assert plan.idempotency_name == "Idempotency-Key"
 
-    def test_the_input_schema_survives_the_round_trip(self) -> None:
+    def test_the_input_schema_is_read_through_its_alias(self) -> None:
         # ``schema_`` on the model, ``schema`` in the document.
         doc = _document()
         plan = build_write_plan(
@@ -168,7 +169,7 @@ class TestRawKeysAreTheOnesThatArrive:
         assert isinstance(plan, StreamWritePlan)
         assert plan.json_fields == {"payload"}
 
-    def test_the_request_and_batching_survive_the_round_trip(self) -> None:
+    def test_the_request_and_batching_reach_the_plan(self) -> None:
         doc = _document(batching={"max_records": 50})
         plan = build_write_plan(
             doc,
@@ -179,26 +180,6 @@ class TestRawKeysAreTheOnesThatArrive:
         )
         assert isinstance(plan, StreamWritePlan)
         assert (plan.method, plan.endpoint, plan.max_records) == ("POST", "/items", 50)
-
-    def test_no_module_reads_a_model_attribute_name(self) -> None:
-        # The static half of the same rule: every one of these finds
-        # nothing, and every site that reads them treats nothing as "the
-        # author declared nothing".
-        package = Path(cdk.api.__file__).parent
-        offenders: list[str] = []
-        for path in sorted(package.rglob("*.py")):
-            source = path.read_text()
-            for node in ast.walk(ast.parse(source, filename=str(path))):
-                if not isinstance(node, ast.Constant) or not isinstance(
-                    node.value, str
-                ):
-                    continue
-                if node.value in {"location", "schema_", "and_", "or_", "not_"}:
-                    offenders.append(f"{path.name}:{node.lineno}: {node.value!r}")
-        assert not offenders, (
-            "these are the contract models' Python attribute names, not the "
-            "document's keys:\n  " + "\n  ".join(offenders)
-        )
 
 
 class TestModeDispatch:
@@ -236,8 +217,8 @@ class TestIdempotencyRefusals:
     The header rule is one only this side knows: which headers the
     connection already sends is a session fact, not a document one. The
     rest mirror rules the contract also enforces -- kept as a second line
-    of defence, and exercised through hand-written blocks precisely
-    because a contract-valid document can no longer reach them.
+    of defence, and reached by handing the blocks in directly, precisely
+    because a contract-valid document can no longer carry them.
     """
 
     def test_a_header_the_connection_already_sends_is_refused(self) -> None:
@@ -270,8 +251,8 @@ class TestIdempotencyRefusals:
         # A restart re-batches records, so a per-request key over several
         # of them cannot dedup.
         problem = idempotency_config_problem(
-            {"in": "header", "name": "Idempotency-Key"},
-            {"max_records": 10},
+            Idempotency.model_validate({"in": "header", "name": "Idempotency-Key"}),
+            Batching.model_validate({"max_records": 10}),
             StreamWritePlan(),
             reserved_headers=set(),
             declared_input_fields=set(),
@@ -283,7 +264,7 @@ class TestIdempotencyRefusals:
         # field with the reserved name collides on every record -- after
         # the ack already promised exactly-once.
         problem = idempotency_config_problem(
-            {"in": "body", "name": "id"},
+            Idempotency.model_validate({"in": "body", "name": "id"}),
             None,
             StreamWritePlan(body_spec=None),
             reserved_headers=set(),
@@ -293,7 +274,7 @@ class TestIdempotencyRefusals:
 
     def test_a_body_template_field_the_key_reserves_is_refused(self) -> None:
         problem = idempotency_config_problem(
-            {"in": "body", "name": "key"},
+            Idempotency.model_validate({"in": "body", "name": "key"}),
             None,
             StreamWritePlan(body_spec={"key": {"literal": "x"}}),
             reserved_headers=set(),
@@ -303,7 +284,7 @@ class TestIdempotencyRefusals:
 
     def test_a_non_object_body_cannot_carry_a_body_key(self) -> None:
         problem = idempotency_config_problem(
-            {"in": "body", "name": "key"},
+            Idempotency.model_validate({"in": "body", "name": "key"}),
             None,
             StreamWritePlan(body_spec=[{"from_input": "record"}]),
             reserved_headers=set(),
@@ -419,22 +400,15 @@ class TestTheRequestTheStreamWillActuallySend:
         # Write params resolve their default through the connection, secrets
         # and runtime scopes; a param with no default has nothing to give,
         # and a URL that still carries braces is answered 200 by many
-        # providers.
-        doc = _document(
-            path="/Contact/{id}",
-            path_params={"id": {"from_param": "id"}},
-            params={"id": {"in": "path", "type": "string", "required": True}},
-            contract_valid=False,
-        )
-        outcome = build_write_plan(
-            doc,
-            _spec(),
-            header_names_for=lambda _ref: set(),
-            transport_problem=lambda _ref: None,
-            resolver=_resolver(),
-        )
-        assert isinstance(outcome, str)
-        assert "{id}" in outcome and "path_params" in outcome
+        # providers. The contract decides this from the document alone
+        # (RULE-ENDP-027/028), so the plan builder is never handed one --
+        # the parse is the refusal.
+        with pytest.raises(ValidationError):
+            _document(
+                path="/Contact/{id}",
+                path_params={"id": {"from_param": "id"}},
+                params={"id": {"in": "path", "type": "string", "required": True}},
+            )
 
     def test_declared_headers_and_query_land_on_the_plan(self) -> None:
         doc = _document(
@@ -496,15 +470,15 @@ class TestTheRequestTheStreamWillActuallySend:
 
         block = write_mode_block(doc, "insert")
         assert block is not None
-        request = block["request"]
-        table = ParamTable.for_write(block["params"], resolver)
+        request = block.request
+        table = ParamTable.for_write(block.params, resolver)
         as_read = RequestBuilder(
             table,
             raw_body=None,
             resolver=resolver,
             endpoint="/items",
-            declared_query=request["query"],
-            declared_headers=request["headers"],
+            declared_query=request.query,
+            declared_headers=request.headers,
         ).for_page(table.values)
         assert (plan.query, plan.headers) == (as_read.query, as_read.headers)
 
@@ -741,16 +715,26 @@ class TestRetryVerdicts:
 
 class TestFieldCollection:
     def test_the_flat_columns_shape_is_walked_too(self) -> None:
-        block = {
-            "input": {
-                "schema": {
-                    "columns": [
-                        {"name": "blob", "arrow_type": "Json"},
-                        {"name": "id", "arrow_type": "Int64"},
-                    ]
-                }
+        # The write input schema's CONTENTS stay free-form JSON, so the
+        # flat-columns spelling is authored inside the block and parsed
+        # with it.
+        block = WriteOperation.model_validate(
+            {
+                "request": {
+                    "method": "POST",
+                    "path": "/items",
+                    "body": {"item": {"from_input": "record"}},
+                },
+                "input": {
+                    "schema": {
+                        "columns": [
+                            {"name": "blob", "arrow_type": "Json"},
+                            {"name": "id", "arrow_type": "Int64"},
+                        ]
+                    }
+                },
             }
-        }
+        )
         assert collect_json_fields(block) == {"blob"}
         assert collect_input_field_names(block) == {"blob", "id"}
 

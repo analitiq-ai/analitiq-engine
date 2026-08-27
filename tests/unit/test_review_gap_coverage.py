@@ -10,6 +10,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from analitiq.contracts.endpoints import DATABASE_ENDPOINT_SCHEMA_URL
 
 
 def _merge_capable_caps():
@@ -88,26 +89,30 @@ class TestWriteConflictKeysWiring:
         handler._endpoint_refs = {
             "s1": {"scope": "connector", "connection_id": "pg", "endpoint_id": "x"},
         }
-        handler._stream_endpoints = {
-            "s1": {
-                "database_object": {"name": "orders", "schema": "public"},
-                "columns": [
-                    {
-                        "name": "tenant_id",
-                        "native_type": "BIGINT",
-                        "arrow_type": "Int64",
-                        "nullable": False,
-                    },
-                    {
-                        "name": "id",
-                        "native_type": "BIGINT",
-                        "arrow_type": "Int64",
-                        "nullable": False,
-                    },
-                ],
-                "primary_keys": ["id"],
-            },
-        }
+        handler.set_stream_endpoints(
+            {
+                "s1": {
+                    "$schema": DATABASE_ENDPOINT_SCHEMA_URL,
+                    "endpoint_id": "orders",
+                    "database_object": {"name": "orders", "schema": "public"},
+                    "columns": [
+                        {
+                            "name": "tenant_id",
+                            "native_type": "BIGINT",
+                            "arrow_type": "Int64",
+                            "nullable": False,
+                        },
+                        {
+                            "name": "id",
+                            "native_type": "BIGINT",
+                            "arrow_type": "Int64",
+                            "nullable": False,
+                        },
+                    ],
+                    "primary_keys": ["id"],
+                },
+            }
+        )
         handler.set_stream_conflict_keys({"s1": ["tenant_id", "id"]})
         handler._ensure_tables_exist = AsyncMock()
 
@@ -150,20 +155,24 @@ class TestWriteConflictKeysWiring:
         handler._endpoint_refs = {
             "s1": {"scope": "connector", "connection_id": "pg", "endpoint_id": "x"},
         }
-        handler._stream_endpoints = {
-            "s1": {
-                "database_object": {"name": "orders", "schema": "public"},
-                "columns": [
-                    {
-                        "name": "id",
-                        "native_type": "BIGINT",
-                        "arrow_type": "Int64",
-                        "nullable": False,
-                    }
-                ],
-                "primary_keys": ["id"],
-            },
-        }
+        handler.set_stream_endpoints(
+            {
+                "s1": {
+                    "$schema": DATABASE_ENDPOINT_SCHEMA_URL,
+                    "endpoint_id": "orders",
+                    "database_object": {"name": "orders", "schema": "public"},
+                    "columns": [
+                        {
+                            "name": "id",
+                            "native_type": "BIGINT",
+                            "arrow_type": "Int64",
+                            "nullable": False,
+                        }
+                    ],
+                    "primary_keys": ["id"],
+                },
+            }
+        )
         handler._ensure_tables_exist = AsyncMock()
 
         from src.grpc.generated.analitiq.v1 import SchemaMessage, WriteMode

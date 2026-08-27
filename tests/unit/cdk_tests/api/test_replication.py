@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
+from analitiq.contracts.endpoints import Replication
 
 from cdk.api.replication import cursor_param_for, effective_start
 from cdk.exceptions import ReadError
@@ -21,25 +20,35 @@ _WINDOW = {
 }
 
 
+def _replication(*mappings: dict[str, object]) -> Replication:
+    """The declared block, parsed the way the read path receives it.
+
+    Which mapping form each entry is comes out of the parse as a class, so
+    a test that handed over a bare dict would be asking a question the
+    caller never asks.
+    """
+    return Replication.model_validate(
+        {"supported_methods": ["incremental"], "cursor_mappings": list(mappings)}
+    )
+
+
 class TestCursorParam:
     def test_a_single_mapping_names_the_param(self) -> None:
-        assert cursor_param_for({"cursor_mappings": [_SINGLE]}, "updated_at") == "since"
+        assert cursor_param_for(_replication(_SINGLE), "updated_at") == "since"
 
     def test_a_window_mapping_does_not_drive_the_filter(self) -> None:
         # Half-binding a window would send a lower bound with no upper one
         # and read a different range than the author declared.
-        assert cursor_param_for({"cursor_mappings": [_WINDOW]}, "updated_at") is None
+        assert cursor_param_for(_replication(_WINDOW), "updated_at") is None
 
-    def test_the_two_shapes_are_told_apart_by_their_own_keys(self) -> None:
-        block = {"cursor_mappings": [_WINDOW, _SINGLE]}
-        assert cursor_param_for(block, "updated_at") == "since"
+    def test_a_window_mapping_ahead_of_it_does_not_hide_the_single_one(self) -> None:
+        assert cursor_param_for(_replication(_WINDOW, _SINGLE), "updated_at") == "since"
 
-    @pytest.mark.parametrize("block", [None, {}, {"cursor_mappings": []}])
-    def test_an_undeclared_mapping_answers_nothing(self, block: Any) -> None:
-        assert cursor_param_for(block, "updated_at") is None
+    def test_an_undeclared_block_answers_nothing(self) -> None:
+        assert cursor_param_for(None, "updated_at") is None
 
     def test_another_fields_mapping_is_not_borrowed(self) -> None:
-        assert cursor_param_for({"cursor_mappings": [_SINGLE]}, "created_at") is None
+        assert cursor_param_for(_replication(_SINGLE), "created_at") is None
 
 
 class TestEffectiveStart:

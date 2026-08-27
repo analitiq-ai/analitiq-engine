@@ -6,13 +6,18 @@ can fail is a defect in ONE stream's endpoint document, so it belongs on
 that stream's ``SchemaAck`` with a config-defect category.
 
 Before the resolution boundary was classified, each defect left the build
-wearing whatever the resolver happened to raise: conflicting expression
-markers and an unknown derived function as ``TransportSpecError``, a
-derived function handed the wrong type as ``TypeError``. The servicer's
-clauses match ``(UnmappedTypeError, InvalidTypeMapError)`` and
+wearing whatever the resolver happened to raise: an unknown derived
+function as ``TransportSpecError``, a derived function handed the wrong
+type as ``TypeError``. The servicer's clauses match
+``(UnmappedTypeError, InvalidTypeMapError)`` and
 ``(KeyError, TypeError, ValueError)`` -- ``TransportSpecError`` matched
 neither, so ``StreamRecords`` re-raised and every other stream sharing the
 connection died with one stream's typo.
+
+A defect the published schema can decide from the document alone never
+gets that far: parsing refuses it, so the handshake answers only for the
+defects that turn on a runtime fact. The two sets are kept apart below so
+neither quietly stops being tested.
 """
 
 from __future__ import annotations
@@ -21,7 +26,9 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from analitiq.contracts.endpoints import ApiEndpointDoc
 from cdk_tests.api.fakes import FakeSession, runtime_with
+from pydantic import ValidationError
 
 from cdk.api import GenericAPIConnector
 from cdk.types import FailureCategory
@@ -93,15 +100,12 @@ async def _ack(document: dict[str, Any]) -> Any:
     )
 
 
+#: Defects no document can be judged on alone: each one turns on which
+#: derived functions the run registered and what type they accept, which is a
+#: runtime fact. These are the ones a handshake still has to answer for.
 _DEFECTS: dict[str, dict[str, Any]] = {
-    "a header with conflicting expression markers": {
-        "headers": {"X-T": {"ref": "connection.parameters.a", "template": "b"}}
-    },
     "a query value calling a function nobody registered": {
         "query": {"q": {"function": "nope", "input": {"literal": 1}}}
-    },
-    "a header reading a scope that does not exist": {
-        "headers": {"X-T": {"ref": "nosuchscope.a"}}
     },
     "a query value handing a function the wrong type": {
         "query": {"q": {"function": "base64_encode", "input": {"literal": 5}}}
@@ -116,6 +120,18 @@ _DEFECTS: dict[str, dict[str, Any]] = {
             }
         },
         "query": {"token": {"from_param": "tok"}},
+    },
+}
+
+#: Defects the contract decides from the document alone. They never reach a
+#: handshake: parsing the document is what refuses them, so their coverage is
+#: that the published schema still catches each one.
+_STATIC_DEFECTS: dict[str, dict[str, Any]] = {
+    "a header with conflicting expression markers": {
+        "headers": {"X-T": {"ref": "connection.parameters.a", "template": "b"}}
+    },
+    "a header reading a scope that does not exist": {
+        "headers": {"X-T": {"ref": "nosuchscope.a"}}
     },
     "a param default reading a scope that does not exist": {
         "params": {
@@ -151,3 +167,13 @@ class TestOneStreamsDocumentDefectStaysOnItsOwnAck:
         ack = await _ack(_document(**_DEFECTS[defect]))
         assert ack.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
         assert ack.message
+
+
+@pytest.mark.parametrize("defect", sorted(_STATIC_DEFECTS), ids=sorted(_STATIC_DEFECTS))
+class TestADocumentDefectTheContractDecidesNeverReachesAHandshake:
+    def test_the_published_schema_refuses_the_document(self, defect: str) -> None:
+        # Nothing about these needs a run: the ack path above is the
+        # residue left once the contract has had its say, and it stays
+        # honest only while the contract keeps catching these four.
+        with pytest.raises(ValidationError):
+            ApiEndpointDoc.model_validate(_document(**_STATIC_DEFECTS[defect]))

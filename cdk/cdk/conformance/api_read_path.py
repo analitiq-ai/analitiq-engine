@@ -56,10 +56,17 @@ when it bites:
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import Any
 
+from analitiq.contracts.endpoints import (
+    CursorPagination,
+    KeysetPagination,
+    Pagination,
+    Predicate,
+    ReadOperation,
+    ReadRequest,
+)
 from yarl import URL
 
 from cdk.api.body import FORM_CONTENT_TYPE, encode_form, media_type
@@ -94,6 +101,7 @@ from .api_surface import (
     fillable_at_request_time,
     read_operations,
     unknown_function_problem,
+    unread_endpoints,
 )
 from .target import ConformanceTarget
 from .violations import Violation
@@ -112,8 +120,8 @@ RECORDS_CHECK = "api-record-schema"
 
 #: What compiling a read raises: ``RequestSpecError`` from every
 #: declaration the request build resolves, and ``ReadError`` from the
-#: probe's own refusals (a missing request block, a placeholder nothing
-#: could bind) and from ``build_read_strategy``. Two, not five: the engine
+#: probe's own refusals (a request block naming what no page carries) and
+#: from ``build_read_strategy``. Two, not five: the engine
 #: classifies at the boundary now, so the kit no longer has to enumerate
 #: the resolver's exception vocabulary -- an enumeration it could only ever
 #: get wrong in one direction, by letting a defect out as a raw traceback
@@ -237,9 +245,9 @@ class _ReadProbe:
     """
 
     label: str
-    read: dict[str, Any]
-    request: Mapping[str, Any]
-    pagination: dict[str, Any] | None
+    read: ReadOperation
+    request: ReadRequest
+    pagination: Pagination | None
     url: str
     origin: str
     table: ParamTable
@@ -260,7 +268,7 @@ class _ReadProbe:
 
 
 def _compile_read(
-    target: ConformanceTarget, label: str, read: dict[str, Any]
+    target: ConformanceTarget, label: str, read: ReadOperation
 ) -> _ReadProbe:
     """Compile one read to its first request, raising on any authoring defect.
 
@@ -277,24 +285,23 @@ def _compile_read(
     resolver = definition_resolver(
         target, runtime_values={"batch_size": _PROBE_BATCH_SIZE}
     )
-    request_block = read.get("request")
-    if not isinstance(request_block, Mapping):
-        raise ReadError("operations.read declares no request block")
-    declared_path = request_block.get("path")
-    if not isinstance(declared_path, str) or not declared_path:
-        raise ReadError("operations.read.request declares no path")
+    # The request block and its path are required fields of the parsed
+    # operation, so there is nothing here to refuse: a document missing
+    # either never became a ReadOperation, and the kit reports THAT as an
+    # endpoint-document-contract finding at load.
+    request_block = read.request
+    declared_path = request_block.path
 
-    declared_params = read.get("params") or {}
-    table = ParamTable.for_read(declared_params, resolver)
+    table = ParamTable.for_read(read.params, resolver)
     problem = request_block_problem(
         request_block,
         reserved_headers=reserved_header_names(
-            _declared_header_names(target, request_block.get("transport_ref"))
+            _declared_header_names(target, request_block.transport_ref)
         ),
         resolver=resolver,
         controlled_by=table.controlled_by,
-        declared_params=declared_params,
-        pagination=read.get("pagination"),
+        declared_params=read.params,
+        pagination=read.pagination,
         endpoint=label,
     )
     if problem is not None:
@@ -308,9 +315,9 @@ def _compile_read(
     # The transport THIS read dispatches through, so the compiled URL is
     # the one the engine builds; the guard is armed with every origin the
     # connector declares a dispatchable transport for.
-    origin = api_base_url(target, request_block.get("transport_ref")) or STAND_IN_ORIGIN
-    pagination = read.get("pagination")
-    if isinstance(pagination, dict):
+    origin = api_base_url(target, request_block.transport_ref) or STAND_IN_ORIGIN
+    pagination = read.pagination
+    if pagination is not None:
         scope_problem = _page_scope_problem(pagination)
         if scope_problem is not None:
             raise ReadError(scope_problem)
@@ -318,7 +325,7 @@ def _compile_read(
         label=label,
         read=read,
         request=request_block,
-        pagination=pagination if isinstance(pagination, dict) else None,
+        pagination=pagination,
         url=join_url(origin, path),
         origin=origin,
         table=table,
@@ -332,7 +339,7 @@ def _compile_read(
     )
 
 
-def _page_scope_problem(pagination: Mapping[str, Any]) -> str | None:
+def _page_scope_problem(pagination: Pagination) -> str | None:
     """Why a pagination reference addresses what no page carries, or ``None``.
 
     The half of the retired reference check the contract did not take:
@@ -366,7 +373,7 @@ def _page_scope_problem(pagination: Mapping[str, Any]) -> str | None:
 
 def _path_values(
     declared_path: str,
-    request_block: Mapping[str, Any],
+    request_block: ReadRequest,
     *,
     table: ParamTable,
     resolver: Resolver,
@@ -403,7 +410,7 @@ def _path_values(
     moves, and the value inside one path segment is the same on every page.
     """
     bound = bind_request_values(
-        request_block.get("path_params"),
+        request_block.path_params,
         params=table.values,
         resolver=resolver,
         block="path_params",
@@ -461,13 +468,16 @@ def _request_builder(probe: _ReadProbe) -> RequestBuilder:
         probe.table,
         raw_body=_drivable_body(probe),
         resolver=probe.resolver,
-        endpoint=str(probe.request.get("path")),
-        declared_query=probe.request.get("query"),
-        declared_headers=probe.request.get("headers"),
-        content_type=probe.request.get("content_type"),
-        query_styles=declared_query_styles(
-            probe.request.get("query"), probe.read.get("params") or {}
-        ),
+        endpoint=probe.request.path,
+        declared_query=probe.request.query,
+        declared_headers=probe.request.headers,
+        # ``body`` and ``content_type`` are declared on the POST branch of
+        # the read-request union and nowhere else, so a GET has no
+        # attribute to read. getattr's default says "this read sends no
+        # body" for both branches at once, exactly as the read's own
+        # builder does.
+        content_type=getattr(probe.request, "content_type", None),
+        query_styles=declared_query_styles(probe.request.query, probe.read.params),
     )
 
 
@@ -502,7 +512,7 @@ def _drivable_body(probe: _ReadProbe) -> Any:
     the loop has a value, the one defect no check stopping at the first
     request can see.
     """
-    body = probe.request.get("body")
+    body = getattr(probe.request, "body", None)
     if body is None or _is_connection_expression(body):
         return None
     if Resolver.is_expression_node(body) or (
@@ -550,7 +560,7 @@ def _materialize_first_request(
     record of what page one actually sends, and the advance drive compares
     page two against it.
     """
-    body = probe.request.get("body")
+    body = getattr(probe.request, "body", None)
     problem = None if body is None else unknown_function_problem(body, probe.resolver)
     if problem is not None:
         raise ReadError(problem)
@@ -678,10 +688,15 @@ def _body_paths(node: Any) -> list[list[str]]:
     ]
 
 
-def _response_schema(probe: _ReadProbe) -> Any:
-    """Return the endpoint's declared response schema, or ``None``."""
-    response = probe.read.get("response")
-    return response.get("schema") if isinstance(response, Mapping) else None
+def _response_schema(probe: _ReadProbe) -> dict[str, Any]:
+    """Return the endpoint's declared response schema.
+
+    Always there: the response block is required on a read operation, and
+    the schema it carries is required on the block. What the schema
+    DECLARES is another matter -- it is free-form JSON Schema in the
+    contract, so every walk below it still asks rather than assumes.
+    """
+    return probe.read.response.schema_
 
 
 def _declared_schema(schema: Any, path: list[str]) -> Any | None:
@@ -726,8 +741,17 @@ def _continuation_paths(probe: _ReadProbe) -> list[list[str]]:
     would type the author's comparison by the paging scheme rather than by
     what the connector declared the field to be.
     """
-    block = probe.pagination or {}
-    scheme = block.get(str(block.get("type", "")))
+    pagination = probe.pagination
+    if pagination is None:
+        return []
+    # The contract names each scheme's block after its own discriminator
+    # (``offset``, ``page``, ``cursor``, ``keyset``, ``link``), so the
+    # discriminator reaches the block the strategy reads without a second
+    # table here restating the union -- a table that would be one rename
+    # behind the contract. getattr's default keeps a scheme this build has
+    # no vocabulary for from raising: build_read_strategy already refuses
+    # it by name.
+    scheme = getattr(pagination, pagination.type, None)
     return _body_paths(scheme) if scheme is not None else []
 
 
@@ -762,7 +786,7 @@ def _scripted_page(
     The records land at the declared ``records.ref``, so a stop condition
     written against the records array sees the page the loop would hand it.
     """
-    scheme = str((probe.pagination or {}).get("type", ""))
+    scheme = probe.pagination.type if probe.pagination is not None else ""
     schema = _response_schema(probe)
     payload: dict[str, Any] = {}
     for path in _body_paths(probe.pagination):
@@ -774,7 +798,7 @@ def _scripted_page(
             _plant(payload, path, continuation)
         elif declared_type(_declared_schema(schema, path)) is None:
             _plant(payload, path, _continuation_value(scheme, key))
-    records_ref = ((probe.read.get("response") or {}).get("records") or {}).get("ref")
+    records_ref = probe.read.response.records.ref
     try:
         records_path = split_records_ref(records_ref)
     except ReadError:
@@ -836,11 +860,10 @@ def _declared_record(probe: _ReadProbe, *, key: int) -> dict[str, Any] | None:
     ``None`` when that schema does not resolve, which the record-schema
     check reports on its own.
     """
-    response = probe.read.get("response")
-    if not isinstance(response, Mapping):
-        return None
     try:
-        return _sample_object(records_items_schema(probe.label, response), key=key)
+        return _sample_object(
+            records_items_schema(probe.label, probe.read.response), key=key
+        )
     except ReadError:
         # The only failure ``records_items_schema`` raises: a ref that is
         # not anchored, does not resolve, or reaches something carrying no
@@ -878,11 +901,10 @@ def _probe_records(
 
 def _keyset_field(probe: _ReadProbe) -> str | None:
     """Return the keyset scheme's ordering field, ``None`` for the other four."""
-    block = probe.pagination or {}
-    if block.get("type") != "keyset":
+    pagination = probe.pagination
+    if not isinstance(pagination, KeysetPagination):
         return None
-    field = (block.get("keyset") or {}).get("order_by_field")
-    return field if isinstance(field, str) and field else None
+    return pagination.keyset.order_by_field
 
 
 def check_api_read_compiles(target: ConformanceTarget) -> list[Violation]:
@@ -911,9 +933,14 @@ def check_api_read_compiles(target: ConformanceTarget) -> list[Violation]:
     string would go blind on those two.
     """
     probes, compile_violations = _probes(target)
-    violations = list(compile_violations)
+    violations = unread_endpoints(COMPILE_CHECK, target) + list(compile_violations)
     for probe in probes:
-        cursor_param = ((probe.pagination or {}).get("cursor") or {}).get("param")
+        pagination = probe.pagination
+        cursor_param = (
+            pagination.cursor.param
+            if isinstance(pagination, CursorPagination)
+            else None
+        )
         if cursor_param and cursor_param in probe.first.params:
             violations.append(
                 Violation(
@@ -956,7 +983,8 @@ def check_api_read_advances(target: ConformanceTarget) -> list[Violation]:
       fresh traversal of its own.
     """
     probes, compile_violations = _probes(target)
-    violations: list[Violation] = _undriven(ADVANCE_CHECK, compile_violations)
+    violations: list[Violation] = unread_endpoints(ADVANCE_CHECK, target)
+    violations += _undriven(ADVANCE_CHECK, compile_violations)
     for probe in probes:
         violations.extend(_advance_violations(probe))
         violations.extend(_refusal_violations(probe))
@@ -986,7 +1014,7 @@ def _advance_violations(probe: _ReadProbe) -> list[Violation]:
     (:data:`_DRIVEN_PAGES`), which is what makes a repeated request mean
     something rather than being the same page served twice.
     """
-    scheme = str((probe.pagination or {}).get("type", ""))
+    scheme = probe.pagination.type if probe.pagination is not None else ""
     strategy = probe.strategy()
     builder = _request_builder(probe)
     # What moves a traversal is what is SENT, and a param reaches the wire
@@ -1084,7 +1112,7 @@ def _wire_target(url: str) -> str:
 
 def _refusal_violations(probe: _ReadProbe) -> list[Violation]:
     """Arm the two rules that have to hold before a page is yielded."""
-    scheme = str((probe.pagination or {}).get("type", ""))
+    scheme = probe.pagination.type if probe.pagination is not None else ""
     if scheme == "keyset":
         return _refuses(
             probe,
@@ -1207,29 +1235,27 @@ def check_api_read_stop_condition(target: ConformanceTarget) -> list[Violation]:
       under ``response`` answers the same thing on every page, so it either
       ends the stream at page one or never ends it, and no page the provider
       serves can change its mind.
+
+    That a paginated read declares one at all is no longer asked here: the
+    contract makes ``stop_when`` required on every member of the pagination
+    union, so a block without one is a document the kit refuses at load
+    (``endpoint-document-contract``) rather than a probe it drives.
     """
     probes, compile_violations = _probes(target)
-    violations: list[Violation] = _undriven(STOP_CHECK, compile_violations)
+    violations: list[Violation] = unread_endpoints(STOP_CHECK, target)
+    violations += _undriven(STOP_CHECK, compile_violations)
     for probe in probes:
         if probe.pagination is None:
             continue
-        declared = probe.pagination.get("stop_when")
-        if declared is None:
-            violations.append(
-                Violation(
-                    STOP_CHECK,
-                    f"endpoint {probe.label!r}: pagination declares no "
-                    f"stop_when. The loop then ends only on an empty page or "
-                    f"on the scheme running out, and a provider that serves "
-                    f"a last page without either is read forever.",
-                )
-            )
-            continue
-        violations.extend(_stop_condition_violations(probe, declared))
+        violations.extend(
+            _stop_condition_violations(probe, probe.pagination.stop_when)
+        )
     return violations
 
 
-def _stop_condition_violations(probe: _ReadProbe, declared: Any) -> list[Violation]:
+def _stop_condition_violations(
+    probe: _ReadProbe, declared: Predicate
+) -> list[Violation]:
     """Evaluate one declared stop condition against a scripted page."""
     violations: list[Violation] = []
     page = _scripted_page(probe, records=_probe_records(probe))
@@ -1261,7 +1287,9 @@ def _stop_condition_violations(probe: _ReadProbe, declared: Any) -> list[Violati
     return violations
 
 
-def _premature_stop(probe: _ReadProbe, declared: Any, stops: bool) -> list[Violation]:
+def _premature_stop(
+    probe: _ReadProbe, declared: Predicate, stops: bool
+) -> list[Violation]:
     """Report a condition that ends the traversal on a plainly-full page.
 
     The verdict itself has to be read, not just the fact that it evaluated:
@@ -1316,13 +1344,11 @@ def _non_terminal_paths(probe: _ReadProbe) -> set[str]:
     evidence = {f"{_RESPONSE_PREFIX}record_count", _BODY_PREFIX.rstrip(".")}
     for path in _continuation_paths(probe):
         evidence.add(_BODY_PREFIX + ".".join(path))
-    records_ref = ((probe.read.get("response") or {}).get("records") or {}).get("ref")
-    if isinstance(records_ref, str):
-        evidence.add(records_ref)
+    evidence.add(probe.read.response.records.ref)
     return evidence
 
 
-def _operands_are_declared(probe: _ReadProbe, declared: Any) -> bool:
+def _operands_are_declared(probe: _ReadProbe, declared: Predicate) -> bool:
     """Whether every body operand the condition reads has a declared type.
 
     A scripted page can only carry the types the response schema names. For
@@ -1350,21 +1376,11 @@ def check_api_record_schema(target: ConformanceTarget) -> list[Violation]:
     schema does not declare, or a JSON type the type-map has no rule for,
     fails the read on its first page.
     """
-    violations: list[Violation] = []
+    violations: list[Violation] = unread_endpoints(RECORDS_CHECK, target)
     mapper = target.type_mapper
     for label, read in read_operations(target):
-        response = read.get("response")
-        if not isinstance(response, Mapping):
-            violations.append(
-                Violation(
-                    RECORDS_CHECK,
-                    f"endpoint {label!r}: operations.read declares no response "
-                    f"block, so a read has nowhere to find its records.",
-                )
-            )
-            continue
         try:
-            items = deepcopy(records_items_schema(label, response))
+            items = records_items_schema(label, read.response)
             _resolve_arrow_types(items, mapper)
             SchemaContract(items)
         except _RECORD_FAILURES as err:

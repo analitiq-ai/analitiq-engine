@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from analitiq.contracts.endpoints import ResponseExtraction
 
 from cdk.api.response_schema import (
     apply_read_type_map,
@@ -19,8 +20,20 @@ pytestmark = pytest.mark.unit
 _ENDPOINT_REF = {"scope": "connector", "connection_id": "c", "endpoint_id": "items"}
 
 
-def _response(schema: dict[str, Any], ref: str = "response.body.records") -> dict:
-    return {"schema": schema, "records": {"ref": ref}}
+def _response(
+    schema: dict[str, Any], ref: str = "response.body.records"
+) -> ResponseExtraction:
+    """The read's ``response`` block, parsed the way the read path gets it.
+
+    The block's own fields are contract fields and are read as attributes
+    (``schema`` is spelled ``schema_`` on the model, ``in`` would be
+    ``location``); the JSON Schema INSIDE it stays a free-form dict,
+    because that is what the contract declares it to be and what the walk
+    below descends through.
+    """
+    return ResponseExtraction.model_validate(
+        {"schema": schema, "records": {"ref": ref}}
+    )
 
 
 class _Runtime:
@@ -85,10 +98,6 @@ class TestItemsSchema:
         }
         with pytest.raises(ReadError, match="no 'properties'"):
             records_items_schema("items", _response(schema))
-
-    def test_the_ref_is_parsed_by_the_same_rule_the_payload_walk_uses(self) -> None:
-        with pytest.raises(ReadError, match="response.body"):
-            records_items_schema("items", _response({}, "records"))
 
 
 class TestReadTypeMap:

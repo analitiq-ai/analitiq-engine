@@ -2321,7 +2321,33 @@ class TestApiRunWithNothingToDrive:
                 path.unlink()
                 continue
             document = json.loads(path.read_text())
+            # The write block goes in as the read comes out: an operations
+            # object declaring neither is refused by the contract, and a
+            # document that never parsed is the sibling finding next door.
+            # What this gate is about is a connector shipping endpoints
+            # that are real and simply write-only.
             document["operations"].pop("read")
+            document["operations"]["write"] = {
+                "insert": {
+                    "request": {
+                        "method": "POST",
+                        "path": "/v1/widgets",
+                        "body": {"widget": {"from_input": "record"}},
+                    },
+                    "input": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "id": {
+                                    "type": "integer",
+                                    "native_type": "integer",
+                                    "arrow_type": "Int64",
+                                }
+                            },
+                        }
+                    },
+                }
+            }
             path.write_text(json.dumps(document))
         report = _report(check_api_has_reads(load_target(root)))
         assert "declare no operations.read" in report

@@ -24,6 +24,10 @@ from uuid import uuid4
 
 import pyarrow as pa
 import pytest
+from analitiq.contracts.endpoints import (
+    DATABASE_ENDPOINT_SCHEMA_URL,
+    DatabaseEndpointDoc,
+)
 from sqlalchemy import MetaData, Table, create_engine
 from sqlalchemy.pool import StaticPool
 
@@ -34,6 +38,26 @@ from cdk.sql.generic import GenericSQLConnector, _StreamState
 from cdk.sql.sqlalchemy_backend import SqlAlchemyBackend
 from cdk.sql.stage_cycle import StageCycle
 from cdk.types import AckStatus, Cursor
+
+
+def _endpoint_doc(columns, *, table="events", schema=None):
+    """A contract-valid database endpoint document for the DDL fixtures.
+
+    ``_StreamState`` carries the resolved address on its own field, but the
+    document still names the same object: a fixture describing some other
+    table would build DDL the state never writes to.
+    """
+    database_object = {"name": table}
+    if schema is not None:
+        database_object["schema"] = schema
+    return DatabaseEndpointDoc.model_validate(
+        {
+            "$schema": DATABASE_ENDPOINT_SCHEMA_URL,
+            "endpoint_id": table,
+            "database_object": database_object,
+            "columns": columns,
+        }
+    )
 
 
 def _sqlite_sync_engine():
@@ -719,9 +743,17 @@ class TestDedicatedStageSchemaPreDdl:
             address=TableAddress(table="events", schema="public"),
             primary_keys=["id"],
             write_mode="insert",
-            endpoint_document={
-                "columns": [{"name": "id", "arrow_type": "Int64", "nullable": False}],
-            },
+            endpoint_document=_endpoint_doc(
+                [
+                    {
+                        "name": "id",
+                        "native_type": "INTEGER",
+                        "arrow_type": "Int64",
+                        "nullable": False,
+                    }
+                ],
+                schema="public",
+            ),
         )
         await handler._ensure_tables_exist(state, _StubTypeMapper())
         assert 'CREATE SCHEMA IF NOT EXISTS "_analitiq_staging"' in ran
@@ -813,8 +845,13 @@ class TestSyncEngineReadPath:
             checkpoint.save_cursor = AsyncMock()
             config = {
                 "endpoint_document": {
+                    "$schema": DATABASE_ENDPOINT_SCHEMA_URL,
+                    "endpoint_id": "events",
                     "database_object": {"name": "events"},
-                    "columns": [{"name": "id"}, {"name": "name"}],
+                    "columns": [
+                        {"name": "id", "native_type": "INTEGER", "arrow_type": "Int64"},
+                        {"name": "name", "native_type": "TEXT", "arrow_type": "Utf8"},
+                    ],
                 },
                 "stream_source": {},
             }
@@ -918,8 +955,8 @@ class TestSyncRuntimeWiring:
                 address=TableAddress(table="events"),
                 primary_keys=["id"],
                 write_mode="insert",
-                endpoint_document={
-                    "columns": [
+                endpoint_document=_endpoint_doc(
+                    [
                         {
                             "name": "id",
                             "native_type": "INTEGER",
@@ -927,8 +964,8 @@ class TestSyncRuntimeWiring:
                             "nullable": False,
                         },
                         {"name": "name", "native_type": "TEXT", "arrow_type": "Utf8"},
-                    ],
-                },
+                    ]
+                ),
             )
             await handler._ensure_tables_exist(state, _StubTypeMapper())
 

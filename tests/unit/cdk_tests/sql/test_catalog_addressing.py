@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pyarrow as pa
 import pytest
+from analitiq.contracts.endpoints import DATABASE_ENDPOINT_SCHEMA_URL
 
 from cdk.exceptions import ReadError
 from cdk.sql.capabilities import SqlCapabilities
@@ -36,6 +37,8 @@ from .conftest import caps_block
 STREAM = "s1"
 
 ENDPOINT_DOC = {
+    "$schema": DATABASE_ENDPOINT_SCHEMA_URL,
+    "endpoint_id": "events",
     "database_object": {"name": "events", "schema": "ds", "catalog": "proj"},
     "columns": [
         {

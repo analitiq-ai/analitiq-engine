@@ -3,12 +3,17 @@
 Loading already failed loud (:func:`~cdk.conformance.target.load_target`
 raises on a missing definition, malformed JSON, an invalid
 ``sql_capabilities`` vocabulary, or unparseable type-map rules); these
-tests pin the facts loading alone does not enforce.
+tests pin the facts loading alone does not enforce -- including the one
+loading deliberately does NOT raise on, an endpoint document the
+published contract refuses.
 """
 
 from __future__ import annotations
 
-from cdk.conformance.target import ConformanceTarget
+import pytest
+
+from cdk.conformance.target import ConformanceTarget, check_endpoint_documents
+from cdk.conformance.violations import violation_report
 
 
 def test_definition_identifies_the_connector(
@@ -34,3 +39,12 @@ def test_connector_ships_a_read_type_map(
         "the connector ships no definition/type-map-read.json; the engine "
         "canonicalizes every source type it discovers through that map"
     )
+
+
+def test_every_endpoint_document_satisfies_its_contract(
+    conformance_target: ConformanceTarget,
+) -> None:
+    """A document the contract refuses is an endpoint no other check assesses."""
+    violations = check_endpoint_documents(conformance_target)
+    if violations:
+        pytest.fail(violation_report(violations))

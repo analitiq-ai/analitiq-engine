@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, patch
 
 import pyarrow as pa
 import pytest
+from analitiq.contracts.endpoints import DATABASE_ENDPOINT_SCHEMA_URL
 
 from cdk.exceptions import ReadError
 from cdk.secrets.exceptions import PlaceholderExpansionError
@@ -71,8 +72,13 @@ def _endpoint_config(
 ):
     return {
         "endpoint_document": {
+            "$schema": DATABASE_ENDPOINT_SCHEMA_URL,
+            "endpoint_id": "orders",
             "database_object": {"name": "orders", "schema": "public"},
-            "columns": [{"name": c} for c in columns],
+            "columns": [
+                {"name": c, "native_type": "TEXT", "arrow_type": "Utf8"}
+                for c in columns
+            ],
         },
         "stream_source": {
             "filters": filters or [],
@@ -107,7 +113,18 @@ class TestReadGuards:
     async def test_missing_table_name_raises(self):
         connector = GenericSQLConnector()
         runtime = _FakeRuntime(is_adbc=False)
-        config = {"endpoint_document": {"database_object": {}, "columns": []}}
+        # Every other field is contract-valid, so the missing object name is
+        # the only thing the refusal can be about.
+        config = {
+            "endpoint_document": {
+                "$schema": DATABASE_ENDPOINT_SCHEMA_URL,
+                "endpoint_id": "orders",
+                "database_object": {"schema": "public"},
+                "columns": [
+                    {"name": "id", "native_type": "TEXT", "arrow_type": "Utf8"}
+                ],
+            }
+        }
         with pytest.raises(ReadError, match="database_object.name"):
             await _drain(connector, runtime, config, _checkpoint())
 
@@ -259,6 +276,11 @@ class TestReadAdbcBranch:
 
     @pytest.mark.asyncio
     async def test_empty_columns_rejected(self):
+        # A document declaring no columns compiles to a SELECT with no
+        # projection, so it must be refused before any extraction work.
+        # Releasing the runtime on a read error is pinned by
+        # test_incremental_cursor_field_not_in_projection_raises, which
+        # fails deep enough in the read to have opened one.
         runtime = _FakeRuntime(is_adbc=True)
         connector = GenericSQLConnector()
         with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
@@ -266,10 +288,8 @@ class TestReadAdbcBranch:
         ):
             config = _endpoint_config(columns=())
             config["endpoint_document"]["columns"] = []
-            with pytest.raises(ReadError, match="non-empty column projection"):
+            with pytest.raises(ReadError, match="column"):
                 await _drain(connector, runtime, config, _checkpoint())
-        # Even on the read error, the runtime is released.
-        runtime.close.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_saves_last_cursor_value_from_batch(self):

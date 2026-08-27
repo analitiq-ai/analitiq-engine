@@ -11,6 +11,10 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from analitiq.contracts.endpoints import (
+    DATABASE_ENDPOINT_SCHEMA_URL,
+    DatabaseEndpointDoc,
+)
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.sql.capabilities import SqlCapabilities
@@ -20,10 +24,34 @@ from cdk.sql.generic import GenericSQLConnector, _StreamState
 from cdk.type_map import TypeMapper
 from cdk.type_map.rules import parse_rules
 
+
 # A fixed, timezone-aware emit instant for write_batch/send_batch calls; the
 # engine stamps this per batch (issue #353). Value is arbitrary for sinks
 # that ignore it.
 _EMITTED_AT = datetime(2026, 7, 21, 9, 0, 0, tzinfo=timezone.utc)
+
+
+def _endpoint_json(columns, *, table, schema="public", primary_keys=None):
+    """A contract-valid database endpoint document as the engine sends it.
+
+    ``set_stream_endpoints`` takes authored JSON, so the fixtures that go
+    through that funnel keep the wire shape; the ones that reach into
+    ``_StreamState`` directly parse it with :func:`_endpoint_doc`.
+    """
+    document = {
+        "$schema": DATABASE_ENDPOINT_SCHEMA_URL,
+        "endpoint_id": table,
+        "database_object": {"name": table, "schema": schema},
+        "columns": columns,
+    }
+    if primary_keys is not None:
+        document["primary_keys"] = primary_keys
+    return document
+
+
+def _endpoint_doc(columns, **kwargs):
+    """The parsed form of :func:`_endpoint_json`, for a hand-built state."""
+    return DatabaseEndpointDoc.model_validate(_endpoint_json(columns, **kwargs))
 
 
 def _mapper(label: str) -> TypeMapper:
@@ -185,45 +213,51 @@ class TestEndpointRefDispatch:
 
 
 class TestColumnDefStrictness:
-    """``_build_column_defs`` must refuse malformed payloads rather than
-    silently dropping columns. Covers the sibling raise of the Arrow-side
-    check in ``schema_contract``."""
+    """A malformed column must be refused loudly rather than silently
+    dropped from the DDL. The contract makes both shapes unrepresentable,
+    so the refusal now happens where the document is registered -- before
+    any state is stored or any DDL is built -- and carries the stream id
+    the engine needs to reject the right schema.
+    """
 
     def test_unnamed_column_raises(self):
-        """A column without a name fails DDL construction loudly."""
+        """A column without a name is refused when the document registers."""
 
         handler = GenericSQLConnector()
-        handler._runtime = _runtime(connector_mapper=_mapper("pg"))
-
-        state = _StreamState(
-            address=TableAddress(table="t", schema="public"),
-            endpoint_document={
-                "columns": [
-                    {"arrow_type": "Int64"},  # missing 'name'
-                    {"name": "valid", "arrow_type": "Int64"},
-                ]
-            },
-        )
-        with pytest.raises(SchemaConfigurationError, match="has no 'name' field"):
-            handler._build_column_defs(state)
+        with pytest.raises(SchemaConfigurationError) as err:
+            handler.set_stream_endpoints(
+                {
+                    "s1": _endpoint_json(
+                        [
+                            {"native_type": "BIGINT", "arrow_type": "Int64"},
+                            {
+                                "name": "valid",
+                                "native_type": "BIGINT",
+                                "arrow_type": "Int64",
+                            },
+                        ],
+                        table="t",
+                    )
+                }
+            )
+        assert "s1" in str(err.value)
+        assert "name" in str(err.value)
 
     def test_column_without_arrow_type_raises(self):
+        # native_type alone is not enough: DDL consumes the stored
+        # arrow_type (the same declaration the schema contract casts
+        # with), never the read map.
         handler = GenericSQLConnector()
-        handler._runtime = _runtime(connector_mapper=_mapper("pg"))
-
-        state = _StreamState(
-            address=TableAddress(table="t", schema="public"),
-            endpoint_document={
-                "columns": [
-                    # native_type alone is not enough: DDL consumes the
-                    # stored arrow_type (the same declaration the schema
-                    # contract casts with), never the read map.
-                    {"name": "id", "native_type": "BIGINT"},
-                ]
-            },
-        )
-        with pytest.raises(SchemaConfigurationError, match="has no 'arrow_type'"):
-            handler._build_column_defs(state)
+        with pytest.raises(SchemaConfigurationError) as err:
+            handler.set_stream_endpoints(
+                {
+                    "s1": _endpoint_json(
+                        [{"name": "id", "native_type": "BIGINT"}], table="t"
+                    )
+                }
+            )
+        assert "s1" in str(err.value)
+        assert "arrow_type" in str(err.value)
 
 
 class TestWriteBatchFatalOnTypeMapError:
@@ -500,7 +534,10 @@ class TestEnsureTablesEngineNoneRaises:
         assert handler._engine is None
         state = _StreamState(
             address=TableAddress(table="events", schema="public"),
-            endpoint_document={"columns": [{"name": "id"}]},
+            endpoint_document=_endpoint_doc(
+                [{"name": "id", "native_type": "BIGINT", "arrow_type": "Int64"}],
+                table="events",
+            ),
         )
 
         with mock_patch.object(
@@ -810,8 +847,8 @@ class TestDDLLockSerialization:
             """Configure one stream end-to-end against the shared handler."""
             state = _StreamState(
                 address=TableAddress(table=f"t_{stream_id}", schema="public"),
-                endpoint_document={
-                    "columns": [
+                endpoint_document=_endpoint_doc(
+                    [
                         {
                             "name": "id",
                             "native_type": "BIGINT",
@@ -819,9 +856,9 @@ class TestDDLLockSerialization:
                             "nullable": False,
                         }
                     ],
-                    "primary_keys": ["id"],
-                    "database_object": {"name": f"t_{stream_id}", "schema": "public"},
-                },
+                    table=f"t_{stream_id}",
+                    primary_keys=["id"],
+                ),
                 primary_keys=["id"],
             )
             order.append(f"enter:{stream_id}")
@@ -860,11 +897,11 @@ class TestConfigureSchemaErrorPropagation:
         )
         handler.set_stream_endpoints(
             {
-                "s1": {
-                    "database_object": {"name": "events", "schema": "public"},
-                    "columns": [{"name": "id", "native_type": "BIGINT"}],
-                    "primary_keys": ["id"],
-                }
+                "s1": _endpoint_json(
+                    [{"name": "id", "native_type": "BIGINT", "arrow_type": "Int64"}],
+                    table="events",
+                    primary_keys=["id"],
+                )
             }
         )
         return handler

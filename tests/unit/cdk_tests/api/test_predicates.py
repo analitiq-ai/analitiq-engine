@@ -173,6 +173,36 @@ class TestEveryContractOperatorIsCovered:
         assert not invented, f"operators the contract does not declare: {invented}"
 
 
+class TestAParsedStopConditionReadsTheSame:
+    """The stop condition arrives as a contract model, and answers the same.
+
+    ``operations.read.pagination.stop_when`` is a parsed ``Predicate`` on
+    the document the read path now navigates, so what reaches this
+    evaluator is a model rather than the node its author wrote. It is read
+    in its authored form -- alias names restored, the author's omissions
+    still omitted -- which is what lets the operator table below stay the
+    contract's vocabulary without importing the contract.
+    """
+
+    _AUTHORED = {
+        "and": [
+            {"eq": [{"value": 1}, {"value": 1}]},
+            {"not": {"empty": {"value": ["a"]}}},
+        ]
+    }
+
+    def test_the_model_and_the_json_it_was_parsed_from_agree(self) -> None:
+        import typing
+
+        from analitiq.contracts.endpoints import Predicate
+        from pydantic import TypeAdapter
+
+        parsed = TypeAdapter(typing.cast(Any, Predicate)).validate_python(
+            self._AUTHORED
+        )
+        assert _ev(parsed) is _ev(self._AUTHORED) is True
+
+
 class TestTheModuleStaysCdkClean:
     def test_it_imports_no_contract_models(self) -> None:
         # The whole point of reading the operator off the node: selecting a
