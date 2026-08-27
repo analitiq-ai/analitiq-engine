@@ -10,6 +10,8 @@ from typing import Any, Final
 
 from analitiq.contracts.endpoints import ApiEndpointDoc
 
+from src.config.schema_validator import EndpointDocument
+
 from .census import field_census
 from .drive import drive_case
 from .recording import ReadLedger, recording_document
@@ -51,7 +53,7 @@ CONTRACT_MODELS_DISTRIBUTION: Final[str] = "analitiq-contract-models"
 #: The resources the manifest covers, and the contract model each one's
 #: document is rooted at. api-endpoint is the pilot; a further resource is
 #: an entry here plus corpus cases, never a new mechanism.
-RESOURCE_ROOTS: Final[dict[str, type[ApiEndpointDoc]]] = {
+RESOURCE_ROOTS: Final[dict[str, type[EndpointDocument]]] = {
     "api-endpoint": ApiEndpointDoc,
 }
 
@@ -100,13 +102,13 @@ def build_consumption_manifest() -> dict[str, Any]:
             document = recording_document(root.model_validate(case["document"]), ledger)
             asyncio.run(drive_case(case, document))
         claims = ledger.claims()
+        consumed = {
+            model: sorted(set(claims.get(model, ())) & set(fields))
+            for model, fields in sorted(census.items())
+        }
         resources[resource] = {
             "root_model": root.__name__,
-            "consumed": {
-                model: sorted(set(claims.get(model, ())) & set(fields))
-                for model, fields in sorted(census.items())
-                if set(claims.get(model, ())) & set(fields)
-            },
+            "consumed": {model: fields for model, fields in consumed.items() if fields},
         }
     return {
         "version": CONSUMPTION_MANIFEST_VERSION,

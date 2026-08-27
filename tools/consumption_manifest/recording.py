@@ -179,9 +179,12 @@ def _wrap_value(value: Any, dumped: Any, ledger: ReadLedger) -> Any:
     if isinstance(value, BaseModel) and isinstance(dumped, dict):
         return _wrap_model(value, dumped, ledger)
     if isinstance(value, (list, tuple)) and isinstance(dumped, list):
+        # strict: a length mismatch between a model list and its dump
+        # cannot happen, and if it ever did it would silently leave nodes
+        # unwrapped -- which reads as "the engine ignored them".
         return [
             _wrap_value(item, item_dump, ledger)
-            for item, item_dump in zip(value, dumped)
+            for item, item_dump in zip(value, dumped, strict=True)
         ]
     if isinstance(value, dict) and isinstance(dumped, dict):
         # Driven from the DUMPED keys, matching back into the model's own
@@ -196,7 +199,7 @@ def _wrap_value(value: Any, dumped: Any, ledger: ReadLedger) -> Any:
 
 
 def _member(mapping: dict[Any, Any], dumped_key: str) -> Any:
-    """The model-side value behind one dumped key, or ``None`` if it has none."""
+    """Return the model-side value behind one dumped key, or ``None``."""
     if dumped_key in mapping:
         return mapping[dumped_key]
     for key, value in mapping.items():

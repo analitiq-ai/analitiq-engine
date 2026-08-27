@@ -1,6 +1,6 @@
 """The published consumption manifest states what the engine actually reads.
 
-Four properties, and the artifact is worthless without any one of them:
+Five properties, and the artifact is worthless without any one of them:
 
 * it is what the engine's path produces TODAY -- a stale claim is exactly
   the rot the artifact exists to end;
@@ -10,7 +10,9 @@ Four properties, and the artifact is worthless without any one of them:
   the contract does not have cannot become a claim about the contract;
 * it claims the four surfaces the api path was taught to honour, so a
   regression that stops honouring one turns this red rather than
-  silently withdrawing the claim under an unbumped version.
+  silently withdrawing the claim under an unbumped version;
+* the recording observes the run rather than changing it, so what the
+  manifest saw is what a pipeline would do.
 """
 
 from __future__ import annotations
@@ -21,10 +23,9 @@ from importlib import metadata
 
 import pytest
 from analitiq.contracts.endpoints import ApiEndpointDoc
-from pydantic import BaseModel
 
 from src.models.resolved import dump_endpoint_document
-from tools.consumption_manifest.census import field_census, wire_name
+from tools.consumption_manifest.census import declared_fields, field_census
 from tools.consumption_manifest.drive import drive_case
 from tools.consumption_manifest.manifest import (
     CONSUMPTION_MANIFEST_PATH,
@@ -96,7 +97,7 @@ class TestTheCorpusCoversTheContract:
         """
         declared: set[tuple[str, str]] = set()
         for case in load_corpus(RESOURCE):
-            _collect(ApiEndpointDoc.model_validate(case["document"]), declared)
+            declared |= declared_fields(ApiEndpointDoc.model_validate(case["document"]))
         missing = {
             (model, field) for model, fields in census.items() for field in fields
         } - declared
@@ -159,28 +160,3 @@ class TestTheRecordingObservesRatherThanChanges:
             drive_case(case, recording_document(parsed, ReadLedger()))
         )
         assert watched == plain
-
-
-def _collect(instance: object, into: set[tuple[str, str]]) -> None:
-    """Record every field this document actually declares, model by model."""
-    if not isinstance(instance, BaseModel):
-        return
-    dumped = instance.model_dump(by_alias=True, exclude_unset=True, mode="json")
-    for name, field in type(instance).model_fields.items():
-        key = wire_name(field) or name
-        if key not in dumped:
-            continue
-        into.add((type(instance).__name__, key))
-        for child in _children(getattr(instance, name)):
-            _collect(child, into)
-
-
-def _children(value: object) -> list[object]:
-    """The model instances one field value carries, at any container depth."""
-    if isinstance(value, BaseModel):
-        return [value]
-    if isinstance(value, (list, tuple)):
-        return [child for item in value for child in _children(item)]
-    if isinstance(value, dict):
-        return [child for item in value.values() for child in _children(item)]
-    return []

@@ -20,13 +20,21 @@ from typing import Any
 
 from pydantic import BaseModel
 
-__all__ = ["field_census", "wire_name"]
+__all__ = ["declared_fields", "field_census", "wire_name"]
 
 
 def wire_name(field: Any) -> str | None:
-    """Return the name this field carries in a document, or ``None``."""
-    alias = field.alias
-    return alias if isinstance(alias, str) else None
+    """Return the name this field carries in a document, or ``None``.
+
+    ``serialization_alias`` first, then ``alias`` -- the order pydantic's
+    own ``by_alias`` dump resolves them in. Reading only ``alias`` would
+    name a field one thing here and another in the document, and the
+    field would then go unclaimed however much the engine reads it.
+    """
+    for alias in (field.serialization_alias, field.alias):
+        if isinstance(alias, str):
+            return alias
+    return None
 
 
 def _models_in(annotation: Any) -> list[type[BaseModel]]:
@@ -65,3 +73,34 @@ def field_census(root: type[BaseModel]) -> dict[str, tuple[str, ...]]:
             pending.extend(_models_in(field.annotation))
         census[model.__name__] = tuple(names)
     return census
+
+
+def declared_fields(instance: BaseModel) -> set[tuple[str, str]]:
+    """Return the census pairs one DOCUMENT declares, model node by node.
+
+    The counterpart to :func:`field_census`: that answers what the
+    contract has, this answers what a given document says. The gap
+    between them is the only reason a field can be unclaimed without the
+    engine having ignored it.
+    """
+    declared: set[tuple[str, str]] = set()
+    dumped = instance.model_dump(by_alias=True, exclude_unset=True, mode="json")
+    for name, field in type(instance).model_fields.items():
+        key = wire_name(field) or name
+        if key not in dumped:
+            continue
+        declared.add((type(instance).__name__, key))
+        for child in _model_values(getattr(instance, name)):
+            declared |= declared_fields(child)
+    return declared
+
+
+def _model_values(value: Any) -> list[BaseModel]:
+    """Return the model instances one field value carries, at any depth."""
+    if isinstance(value, BaseModel):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [child for item in value for child in _model_values(item)]
+    if isinstance(value, dict):
+        return [child for item in value.values() for child in _model_values(item)]
+    return []
