@@ -267,6 +267,47 @@ class TestBuildBootstrap:
         )
         assert refs == {"uploads"}
 
+    async def test_a_refused_document_costs_its_stream_and_not_the_bootstrap(
+        self, tmp_path
+    ):
+        """One stream's unparseable document must not kill the worker.
+
+        The bootstrap runs before either worker has a server, so raising
+        here would exit the process and every stream on it would go
+        unanswered over one document. The refused stream contributes no
+        transport -- it is about to be rejected downstream, so a credential
+        resolved for it is one the worker never sends -- and both documents
+        are still packed, because the layer that rejects the stream is the
+        one that reads the document it was handed.
+        """
+        connectors = tmp_path / "connectors"
+        connections = tmp_path / "connections"
+        _write_definition(connectors / "sevdesk", rules=_RULES)
+        connections.mkdir()
+
+        good = _api_document({"read": _read_operation("files")})
+        # TELEPORT is no branch of the method-discriminated read request, so
+        # the document cannot become an ApiEndpointDoc at all.
+        refused = _api_document({"read": _read_operation("uploads")})
+        refused["operations"]["read"]["request"]["method"] = "TELEPORT"
+
+        runtime = MagicMock()
+        runtime.connector_type = "api"
+        runtime.connector_id = "sevdesk"
+        runtime.connection_id = "my-api"
+        runtime.resolve_spec = AsyncMock(return_value={"connection_id": "my-api"})
+
+        bootstrap = await build_bootstrap(
+            runtime,
+            role="source",
+            connectors_dir=connectors,
+            connections_dir=connections,
+            stream_endpoints={"good": good, "bad": refused},
+        )
+        (call,) = runtime.resolve_spec.await_args_list
+        assert call.kwargs["transport_refs"] == {"files"}
+        assert bootstrap["stream_endpoints"] == {"good": good, "bad": refused}
+
     async def test_a_run_naming_no_transport_asks_for_none(self, tmp_path):
         """A single-transport connector costs what it always cost."""
         connectors = tmp_path / "connectors"

@@ -609,6 +609,72 @@ class TestNeverFillableScopeRefusals:
         assert problem is not None
         assert "'secrets.page_size'" in problem
 
+    @pytest.mark.parametrize(
+        "block",
+        [
+            {
+                "type": "offset",
+                "offset": {"param": "skip", "initial": 0, "increment_by": 1},
+                "limit": {"param": "limit", "default": {"ref": "response.body.size"}},
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+            {
+                "type": "page",
+                "page": {
+                    "param": "page",
+                    "initial": 1,
+                    "increment_by": {"ref": "response.body.size"},
+                },
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+        ],
+        ids=["limit.default", "page.increment_by"],
+    )
+    def test_a_pre_page_value_reading_the_response_is_refused(self, block) -> None:
+        """The pagination block is the one place ``response.*`` is fillable.
+
+        Both PRE_PAGE_VALUE_PATHS entries are the exception: they resolve
+        before a page exists, so a response read there resolves to nothing
+        on every run. ``resolve_page_size`` answers that by warning and
+        taking the engine's batch size, and ``_Page`` by keeping a stride
+        nobody authored -- green runs paginating at a size the document did
+        not ask for.
+        """
+        problem = request_block_problem(
+            _request({}),
+            endpoint="items",
+            reserved_headers=frozenset(),
+            resolver=_resolver(),
+            pagination=_pagination(block),
+        )
+        assert problem is not None
+        assert "'response.body.size'" in problem
+
+    def test_a_per_page_value_reading_the_response_is_not_refused(self) -> None:
+        # The contrast that makes the entries above mean something: the
+        # same expression one field over is resolved against the page just
+        # served, so the page loop supplies it.
+        assert (
+            request_block_problem(
+                _request({}),
+                endpoint="items",
+                reserved_headers=frozenset(),
+                resolver=_resolver(),
+                pagination=_pagination(
+                    {
+                        "type": "offset",
+                        "offset": {
+                            "param": "skip",
+                            "initial": 0,
+                            "increment_by": {"ref": "response.body.size"},
+                        },
+                        "stop_when": {"empty": {"ref": "response.body.records"}},
+                    }
+                ),
+            )
+            is None
+        )
+
     @pytest.mark.parametrize("subtree", ["parameters", "selections", "discovered"])
     def test_a_subtree_root_is_supplied_not_merely_its_children(
         self, subtree: str

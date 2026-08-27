@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 from analitiq.contracts.endpoints import ResponseExtraction
+from pydantic import ValidationError
 
 from cdk.api.response_schema import (
     apply_read_type_map,
@@ -85,6 +86,16 @@ class TestItemsSchema:
         }
         items = records_items_schema("items", _response(schema, "response.body"))
         assert items["properties"] == {"id": {}}
+
+    def test_a_ref_in_a_real_scope_but_off_the_body_never_parses(self) -> None:
+        # ``connector.foo`` satisfies the ref grammar's scope pattern, so
+        # only the anchor rule refuses it -- and the contract is what
+        # applies that rule, before ``records_items_schema`` sees a block at
+        # all. The ``split_records_ref`` call inside the walk is the same
+        # refusal one layer in, kept for the callers that receive a bare ref
+        # string; this pins that no block reaching HERE can carry one.
+        with pytest.raises(ValidationError):
+            _response({"type": "object"}, "connector.foo")
 
     def test_a_field_the_schema_does_not_declare_names_what_is_available(self) -> None:
         schema = {"type": "object", "properties": {"data": {"type": "array"}}}

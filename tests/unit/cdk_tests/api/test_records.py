@@ -25,11 +25,17 @@ class TestSplitRecordsRef:
     def test_a_dotted_ref_is_the_fields_below_the_body(self) -> None:
         assert split_records_ref("response.body.data.items") == ["data", "items"]
 
-    @pytest.mark.parametrize("ref", ["", None, "body.records", "records", "$.records"])
+    @pytest.mark.parametrize(
+        "ref", ["", None, "body.records", "records", "$.records", "connector.foo"]
+    )
     def test_an_unanchored_ref_raises_naming_it(self, ref: Any) -> None:
         # The contract anchors records at the response body. Reading an
         # unanchored ref as "nothing found" is what let a mistyped path pass
         # for an empty stream.
+        #
+        # ``connector.foo`` is the one that needs saying: it satisfies the
+        # ref grammar's scope pattern, so the anchor rule is the only thing
+        # between it and a silent empty stream.
         with pytest.raises(ReadError, match="response.body"):
             split_records_ref(ref)
 
