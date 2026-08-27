@@ -10,6 +10,7 @@ never touches the filesystem config or the secret store.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -18,8 +19,9 @@ from pydantic import ValidationError
 
 from cdk.api.request import endpoint_transport_refs
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.exceptions import TransportSpecError
 from cdk.type_map.loader import connector_definition_dir, read_raw_type_maps
+
+logger = logging.getLogger(__name__)
 
 #: The connector kind whose endpoint documents declare operations, spelled
 #: as ``ConnectionRuntime.connector_type`` reports it and as
@@ -27,16 +29,29 @@ from cdk.type_map.loader import connector_definition_dir, read_raw_type_maps
 _API_KIND = "api"
 
 
-def _api_endpoint_document(payload: Any, carrier: str) -> ApiEndpointDoc:
-    """Parse one authored API endpoint document, naming what carried it.
+def _api_endpoint_document(payload: Any, carrier: str) -> ApiEndpointDoc | None:
+    """Parse one authored API endpoint document, or answer ``None``.
 
     The shell parses a document it is only about to pack because it also
     READS it, right here: ``endpoint_transport_refs`` answers off named
     attributes, and the transports it names decide which credentials this
-    payload carries. A document that cannot be parsed cannot be scoped,
-    and both ways of guessing are wrong -- resolving nothing leaves the
-    worker unable to open the transport its operation dispatches through,
-    and resolving everything hands it credentials it never sends.
+    payload carries.
+
+    A document the contract refuses answers ``None`` and contributes no
+    transport, rather than raising. Raising here would abort the whole
+    bootstrap, and the bootstrap runs before either worker has a server:
+    ``DestinationWorkerProxy.connect`` awaits it at ``src/main.py`` before
+    the destination server exists, so one refused document would kill the
+    process and every stream on it would go unanswered. The layer that CAN
+    answer per stream is downstream -- ``configure_schema`` holds a
+    rejection for the one stream that owns the document, and a source read
+    fails with a ``ReadError`` the servicer already classifies -- so the
+    refusal is left to be reported there, by the side that can name one
+    stream without stopping the rest.
+
+    Contributing no transport is exactly right for such a document: the
+    stream that declared it is about to be rejected, so a credential
+    resolved for it would be one the worker never sends.
 
     *carrier* names the slot the document arrived in rather than its
     ``endpoint_id``: the id is one of the fields this parse may have just
@@ -45,12 +60,13 @@ def _api_endpoint_document(payload: Any, carrier: str) -> ApiEndpointDoc:
     try:
         return ApiEndpointDoc.model_validate(payload)
     except ValidationError as err:
-        # TransportSpecError, not the bare ValidationError: it is listed in
-        # the source service's deterministic read errors, so a document the
-        # contract refuses can never be classified as retryable.
-        raise TransportSpecError(
-            f"{carrier}: endpoint document does not satisfy ApiEndpointDoc: {err}"
-        ) from err
+        logger.warning(
+            "%s: endpoint document does not satisfy ApiEndpointDoc, so it "
+            "names no transport and its stream will be rejected: %s",
+            carrier,
+            err,
+        )
+        return None
 
 
 def read_type_map_payloads(
@@ -114,20 +130,20 @@ async def build_bootstrap(
     # -- which is what this loop already answered for them.
     if runtime.connector_type == _API_KIND:
         for stream_id, document in (stream_endpoints or {}).items():
+            parsed = _api_endpoint_document(document, f"stream {stream_id!r}")
+            if parsed is None:
+                continue
             mode = (stream_write_modes or {}).get(stream_id)
             transport_refs |= endpoint_transport_refs(
-                _api_endpoint_document(document, f"stream {stream_id!r}"),
-                role=role,
-                write_modes=[mode] if mode else None,
+                parsed, role=role, write_modes=[mode] if mode else None
             )
         authored_source = (source_config or {}).get("endpoint_document")
         if authored_source:
-            transport_refs |= endpoint_transport_refs(
-                _api_endpoint_document(
-                    authored_source, "source config 'endpoint_document'"
-                ),
-                role=role,
+            parsed_source = _api_endpoint_document(
+                authored_source, "source config 'endpoint_document'"
             )
+            if parsed_source is not None:
+                transport_refs |= endpoint_transport_refs(parsed_source, role=role)
     connection_payload = await runtime.resolve_spec(transport_refs=transport_refs)
     return {
         "role": role,

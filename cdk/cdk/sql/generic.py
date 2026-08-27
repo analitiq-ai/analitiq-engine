@@ -205,7 +205,7 @@ def _column_declarations(document: DatabaseEndpointDoc) -> dict[str, Any]:
     """
     return {
         "columns": [
-            column.model_dump(mode="json", exclude_none=True)
+            column.model_dump(mode="json", by_alias=True, exclude_none=True)
             for column in document.columns
         ]
     }
@@ -969,20 +969,31 @@ class GenericSQLConnector(BaseDestinationHandler):
         directly. Both engine and destination load the same artifacts via
         ``PipelineConfigPrep``, so no schema details cross the wire.
         """
-        if not self._connected:
-            logger.error("Cannot configure schema: not connected")
-            return False
-
         stream_id = schema_spec.stream_id
-        # Before the "never registered" branch: a stream whose document was
-        # registered but did not parse is absent from _stream_endpoints too,
-        # and telling its author to call set_stream_endpoints() would name
-        # the wrong defect. SchemaConfigurationError, not a bare False: the
-        # servicer translates this type into a rejected SchemaAck carrying
-        # the parse failure verbatim, which is the reason worth reporting.
+        # Before both the "not connected" and the "never registered"
+        # branches, and in that order for a reason: a document the contract
+        # refuses is a permanent authoring defect that will still be there
+        # once the connector is connected, while "not connected" is a
+        # wiring condition that says nothing about the stream. Reporting
+        # the transient one first would hand the author the wrong defect
+        # twice. A stream whose document was registered but did not parse
+        # is absent from _stream_endpoints too, so this also has to precede
+        # the registration branch or it would tell the author to call
+        # set_stream_endpoints() for a document they did supply.
+        #
+        # SchemaConfigurationError, not a bare False: the servicer
+        # translates this type into a rejected SchemaAck carrying the parse
+        # failure verbatim, which is the reason worth reporting. The API
+        # connector answers the identical case through its own
+        # _reject_schema idiom; both land as one rejected stream with
+        # CONFIG_DEFECT, and neither stops the worker's other streams.
         problem = self._stream_endpoint_problems.get(stream_id)
         if problem is not None:
             raise SchemaConfigurationError(problem)
+
+        if not self._connected:
+            logger.error("Cannot configure schema: not connected")
+            return False
 
         endpoint_doc = self._stream_endpoints.get(stream_id)
         if endpoint_doc is None:

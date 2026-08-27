@@ -9,7 +9,7 @@ __all__ = ["authored_json", "decode_json_fields"]
 
 
 def authored_json(value: Any) -> Any:
-    """A contract model's authored JSON form, or *value* unchanged.
+    """Return a contract model's authored JSON form, or *value* unchanged.
 
     The value-expression grammar belongs to the :class:`~cdk.resolver.Resolver`
     and is shared by every transport, so a contract model reaching it arrives
