@@ -5,19 +5,28 @@ need -- the path, the method, the batching cap, the body template, the
 idempotency placement, the retry verdict -- is settled here, so the write
 loop reads a plan instead of re-deriving the document per batch.
 
-Every read is a RAW contract key. The document is already validated, and
-the model's Python attribute names differ from the keys it serialises:
-``in`` is spelled ``location`` on the model and ``schema`` is spelled
-``schema_``. Reading by the attribute name finds nothing, and every site
-here treats nothing as "the author declared nothing" -- which for
-idempotency means promising exactly-once while never sending the key.
+The document arrives parsed, so every read here is a model attribute, and
+on two fields that attribute is spelled differently from the key the
+author wrote: ``in`` is ``location``, ``schema`` is ``schema_``. Naming
+the authored key instead now raises on the first read rather than
+answering nothing, which is most of what the parse buys: every site here
+reads nothing as "the author declared nothing", and for idempotency that
+means promising exactly-once while never sending the key.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
+
+from analitiq.contracts.endpoints import (
+    ApiEndpointDoc,
+    Batching,
+    Idempotency,
+    WriteMode,
+    WriteOperation,
+)
 
 from ..exceptions import TransportSpecError
 from ..record_identity import record_digest
@@ -50,8 +59,11 @@ __all__ = [
 ]
 
 #: Proto write-mode int -> the ``operations.write.<key>`` block it selects.
-#: The contract's write map is closed and keyed by mode name.
-WRITE_MODE_KEYS: dict[int, Literal["insert", "upsert"]] = {1: "insert", 2: "upsert"}
+#: The contract's write map is closed and keyed by mode name, and the names
+#: are the contract's own ``WriteMode``: ``operations.write`` is keyed by it,
+#: so a mode the contract renames or drops stops type-checking here instead
+#: of quietly selecting nothing.
+WRITE_MODE_KEYS: dict[int, WriteMode] = {1: "insert", 2: "upsert"}
 
 
 @dataclass
@@ -113,7 +125,7 @@ class StreamWritePlan:
     retry_verdict: RetryVerdict | None = None
 
 
-def write_mode_block(doc: Mapping[str, Any], mode_key: str) -> Mapping[str, Any] | None:
+def write_mode_block(doc: ApiEndpointDoc, mode_key: WriteMode) -> WriteOperation | None:
     """Return the ``operations.write.<mode_key>`` block, or ``None``.
 
     Presence is the whole acceptance predicate: the validated document
@@ -121,19 +133,17 @@ def write_mode_block(doc: Mapping[str, Any], mode_key: str) -> Mapping[str, Any]
     per-stream dispatch both go through here, so the two cannot disagree on
     whether a write mode is offered.
     """
-    write = (doc.get("operations") or {}).get("write") or {}
-    block = write.get(mode_key)
-    return block if isinstance(block, Mapping) else None
+    return (doc.operations.write or {}).get(mode_key)
 
 
-def collect_json_fields(mode_block: Mapping[str, Any]) -> set[str]:
+def collect_json_fields(mode_block: WriteOperation) -> set[str]:
     """Body field names declared with ``arrow_type: "Json"``.
 
     The write input schema is free-form JSON Schema in the contract, so
     both shapes it permits are walked: JSON-Schema ``properties`` and the
     flat ``columns`` array.
     """
-    schema = (mode_block.get("input") or {}).get("schema") or {}
+    schema = mode_block.input.schema_
     names: set[str] = set()
     for name, prop in (schema.get("properties") or {}).items():
         if isinstance(prop, Mapping) and prop.get("arrow_type") == "Json":
@@ -146,9 +156,9 @@ def collect_json_fields(mode_block: Mapping[str, Any]) -> set[str]:
     return names
 
 
-def collect_input_field_names(mode_block: Mapping[str, Any]) -> set[str]:
+def collect_input_field_names(mode_block: WriteOperation) -> set[str]:
     """Every field name the write input schema declares, in both shapes."""
-    schema = (mode_block.get("input") or {}).get("schema") or {}
+    schema = mode_block.input.schema_
     names: set[str] = {
         name for name in (schema.get("properties") or {}) if isinstance(name, str)
     }
@@ -182,8 +192,8 @@ def reserved_header_names(transport_header_names: Iterable[str]) -> frozenset[st
 
 
 def idempotency_config_problem(
-    idempotency: Mapping[str, Any],
-    batching: Mapping[str, Any] | None,
+    idempotency: Idempotency,
+    batching: Batching | None,
     plan: StreamWritePlan,
     *,
     reserved_headers: frozenset[str] | set[str],
@@ -198,8 +208,8 @@ def idempotency_config_problem(
     mode -- a present ``batching`` block IS the multi-record case, so the
     exclusion keys on its presence.
     """
-    target = idempotency.get("in")
-    name = str(idempotency.get("name") or "")
+    target = idempotency.location
+    name = idempotency.name
     if target == "header":
         # The key lands in the same header map an endpoint's own headers do,
         # by a different route, so it answers to the same wire rules: a name
@@ -330,8 +340,8 @@ def content_idempotency_key(record: Mapping[str, Any]) -> str:
 
 
 def _selected_mode(
-    doc: Mapping[str, Any], schema_spec: SchemaSpec
-) -> tuple[str, Mapping[str, Any]] | str:
+    doc: ApiEndpointDoc, schema_spec: SchemaSpec
+) -> tuple[WriteMode, WriteOperation] | str:
     """Return the write block this schema selects, or why it cannot be served.
 
     Two ways a stream asks for something the api path does not have: a
@@ -349,7 +359,7 @@ def _selected_mode(
         )
     mode_block = write_mode_block(doc, mode_key)
     if mode_block is None:
-        write = (doc.get("operations") or {}).get("write")
+        write = doc.operations.write
         available = sorted(write) if write else None
         return (
             f"endpoint document does not define an operations.write.{mode_key} "
@@ -381,8 +391,8 @@ def _batching_problem(plan: StreamWritePlan) -> str | None:
 
 def _apply_idempotency(
     plan: StreamWritePlan,
-    mode_block: Mapping[str, Any],
-    batching: Mapping[str, Any] | None,
+    mode_block: WriteOperation,
+    batching: Batching | None,
     *,
     reserved: frozenset[str],
 ) -> str | None:
@@ -393,7 +403,7 @@ def _apply_idempotency(
     connection or the endpoint already sends, a name the client cannot
     put on the wire, a body field the record already carries.
     """
-    idempotency = mode_block.get("idempotency")
+    idempotency = mode_block.idempotency
     if idempotency is None:
         return None
     problem = idempotency_config_problem(
@@ -408,13 +418,13 @@ def _apply_idempotency(
     )
     if problem is not None:
         return problem
-    plan.idempotency_in = idempotency.get("in")
-    plan.idempotency_name = idempotency.get("name", "")
+    plan.idempotency_in = idempotency.location
+    plan.idempotency_name = idempotency.name
     return None
 
 
 def build_write_plan(
-    doc: Mapping[str, Any],
+    doc: ApiEndpointDoc,
     schema_spec: SchemaSpec,
     *,
     header_names_for: Callable[[str | None], Iterable[str]],
@@ -440,42 +450,42 @@ def build_write_plan(
         return selected
     mode_key, mode_block = selected
 
-    request = mode_block.get("request") or {}
-    endpoint_id = str(doc.get("endpoint_id", "<unnamed>"))
+    request = mode_block.request
+    endpoint_id = doc.endpoint_id
     # Refused HERE, not when the first non-empty batch tries to send: a
     # transport that cannot be opened is an authoring defect, and
     # accepting the schema for it turns that defect into a fatal batch
     # after the engine was told the stream was ready to write.
-    problem = transport_problem(request.get("transport_ref"))
+    problem = transport_problem(request.transport_ref)
     if problem is not None:
         return problem
-    reserved = reserved_header_names(header_names_for(request.get("transport_ref")))
+    reserved = reserved_header_names(header_names_for(request.transport_ref))
     try:
-        table = ParamTable.for_write(mode_block.get("params") or {}, resolver)
+        table = ParamTable.for_write(mode_block.params, resolver)
         problem = request_block_problem(
             request,
             reserved_headers=reserved,
             resolver=resolver,
             controlled_by=table.controlled_by,
-            declared_params=mode_block.get("params") or {},
+            declared_params=mode_block.params,
             endpoint=endpoint_id,
         )
         if problem is not None:
             return problem
 
         plan = StreamWritePlan(
-            method=request.get("method", "POST"),
-            transport_ref=request.get("transport_ref"),
+            method=request.method,
+            transport_ref=request.transport_ref,
             json_fields=collect_json_fields(mode_block),
-            body_spec=request.get("body"),
-            content_type=request.get("content_type"),
+            body_spec=request.body,
+            content_type=request.content_type,
             params=table.values,
             write_mode_key=mode_key,
         )
         plan.endpoint = substitute_path(
-            request.get("path", ""),
+            request.path,
             bind_request_values(
-                request.get("path_params"),
+                request.path_params,
                 params=table.values,
                 resolver=resolver,
                 block="path_params",
@@ -487,13 +497,11 @@ def build_write_plan(
         # query key or header reaches the wire whichever role sends it.
         plan.query, plan.headers = bind_query_and_headers(
             params=table.values,
-            declared_query=request.get("query"),
-            declared_headers=request.get("headers"),
+            declared_query=request.query,
+            declared_headers=request.headers,
             resolver=resolver,
             endpoint=endpoint_id,
-            query_styles=declared_query_styles(
-                request.get("query"), mode_block.get("params") or {}
-            ),
+            query_styles=declared_query_styles(request.query, mode_block.params),
         )
     except RequestSpecError as err:
         # An unbound placeholder, a param default reading a scope nothing
@@ -506,12 +514,12 @@ def build_write_plan(
     # A present batching block IS the multi-record case and carries
     # ``max_records`` (>= 2, contract-guaranteed); absence means one request
     # per record.
-    batching = mode_block.get("batching")
+    batching = mode_block.batching
     if batching is not None:
         problem = _batching_problem(plan)
         if problem is not None:
             return problem
-        plan.max_records = batching.get("max_records")
+        plan.max_records = batching.max_records
 
     problem = _apply_idempotency(plan, mode_block, batching, reserved=reserved)
     if problem is not None:

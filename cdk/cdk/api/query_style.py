@@ -28,6 +28,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from analitiq.contracts.endpoints import Param
+
 from .exceptions import RequestSpecError
 
 #: The caller's rule for what one value may be on the wire, passed in
@@ -87,7 +89,7 @@ STYLES = tuple(sorted({style for style, _ in _DEFINED}))
 
 
 def declared_query_styles(
-    declared_query: Any, declared_params: Mapping[str, Any]
+    declared_query: Mapping[str, Any] | None, declared_params: Mapping[str, Param]
 ) -> dict[str, QueryStyle]:
     """Map each query key to the serialization its bound param declares.
 
@@ -103,23 +105,24 @@ def declared_query_styles(
     refusal. Guessing which of a function's inputs lent its style would
     put the engine's reading of an expression on the wire.
     """
-    if not isinstance(declared_query, Mapping):
+    if declared_query is None:
         return {}
     styles: dict[str, QueryStyle] = {}
     for key, node in declared_query.items():
         if not isinstance(node, Mapping) or set(node) != {"from_param"}:
             continue
         declaration = declared_params.get(node["from_param"])
-        if not isinstance(declaration, Mapping):
+        if declaration is None:
             continue
-        declared_type = declaration.get("type")
-        style, explode = declaration.get("style"), declaration.get("explode")
-        if (
-            isinstance(declared_type, str)
-            and isinstance(style, str)
-            and isinstance(explode, bool)
-        ):
-            styles[str(key)] = QueryStyle(declared_type, style, explode)
+        # The contract requires the pair only on a query param typed
+        # ``array`` or ``object``: a scalar one declares neither and has no
+        # collection to spell, so it carries no style at all rather than
+        # half of one.
+        if declaration.style is None or declaration.explode is None:
+            continue
+        styles[str(key)] = QueryStyle(
+            declaration.type, declaration.style, declaration.explode
+        )
     return styles
 
 

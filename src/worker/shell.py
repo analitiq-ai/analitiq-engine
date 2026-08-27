@@ -13,9 +13,44 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from analitiq.contracts.endpoints import ApiEndpointDoc
+from pydantic import ValidationError
+
 from cdk.api.request import endpoint_transport_refs
 from cdk.connection_runtime import ConnectionRuntime
+from cdk.exceptions import TransportSpecError
 from cdk.type_map.loader import connector_definition_dir, read_raw_type_maps
+
+#: The connector kind whose endpoint documents declare operations, spelled
+#: as ``ConnectionRuntime.connector_type`` reports it and as
+#: ``cdk.registry.KIND_DEFAULTS`` keys it.
+_API_KIND = "api"
+
+
+def _api_endpoint_document(payload: Any, carrier: str) -> ApiEndpointDoc:
+    """Parse one authored API endpoint document, naming what carried it.
+
+    The shell parses a document it is only about to pack because it also
+    READS it, right here: ``endpoint_transport_refs`` answers off named
+    attributes, and the transports it names decide which credentials this
+    payload carries. A document that cannot be parsed cannot be scoped,
+    and both ways of guessing are wrong -- resolving nothing leaves the
+    worker unable to open the transport its operation dispatches through,
+    and resolving everything hands it credentials it never sends.
+
+    *carrier* names the slot the document arrived in rather than its
+    ``endpoint_id``: the id is one of the fields this parse may have just
+    rejected.
+    """
+    try:
+        return ApiEndpointDoc.model_validate(payload)
+    except ValidationError as err:
+        # TransportSpecError, not the bare ValidationError: it is listed in
+        # the source service's deterministic read errors, so a document the
+        # contract refuses can never be classified as retryable.
+        raise TransportSpecError(
+            f"{carrier}: endpoint document does not satisfy ApiEndpointDoc: {err}"
+        ) from err
 
 
 def read_type_map_payloads(
@@ -73,15 +108,26 @@ async def build_bootstrap(
     not carry.
     """
     transport_refs: set[str] = set()
-    for stream_id, document in (stream_endpoints or {}).items():
-        mode = (stream_write_modes or {}).get(stream_id)
-        transport_refs |= endpoint_transport_refs(
-            document, role=role, write_modes=[mode] if mode else None
-        )
-    if source_config:
-        transport_refs |= endpoint_transport_refs(
-            source_config.get("endpoint_document"), role=role
-        )
+    # Scoped to the api kind because an endpoint document is per-kind and
+    # only the API one declares ``operations``: nowhere else can an
+    # operation name a transport, so every other kind answers the empty set
+    # -- which is what this loop already answered for them.
+    if runtime.connector_type == _API_KIND:
+        for stream_id, document in (stream_endpoints or {}).items():
+            mode = (stream_write_modes or {}).get(stream_id)
+            transport_refs |= endpoint_transport_refs(
+                _api_endpoint_document(document, f"stream {stream_id!r}"),
+                role=role,
+                write_modes=[mode] if mode else None,
+            )
+        authored_source = (source_config or {}).get("endpoint_document")
+        if authored_source:
+            transport_refs |= endpoint_transport_refs(
+                _api_endpoint_document(
+                    authored_source, "source config 'endpoint_document'"
+                ),
+                role=role,
+            )
     connection_payload = await runtime.resolve_spec(transport_refs=transport_refs)
     return {
         "role": role,

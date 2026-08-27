@@ -14,7 +14,10 @@ annotated schema, and ``SchemaContract`` turns it into Arrow.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from typing import Any
+
+from analitiq.contracts.endpoints import ResponseExtraction
 
 from ..exceptions import ReadError
 from ..type_map import TypeMapper, UnmappedTypeError
@@ -25,7 +28,7 @@ __all__ = ["apply_read_type_map", "records_items_schema", "resolve_field_arrow_t
 
 
 def records_items_schema(
-    endpoint_id: str, response_block: Mapping[str, Any]
+    endpoint_id: str, response_block: ResponseExtraction
 ) -> dict[str, Any]:
     """Walk the declared response schema to the per-record items schema.
 
@@ -33,10 +36,18 @@ def records_items_schema(
     same parser the live payload walk uses, so the schema and the data can
     never be read from two different places in the body. The response
     schema itself is free-form JSON Schema in the contract, so the walk
-    stays dict-shaped.
+    stays dict-shaped even though the block around it is a model.
+
+    The answer is a deep copy because :func:`apply_read_type_map`
+    annotates each field in place, and this subtree is reached from an
+    endpoint document the connector holds for its whole life: annotating
+    the document itself would let the first read's type-map scope decide
+    the Arrow types every later read sees. The model is frozen, but a
+    ``dict[str, Any]`` field's contents are not, so freezing is no
+    protection here.
     """
-    node: Any = response_block.get("schema")
-    records_ref = (response_block.get("records") or {}).get("ref")
+    node: Any = response_block.schema_
+    records_ref = response_block.records.ref
     for field in split_records_ref(records_ref):
         properties = node.get("properties") if isinstance(node, dict) else None
         if not isinstance(properties, dict) or field not in properties:
@@ -58,7 +69,7 @@ def records_items_schema(
             f"endpoint {endpoint_id!r}: cannot resolve the record schema at "
             f"{records_ref!r} (no 'properties' under the addressed items)"
         )
-    return items
+    return deepcopy(items)
 
 
 def apply_read_type_map(

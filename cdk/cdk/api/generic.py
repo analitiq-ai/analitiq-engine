@@ -28,6 +28,8 @@ from typing import Any
 
 import aiohttp
 import pyarrow as pa
+from analitiq.contracts.endpoints import ApiEndpointDoc, ReadOperation, Replication
+from pydantic import ValidationError
 
 from ..base_handler import (
     BaseDestinationHandler,
@@ -125,19 +127,43 @@ class _Dispatch:
 
 def _read_operation(
     config: dict[str, Any],
-) -> tuple[str, dict[str, Any], dict[str, Any], Mapping[str, Any]]:
+) -> tuple[str, ReadOperation, dict[str, Any], Mapping[str, Any]]:
     """Read the four things a read is addressed by, refusing a document without them.
 
     All four are contract-required, so an absent one is a wiring defect
     between the engine and this connector rather than an author's mistake --
     which is why each names what is missing instead of defaulting.
+
+    ``stream_source`` and its ``endpoint_ref`` stay dicts: they belong to
+    the STREAM document, not to the endpoint document parsed here.
     """
     doc = config.get("endpoint_document")
     if not doc:
         raise ReadError("source config is missing 'endpoint_document'")
-    endpoint_id = doc.get("endpoint_id", "<unnamed>")
-    read = (doc.get("operations") or {}).get("read")
-    if not read:
+    # The engine hands authored JSON across the worker boundary, so the
+    # document is parsed here: the connector process is untrusted, and a
+    # document the published contract refuses must fail before the first
+    # request goes out rather than as a missing key mid-read. The parse is
+    # also what makes every field below a named attribute.
+    try:
+        document = ApiEndpointDoc.model_validate(doc)
+    except ValidationError as err:
+        # ReadError, not the bare ValidationError: the worker classifies
+        # this type as a deterministic read failure instead of retrying it.
+        # Named by the slot the document arrived in rather than by
+        # endpoint_id, because the id is one of the fields this parse may
+        # have just rejected -- quoting it would name the endpoint with the
+        # very value that failed.
+        raise ReadError(
+            f"source config 'endpoint_document' does not satisfy "
+            f"ApiEndpointDoc: {err}"
+        ) from err
+    endpoint_id = document.endpoint_id
+    # Still checked after a successful parse: the contract permits a
+    # write-only document, which is a valid ApiEndpointDoc and an
+    # unreadable source.
+    read = document.operations.read
+    if read is None:
         raise ReadError(
             f"endpoint {endpoint_id!r}: operations.read is required to read "
             f"this endpoint as a source"
@@ -190,11 +216,15 @@ class GenericAPIConnector(BaseDestinationHandler):
 
         # Write role only.
         self._streams: dict[str, StreamWritePlan] = {}
-        # Raw, unvalidated: the engine validated every document against the
-        # published contract before it crossed the process boundary, so a
-        # second parse here would only convert the keys the connector must
-        # read into attribute names that do not exist in the document.
-        self._stream_endpoints: dict[str, Mapping[str, Any]] = {}
+        # Parsed, not raw. The engine does validate every document before it
+        # crosses the process boundary, but this process runs untrusted,
+        # AI-authored connector code and re-validating what arrives over
+        # that boundary is defense in depth: the far side is exactly where a
+        # document may no longer be the one the engine checked. The parse is
+        # also what turns a contract field the engine happens to ignore into
+        # an unused attribute a tool can find, rather than a key nobody can
+        # prove is unread.
+        self._stream_endpoints: dict[str, ApiEndpointDoc] = {}
         self._write_resolver: Resolver | None = None
         self.last_schema_rejection: str | None = None
 
@@ -416,14 +446,14 @@ class GenericAPIConnector(BaseDestinationHandler):
 
         endpoint_id, read, stream_source, endpoint_ref = _read_operation(config)
 
-        items_schema = records_items_schema(endpoint_id, read["response"])
+        items_schema = records_items_schema(endpoint_id, read.response)
         apply_read_type_map(items_schema, endpoint_ref, runtime)
         schema_contract = SchemaContract(items_schema)
 
-        request_block = read["request"]
-        method = request_block["method"]
-        records_ref = read["response"]["records"]["ref"]
-        pagination = read.get("pagination")
+        request_block = read.request
+        method = request_block.method
+        records_ref = read.response.records.ref
+        pagination = read.pagination
 
         # One resolver per read, carrying the engine's page size in the
         # runtime scope. Every declared expression this read resolves --
@@ -441,7 +471,7 @@ class GenericAPIConnector(BaseDestinationHandler):
         # own params, never heals on a retry.
         try:
             table = ParamTable.for_read(
-                read.get("params") or {},
+                read.params,
                 resolver,
                 filters=stream_source.get("filters") or [],
             )
@@ -452,12 +482,12 @@ class GenericAPIConnector(BaseDestinationHandler):
                 # session is opened to judge a declaration, and never from
                 # the default's when the read goes out elsewhere.
                 reserved_headers=reserved_header_names(
-                    runtime.transport_header_names(request_block.get("transport_ref"))
+                    runtime.transport_header_names(request_block.transport_ref)
                 ),
                 resolver=resolver,
                 controlled_by=table.controlled_by,
-                declared_params=read.get("params") or {},
-                pagination=read.get("pagination"),
+                declared_params=read.params,
+                pagination=pagination,
                 endpoint=endpoint_id,
             )
             if problem is not None:
@@ -468,7 +498,7 @@ class GenericAPIConnector(BaseDestinationHandler):
             if replication_block.get("method") == "incremental":
                 await self._bind_incremental_filter(
                     table.values,
-                    read.get("replication"),
+                    read.replication,
                     replication_block,
                     checkpoint=checkpoint,
                     stream_name=stream_name,
@@ -482,9 +512,9 @@ class GenericAPIConnector(BaseDestinationHandler):
             # above -- neither loop has produced a value at this point, and
             # the path is substituted once.
             path = substitute_path(
-                request_block["path"],
+                request_block.path,
                 bind_request_values(
-                    request_block.get("path_params"),
+                    request_block.path_params,
                     params=table.values,
                     resolver=resolver,
                     block="path_params",
@@ -500,22 +530,25 @@ class GenericAPIConnector(BaseDestinationHandler):
         # at connect(), so a connector whose reads name nothing opens the
         # one session it always opened.
         try:
-            dispatch = await self._dispatch_through(request_block.get("transport_ref"))
+            dispatch = await self._dispatch_through(request_block.transport_ref)
         except TransportSpecError as err:
             raise ReadError(f"endpoint {endpoint_id!r}: {err}") from err
         full_url = join_url(dispatch.base_url, path)
 
         builder = RequestBuilder(
             table,
-            raw_body=request_block.get("body"),
+            # getattr, not attribute access: a read request is the
+            # method-discriminated union, and only its POST branch declares
+            # a body and the media type describing it. A GET read has no
+            # such attribute at all, so asking for it by name would be an
+            # AttributeError on the commonest read there is.
+            raw_body=getattr(request_block, "body", None),
             resolver=resolver,
-            endpoint=request_block["path"],
-            declared_query=request_block.get("query"),
-            declared_headers=request_block.get("headers"),
-            content_type=request_block.get("content_type"),
-            query_styles=declared_query_styles(
-                request_block.get("query"), read.get("params") or {}
-            ),
+            endpoint=request_block.path,
+            declared_query=request_block.query,
+            declared_headers=request_block.headers,
+            content_type=getattr(request_block, "content_type", None),
+            query_styles=declared_query_styles(request_block.query, read.params),
         )
 
         strategy = build_read_strategy(
@@ -533,7 +566,9 @@ class GenericAPIConnector(BaseDestinationHandler):
                 fetch=self._fetcher(
                     dispatch, builder, method=method, records_ref=records_ref
                 ),
-                stop_when=stop_condition((pagination or {}).get("stop_when"), resolver),
+                stop_when=stop_condition(
+                    pagination.stop_when if pagination else None, resolver
+                ),
             ),
             schema=schema_contract,
             cursor_field=cursor_field,
@@ -641,14 +676,19 @@ class GenericAPIConnector(BaseDestinationHandler):
     @staticmethod
     async def _bind_incremental_filter(
         params: dict[str, Any],
-        declared_replication: Mapping[str, Any] | None,
+        declared_replication: Replication | None,
         stream_replication: Mapping[str, Any],
         *,
         checkpoint: CheckpointStore,
         stream_name: str,
         partition: dict[str, Any],
     ) -> None:
-        """Write the stored cursor, minus the safety window, into its param."""
+        """Write the stored cursor, minus the safety window, into its param.
+
+        ``declared_replication`` is the endpoint document's block, a
+        contract model; ``stream_replication`` is the STREAM document's,
+        which this issue does not type and which stays a dict.
+        """
         cursor_field = stream_replication.get("cursor_field")
         if not cursor_field:
             return
@@ -692,8 +732,26 @@ class GenericAPIConnector(BaseDestinationHandler):
     def set_stream_endpoints(
         self, stream_endpoints: Mapping[str, Mapping[str, Any]]
     ) -> None:
-        """Register each stream's contract endpoint document, raw."""
-        self._stream_endpoints = dict(stream_endpoints)
+        """Register each stream's contract endpoint document.
+
+        The engine hands authored JSON across the worker boundary, so the
+        signature stays dict-in and each document is parsed here -- refused
+        at registration, before any plan is built, rather than surfacing
+        later as a missing key deep in the write path.
+        """
+        parsed: dict[str, ApiEndpointDoc] = {}
+        for stream_id, document in stream_endpoints.items():
+            try:
+                parsed[stream_id] = ApiEndpointDoc.model_validate(document)
+            except ValidationError as err:
+                # TransportSpecError, not the bare ValidationError: the
+                # worker classifies this type as deterministic instead of
+                # retrying a document that will never parse.
+                raise TransportSpecError(
+                    f"stream {stream_id!r}: endpoint document does not "
+                    f"satisfy ApiEndpointDoc: {err}"
+                ) from err
+        self._stream_endpoints = parsed
 
     @property
     def connector_type(self) -> str:
@@ -730,7 +788,7 @@ class GenericAPIConnector(BaseDestinationHandler):
         configured stream can use.
         """
         return any(
-            block.get("batching") is not None
+            block.batching is not None
             for doc in self._stream_endpoints.values()
             for mode_key in WRITE_MODE_KEYS.values()
             if (block := write_mode_block(doc, mode_key)) is not None
