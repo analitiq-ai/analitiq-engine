@@ -21,6 +21,7 @@ from decimal import Decimal
 from typing import Any
 
 from cdk.exceptions import TransportSpecError, UnresolvedValueError
+from cdk.json_utils import authored_json
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,17 @@ def scope_paths(node: Any) -> list[str]:
     Never raises: a caller scanning a declaration wants what it references,
     and a malformed node is a defect for
     :func:`expression_node_problem` to name.
+
+    Reads a contract model in its authored form for the same reason
+    :meth:`Resolver.resolve` does, and it matters more here: this answers
+    what a declaration READS, and a model it could not walk would answer
+    the empty list -- indistinguishable from a declaration that reads
+    nothing. The never-fillable guard built on that answer would go quiet
+    over exactly the blocks the contract models most deeply, and a
+    pagination value reading ``secrets.*`` would pass its check and then be
+    dropped from every request.
     """
+    node = authored_json(node)
     if isinstance(node, list):
         return [path for item in node for path in scope_paths(item)]
     if not isinstance(node, Mapping):
@@ -333,7 +344,16 @@ class Resolver:
     # ------------------------------------------------------------------
 
     def resolve(self, value: Any) -> Any:
-        """Recursively resolve a JSON value."""
+        """Recursively resolve a JSON value.
+
+        A contract model arriving here is read in its authored form
+        (:func:`~cdk.json_utils.authored_json`). The declaration grammar is
+        shared by every transport and owned here; a model is how the
+        contract SPELLS a declaration, not a second grammar this has to
+        learn, and one conversion at the entry point covers every nesting
+        depth below it.
+        """
+        value = authored_json(value)
         if isinstance(value, Mapping):
             return self._resolve_mapping(value)
         if isinstance(value, list):
@@ -371,7 +391,11 @@ class Resolver:
 
         Non-expression structure (plain dicts, lists, scalars) passes through
         with its children resolved recursively.
+
+        A contract model arriving here is read in its authored form, exactly
+        as in :meth:`resolve` and for the same reason.
         """
+        value = authored_json(value)
         if self.is_expression_node(value):
             # No warning here. A top-level node has no key of its own to
             # name, and every caller that hands one over already knows what
