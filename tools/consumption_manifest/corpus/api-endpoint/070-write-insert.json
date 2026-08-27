@@ -1,0 +1,143 @@
+{
+  "case_id": "write-insert",
+  "why": "One write mode with every block a write declares: params, input schema, batching, idempotency and the full response extraction.",
+  "write": {
+    "records": [
+      {
+        "id": 1,
+        "payload": {
+          "k": "v"
+        }
+      },
+      {
+        "id": 2,
+        "payload": {
+          "k": "w"
+        }
+      }
+    ],
+    "responses": [
+      {
+        "created": 1,
+        "ids": [
+          1
+        ],
+        "ok": true,
+        "trace": "t"
+      },
+      {
+        "created": 1,
+        "ids": [
+          2
+        ],
+        "ok": true,
+        "trace": "t"
+      }
+    ]
+  },
+  "document": {
+    "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
+    "endpoint_id": "write-items",
+    "operations": {
+      "write": {
+        "insert": {
+          "request": {
+            "method": "POST",
+            "transport_ref": "api",
+            "path": "/v1/tenants/{tenant}/write-items",
+            "headers": {
+              "X-Write-Mode": "census"
+            },
+            "query": {
+              "dry_run": {
+                "from_param": "dry_run"
+              }
+            },
+            "content_type": "application/json",
+            "body": {
+              "item": {
+                "from_input": "record"
+              }
+            },
+            "path_params": {
+              "tenant": {
+                "from_param": "tenant"
+              }
+            }
+          },
+          "params": {
+            "dry_run": {
+              "in": "query",
+              "type": "boolean",
+              "required": false,
+              "default": {
+                "literal": false
+              }
+            },
+            "tenant": {
+              "in": "path",
+              "type": "string",
+              "required": true,
+              "default": {
+                "literal": "tenant-1"
+              }
+            }
+          },
+          "input": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "integer",
+                  "native_type": "integer",
+                  "arrow_type": "Int64"
+                },
+                "payload": {
+                  "type": "object",
+                  "native_type": "json",
+                  "arrow_type": "Json"
+                }
+              }
+            }
+          },
+          "idempotency": {
+            "in": "header",
+            "name": "Idempotency-Key"
+          },
+          "response": {
+            "success_when": {
+              "eq": [
+                {
+                  "ref": "response.body.ok"
+                },
+                true
+              ]
+            },
+            "error": {
+              "code": {
+                "ref": "response.body.error.code"
+              },
+              "message": {
+                "ref": "response.body.error.message"
+              },
+              "details": {
+                "template": "write failed: ${response.body.error.code}"
+              }
+            },
+            "affected_records": {
+              "ref": "response.body.created"
+            },
+            "generated_keys": {
+              "ref": "response.body.ids"
+            },
+            "metadata": {
+              "trace": {
+                "ref": "response.body.trace"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

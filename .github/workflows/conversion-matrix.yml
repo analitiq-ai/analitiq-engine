@@ -6,9 +6,10 @@ name: conversion-matrix
 #
 #   1. @analitiq-ai/conversion-matrix on GitHub Packages, so the frontend can
 #      pin the typed helpers over the grid.
-#   2. Versioned raw JSON on S3 (sync-s3 job) — the conversion grid and the
-#      arrow_type parameter grammar, each under its own prefix and carrying its
-#      own version — one leg per target environment (dev, prod), so non-npm
+#   2. Versioned raw JSON on S3 (sync-s3 job) — the conversion grid, the
+#      arrow_type parameter grammar and the consumption manifest, each under
+#      its own prefix and carrying its own version — one leg per target
+#      environment (dev, prod), so non-npm
 #      consumers can pin the contracts without registry credentials.
 #      Authentication is GitHub OIDC (short-lived, no stored
 #      keys); the role, region, and bucket come exclusively from GitHub
@@ -23,12 +24,14 @@ on:
     paths:
       - cdk/cdk/type_map/conversion_matrix.json
       - cdk/cdk/type_map/arrow_type_grammar.json
+      - tools/consumption_manifest/consumption_manifest.json
       - packages/conversion-matrix/**
       - .github/workflows/conversion-matrix.yml
   pull_request:
     paths:
       - cdk/cdk/type_map/conversion_matrix.json
       - cdk/cdk/type_map/arrow_type_grammar.json
+      - tools/consumption_manifest/consumption_manifest.json
       - packages/conversion-matrix/**
       - .github/workflows/conversion-matrix.yml
 

@@ -403,6 +403,11 @@ yarn-error.log*
 # *.json ignore so Infra/the frontend can consume them.
 !cdk/cdk/type_map/conversion_matrix.json
 !cdk/cdk/type_map/arrow_type_grammar.json
+# The consumption manifest is generated the same way (by driving the engine's
+# api path over the corpus beside it), and the corpus is its source: both are
+# tracked, or the manifest cannot be regenerated or byte-compared in CI.
+!tools/consumption_manifest/consumption_manifest.json
+!tools/consumption_manifest/corpus/**/*.json
 
 # conversion-matrix npm package: committed past the blanket *.json and scripts/
 # ignores (its build scripts and config are source, not generated artifacts).

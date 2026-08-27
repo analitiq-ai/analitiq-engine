@@ -14,8 +14,8 @@ import { matrixVersion } from "../dist/index.js";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const typeMapDir = join(repoRoot, "cdk", "cdk", "type_map");
 
-for (const { prefix, file } of ARTIFACTS) {
-  const sourcePath = join(typeMapDir, file);
+for (const { prefix, path } of ARTIFACTS) {
+  const sourcePath = join(repoRoot, path);
 
   test(`${prefix}: source file is valid JSON`, () => {
     assert.doesNotThrow(() => JSON.parse(readFileSync(sourcePath, "utf8")));

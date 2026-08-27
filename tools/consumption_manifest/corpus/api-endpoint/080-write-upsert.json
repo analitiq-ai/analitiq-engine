@@ -1,0 +1,73 @@
+{
+  "case_id": "write-upsert",
+  "why": "Upsert: the provider's conflict target, and a batched request that carries many records at once.",
+  "write": {
+    "records": [
+      {
+        "id": 1
+      },
+      {
+        "id": 2
+      }
+    ],
+    "responses": [
+      {},
+      {},
+      {}
+    ]
+  },
+  "document": {
+    "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
+    "endpoint_id": "upsert-items",
+    "operations": {
+      "write": {
+        "upsert": {
+          "request": {
+            "method": "POST",
+            "transport_ref": "api",
+            "path": "/v1/upsert-items",
+            "headers": {
+              "X-Write-Mode": "census"
+            },
+            "query": {
+              "dry_run": {
+                "from_param": "dry_run"
+              }
+            },
+            "content_type": "application/json",
+            "body": {
+              "items": {
+                "from_input": "records"
+              }
+            }
+          },
+          "params": {
+            "dry_run": {
+              "in": "query",
+              "type": "boolean",
+              "required": false
+            }
+          },
+          "input": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "integer",
+                  "native_type": "integer",
+                  "arrow_type": "Int64"
+                }
+              }
+            }
+          },
+          "conflict_keys": [
+            "id"
+          ],
+          "batching": {
+            "max_records": 2
+          }
+        }
+      }
+    }
+  }
+}

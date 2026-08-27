@@ -1,0 +1,206 @@
+{
+  "contract_models": "1.0.0rc23",
+  "resources": {
+    "api-endpoint": {
+      "consumed": {
+        "ApiEndpointDoc": [
+          "endpoint_id",
+          "operations"
+        ],
+        "Batching": [
+          "max_records"
+        ],
+        "Cursor": [
+          "next_cursor",
+          "param"
+        ],
+        "CursorPagination": [
+          "cursor",
+          "limit",
+          "stop_when",
+          "type"
+        ],
+        "FunctionExpression": [
+          "function",
+          "input",
+          "map",
+          "safe"
+        ],
+        "GetReadRequest": [
+          "headers",
+          "headers_remove",
+          "method",
+          "path",
+          "path_params",
+          "query",
+          "transport_ref"
+        ],
+        "Idempotency": [
+          "in",
+          "name"
+        ],
+        "Keyset": [
+          "initial",
+          "order_by_field",
+          "param"
+        ],
+        "KeysetPagination": [
+          "keyset",
+          "limit",
+          "stop_when",
+          "type"
+        ],
+        "Link": [
+          "next_url"
+        ],
+        "LinkPagination": [
+          "limit",
+          "link",
+          "stop_when",
+          "type"
+        ],
+        "LiteralExpression": [
+          "literal"
+        ],
+        "OffsetCursor": [
+          "increment_by",
+          "initial",
+          "param"
+        ],
+        "OffsetPagination": [
+          "limit",
+          "offset",
+          "stop_when",
+          "type"
+        ],
+        "Operations": [
+          "read",
+          "write"
+        ],
+        "PageCursor": [
+          "increment_by",
+          "initial",
+          "param"
+        ],
+        "PagePagination": [
+          "limit",
+          "page",
+          "stop_when",
+          "type"
+        ],
+        "PageSize": [
+          "default",
+          "max",
+          "param"
+        ],
+        "Param": [
+          "controlled_by",
+          "default",
+          "explode",
+          "style",
+          "type"
+        ],
+        "PostReadRequest": [
+          "body",
+          "content_type",
+          "headers",
+          "headers_remove",
+          "method",
+          "path",
+          "path_params",
+          "query",
+          "transport_ref"
+        ],
+        "PredicateAnd": [
+          "and"
+        ],
+        "PredicateEmpty": [
+          "empty"
+        ],
+        "PredicateEq": [
+          "eq"
+        ],
+        "PredicateExists": [
+          "exists"
+        ],
+        "PredicateGt": [
+          "gt"
+        ],
+        "PredicateGte": [
+          "gte"
+        ],
+        "PredicateLt": [
+          "lt"
+        ],
+        "PredicateLte": [
+          "lte"
+        ],
+        "PredicateMissing": [
+          "missing"
+        ],
+        "PredicateNeq": [
+          "neq"
+        ],
+        "PredicateNot": [
+          "not"
+        ],
+        "PredicateNotEmpty": [
+          "not_empty"
+        ],
+        "PredicateOr": [
+          "or"
+        ],
+        "ReadOperation": [
+          "pagination",
+          "params",
+          "replication",
+          "request",
+          "response"
+        ],
+        "RefExpression": [
+          "ref"
+        ],
+        "Replication": [
+          "cursor_mappings"
+        ],
+        "ResponseExtraction": [
+          "records",
+          "schema"
+        ],
+        "SingleCursorMapping": [
+          "cursor_field",
+          "param"
+        ],
+        "TemplateExpression": [
+          "template"
+        ],
+        "WindowCursorMapping": [
+          "start_param"
+        ],
+        "WriteInput": [
+          "schema"
+        ],
+        "WriteOperation": [
+          "batching",
+          "idempotency",
+          "input",
+          "params",
+          "request"
+        ],
+        "WriteRequest": [
+          "body",
+          "content_type",
+          "headers",
+          "headers_remove",
+          "method",
+          "path",
+          "path_params",
+          "query",
+          "transport_ref"
+        ]
+      },
+      "root_model": "ApiEndpointDoc"
+    }
+  },
+  "version": "1.0.0"
+}

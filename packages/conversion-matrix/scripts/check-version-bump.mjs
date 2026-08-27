@@ -23,7 +23,6 @@ import { fileURLToPath } from "node:url";
 import { ARTIFACTS, compareVersions, parseVersion } from "./sync-contracts-to-s3.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const typeMapPath = "cdk/cdk/type_map";
 
 /**
  * Verdict for one artifact, from the base branch's copy (raw text, or null
@@ -101,8 +100,7 @@ function readAtRef(ref, path) {
 function main() {
   const baseRef = process.argv[2];
   if (!baseRef) throw new Error("usage: check-version-bump.mjs <base-ref>");
-  for (const { prefix, file } of ARTIFACTS) {
-    const path = `${typeMapPath}/${file}`;
+  for (const { prefix, path } of ARTIFACTS) {
     let verdict;
     try {
       verdict = checkVersionBump(

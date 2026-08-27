@@ -1,0 +1,88 @@
+{
+  "case_id": "read-link-literal",
+  "why": "A literal next link. Every other typed expression slot the loop evaluates takes a ref or a template, so this is where a literal expression is reachable at all.",
+  "batch_size": 2,
+  "pages": [
+    {
+      "data": [
+        {
+          "id": 1,
+          "name": "a"
+        }
+      ],
+      "links": {
+        "next": "/v1/literal-items?page=2"
+      }
+    },
+    {
+      "data": [
+        {
+          "id": 2,
+          "name": "b"
+        }
+      ],
+      "links": {}
+    }
+  ],
+  "document": {
+    "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
+    "endpoint_id": "literal-link-items",
+    "operations": {
+      "read": {
+        "request": {
+          "method": "GET",
+          "path": "/v1/literal-items"
+        },
+        "pagination": {
+          "type": "link",
+          "link": {
+            "next_url": {
+              "literal": "https://api.example.test/v1/literal-items?page=2"
+            }
+          },
+          "stop_when": {
+            "missing": {
+              "ref": "response.body.links.next"
+            }
+          }
+        },
+        "response": {
+          "records": {
+            "ref": "response.body.data"
+          },
+          "schema": {
+            "type": "object",
+            "properties": {
+              "data": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "integer",
+                      "native_type": "integer",
+                      "arrow_type": "Int64"
+                    },
+                    "name": {
+                      "type": "string",
+                      "native_type": "string",
+                      "arrow_type": "Utf8"
+                    }
+                  }
+                }
+              },
+              "links": {
+                "type": "object",
+                "properties": {
+                  "next": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

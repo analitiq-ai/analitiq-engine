@@ -1,0 +1,49 @@
+{
+  "case_id": "write-headers-remove",
+  "why": "And on a write request, where the refusal arrives as a schema rejection rather than a read error.",
+  "refused": "headers_remove",
+  "write": {
+    "records": [
+      {
+        "id": 1
+      }
+    ],
+    "responses": [
+      {}
+    ]
+  },
+  "document": {
+    "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
+    "endpoint_id": "write-headers-remove",
+    "operations": {
+      "write": {
+        "insert": {
+          "request": {
+            "method": "POST",
+            "path": "/v1/things",
+            "headers_remove": [
+              "X-Inherited"
+            ],
+            "body": {
+              "item": {
+                "from_input": "record"
+              }
+            }
+          },
+          "input": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "integer",
+                  "native_type": "integer",
+                  "arrow_type": "Int64"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

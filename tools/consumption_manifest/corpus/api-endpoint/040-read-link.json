@@ -1,0 +1,121 @@
+{
+  "case_id": "read-link",
+  "why": "Link paging with a templated next URL: the typed slot where a template expression is what the loop evaluates.",
+  "batch_size": 2,
+  "pages": [
+    {
+      "data": [
+        {
+          "id": 1,
+          "sequence": 1,
+          "name": "n1"
+        },
+        {
+          "id": 2,
+          "sequence": 2,
+          "name": "n2"
+        }
+      ],
+      "links": {
+        "next": "2"
+      }
+    },
+    {
+      "data": [
+        {
+          "id": 3,
+          "sequence": 3,
+          "name": "n3"
+        }
+      ],
+      "links": {}
+    }
+  ],
+  "document": {
+    "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
+    "endpoint_id": "link-items",
+    "operations": {
+      "read": {
+        "request": {
+          "method": "GET",
+          "path": "/v1/link-items",
+          "query": {
+            "page_size": {
+              "from_param": "page_size"
+            }
+          }
+        },
+        "params": {
+          "page_size": {
+            "in": "query",
+            "type": "integer",
+            "required": false,
+            "controlled_by": "pagination"
+          }
+        },
+        "pagination": {
+          "type": "link",
+          "limit": {
+            "param": "page_size",
+            "default": {
+              "ref": "runtime.batch_size"
+            },
+            "max": 200
+          },
+          "link": {
+            "next_url": {
+              "template": "https://api.example.test/v1/link-items?after=${response.body.links.next}"
+            }
+          },
+          "stop_when": {
+            "missing": {
+              "ref": "response.body.links.next"
+            }
+          }
+        },
+        "response": {
+          "records": {
+            "ref": "response.body.data"
+          },
+          "schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+              "data": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "integer",
+                      "native_type": "integer",
+                      "arrow_type": "Int64"
+                    },
+                    "sequence": {
+                      "type": "integer",
+                      "native_type": "integer",
+                      "arrow_type": "Int64"
+                    },
+                    "name": {
+                      "type": "string",
+                      "native_type": "string",
+                      "arrow_type": "Utf8"
+                    }
+                  }
+                }
+              },
+              "links": {
+                "type": "object",
+                "properties": {
+                  "next": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

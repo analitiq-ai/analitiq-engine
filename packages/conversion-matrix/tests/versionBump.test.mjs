@@ -11,6 +11,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { checkVersionBump } from "../scripts/check-version-bump.mjs";
+import { ARTIFACTS } from "../scripts/sync-contracts-to-s3.mjs";
 
 const artifact = (version, body) => JSON.stringify({ version, families: body });
 
@@ -126,7 +127,9 @@ function withRepo(run) {
     git(dir, ["init", "-q", "-b", "main"]);
     git(dir, ["config", "user.email", "t@t"]);
     git(dir, ["config", "user.name", "t"]);
-    mkdirSync(join(dir, "cdk", "cdk", "type_map"), { recursive: true });
+    for (const { path } of ARTIFACTS) {
+      mkdirSync(dirname(join(dir, path)), { recursive: true });
+    }
     const fixtureScripts = join(dir, "packages", "conversion-matrix", "scripts");
     mkdirSync(fixtureScripts, { recursive: true });
     for (const name of ["check-version-bump.mjs", "sync-contracts-to-s3.mjs"]) {
@@ -138,6 +141,13 @@ function withRepo(run) {
   }
 }
 
+/** Write every ARTIFACTS entry into the fixture repo at one version. */
+const writeAll = (dir, version, body = {}) => {
+  for (const { path } of ARTIFACTS) {
+    writeFileSync(join(dir, path), artifact(version, body));
+  }
+};
+
 const runCli = (cli, ref) =>
   execFileSync("node", [cli, ref], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 
@@ -145,8 +155,7 @@ test("a bad base ref aborts instead of reporting the artifact as absent", () => 
   // The failure mode this replaces: classifying git's prose as "not in that
   // ref" turns the gate into a no-op that prints success.
   withRepo((dir, cli) => {
-    writeFileSync(join(dir, "cdk", "cdk", "type_map", "conversion_matrix.json"), artifact("1.0.0", {}));
-    writeFileSync(join(dir, "cdk", "cdk", "type_map", "arrow_type_grammar.json"), artifact("1.0.0", {}));
+    writeAll(dir, "1.0.0");
     git(dir, ["add", "-A"]);
     git(dir, ["commit", "-qm", "init"]);
     assert.throws(() => runCli(cli, "no-such-ref"), (err) => {
@@ -162,11 +171,11 @@ test("a path absent at the base ref is reported as added, not compared", () => {
     git(dir, ["add", "-A"]);
     git(dir, ["commit", "-qm", "no artifacts yet"]);
     const base = git(dir, ["rev-parse", "HEAD"]).trim();
-    writeFileSync(join(dir, "cdk", "cdk", "type_map", "conversion_matrix.json"), artifact("2.0.0", {}));
-    writeFileSync(join(dir, "cdk", "cdk", "type_map", "arrow_type_grammar.json"), artifact("1.1.0", {}));
+    writeAll(dir, "2.0.0");
     const out = runCli(cli, base);
-    assert.match(out, /conversion-matrix absent in .* added here at v2\.0\.0 \(not compared\)/);
-    assert.match(out, /arrow-type-grammar absent in .* added here at v1\.1\.0 \(not compared\)/);
+    for (const { prefix } of ARTIFACTS) {
+      assert.match(out, new RegExp(`${prefix} absent in .* added here at v2\\.0\\.0 \\(not compared\\)`));
+    }
   });
 });
 
@@ -174,37 +183,35 @@ test("an unversioned base is reported as not compared, and names the artifact", 
   // The state of main before versioned artifacts existed. The check cannot
   // order against it, and must not print the line it uses for a verified bump.
   withRepo((dir, cli) => {
-    for (const file of ["conversion_matrix.json", "arrow_type_grammar.json"]) {
-      writeFileSync(join(dir, "cdk", "cdk", "type_map", file), JSON.stringify({ families: {} }));
+    for (const { path } of ARTIFACTS) {
+      writeFileSync(join(dir, path), JSON.stringify({ families: {} }));
     }
     git(dir, ["add", "-A"]);
     git(dir, ["commit", "-qm", "unversioned"]);
     const base = git(dir, ["rev-parse", "HEAD"]).trim();
-    writeFileSync(join(dir, "cdk", "cdk", "type_map", "conversion_matrix.json"), artifact("2.0.0", {}));
-    writeFileSync(join(dir, "cdk", "cdk", "type_map", "arrow_type_grammar.json"), artifact("1.1.0", {}));
+    writeAll(dir, "2.0.0");
     const out = runCli(cli, base);
-    assert.match(out, /conversion-matrix declares v2\.0\.0; the copy in .* declares no orderable version \(not compared/);
-    assert.match(out, /arrow-type-grammar declares v1\.1\.0; the copy in .* declares no orderable version \(not compared/);
+    for (const { prefix } of ARTIFACTS) {
+      assert.match(out, new RegExp(`${prefix} declares v2\\.0\\.0; the copy in .* declares no orderable version \\(not compared`));
+    }
     assert.doesNotMatch(out, /changed and declares/);
   });
 });
 
 test("the CLI names which artifact refused to publish", () => {
   withRepo((dir, cli) => {
-    for (const file of ["conversion_matrix.json", "arrow_type_grammar.json"]) {
-      writeFileSync(join(dir, "cdk", "cdk", "type_map", file), artifact("1.0.0", {}));
-    }
+    writeAll(dir, "1.0.0");
     git(dir, ["add", "-A"]);
     git(dir, ["commit", "-qm", "init"]);
     const base = git(dir, ["rev-parse", "HEAD"]).trim();
-    // Change the grammar's bytes without touching its version.
-    writeFileSync(
-      join(dir, "cdk", "cdk", "type_map", "arrow_type_grammar.json"),
-      artifact("1.0.0", { changed: true })
-    );
+    // Change the LAST artifact's bytes without touching its version, so the
+    // failure is also proof the loop reaches every entry rather than stopping
+    // at the first.
+    const last = ARTIFACTS[ARTIFACTS.length - 1];
+    writeFileSync(join(dir, last.path), artifact("1.0.0", { changed: true }));
     assert.throws(() => runCli(cli, base), (err) => {
       const output = `${err.stdout ?? ""}${err.stderr ?? ""}`;
-      assert.match(output, /arrow-type-grammar: content changed but version 1\.0\.0/);
+      assert.match(output, new RegExp(`${last.prefix}: content changed but version 1\\.0\\.0`));
       return true;
     });
   });

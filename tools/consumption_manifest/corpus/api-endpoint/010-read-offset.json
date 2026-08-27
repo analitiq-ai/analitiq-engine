@@ -1,0 +1,231 @@
+{
+  "case_id": "read-offset",
+  "why": "Offset paging, every request binding map, and an incremental cursor bound through a single-param mapping.",
+  "batch_size": 2,
+  "stored_cursor": {
+    "cursor": "2026-01-01T00:00:00Z"
+  },
+  "stream_source": {
+    "endpoint_ref": {
+      "scope": "connector",
+      "connection_id": "census-connection",
+      "endpoint_id": "offset-invoices"
+    },
+    "primary_keys": [
+      "id"
+    ],
+    "replication": {
+      "method": "incremental",
+      "cursor_field": "updated_at",
+      "safety_window_seconds": 60
+    }
+  },
+  "pages": [
+    {
+      "records": [
+        {
+          "id": 1,
+          "updated_at": "2026-02-01T00:00:00Z"
+        },
+        {
+          "id": 2,
+          "updated_at": "2026-02-02T00:00:00Z"
+        }
+      ],
+      "total": 4
+    },
+    {
+      "records": [],
+      "total": 4
+    }
+  ],
+  "document": {
+    "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
+    "endpoint_id": "offset-invoices",
+    "display_name": "Invoices (offset-paginated)",
+    "description": "Every request binding map on one read.",
+    "tags": [
+      "census"
+    ],
+    "operations": {
+      "read": {
+        "request": {
+          "method": "GET",
+          "transport_ref": "api",
+          "path": "/v1/accounts/{account}/invoices",
+          "path_params": {
+            "account": {
+              "from_param": "account"
+            }
+          },
+          "headers": {
+            "X-Page-Style": {
+              "literal": "offset"
+            }
+          },
+          "query": {
+            "skip": {
+              "from_param": "skip"
+            },
+            "limit": {
+              "from_param": "limit"
+            },
+            "since": {
+              "from_param": "since"
+            },
+            "status[]": {
+              "from_param": "status"
+            }
+          }
+        },
+        "params": {
+          "account": {
+            "in": "path",
+            "type": "string",
+            "required": true,
+            "description": "Account the invoices belong to.",
+            "default": {
+              "literal": "acct-1"
+            },
+            "pattern": "^[a-z0-9-]+$",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "skip": {
+            "in": "query",
+            "type": "integer",
+            "required": false,
+            "controlled_by": "pagination",
+            "minimum": 0,
+            "maximum": 100000
+          },
+          "limit": {
+            "in": "query",
+            "type": "integer",
+            "required": false,
+            "controlled_by": "pagination"
+          },
+          "since": {
+            "in": "query",
+            "type": "string",
+            "format": "date-time",
+            "required": false,
+            "controlled_by": "replication"
+          },
+          "status": {
+            "in": "query",
+            "type": "array",
+            "required": false,
+            "style": "form",
+            "explode": false,
+            "enum": [
+              "open",
+              "paid"
+            ],
+            "minItems": 1,
+            "maxItems": 2,
+            "default": {
+              "literal": [
+                "open",
+                "paid"
+              ]
+            }
+          }
+        },
+        "pagination": {
+          "type": "offset",
+          "offset": {
+            "param": "skip",
+            "initial": 0,
+            "increment_by": {
+              "ref": "response.record_count"
+            }
+          },
+          "limit": {
+            "param": "limit",
+            "default": {
+              "ref": "runtime.batch_size"
+            },
+            "max": 50
+          },
+          "stop_when": {
+            "or": [
+              {
+                "empty": {
+                  "ref": "response.body.records"
+                }
+              },
+              {
+                "and": [
+                  {
+                    "exists": {
+                      "ref": "response.body.total"
+                    }
+                  },
+                  {
+                    "not": {
+                      "missing": {
+                        "ref": "response.body.total"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "replication": {
+          "supported_methods": [
+            "full_refresh",
+            "incremental"
+          ],
+          "cursor_mappings": [
+            {
+              "cursor_field": "updated_at",
+              "param": "since",
+              "operator": "gte",
+              "format": "date-time"
+            }
+          ]
+        },
+        "response": {
+          "records": {
+            "ref": "response.body.records"
+          },
+          "metadata": {
+            "page_total": {
+              "template": "offset-${response.body.total}"
+            }
+          },
+          "schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+              "total": {
+                "type": "integer"
+              },
+              "records": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "integer",
+                      "native_type": "integer",
+                      "arrow_type": "Int64"
+                    },
+                    "updated_at": {
+                      "type": "string",
+                      "native_type": "string",
+                      "arrow_type": "Utf8"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

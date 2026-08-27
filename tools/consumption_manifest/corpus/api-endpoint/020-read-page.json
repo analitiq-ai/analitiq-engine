@@ -1,0 +1,185 @@
+{
+  "case_id": "read-page",
+  "why": "Page-number paging: the page cursor's own three fields, and the ordering predicates.",
+  "batch_size": 2,
+  "pages": [
+    {
+      "items": [
+        {
+          "id": 1,
+          "sequence": 1,
+          "name": "n1"
+        },
+        {
+          "id": 2,
+          "sequence": 2,
+          "name": "n2"
+        }
+      ],
+      "page": 1,
+      "total_pages": 2,
+      "state": "more"
+    },
+    {
+      "items": [
+        {
+          "id": 3,
+          "sequence": 3,
+          "name": "n3"
+        }
+      ],
+      "page": 2,
+      "total_pages": 2,
+      "state": "done"
+    }
+  ],
+  "document": {
+    "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
+    "endpoint_id": "page-items",
+    "operations": {
+      "read": {
+        "request": {
+          "method": "GET",
+          "path": "/v1/page-items",
+          "query": {
+            "per_page": {
+              "from_param": "per_page"
+            },
+            "page": {
+              "from_param": "page"
+            },
+            "q": {
+              "from_param": "q"
+            }
+          }
+        },
+        "params": {
+          "per_page": {
+            "in": "query",
+            "type": "integer",
+            "required": false,
+            "controlled_by": "pagination"
+          },
+          "page": {
+            "in": "query",
+            "type": "integer",
+            "required": false,
+            "controlled_by": "pagination"
+          },
+          "q": {
+            "in": "query",
+            "type": "string",
+            "required": false,
+            "operators": [
+              "eq",
+              "neq"
+            ]
+          }
+        },
+        "pagination": {
+          "type": "page",
+          "limit": {
+            "param": "per_page",
+            "default": {
+              "ref": "runtime.batch_size"
+            },
+            "max": 100
+          },
+          "page": {
+            "param": "page",
+            "initial": 1,
+            "increment_by": 1
+          },
+          "stop_when": {
+            "and": [
+              {
+                "gte": [
+                  {
+                    "ref": "response.body.page"
+                  },
+                  {
+                    "ref": "response.body.total_pages"
+                  }
+                ]
+              },
+              {
+                "lte": [
+                  {
+                    "ref": "response.body.page"
+                  },
+                  {
+                    "ref": "response.body.total_pages"
+                  }
+                ]
+              },
+              {
+                "eq": [
+                  {
+                    "ref": "response.body.state"
+                  },
+                  "done"
+                ]
+              },
+              {
+                "neq": [
+                  {
+                    "ref": "response.body.state"
+                  },
+                  "more"
+                ]
+              },
+              {
+                "not_empty": {
+                  "ref": "response.body.state"
+                }
+              }
+            ]
+          }
+        },
+        "response": {
+          "records": {
+            "ref": "response.body.items"
+          },
+          "schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "integer",
+                      "native_type": "integer",
+                      "arrow_type": "Int64"
+                    },
+                    "sequence": {
+                      "type": "integer",
+                      "native_type": "integer",
+                      "arrow_type": "Int64"
+                    },
+                    "name": {
+                      "type": "string",
+                      "native_type": "string",
+                      "arrow_type": "Utf8"
+                    }
+                  }
+                }
+              },
+              "page": {
+                "type": "integer"
+              },
+              "total_pages": {
+                "type": "integer"
+              },
+              "state": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

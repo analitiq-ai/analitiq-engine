@@ -1,0 +1,176 @@
+{
+  "case_id": "read-post",
+  "why": "A POST read: the body and content type a GET has no field for, plus a window cursor mapping and a function-expression default.",
+  "batch_size": 2,
+  "stored_cursor": {
+    "cursor": "2026-01-01T00:00:00Z"
+  },
+  "stream_source": {
+    "endpoint_ref": {
+      "scope": "connector",
+      "connection_id": "census-connection",
+      "endpoint_id": "post-search"
+    },
+    "primary_keys": [
+      "id"
+    ],
+    "replication": {
+      "method": "incremental",
+      "cursor_field": "updated_at",
+      "safety_window_seconds": 60
+    }
+  },
+  "pages": [
+    {
+      "hits": [
+        {
+          "id": 1,
+          "name": "a",
+          "updated_at": "2026-02-01T00:00:00Z"
+        }
+      ]
+    }
+  ],
+  "document": {
+    "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
+    "endpoint_id": "post-search",
+    "operations": {
+      "read": {
+        "request": {
+          "method": "POST",
+          "transport_ref": "files",
+          "path": "/v1/tenants/{tenant}/search",
+          "path_params": {
+            "tenant": {
+              "from_param": "tenant"
+            }
+          },
+          "headers": {
+            "X-Search-Mode": "exact"
+          },
+          "query": {
+            "trace": {
+              "from_param": "trace"
+            },
+            "mode": {
+              "from_param": "mode"
+            }
+          },
+          "content_type": "application/json",
+          "body": {
+            "from": {
+              "from_param": "window_start"
+            },
+            "to": {
+              "from_param": "window_end"
+            }
+          }
+        },
+        "params": {
+          "tenant": {
+            "in": "path",
+            "type": "string",
+            "required": true,
+            "default": {
+              "literal": "tenant-1"
+            }
+          },
+          "trace": {
+            "in": "query",
+            "type": "string",
+            "required": false,
+            "default": {
+              "function": "url_encode",
+              "input": {
+                "ref": "runtime.connection_id"
+              },
+              "safe": "-"
+            }
+          },
+          "window_start": {
+            "in": "body",
+            "type": "string",
+            "format": "date-time",
+            "required": false,
+            "controlled_by": "replication"
+          },
+          "window_end": {
+            "in": "body",
+            "type": "string",
+            "format": "date-time",
+            "required": false,
+            "controlled_by": "replication"
+          },
+          "mode": {
+            "in": "query",
+            "type": "string",
+            "required": false,
+            "default": {
+              "function": "lookup",
+              "input": {
+                "ref": "runtime.connection_id"
+              },
+              "map": {
+                "census-connection": "fast"
+              }
+            }
+          }
+        },
+        "replication": {
+          "supported_methods": [
+            "full_refresh",
+            "incremental"
+          ],
+          "cursor_mappings": [
+            {
+              "cursor_field": "updated_at",
+              "start_param": "window_start",
+              "end_param": "window_end",
+              "start_operator": "gte",
+              "end_operator": "lt",
+              "format": "date-time"
+            }
+          ]
+        },
+        "response": {
+          "records": {
+            "ref": "response.body.hits"
+          },
+          "metadata": {
+            "seen": {
+              "ref": "response.record_count"
+            }
+          },
+          "schema": {
+            "type": "object",
+            "properties": {
+              "hits": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "integer",
+                      "native_type": "integer",
+                      "arrow_type": "Int64"
+                    },
+                    "name": {
+                      "type": "string",
+                      "native_type": "string",
+                      "arrow_type": "Utf8"
+                    },
+                    "updated_at": {
+                      "type": "string",
+                      "native_type": "string",
+                      "arrow_type": "Utf8"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

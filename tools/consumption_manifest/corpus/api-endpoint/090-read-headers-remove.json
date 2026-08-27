@@ -1,0 +1,36 @@
+{
+  "case_id": "read-headers-remove",
+  "why": "request.headers_remove is contract-valid and the engine reads it only to refuse: a per-request instruction cannot delete a header the connection put on the shared session.",
+  "refused": "headers_remove",
+  "pages": [{"records": []}],
+  "document": {
+    "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
+    "endpoint_id": "headers-remove",
+    "operations": {
+      "read": {
+        "request": {
+          "method": "GET",
+          "path": "/v1/things",
+          "headers_remove": ["X-Inherited"]
+        },
+        "response": {
+          "records": {"ref": "response.body.records"},
+          "schema": {
+            "type": "object",
+            "properties": {
+              "records": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {"type": "integer", "native_type": "integer", "arrow_type": "Int64"}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
