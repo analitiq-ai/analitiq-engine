@@ -1251,8 +1251,6 @@ class GenericSQLConnector(BaseDestinationHandler):
                 ColumnDef(
                     name=col_name,
                     canonical_type=col_def.arrow_type,
-                    # An omitted ``nullable`` means nullable: the contract
-                    # leaves it unset rather than false, so only an
                     # ``is not False``, not ``bool(...)``: the contract types
                     # nullable as ``bool | None``, so only an authored
                     # ``false`` makes the column NOT NULL. An authored

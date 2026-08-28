@@ -230,7 +230,13 @@ def test_every_pagination_member_names_its_block_after_its_discriminator() -> No
     the wrong way round -- would stop firing. The read would certify green
     after one page.
     """
-    for member in _model_members(Pagination):
+    members = _model_members(Pagination)
+    assert members, (
+        "Pagination is no longer a union of contract models this can walk, so "
+        "the loop below would pin nothing: api_read_path reaches a scheme's "
+        "block through its discriminator and would answer None unchecked"
+    )
+    for member in members:
         discriminator = get_args(member.model_fields["type"].annotation)
         assert len(discriminator) == 1, (
             f"{member.__name__}.type is no longer a single-value Literal; the "
