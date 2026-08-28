@@ -225,8 +225,8 @@ def test_a_path_table_claims_each_step_through_every_carrier(
         lambda module, attr: (("x", "deep"), ("q",), ("x", "gone")),
     )
     manifest = census.Manifest()
-    census.claim_path_tables(manifest, models)
-    site = census.Site("m", 0, "T")
+    site = census.Site("src.walker", 42)
+    census.claim_path_tables(manifest, models, {"m.T": {site}})
     assert {m: dict(f) for m, f in manifest.claims.items()} == {
         model_name(Leaf): {"x": {site}},
         model_name(Carrier): {"x": {site}},

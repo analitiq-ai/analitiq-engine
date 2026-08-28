@@ -30,7 +30,7 @@ from cdk.contract_consumption import (
 
 pytestmark = pytest.mark.unit
 
-_SITE = re.compile(r"^[a-z_][a-z0-9_.]*:([1-9][0-9]*|[A-Z_][A-Z0-9_]*)$")
+_SITE = re.compile(r"^[a-z_][a-z0-9_.]*:[1-9][0-9]*$")
 
 
 def _model(name: str) -> type[BaseModel]:

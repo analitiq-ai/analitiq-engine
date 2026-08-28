@@ -61,7 +61,7 @@ from analitiq.contracts.endpoints import (
 from analitiq.contracts.pipelines.config import Runtime
 from analitiq.contracts.stream import (
     AssignmentTarget,
-    AssignmentValue,
+    ConstantAssignmentValue,
     EndpointRef,
     Filter,
     Replication,
@@ -111,7 +111,9 @@ ROOTS: Final[tuple[Any, ...]] = (
     EndpointRef,
     Runtime,
     AssignmentTarget,
-    AssignmentValue,
+    # The constant variant only: the engine's MappingDocument replaces the
+    # contract's expression variant with its own ExpressionValue model.
+    ConstantAssignmentValue,
     Validation,
     ValidationRule,
 )
@@ -144,7 +146,9 @@ DYNAMIC_ATTRIBUTE_TABLES: Final[Mapping[str, tuple[str, str]]] = {
 }
 
 #: Tables of attribute paths walked on an ``Any``-typed receiver: the
-#: annotation the walk starts from, and the table's module and name.
+#: annotation the walk starts from, and the table's module and name. The
+#: claims land on the runtime sites that reference the table, so a table
+#: nothing reads any more claims nothing and fails the render.
 PATH_TABLES: Final[tuple[tuple[Any, str, str], ...]] = (
     (Pagination, "cdk.api.strategies", "PRE_PAGE_VALUE_PATHS"),
 )
@@ -162,14 +166,13 @@ AUTHORED_JSON: Final = "cdk.json_utils.authored_json"
 
 @dataclass(frozen=True, order=True)
 class Site:
-    """Where a read happens: a module and a line, or a module and a table."""
+    """Where a read happens: a module and a line."""
 
     module: str
     line: int
-    table: str = ""
 
     def render(self) -> str:
-        return f"{self.module}:{self.table or self.line}"
+        return f"{self.module}:{self.line}"
 
 
 @dataclass(frozen=True)
@@ -280,6 +283,20 @@ def _access_of(
         models = _receiver_models(types.get(args[0]))
         return Access(site, models, "authored_json") if models else None
     return None
+
+
+def table_references(result: build.BuildResult) -> dict[str, set[Site]]:
+    """Every runtime site that names a registered path table, by table."""
+    tables = {f"{module}.{attribute}" for _, module, attribute in PATH_TABLES}
+    references: dict[str, set[Site]] = defaultdict(set)
+    for module, state in result.graph.items():
+        if not _in_scope(module, RUNTIME_MODULES) or state.tree is None:
+            continue
+        for expr in get_subexpressions(state.tree):
+            if isinstance(expr, (NameExpr, MemberExpr)) and expr.fullname in tables:
+                if module != expr.fullname.rpartition(".")[0]:
+                    references[expr.fullname].add(Site(module, expr.line))
+    return references
 
 
 def grammar_entries(result: build.BuildResult) -> dict[str, set[Site]]:
@@ -435,18 +452,33 @@ def _classify_pydantic_name(manifest: Manifest, access: Access, model: str) -> N
 
 
 def claim_path_tables(
-    manifest: Manifest, models: Mapping[str, type[BaseModel]]
+    manifest: Manifest,
+    models: Mapping[str, type[BaseModel]],
+    references: Mapping[str, set[Site]],
 ) -> None:
-    """Claim each step of every registered path table, per carrying branch."""
+    """Claim each step of every registered path table, per carrying branch.
+
+    The claims land on the runtime sites that reference the table
+    (*references*, from :func:`table_references`): a registered table no
+    runtime module reads is dead and fails the render rather than claiming
+    its fields forever.
+    """
     for annotation, module, attribute in PATH_TABLES:
-        site = Site(module, 0, attribute)
+        table = f"{module}.{attribute}"
+        sites = references.get(table, set())
+        if not sites:
+            manifest.problems.append(
+                f"{table}: registered in PATH_TABLES but no runtime module "
+                f"outside {module} references it; delete the registration"
+            )
+            continue
         members = contract_models(annotation)
         for path in _table_entries(module, attribute):
             carriers = [m for m in members if path[0] in m.model_fields]
             if not carriers:
                 manifest.problems.append(
-                    f"{site.render()}: path {path} starts at a field no member "
-                    f"of the annotation declares"
+                    f"{table}: path {path} starts at a field no member of the "
+                    f"annotation declares"
                 )
             resolved_fully = False
             for carrier in carriers:
@@ -456,19 +488,18 @@ def claim_path_tables(
                     name = model_name(node)
                     if name not in models:
                         manifest.problems.append(
-                            f"{site.render()}: reads {name}, which no declared "
-                            f"root reaches"
+                            f"{table}: reads {name}, which no declared root reaches"
                         )
                         continue
-                    manifest.claims[name][key].add(site)
+                    manifest.claims[name][key].update(sites)
             if carriers and not resolved_fully:
                 # A branch may stop short (the walk answers None there, as
                 # for any field it does not declare), but a path no branch
                 # resolves to its last step is a stale entry that must not
                 # simply drop out of the manifest.
                 manifest.problems.append(
-                    f"{site.render()}: path {path} resolves to its last step "
-                    f"through no member of the annotation"
+                    f"{table}: path {path} resolves to its last step through "
+                    f"no member of the annotation"
                 )
 
 
@@ -489,7 +520,7 @@ def build_contract_consumption() -> dict[str, Any]:
     models = reachable_models(ROOTS)
     result = type_check()
     manifest = classify(census(result), models)
-    claim_path_tables(manifest, models)
+    claim_path_tables(manifest, models, table_references(result))
     entries = grammar_entries(result)
     opaque = {
         model_name(m): _opaque_entry(model_name(m), consumer, manifest, entries)
