@@ -478,16 +478,16 @@
     },
     "analitiq.contracts.stream.AssignmentTarget": {
       "arrow_type": [
-        "src.engine.mapping:235",
-        "src.engine.mapping:347"
+        "src.engine.mapping:238",
+        "src.engine.mapping:391"
       ],
       "nullable": [
-        "src.engine.mapping:238"
+        "src.engine.mapping:241"
       ],
       "path": [
-        "src.engine.mapping:181",
-        "src.engine.mapping:225",
-        "src.engine.mapping:238"
+        "src.engine.mapping:184",
+        "src.engine.mapping:228",
+        "src.engine.mapping:241"
       ]
     },
     "analitiq.contracts.stream.ConnectionEndpointRef": {
@@ -530,12 +530,12 @@
     },
     "analitiq.contracts.stream.ConstantAssignmentValue": {
       "constant": [
-        "src.engine.mapping:383"
+        "src.engine.mapping:444"
       ]
     },
     "analitiq.contracts.stream.ConstantValue": {
       "value": [
-        "src.engine.mapping:383"
+        "src.engine.mapping:444"
       ]
     },
     "analitiq.contracts.stream.Filter": {
@@ -605,32 +605,40 @@
         "cdk.sql.generic:2425"
       ]
     },
+    "analitiq.contracts.stream.StreamValidationErrorHandling": {
+      "strategy": [
+        "src.engine.mapping:427"
+      ]
+    },
     "analitiq.contracts.stream.Validation": {
+      "error_handling": [
+        "src.engine.mapping:424"
+      ],
       "rules": [
-        "src.engine.mapping:364"
+        "src.engine.mapping:408"
       ]
     },
     "analitiq.contracts.stream.ValidationRule": {
       "field": [
-        "src.engine.mapping:1015"
+        "src.engine.mapping:1076"
       ],
       "message": [
-        "src.engine.mapping:1051"
+        "src.engine.mapping:1112"
       ],
       "type": [
-        "src.engine.mapping:1026",
-        "src.engine.mapping:1036",
-        "src.engine.mapping:1053",
-        "src.engine.mapping:1073",
-        "src.engine.mapping:1095",
-        "src.engine.mapping:1101"
+        "src.engine.mapping:1087",
+        "src.engine.mapping:1097",
+        "src.engine.mapping:1114",
+        "src.engine.mapping:1134",
+        "src.engine.mapping:1156",
+        "src.engine.mapping:1162"
       ],
       "value": [
-        "src.engine.mapping:1078",
-        "src.engine.mapping:1081",
-        "src.engine.mapping:1084",
-        "src.engine.mapping:1091",
-        "src.engine.mapping:1110"
+        "src.engine.mapping:1139",
+        "src.engine.mapping:1142",
+        "src.engine.mapping:1145",
+        "src.engine.mapping:1152",
+        "src.engine.mapping:1171"
       ]
     }
   },
@@ -948,7 +956,7 @@
     "analitiq.contracts.stream.AssignmentTarget": {
       "consumer": "cdk.type_map.arrow",
       "dumps": [
-        "src.engine.mapping:228"
+        "src.engine.mapping:231"
       ],
       "entries": []
     }

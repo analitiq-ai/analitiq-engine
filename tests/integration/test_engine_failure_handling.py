@@ -778,7 +778,7 @@ class TestEngineFatalFailureHandling:
                 FailureCategory.FAILURE_CATEGORY_NOT_READY,
             )
         )
-        assert processor.exhausted_failure_codes == [ErrorCode.INTERNAL]
+        assert [d.code for d in processor.dropped_batches] == [ErrorCode.INTERNAL]
 
         # An undeclared ack takes the load stage's default whatever its
         # summary says. The first summary names a config-defect exception
@@ -790,7 +790,7 @@ class TestEngineFatalFailureHandling:
             "connection reset by peer",
         ):
             processor = await _exhaust(_retryable(summary))
-            assert processor.exhausted_failure_codes == [
+            assert [d.code for d in processor.dropped_batches] == [
                 ErrorCode.DESTINATION_WRITE_FAILED
             ]
 

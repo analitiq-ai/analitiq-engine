@@ -371,3 +371,53 @@ class TestErrorStrategyVocabulary:
                 retry_delay=0,
                 error_strategy="tolerate-everything",  # type: ignore[arg-type]
             )
+
+
+class TestRejectedBatch:
+    """Issue #468 -- a batch the transform rejected on a validation rule
+    takes the rule's own strategy through the same ladder an exhausted send
+    does, with no send and no retry."""
+
+    @pytest.mark.parametrize(
+        ("strategy", "expected"),
+        [
+            (ErrorStrategy.DLQ, DeadLetter),
+            (ErrorStrategy.SKIP, Skipped),
+            (ErrorStrategy.FAIL, Failed),
+        ],
+    )
+    def test_the_rule_s_strategy_decides(self, strategy, expected):
+        disposition = BatchPolicy.reject(strategy=strategy, summary="rows 0, 2")
+        assert isinstance(disposition, expected)
+        assert disposition.report.kind is FailureKind.VALIDATION_FAILED
+        assert disposition.report.summary == "rows 0, 2"
+        assert disposition.report.attempts == 0
+        assert (
+            disposition.report.category is FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+        )
+
+    def test_fail_never_dead_letters_on_the_way_out(self):
+        disposition = BatchPolicy.reject(strategy=ErrorStrategy.FAIL, summary="x")
+        assert isinstance(disposition, Failed)
+        assert disposition.dead_letter is False
+
+    def test_a_strategy_outside_the_vocabulary_is_refused(self):
+        with pytest.raises(ValueError):
+            BatchPolicy.reject(
+                strategy="tolerate", summary="x"  # type: ignore[arg-type]
+            )
+
+    def test_strictest_orders_fail_over_dlq_over_skip(self):
+        assert (
+            ErrorStrategy.strictest([ErrorStrategy.SKIP, ErrorStrategy.DLQ])
+            is ErrorStrategy.DLQ
+        )
+        assert (
+            ErrorStrategy.strictest(
+                [ErrorStrategy.DLQ, ErrorStrategy.FAIL, ErrorStrategy.SKIP]
+            )
+            is ErrorStrategy.FAIL
+        )
+        assert ErrorStrategy.strictest([ErrorStrategy.SKIP]) is ErrorStrategy.SKIP
+        with pytest.raises(ValueError):
+            ErrorStrategy.strictest([])

@@ -18,11 +18,13 @@ import pyarrow as pa
 import pytest
 
 import src
+from src.engine.batch_policy import ErrorStrategy
 from src.engine.exceptions import TransformationError
 from src.engine.mapping import (
     _EXPR_NODE_KEYS,
     _FUNCTION_CATALOG,
     MappingDocument,
+    ValidationFailure,
     build_output_schema,
     compile_mapping,
 )
@@ -80,9 +82,9 @@ def _document(assignments):
     return MappingDocument.parse({"assignments": assignments})
 
 
-def _compile(assignments):
+def _compile(assignments, default_strategy=ErrorStrategy.FAIL):
     """Read and compile *assignments* -- the whole document-to-transform route."""
-    return compile_mapping(_document(assignments))
+    return compile_mapping(_document(assignments), default_strategy=default_strategy)
 
 
 def _run(records, assignments):
@@ -183,7 +185,8 @@ class TestDocumentIsClosed:
             compile_mapping(
                 MappingDocument.parse(
                     {"assignments": [], "defaults": {"on_error": "dlq"}}
-                )
+                ),
+                default_strategy=ErrorStrategy.FAIL,
             )
 
     def test_unknown_assignment_field_is_named(self):
@@ -710,7 +713,8 @@ class TestConversionMatrix:
 class TestFailLoudSemantics:
     """A row failing any rule, a null in a non-nullable column, or a missing
     source column are handled batch-wide and loudly -- the transform never does
-    per-row DLQ routing (that is the engine's error_strategy downstream)."""
+    per-row DLQ routing; a rule failure carries the strategy the stream
+    disposes of the whole batch under."""
 
     def test_non_nullable_null_fails_the_batch(self):
         with pytest.raises(TransformationError, match="not nullable"):
@@ -1012,26 +1016,103 @@ class TestValidationRules:
         with pytest.raises(TransformationError, match="needs a value object"):
             _run([{"v": 3}], self._validated([_rule("range", value=value)]))
 
-    def test_error_handling_block_is_accepted_and_inert(self):
-        """Failure handling is decided per batch and per stream.
 
-        The contract carries a per-assignment override; the engine has no grain
-        to apply it at, so it is accepted and the batch still fails loud.
-        """
+class TestValidationErrorStrategy:
+    """Each rule fails under its assignment's ``error_handling.strategy``
+    override, else the pipeline default the transform was compiled with
+    (issue #468). The failure is still batch-wide; the strategy it carries is
+    what the stream disposes of the batch under."""
+
+    @staticmethod
+    def _validated(rules, error_handling=None, name="v"):
+        validate = {"rules": rules}
+        if error_handling is not None:
+            validate["error_handling"] = error_handling
+        return _assignment(name, "Int64", _expr(_get(name)), validate=validate)
+
+    def _failure(self, records, assignments, default=ErrorStrategy.FAIL):
+        with pytest.raises(ValidationFailure) as info:
+            _compile(assignments, default).run(pa.RecordBatch.from_pylist(records))
+        return info.value
+
+    def test_override_strategy_is_carried(self):
+        failure = self._failure(
+            [{"v": None}],
+            [self._validated([_rule("not_null")], {"strategy": "skip"})],
+        )
+        assert failure.strategy is ErrorStrategy.SKIP
+        assert "not_null" in str(failure)
+
+    def test_override_wins_over_the_pipeline_default(self):
+        failure = self._failure(
+            [{"v": None}],
+            [self._validated([_rule("not_null")], {"strategy": "dlq"})],
+            default=ErrorStrategy.SKIP,
+        )
+        assert failure.strategy is ErrorStrategy.DLQ
+
+    @pytest.mark.parametrize("default", list(ErrorStrategy))
+    def test_no_override_takes_the_pipeline_default(self, default):
+        """Absent means the pipeline default, never the contract block's own
+        default value."""
+        failure = self._failure(
+            [{"v": None}], [self._validated([_rule("not_null")])], default=default
+        )
+        assert failure.strategy is default
+
+    def test_retry_fields_change_nothing(self):
+        """A rule is deterministic; the override's retry fields are not read."""
+        failure = self._failure(
+            [{"v": None}],
+            [
+                self._validated(
+                    [_rule("not_null")],
+                    {"strategy": "skip", "max_retries": 3, "retry_delay_seconds": 9},
+                )
+            ],
+        )
+        assert failure.strategy is ErrorStrategy.SKIP
+
+    def test_strictest_strategy_wins_across_failed_rules(self):
+        """One batch, several failed rules under different strategies: the
+        batch takes the strictest verdict (fail > dlq > skip)."""
         assignments = [
-            _assignment(
-                "v",
-                "Int64",
-                _expr(_get("v")),
-                validate={
-                    "rules": [_rule("not_null")],
-                    "error_handling": {"strategy": "skip", "max_retries": 3},
-                },
-            )
+            self._validated([_rule("not_null", field="a")], {"strategy": "skip"}, "a"),
+            self._validated([_rule("not_null", field="b")], {"strategy": "dlq"}, "b"),
+            self._validated([_rule("range", field="c", value={"min": 0})], None, "c"),
         ]
+        both_dropped = self._failure(
+            [{"a": None, "b": None, "c": 1}], assignments, default=ErrorStrategy.FAIL
+        )
+        assert both_dropped.strategy is ErrorStrategy.DLQ
+        only_a = self._failure(
+            [{"a": None, "b": 1, "c": 1}], assignments, default=ErrorStrategy.FAIL
+        )
+        assert only_a.strategy is ErrorStrategy.SKIP
+        with_default = self._failure(
+            [{"a": None, "b": None, "c": -1}], assignments, default=ErrorStrategy.FAIL
+        )
+        assert with_default.strategy is ErrorStrategy.FAIL
+
+    def test_passing_batch_is_untouched_by_the_override(self):
+        assignments = [self._validated([_rule("not_null")], {"strategy": "skip"})]
         assert _run([{"v": 1}], assignments) == [{"v": 1}]
-        with pytest.raises(TransformationError, match="not_null"):
-            _run([{"v": None}], assignments)
+
+    def test_mapping_defect_on_the_same_batch_is_not_a_validation_failure(self):
+        """A null in a non-nullable column is a mapping defect no strategy
+        relaxes: the batch fails as a TransformationError that also names the
+        rule failure, never as a droppable ValidationFailure."""
+        assignments = [
+            self._validated([_rule("not_null")], {"strategy": "skip"}),
+            _assignment("n", "Utf8", _expr(_get("n")), nullable=False),
+        ]
+        with pytest.raises(TransformationError) as info:
+            _compile(assignments).run(
+                pa.RecordBatch.from_pylist([{"v": None, "n": None}])
+            )
+        assert not isinstance(info.value, ValidationFailure)
+        assert "not nullable" in str(info.value)
+        assert "not_null" in str(info.value)
 
 
 class TestCompiledReuseAndConsts:

@@ -59,7 +59,12 @@ from .batch_policy import (
     Skipped,
 )
 from .exceptions import StreamProcessingError
-from .mapping import CompiledTransform, MappingDocument, compile_mapping
+from .mapping import (
+    CompiledTransform,
+    MappingDocument,
+    ValidationFailure,
+    compile_mapping,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +108,14 @@ class StreamMetrics:
     records_skipped: int = 0
     batches_processed: int = 0
     batches_failed: int = 0
+
+
+@dataclass(frozen=True)
+class DroppedBatch:
+    """The classified cause of a batch a dlq/skip verdict dropped."""
+
+    code: ErrorCode
+    stage: FailureStage
 
 
 class StreamProcessor:
@@ -165,6 +178,9 @@ class StreamProcessor:
         # The client's own connect-retry budget; the batch retry budget is
         # the policy's.
         self.max_retries = max_retries
+        # The pipeline default a validation rule fails under unless its
+        # assignment overrides it; compiled into the transform by run().
+        self.error_strategy = ErrorStrategy(error_strategy)
         # Bound once per stream: every batch of this stream, and the
         # zero-batch synthetic truncate, reach their verdict through it.
         self.batch_policy = BatchPolicy(
@@ -188,9 +204,10 @@ class StreamProcessor:
         # propagates the None sentinel into the batch loop) never triggers
         # the truncate (issue #312).
         self.zero_batch_truncate_needed = False
-        # Classified cause of every retry-exhausted batch the dlq/skip
-        # strategies dropped without raising (issue #351).
-        self.exhausted_failure_codes: list[ErrorCode] = []
+        # Classified cause of every batch the dlq/skip strategies dropped
+        # without raising (issue #351): a retry-exhausted send, or a batch
+        # the transform rejected on a validation rule.
+        self.dropped_batches: list[DroppedBatch] = []
 
     async def run(self) -> ErrorCode | None:
         """Process the stream end to end and emit its metrics record.
@@ -225,7 +242,9 @@ class StreamProcessor:
             # code.
             if self.mapping.assignments:
                 try:
-                    self.transform = compile_mapping(self.mapping)
+                    self.transform = compile_mapping(
+                        self.mapping, default_strategy=self.error_strategy
+                    )
                 except Exception as compile_error:
                     tag_failure(
                         compile_error,
@@ -532,7 +551,14 @@ class StreamProcessor:
     async def _transform_stage(
         self, input_queue: asyncio.Queue[Any], output_queue: asyncio.Queue[Any]
     ) -> None:
-        """Transform data with field mappings and validation."""
+        """Transform data with field mappings and validation.
+
+        A batch that fails a validation rule never reaches the load stage:
+        it is disposed of here, under the strategy the failed rule carries,
+        through the same reaction ladder a failed send takes. A dropped
+        batch is dead-lettered or skipped and the stream continues; a
+        failed one stops the stream.
+        """
         logger.debug("Starting transform stage for stream %s", self.stream_name)
 
         batch_count = 0
@@ -545,7 +571,25 @@ class StreamProcessor:
                 if self.transform is None:
                     transformed_batch = batch
                 else:
-                    transformed_batch = self.transform.run(batch)
+                    try:
+                        transformed_batch = self.transform.run(batch)
+                    except ValidationFailure as failure:
+                        disposition = self.batch_policy.reject(
+                            strategy=failure.strategy,
+                            summary=f"rejected by validation: {failure}",
+                        )
+                        # The source rows are what the operator has to
+                        # repair: the output batch was never built.
+                        await self._apply_disposition(
+                            disposition,
+                            batch_seq=batch_count + 1,
+                            record_dicts=batch.to_pylist(),
+                        )
+                        continue
+                    except Exception:
+                        self.pipeline_metrics.increment_batches_failed()
+                        self.metrics.batches_failed += 1
+                        raise
 
                 await output_queue.put(transformed_batch)
                 batch_count += 1
@@ -568,8 +612,6 @@ class StreamProcessor:
                 e,
             )
             await output_queue.put(None)  # Signal end even on error
-            self.pipeline_metrics.increment_batches_failed()
-            self.metrics.batches_failed += 1
             # A transform failure is a mapping/type problem. The engine validates
             # no data schema, so this is a configuration defect (CONFIG_INVALID),
             # not a data-vs-schema mismatch. tag_failure is no-overwrite, so a
@@ -834,14 +876,26 @@ class StreamProcessor:
         )
         logger.error("Stream %s: %s", self.stream_name, failure)
 
+        # dlq/skip return without raising, so this batch's cause would die
+        # with this scope. Classify it exactly as the fail strategy's raise
+        # would -- the declared category for an exhausted send, the
+        # transform stage's code for a rejected batch -- and stash it for the
+        # partial-run classification, so the reported code cannot depend on
+        # the error strategy (issue #351).
+        if report.kind is FailureKind.VALIDATION_FAILED:
+            self.dropped_batches.append(
+                DroppedBatch(
+                    code=default_code_for_stage(FailureStage.TRANSFORM),
+                    stage=FailureStage.TRANSFORM,
+                )
+            )
         if report.kind is FailureKind.RETRIES_EXHAUSTED:
-            # dlq/skip return without raising, so this batch's cause would
-            # die with this scope. Classify it exactly as the fail strategy's
-            # raise would -- declared category first, text fallback for an
-            # undeclared ack -- and stash the code for the partial-run
-            # classification, so the reported code cannot depend on the error
-            # strategy (issue #351).
-            self.exhausted_failure_codes.append(classify_destination_failure(failure))
+            self.dropped_batches.append(
+                DroppedBatch(
+                    code=classify_destination_failure(failure),
+                    stage=FailureStage.DESTINATION_LOAD,
+                )
+            )
             if batch_seq == 1 and self._is_truncate_insert():
                 # The destination truncates on batch_seq 1 (issue #307).
                 # Dropping the first batch and continuing would let batch 2
@@ -992,38 +1046,43 @@ class StreamProcessor:
         """Name how the stream ended when no stage raised.
 
         The dlq/skip strategies complete the stream without raising after
-        exhausting retries; reflect that it only partly succeeded and carry
-        the destination cause rather than reporting success. Every exhausted
-        batch was classified when it broke, exactly as the fail strategy's
-        raise path would have classified it; the dominant code across them
-        (the read_failure_tag rule) names the run, so the same failure
-        classifies identically under fail and dlq/skip (issue #351).
+        dropping a batch -- an exhausted send, or a batch a validation rule
+        rejected; reflect that it only partly succeeded and carry the cause
+        rather than reporting success. Every dropped batch was classified
+        when it broke, exactly as the fail strategy's raise path would have
+        classified it; the dominant code across them (the read_failure_tag
+        rule) names the run, so the same failure classifies identically
+        under fail and dlq/skip (issue #351).
         """
         if self.metrics.records_failed == 0:
             logger.info("Stream %s completed successfully", self.stream_name)
             return "success", None, None, None
 
-        error_code = (
-            dominant_error_code(self.exhausted_failure_codes)
-            or ErrorCode.DESTINATION_WRITE_FAILED
+        error_code = dominant_error_code(d.code for d in self.dropped_batches)
+        if error_code is None:
+            error_code = ErrorCode.DESTINATION_WRITE_FAILED
+        stage = next(
+            (d.stage for d in self.dropped_batches if d.code is error_code),
+            FailureStage.DESTINATION_LOAD,
         )
-        # 'skip' drops exhausted batches without a DLQ entry, so those
-        # records are NOT recoverable; do not imply dead-lettering. The
-        # 'partial' path is only reached via the dlq/skip break, so a
-        # non-zero skip count means the strategy was skip. error_detail
-        # carries only allowlisted-safe fields; the destination
-        # failure_summary stays in the DLQ (when used) and the logs.
-        if self.metrics.records_skipped > 0:
-            reason = "records skipped (dropped) after retries"
+        # 'skip' drops batches without a DLQ entry, so those records are NOT
+        # recoverable; do not imply dead-lettering. Rules carry their own
+        # strategies, so one stream can have both skipped and dead-lettered
+        # batches. error_detail carries only allowlisted-safe fields; the
+        # failure summary stays in the DLQ (when used) and the logs.
+        if self.metrics.records_skipped == 0:
+            action = "dead-lettered"
+        elif self.metrics.records_skipped == self.metrics.records_failed:
             action = "skipped (dropped)"
         else:
-            reason = "records dead-lettered after retries"
-            action = "dead-lettered"
-        error_detail = detail_for_code(
-            error_code,
-            stage=FailureStage.DESTINATION_LOAD,
-            reason=reason,
+            action = "dead-lettered or skipped (dropped)"
+        cause = (
+            "after failing validation"
+            if stage is FailureStage.TRANSFORM
+            else "after retries"
         )
+        reason = f"records {action} {cause}"
+        error_detail = detail_for_code(error_code, stage=stage, reason=reason)
         logger.warning(
             "Stream %s completed partially: %s records %s",
             self.stream_name,

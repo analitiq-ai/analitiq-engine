@@ -32,6 +32,7 @@ from cdk.type_map.conversions import (
 )
 from cdk.type_map.exceptions import InvalidTypeMapError
 from cdk.type_map.grammar import ARROW_FAMILIES
+from src.engine.batch_policy import ErrorStrategy
 from src.engine.exceptions import TransformationError
 from src.engine.mapping import _FUNCTION_CATALOG, MappingDocument, compile_mapping
 
@@ -270,9 +271,10 @@ def _retype_batch(target_arrow_type: str, column: pa.Array) -> pa.RecordBatch:
         }
     ]
     batch = pa.RecordBatch.from_arrays([column], names=["src"])
-    return compile_mapping(MappingDocument.parse({"assignments": assignments})).run(
-        batch
-    )
+    return compile_mapping(
+        MappingDocument.parse({"assignments": assignments}),
+        default_strategy=ErrorStrategy.FAIL,
+    ).run(batch)
 
 
 class TestTransformBoundaryConformance:
@@ -444,9 +446,10 @@ def _retype_nested(target: dict, column: pa.Array) -> pa.RecordBatch:
         }
     ]
     batch = pa.RecordBatch.from_arrays([column], names=["src"])
-    return compile_mapping(MappingDocument.parse({"assignments": assignments})).run(
-        batch
-    )
+    return compile_mapping(
+        MappingDocument.parse({"assignments": assignments}),
+        default_strategy=ErrorStrategy.FAIL,
+    ).run(batch)
 
 
 def _cast_nested(target: dict, column: pa.Array) -> pa.RecordBatch:

@@ -186,7 +186,8 @@ Defined in `src/engine/exceptions.py`:
 
 ```
 StreamProcessingError                   (base for runtime stream failures)
-└── TransformationError
+└── TransformationError                 (a mapping defect on a batch)
+    └── ValidationFailure               (rows failing a rule; carries the strategy)
 
 ConfigurationError                      (config-time failures)
 ```
