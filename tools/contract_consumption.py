@@ -71,8 +71,9 @@ from analitiq.contracts.stream import (
 )
 from mypy import build
 from mypy.main import process_options
-from mypy.nodes import CallExpr, MemberExpr, NameExpr, StrExpr
+from mypy.nodes import CallExpr
 from mypy.nodes import Expression as MypyExpression
+from mypy.nodes import MemberExpr, NameExpr, StrExpr
 from mypy.server.subexpr import get_subexpressions
 from mypy.types import Instance, Type, UnionType, get_proper_type
 from pydantic import BaseModel
