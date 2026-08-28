@@ -33,6 +33,7 @@ on:
     paths:
       - cdk/**
       - .github/workflows/publish-cdk.yml
+      - .github/workflows/sync-contracts-s3.yml
 
 jobs:
   build:
@@ -180,7 +181,11 @@ jobs:
   sync-s3:
     name: publish contract-consumption to S3
     if: github.ref_type == 'tag'
-    needs: build
+    # After the PyPI upload, not beside it: the manifest's version is the
+    # wheel's, so S3 must never advertise a release the pypi environment's
+    # reviewer rejected -- the sync script would then refuse the corrected
+    # bytes under that same version.
+    needs: publish
     uses: ./.github/workflows/sync-contracts-s3.yml
     permissions:
       contents: read

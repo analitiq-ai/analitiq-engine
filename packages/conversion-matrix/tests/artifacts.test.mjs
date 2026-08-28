@@ -50,18 +50,6 @@ test("every artifact publishes through exactly one known channel", () => {
   assert.throws(() => artifactsFor("nightly"), /unknown channel "nightly"/);
 });
 
-test("the consumption manifest is versioned by the CDK release", () => {
-  // The manifest's version is cdk.__version__, so the cdk-v* tag that ships
-  // the wheel is the coordinate a consumer pins it by. A drift between the
-  // two would publish the manifest under a version no wheel carries.
-  const [manifest] = artifactsFor("cdk-release");
-  const { version } = JSON.parse(readFileSync(join(repoRoot, manifest.path), "utf8"));
-  const cdkInit = readFileSync(join(repoRoot, "cdk", "cdk", "__init__.py"), "utf8");
-  const declared = /__version__ = "([^"]+)"/.exec(cdkInit);
-  assert.notEqual(declared, null, "cdk/cdk/__init__.py declares no __version__");
-  assert.equal(version, declared[1]);
-});
-
 test("the built package reports the engine artifact's own version", () => {
   // matrixVersion is public API and documented as equal to the artifact's
   // version; nothing else compares the built value against the source.

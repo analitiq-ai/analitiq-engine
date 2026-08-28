@@ -400,7 +400,7 @@ yarn-error.log*
 
 # Published contract artifacts: generated (from the canonical tables in
 # cdk/cdk/type_map/conversions.py and grammar.py, and from the mypy census in
-# scripts/contract_consumption.py), tracked despite the blanket *.json ignore
+# tools/contract_consumption.py), tracked despite the blanket *.json ignore
 # so Infra/the frontend/the contract repo can consume them.
 !cdk/cdk/type_map/conversion_matrix.json
 !cdk/cdk/type_map/arrow_type_grammar.json

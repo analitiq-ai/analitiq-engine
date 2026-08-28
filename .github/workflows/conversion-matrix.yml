@@ -19,12 +19,14 @@ on:
       - cdk/cdk/type_map/arrow_type_grammar.json
       - packages/conversion-matrix/**
       - .github/workflows/conversion-matrix.yml
+      - .github/workflows/sync-contracts-s3.yml
   pull_request:
     paths:
       - cdk/cdk/type_map/conversion_matrix.json
       - cdk/cdk/type_map/arrow_type_grammar.json
       - packages/conversion-matrix/**
       - .github/workflows/conversion-matrix.yml
+      - .github/workflows/sync-contracts-s3.yml
 
 defaults:
   run:

@@ -1,6 +1,6 @@
 """The committed ``contract-consumption`` manifest matches the contract it names.
 
-The census itself (``scripts/contract_consumption.py``) is a full mypy build
+The census itself (``tools/contract_consumption.py``) is a full mypy build
 and runs as a CI step, not here. What this suite pins is cheap and does not
 need mypy: that the committed document is the shape the contract repo
 vendors, that it names this CDK's version and the installed contract-models,
@@ -53,6 +53,13 @@ def test_manifest_names_this_release_and_the_installed_contract(manifest: dict) 
     # The publisher and the wheel check read these; the version is the cdk-v*
     # release coordinate, not a hand-bumped number.
     assert manifest["version"] == cdk.__version__
+    # The S3 key is v{version} and the publisher orders versions as plain
+    # semver; a pre-release CDK version would pass the tag check, ship to
+    # PyPI, and only then be refused by the sync. Refused here instead, on
+    # the PR that bumps the version.
+    assert re.fullmatch(
+        r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", manifest["version"]
+    )
     assert manifest["contract_models_version"] == importlib.metadata.version(
         "analitiq-contract-models"
     )

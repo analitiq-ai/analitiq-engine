@@ -111,7 +111,7 @@ jobs:
       - name: Check the committed manifest against a fresh census
         env:
           PYTHONPATH: cdk
-        run: poetry run python scripts/contract_consumption.py --check
+        run: poetry run python tools/contract_consumption.py --check
 
   lint:
     name: pre-commit (all files)

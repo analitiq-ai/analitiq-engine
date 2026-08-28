@@ -45,7 +45,7 @@ The `ci` workflow runs on every pull request and on pushes to `main`:
   type map exported, checking `cdk/cdk/contract_consumption.json` (the
   contract fields the engine reads) against a fresh census. A PR that adds or
   removes a read on a contract model regenerates the file:
-  `PYTHONPATH=cdk poetry run python scripts/contract_consumption.py --write`.
+  `PYTHONPATH=cdk poetry run python tools/contract_consumption.py --write`.
   A dynamic read the census cannot classify, or a read on a model outside the
   declared roots, fails the render until it is registered in the script.
 

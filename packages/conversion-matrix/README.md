@@ -104,7 +104,7 @@ which additionally need a tz database on the consumer side.
 
 The consumption manifest says which contract fields the engine reads — every
 `(model, field)` pair plus the sites reading it, computed from mypy's type map
-over the engine and the CDK by `scripts/contract_consumption.py`. It is claims
+over the engine and the CDK by `tools/contract_consumption.py`. It is claims
 only: the contract repo decides which unread fields are defects, authoring-only
 or validator-only, and fails its own build on a field that is neither read nor
 so declared. Its `version` is `cdk.__version__`, and it publishes at the

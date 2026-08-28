@@ -24,12 +24,11 @@ from typing import get_args
 
 import pytest
 from analitiq.contracts.endpoints import Pagination, ReadRequest, WriteRequest
-from pydantic import BaseModel
 
 import cdk.api
 from cdk.api.request import _REQUEST_SLOTS
 from cdk.api.strategies import PRE_PAGE_VALUE_PATHS
-from cdk.contract_consumption import contract_models
+from cdk.contract_consumption import contract_models, path_steps
 
 pytestmark = pytest.mark.unit
 
@@ -162,19 +161,6 @@ def test_a_body_bearing_request_declares_every_slot_the_walk_reads() -> None:
         )
 
 
-def _unresolved_key(model: type[BaseModel], path: tuple[str, ...]) -> str | None:
-    """The first segment of *path* the models do not declare, or ``None``."""
-    node: type[BaseModel] | None = model
-    for index, key in enumerate(path):
-        if node is None or key not in node.model_fields:
-            return key
-        if index + 1 == len(path):
-            return None
-        members = contract_models(node.model_fields[key].annotation)
-        node = members[0] if members else None
-    return None
-
-
 def test_every_pre_page_path_resolves_through_the_pagination_models() -> None:
     members = contract_models(Pagination)
     for path in PRE_PAGE_VALUE_PATHS:
@@ -185,7 +171,8 @@ def test_every_pre_page_path_resolves_through_the_pagination_models() -> None:
             f"pre-page value reading 'response.*' stops being refused"
         )
         for carrier in carriers:
-            missing = _unresolved_key(carrier, path)
+            walked = {key for _, key in path_steps(carrier, path)}
+            missing = next((key for key in path if key not in walked), None)
             assert missing is None, (
                 f"PRE_PAGE_VALUE_PATHS entry {path} does not resolve through "
                 f"{carrier.__name__}: {missing!r} is not a declared field"
