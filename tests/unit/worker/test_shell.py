@@ -20,6 +20,59 @@ from src.worker.shell import build_bootstrap, read_type_map_payloads
 _RULES = [{"match": "exact", "native": "BIGINT", "canonical": "Int64"}]
 _WRITE_RULES = [{"match": "exact", "canonical": "Int64", "native": "BIGINT"}]
 
+#: One record field, spelled the way the contract requires a schema to spell
+#: one. Shared by both sides so the documents below stay about transports.
+_FIELDS = {"id": {"type": "integer", "native_type": "integer", "arrow_type": "Int64"}}
+
+
+def _read_operation(transport_ref):
+    """A read operation dispatching through *transport_ref*."""
+    return {
+        "request": {"method": "GET", "path": "/items", "transport_ref": transport_ref},
+        "response": {
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "records": {
+                        "type": "array",
+                        "items": {"type": "object", "properties": _FIELDS},
+                    }
+                },
+            },
+            "records": {"ref": "response.body.records"},
+        },
+    }
+
+
+def _write_operation(transport_ref, *, mode="insert"):
+    """A write operation of *mode* dispatching through *transport_ref*."""
+    block = {
+        "request": {
+            "method": "POST",
+            "path": "/items",
+            "transport_ref": transport_ref,
+            "body": {"item": {"from_input": "record"}},
+        },
+        "input": {"schema": {"type": "object", "properties": _FIELDS}},
+    }
+    if mode == "upsert":
+        block["conflict_keys"] = ["id"]
+    return block
+
+
+def _api_document(operations):
+    """An endpoint document carrying *operations*, in wire form.
+
+    Wire form and complete, because ``build_bootstrap`` parses what it is
+    handed before it reads a transport off it: a skeleton naming only the
+    transports would never reach the read this test is about.
+    """
+    return {
+        "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
+        "endpoint_id": "items",
+        "operations": operations,
+    }
+
 
 def _write_definition(base, *, rules=None, write_rules=None):
     definition = base / "definition"
@@ -118,12 +171,12 @@ class TestBuildBootstrap:
         assert json.loads(json.dumps(bootstrap)) == bootstrap
 
     #: One document declaring both sides, each naming its own transport.
-    _BOTH_SIDES = {
-        "operations": {
-            "read": {"request": {"transport_ref": "files"}},
-            "write": {"insert": {"request": {"transport_ref": "uploads"}}},
+    _BOTH_SIDES = _api_document(
+        {
+            "read": _read_operation("files"),
+            "write": {"insert": _write_operation("uploads")},
         }
-    }
+    )
 
     async def _refs_for(self, tmp_path, role, **documents):
         connectors = tmp_path / "connectors"
@@ -166,14 +219,14 @@ class TestBuildBootstrap:
         self, tmp_path
     ):
         """An unused mode's transport is credentials the worker never sends."""
-        document = {
-            "operations": {
+        document = _api_document(
+            {
                 "write": {
-                    "insert": {"request": {"transport_ref": "bulk"}},
-                    "upsert": {"request": {"transport_ref": "single"}},
+                    "insert": _write_operation("bulk"),
+                    "upsert": _write_operation("single", mode="upsert"),
                 }
             }
-        }
+        )
         refs = await self._refs_for(
             tmp_path,
             "destination",
@@ -186,14 +239,14 @@ class TestBuildBootstrap:
         self, tmp_path
     ):
         """Nothing said which, so nothing may be left unopenable."""
-        document = {
-            "operations": {
+        document = _api_document(
+            {
                 "write": {
-                    "insert": {"request": {"transport_ref": "bulk"}},
-                    "upsert": {"request": {"transport_ref": "single"}},
+                    "insert": _write_operation("bulk"),
+                    "upsert": _write_operation("single", mode="upsert"),
                 }
             }
-        }
+        )
         refs = await self._refs_for(
             tmp_path, "destination", stream_endpoints={"items": document}
         )
@@ -213,6 +266,47 @@ class TestBuildBootstrap:
             tmp_path, "destination", stream_endpoints={"items": self._BOTH_SIDES}
         )
         assert refs == {"uploads"}
+
+    async def test_a_refused_document_costs_its_stream_and_not_the_bootstrap(
+        self, tmp_path
+    ):
+        """One stream's unparseable document must not kill the worker.
+
+        The bootstrap runs before either worker has a server, so raising
+        here would exit the process and every stream on it would go
+        unanswered over one document. The refused stream contributes no
+        transport -- it is about to be rejected downstream, so a credential
+        resolved for it is one the worker never sends -- and both documents
+        are still packed, because the layer that rejects the stream is the
+        one that reads the document it was handed.
+        """
+        connectors = tmp_path / "connectors"
+        connections = tmp_path / "connections"
+        _write_definition(connectors / "sevdesk", rules=_RULES)
+        connections.mkdir()
+
+        good = _api_document({"read": _read_operation("files")})
+        # TELEPORT is no branch of the method-discriminated read request, so
+        # the document cannot become an ApiEndpointDoc at all.
+        refused = _api_document({"read": _read_operation("uploads")})
+        refused["operations"]["read"]["request"]["method"] = "TELEPORT"
+
+        runtime = MagicMock()
+        runtime.connector_type = "api"
+        runtime.connector_id = "sevdesk"
+        runtime.connection_id = "my-api"
+        runtime.resolve_spec = AsyncMock(return_value={"connection_id": "my-api"})
+
+        bootstrap = await build_bootstrap(
+            runtime,
+            role="source",
+            connectors_dir=connectors,
+            connections_dir=connections,
+            stream_endpoints={"good": good, "bad": refused},
+        )
+        (call,) = runtime.resolve_spec.await_args_list
+        assert call.kwargs["transport_refs"] == {"files"}
+        assert bootstrap["stream_endpoints"] == {"good": good, "bad": refused}
 
     async def test_a_run_naming_no_transport_asks_for_none(self, tmp_path):
         """A single-transport connector costs what it always cost."""

@@ -46,7 +46,11 @@ from typing import Any
 
 from analitiq.contracts.endpoints import ApiEndpointDoc, DatabaseEndpointDoc
 from analitiq.contracts.pipelines.config import Runtime as ContractRuntime
-from analitiq.contracts.stream import IncrementalReplication
+from analitiq.contracts.stream import (
+    ConnectionEndpointRef,
+    EndpointRef,
+    IncrementalReplication,
+)
 from analitiq.contracts.stream import Replication as ContractReplication
 from pydantic import BaseModel, TypeAdapter
 
@@ -62,7 +66,12 @@ from cdk.type_map import (
 )
 from src.config import settings
 from src.config.connection_loader import load_connection_file, load_connector_definition
-from src.config.endpoint_resolver import ConnectionLookup, resolve_endpoint_ref
+from src.config.endpoint_resolver import (
+    ConnectionLookup,
+    endpoint_ref_label,
+    parse_endpoint_ref,
+    resolve_endpoint_ref,
+)
 from src.config.schema_validator import ContractValidationError, EndpointDocument
 from src.config.schema_validator import validate as validate_artifact
 from src.config.schema_validator import validate_bundle
@@ -79,7 +88,6 @@ from src.models.resolved import (
     ResolvedStream,
     RuntimeConfig,
 )
-from src.models.stream import EndpointRef
 
 logger = logging.getLogger(__name__)
 
@@ -536,9 +544,12 @@ class PipelineConfigPrep:
 
     def _resolve_endpoint(self, endpoint_ref: Any) -> EndpointDocument:
         """Resolve one endpoint reference to its typed contract document."""
-        ref = EndpointRef.from_dict(endpoint_ref)
+        ref = parse_endpoint_ref(endpoint_ref)
         if ref in self._resolved_endpoints:
             return self._resolved_endpoints[ref]
+        # A contract model's own str dumps every field; error text and logs
+        # name the endpoint by its on-disk handle instead.
+        label = endpoint_ref_label(ref)
         document = resolve_endpoint_ref(ref, self._paths, self._connection_lookup())
         # Extract the endpoint variant name from the document's declared
         # ``$schema`` URL. The variant name is the path segment ending in
@@ -550,22 +561,22 @@ class PipelineConfigPrep:
         match = _ENDPOINT_KIND_RE.search(schema_url)
         if not match:
             raise ValueError(
-                f"Endpoint {ref!s} has no recognizable endpoint $schema URL "
+                f"Endpoint {label} has no recognizable endpoint $schema URL "
                 f"({schema_url!r}); $schema must contain an *-endpoint path segment "
                 f"(e.g. api-endpoint, database-endpoint)"
             )
         endpoint_kind = match.group(1)
         try:
-            model = validate_artifact(endpoint_kind, document, source=str(ref))
+            model = validate_artifact(endpoint_kind, document, source=label)
         except ContractValidationError:
-            # ContractValidationError already embeds str(ref) as its source and
+            # ContractValidationError already embeds the ref label as its source and
             # carries structured per-field errors; re-raise as-is to preserve type.
             raise
         except ValueError as exc:
             # validate_artifact raises plain ValueError for unknown artifact
             # kinds; add ref and $schema URL context which that error omits.
             raise ValueError(
-                f"Endpoint {ref!s} ($schema={schema_url!r}, "
+                f"Endpoint {label} ($schema={schema_url!r}, "
                 f"kind={endpoint_kind!r}): {exc}"
             ) from exc
         if not isinstance(model, ApiEndpointDoc | DatabaseEndpointDoc):
@@ -573,7 +584,7 @@ class PipelineConfigPrep:
             # a wiring defect in the artifact-kind registry, not a document
             # problem; fail loud rather than carry an unexpected type.
             raise ValueError(
-                f"Endpoint {ref!s}: artifact kind {endpoint_kind!r} validated "
+                f"Endpoint {label}: artifact kind {endpoint_kind!r} validated "
                 f"to {type(model).__name__}, not an endpoint document model"
             )
         # For a connection-scoped ref the endpoint_id is the server-derived
@@ -582,15 +593,17 @@ class PipelineConfigPrep:
         # {endpoint_id}.json exists; guard against a stale/mismatched file whose
         # contents point at a different table by requiring the loaded document's
         # own endpoint_id to equal the ref's.
-        if ref.scope == "connection" and model.endpoint_id != ref.endpoint_id:
+        if isinstance(ref, ConnectionEndpointRef) and (
+            model.endpoint_id != ref.endpoint_id
+        ):
             raise ValueError(
-                f"Endpoint {ref!s}: on-disk document declares endpoint_id "
+                f"Endpoint {label}: on-disk document declares endpoint_id "
                 f"{model.endpoint_id!r}, which does not match the "
                 f"reference's server-derived {ref.endpoint_id!r}; the endpoint "
                 f"file does not describe the referenced table."
             )
         self._resolved_endpoints[ref] = model
-        logger.info("Resolved endpoint: %s", ref)
+        logger.info("Resolved endpoint: %s", label)
         return model
 
     # ------------------------------------------------------------------
@@ -783,7 +796,7 @@ class PipelineConfigPrep:
         validation and the bundle validator; this resolves it to the
         connection runtime and the endpoint document it points at.
         """
-        endpoint_ref = EndpointRef.from_dict(block["endpoint_ref"])
+        endpoint_ref = parse_endpoint_ref(block["endpoint_ref"])
         runtime = self._resolve_connection_by_id(endpoint_ref.connection_id)
         endpoint = self._resolve_endpoint(endpoint_ref)
         return endpoint_ref, runtime, endpoint

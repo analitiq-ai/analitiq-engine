@@ -1,12 +1,13 @@
 """Evaluate a declared stop condition against the page it was written for.
 
-The engine validates the endpoint document against the published contract
-before anything reads it, so this layer navigates an already-validated
-document raw: a predicate is a one-key mapping whose key names the operator,
-exactly as the contract's own union serialises. That is what lets the CDK
-evaluate one without importing the contract's seventeen predicate models --
-selecting a branch by ``isinstance`` would have dragged all of them in, and
-the CDK's dependency set stays SQLAlchemy + Pydantic.
+A stop condition arrives as the contract model the endpoint document
+parsed into, and is read here in its authored form
+(:func:`~cdk.json_utils.authored_json`): a predicate is a one-key mapping
+whose key names the operator, exactly as the contract's own union
+serialises. That is what lets this evaluate one without importing the
+contract's seventeen predicate models -- selecting a branch by
+``isinstance`` would drag all of them in, and one conversion at the entry
+point reads every nested ``and`` / ``or`` / ``not`` the same way.
 
 The vocabulary is still the contract's. An operator this build does not know
 fails loud naming what it read, rather than quietly answering False and
@@ -18,6 +19,8 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from decimal import Decimal
 from typing import Any
+
+from ..json_utils import authored_json
 
 __all__ = ["UnknownPredicate", "evaluate_predicate"]
 
@@ -98,6 +101,7 @@ def evaluate_predicate(pred: Any, resolve: Resolve) -> bool:
     naming the operator rather than guessing a truth value, because a guess
     here either truncates a read or runs it forever.
     """
+    pred = authored_json(pred)
     if not isinstance(pred, Mapping):
         raise UnknownPredicate(
             f"a stop_when predicate is an object; read {type(pred).__name__}"

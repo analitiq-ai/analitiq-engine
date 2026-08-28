@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from analitiq.contracts.endpoints import ApiEndpointDoc, DatabaseEndpointDoc
+from analitiq.contracts.stream import validate_endpoint_ref
 
 from src.engine.mapping import MappingDocument
 from src.models.resolved import (
@@ -17,7 +18,6 @@ from src.models.resolved import (
     RuntimeConfig,
     dump_endpoint_document,
 )
-from src.models.stream import EndpointRef
 from src.runner import (
     _build_config_dict,
     _build_destination_config,
@@ -71,9 +71,24 @@ def _api_endpoint_doc(endpoint_id="invoices-ep"):
 
 
 def _make_endpoint_ref(scope="connector", connection_id="conn", endpoint_id="ep"):
-    return EndpointRef(
-        scope=scope, connection_id=connection_id, endpoint_id=endpoint_id
-    )
+    """A contract endpoint_ref of either scope.
+
+    A connection ref is identified by its locator, not by an authored id, so
+    ``endpoint_id`` names the table there and the contract derives the handle.
+    """
+    if scope == "connection":
+        payload = {
+            "scope": scope,
+            "connection_id": connection_id,
+            "database_object": {"schema": "public", "name": endpoint_id},
+        }
+    else:
+        payload = {
+            "scope": scope,
+            "connection_id": connection_id,
+            "endpoint_id": endpoint_id,
+        }
+    return validate_endpoint_ref(payload)
 
 
 def _make_runtime(connector_type="database"):

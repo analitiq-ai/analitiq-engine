@@ -40,6 +40,15 @@ from datetime import datetime
 from typing import Any, Literal
 
 import pyarrow as pa
+from analitiq.contracts.endpoints import DatabaseEndpointDoc, DatabaseObject
+from analitiq.contracts.stream import EndpointRef
+from analitiq.contracts.stream import Filter as StreamFilter
+from analitiq.contracts.stream import (
+    IncrementalReplication,
+    StreamSource,
+    validate_endpoint_ref,
+)
+from pydantic import ValidationError
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -185,8 +194,28 @@ class _StreamState:
     # an explicit conflict target under the contract.
     conflict_keys: list[str] = field(default_factory=list)
     write_mode: WriteMode = "upsert"
-    endpoint_document: dict[str, Any] = field(default_factory=dict)
+    endpoint_document: DatabaseEndpointDoc | None = None
     schema_contract: SchemaContract | None = None
+
+
+def _column_declarations(document: DatabaseEndpointDoc) -> dict[str, Any]:
+    """Render the document's columns as the JSON ``SchemaContract`` reads.
+
+    ``SchemaContract`` is endpoint-kind-neutral: it walks free-form Arrow
+    field declarations, a database endpoint's ``columns`` and an API
+    endpoint's JSON-Schema ``properties`` alike, so it stays a JSON reader
+    rather than learning the database endpoint model. ``exclude_none``
+    keeps an omitted optional omitted — ``SchemaContract`` reads
+    ``nullable`` with a default of ``True``, and a dumped
+    ``"nullable": None`` would silently make every unstated column NOT
+    NULL.
+    """
+    return {
+        "columns": [
+            column.model_dump(mode="json", by_alias=True, exclude_none=True)
+            for column in document.columns
+        ]
+    }
 
 
 def read_query_builder(
@@ -350,15 +379,28 @@ class GenericSQLConnector(BaseDestinationHandler):
         # writes (e.g. PostgreSQL's ``pg_type_typname_nsp_index``).
         self._ddl_lock: asyncio.Lock = asyncio.Lock()
 
-        # Stream-id -> structured endpoint_ref dict so configure_schema()
-        # can pick the type-mapper matching the endpoint's scope (connector
-        # vs connection). Populated by set_endpoint_refs() at startup.
-        self._endpoint_refs: dict[str, dict[str, Any]] = {}
+        # Stream-id -> the stream document's contract endpoint_ref, so
+        # configure_schema() can pick the type-mapper matching the
+        # endpoint's scope (connector vs connection). Populated by
+        # set_endpoint_refs() at startup.
+        self._endpoint_refs: dict[str, EndpointRef] = {}
+
+        # Stream-id -> why that stream's endpoint_ref did not parse, held
+        # for the same reason as the document problems below: registration
+        # runs before the gRPC server exists.
+        self._endpoint_ref_problems: dict[str, str] = {}
 
         # Stream-id -> contract endpoint document (database_object,
         # columns, primary_keys, …). Populated by set_stream_endpoints()
         # at startup.
-        self._stream_endpoints: dict[str, dict[str, Any]] = {}
+        self._stream_endpoints: dict[str, DatabaseEndpointDoc] = {}
+
+        # Stream-id -> why that stream's document did not parse. Held here
+        # rather than raised at startup: set_stream_endpoints() runs before
+        # the gRPC server exists, so a raise there kills the worker and
+        # every other stream on it. configure_schema() is the first point
+        # with a per-stream ack to put the reason on.
+        self._stream_endpoint_problems: dict[str, str] = {}
 
         # Stream-id -> upsert conflict keys (the stream's validated
         # ``write.conflict_keys``). Populated by set_stream_conflict_keys()
@@ -378,11 +420,30 @@ class GenericSQLConnector(BaseDestinationHandler):
         which ``TypeMapper`` applies (public endpoint → connector's map,
         private endpoint → connection's map).
 
-        Values are dict-shape ``EndpointRef`` payloads
-        (``{"scope", "connection_id", "endpoint_id"}`` plus optional ``x-*``
-        extension keys).
+        Each value arrives as the stream document's authored ``endpoint_ref``
+        JSON and is parsed here against the published contract, exactly as
+        ``set_stream_endpoints`` parses the endpoint document: the connector
+        process is untrusted, and a ref whose scope the contract refuses must
+        be refused before it selects a type-map.
+
+        A parse failure is recorded against its own stream, never raised —
+        this runs before the gRPC server is constructed, so raising would
+        take down every other stream this worker serves for one malformed
+        ref. ``_type_mapper_for_stream`` raises it where the SchemaAck
+        exists.
         """
-        self._endpoint_refs = dict(endpoint_refs)
+        parsed: dict[str, EndpointRef] = {}
+        problems: dict[str, str] = {}
+        for sid, ref in endpoint_refs.items():
+            try:
+                parsed[sid] = validate_endpoint_ref(ref)
+            except ValidationError as err:
+                problems[sid] = (
+                    f"stream {sid!r}: endpoint_ref does not satisfy the "
+                    f"contract's EndpointRef: {err}"
+                )
+        self._endpoint_refs = parsed
+        self._endpoint_ref_problems = problems
 
     def set_stream_endpoints(
         self, stream_endpoints: Mapping[str, Mapping[str, Any]]
@@ -393,10 +454,32 @@ class GenericSQLConnector(BaseDestinationHandler):
         database object (catalog/schema/name), columns, and primary keys from
         this map at ``configure_schema`` time rather than unpacking them off
         the wire.
+
+        The engine hands authored JSON across the worker boundary, so each
+        document is parsed here: the connector process is untrusted, storage
+        stays typed, and the parse is what makes every field below a named
+        attribute instead of a dict lookup.
+
+        A parse failure is recorded against its own stream, never raised.
+        This runs from the worker entry point before the gRPC server is
+        constructed, so raising would exit the process and the engine would
+        see a dead worker instead of a rejected stream -- taking down every
+        other stream this worker serves for one malformed document. The
+        stream keeps its failure until ``configure_schema`` can raise it
+        where the SchemaAck exists.
         """
-        self._stream_endpoints = {
-            sid: dict(doc) for sid, doc in stream_endpoints.items()
-        }
+        parsed: dict[str, DatabaseEndpointDoc] = {}
+        problems: dict[str, str] = {}
+        for sid, doc in stream_endpoints.items():
+            try:
+                parsed[sid] = DatabaseEndpointDoc.model_validate(doc)
+            except ValidationError as err:
+                problems[sid] = (
+                    f"stream {sid!r}: endpoint document does not satisfy "
+                    f"DatabaseEndpointDoc: {err}"
+                )
+        self._stream_endpoints = parsed
+        self._stream_endpoint_problems = problems
 
     def set_stream_conflict_keys(
         self, stream_conflict_keys: Mapping[str, list[str]]
@@ -467,6 +550,12 @@ class GenericSQLConnector(BaseDestinationHandler):
             raise RuntimeError(
                 "GenericSQLConnector._type_mapper_for_stream() called before connect()"
             )
+        problem = self._endpoint_ref_problems.get(stream_id)
+        if problem is not None:
+            # Raised here rather than at registration, and as the type the
+            # gRPC layer turns into a rejected SchemaAck: one stream is
+            # refused, the worker's others keep running.
+            raise SchemaConfigurationError(problem)
         endpoint_ref = self._endpoint_refs.get(stream_id)
         if endpoint_ref is None:
             raise RuntimeError(
@@ -474,17 +563,12 @@ class GenericSQLConnector(BaseDestinationHandler):
                 f"stream_id={stream_id!r}; call set_endpoint_refs() before the "
                 f"gRPC server starts"
             )
-        # The CDK takes only the resolved scope string, never the engine's
-        # EndpointRef model. ``EndpointScope(scope)`` raises ValueError on an
-        # unknown scope, preserving the validation the engine gets from the
-        # published contract (``validate_endpoint_ref``) engine-side.
-        scope = endpoint_ref.get("scope") if isinstance(endpoint_ref, Mapping) else None
-        if not scope:
-            raise RuntimeError(
-                f"endpoint_ref for stream_id={stream_id!r} has no 'scope'; "
-                f"expected one of {[s.value for s in EndpointScope]}"
-            )
-        return self._runtime.type_mapper_for(scope=EndpointScope(scope))
+        # The ref is the contract's scope-discriminated model, so the scope
+        # is a field of it rather than a key that may be absent.
+        # ``EndpointScope(scope)`` remains the translation into the CDK's own
+        # vocabulary, and raises ValueError on a scope this CDK has no mapper
+        # family for.
+        return self._runtime.type_mapper_for(scope=EndpointScope(endpoint_ref.scope))
 
     @property
     def connector_type(self) -> str:
@@ -843,7 +927,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             raise cancelled
 
     def _destination_address(
-        self, stream_id: str, database_object: Mapping[str, Any], table_name: str
+        self, stream_id: str, database_object: DatabaseObject, table_name: str
     ) -> TableAddress | None:
         """Resolve the stream's target :class:`TableAddress`, or ``None`` to reject.
 
@@ -853,7 +937,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         reject path); deterministic authoring errors raise
         :class:`SchemaConfigurationError` for the SchemaAck translation.
         """
-        raw_schema = database_object.get("schema")
+        raw_schema = database_object.schema_
         if self._adbc_only:
             # Snowflake's default schema is account-/role-dependent;
             # BigQuery requires an explicit dataset. Falling back to
@@ -874,7 +958,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             address = self.dialect.table_address(
                 table_name,
                 schema=schema_name,
-                catalog=database_object.get("catalog") or "",
+                catalog=database_object.catalog or "",
             )
         except CatalogAddressingError as err:
             # Deterministic authoring error — surface it in the SchemaAck
@@ -918,11 +1002,32 @@ class GenericSQLConnector(BaseDestinationHandler):
         directly. Both engine and destination load the same artifacts via
         ``PipelineConfigPrep``, so no schema details cross the wire.
         """
+        stream_id = schema_spec.stream_id
+        # Before both the "not connected" and the "never registered"
+        # branches, and in that order for a reason: a document the contract
+        # refuses is a permanent authoring defect that will still be there
+        # once the connector is connected, while "not connected" is a
+        # wiring condition that says nothing about the stream. Reporting
+        # the transient one first would hand the author the wrong defect
+        # twice. A stream whose document was registered but did not parse
+        # is absent from _stream_endpoints too, so this also has to precede
+        # the registration branch or it would tell the author to call
+        # set_stream_endpoints() for a document they did supply.
+        #
+        # SchemaConfigurationError, not a bare False: the servicer
+        # translates this type into a rejected SchemaAck carrying the parse
+        # failure verbatim, which is the reason worth reporting. The API
+        # connector answers the identical case through its own
+        # _reject_schema idiom; both land as one rejected stream with
+        # CONFIG_DEFECT, and neither stops the worker's other streams.
+        problem = self._stream_endpoint_problems.get(stream_id)
+        if problem is not None:
+            raise SchemaConfigurationError(problem)
+
         if not self._connected:
             logger.error("Cannot configure schema: not connected")
             return False
 
-        stream_id = schema_spec.stream_id
         endpoint_doc = self._stream_endpoints.get(stream_id)
         if endpoint_doc is None:
             logger.error(
@@ -941,16 +1046,10 @@ class GenericSQLConnector(BaseDestinationHandler):
         # _type_mapper_for_stream, raw driver errors during DDL — is a
         # defect that must fail the RPC as-is rather than degrade into
         # a generic schema rejection.
-        database_object = endpoint_doc.get("database_object") or {}
-        table_name = database_object.get("name") or ""
-        if not table_name:
-            logger.error(
-                "Endpoint document for stream %r has no database_object.name",
-                stream_id,
-            )
-            return False
+        database_object = endpoint_doc.database_object
+        table_name = database_object.name
 
-        primary_keys = list(endpoint_doc.get("primary_keys") or [])
+        primary_keys = list(endpoint_doc.primary_keys or [])
         # The stream's Infra-validated upsert conflict target, forwarded
         # verbatim via set_stream_conflict_keys(). Absent or empty means
         # no conflict target (INSERT mode); the engine never derives one
@@ -961,7 +1060,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             return False
         state = _StreamState(
             address=address,
-            endpoint_document=dict(endpoint_doc),
+            endpoint_document=endpoint_doc,
             write_mode=self._get_write_mode(schema_spec.write_mode),
             primary_keys=primary_keys,
             conflict_keys=conflict_keys,
@@ -1001,7 +1100,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                 f"slow catalog); the statement was cancelled"
             ) from exc
 
-        state.schema_contract = SchemaContract(state.endpoint_document)
+        state.schema_contract = SchemaContract(_column_declarations(endpoint_doc))
 
         self._streams[stream_id] = state
         logger.info(
@@ -1138,25 +1237,30 @@ class GenericSQLConnector(BaseDestinationHandler):
         ``_record_hash`` as its synthetic primary key (see
         :meth:`_needs_record_hash`).
         """
+        if state.endpoint_document is None:
+            raise SchemaConfigurationError(
+                f"destination stream for {state.address} "
+                f"has no endpoint document; cannot build DDL"
+            )
         columns: list[ColumnDef] = []
         declared: set[str] = set()
-        for index, col_def in enumerate(state.endpoint_document.get("columns") or []):
-            col_name = col_def.get("name")
-            if not col_name:
-                raise SchemaConfigurationError(
-                    f"endpoint column at index {index} has no 'name' field"
-                )
-            arrow_type = col_def.get("arrow_type")
-            if not arrow_type:
-                raise SchemaConfigurationError(
-                    f"column {col_name!r} has no 'arrow_type' field"
-                )
-            raw_default = col_def.get("default")
+        for col_def in state.endpoint_document.columns:
+            col_name = col_def.name
+            raw_default = col_def.default
             columns.append(
                 ColumnDef(
                     name=col_name,
-                    canonical_type=arrow_type,
-                    nullable=bool(col_def.get("nullable", True)),
+                    canonical_type=col_def.arrow_type,
+                    # ``is not False``, not ``bool(...)``: the contract types
+                    # nullable as ``bool | None``, so only an authored
+                    # ``false`` makes the column NOT NULL. An authored
+                    # ``null`` now means nullable, where reading the dict with
+                    # a True default used to answer bool(None) -> NOT NULL and
+                    # silently contradict the author. The omitted case is
+                    # unchanged. Arrow agrees either way: _column_declarations
+                    # dumps with exclude_none, so SchemaContract never sees an
+                    # explicit null and falls back to the same default.
+                    nullable=col_def.nullable is not False,
                     primary_key=col_name in state.primary_keys,
                     default=(
                         raw_default
@@ -1233,11 +1337,6 @@ class GenericSQLConnector(BaseDestinationHandler):
         engine-managed ``_record_hash`` readiness rule below is one rule
         for every transport.
         """
-        if not state.endpoint_document:
-            raise SchemaConfigurationError(
-                f"destination stream for {state.address} "
-                f"has no endpoint document; cannot build DDL"
-            )
         target_ddl = build_create_table_sql(
             self.dialect,
             type_mapper,
@@ -1903,15 +2002,43 @@ class GenericSQLConnector(BaseDestinationHandler):
         change (guard rails + two transports in one generator); splitting
         it is its own refactor, not a side effect of catalog addressing.
         """
-        endpoint_doc = config.get("endpoint_document")
-        if not endpoint_doc:
+        authored_document = config.get("endpoint_document")
+        if not authored_document:
             raise ReadError(
                 "GenericSQLConnector: source config missing 'endpoint_document'"
             )
-        database_object = endpoint_doc.get("database_object") or {}
-        table_name = database_object.get("name")
-        if not table_name:
-            raise ReadError("endpoint document missing database_object.name")
+        # The engine hands authored JSON across the worker boundary, so the
+        # document is parsed here: the connector process is untrusted, and a
+        # document the published contract refuses must fail before any
+        # extraction rather than as a missing key mid-read. The parse is
+        # also what makes every field below a named attribute.
+        try:
+            endpoint_doc = DatabaseEndpointDoc.model_validate(authored_document)
+        except ValidationError as err:
+            # ReadError, not the bare ValidationError: the worker classifies
+            # this type as a deterministic read failure instead of retrying.
+            raise ReadError(
+                f"stream {stream_name!r}: endpoint document does not satisfy "
+                f"DatabaseEndpointDoc: {err}"
+            ) from err
+        # The stream's source block is the second contract document this
+        # read is given, so it is parsed at the same point and refused the
+        # same way -- before the database connection is opened, not as a
+        # missing key once rows are already moving.
+        authored_source = config.get("stream_source")
+        if not authored_source:
+            raise ReadError(
+                "GenericSQLConnector: source config missing 'stream_source'"
+            )
+        try:
+            stream_source = StreamSource.model_validate(authored_source)
+        except ValidationError as err:
+            raise ReadError(
+                f"stream {stream_name!r}: stream source does not satisfy "
+                f"StreamSource: {err}"
+            ) from err
+        database_object = endpoint_doc.database_object
+        table_name = database_object.name
         # read_batches is a runtime-taking entry point (no connect()), so
         # the declared capabilities bind here — before the address gate
         # below consults them.
@@ -1927,8 +2054,8 @@ class GenericSQLConnector(BaseDestinationHandler):
         try:
             address = self.dialect.table_address(
                 table_name,
-                schema=database_object.get("schema") or "",
-                catalog=database_object.get("catalog") or "",
+                schema=database_object.schema_ or "",
+                catalog=database_object.catalog or "",
             )
         except CatalogAddressingError as err:
             raise ReadError(str(err)) from err
@@ -1952,30 +2079,37 @@ class GenericSQLConnector(BaseDestinationHandler):
         )
 
         try:
-            stream_source = config.get("stream_source") or {}
-            schema_contract = SchemaContract(endpoint_doc)
+            schema_contract = SchemaContract(_column_declarations(endpoint_doc))
             column_names = self._select_columns(endpoint_doc, stream_source)
-            filters = self._build_filters(stream_source.get("filters") or [])
+            filters = self._build_filters(stream_source.filters or [])
 
-            replication = stream_source.get("replication") or {}
-            # cursor_field is a contract string|null (validated upstream), so no
-            # list normalization is needed.
-            cursor_field = replication.get("cursor_field")
-            replication_method = replication.get("method", "full_refresh")
+            # isinstance, not a key test: the stream's replication is a
+            # method-discriminated union and ``cursor_field`` is a field of
+            # the incremental member alone. A full refresh therefore has no
+            # cursor to read, which is why every "is this incremental?"
+            # question below is asked as "is there a cursor field?".
+            replication = stream_source.replication
+            cursor_field = (
+                replication.cursor_field
+                if isinstance(replication, IncrementalReplication)
+                else None
+            )
 
             # Stream-declared page ordering (the contract's
             # ``source.database_pagination.order_by_field``). Takes
             # precedence over the ADBC first-column fallback; a
             # full-refresh stream uses it to declare the ordering its
-            # paged read needs.
-            database_pagination = stream_source.get("database_pagination") or {}
-            order_by_field = database_pagination.get("order_by_field")
-            if (
-                order_by_field
-                and replication_method == "incremental"
-                and cursor_field
-                and order_by_field != cursor_field
-            ):
+            # paged read needs. Nothing else on the block is read: the
+            # contract states ``page_size`` is consumed by no engine
+            # release, and that ``type`` selects the document's shape and
+            # not a read path -- every database source read is offset-paged
+            # whichever variant is declared -- so both variants are read
+            # through the one field they share.
+            database_pagination = stream_source.database_pagination
+            order_by_field = (
+                database_pagination.order_by_field if database_pagination else None
+            )
+            if order_by_field and cursor_field and order_by_field != cursor_field:
                 # Checkpoint advancement takes the cursor value of the
                 # page's last row, which is the maximum only when pages
                 # are ordered by the cursor. An ordering that diverges
@@ -1990,18 +2124,14 @@ class GenericSQLConnector(BaseDestinationHandler):
                     f"Drop order_by_field or make it the cursor field."
                 )
 
-            if replication_method == "incremental" and cursor_field:
+            if cursor_field:
                 # The wildcard projection compiles to SELECT * (see
                 # QueryBuilder.build_select_query), but the fetched batch
                 # is cast through SchemaContract, which keeps only the
                 # endpoint contract's columns — so the cursor column must
                 # be declared there for its value to survive the cast.
                 if column_names == ["*"]:
-                    effective_columns = [
-                        c["name"]
-                        for c in (endpoint_doc.get("columns") or [])
-                        if c.get("name")
-                    ]
+                    effective_columns = [c.name for c in endpoint_doc.columns]
                 else:
                     effective_columns = column_names
                 if cursor_field not in effective_columns:
@@ -2020,9 +2150,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             partition = partition or {}
             cursor_state = await checkpoint.get_cursor(stream_name, partition)
             stored_cursor = cursor_state.get("cursor") if cursor_state else None
-            cursor_value = (
-                stored_cursor if replication_method == "incremental" else None
-            )
+            cursor_value = stored_cursor if cursor_field else None
 
             if adbc_only:
                 async for batch in self._read_via_adbc_only(
@@ -2032,9 +2160,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                     address=address,
                     columns=column_names,
                     filters=filters,
-                    cursor_field=(
-                        cursor_field if replication_method == "incremental" else None
-                    ),
+                    cursor_field=cursor_field,
                     cursor_value=cursor_value,
                     order_by_field=order_by_field,
                     batch_size=batch_size,
@@ -2062,11 +2188,7 @@ class GenericSQLConnector(BaseDestinationHandler):
                         catalog_name=address.catalog or None,
                         columns=column_names,
                         filters=filters,
-                        cursor_field=(
-                            cursor_field
-                            if replication_method == "incremental"
-                            else None
-                        ),
+                        cursor_field=cursor_field,
                         cursor_value=cursor_value,
                         # Resume inclusively (>=), re-reading the boundary row.
                         # A non-unique cursor (e.g. a coarse timestamp with
@@ -2298,31 +2420,24 @@ class GenericSQLConnector(BaseDestinationHandler):
 
     @staticmethod
     def _select_columns(
-        endpoint_doc: dict[str, Any], stream_source: dict[str, Any]
+        endpoint_doc: DatabaseEndpointDoc, stream_source: StreamSource
     ) -> list[str]:
-        selected = stream_source.get("selected_columns")
+        selected = stream_source.selected_columns
         if selected:
             return list(selected)
-        columns = endpoint_doc.get("columns") or []
-        return [c["name"] for c in columns if c.get("name")]
+        return [c.name for c in endpoint_doc.columns]
 
     @staticmethod
-    def _build_filters(stream_filters: list[dict[str, Any]]) -> list[Filter]:
-        out: list[Filter] = []
-        for f in stream_filters:
-            field_name = f.get("field")
-            if not field_name:
-                # A declared filter that compiles away silently widens the
-                # result set — a configuration defect retries cannot heal.
-                raise ReadError(f"stream filter missing 'field': {f!r}")
-            out.append(
-                Filter(
-                    field=field_name,
-                    op=f.get("operator", "eq"),
-                    value=f.get("value"),
-                )
-            )
-        return out
+    def _build_filters(stream_filters: list[StreamFilter]) -> list[Filter]:
+        """Turn the stream's declared predicates into query-builder ones.
+
+        Field and operator are both required by the stream contract, so a
+        filter that would compile away to nothing -- silently widening the
+        result set -- is refused by the source's parse rather than here.
+        """
+        return [
+            Filter(field=f.field, op=f.operator, value=f.value) for f in stream_filters
+        ]
 
     # ==================================================================
     # Discoverable + TableCreator roles (control-plane)

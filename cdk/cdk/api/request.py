@@ -44,6 +44,17 @@ from types import MappingProxyType
 from typing import Any
 from urllib.parse import quote
 
+from analitiq.contracts.endpoints import (
+    ApiEndpointDoc,
+    Pagination,
+    Param,
+    ReadOperation,
+    ReadRequest,
+    WriteOperation,
+    WriteRequest,
+)
+from analitiq.contracts.stream import Filter
+
 from ..request_binding import (
     bind_param_refs,
     bind_record_inputs,
@@ -128,10 +139,10 @@ class ParamTable:
     @classmethod
     def for_read(
         cls,
-        declared: Mapping[str, Any],
+        declared: Mapping[str, Param],
         resolver: Resolver,
         *,
-        filters: Iterable[Mapping[str, Any]] = (),
+        filters: Iterable[Filter] = (),
     ) -> ParamTable:
         """Build the read role's table: defaults, then the stream's filters.
 
@@ -147,11 +158,14 @@ class ParamTable:
         correctness failure rather than a slow read. Nothing in the contract
         links a filter to a param declaration, so this is the only place it
         can be caught, and it is caught loudly.
+
+        ``filters`` are the stream document's contract ``Filter`` models,
+        so the field a filter names is a required attribute rather than a
+        key that might be missing -- an unnamed filter never reaches here,
+        the stream's parse refuses it.
         """
         uncontrolled = {
-            name: decl
-            for name, decl in declared.items()
-            if isinstance(decl, Mapping) and not decl.get("controlled_by")
+            name: decl for name, decl in declared.items() if decl.controlled_by is None
         }
         # A default is a declared expression like any other, so a defect in
         # one leaves through the same door the binding maps use rather than
@@ -160,9 +174,7 @@ class ParamTable:
             values = resolve_param_defaults(uncontrolled, resolver)
         table = cls(values=values, controlled_by=_controlled_by(declared))
         for declared_filter in filters:
-            target = declared_filter.get("field")
-            if not target:
-                continue
+            target = declared_filter.field
             if target not in declared:
                 raise RequestSpecError(
                     f"the stream filters on {target!r}, which "
@@ -171,13 +183,13 @@ class ParamTable:
                     f"reads the whole collection. Declared params: "
                     f"{sorted(declared)}"
                 )
-            value = declared_filter.get("value")
+            value = declared_filter.value
             if value is not None:
                 table.values[target] = value
         return table
 
     @classmethod
-    def for_write(cls, declared: Mapping[str, Any], resolver: Resolver) -> ParamTable:
+    def for_write(cls, declared: Mapping[str, Param], resolver: Resolver) -> ParamTable:
         """Build the write role's table.
 
         Write params are request-construction inputs feeding the body's
@@ -189,19 +201,22 @@ class ParamTable:
         return cls(values=values, controlled_by=_controlled_by(declared))
 
 
-def _controlled_by(declared: Mapping[str, Any]) -> dict[str, str]:
+def _controlled_by(declared: Mapping[str, Param]) -> dict[str, str]:
     """Map each declared param a loop owns to the loop that owns it."""
     return {
-        name: str(decl["controlled_by"])
+        name: decl.controlled_by
         for name, decl in declared.items()
-        if isinstance(decl, Mapping) and decl.get("controlled_by")
+        if decl.controlled_by is not None
     }
 
 
 def bind_request_values(
-    # Typed ``Any`` on purpose: the document is raw JSON at this point, so
-    # "not an object" is a real state to refuse rather than one the
-    # annotation can rule out.
+    # Typed ``Any`` on purpose. An operation's own maps arrive parsed, so
+    # the contract has already ruled a non-object out for them -- but this
+    # is an exported CDK helper, and a connector overriding a method on the
+    # CDK base calls it with a map of its own making. "Not an object" is a
+    # real state on that route, refused here rather than reaching the
+    # resolver as whichever builtin error a walk over it raises.
     declared: Any,
     *,
     params: Mapping[str, Any],
@@ -400,7 +415,7 @@ ROLE_OPERATIONS = {"source": ("read",), "destination": ("write",)}
 
 
 def endpoint_transport_refs(
-    document: Any, *, role: str, write_modes: Iterable[str] | None = None
+    document: ApiEndpointDoc, *, role: str, write_modes: Iterable[str] | None = None
 ) -> set[str]:
     """Name every transport this run's operations in *document* dispatch through.
 
@@ -421,45 +436,51 @@ def endpoint_transport_refs(
     the key is a second answer, and the two disagreeing means a request
     resolved against one transport and sent on another.
 
-    The document is raw JSON -- it arrives from the bootstrap, not from a
-    parsed model -- so every level is shape-checked rather than assumed.
-    A document with no transport_ref anywhere answers the empty set, which
-    is what a single-transport connector always answers.
+    The document is parsed before it gets here -- both callers validate it
+    at the boundary they receive it on -- so every level below is a named
+    attribute the contract guarantees rather than a shape this function
+    re-checks. What is still optional here is optional in the contract: an
+    operation the document does not declare, and a request naming no
+    transport. A document with no transport_ref anywhere answers the empty
+    set, which is what a single-transport connector always answers.
     """
-    operations = (
-        (document or {}).get("operations") if isinstance(document, Mapping) else None
-    )
-    if not isinstance(operations, Mapping):
-        return set()
-    blocks: list[Any] = []
+    operations = document.operations
+    blocks: list[ReadOperation | WriteOperation | None] = []
     for name in ROLE_OPERATIONS.get(role, ()):
-        block = operations.get(name)
         if name != "write":
             # ``read`` is one block; ``write`` is a map of modes.
-            blocks.append(block)
-        elif isinstance(block, Mapping):
-            selected = list(write_modes) if write_modes is not None else list(block)
-            blocks.extend(block.get(mode) for mode in selected)
+            blocks.append(operations.read)
+            continue
+        declared_modes = operations.write or {}
+        # Selected by membership rather than by looking each name up: the
+        # mode keys are the contract's closed vocabulary and the caller
+        # passes plain strings, so a lookup would have to widen the key
+        # type to ask a question a filter answers as it stands.
+        selected = None if write_modes is None else set(write_modes)
+        blocks.extend(
+            operation
+            for mode, operation in declared_modes.items()
+            if selected is None or mode in selected
+        )
     refs: set[str] = set()
     for block in blocks:
-        if not isinstance(block, Mapping):
+        if block is None:
             continue
-        request = block.get("request")
-        ref = request.get("transport_ref") if isinstance(request, Mapping) else None
-        if isinstance(ref, str) and ref:
+        ref = block.request.transport_ref
+        if ref:
             refs.add(ref)
     return refs
 
 
 def request_block_problem(
-    request_block: Mapping[str, Any],
+    request_block: ReadRequest | WriteRequest,
     *,
     reserved_headers: frozenset[str] | set[str],
     resolver: Resolver,
     endpoint: str,
     controlled_by: Mapping[str, str] = MappingProxyType({}),
-    declared_params: Mapping[str, Any] = MappingProxyType({}),
-    pagination: Mapping[str, Any] | None = None,
+    declared_params: Mapping[str, Param] = MappingProxyType({}),
+    pagination: Pagination | None = None,
 ) -> str | None:
     """Why this request block cannot be sent as declared, or ``None``.
 
@@ -476,7 +497,7 @@ def request_block_problem(
     a never-request-time scope is the same silent omission a request slot's
     would be, so the one secret-read walk covers all of them.
     """
-    removals = request_block.get("headers_remove")
+    removals = request_block.headers_remove
     if removals:
         return (
             f"request.headers_remove {list(removals)} cannot be honoured: the "
@@ -490,14 +511,18 @@ def request_block_problem(
     # would surface as a failed batch instead of a refused schema. The media
     # type is the same on every record, so it settles once, with the rest of
     # the request block.
-    problem = unsupported_media_type(request_block.get("content_type"))
+    #
+    # ``content_type`` is declared on the branches that carry a body and
+    # nowhere else, so a GET read has no attribute to read: getattr's
+    # default says "this request sends no body" for every branch at once.
+    problem = unsupported_media_type(getattr(request_block, "content_type", None))
     if problem is not None:
         return problem
     problem = _secret_read_problem(request_block, declared_params, pagination, resolver)
     if problem is not None:
         return problem
     problem = _header_map_problem(
-        request_block.get("headers"), reserved_headers=reserved_headers
+        request_block.headers, reserved_headers=reserved_headers
     )
     if problem is not None:
         return problem
@@ -508,8 +533,8 @@ def request_block_problem(
 
 
 def _query_style_problem(
-    request_block: Mapping[str, Any],
-    declared_params: Mapping[str, Any],
+    request_block: ReadRequest | WriteRequest,
+    declared_params: Mapping[str, Param],
     endpoint: str,
 ) -> str | None:
     """Why a declared query serialization cannot be sent, or ``None``.
@@ -521,7 +546,7 @@ def _query_style_problem(
     read that already committed rows.
     """
     for key, style in declared_query_styles(
-        request_block.get("query"), declared_params
+        request_block.query, declared_params
     ).items():
         problem = unserializable_style_problem(key, style, endpoint=endpoint)
         if problem is not None:
@@ -566,24 +591,30 @@ def request_supplies(path: str) -> bool:
     )
 
 
-#: The request slots a declaration can put an expression in.
+#: The request slots a declaration can put an expression in. ``body`` is
+#: declared on the branches that carry one and nowhere else, so the walk
+#: below reads every slot with a default rather than asking which branch
+#: this request is: a slot the branch does not declare has no expression in
+#: it, which is the same answer as a slot it declares and leaves out.
 _REQUEST_SLOTS = ("headers", "query", "body", "path_params")
 
 
-def _pagination_value(
-    pagination: Mapping[str, Any] | None, path: tuple[str, ...]
-) -> Any:
-    """Return the declared value at *path* in the pagination block, or ``None``."""
+def _pagination_value(pagination: Pagination | None, path: tuple[str, ...]) -> Any:
+    """Return the declared value at *path* in the pagination block, or ``None``.
+
+    The path names attributes: the pagination models spell every field the
+    way the wire does, and a strategy that declares no ``limit`` (or no
+    ``page``, being another strategy entirely) simply has no attribute
+    there -- the same "nothing declared" the paths are read for.
+    """
     node: Any = pagination
     for key in path:
-        if not isinstance(node, Mapping):
-            return None
-        node = node.get(key)
+        node = getattr(node, key, None)
     return node
 
 
 def _declared_expressions(
-    request_block: Mapping[str, Any], declared_params: Mapping[str, Any]
+    request_block: ReadRequest | WriteRequest, declared_params: Mapping[str, Param]
 ) -> Iterator[Any]:
     """Yield each declared expression an operation carries, one at a time.
 
@@ -607,20 +638,19 @@ def _declared_expressions(
     its ``default`` is.
     """
     for slot in _REQUEST_SLOTS:
-        declared = request_block.get(slot)
+        declared = getattr(request_block, slot, None)
         if slot == "body" or not isinstance(declared, Mapping):
             yield declared
         else:
             yield from declared.values()
     for declaration in declared_params.values():
-        if isinstance(declaration, Mapping):
-            yield declaration.get("default")
+        yield declaration.default
 
 
 def _secret_read_problem(
-    request_block: Mapping[str, Any],
-    declared_params: Mapping[str, Any],
-    pagination: Mapping[str, Any] | None,
+    request_block: ReadRequest | WriteRequest,
+    declared_params: Mapping[str, Param],
+    pagination: Pagination | None,
     resolver: Resolver,
 ) -> str | None:
     """Why an operation reads what no request can carry, or ``None``.
@@ -766,7 +796,7 @@ def param_bindings(node: Any) -> Iterator[str]:
 
 
 def _controlled_placeholder_problem(
-    request_block: Mapping[str, Any], controlled_by: Mapping[str, str]
+    request_block: ReadRequest | WriteRequest, controlled_by: Mapping[str, str]
 ) -> str | None:
     """Why a path placeholder cannot be substituted, or ``None``.
 
@@ -786,11 +816,11 @@ def _controlled_placeholder_problem(
     loop owns is a position in a traversal and a position cannot address a
     resource.
     """
-    path = request_block.get("path")
-    if not isinstance(path, str) or not controlled_by:
+    path = request_block.path
+    if not controlled_by:
         return None
-    bindings = request_block.get("path_params")
-    if not isinstance(bindings, Mapping):
+    bindings = request_block.path_params
+    if bindings is None:
         return None
     for name in path_placeholders(path):
         binding = bindings.get(name)

@@ -81,7 +81,7 @@ src/
 │   └── metrics_storage.py       # Emits ANALITIQ_METRICS:: log lines
 │
 ├── grpc/                    # gRPC client and generated stubs
-├── models/                  # Pydantic v2 models (engine config, metrics, stream)
+├── models/                  # Engine-side models (resolved config, metrics, state)
 ├── config/                  # Endpoint resolver, connection loader, validators
 ├── runner.py                # PipelineRunner (CLI entry from src.main)
 ├── runtime_archive.py       # Runtime config archive loading (local path or URL)

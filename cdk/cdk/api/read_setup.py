@@ -22,6 +22,8 @@ from __future__ import annotations
 from functools import partial
 from typing import Any
 
+from analitiq.contracts.endpoints import Pagination, Predicate
+
 from ..exceptions import ReadError
 from ..resolver import Resolver
 from .exceptions import RequestSpecError, request_spec_errors
@@ -55,7 +57,7 @@ def page_expression_resolver(resolver: Resolver) -> Resolve:
     return resolve
 
 
-def stop_condition(declared: Any, resolver: Resolver) -> StopCondition:
+def stop_condition(declared: Predicate | None, resolver: Resolver) -> StopCondition:
     """Adapt the declared stop condition to what the loop asks of it."""
 
     def stop_when(page: Page) -> bool:
@@ -75,7 +77,7 @@ def stop_condition(declared: Any, resolver: Resolver) -> StopCondition:
 
 
 def build_read_strategy(
-    pagination: dict[str, Any] | None,
+    pagination: Pagination | None,
     *,
     table: ParamTable,
     resolver: Resolver,
@@ -110,9 +112,9 @@ def build_read_strategy(
                 pagination, batch_size=batch_size, resolve=resolver.resolve_for_request
             )
             base_params = dict(table.values)
-            limit = (pagination or {}).get("limit") or {}
-            if limit.get("param"):
-                base_params[limit["param"]] = page_size
+            limit = pagination.limit if pagination is not None else None
+            if limit is not None and limit.param:
+                base_params[limit.param] = page_size
 
             return build_strategy(
                 pagination,

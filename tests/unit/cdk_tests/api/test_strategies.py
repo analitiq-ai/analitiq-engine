@@ -1,9 +1,17 @@
 """Each paging scheme, driven through the loop it now shares.
 
 The adapters answer only where a traversal starts and where it goes next.
-Blocks are the contract's own shape as plain dictionaries -- the engine
-validates the document before this layer reads it, so nothing here imports a
-contract model.
+Blocks are authored in wire form and parsed into the contract's own
+pagination union, because which scheme a block is is what selects the
+adapter: an author's ``type`` picks the branch at the parse, and the
+adapter then reads its own fields by name rather than sifting a dict for
+the keys it hopes are there.
+
+The declared step and the declared token are read through the injected
+``resolve``, so what they resolve TO is a provider fact this file scripts
+-- which is why a step the contract would never accept as a literal is
+still tested: the value arrives from a response body, not from the
+document.
 """
 
 from __future__ import annotations
@@ -12,11 +20,21 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from analitiq.contracts.endpoints import Pagination
+from pydantic import TypeAdapter
 
 from cdk.api.page_loop import Page, PageLoop, PageRequest
 from cdk.api.strategies import UnknownPaginationStrategy, build_strategy
 
 pytestmark = pytest.mark.unit
+
+_PAGINATION: TypeAdapter[Any] = TypeAdapter(Pagination)
+
+#: The per-page step a provider reports back, as the contract spells it.
+_STEP = {"ref": "response.record_count"}
+
+#: The next-page token or URL a provider puts in its body.
+_NEXT = {"ref": "response.body.next"}
 
 
 def _rows(n: int, start: int = 0) -> list[dict[str, Any]]:
@@ -50,8 +68,16 @@ def _follow(current: str, target: str) -> str:
 
 
 def _build(block, *, resolve=lambda expr, page: expr, base=None, follow=_follow):
+    """Parse one authored block and build its adapter.
+
+    ``stop_when`` is filled in when a fixture omits it: the contract
+    requires every strategy to declare one, but where a traversal stops is
+    the loop's question and no adapter reads it, so making each block below
+    restate it would say nothing about the adapter under test.
+    """
+    declared = {"stop_when": {"empty": {"ref": "response.body.records"}}, **block}
     return build_strategy(
-        block,
+        _PAGINATION.validate_python(declared),
         url="/things",
         base_params=base or {},
         resolve=resolve,
@@ -86,7 +112,7 @@ class TestOffset:
         sizes = iter([10, 25])
 
         def resolve(expr: Any, page: Page | None) -> Any:
-            if expr != {"ref": "size"}:
+            if getattr(expr, "ref", None) != _STEP["ref"]:
                 return expr
             try:
                 return next(sizes)
@@ -99,7 +125,7 @@ class TestOffset:
                 "offset": {
                     "param": "skip",
                     "initial": 0,
-                    "increment_by": {"ref": "size"},
+                    "increment_by": _STEP,
                 },
             },
             resolve=resolve,
@@ -115,8 +141,9 @@ class TestOffset:
         s = _build(
             {
                 "type": "offset",
-                "offset": {"param": "skip", "initial": 0, "increment_by": step},
-            }
+                "offset": {"param": "skip", "initial": 0, "increment_by": _STEP},
+            },
+            resolve=lambda expr, page: step,
         )
         with pytest.raises(ValueError, match="offset.increment_by"):
             s.advance(Page(_rows(1)))
@@ -130,8 +157,9 @@ class TestOffset:
         s = _build(
             {
                 "type": "offset",
-                "offset": {"param": "skip", "initial": 0, "increment_by": step},
-            }
+                "offset": {"param": "skip", "initial": 0, "increment_by": _STEP},
+            },
+            resolve=lambda expr, page: step,
         )
         assert s.advance(Page(_rows(1))).params == {"skip": 10}
 
@@ -154,7 +182,7 @@ class TestPage:
         s = _build(
             {
                 "type": "page",
-                "page": {"param": "p", "initial": 1, "increment_by": {"ref": "stride"}},
+                "page": {"param": "p", "initial": 1, "increment_by": _STEP},
             },
             resolve=resolve,
         )
@@ -170,7 +198,7 @@ class TestCursor:
         s = _build(
             {
                 "type": "cursor",
-                "cursor": {"param": "after", "next_cursor": {"ref": "next"}},
+                "cursor": {"param": "after", "next_cursor": _NEXT},
             }
         )
         assert s.first().params == {}
@@ -179,7 +207,7 @@ class TestCursor:
         s = _build(
             {
                 "type": "cursor",
-                "cursor": {"param": "after", "next_cursor": {"ref": "next"}},
+                "cursor": {"param": "after", "next_cursor": _NEXT},
             },
             resolve=lambda expr, page: page.payload["next"],
         )
@@ -191,7 +219,7 @@ class TestCursor:
         s = _build(
             {
                 "type": "cursor",
-                "cursor": {"param": "after", "next_cursor": {"ref": "next"}},
+                "cursor": {"param": "after", "next_cursor": _NEXT},
             },
             resolve=lambda expr, page: token,
         )
@@ -240,7 +268,7 @@ class TestLink:
         # A next URL is absolute and carries the provider's own query, so
         # re-appending ours would fight it. The contract says so for link.
         s = _build(
-            {"type": "link", "link": {"next_url": {"ref": "next"}}},
+            {"type": "link", "link": {"next_url": _NEXT}},
             resolve=lambda expr, page: page.payload["next"],
             base={"limit": 50},
         )
@@ -253,24 +281,44 @@ class TestLink:
     @pytest.mark.parametrize("target", [None, ""])
     def test_an_absent_link_ends_the_traversal(self, target: Any) -> None:
         s = _build(
-            {"type": "link", "link": {"next_url": {"ref": "next"}}},
+            {"type": "link", "link": {"next_url": _NEXT}},
             resolve=lambda expr, page: target,
         )
         assert s.advance(Page(_rows(2))) is None
 
     def test_a_non_url_is_refused(self) -> None:
         s = _build(
-            {"type": "link", "link": {"next_url": {"ref": "next"}}},
+            {"type": "link", "link": {"next_url": _NEXT}},
             resolve=lambda expr, page: {"href": "/x"},
         )
         with pytest.raises(ValueError, match="not a URL"):
             s.advance(Page(_rows(2)))
 
 
+class _SchemeFromALaterContract:
+    """A strategy this build cannot walk, which no parse can produce.
+
+    The contract's union is closed, so a sixth scheme is a contract
+    release: the document parses on the newer models and arrives here
+    naming a ``type`` this build has no adapter for. Standing in for that
+    skew is the only way to reach the refusal, and reaching it matters --
+    the alternative to failing loud is a read that walks one page and
+    reports success.
+    """
+
+    type = "time"
+
+
 class TestTheUnionIsClosed:
     def test_an_unknown_scheme_fails_loud_naming_the_union(self) -> None:
         with pytest.raises(UnknownPaginationStrategy, match="cursor"):
-            _build({"type": "time"})
+            build_strategy(
+                _SchemeFromALaterContract(),
+                url="/things",
+                base_params={},
+                resolve=lambda expr, page: expr,
+                follow_url=_follow,
+            )
 
     def test_every_contract_scheme_builds(self) -> None:
         blocks = [
@@ -279,9 +327,9 @@ class TestTheUnionIsClosed:
                 "offset": {"param": "s", "initial": 0, "increment_by": 1},
             },
             {"type": "page", "page": {"param": "p", "initial": 1}},
-            {"type": "cursor", "cursor": {"param": "a", "next_cursor": {}}},
+            {"type": "cursor", "cursor": {"param": "a", "next_cursor": _NEXT}},
             {"type": "keyset", "keyset": {"param": "k", "order_by_field": "id"}},
-            {"type": "link", "link": {"next_url": {}}},
+            {"type": "link", "link": {"next_url": _NEXT}},
         ]
         for block in blocks:
             assert _build(block).first() is not None

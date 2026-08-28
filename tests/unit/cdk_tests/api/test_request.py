@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import pytest
+from analitiq.contracts.endpoints import Pagination, Param, ReadRequest
+from analitiq.contracts.stream import Filter
+from pydantic import TypeAdapter
 
 from cdk.api.exceptions import RequestSpecError
 from cdk.api.request import (
@@ -20,6 +24,49 @@ from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.resolver import ResolutionContext, Resolver
 
 pytestmark = pytest.mark.unit
+
+#: Both are discriminated unions, so which branch a block is comes out of
+#: the parse rather than out of a key the test sniffed for.
+_READ_REQUEST: TypeAdapter[Any] = TypeAdapter(ReadRequest)
+_PAGINATION: TypeAdapter[Any] = TypeAdapter(Pagination)
+
+
+def _filters(*declared: Mapping[str, Any]) -> list[Filter]:
+    """The stream's filters, parsed as the read path hands them over.
+
+    Same reason as ``_params``: the read reads ``field``/``value`` off the
+    contract model, so a test passing dicts would prove nothing about what
+    the read does with a real stream's filters.
+    """
+    return [Filter.model_validate(f) for f in declared]
+
+
+def _params(declared: Mapping[str, Any]) -> dict[str, Param]:
+    """The operation's declared params, parsed as the caller receives them.
+
+    Parsed rather than handed over as dicts because that is the difference
+    the whole module turns on: a param's placement is ``location`` on the
+    model and ``in`` on the wire, and a test writing the wire name against
+    code reading the attribute would agree with itself and with nothing
+    else.
+    """
+    return {name: Param.model_validate(spec) for name, spec in declared.items()}
+
+
+def _request(block: Mapping[str, Any]) -> Any:
+    """One declared request block, parsed as an operation's is.
+
+    ``method`` and ``path`` are required of every request the contract
+    accepts, and defaulted here so each test writes only the binding map it
+    is about. A block carrying a body names its own method: only the POST
+    branch of the read request declares one.
+    """
+    return _READ_REQUEST.validate_python({"method": "GET", "path": "/items", **block})
+
+
+def _pagination(block: Mapping[str, Any]) -> Any:
+    """One declared pagination block, parsed as a read operation's is."""
+    return _PAGINATION.validate_python(block)
 
 
 def _resolver(**runtime: Any) -> Resolver:
@@ -43,14 +90,16 @@ def _resolver(**runtime: Any) -> Resolver:
 class TestReadParamTable:
     def test_declared_defaults_resolve_through_the_grammar(self) -> None:
         table = ParamTable.for_read(
-            {
-                "profile": {
-                    "in": "query",
-                    "type": "integer",
-                    "required": True,
-                    "default": {"ref": "connection.parameters.profile"},
+            _params(
+                {
+                    "profile": {
+                        "in": "query",
+                        "type": "integer",
+                        "required": True,
+                        "default": {"ref": "connection.parameters.profile"},
+                    }
                 }
-            },
+            ),
             _resolver(),
         )
         assert table.values == {"profile": 42}
@@ -62,17 +111,19 @@ class TestReadParamTable:
         import base64
 
         table = ParamTable.for_read(
-            {
-                "auth": {
-                    "in": "query",
-                    "type": "string",
-                    "required": True,
-                    "default": {
-                        "function": "base64_encode",
-                        "input": {"ref": "connection.parameters.token"},
-                    },
+            _params(
+                {
+                    "auth": {
+                        "in": "query",
+                        "type": "string",
+                        "required": True,
+                        "default": {
+                            "function": "base64_encode",
+                            "input": {"ref": "connection.parameters.token"},
+                        },
+                    }
                 }
-            },
+            ),
             Resolver(
                 ResolutionContext(connection={"parameters": {"token": "tok-123"}}),
                 functions=DEFAULT_FUNCTIONS,
@@ -85,19 +136,21 @@ class TestReadParamTable:
         # and the partially-resolved value still goes out, which is not the
         # same rule as a bare ref omitting its param.
         table = ParamTable.for_read(
-            {
-                "scope": {
-                    "in": "query",
-                    "type": "string",
-                    "required": False,
-                    "default": {
-                        "template": (
-                            "${connection.parameters.org}/"
-                            "${connection.parameters.gone}"
-                        )
-                    },
+            _params(
+                {
+                    "scope": {
+                        "in": "query",
+                        "type": "string",
+                        "required": False,
+                        "default": {
+                            "template": (
+                                "${connection.parameters.org}/"
+                                "${connection.parameters.gone}"
+                            )
+                        },
+                    }
                 }
-            },
+            ),
             Resolver(ResolutionContext(connection={"parameters": {"org": "acme"}})),
         )
         assert table.values == {"scope": "acme/"}
@@ -106,31 +159,35 @@ class TestReadParamTable:
         # A resolved default would be overwritten on the first page anyway
         # -- or survive as a stale value the loop never touched.
         table = ParamTable.for_read(
-            {
-                "limit": {
-                    "in": "query",
-                    "type": "integer",
-                    "required": False,
-                    "controlled_by": "pagination",
-                    "default": {"literal": 5},
+            _params(
+                {
+                    "limit": {
+                        "in": "query",
+                        "type": "integer",
+                        "required": False,
+                        "controlled_by": "pagination",
+                        "default": {"literal": 5},
+                    }
                 }
-            },
+            ),
             _resolver(),
         )
         assert table.values == {}
 
     def test_a_stream_filter_overrides_a_declared_default(self) -> None:
         table = ParamTable.for_read(
-            {
-                "status": {
-                    "in": "query",
-                    "type": "string",
-                    "required": False,
-                    "default": {"literal": "all"},
+            _params(
+                {
+                    "status": {
+                        "in": "query",
+                        "type": "string",
+                        "required": False,
+                        "default": {"literal": "all"},
+                    }
                 }
-            },
+            ),
             _resolver(),
-            filters=[{"field": "status", "value": "open"}],
+            filters=_filters({"field": "status", "operator": "eq", "value": "open"}),
         )
         assert table.values == {"status": "open"}
 
@@ -141,22 +198,26 @@ class TestReadParamTable:
         # collection while reporting success.
         with pytest.raises(RequestSpecError, match="customer_number"):
             ParamTable.for_read(
-                {"cn": {"in": "query", "type": "string", "required": False}},
+                _params({"cn": {"in": "query", "type": "string", "required": False}}),
                 _resolver(),
-                filters=[{"field": "customer_number", "value": "C-1"}],
+                filters=_filters(
+                    {"field": "customer_number", "operator": "eq", "value": "C-1"}
+                ),
             )
 
     def test_an_unresolved_default_omits_its_param(self, caplog) -> None:
         with caplog.at_level("WARNING"):
             table = ParamTable.for_read(
-                {
-                    "who": {
-                        "in": "query",
-                        "type": "string",
-                        "required": False,
-                        "default": {"ref": "connection.parameters.absent"},
+                _params(
+                    {
+                        "who": {
+                            "in": "query",
+                            "type": "string",
+                            "required": False,
+                            "default": {"ref": "connection.parameters.absent"},
+                        }
                     }
-                },
+                ),
                 _resolver(),
             )
         assert table.values == {}
@@ -173,17 +234,19 @@ class TestRequestBuilder:
         # -- which for a secret-valued param put a credential on the query
         # string.
         table = ParamTable.for_read(
-            {
-                "api_key": {
-                    "in": "query",
-                    "type": "string",
-                    "required": True,
-                    "default": {"literal": "s3cret"},
-                },
-                "tenant": {"in": "header", "type": "string", "required": True},
-                "id": {"in": "path", "type": "string", "required": True},
-                "payload": {"in": "body", "type": "string", "required": False},
-            },
+            _params(
+                {
+                    "api_key": {
+                        "in": "query",
+                        "type": "string",
+                        "required": True,
+                        "default": {"literal": "s3cret"},
+                    },
+                    "tenant": {"in": "header", "type": "string", "required": True},
+                    "id": {"in": "path", "type": "string", "required": True},
+                    "payload": {"in": "body", "type": "string", "required": False},
+                }
+            ),
             _resolver(),
         )
         builder = RequestBuilder(
@@ -203,7 +266,7 @@ class TestRequestBuilder:
         # request.query is not a rename map: the key is what goes on the
         # wire, and it need not be a declared param's name.
         table = ParamTable.for_read(
-            {"limit": {"in": "query", "type": "integer", "required": False}},
+            _params({"limit": {"in": "query", "type": "integer", "required": False}}),
             _resolver(),
         )
         builder = RequestBuilder(
@@ -217,7 +280,7 @@ class TestRequestBuilder:
 
     def test_a_declared_header_binds_a_param(self) -> None:
         table = ParamTable.for_read(
-            {"tenant": {"in": "query", "type": "string", "required": False}},
+            _params({"tenant": {"in": "query", "type": "string", "required": False}}),
             _resolver(),
         )
         builder = RequestBuilder(
@@ -235,9 +298,9 @@ class TestRequestBuilder:
         # A next URL replaces the request, not the connection: the headers
         # say how this connection talks to the provider.
         table = ParamTable.for_read(
-            {"tenant": {"in": "query", "type": "string", "required": False}},
+            _params({"tenant": {"in": "query", "type": "string", "required": False}}),
             _resolver(),
-            filters=[{"field": "tenant", "value": "acme"}],
+            filters=_filters({"field": "tenant", "operator": "eq", "value": "acme"}),
         )
         builder = RequestBuilder(
             table,
@@ -257,7 +320,7 @@ class TestRequestBuilder:
         # going onto the query string raw would be a second sink with its
         # own spelling rules: internal names, no bindings, no refusals.
         table = ParamTable.for_read(
-            {"limit": {"in": "query", "type": "integer", "required": False}},
+            _params({"limit": {"in": "query", "type": "integer", "required": False}}),
             _resolver(),
         )
         builder = RequestBuilder(
@@ -274,7 +337,7 @@ class TestRequestBuilder:
         # Built per page: a body-paginated endpoint must see what the loop
         # set, not the values frozen at the first request.
         table = ParamTable.for_read(
-            {"offset": {"in": "body", "type": "integer", "required": False}},
+            _params({"offset": {"in": "body", "type": "integer", "required": False}}),
             _resolver(),
         )
         builder = RequestBuilder(
@@ -519,18 +582,20 @@ class TestNeverFillableScopeRefusals:
 
     def test_a_param_default_reading_a_secret_is_refused(self) -> None:
         problem = request_block_problem(
-            {"query": {"key": {"from_param": "api_key"}}},
+            _request({"query": {"key": {"from_param": "api_key"}}}),
             endpoint="items",
             reserved_headers=frozenset(),
             resolver=_resolver(),
-            declared_params={
-                "api_key": {
-                    "in": "query",
-                    "type": "string",
-                    "required": True,
-                    "default": {"ref": "secrets.api_key"},
+            declared_params=_params(
+                {
+                    "api_key": {
+                        "in": "query",
+                        "type": "string",
+                        "required": True,
+                        "default": {"ref": "secrets.api_key"},
+                    }
                 }
-            },
+            ),
         )
         assert problem is not None
         assert "'secrets.api_key'" in problem
@@ -538,20 +603,90 @@ class TestNeverFillableScopeRefusals:
 
     def test_a_pagination_value_reading_a_secret_is_refused(self) -> None:
         problem = request_block_problem(
-            {},
+            _request({}),
             endpoint="items",
             reserved_headers=frozenset(),
             resolver=_resolver(),
-            pagination={
-                "type": "offset",
-                "limit": {
-                    "param": "limit",
-                    "default": {"ref": "secrets.page_size"},
-                },
-            },
+            pagination=_pagination(
+                {
+                    "type": "offset",
+                    "offset": {"param": "skip", "initial": 0, "increment_by": 1},
+                    "limit": {
+                        "param": "limit",
+                        "default": {"ref": "secrets.page_size"},
+                    },
+                    "stop_when": {"empty": {"ref": "response.body.records"}},
+                }
+            ),
         )
         assert problem is not None
         assert "'secrets.page_size'" in problem
+
+    @pytest.mark.parametrize(
+        "block",
+        [
+            {
+                "type": "offset",
+                "offset": {"param": "skip", "initial": 0, "increment_by": 1},
+                "limit": {"param": "limit", "default": {"ref": "response.body.size"}},
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+            {
+                "type": "page",
+                "page": {
+                    "param": "page",
+                    "initial": 1,
+                    "increment_by": {"ref": "response.body.size"},
+                },
+                "stop_when": {"empty": {"ref": "response.body.records"}},
+            },
+        ],
+        ids=["limit.default", "page.increment_by"],
+    )
+    def test_a_pre_page_value_reading_the_response_is_refused(self, block) -> None:
+        """The pagination block is the one place ``response.*`` is fillable.
+
+        Both PRE_PAGE_VALUE_PATHS entries are the exception: they resolve
+        before a page exists, so a response read there resolves to nothing
+        on every run. ``resolve_page_size`` answers that by warning and
+        taking the engine's batch size, and ``_Page`` by keeping a stride
+        nobody authored -- green runs paginating at a size the document did
+        not ask for.
+        """
+        problem = request_block_problem(
+            _request({}),
+            endpoint="items",
+            reserved_headers=frozenset(),
+            resolver=_resolver(),
+            pagination=_pagination(block),
+        )
+        assert problem is not None
+        assert "'response.body.size'" in problem
+
+    def test_a_per_page_value_reading_the_response_is_not_refused(self) -> None:
+        # The contrast that makes the entries above mean something: the
+        # same expression one field over is resolved against the page just
+        # served, so the page loop supplies it.
+        assert (
+            request_block_problem(
+                _request({}),
+                endpoint="items",
+                reserved_headers=frozenset(),
+                resolver=_resolver(),
+                pagination=_pagination(
+                    {
+                        "type": "offset",
+                        "offset": {
+                            "param": "skip",
+                            "initial": 0,
+                            "increment_by": {"ref": "response.body.size"},
+                        },
+                        "stop_when": {"empty": {"ref": "response.body.records"}},
+                    }
+                ),
+            )
+            is None
+        )
 
     @pytest.mark.parametrize("subtree", ["parameters", "selections", "discovered"])
     def test_a_subtree_root_is_supplied_not_merely_its_children(
@@ -567,7 +702,12 @@ class TestNeverFillableScopeRefusals:
         """
         assert (
             request_block_problem(
-                {"body": {"ref": f"connection.{subtree}"}},
+                _request(
+                    {
+                        "method": "POST",
+                        "body": {"ref": f"connection.{subtree}"},
+                    }
+                ),
                 endpoint="items",
                 reserved_headers=frozenset(),
                 resolver=_resolver(),
@@ -586,7 +726,7 @@ class TestNeverFillableScopeRefusals:
         """
         assert (
             request_block_problem(
-                {"query": {"q": {"ref": "connection.parameters"}}},
+                _request({"query": {"q": {"ref": "connection.parameters"}}}),
                 endpoint="items",
                 reserved_headers=frozenset(),
                 resolver=_resolver(),
@@ -616,12 +756,14 @@ class TestNeverFillableScopeRefusals:
         this guard exists to prevent.
         """
         problem = request_block_problem(
-            {
-                "query": {
-                    wire_key: {"literal": "v"},
-                    "api_key": {"ref": "secrets.api_key"},
+            _request(
+                {
+                    "query": {
+                        wire_key: {"literal": "v"},
+                        "api_key": {"ref": "secrets.api_key"},
+                    }
                 }
-            },
+            ),
             endpoint="items",
             reserved_headers=frozenset(),
             resolver=_resolver(),
@@ -632,19 +774,21 @@ class TestNeverFillableScopeRefusals:
     def test_a_param_named_after_a_marker_cannot_hide_another_default(self) -> None:
         """Same shadowing, one map over: params are keyed by author names too."""
         problem = request_block_problem(
-            {"query": {"k": {"from_param": "api_key"}}},
+            _request({"query": {"k": {"from_param": "api_key"}}}),
             endpoint="items",
             reserved_headers=frozenset(),
             resolver=_resolver(),
-            declared_params={
-                "ref": {"in": "query", "type": "string", "required": False},
-                "api_key": {
-                    "in": "query",
-                    "type": "string",
-                    "required": True,
-                    "default": {"ref": "secrets.api_key"},
-                },
-            },
+            declared_params=_params(
+                {
+                    "ref": {"in": "query", "type": "string", "required": False},
+                    "api_key": {
+                        "in": "query",
+                        "type": "string",
+                        "required": True,
+                        "default": {"ref": "secrets.api_key"},
+                    },
+                }
+            ),
         )
         assert problem is not None
         assert "'secrets.api_key'" in problem
@@ -654,7 +798,7 @@ class TestNeverFillableScopeRefusals:
         # `runtime.` prefix match would give `runtime.batchsize` the
         # warn-and-omit fate this walk exists to refuse.
         problem = request_block_problem(
-            {"query": {"limit": {"ref": "runtime.batchsize"}}},
+            _request({"query": {"limit": {"ref": "runtime.batchsize"}}}),
             endpoint="items",
             reserved_headers=frozenset(),
             resolver=_resolver(),
@@ -667,7 +811,7 @@ class TestNeverFillableScopeRefusals:
         # batch_size the way the read role's does.
         assert (
             request_block_problem(
-                {"query": {"limit": {"ref": "runtime.batch_size"}}},
+                _request({"query": {"limit": {"ref": "runtime.batch_size"}}}),
                 endpoint="items",
                 reserved_headers=frozenset(),
                 resolver=_resolver(batch_size=37),
@@ -679,7 +823,7 @@ class TestNeverFillableScopeRefusals:
         # The same read against a resolver built WITHOUT batch_size -- the
         # write role's shape -- is a value that never arrives on this phase.
         problem = request_block_problem(
-            {"query": {"limit": {"ref": "runtime.batch_size"}}},
+            _request({"query": {"limit": {"ref": "runtime.batch_size"}}}),
             endpoint="items",
             reserved_headers=frozenset(),
             resolver=_resolver(),
@@ -692,18 +836,20 @@ class TestNeverFillableScopeRefusals:
         # request-time resolution DOES supply the connection document.
         assert (
             request_block_problem(
-                {"query": {"key": {"from_param": "api_key"}}},
+                _request({"query": {"key": {"from_param": "api_key"}}}),
                 endpoint="items",
                 reserved_headers=frozenset(),
                 resolver=_resolver(),
-                declared_params={
-                    "api_key": {
-                        "in": "query",
-                        "type": "string",
-                        "required": True,
-                        "default": {"ref": "connection.parameters.api_key"},
+                declared_params=_params(
+                    {
+                        "api_key": {
+                            "in": "query",
+                            "type": "string",
+                            "required": True,
+                            "default": {"ref": "connection.parameters.api_key"},
+                        }
                     }
-                },
+                ),
             )
             is None
         )
@@ -714,7 +860,7 @@ class TestRequestBlockRefusals:
 
     def test_a_declared_header_the_connection_owns_is_refused(self) -> None:
         problem = request_block_problem(
-            {"headers": {"Authorization": {"literal": "Bearer x"}}},
+            _request({"headers": {"Authorization": {"literal": "Bearer x"}}}),
             endpoint="items",
             reserved_headers=frozenset({"authorization"}),
             resolver=_resolver(),
@@ -728,7 +874,9 @@ class TestRequestBlockRefusals:
         # refuse an endpoint that shadows nothing.
         assert (
             request_block_problem(
-                {"headers": {"X-Legacy-Auth": {"from_param": "Authorization"}}},
+                _request(
+                    {"headers": {"X-Legacy-Auth": {"from_param": "Authorization"}}}
+                ),
                 endpoint="items",
                 reserved_headers=frozenset({"authorization"}),
                 resolver=_resolver(),
@@ -741,7 +889,7 @@ class TestRequestBlockRefusals:
         # still shadows the connection's header, because the key is what
         # the provider sees.
         problem = request_block_problem(
-            {"headers": {"Authorization": {"from_param": "tok"}}},
+            _request({"headers": {"Authorization": {"from_param": "tok"}}}),
             endpoint="items",
             reserved_headers=frozenset({"authorization"}),
             resolver=_resolver(),
@@ -751,10 +899,12 @@ class TestRequestBlockRefusals:
     def test_a_plain_path_binding_is_permitted(self) -> None:
         assert (
             request_block_problem(
-                {
-                    "path": "/Contact/{id}",
-                    "path_params": {"id": {"from_param": "id"}},
-                },
+                _request(
+                    {
+                        "path": "/Contact/{id}",
+                        "path_params": {"id": {"from_param": "id"}},
+                    }
+                ),
                 endpoint="items",
                 reserved_headers=frozenset(),
                 resolver=_resolver(),
@@ -772,10 +922,12 @@ class TestRequestBlockRefusals:
         # refresh, so the read failed on the URL it built and blamed a
         # correct binding -- then worked on the next run.
         problem = request_block_problem(
-            {
-                "path": "/items/{since}",
-                "path_params": {"since": {"from_param": "since"}},
-            },
+            _request(
+                {
+                    "path": "/items/{since}",
+                    "path_params": {"since": {"from_param": "since"}},
+                }
+            ),
             endpoint="items",
             reserved_headers=frozenset(),
             resolver=_resolver(),

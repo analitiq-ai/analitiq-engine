@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pyarrow as pa
 import pytest
+from analitiq.contracts.stream import validate_endpoint_ref
 
 from cdk.types import FailureCategory
 from src.engine.batch_policy import ErrorStrategy
@@ -30,7 +31,6 @@ from src.models.resolved import (
     ResolvedSource,
     RuntimeConfig,
 )
-from src.models.stream import EndpointRef
 from src.runner import PipelineRunner
 from src.state.error_classification import (
     ErrorCode,
@@ -186,8 +186,8 @@ def sample_stream_config():
             # The runner always attaches the typed resolved source; the load
             # stage reads replication/primary-keys off it.
             "_resolved_source": ResolvedSource(
-                endpoint_ref=EndpointRef(
-                    scope="connector", connection_id="c", endpoint_id="e"
+                endpoint_ref=validate_endpoint_ref(
+                    {"scope": "connector", "connection_id": "c", "endpoint_id": "e"}
                 ),
                 connection_ref="conn",
                 runtime=_mock_runtime(),
@@ -452,8 +452,8 @@ class TestEngineFatalFailureHandling:
         config = dict(sample_stream_config)
         config["source"] = dict(sample_stream_config["source"])
         config["source"]["_resolved_source"] = ResolvedSource(
-            endpoint_ref=EndpointRef(
-                scope="connector", connection_id="c", endpoint_id="e"
+            endpoint_ref=validate_endpoint_ref(
+                {"scope": "connector", "connection_id": "c", "endpoint_id": "e"}
             ),
             connection_ref="conn",
             runtime=_mock_runtime(),

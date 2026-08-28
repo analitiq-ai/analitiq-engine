@@ -1,7 +1,31 @@
-"""JSON helpers shared by the CDK (Json-typed column decoding)."""
+"""JSON helpers shared by the CDK (Json-typed column decoding, authored form)."""
 
 import json
 from typing import Any
+
+from pydantic import BaseModel
+
+__all__ = ["authored_json", "decode_json_fields"]
+
+
+def authored_json(value: Any) -> Any:
+    """Return a contract model's authored JSON form, or *value* unchanged.
+
+    The value-expression grammar belongs to the :class:`~cdk.resolver.Resolver`
+    and is shared by every transport, so a contract model reaching it arrives
+    as the JSON its author wrote rather than as a shape the resolver would
+    have to learn. ``by_alias`` restores the contract's own field names
+    (``in``, ``schema``, ``and``) and ``exclude_unset`` keeps an author's
+    omissions omitted, so what gets walked is the authored node and not the
+    model's defaults.
+
+    This needs pydantic and nothing else. That is what lets the resolver stay
+    contract-version-agnostic, and lets the predicate walker evaluate a stop
+    condition without importing the contract's seventeen predicate models.
+    """
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json", by_alias=True, exclude_unset=True)
+    return value
 
 
 def decode_json_fields(

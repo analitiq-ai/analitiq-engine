@@ -35,7 +35,26 @@ packages = [{ include = "cdk" }]
 # only introspects schemas and creates tables) installs neither.
 python = "^3.11"
 sqlalchemy = { version = "^2.0.0", extras = ["asyncio"] }
-pydantic = "^2.0.0"
+# 2.12 is the floor ``analitiq-contract-models`` needs; the CDK has no use of
+# its own for anything newer than 2.0.
+pydantic = "^2.12"
+# Core, and the reason is the whole of issue #454: an endpoint document read
+# as a dict makes "which contract fields does the engine actually use" a
+# string-reachability question that no tool can answer, and four contract
+# fields shipped unread because of it. Read as the published model, an unused
+# field is an unused attribute -- answerable statically, including from
+# outside this repo.
+#
+# Declared as a RANGE rather than a pin: within a contract major the models
+# are additive, so a new optional field needs no CDK release. Only a contract
+# MAJOR moves this, and that already breaks every consumer.
+# Floor is the rc the CDK actually compiles against, not the start of the
+# major: within a released major the models are additive, but across the
+# rc series they are not, and this package imports names that accrued over
+# it (DatabaseEndpointDoc, WriteInput.schema_, SingleCursorMapping,
+# validate_endpoint_ref). A lower floor resolves for pip and then fails at
+# import.
+analitiq-contract-models = { version = ">=1.0.0rc23,<2", allow-prereleases = true }
 # Core, on purpose, though only the HTTP transport sends a request: yarl is
 # what aiohttp builds every URL with, so it is the authority on what an
 # endpoint's URL means. Keeping it behind the [api] extra is what forced the

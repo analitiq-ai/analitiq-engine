@@ -24,6 +24,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from analitiq.contracts.endpoints import ApiEndpointDoc, ReadOperation
+
 from cdk.api.exceptions import RequestSpecError, request_spec_errors
 from cdk.api.request import request_supplies
 from cdk.api.urls import redact_credentials
@@ -43,7 +45,7 @@ from cdk.transport_factory import (
 )
 
 from .fakes import NoSecretsResolver
-from .target import ConformanceTarget
+from .target import ENDPOINT_DOCUMENT_CHECK, ConformanceTarget
 from .violations import Violation
 
 __all__ = [
@@ -56,6 +58,7 @@ __all__ = [
     "fillable_at_request_time",
     "read_operations",
     "unknown_function_problem",
+    "unread_endpoints",
 ]
 
 TRANSPORT_CHECK = "api-read-transport-selection"
@@ -203,22 +206,55 @@ def _transport_deferral(
     return problems, (not problems and any(deferred(path) for path in paths))
 
 
-def read_operations(target: ConformanceTarget) -> list[tuple[str, dict[str, Any]]]:
-    """Every endpoint document's read operation, labelled for messages.
+def read_operations(target: ConformanceTarget) -> list[tuple[str, ReadOperation]]:
+    """Every api endpoint document's read operation, labelled for messages.
 
-    The label is the document's own ``endpoint_id`` when it declares one,
-    so a violation names what a stream's ``endpoint_ref`` names, and the
-    file stem otherwise. Documents with no read operation are write-only
-    and carry nothing the read-path checks certify.
+    The label is the document's own ``endpoint_id``, which is what a
+    stream's ``endpoint_ref`` names, so a violation names the endpoint the
+    author addresses rather than the file it happens to live in. The
+    contract requires it, so there is nothing to fall back to.
+
+    A connector may ship documents of either published variant, and only
+    the api one carries operations at all -- so which variant a document is
+    is asked of the parsed model, never sniffed off its keys. Api documents
+    with no read operation are write-only and carry nothing the read-path
+    checks certify.
     """
-    reads: list[tuple[str, dict[str, Any]]] = []
-    for stem, document in sorted(target.endpoints.items()):
-        operations = document.get("operations")
-        read = operations.get("read") if isinstance(operations, Mapping) else None
-        if isinstance(read, dict):
-            label = document.get("endpoint_id")
-            reads.append((str(label) if label else stem, read))
+    reads: list[tuple[str, ReadOperation]] = []
+    for _stem, document in sorted(target.endpoints.items()):
+        if not isinstance(document, ApiEndpointDoc):
+            continue
+        read = document.operations.read
+        if read is not None:
+            reads.append((document.endpoint_id, read))
     return reads
+
+
+def unread_endpoints(check: str, target: ConformanceTarget) -> list[Violation]:
+    """Say which endpoint documents a check could not read at all, if any.
+
+    The same rule :func:`~cdk.conformance.api_read_path._undriven` applies
+    one level down: a document the published contract refuses never became
+    a read operation, so every check that iterates them passes it by
+    silently. The defect itself belongs to
+    ``endpoint-document-contract`` and is not repeated here -- saying it
+    from five checks would bury the one message that says what to change --
+    but "I did not assess this endpoint" has to come from the check that
+    did not, because a repo may wire any of these into a harness of its
+    own where nothing else reports.
+    """
+    unread = sorted(target.endpoint_problems)
+    if not unread:
+        return []
+    return [
+        Violation(
+            check,
+            f"{len(unread)} endpoint document(s) ({', '.join(unread)}) were "
+            f"not read because the published contract refuses them; see the "
+            f"{ENDPOINT_DOCUMENT_CHECK!r} check for what to fix. Nothing "
+            f"here says anything about them.",
+        )
+    ]
 
 
 def definition_resolver(
@@ -323,9 +359,8 @@ def dispatch_transport_refs(target: ConformanceTarget) -> list[str]:
     default_ref = target.definition.get("default_transport")
     refs = [default_ref] if isinstance(default_ref, str) else []
     for _label, read in read_operations(target):
-        request = read.get("request")
-        ref = request.get("transport_ref") if isinstance(request, Mapping) else None
-        if isinstance(ref, str) and ref in transports and ref not in refs:
+        ref = read.request.transport_ref
+        if ref and ref in transports and ref not in refs:
             refs.append(ref)
     return refs
 
@@ -400,13 +435,13 @@ def check_read_transport_selection(target: ConformanceTarget) -> list[Violation]
     says which reads stop rather than reading as a defect in a block
     nothing uses.
     """
-    violations: list[Violation] = []
+    violations: list[Violation] = unread_endpoints(TRANSPORT_CHECK, target)
     transports = target.declared_transports()
     default_ref = target.definition.get("default_transport")
     if not isinstance(default_ref, str) or not isinstance(
         transports.get(default_ref), Mapping
     ):
-        return [
+        violations.append(
             Violation(
                 TRANSPORT_CHECK,
                 f"connector.json names default_transport {default_ref!r}, "
@@ -415,7 +450,8 @@ def check_read_transport_selection(target: ConformanceTarget) -> list[Violation]
                 f"opens it at connect time, so no stream on this connector "
                 f"reaches its first request.",
             )
-        ]
+        )
+        return violations
     for ref in dispatch_transport_refs(target):
         block = transports[ref]
         stops = _stops(target, ref, default_ref)
@@ -461,8 +497,7 @@ def _stops(target: ConformanceTarget, ref: str, default_ref: Any) -> str:
     named = sorted(
         label
         for label, read in read_operations(target)
-        if isinstance(read.get("request"), Mapping)
-        and read["request"].get("transport_ref") == ref
+        if read.request.transport_ref == ref
     )
     return (
         f"the reads that dispatch through it ({', '.join(named)}) fail on "
@@ -728,12 +763,23 @@ def check_api_has_reads(target: ConformanceTarget) -> list[Violation]:
     if target.kind != "api" or read_operations(target):
         return []
     endpoints = sorted(target.endpoints)
-    carried = (
-        f"the endpoint documents it does ship ({', '.join(endpoints)}) declare "
-        f"no operations.read"
-        if endpoints
-        else "it ships no endpoint documents at all"
-    )
+    unread = sorted(target.endpoint_problems)
+    if endpoints:
+        carried = (
+            f"the endpoint documents it does ship ({', '.join(endpoints)}) "
+            f"declare no operations.read"
+        )
+    elif unread:
+        # An unparsed document is not an absent one. Saying the connector
+        # ships none would send the author looking for files that are
+        # already there and already refused, by a check next door.
+        carried = (
+            f"none of the endpoint documents it ships ({', '.join(unread)}) "
+            f"satisfies the published contract, so none of them carries a "
+            f"read; see the {ENDPOINT_DOCUMENT_CHECK!r} check"
+        )
+    else:
+        carried = "it ships no endpoint documents at all"
     return [
         Violation(
             READS_CHECK,

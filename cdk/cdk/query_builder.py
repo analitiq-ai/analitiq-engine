@@ -72,6 +72,9 @@ class FilterOperator(Enum):
     ILIKE = "ilike"
     IS_NULL = "is_null"
     IS_NOT_NULL = "is_not_null"
+    CONTAINS = "contains"
+    STARTS_WITH = "starts_with"
+    ENDS_WITH = "ends_with"
 
 
 @dataclass
@@ -231,6 +234,28 @@ class QueryBuilder:
         "ilike": FilterOperator.ILIKE,
         "is_null": FilterOperator.IS_NULL,
         "is_not_null": FilterOperator.IS_NOT_NULL,
+        # ``neq`` is the contract's spelling of the comparison ``ne`` names
+        # above, and it is the one that was a live defect: RULE-STRM-012
+        # admits it on a CONNECTION-scoped source, which is what every
+        # database stream declares, so a contract-valid stream reached this
+        # map and failed its read with "Unknown filter operator".
+        #
+        # The three substring operators are api-scope only under that same
+        # rule, so no connection-scoped stream can reach them here. They are
+        # mapped because scope, not kind, picks the vocabulary: a database
+        # connector shipping a CONNECTOR-scoped endpoint gets the api
+        # vocabulary and still renders through this builder. Mapping them
+        # costs one branch; leaving them out would make that connector fail
+        # on a filter the contract told its author was valid.
+        #
+        # The SQL symbols above carry no contract spelling at all -- they are
+        # for a connector calling this builder directly -- which is why the
+        # pin requires the map to COVER the contract vocabulary rather than
+        # to equal it.
+        "neq": FilterOperator.NE,
+        "contains": FilterOperator.CONTAINS,
+        "starts_with": FilterOperator.STARTS_WITH,
+        "ends_with": FilterOperator.ENDS_WITH,
     }
 
     def __init__(
@@ -441,45 +466,13 @@ class QueryBuilder:
 
         col = Column(self._ident(field))
 
-        # Build condition based on operator
-        if op == FilterOperator.IS_NULL:
-            return col.is_(None), []
-        elif op == FilterOperator.IS_NOT_NULL:
-            return col.isnot(None), []
-        elif op == FilterOperator.IN:
-            if not isinstance(value, (list, tuple)):
-                value = [value]
-            return col.in_(value), list(value)
-        elif op == FilterOperator.NOT_IN:
-            if not isinstance(value, (list, tuple)):
-                value = [value]
-            return col.notin_(value), list(value)
-        elif op == FilterOperator.LIKE:
-            return col.like(value), [value]
-        elif op == FilterOperator.ILIKE:
-            # ILIKE is PostgreSQL-specific; for MySQL use LIKE with LOWER()
-            if _is_postgresql_dialect(self.dialect):
-                return col.ilike(value), [value]
-            else:
-                from sqlalchemy import func
-
-                return func.lower(col).like(func.lower(value)), [value]
-        elif op == FilterOperator.EQ:
-            return col == value, [value]
-        elif op == FilterOperator.NE:
-            return col != value, [value]
-        elif op == FilterOperator.GT:
-            return col > value, [value]
-        elif op == FilterOperator.GTE:
-            return col >= value, [value]
-        elif op == FilterOperator.LT:
-            return col < value, [value]
-        elif op == FilterOperator.LTE:
-            return col <= value, [value]
-
-        # Unreachable while every FilterOperator member has a branch above;
-        # raising keeps a future enum addition from silently dropping filters.
-        raise ValueError(f"Filter operator {op!r} has no condition builder")
+        build = _CONDITION_BUILDERS.get(op)
+        if build is None:
+            # Unreachable while every FilterOperator member has an entry;
+            # raising keeps a future enum addition from silently dropping
+            # filters, which would widen the result set rather than fail.
+            raise ValueError(f"Filter operator {op!r} has no condition builder")
+        return build(self, col, value)
 
     def _build_cursor_condition(
         self, cursor_field: str, cursor_value: Any, cursor_mode: str, param_offset: int
@@ -554,3 +547,68 @@ class QueryBuilder:
         logger.debug(f"Parameters: {out_params}")
 
         return query_str, out_params
+
+
+def _in_values(value: Any) -> list[Any]:
+    """Return a membership operand as a list, whatever arity it was authored with."""
+    return list(value) if isinstance(value, (list, tuple)) else [value]
+
+
+def _ilike_condition(
+    builder: "QueryBuilder", col: Any, value: Any
+) -> tuple[Any, list[Any]]:
+    """Case-insensitive match, spelled the way the dialect spells it.
+
+    ILIKE is PostgreSQL's; everywhere else the same intent is LOWER() on
+    both sides. The one operator whose rendering depends on the dialect,
+    which is why it is a function and the rest are lambdas.
+    """
+    if _is_postgresql_dialect(builder.dialect):
+        return col.ilike(value), [value]
+    from sqlalchemy import func
+
+    return func.lower(col).like(func.lower(value)), [value]
+
+
+#: How each operator becomes a condition, as one entry per member.
+#:
+#: A table rather than a fifteen-arm elif chain: the arms differed only in
+#: which SQLAlchemy call they made, so the chain was fifteen ways to write
+#: one dispatch, and a missing arm read as a silently dropped filter. The
+#: lookup answers None for a member nobody wrote an entry for, which is the
+#: loud failure the chain's unreachable tail used to be.
+#:
+#: ``contains`` / ``starts_with`` / ``ends_with`` pass ``autoescape``: the
+#: value is stream-authored data, not a pattern, so a literal % or _ in it
+#: must match itself rather than silently becoming a wildcard and widening
+#: the result set. SQLAlchemy owns that escaping and emits the ESCAPE clause
+#: per dialect; a pattern spelled by hand here would be a second, worse copy
+#: of a rule the library already applies.
+_CONDITION_BUILDERS: dict[
+    FilterOperator, Callable[["QueryBuilder", Any, Any], tuple[Any, list[Any]]]
+] = {
+    FilterOperator.IS_NULL: lambda _b, col, _v: (col.is_(None), []),
+    FilterOperator.IS_NOT_NULL: lambda _b, col, _v: (col.isnot(None), []),
+    FilterOperator.IN: lambda _b, col, v: (col.in_(_in_values(v)), _in_values(v)),
+    FilterOperator.NOT_IN: lambda _b, col, v: (
+        col.notin_(_in_values(v)),
+        _in_values(v),
+    ),
+    FilterOperator.LIKE: lambda _b, col, v: (col.like(v), [v]),
+    FilterOperator.ILIKE: _ilike_condition,
+    FilterOperator.EQ: lambda _b, col, v: (col == v, [v]),
+    FilterOperator.NE: lambda _b, col, v: (col != v, [v]),
+    FilterOperator.GT: lambda _b, col, v: (col > v, [v]),
+    FilterOperator.GTE: lambda _b, col, v: (col >= v, [v]),
+    FilterOperator.LT: lambda _b, col, v: (col < v, [v]),
+    FilterOperator.LTE: lambda _b, col, v: (col <= v, [v]),
+    FilterOperator.CONTAINS: lambda _b, col, v: (col.contains(v, autoescape=True), [v]),
+    FilterOperator.STARTS_WITH: lambda _b, col, v: (
+        col.startswith(v, autoescape=True),
+        [v],
+    ),
+    FilterOperator.ENDS_WITH: lambda _b, col, v: (
+        col.endswith(v, autoescape=True),
+        [v],
+    ),
+}

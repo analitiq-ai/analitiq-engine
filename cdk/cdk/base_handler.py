@@ -273,9 +273,9 @@ class BaseDestinationHandler(ABC):
     def set_endpoint_refs(self, endpoint_refs: Mapping[str, Any]) -> None:
         """Register the ``stream_id → endpoint_ref`` index for this handler.
 
-        ``endpoint_refs`` values are dict-shape ``EndpointRef`` payloads
-        (``{"scope", "connection_id", "endpoint_id"}`` plus optional ``x-*``
-        extension keys). Called once by the
+        ``endpoint_refs`` values are the stream document's authored
+        ``endpoint_ref`` JSON, which a handler parses against the published
+        contract -- a closed shape, so no extension keys. Called once by the
         destination entrypoint before the gRPC server starts. The default
         implementation is a no-op; handlers that need per-stream endpoint
         context (e.g. picking a type-mapper by scope) override it.

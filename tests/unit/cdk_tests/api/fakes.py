@@ -10,6 +10,9 @@ from __future__ import annotations
 import json
 from typing import Any, cast
 
+from analitiq.contracts.endpoints import ApiEndpointDoc
+from analitiq.contracts.stream import StreamSource
+
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.secrets import InMemorySecretsResolver
 from cdk.transport_factory import HttpTransport
@@ -179,20 +182,35 @@ class FakeCheckpoint:
         self.saved.append(cursor)
 
 
-def endpoint_document(
+def endpoint_json(
     *,
     pagination: dict[str, Any] | None = None,
     params: dict[str, Any] | None = None,
     replication: dict[str, Any] | None = None,
     request: dict[str, Any] | None = None,
     records_ref: str = "response.body.records",
+    response_fields: dict[str, Any] | None = None,
+    record_fields: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build a read endpoint document around ``/items``.
+    """A read endpoint document around ``/items``, unparsed.
 
-    Written raw, as the engine hands it across the boundary: the CDK
-    navigates an already-validated document and must not import a contract
-    model to build one.
+    Only for the tests that deliberately author a document the contract
+    REFUSES and assert the refusal. Everything else goes through
+    :func:`endpoint_document`, which is this document parsed.
+
+    ``response_fields`` declares further members of the response body
+    beside ``records`` (a next link, a ``has_more`` flag); ``record_fields``
+    declares further members of one record. Both exist because the contract
+    resolves every ``response.body.<path>`` a document references against
+    this schema, so a paging value naming a field the schema does not
+    declare is an authoring defect rather than a shortcut a fixture may
+    take.
     """
+    record_properties: dict[str, Any] = {
+        "id": {"type": "integer", "native_type": "integer", "arrow_type": "Int64"},
+        "name": {"type": "string", "native_type": "text", "arrow_type": "Utf8"},
+        **(record_fields or {}),
+    }
     read: dict[str, Any] = {
         "request": request or {"method": "GET", "path": "/items"},
         "response": {
@@ -201,14 +219,9 @@ def endpoint_document(
                 "properties": {
                     "records": {
                         "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": {"type": "integer", "arrow_type": "Int64"},
-                                "name": {"type": "string", "arrow_type": "Utf8"},
-                            },
-                        },
-                    }
+                        "items": {"type": "object", "properties": record_properties},
+                    },
+                    **(response_fields or {}),
                 },
             },
             "records": {"ref": records_ref},
@@ -225,6 +238,26 @@ def endpoint_document(
         "endpoint_id": "items",
         "operations": {"read": read},
     }
+
+
+def endpoint_document(**shape: Any) -> dict[str, Any]:
+    """The same document, parsed and handed back as the JSON it was.
+
+    JSON, because that is what the caller under test is handed: the engine
+    serializes the document across the worker boundary and the connector
+    parses it on the far side, so a fixture that started as a model would
+    skip the parse every real run performs.
+
+    Parsed here all the same, and the result thrown away. A fixture written
+    as a hand-shaped dict can drift from the published contract with no
+    test noticing -- which is how contract fields ship unread -- so this
+    parse is the fake refusing itself: a document ``ApiEndpointDoc`` would
+    not accept fails in the test that built it, rather than surviving as a
+    shape no real run can send.
+    """
+    document = endpoint_json(**shape)
+    ApiEndpointDoc.model_validate(document)
+    return document
 
 
 def stream_source(
@@ -251,4 +284,9 @@ def stream_source(
     }
     if filters:
         block["filters"] = filters
+    # Parsed here and the result thrown away, exactly as the endpoint
+    # document above is: the read path parses this block against
+    # ``StreamSource``, so a fixture the contract would refuse fails in the
+    # test that built it rather than pinning a read no engine can send.
+    StreamSource.model_validate(block)
     return block

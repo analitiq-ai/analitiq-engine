@@ -33,21 +33,31 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
+from analitiq.contracts.endpoints import Param
+
 logger = logging.getLogger(__name__)
 
 
 def resolve_param_defaults(
-    params_spec: Mapping[str, Any],
+    params_spec: Mapping[str, Param],
     resolver: Any,
     *,
     context: str = "param",
 ) -> dict[str, Any]:
     """Resolve ``default`` expressions for each declared param.
 
-    Iterates *params_spec*, skips non-dict entries and those without a
-    ``default`` key, calls ``resolver.resolve_for_request`` on each default,
-    and omits params whose default resolves to ``None`` (logging a warning).
-    Returns a ``{name: value}`` dict of all successfully-resolved defaults.
+    Iterates *params_spec*, skips params that declare no ``default``, calls
+    ``resolver.resolve_for_request`` on each default, and omits params whose
+    default resolves to ``None`` (logging a warning). Returns a
+    ``{name: value}`` dict of all successfully-resolved defaults.
+
+    "Declares no default" is ``model_fields_set``, never ``default is None``:
+    the contract fills an omitted ``default`` with ``None``, so the value
+    alone cannot separate an author's omission from an authored
+    ``"default": null`` -- and the two behave differently. An omission is
+    the ordinary shape of a param a request binding fills; an authored null
+    is a default nothing can ever resolve, which is what the warning below
+    is for.
 
     *resolver* must expose a ``resolve_for_request(expr)`` method
     (e.g. :class:`cdk.resolver.Resolver`).  Authoring errors such as
@@ -59,9 +69,9 @@ def resolve_param_defaults(
     """
     values: dict[str, Any] = {}
     for name, decl in params_spec.items():
-        if not isinstance(decl, dict) or "default" not in decl:
+        if "default" not in decl.model_fields_set:
             continue
-        value = resolver.resolve_for_request(decl["default"])
+        value = resolver.resolve_for_request(decl.default)
         if value is None:
             logger.warning(
                 "%s %r: default did not resolve; parameter omitted",

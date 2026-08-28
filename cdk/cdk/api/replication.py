@@ -1,30 +1,26 @@
 """Binding a stream's incremental cursor to the param the endpoint declares.
 
-The document is already validated, so the two cursor-mapping shapes are
-told apart by the keys they carry: a window mapping declares
-start/end params and operators, a single mapping declares one of each.
-Only the single form drives an incremental filter today -- half-binding a
-window would send a lower bound with no upper one and read a different
-range than the author declared.
+The contract's cursor-mapping union parses into two classes, so which
+form a mapping is comes out of the parse and is read with ``isinstance``
+-- never re-derived from the keys the mapping happens to carry. Only the
+single form drives an incremental filter today -- half-binding a window
+would send a lower bound with no upper one and read a different range
+than the author declared.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+from analitiq.contracts.endpoints import Replication, SingleCursorMapping
 
 from ..exceptions import ReadError
 
 __all__ = ["cursor_param_for", "effective_start"]
 
-#: The keys that make a cursor mapping a window rather than a single bound.
-_WINDOW_KEYS = ("start_param", "end_param", "start_operator", "end_operator")
 
-
-def cursor_param_for(
-    replication_block: Mapping[str, Any] | None, cursor_field: str
-) -> str | None:
+def cursor_param_for(replication: Replication | None, cursor_field: str) -> str | None:
     """Return the param the stream's cursor field binds to, or ``None``.
 
     ``None`` means the endpoint declares no single-param mapping for this
@@ -32,15 +28,13 @@ def cursor_param_for(
     loudly, because an incremental stream silently reading everything is
     the failure mode this answer exists to make visible.
     """
-    mappings = (replication_block or {}).get("cursor_mappings") or []
-    for mapping in mappings:
-        if not isinstance(mapping, Mapping):
+    if replication is None:
+        return None
+    for mapping in replication.cursor_mappings:
+        if not isinstance(mapping, SingleCursorMapping):
             continue
-        if any(key in mapping for key in _WINDOW_KEYS):
-            continue
-        if mapping.get("cursor_field") == cursor_field:
-            param = mapping.get("param")
-            return str(param) if param else None
+        if mapping.cursor_field == cursor_field:
+            return mapping.param or None
     return None
 
 

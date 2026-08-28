@@ -194,9 +194,15 @@ class TestOneRequestPerChunk:
         assert result.records_written == 0
 
     async def test_an_unbuildable_chunk_attributes_from_its_offset(self) -> None:
+        # Unbuildable at the chunk, not at the parse: a function handed a
+        # type it cannot take is a defect the document carries fine and the
+        # body build meets on every chunk.
         document = _document(
             batching={"max_records": 2},
-            body={"items": {"from_input": "records.missing.deeper"}},
+            body={
+                "items": {"from_input": "records"},
+                "tag": {"function": "base64_encode", "input": {"literal": 5}},
+            },
         )
         session = FakeSession()
         connector = await _connected(session, document)
@@ -278,14 +284,23 @@ class TestDeclaredWriteParams:
         await _write(connector, _ids(1))
         assert b'"tenant":"acme"' in session.calls[0]["data"]
 
-    async def test_an_undeclared_param_drops_its_field(self) -> None:
-        # A from_param naming nothing binds None, and an unresolved value
-        # omits its field rather than going onto the wire as null.
+    async def test_a_param_that_resolves_to_nothing_drops_its_field(self) -> None:
+        # A declared param whose default resolves to nothing binds None,
+        # and an unresolved value omits its field rather than going onto
+        # the wire as null.
         document = _document(
+            params={
+                "tenant": {
+                    "in": "body",
+                    "type": "string",
+                    "required": False,
+                    "default": {"ref": "connection.parameters.absent"},
+                }
+            },
             body={
                 "item": {"from_input": "record"},
-                "tenant": {"from_param": "never_declared"},
-            }
+                "tenant": {"from_param": "tenant"},
+            },
         )
         session = FakeSession([FakeResponse(body={})])
         connector = await _connected(session, document)

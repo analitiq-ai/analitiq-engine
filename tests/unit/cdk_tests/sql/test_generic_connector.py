@@ -20,6 +20,8 @@ from unittest.mock import AsyncMock, patch
 
 import pyarrow as pa
 import pytest
+from analitiq.contracts.endpoints import DATABASE_ENDPOINT_SCHEMA_URL
+from analitiq.contracts.stream import StreamSource
 
 from cdk.exceptions import ReadError
 from cdk.secrets.exceptions import PlaceholderExpansionError
@@ -71,15 +73,57 @@ def _endpoint_config(
 ):
     return {
         "endpoint_document": {
+            "$schema": DATABASE_ENDPOINT_SCHEMA_URL,
+            "endpoint_id": "orders",
             "database_object": {"name": "orders", "schema": "public"},
-            "columns": [{"name": c} for c in columns],
+            "columns": [
+                {"name": c, "native_type": "TEXT", "arrow_type": "Utf8"}
+                for c in columns
+            ],
         },
-        "stream_source": {
-            "filters": filters or [],
-            "replication": replication or {},
-            "database_pagination": database_pagination or {},
-        },
+        "stream_source": _stream_source(
+            filters=filters,
+            replication=replication,
+            database_pagination=database_pagination,
+        ),
     }
+
+
+def _stream_source(
+    *,
+    filters=None,
+    replication=None,
+    database_pagination=None,
+) -> dict[str, Any]:
+    """The stream's source block, as the engine hands it to the read.
+
+    Parsed here and the result thrown away, for the reason the endpoint
+    document is: a block ``StreamSource`` would refuse is a shape no
+    pipeline can send, so a fixture drifting from the published contract
+    fails in the test that built it rather than pinning a read no run
+    performs. Only the blocks a test declares are present -- an empty
+    ``replication`` or ``database_pagination`` names no variant of its
+    union, which is a document the contract rejects rather than a stream
+    that declared nothing.
+    """
+    block: dict[str, Any] = {
+        # Connection scope: a database source's binding carries the
+        # verbatim object locator, and it is the scope under which the
+        # contract allows the database-only read options below.
+        "endpoint_ref": {
+            "scope": "connection",
+            "connection_id": "test-conn",
+            "database_object": {"schema": "public", "name": "orders"},
+        }
+    }
+    if filters:
+        block["filters"] = filters
+    if replication:
+        block["replication"] = replication
+    if database_pagination:
+        block["database_pagination"] = database_pagination
+    StreamSource.model_validate(block)
+    return block
 
 
 async def _drain(connector, runtime, config, checkpoint, batch_size=2):
@@ -107,7 +151,18 @@ class TestReadGuards:
     async def test_missing_table_name_raises(self):
         connector = GenericSQLConnector()
         runtime = _FakeRuntime(is_adbc=False)
-        config = {"endpoint_document": {"database_object": {}, "columns": []}}
+        # Every other field is contract-valid, so the missing object name is
+        # the only thing the refusal can be about.
+        config = {
+            "endpoint_document": {
+                "$schema": DATABASE_ENDPOINT_SCHEMA_URL,
+                "endpoint_id": "orders",
+                "database_object": {"schema": "public"},
+                "columns": [
+                    {"name": "id", "native_type": "TEXT", "arrow_type": "Utf8"}
+                ],
+            }
+        }
         with pytest.raises(ReadError, match="database_object.name"):
             await _drain(connector, runtime, config, _checkpoint())
 
@@ -128,11 +183,19 @@ class TestReadGuards:
                 await _drain(connector, runtime, config, _checkpoint())
         runtime.close.assert_awaited()
 
-    def test_build_filters_missing_field_raises(self):
-        # A filter dict without 'field' used to be skipped, silently
-        # widening the result set.
-        with pytest.raises(ReadError, match="missing 'field'"):
-            GenericSQLConnector._build_filters([{"operator": "eq", "value": 1}])
+    @pytest.mark.asyncio
+    async def test_a_filter_naming_no_field_is_refused_by_the_source_parse(self):
+        # A filter without 'field' used to be skipped, silently widening
+        # the result set, and _build_filters guarded against it. The stream
+        # contract requires the field, so the source parse now refuses the
+        # whole read before a connection is opened -- an unnamed filter
+        # never reaches the query builder to be guarded against.
+        connector = GenericSQLConnector()
+        runtime = _FakeRuntime(is_adbc=False)
+        config = _endpoint_config()
+        config["stream_source"]["filters"] = [{"operator": "eq", "value": 1}]
+        with pytest.raises(ReadError, match="does not satisfy StreamSource"):
+            await _drain(connector, runtime, config, _checkpoint())
 
     @pytest.mark.asyncio
     async def test_incremental_wildcard_projection_passes_cursor_check(self):
@@ -259,6 +322,11 @@ class TestReadAdbcBranch:
 
     @pytest.mark.asyncio
     async def test_empty_columns_rejected(self):
+        # A document declaring no columns compiles to a SELECT with no
+        # projection, so it must be refused before any extraction work.
+        # Releasing the runtime on a read error is pinned by
+        # test_incremental_cursor_field_not_in_projection_raises, which
+        # fails deep enough in the read to have opened one.
         runtime = _FakeRuntime(is_adbc=True)
         connector = GenericSQLConnector()
         with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
@@ -266,10 +334,8 @@ class TestReadAdbcBranch:
         ):
             config = _endpoint_config(columns=())
             config["endpoint_document"]["columns"] = []
-            with pytest.raises(ReadError, match="non-empty column projection"):
+            with pytest.raises(ReadError, match="column"):
                 await _drain(connector, runtime, config, _checkpoint())
-        # Even on the read error, the runtime is released.
-        runtime.close.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_saves_last_cursor_value_from_batch(self):

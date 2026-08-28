@@ -37,6 +37,7 @@ from typing import Any
 
 import pyarrow as pa
 import pytest
+from analitiq.contracts.endpoints import DatabaseEndpointDoc
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.secrets.resolvers.scheme import SchemeSecretsResolver
@@ -45,7 +46,7 @@ from cdk.sql.generic import GenericSQLConnector
 from cdk.types import BatchWriteResult, Cursor, SchemaSpec, WriteMode
 
 from ..fakes import MemoryCheckpointStore
-from ..target import ConformanceSetupError, ConformanceTarget
+from ..target import ConformanceSetupError, ConformanceTarget, schema_url_of
 
 STREAM_ID = "conformance-stream"
 RUN_ID = "conformance-run"
@@ -189,15 +190,47 @@ class LiveHarness:
         )
 
     def endpoint_document(self) -> dict[str, Any]:
-        """Return the suite table's contract endpoint document."""
+        """Return the suite table's contract endpoint document.
+
+        JSON, because ``set_stream_endpoints`` takes JSON: the connector
+        parses it against ``DatabaseEndpointDoc`` on the way in, the same
+        funnel the engine hands a saved document through, so a fixture
+        short of the contract fails there rather than being quietly
+        accepted by a suite the engine would refuse.
+        """
         return {
+            "$schema": schema_url_of(DatabaseEndpointDoc),
+            "endpoint_id": self.table,
             "database_object": {"name": self.table, "schema": self.schema},
             "columns": [
-                {"name": "id", "arrow_type": "Int64", "nullable": False},
-                {"name": "val", "arrow_type": "Utf8", "nullable": True},
-                {"name": "seq", "arrow_type": "Int64", "nullable": True},
+                self._column("id", "Int64", nullable=False),
+                self._column("val", "Utf8", nullable=True),
+                self._column("seq", "Int64", nullable=True),
             ],
             "primary_keys": ["id"],
+        }
+
+    def _column(self, name: str, arrow_type: str, *, nullable: bool) -> dict[str, Any]:
+        """Declare one column of the suite table.
+
+        The contract requires a ``native_type`` beside the Arrow one. Here
+        it is asked of the connector's own write map rather than invented,
+        because this table is one the suite CREATES through that same map:
+        the DDL renders each Arrow type through ``to_native_type``, so
+        that is what the column actually is in the database the read phase
+        then reads back.
+        """
+        mapper = self.target.type_mapper
+        if mapper is None:
+            raise ConformanceSetupError(
+                "the live tier writes and reads its own table, so the "
+                "connector must ship type maps; this one ships none"
+            )
+        return {
+            "name": name,
+            "native_type": mapper.to_native_type(arrow_type),
+            "arrow_type": arrow_type,
+            "nullable": nullable,
         }
 
     # ------------------------------------------------------------------
@@ -281,7 +314,18 @@ class LiveHarness:
         )
         config = {
             "endpoint_document": self.endpoint_document(),
-            "stream_source": {"replication": replication},
+            "stream_source": {
+                # The binding a real database stream carries: connection
+                # scope, locating the suite table the write phase filled.
+                # The read parses this block as the contract's StreamSource,
+                # so the kit sends what a pipeline sends.
+                "endpoint_ref": {
+                    "scope": "connection",
+                    "connection_id": "conformance-live",
+                    "database_object": {"schema": self.schema, "name": self.table},
+                },
+                "replication": replication,
+            },
         }
         rows: list[dict[str, Any]] = []
         try:

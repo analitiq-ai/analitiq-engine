@@ -18,6 +18,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from analitiq.contracts.endpoints import DATABASE_ENDPOINT_SCHEMA_URL
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.sql.capabilities import (
@@ -190,23 +191,30 @@ def _upsert_handler(cls=GenericSQLConnector):
     handler._engine = MagicMock()
     handler._runtime = MagicMock()
     handler._runtime.type_mapper_for = MagicMock(return_value=MagicMock())
-    handler._endpoint_refs = {
-        "s1": {"scope": "connector", "connection_id": "c", "endpoint_id": "e"}
-    }
-    handler._stream_endpoints = {
-        "s1": {
-            "database_object": {"name": "orders", "schema": "public"},
-            "columns": [
-                {
-                    "name": "id",
-                    "native_type": "BIGINT",
-                    "arrow_type": "Int64",
-                    "nullable": False,
-                }
-            ],
-            "primary_keys": ["id"],
+    # Through the registration funnel, not onto the attribute: the handler
+    # holds parsed contract refs, and a hand-built dict would be a shape no
+    # worker can send.
+    handler.set_endpoint_refs(
+        {"s1": {"scope": "connector", "connection_id": "c", "endpoint_id": "e"}}
+    )
+    handler.set_stream_endpoints(
+        {
+            "s1": {
+                "$schema": DATABASE_ENDPOINT_SCHEMA_URL,
+                "endpoint_id": "orders",
+                "database_object": {"name": "orders", "schema": "public"},
+                "columns": [
+                    {
+                        "name": "id",
+                        "native_type": "BIGINT",
+                        "arrow_type": "Int64",
+                        "nullable": False,
+                    }
+                ],
+                "primary_keys": ["id"],
+            }
         }
-    }
+    )
     handler.set_stream_conflict_keys({"s1": ["id"]})
     handler._ensure_tables_exist = AsyncMock()
     return handler

@@ -220,11 +220,20 @@ class BatchWriteResult:
 class EndpointScope(StrEnum):
     """Whether an endpoint reference is scoped to a connector or a connection.
 
-    The value read off the engine's ``EndpointRef.scope``. Constructing
-    ``EndpointScope(value)`` raises ``ValueError`` on an unknown value, which
-    preserves the scope validation the engine gets from the published contract
-    (``validate_endpoint_ref``) engine-side. The CDK takes this enum (not the
-    engine model) so it never imports ``src/models``.
+    The CDK's runtime vocabulary for scope: ``type_mapper_for`` dispatches on
+    a member, and the SQL and API read paths reach it holding only the raw
+    ``scope`` string off a serialised ``endpoint_ref`` that crossed the worker
+    boundary. ``EndpointScope(value)`` is where that string is checked -- an
+    unknown scope raises ``ValueError`` at the conversion instead of quietly
+    selecting the connector mapper two frames later.
+
+    An enum rather than the contract's endpoint-ref models because the scope
+    arrives alone, without the document it was parsed from: the contract
+    spells scope as a ``Literal`` on each variant of a discriminated union,
+    which answers "which scope is this" only by branching over parsed
+    variants. The members are held to that Literal by
+    ``tests/unit/cdk_tests/test_endpoint_scope_vocabulary.py``, so a scope the
+    contract adds or renames fails there instead of drifting.
     """
 
     CONNECTOR = "connector"

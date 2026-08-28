@@ -6,16 +6,21 @@ author's stop condition belong to :class:`~cdk.api.page_loop.PageLoop` and
 are not re-decided here -- that re-deciding is what let the five hand-written
 loops drift apart.
 
-Blocks arrive as plain dictionaries. The engine validates the endpoint
-document against the published contract before anything reads it, so this
-layer navigates an already-validated document raw and the CDK's dependency
-set stays SQLAlchemy + Pydantic. The vocabulary is still the contract's: an
-adapter cannot rename a field, and an unknown ``type`` fails loud naming the
+Blocks arrive as the contract's own pagination models. The endpoint document
+is parsed against the published contract before anything reads it -- worker
+side too, because a worker runs untrusted connector code -- so the ``type``
+an author wrote picks the union member at the parse, and each adapter then
+reads its own block's fields by name instead of sifting a dictionary for the
+keys it hopes are there. An unknown ``type`` reaching here therefore means a
+contract release this build has no adapter for, and it fails loud naming the
 strategy union rather than silently reading nothing.
 
 Value expressions (a next cursor, a next URL, a per-page increment) are
 resolved through an injected ``resolve``, so this module knows neither the
-resolver's construction nor the response scope's shape.
+resolver's construction nor the response scope's shape. They are handed over
+exactly as they were parsed: the resolver's grammar is transport-neutral, and
+turning a parsed node back into the JSON its author wrote is the resolver's
+own entry-point business, not something five adapters each get to spell.
 """
 
 from __future__ import annotations
@@ -23,6 +28,15 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from typing import Any
+
+from analitiq.contracts.endpoints import (
+    CursorPagination,
+    KeysetPagination,
+    LinkPagination,
+    OffsetPagination,
+    PagePagination,
+    Pagination,
+)
 
 from .page_loop import Page, PageRequest, PaginationStrategy
 from .records import walk_path
@@ -38,10 +52,10 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 #: The declared pagination values resolved BEFORE the traversal has a page,
-#: as paths into the pagination block. ``limit.default`` is resolved by
-#: :func:`resolve_page_size` to place the page size on the first request,
-#: and ``page.increment_by`` by ``_Page.__init__`` so a page number cannot
-#: change stride mid-read. Every other declared value -- ``offset``'s
+#: as attribute paths into the pagination block. ``limit.default`` is
+#: resolved by :func:`resolve_page_size` to place the page size on the first
+#: request, and ``page.increment_by`` by ``_Page.__init__`` so a page number
+#: cannot change stride mid-read. Every other declared value -- ``offset``'s
 #: increment, ``cursor``'s token, ``link``'s next URL, the stop condition --
 #: is resolved in ``advance``, against the page just served.
 #:
@@ -71,8 +85,14 @@ FollowUrl = Callable[[str, str], str]
 
 #: Builds one adapter from its declared block. A Protocol cannot be
 #: instantiated, so the table is typed by what building one looks like.
+#:
+#: The block is ``Any`` and not ``Pagination``: each adapter takes the one
+#: union member its key selects, and a callable's parameters are
+#: contravariant, so no single written-out signature says "the member this
+#: key selects". The narrowing that matters is on each adapter's own
+#: ``__init__``, where a wrong member would be a type error at the call.
 _StrategyFactory = Callable[
-    [dict[str, Any], dict[str, Any], str, Resolve, FollowUrl], PaginationStrategy
+    [Any, dict[str, Any], str, Resolve, FollowUrl], PaginationStrategy
 ]
 
 
@@ -122,7 +142,7 @@ def _positive_step(value: Any, *, context: str) -> int:
 
 
 def resolve_page_size(
-    block: dict[str, Any] | None,
+    pagination: Pagination | None,
     *,
     batch_size: int,
     resolve: Callable[[Any], Any],
@@ -143,10 +163,12 @@ def resolve_page_size(
     spelling only, so a document reaching here can still declare a
     non-positive size as an expression.
     """
-    limit = (block or {}).get("limit") or {}
+    limit = pagination.limit if pagination is not None else None
     size = batch_size
-    if limit.get("default") is not None:
-        resolved = resolve(limit["default"])
+    if limit is None:
+        return size
+    if limit.default is not None:
+        resolved = resolve(limit.default)
         if resolved is not None:
             size = _positive_step(resolved, context="limit.default")
         else:
@@ -155,8 +177,8 @@ def resolve_page_size(
                 "engine batch_size %d",
                 batch_size,
             )
-    if limit.get("max") is not None:
-        size = min(size, int(limit["max"]))
+    if limit.max is not None:
+        size = min(size, limit.max)
     return size
 
 
@@ -165,19 +187,19 @@ class _Offset:
 
     def __init__(
         self,
-        block: dict[str, Any],
+        block: OffsetPagination,
         base: dict[str, Any],
         url: str,
         resolve: Resolve,
         follow: FollowUrl,
     ) -> None:
-        cursor = block["offset"]
-        self._param = cursor["param"]
-        self._next_offset = int(cursor["initial"])
+        cursor = block.offset
+        self._param = cursor.param
+        self._next_offset = int(cursor.initial)
         # Resolved per page, deliberately: the contract lets offset declare
         # increment_by as a value expression, so a provider that reports its
         # own page size can drive the step.
-        self._increment_by = cursor["increment_by"]
+        self._increment_by = cursor.increment_by
         self._base = base
         self._url = url
         self._resolve = resolve
@@ -198,19 +220,20 @@ class _Page:
 
     def __init__(
         self,
-        block: dict[str, Any],
+        block: PagePagination,
         base: dict[str, Any],
         url: str,
         resolve: Resolve,
         follow: FollowUrl,
     ) -> None:
-        cursor = block["page"]
-        self._param = cursor["param"]
-        self._page_number = int(cursor["initial"])
-        # Resolved once, before the first request: the contract types page's
-        # increment_by loosely and a page number advances by a fixed stride,
-        # so re-resolving per page would invite a step that changes mid-read.
-        declared = cursor.get("increment_by")
+        cursor = block.page
+        self._param = cursor.param
+        self._page_number = int(cursor.initial)
+        # Resolved once, before the first request: the contract lets page's
+        # increment_by be a value expression, and a page number advances by
+        # a fixed stride, so re-resolving per page would invite a step that
+        # changes mid-read.
+        declared = cursor.increment_by
         self._step = (
             1
             if declared is None
@@ -232,15 +255,15 @@ class _Cursor:
 
     def __init__(
         self,
-        block: dict[str, Any],
+        block: CursorPagination,
         base: dict[str, Any],
         url: str,
         resolve: Resolve,
         follow: FollowUrl,
     ) -> None:
-        cursor = block["cursor"]
-        self._param = cursor["param"]
-        self._next_cursor = cursor["next_cursor"]
+        cursor = block.cursor
+        self._param = cursor.param
+        self._next_cursor = cursor.next_cursor
         self._base = base
         self._url = url
         self._resolve = resolve
@@ -263,16 +286,16 @@ class _Keyset:
 
     def __init__(
         self,
-        block: dict[str, Any],
+        block: KeysetPagination,
         base: dict[str, Any],
         url: str,
         resolve: Resolve,
         follow: FollowUrl,
     ) -> None:
-        keyset = block["keyset"]
-        self._param = keyset["param"]
-        self._field = keyset["order_by_field"]
-        self._last = keyset.get("initial")
+        keyset = block.keyset
+        self._param = keyset.param
+        self._field = keyset.order_by_field
+        self._last = keyset.initial
         self._base = base
         self._url = url
 
@@ -305,13 +328,13 @@ class _Link:
 
     def __init__(
         self,
-        block: dict[str, Any],
+        block: LinkPagination,
         base: dict[str, Any],
         url: str,
         resolve: Resolve,
         follow: FollowUrl,
     ) -> None:
-        self._next_url = block["link"]["next_url"]
+        self._next_url = block.link.next_url
         # The declared params bind on the first request only: a next URL is
         # absolute and carries the provider's own query, so re-appending
         # ours would fight it. That is the contract's own rule for link.
@@ -345,7 +368,8 @@ class _Link:
 class _Single:
     """Read the one page an endpoint that declares no pagination serves.
 
-    Not a scheme the contract names -- the absence of one. It exists so the
+    Not a scheme the contract names -- the absence of one, which is why its
+    block is ``None`` rather than a union member. It exists so the
     unpaginated read runs on the same loop as every other: the empty-page
     rule, the fetch, and the yield are then written once rather than once
     here and once in a special case beside the loop.
@@ -353,7 +377,7 @@ class _Single:
 
     def __init__(
         self,
-        block: dict[str, Any],
+        block: None,
         base: dict[str, Any],
         url: str,
         resolve: Resolve,
@@ -372,7 +396,10 @@ class _Single:
         return None
 
 
-#: The contract's closed strategy union, by its own discriminator.
+#: The contract's closed strategy union, by its own discriminator. Keyed by
+#: the literal string the union discriminates on rather than by the member
+#: class, so a document parsed on a newer contract still reaches the refusal
+#: below by name instead of falling off an isinstance chain.
 _STRATEGIES: dict[str, _StrategyFactory] = {
     "offset": _Offset,
     "page": _Page,
@@ -383,7 +410,7 @@ _STRATEGIES: dict[str, _StrategyFactory] = {
 
 
 def build_strategy(
-    block: dict[str, Any] | None,
+    pagination: Pagination | None,
     *,
     url: str,
     base_params: dict[str, Any],
@@ -401,9 +428,9 @@ def build_strategy(
     named, and a default would be a way to skip that refusal by forgetting
     an argument.
     """
-    if block is None:
-        return _Single({}, base_params, url, resolve, follow_url)
-    declared = str(block.get("type", ""))
+    if pagination is None:
+        return _Single(None, base_params, url, resolve, follow_url)
+    declared = pagination.type
     strategy = _STRATEGIES.get(declared)
     if strategy is None:
         raise UnknownPaginationStrategy(
@@ -411,4 +438,4 @@ def build_strategy(
             f"{sorted(_STRATEGIES)}; the contract's strategy union is closed, "
             f"so this build cannot walk it"
         )
-    return strategy(block, base_params, url, resolve, follow_url)
+    return strategy(pagination, base_params, url, resolve, follow_url)

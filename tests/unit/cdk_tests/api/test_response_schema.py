@@ -5,6 +5,9 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from analitiq.contracts.endpoints import ResponseExtraction
+from analitiq.contracts.stream import validate_endpoint_ref
+from pydantic import ValidationError
 
 from cdk.api.response_schema import (
     apply_read_type_map,
@@ -16,11 +19,34 @@ from cdk.type_map import UnmappedTypeError
 
 pytestmark = pytest.mark.unit
 
-_ENDPOINT_REF = {"scope": "connector", "connection_id": "c", "endpoint_id": "items"}
+#: The stream's binding, parsed the way the read path hands it over: a
+#: scope-discriminated contract ref, never a dict.
+_ENDPOINT_REF = validate_endpoint_ref(
+    {"scope": "connector", "connection_id": "c", "endpoint_id": "items"}
+)
+_CONNECTION_REF = validate_endpoint_ref(
+    {
+        "scope": "connection",
+        "connection_id": "c",
+        "database_object": {"schema": "public", "name": "items"},
+    }
+)
 
 
-def _response(schema: dict[str, Any], ref: str = "response.body.records") -> dict:
-    return {"schema": schema, "records": {"ref": ref}}
+def _response(
+    schema: dict[str, Any], ref: str = "response.body.records"
+) -> ResponseExtraction:
+    """The read's ``response`` block, parsed the way the read path gets it.
+
+    The block's own fields are contract fields and are read as attributes
+    (``schema`` is spelled ``schema_`` on the model, ``in`` would be
+    ``location``); the JSON Schema INSIDE it stays a free-form dict,
+    because that is what the contract declares it to be and what the walk
+    below descends through.
+    """
+    return ResponseExtraction.model_validate(
+        {"schema": schema, "records": {"ref": ref}}
+    )
 
 
 class _Runtime:
@@ -73,6 +99,16 @@ class TestItemsSchema:
         items = records_items_schema("items", _response(schema, "response.body"))
         assert items["properties"] == {"id": {}}
 
+    def test_a_ref_in_a_real_scope_but_off_the_body_never_parses(self) -> None:
+        # ``connector.foo`` satisfies the ref grammar's scope pattern, so
+        # only the anchor rule refuses it -- and the contract is what
+        # applies that rule, before ``records_items_schema`` sees a block at
+        # all. The ``split_records_ref`` call inside the walk is the same
+        # refusal one layer in, kept for the callers that receive a bare ref
+        # string; this pins that no block reaching HERE can carry one.
+        with pytest.raises(ValidationError):
+            _response({"type": "object"}, "connector.foo")
+
     def test_a_field_the_schema_does_not_declare_names_what_is_available(self) -> None:
         schema = {"type": "object", "properties": {"data": {"type": "array"}}}
         with pytest.raises(ReadError, match=r"available: \['data'\]"):
@@ -85,10 +121,6 @@ class TestItemsSchema:
         }
         with pytest.raises(ReadError, match="no 'properties'"):
             records_items_schema("items", _response(schema))
-
-    def test_the_ref_is_parsed_by_the_same_rule_the_payload_walk_uses(self) -> None:
-        with pytest.raises(ReadError, match="response.body"):
-            records_items_schema("items", _response({}, "records"))
 
 
 class TestReadTypeMap:
@@ -125,10 +157,6 @@ class TestReadTypeMap:
         runtime = _Runtime(error=RuntimeError("mapper absent"))
         with pytest.raises(ReadError, match="no usable read type-map"):
             apply_read_type_map(items, _ENDPOINT_REF, runtime)
-
-    def test_an_endpoint_ref_without_a_scope_names_the_valid_scopes(self) -> None:
-        with pytest.raises(ReadError, match="connector"):
-            apply_read_type_map({"properties": {}}, {}, _Runtime())
 
 
 class TestNestedResolution:
@@ -168,7 +196,7 @@ class TestMapperIsScoped:
         runtime = _Runtime(_Mapper({"integer": "Int64"}))
         apply_read_type_map(
             {"properties": {"id": {"type": "integer"}}},
-            {"scope": "connection"},
+            _CONNECTION_REF,
             runtime,
         )
         assert runtime.asked == [EndpointScope.CONNECTION]
