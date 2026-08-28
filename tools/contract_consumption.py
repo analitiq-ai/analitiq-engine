@@ -72,6 +72,7 @@ from analitiq.contracts.stream import (
 from mypy import build
 from mypy.main import process_options
 from mypy.nodes import CallExpr, MemberExpr, NameExpr, StrExpr
+from mypy.nodes import Expression as MypyExpression
 from mypy.server.subexpr import get_subexpressions
 from mypy.types import Instance, Type, UnionType, get_proper_type
 from pydantic import BaseModel
@@ -250,22 +251,34 @@ def census(result: build.BuildResult) -> Iterator[Access]:
         if not _in_scope(module, RUNTIME_MODULES) or state.tree is None:
             continue
         for expr in get_subexpressions(state.tree):
-            if isinstance(expr, MemberExpr):
-                models = _receiver_models(result.types.get(expr.expr))
-                if models:
-                    yield Access(Site(module, expr.line), models, expr.name)
-            elif isinstance(expr, CallExpr) and isinstance(expr.callee, NameExpr):
-                callee, args = expr.callee.fullname, expr.args
-                if callee == "builtins.getattr" and len(args) >= 2:
-                    models = _receiver_models(result.types.get(args[0]))
-                    if not models:
-                        continue
-                    name = args[1].value if isinstance(args[1], StrExpr) else None
-                    yield Access(Site(module, expr.line), models, name, lenient=True)
-                elif callee == AUTHORED_JSON and args:
-                    models = _receiver_models(result.types.get(args[0]))
-                    if models:
-                        yield Access(Site(module, expr.line), models, "authored_json")
+            access = _access_of(expr, module, result.types)
+            if access is not None:
+                yield access
+
+
+def _access_of(
+    expr: MypyExpression, module: str, types: Mapping[MypyExpression, Type]
+) -> Access | None:
+    """Return the contract access one expression is, or ``None``.
+
+    Three shapes read a contract model: an attribute access, a ``getattr``
+    (literal or table-driven name), and a hand-over to ``authored_json``.
+    """
+    site = Site(module, expr.line)
+    if isinstance(expr, MemberExpr):
+        models = _receiver_models(types.get(expr.expr))
+        return Access(site, models, expr.name) if models else None
+    if not isinstance(expr, CallExpr) or not isinstance(expr.callee, NameExpr):
+        return None
+    callee, args = expr.callee.fullname, expr.args
+    if callee == "builtins.getattr" and len(args) >= 2:
+        models = _receiver_models(types.get(args[0]))
+        name = args[1].value if isinstance(args[1], StrExpr) else None
+        return Access(site, models, name, lenient=True) if models else None
+    if callee == AUTHORED_JSON and args:
+        models = _receiver_models(types.get(args[0]))
+        return Access(site, models, "authored_json") if models else None
+    return None
 
 
 def grammar_entries(result: build.BuildResult) -> dict[str, set[Site]]:
