@@ -107,7 +107,10 @@ The consumption manifest says which contract fields the engine reads — every
 over the engine and the CDK by `tools/contract_consumption.py`. It is claims
 only: the contract repo decides which unread fields are defects, authoring-only
 or validator-only, and fails its own build on a field that is neither read nor
-so declared. Its `version` is `cdk.__version__`, and it publishes at the
+so declared. Coverage is the `roots` list: a field of a model reachable from a
+root and absent from `claims` is unread; a model no root reaches is not covered
+at all (the engine still reads it as a dictionary), so its fields are neither
+read nor unread until it is typed and declared a root. Its `version` is `cdk.__version__`, and it publishes at the
 `cdk-v*` tag that ships the wheel carrying the same bytes — not on push to
 `main`, where the content moves with every PR under an unchanged version.
 

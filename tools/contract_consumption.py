@@ -322,18 +322,22 @@ def classify(
     for access in accesses:
         kit = _in_scope(access.site.module, KIT_MODULES)
         reads = manifest.kit_reads if kit else manifest.claims
-        declared_by_any = False
+        members: dict[str, type[BaseModel]] = {}
         for model in access.models:
-            declared = models.get(model)
-            if declared is None:
+            if model in models:
+                members[model] = models[model]
+            else:
                 manifest.problems.append(
                     f"{access.site.render()}: reads {model}, which no declared "
                     f"root reaches; add the root the engine holds it through"
                 )
-            elif access.name is None:
-                if not kit:
-                    _claim_dynamic(manifest, access, model, declared, dynamic_sites)
-            elif access.name in declared.model_fields:
+        if access.name is None:
+            if not kit:
+                _claim_dynamic(manifest, access, members, dynamic_sites)
+            continue
+        declared_by_any = False
+        for model, declared in members.items():
+            if access.name in declared.model_fields:
                 reads[model][access.name].add(access.site)
                 declared_by_any = True
             elif not (access.lenient or kit):
@@ -361,21 +365,31 @@ def classify(
 def _claim_dynamic(
     manifest: Manifest,
     access: Access,
-    model: str,
-    declared: type[BaseModel],
+    members: Mapping[str, type[BaseModel]],
     dynamic_sites: dict[str, set[Site]],
 ) -> None:
-    """Claim, for one member, every name the site's registered table reads."""
+    """Claim, on each member declaring it, every name the site's table reads.
+
+    A table name no member declares is a stale entry: the runtime's
+    ``getattr`` answers its default there forever, and the claim would
+    simply vanish.
+    """
     table = DYNAMIC_ATTRIBUTE_TABLES.get(access.site.module)
     if table is None:
         manifest.problems.append(
-            f"{access.site.render()}: getattr on {model} with a non-literal "
-            f"name; register its table in DYNAMIC_ATTRIBUTE_TABLES"
+            f"{access.site.render()}: getattr on {', '.join(members)} with a "
+            f"non-literal name; register its table in DYNAMIC_ATTRIBUTE_TABLES"
         )
         return
     dynamic_sites[access.site.module].add(access.site)
     for name in _table_entries(*table):
-        if name in declared.model_fields:
+        declaring = [m for m, d in members.items() if name in d.model_fields]
+        if not declaring:
+            manifest.problems.append(
+                f"{access.site.render()}: {'.'.join(table)} names {name!r}, which "
+                f"no member of {', '.join(members)} declares"
+            )
+        for model in declaring:
             manifest.claims[model][name].add(access.site)
 
 
@@ -416,8 +430,11 @@ def claim_path_tables(
                     f"{site.render()}: path {path} starts at a field no member "
                     f"of the annotation declares"
                 )
+            resolved_fully = False
             for carrier in carriers:
-                for node, key in path_steps(carrier, path):
+                steps = path_steps(carrier, path)
+                resolved_fully |= {key for _, key in steps} >= set(path)
+                for node, key in steps:
                     name = model_name(node)
                     if name not in models:
                         manifest.problems.append(
@@ -426,6 +443,15 @@ def claim_path_tables(
                         )
                         continue
                     manifest.claims[name][key].add(site)
+            if carriers and not resolved_fully:
+                # A branch may stop short (the walk answers None there, as
+                # for any field it does not declare), but a path no branch
+                # resolves to its last step is a stale entry that must not
+                # simply drop out of the manifest.
+                manifest.problems.append(
+                    f"{site.render()}: path {path} resolves to its last step "
+                    f"through no member of the annotation"
+                )
 
 
 def _render_reads(

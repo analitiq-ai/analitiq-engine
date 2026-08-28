@@ -154,17 +154,21 @@ def test_a_registered_module_allows_one_dynamic_site(
         "DYNAMIC_ATTRIBUTE_TABLES",
         {"src.x": ("cdk.api.request", "_REQUEST_SLOTS")},
     )
-    monkeypatch.setattr(
-        census, "_table_entries", lambda module, attribute: ("x", "y", "q")
-    )
+    monkeypatch.setattr(census, "_table_entries", lambda module, attr: ("x", "y", "z"))
     one, claims = _classify(census, _access(census, None, models=(Leaf, Other)))
     assert one.problems == []
     assert claims == {
         model_name(Leaf): {
             "x": {census.Site("src.x", 7)},
             "y": {census.Site("src.x", 7)},
-        }
+        },
+        model_name(Other): {"z": {census.Site("src.x", 7)}},
     }
+    # A table name no member declares is a stale entry, not a silent miss.
+    monkeypatch.setattr(census, "_table_entries", lambda module, attr: ("x", "gone"))
+    stale, _ = _classify(census, _access(census, None, models=(Leaf, Other)))
+    assert len(stale.problems) == 1 and "'gone'" in stale.problems[0]
+    monkeypatch.setattr(census, "_table_entries", lambda module, attr: ("x",))
     two, _ = _classify(
         census,
         _access(census, None),
@@ -216,7 +220,9 @@ def test_a_path_table_claims_each_step_through_every_carrier(
     models = {**_MODELS, model_name(Inner): Inner, model_name(Carrier): Carrier}
     monkeypatch.setattr(census, "PATH_TABLES", ((Leaf | Carrier, "m", "T"),))
     monkeypatch.setattr(
-        census, "_table_entries", lambda module, attr: (("x", "deep"), ("q",))
+        census,
+        "_table_entries",
+        lambda module, attr: (("x", "deep"), ("q",), ("x", "gone")),
     )
     manifest = census.Manifest()
     census.claim_path_tables(manifest, models)
@@ -226,8 +232,15 @@ def test_a_path_table_claims_each_step_through_every_carrier(
         model_name(Carrier): {"x": {site}},
         model_name(Inner): {"deep": {site}},
     }
-    # A path no member starts is a dead table entry, not a silent no-op.
-    assert len(manifest.problems) == 1 and "('q',)" in manifest.problems[0]
+    # A path no member starts, or one no member resolves to its last step,
+    # is a stale table entry, not a silent no-op. ('x', 'deep') stopping
+    # short in Leaf is fine: Carrier resolves it.
+    assert len(manifest.problems) == 2
+    assert "('q',)" in manifest.problems[0]
+    assert (
+        "('x', 'gone') resolves to its last step through no member"
+        in manifest.problems[1]
+    )
 
 
 def test_a_dump_of_an_opaque_model_is_recorded_as_its_site(
