@@ -122,6 +122,10 @@ OPAQUE: Final[tuple[tuple[Any, str], ...]] = (
     (AssignmentTarget, "cdk.type_map.arrow"),
 )
 
+_OPAQUE_MODELS: Final = frozenset(
+    model_name(m) for annotation, _ in OPAQUE for m in contract_models(annotation)
+)
+
 #: Modules whose ``model_dump`` calls carry a document across the process
 #: boundary, where it is parsed again as the same contract model.
 TRANSPORT_MODULES: Final = frozenset({"src.models.resolved"})
@@ -271,9 +275,6 @@ def classify(
     :func:`claim_path_tables` on the same manifest.
     """
     manifest = Manifest()
-    opaque = {
-        model_name(m) for annotation, _ in OPAQUE for m in contract_models(annotation)
-    }
     dynamic_sites: dict[str, set[Site]] = defaultdict(set)
     for access in accesses:
         kit = _in_scope(access.site.module, KIT_MODULES)
@@ -286,44 +287,14 @@ def classify(
                     f"{access.site.render()}: reads {model}, which no declared "
                     f"root reaches; add the root the engine holds it through"
                 )
-                continue
-            if access.name is None:
-                if kit:
-                    continue
-                table = DYNAMIC_ATTRIBUTE_TABLES.get(access.site.module)
-                if table is None:
-                    manifest.problems.append(
-                        f"{access.site.render()}: getattr on {model} with a "
-                        f"non-literal name; register its table in "
-                        f"DYNAMIC_ATTRIBUTE_TABLES"
-                    )
-                    continue
-                dynamic_sites[access.site.module].add(access.site)
-                for name in _table_entries(*table):
-                    if name in declared.model_fields:
-                        reads[model][name].add(access.site)
-                continue
-            if access.name in declared.model_fields:
+            elif access.name is None:
+                if not kit:
+                    _claim_dynamic(manifest, access, model, declared, dynamic_sites)
+            elif access.name in declared.model_fields:
                 reads[model][access.name].add(access.site)
                 declared_by_any = True
-            elif access.name in INTROSPECTION or access.lenient:
-                continue
-            elif access.name in DUMPS:
-                if kit or model in opaque:
-                    continue
-                if access.site.module in TRANSPORT_MODULES:
-                    manifest.transport.add(access.site)
-                    continue
-                manifest.problems.append(
-                    f"{access.site.render()}: {access.name} on {model}; register "
-                    f"the model in OPAQUE with its consumer, or the module in "
-                    f"TRANSPORT_MODULES"
-                )
-            else:
-                manifest.problems.append(
-                    f"{access.site.render()}: .{access.name} on {model} is neither "
-                    f"a declared field nor a classified pydantic name"
-                )
+            elif not (access.lenient or kit):
+                _classify_pydantic_name(manifest, access, model)
         if access.lenient and access.name is not None and not declared_by_any:
             # A defaulted getattr may miss on SOME members (a GET read has no
             # body); missing on every member is a read of nothing -- a typo,
@@ -342,6 +313,49 @@ def classify(
                 f"table binds which site"
             )
     return manifest
+
+
+def _claim_dynamic(
+    manifest: Manifest,
+    access: Access,
+    model: str,
+    declared: type[BaseModel],
+    dynamic_sites: dict[str, set[Site]],
+) -> None:
+    """Claim, for one member, every name the site's registered table reads."""
+    table = DYNAMIC_ATTRIBUTE_TABLES.get(access.site.module)
+    if table is None:
+        manifest.problems.append(
+            f"{access.site.render()}: getattr on {model} with a non-literal "
+            f"name; register its table in DYNAMIC_ATTRIBUTE_TABLES"
+        )
+        return
+    dynamic_sites[access.site.module].add(access.site)
+    for name in _table_entries(*table):
+        if name in declared.model_fields:
+            manifest.claims[model][name].add(access.site)
+
+
+def _classify_pydantic_name(manifest: Manifest, access: Access, model: str) -> None:
+    """Sort a runtime read of a non-field attribute: introspection, dump, or problem."""
+    assert access.name is not None
+    if access.name in INTROSPECTION:
+        return
+    if access.name not in DUMPS:
+        manifest.problems.append(
+            f"{access.site.render()}: .{access.name} on {model} is neither a "
+            f"declared field nor a classified pydantic name"
+        )
+        return
+    if model in _OPAQUE_MODELS:
+        return
+    if access.site.module in TRANSPORT_MODULES:
+        manifest.transport.add(access.site)
+        return
+    manifest.problems.append(
+        f"{access.site.render()}: {access.name} on {model}; register the model "
+        f"in OPAQUE with its consumer, or the module in TRANSPORT_MODULES"
+    )
 
 
 def claim_path_tables(
