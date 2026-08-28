@@ -80,9 +80,10 @@ from cdk.type_map.arrow import (
     resolve_arrow_type,
 )
 from cdk.type_map.exceptions import InvalidTypeMapError
+from src.config.utils import author_set
 
 from .batch_policy import ErrorStrategy
-from .exceptions import TransformationError
+from .exceptions import TransformationError, ValidationFailure
 
 # A compiled expression: given the source batch, return one value column.
 _ExprFn = Callable[[pa.RecordBatch], pa.Array]
@@ -252,20 +253,6 @@ class _Step:
     is_json: bool
 
 
-class ValidationFailure(TransformationError):
-    """A batch with rows that fail a validation rule.
-
-    Raised by :meth:`CompiledTransform.run` only when the batch is otherwise
-    sound -- every column built and converted, every non-nullable column
-    filled. ``strategy`` is the strictest effective strategy among the rules
-    that failed, and is what the stream disposes of the batch under.
-    """
-
-    def __init__(self, message: str, *, strategy: ErrorStrategy) -> None:
-        super().__init__(message)
-        self.strategy = strategy
-
-
 @dataclass(frozen=True)
 class _BoundRule:
     """A validation rule with the strategy its failure is handled under."""
@@ -419,15 +406,16 @@ def _rule_strategy(
     pipeline ``runtime.error_handling`` default, so only a ``strategy`` the
     author wrote overrides it. An absent block, or a block that sets only the
     retry fields, means the pipeline default -- never the contract model's
-    own default value, which the engine does not adopt for the pipeline block
-    either (see ``pipeline_config_prep``). Only ``strategy`` is read: the
-    block's retry fields describe a retry loop a deterministic rule has no
-    use for.
+    own default value. Author intent is decided by the same
+    :func:`author_set` the pipeline block goes through, so the two blocks
+    cannot drift. Only ``strategy`` is read: the block's retry fields
+    describe a retry loop a deterministic rule has no use for.
     """
     override = validation.error_handling
-    if override is None or "strategy" not in override.model_fields_set:
+    if override is None:
         return default_strategy
-    return ErrorStrategy(override.strategy)
+    chosen = author_set(override, strategy=override.strategy)
+    return ErrorStrategy(chosen["strategy"]) if chosen else default_strategy
 
 
 def _compile_value(

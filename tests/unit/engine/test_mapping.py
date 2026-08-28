@@ -1071,6 +1071,16 @@ class TestValidationErrorStrategy:
         )
         assert failure.strategy is default
 
+    def test_null_strategy_is_a_document_shape_error(self):
+        """The contract's ``strategy`` is a literal, not nullable: ``null`` is
+        rejected at parse, never read as "unset" and never reaches
+        ``ErrorStrategy``."""
+        with pytest.raises(TransformationError, match="strategy"):
+            _compile(
+                [self._validated([_rule("not_null")], {"strategy": None})],
+                ErrorStrategy.FAIL,
+            )
+
     def test_retry_fields_change_nothing(self):
         """A rule is deterministic; the override's retry fields are not read."""
         failure = self._failure(

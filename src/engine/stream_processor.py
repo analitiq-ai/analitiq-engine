@@ -1019,15 +1019,11 @@ class StreamProcessor:
         logger.debug("Starting checkpoint stage for stream %s", self.stream_name)
 
         batch_count = 0
-        # Every batch read, passed or rejected; names a rejected batch in
-        # its log line and dead-letter entry.
-        batch_seq = 0
         try:
             while True:
                 batch = await input_queue.get()
                 if batch is None:
                     break
-                batch_seq += 1
 
                 # The durable checkpoint is written on destination ACK in
                 # _persist_committed_cursor; this stage only counts drained
