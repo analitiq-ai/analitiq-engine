@@ -8,14 +8,13 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ARTIFACTS, parseVersion } from "../scripts/sync-contracts-to-s3.mjs";
+import { ARTIFACTS, CHANNELS, artifactsFor, parseVersion } from "../scripts/sync-contracts-to-s3.mjs";
 import { matrixVersion } from "../dist/index.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const typeMapDir = join(repoRoot, "cdk", "cdk", "type_map");
 
-for (const { prefix, file } of ARTIFACTS) {
-  const sourcePath = join(typeMapDir, file);
+for (const { prefix, path } of ARTIFACTS) {
+  const sourcePath = join(repoRoot, path);
 
   test(`${prefix}: source file is valid JSON`, () => {
     assert.doesNotThrow(() => JSON.parse(readFileSync(sourcePath, "utf8")));
@@ -40,9 +39,21 @@ for (const { prefix, file } of ARTIFACTS) {
   });
 }
 
+test("every artifact publishes through exactly one known channel", () => {
+  // A channel no workflow invokes is an artifact nothing ever publishes; the
+  // two channels here are the two workflows that call the sync script.
+  assert.deepEqual([...CHANNELS].sort(), ["cdk-release", "main"]);
+  assert.deepEqual(
+    CHANNELS.flatMap((channel) => artifactsFor(channel).map((a) => a.prefix)).sort(),
+    ARTIFACTS.map((a) => a.prefix).sort()
+  );
+  assert.throws(() => artifactsFor("nightly"), /unknown channel "nightly"/);
+});
+
 test("the built package reports the engine artifact's own version", () => {
   // matrixVersion is public API and documented as equal to the artifact's
   // version; nothing else compares the built value against the source.
-  const { version } = JSON.parse(readFileSync(join(typeMapDir, "conversion_matrix.json"), "utf8"));
+  const [matrix] = ARTIFACTS.filter((a) => a.prefix === "conversion-matrix");
+  const { version } = JSON.parse(readFileSync(join(repoRoot, matrix.path), "utf8"));
   assert.equal(matrixVersion, version);
 });

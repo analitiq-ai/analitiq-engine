@@ -50,8 +50,8 @@ repos:
   # still flagged. `poetry run mypy src/` stays the full strict run;
   # mypy_path=cdk (pyproject) resolves the in-tree cdk package for both.
   - repo: https://github.com/pre-commit/mirrors-mypy
-    # Pinned to match the project's own mypy (pyproject dev dep mypy = "^1.5.0"
-    # resolves to 1.17.x); an older hook version emits different error codes
+    # Pinned to match the project's own mypy (pyproject dev dep mypy = "1.17.1",
+    # exact); an older hook version emits different error codes
     # (import vs import-untyped) and stale unreachable/decorator false
     # positives, so the hook and `poetry run mypy src/` would disagree.
     rev: v1.17.1

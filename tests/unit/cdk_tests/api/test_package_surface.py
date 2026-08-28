@@ -19,43 +19,20 @@ those tables against the models' own ``model_fields``.
 from __future__ import annotations
 
 import ast
-import types
 from pathlib import Path
-from typing import Annotated, Any, Union, get_args, get_origin
+from typing import get_args
 
 import pytest
 from analitiq.contracts.endpoints import Pagination, ReadRequest, WriteRequest
-from pydantic import BaseModel
 
 import cdk.api
 from cdk.api.request import _REQUEST_SLOTS
 from cdk.api.strategies import PRE_PAGE_VALUE_PATHS
+from cdk.contract_consumption import contract_models, path_steps
 
 pytestmark = pytest.mark.unit
 
 _PACKAGE = Path(cdk.api.__file__).parent
-
-
-def _model_members(annotation: Any) -> list[type[BaseModel]]:
-    """Every contract model *annotation* can be, unions and Annotated unwrapped.
-
-    The contract spells its request and pagination branches as discriminated
-    unions inside ``Annotated``, so "which models can this field hold" is a
-    question about the annotation rather than about any one instance. Asked
-    here once so the pins below read the same declaration the parse does.
-    """
-    found: list[type[BaseModel]] = []
-    pending: list[Any] = [annotation]
-    while pending:
-        node = pending.pop()
-        origin = get_origin(node)
-        if origin is Annotated:
-            pending.append(get_args(node)[0])
-        elif origin in (Union, types.UnionType):
-            pending.extend(get_args(node))
-        elif isinstance(node, type) and issubclass(node, BaseModel):
-            found.append(node)
-    return found
 
 
 #: The HTTP client and its companions belong to the round trip and the
@@ -149,7 +126,7 @@ def test_the_connector_is_not_imported_eagerly() -> None:
 #: credential reference request-time resolution silently drops. Pinned here
 #: against the contract models' own ``model_fields`` so a rename fails
 #: loudly in this suite instead.
-_REQUEST_UNION_MEMBERS = _model_members(ReadRequest) + _model_members(WriteRequest)
+_REQUEST_UNION_MEMBERS = contract_models(ReadRequest) + contract_models(WriteRequest)
 
 
 def test_every_request_slot_the_expression_walk_reads_is_a_contract_field() -> None:
@@ -184,21 +161,8 @@ def test_a_body_bearing_request_declares_every_slot_the_walk_reads() -> None:
         )
 
 
-def _unresolved_key(model: type[BaseModel], path: tuple[str, ...]) -> str | None:
-    """The first segment of *path* the models do not declare, or ``None``."""
-    node: type[BaseModel] | None = model
-    for index, key in enumerate(path):
-        if node is None or key not in node.model_fields:
-            return key
-        if index + 1 == len(path):
-            return None
-        members = _model_members(node.model_fields[key].annotation)
-        node = members[0] if members else None
-    return None
-
-
 def test_every_pre_page_path_resolves_through_the_pagination_models() -> None:
-    members = _model_members(Pagination)
+    members = contract_models(Pagination)
     for path in PRE_PAGE_VALUE_PATHS:
         carriers = [m for m in members if path[0] in m.model_fields]
         assert carriers, (
@@ -207,7 +171,8 @@ def test_every_pre_page_path_resolves_through_the_pagination_models() -> None:
             f"pre-page value reading 'response.*' stops being refused"
         )
         for carrier in carriers:
-            missing = _unresolved_key(carrier, path)
+            walked = {key for _, key in path_steps(carrier, path)}
+            missing = next((key for key in path if key not in walked), None)
             assert missing is None, (
                 f"PRE_PAGE_VALUE_PATHS entry {path} does not resolve through "
                 f"{carrier.__name__}: {missing!r} is not a declared field"
@@ -230,7 +195,7 @@ def test_every_pagination_member_names_its_block_after_its_discriminator() -> No
     the wrong way round -- would stop firing. The read would certify green
     after one page.
     """
-    members = _model_members(Pagination)
+    members = contract_models(Pagination)
     assert members, (
         "Pagination is no longer a union of contract models this can walk, so "
         "the loop below would pin nothing: api_read_path reaches a scheme's "

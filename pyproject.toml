@@ -122,7 +122,10 @@ pytest-cov = "^4.0.0"
 pytest-mock = "^3.10.0"
 black = "^23.0.0"
 flake8 = "^6.0.0"
-mypy = "^1.5.0"
+# Exact pin: tools/contract_consumption.py drives mypy's build API and reads
+# its type map, an internal surface that moves between releases. The
+# pre-commit hook pins the same version.
+mypy = "1.17.1"
 isort = "^5.12.0"
 pre-commit = "^3.3.0"
 sphinx = "^7.0.0"

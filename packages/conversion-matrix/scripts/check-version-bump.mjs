@@ -1,5 +1,7 @@
-// Pre-merge net: an artifact whose bytes changed on this branch must also
-// carry a higher `version`.
+// Pre-merge net: a main-channel artifact whose bytes changed on this branch
+// must also carry a higher `version`. Release-channel artifacts are outside
+// it: their version is the CDK release, which moves once per tag while the
+// content moves with the PRs in between.
 //
 // The publisher (sync-contracts-to-s3.mjs) refuses to republish changed
 // content under an already-published version, and refuses a version older than
@@ -20,10 +22,9 @@ import { readFileSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ARTIFACTS, compareVersions, parseVersion } from "./sync-contracts-to-s3.mjs";
+import { artifactsFor, compareVersions, parseVersion } from "./sync-contracts-to-s3.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const typeMapPath = "cdk/cdk/type_map";
 
 /**
  * Verdict for one artifact, from the base branch's copy (raw text, or null
@@ -101,8 +102,7 @@ function readAtRef(ref, path) {
 function main() {
   const baseRef = process.argv[2];
   if (!baseRef) throw new Error("usage: check-version-bump.mjs <base-ref>");
-  for (const { prefix, file } of ARTIFACTS) {
-    const path = `${typeMapPath}/${file}`;
+  for (const { prefix, path } of artifactsFor("main")) {
     let verdict;
     try {
       verdict = checkVersionBump(

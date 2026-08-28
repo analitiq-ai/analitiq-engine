@@ -6,16 +6,10 @@ name: conversion-matrix
 #
 #   1. @analitiq-ai/conversion-matrix on GitHub Packages, so the frontend can
 #      pin the typed helpers over the grid.
-#   2. Versioned raw JSON on S3 (sync-s3 job) — the conversion grid and the
-#      arrow_type parameter grammar, each under its own prefix and carrying its
-#      own version — one leg per target environment (dev, prod), so non-npm
-#      consumers can pin the contracts without registry credentials.
-#      Authentication is GitHub OIDC (short-lived, no stored
-#      keys); the role, region, and bucket come exclusively from GitHub
-#      Environment variables, so no cloud identifiers live in this repo. An
-#      environment with no role ARN configured skips its steps; once the role
-#      ARN is set, the remaining variables are required and fail loud when
-#      missing.
+#   2. Versioned raw JSON on S3 (sync-s3 job, via sync-contracts-s3.yml) — the
+#      conversion grid and the arrow_type parameter grammar, each under its
+#      own prefix and carrying its own version — so non-npm consumers can pin
+#      the contracts without registry credentials.
 
 on:
   push:
@@ -25,12 +19,14 @@ on:
       - cdk/cdk/type_map/arrow_type_grammar.json
       - packages/conversion-matrix/**
       - .github/workflows/conversion-matrix.yml
+      - .github/workflows/sync-contracts-s3.yml
   pull_request:
     paths:
       - cdk/cdk/type_map/conversion_matrix.json
       - cdk/cdk/type_map/arrow_type_grammar.json
       - packages/conversion-matrix/**
       - .github/workflows/conversion-matrix.yml
+      - .github/workflows/sync-contracts-s3.yml
 
 defaults:
   run:
@@ -96,57 +92,18 @@ jobs:
   sync-s3:
     # Versions on S3 are independent of the npm version: the npm digest covers
     # the shipped TS code too, while each S3 artifact (the grid, the grammar)
-    # states its own version in its own bytes. The sync script reads that
-    # version and reconciles against the latest.json manifest on S3, so a
-    # re-run after a partial failure converges on its own, and every
-    # environment publishes the same version for the same content. (The
-    # first-ever run additionally needs the role to grant s3:ListBucket, so a
-    # missing manifest reads as absence, not as Forbidden.)
-    #
-    # The role/region/bucket variables are ENVIRONMENT-scoped — each
-    # environment carries its own values under the same names — which is why
-    # the gate sits on the steps, not the job: a job-level `if` is evaluated
-    # before the environment attaches and would read every environment-scoped
-    # variable as empty. An unconfigured environment shows as a green leg with
-    # skipped steps.
+    # states its own version in its own bytes. The `main` channel is the two
+    # artifacts that bump their own version constant on every content change,
+    # so any commit on main is publishable; the consumption manifest ships
+    # through the `cdk-release` channel from publish-cdk.yml instead.
     if: github.event_name == 'push'
     needs: verify
-    runs-on: ubuntu-latest
-    strategy:
-      # Legs are independent: a dev hiccup must not hold back prod, or the
-      # other way round.
-      fail-fast: false
-      matrix:
-        env: [dev, prod]
-    # The job's OIDC subject claim carries this repo + environment; each
-    # account's role trust policy pins its own environment (dev role -> dev,
-    # prod role -> prod). Protection rules for an environment are a
-    # repo-settings concern, not a workflow one.
-    environment: ${{ matrix.env }}
-    concurrency:
-      group: conversion-matrix-s3-sync-${{ matrix.env }}
-      cancel-in-progress: false
+    uses: ./.github/workflows/sync-contracts-s3.yml
     permissions:
       contents: read
       id-token: write
-    steps:
+    with:
+      channel: main
       # Tip of main, same rationale as the publish job: always sync the current
       # grid, never a stale triggering commit.
-      - uses: actions/checkout@v4
-        if: vars.CONVERSION_MATRIX_S3_ROLE_ARN != ''
-        with:
-          ref: main
-      - uses: actions/setup-node@v4
-        if: vars.CONVERSION_MATRIX_S3_ROLE_ARN != ''
-        with:
-          node-version: "20"
-      - uses: aws-actions/configure-aws-credentials@v4
-        if: vars.CONVERSION_MATRIX_S3_ROLE_ARN != ''
-        with:
-          role-to-assume: ${{ vars.CONVERSION_MATRIX_S3_ROLE_ARN }}
-          aws-region: ${{ vars.CONVERSION_MATRIX_S3_REGION }}
-      - name: Sync versioned contract artifacts to S3 when their content changed
-        if: vars.CONVERSION_MATRIX_S3_ROLE_ARN != ''
-        env:
-          CONVERSION_MATRIX_S3_BUCKET: ${{ vars.CONVERSION_MATRIX_S3_BUCKET }}
-        run: node scripts/sync-contracts-to-s3.mjs
+      ref: main

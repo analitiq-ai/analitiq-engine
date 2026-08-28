@@ -86,6 +86,33 @@ jobs:
           ANALITIQ_CONFORMANCE_REQUIRE_LIVE: "1"
         run: poetry run pytest tests/conformance_kit/test_kit_live_reference.py
 
+  contract-consumption:
+    name: contract-consumption manifest is current
+    # cdk/cdk/contract_consumption.json states the contract fields the engine
+    # reads, computed from a full mypy build with the type map exported (about
+    # thirty seconds -- a CI step, not a unit test). A stale manifest, a
+    # dynamic read the census cannot classify, or a read on a model outside
+    # the declared roots fails here, so every PR shows the reads it added or
+    # removed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Install dependencies
+        run: poetry install --no-interaction
+
+      - name: Check the committed manifest against a fresh census
+        env:
+          PYTHONPATH: cdk
+        run: poetry run python tools/contract_consumption.py --check
+
   lint:
     name: pre-commit (all files)
     runs-on: ubuntu-latest

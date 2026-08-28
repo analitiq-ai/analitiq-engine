@@ -6,11 +6,22 @@
 //   latest.json                  mutable manifest {version, sha256, commit, publishedAt}
 //
 // The version is carried by the artifact itself (its top-level `version`
-// field, generated from the CDK's GRAMMAR_VERSION / CONVERSION_MATRIX_VERSION)
-// so a consumer holding the bytes can name the vocabulary it got. This script
-// reads that version; it never assigns one. Each artifact's sha256 is compared
-// against its own manifest, and content that changed without a version bump
-// aborts rather than overwriting an immutable published object.
+// field, generated from the CDK's GRAMMAR_VERSION / CONVERSION_MATRIX_VERSION,
+// or cdk.__version__ for the consumption manifest) so a consumer holding the
+// bytes can name the vocabulary it got. This script reads that version; it
+// never assigns one. Each artifact's sha256 is compared against its own
+// manifest, and content that changed without a version bump aborts rather
+// than overwriting an immutable published object.
+//
+// Each artifact names the CHANNEL that publishes it, and one run syncs one
+// channel (`node sync-contracts-to-s3.mjs <channel>`):
+//   main         on push to main -- the artifact bumps its own version
+//                constant whenever its content changes, so any commit is
+//                publishable;
+//   cdk-release  at a cdk-v* tag -- the artifact's version is
+//                cdk.__version__, which moves once per release while the
+//                content moves with every PR, so a push to main would abort
+//                on an unbumped change.
 //
 // Versioning here is deliberately independent of the npm package version —
 // that digest also covers the shipped TS code, so a helper fix bumps npm
@@ -28,12 +39,11 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = resolve(pkgRoot, "..", "..");
-const typeMapDir = join(repoRoot, "cdk", "cdk", "type_map");
 
 // Prefixes are fixed, not configurable: on a shared bucket whose publisher
 // role is not prefix-scoped, a typo'd prefix variable would silently start a
@@ -41,9 +51,32 @@ const typeMapDir = join(repoRoot, "cdk", "cdk", "type_map");
 // Exported so the test suite can assert each source file exists and is
 // tracked — a stale entry otherwise surfaces only in the post-merge sync job.
 export const ARTIFACTS = [
-  { prefix: "conversion-matrix", file: "conversion_matrix.json" },
-  { prefix: "arrow-type-grammar", file: "arrow_type_grammar.json" },
+  {
+    prefix: "conversion-matrix",
+    path: "cdk/cdk/type_map/conversion_matrix.json",
+    channel: "main",
+  },
+  {
+    prefix: "arrow-type-grammar",
+    path: "cdk/cdk/type_map/arrow_type_grammar.json",
+    channel: "main",
+  },
+  {
+    prefix: "contract-consumption",
+    path: "cdk/cdk/contract_consumption.json",
+    channel: "cdk-release",
+  },
 ];
+
+export const CHANNELS = Object.freeze([...new Set(ARTIFACTS.map((a) => a.channel))]);
+
+/** The artifacts one channel publishes; an unknown channel is a usage error. */
+export function artifactsFor(channel) {
+  if (!CHANNELS.includes(channel)) {
+    throw new Error(`unknown channel ${JSON.stringify(channel)}; one of: ${CHANNELS.join(", ")}`);
+  }
+  return ARTIFACTS.filter((a) => a.channel === channel);
+}
 
 // Each component is `0` or a leading-zero-free number, as semver requires.
 // A bare \d+ would accept "01.2.3" and normalise it to 1.2.3, so the object
@@ -80,11 +113,24 @@ export function compareVersions(left, right) {
  * every state that would publish bytes under a version that lies about them.
  * `publishedVersion` / `publishedSha` are null when nothing is published yet.
  *
+ * A declared version OLDER than the published one is refused by default: the
+ * npm channel has one `latest` and no other place for it. A channel that
+ * keeps one immutable object per version (S3) passes `allowOlder` and gets
+ * {action: "backfill", version} instead -- the older release's object can
+ * still be written, and the manifest is left pointing at the newer one. That
+ * is how two CDK tags approved out of order both end up published.
+ *
  * Shared rather than restated: every channel that ships these bytes -- S3, the
  * npm package -- has to hold the same line, and a second copy of the rule is
  * how one channel ends up with the invariant broken while the other refuses.
  */
-export function planVersionedPublish(publishedVersion, publishedSha, currentSha, declaredVersion) {
+export function planVersionedPublish(
+  publishedVersion,
+  publishedSha,
+  currentSha,
+  declaredVersion,
+  { allowOlder = false } = {}
+) {
   const declared = parseVersion(declaredVersion);
   if (declared === null) {
     throw new Error(
@@ -110,12 +156,32 @@ export function planVersionedPublish(publishedVersion, publishedSha, currentSha,
     );
   }
   if (order < 0) {
+    if (allowOlder) return { action: "backfill", version: declaredVersion };
     throw new Error(
       `artifact declares version ${declaredVersion}, older than the published ` +
         `${publishedVersion}; a revert must be published as a new higher version`
     );
   }
   return { action: "publish", version: declaredVersion };
+}
+
+/**
+ * Whether a backfill may write its versioned object, given that object's
+ * current text on S3 (null when absent) and the bytes to publish.
+ *
+ * Absent: write it. Identical: nothing to do. Different: two builds claim the
+ * same version with different bytes, which is the one thing a versioned
+ * channel must never let through.
+ */
+export function planBackfill(objectText, currentSha, declaredVersion) {
+  if (objectText === null) return { action: "publish-object", version: declaredVersion };
+  const publishedSha = createHash("sha256").update(objectText).digest("hex");
+  if (publishedSha === currentSha) return { action: "skip" };
+  throw new Error(
+    `v${declaredVersion} is already published with different bytes (sha256 ` +
+      `${publishedSha.slice(0, 12)} vs ${currentSha.slice(0, 12)}); a version ` +
+      `is immutable once published`
+  );
 }
 
 /**
@@ -143,7 +209,8 @@ export function planSync(manifestText, currentSha, declaredVersion) {
       manifest.version ?? null,
       manifest.sha256 ?? null,
       currentSha,
-      declaredVersion
+      declaredVersion,
+      { allowOlder: true }
     );
   } catch (err) {
     throw new Error(err.message.replace("the published copy", "latest.json on S3"), {
@@ -177,9 +244,9 @@ export function manifestAbsent(cliOutput) {
 // be matched on NoSuchKey alone. NOTE: this distinction only exists when the
 // role grants s3:ListBucket — without it S3 masks a missing key as
 // AccessDenied and the first publish dead-ends on a Forbidden fetch.
-function fetchManifestOrAbsent(bucket, key) {
+function fetchObjectOrAbsent(bucket, key) {
   const dir = mkdtempSync(join(tmpdir(), "engine-contracts-"));
-  const outfile = join(dir, "latest.json");
+  const outfile = join(dir, basename(key));
   try {
     // Only the AWS call is classified. A read failure on the file the CLI just
     // wrote is a local fault, and must not be fed to an AWS error classifier
@@ -202,18 +269,23 @@ function requireEnv(name) {
   return value;
 }
 
-function syncArtifact(bucket, commit, { prefix, file }) {
-  const sourcePath = join(typeMapDir, file);
+function syncArtifact(bucket, commit, { prefix, path }) {
+  const sourcePath = join(repoRoot, path);
+  const file = basename(path);
   const base = `s3://${bucket}/${prefix}`;
   const content = readFileSync(sourcePath);
   const currentSha = createHash("sha256").update(content).digest("hex");
-  const manifestText = fetchManifestOrAbsent(bucket, `${prefix}/latest.json`);
+  const manifestText = fetchObjectOrAbsent(bucket, `${prefix}/latest.json`);
   let plan;
   try {
     plan = planSync(manifestText, currentSha, JSON.parse(content).version);
+    if (plan.action === "backfill") {
+      const objectText = fetchObjectOrAbsent(bucket, `${prefix}/v${plan.version}/${file}`);
+      plan = { ...planBackfill(objectText, currentSha, plan.version), backfill: true };
+    }
   } catch (err) {
-    // Two artifacts sync in one run; without the prefix the operator cannot
-    // tell which one refused to publish.
+    // Several artifacts can sync in one run; without the prefix the operator
+    // cannot tell which one refused to publish.
     throw new Error(`${prefix}: ${err.message}`, { cause: err });
   }
 
@@ -231,6 +303,12 @@ function syncArtifact(bucket, commit, { prefix, file }) {
     ],
     { stdio: "inherit" }
   );
+  if (plan.backfill) {
+    // An older release published after a newer one: its object is written,
+    // latest.json keeps naming the newer version.
+    console.log(`${prefix} v${plan.version} backfilled; latest.json unchanged`);
+    return;
+  }
   const manifest = JSON.stringify(
     {
       version: plan.version,
@@ -252,6 +330,9 @@ function syncArtifact(bucket, commit, { prefix, file }) {
 }
 
 function main() {
+  const channel = process.argv[2];
+  if (!channel) throw new Error(`usage: sync-contracts-to-s3.mjs <${CHANNELS.join("|")}>`);
+  const artifacts = artifactsFor(channel);
   const bucket = requireEnv("CONVERSION_MATRIX_S3_BUCKET");
   // The commit of the checked-out tree the artifacts were read from — the
   // workflow checks out main's tip, so GITHUB_SHA (the triggering commit) can
@@ -260,7 +341,7 @@ function main() {
     cwd: repoRoot,
     encoding: "utf8",
   }).trim();
-  for (const artifact of ARTIFACTS) {
+  for (const artifact of artifacts) {
     syncArtifact(bucket, commit, artifact);
   }
 }

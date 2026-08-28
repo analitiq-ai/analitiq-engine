@@ -41,6 +41,13 @@ The `ci` workflow runs on every pull request and on pushes to `main`:
   type error, a docstring-style violation, or a flagged security pattern fails
   the gate anywhere in the tree -- not only in the files a PR touches. The whole
   repository is kept clean, so any reintroduced violation fails CI.
+- **contract-consumption manifest is current** -- a full mypy build with the
+  type map exported, checking `cdk/cdk/contract_consumption.json` (the
+  contract fields the engine reads) against a fresh census. A PR that adds or
+  removes a read on a contract model regenerates the file:
+  `PYTHONPATH=cdk poetry run python tools/contract_consumption.py --write`.
+  A dynamic read the census cannot classify, or a read on a model outside the
+  declared roots, fails the render until it is registered in the script.
 
 Run `poetry run pre-commit run --all-files` locally before pushing to catch
 everything the gate checks. mypy is pinned to the project's own version in both
@@ -104,8 +111,8 @@ commit is green:
    issues". A bare +1 reaction does not count -- re-request the review so Codex
    posts a verdict comment. Pushing new commits resets the gate until Codex
    reviews the new head.
-2. **CI is green** -- `pytest`, `pre-commit (all files)`, and
-   `Scan for secrets`.
+2. **CI is green** -- `pytest`, `pre-commit (all files)`,
+   `contract-consumption manifest is current`, and `Scan for secrets`.
 3. **DeepSource Code Review Summary is all passed** -- the `DeepSource: Docker`,
    `DeepSource: Python`, `DeepSource: Shell`, and `DeepSource: Secrets`
    statuses, which mirror the analyzer table in DeepSource's PR comment.

@@ -399,10 +399,12 @@ yarn-error.log*
 **/tests/**/fixtures/**/*.py[cod]
 
 # Published contract artifacts: generated (from the canonical tables in
-# cdk/cdk/type_map/conversions.py and grammar.py), tracked despite the blanket
-# *.json ignore so Infra/the frontend can consume them.
+# cdk/cdk/type_map/conversions.py and grammar.py, and from the mypy census in
+# tools/contract_consumption.py), tracked despite the blanket *.json ignore
+# so Infra/the frontend/the contract repo can consume them.
 !cdk/cdk/type_map/conversion_matrix.json
 !cdk/cdk/type_map/arrow_type_grammar.json
+!cdk/cdk/contract_consumption.json
 
 # conversion-matrix npm package: committed past the blanket *.json and scripts/
 # ignores (its build scripts and config are source, not generated artifacts).
