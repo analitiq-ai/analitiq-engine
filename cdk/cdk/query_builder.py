@@ -234,16 +234,24 @@ class QueryBuilder:
         "ilike": FilterOperator.ILIKE,
         "is_null": FilterOperator.IS_NULL,
         "is_not_null": FilterOperator.IS_NOT_NULL,
-        # The substring operators. ``neq`` is the contract's spelling of the
-        # same comparison ``ne`` names above: a stream filter's operator comes
-        # from the contract's FilterOperator vocabulary, so every value in it
-        # has to be a key here or a contract-valid stream cannot run. That is
-        # pinned by a test rather than left to review -- the map spent a
-        # release short of the contract by exactly these four names.
+        # ``neq`` is the contract's spelling of the comparison ``ne`` names
+        # above, and it is the one that was a live defect: RULE-STRM-012
+        # admits it on a CONNECTION-scoped source, which is what every
+        # database stream declares, so a contract-valid stream reached this
+        # map and failed its read with "Unknown filter operator".
         #
-        # The SQL symbols above carry no contract spelling; they are for a
-        # connector calling this builder directly, which is why the pin
-        # requires the map to COVER the vocabulary rather than to equal it.
+        # The three substring operators are api-scope only under that same
+        # rule, so no connection-scoped stream can reach them here. They are
+        # mapped because scope, not kind, picks the vocabulary: a database
+        # connector shipping a CONNECTOR-scoped endpoint gets the api
+        # vocabulary and still renders through this builder. Mapping them
+        # costs one branch; leaving them out would make that connector fail
+        # on a filter the contract told its author was valid.
+        #
+        # The SQL symbols above carry no contract spelling at all -- they are
+        # for a connector calling this builder directly -- which is why the
+        # pin requires the map to COVER the contract vocabulary rather than
+        # to equal it.
         "neq": FilterOperator.NE,
         "contains": FilterOperator.CONTAINS,
         "starts_with": FilterOperator.STARTS_WITH,

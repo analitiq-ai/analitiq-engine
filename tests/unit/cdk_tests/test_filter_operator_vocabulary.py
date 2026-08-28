@@ -9,8 +9,17 @@ contract-valid stream cannot run.
 That is not hypothetical: the map spent a release four names short of the
 contract (``neq``, ``contains``, ``starts_with``, ``ends_with``), and the
 gap was invisible because both sides are hand-written lists that nothing
-compared. Reading the vocabulary off the contract is what makes a future
-addition fail here instead of at a customer's first filtered read.
+compared. ``neq`` was the live one -- RULE-STRM-012 admits it on a
+connection-scoped source, which is what every database stream declares, so
+a contract-valid stream reached the map and failed its read. The three
+substring operators are api-scope under that rule and cannot be reached by
+a connection-scoped stream; they are still required here because scope,
+not kind, picks the vocabulary, and a database connector shipping a
+connector-scoped endpoint renders api-vocabulary filters through this
+builder.
+
+Reading the vocabulary off the contract is what makes a future addition
+fail here instead of at a customer's first filtered read.
 
 Coverage, not equality: the map also accepts SQL symbols (``=``, ``!=``,
 ``<>``) for a connector that calls the builder directly. Those carry no

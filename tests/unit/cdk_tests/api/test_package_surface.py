@@ -212,3 +212,33 @@ def test_every_pre_page_path_resolves_through_the_pagination_models() -> None:
                 f"PRE_PAGE_VALUE_PATHS entry {path} does not resolve through "
                 f"{carrier.__name__}: {missing!r} is not a declared field"
             )
+
+
+def test_every_pagination_member_names_its_block_after_its_discriminator() -> None:
+    """Each scheme's block is reachable from its own ``type`` value.
+
+    ``cdk.conformance.api_read_path._continuation_paths`` reads the block a
+    strategy continues from as ``getattr(pagination, pagination.type)``,
+    deliberately preferring the contract's own naming convention to a second
+    table restating the union. That is the right call and it is why this pin
+    exists: nothing else holds the convention, and ``getattr``'s default
+    answers ``None`` rather than raising.
+
+    A contract that renamed ``LinkPagination.link`` while keeping
+    ``type: "link"`` would make the kit's continuation set silently empty, and
+    ``_premature_stop`` -- the only check that catches a ``stop_when`` written
+    the wrong way round -- would stop firing. The read would certify green
+    after one page.
+    """
+    for member in _model_members(Pagination):
+        discriminator = get_args(member.model_fields["type"].annotation)
+        assert len(discriminator) == 1, (
+            f"{member.__name__}.type is no longer a single-value Literal; the "
+            f"conformance kit reaches a scheme's block through it"
+        )
+        block = discriminator[0]
+        assert block in member.model_fields, (
+            f"{member.__name__} declares type {block!r} but has no field of "
+            f"that name, so api_read_path._continuation_paths reads None and "
+            f"the kit stops checking that scheme's continuation"
+        )

@@ -90,6 +90,7 @@ from cdk.api.strategies import KEYSET_REFUSAL_MARKER
 from cdk.api.urls import ORIGIN_REFUSAL_MARKER, join_url, origin_of
 from cdk.api.write_plan import reserved_header_names
 from cdk.exceptions import ReadError
+from cdk.json_utils import authored_json
 from cdk.resolver import Resolver, scope_paths
 from cdk.schema_contract import SchemaContract
 from cdk.type_map import TypeMapper
@@ -1275,7 +1276,8 @@ def _stop_condition_violations(
         violations.append(
             Violation(
                 STOP_CHECK,
-                f"endpoint {probe.label!r}: stop_when {declared!r} reads "
+                f"endpoint {probe.label!r}: stop_when "
+                f"{authored_json(declared)!r} reads "
                 f"nothing under 'response', which is the only scope that "
                 f"differs from page to page. Its verdict is the same on every "
                 f"page, so it either ends the stream at page one or never "

@@ -1253,7 +1253,15 @@ class GenericSQLConnector(BaseDestinationHandler):
                     canonical_type=col_def.arrow_type,
                     # An omitted ``nullable`` means nullable: the contract
                     # leaves it unset rather than false, so only an
-                    # authored ``false`` makes the column NOT NULL.
+                    # ``is not False``, not ``bool(...)``: the contract types
+                    # nullable as ``bool | None``, so only an authored
+                    # ``false`` makes the column NOT NULL. An authored
+                    # ``null`` now means nullable, where reading the dict with
+                    # a True default used to answer bool(None) -> NOT NULL and
+                    # silently contradict the author. The omitted case is
+                    # unchanged. Arrow agrees either way: _column_declarations
+                    # dumps with exclude_none, so SchemaContract never sees an
+                    # explicit null and falls back to the same default.
                     nullable=col_def.nullable is not False,
                     primary_key=col_name in state.primary_keys,
                     default=(
