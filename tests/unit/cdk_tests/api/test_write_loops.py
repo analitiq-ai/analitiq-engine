@@ -462,7 +462,7 @@ class TestDeclaredResponse:
                 }
             ),
         )
-        with caplog.at_level("INFO", logger="cdk.api.generic"):
+        with caplog.at_level("DEBUG", logger="cdk.api.generic"):
             result = await _write(connector, _ids(1))
         assert result.status == AckStatus.ACK_STATUS_SUCCESS
         assert "generated_keys=42 metadata={'revision': 'v7'}" in caplog.text

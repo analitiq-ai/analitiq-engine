@@ -3,20 +3,20 @@
     "analitiq.contracts.endpoints.ApiEndpointDoc": {
       "endpoint_id": [
         "cdk.api.generic:167",
-        "cdk.api.write_plan:477",
+        "cdk.api.write_plan:480",
         "src.engine.pipeline_config_prep:620",
         "src.engine.pipeline_config_prep:623"
       ],
       "operations": [
         "cdk.api.generic:171",
         "cdk.api.request:447",
-        "cdk.api.write_plan:159",
-        "cdk.api.write_plan:385"
+        "cdk.api.write_plan:162",
+        "cdk.api.write_plan:388"
       ]
     },
     "analitiq.contracts.endpoints.Batching": {
       "max_records": [
-        "cdk.api.write_plan:555"
+        "cdk.api.write_plan:558"
       ]
     },
     "analitiq.contracts.endpoints.Column": {
@@ -128,12 +128,12 @@
     },
     "analitiq.contracts.endpoints.Idempotency": {
       "location": [
-        "cdk.api.write_plan:234",
-        "cdk.api.write_plan:444"
+        "cdk.api.write_plan:237",
+        "cdk.api.write_plan:447"
       ],
       "name": [
-        "cdk.api.write_plan:235",
-        "cdk.api.write_plan:445"
+        "cdk.api.write_plan:238",
+        "cdk.api.write_plan:448"
       ]
     },
     "analitiq.contracts.endpoints.Keyset": {
@@ -218,8 +218,8 @@
       ],
       "write": [
         "cdk.api.request:454",
-        "cdk.api.write_plan:159",
-        "cdk.api.write_plan:385"
+        "cdk.api.write_plan:162",
+        "cdk.api.write_plan:388"
       ]
     },
     "analitiq.contracts.endpoints.PageCursor": {
@@ -381,117 +381,117 @@
     },
     "analitiq.contracts.endpoints.WriteError": {
       "code": [
-        "cdk.api.write_plan:145",
+        "cdk.api.write_plan:148",
         "cdk.api.write_response:58"
       ],
       "details": [
-        "cdk.api.write_plan:145",
+        "cdk.api.write_plan:148",
         "cdk.api.write_response:60"
       ],
       "message": [
-        "cdk.api.write_plan:145",
+        "cdk.api.write_plan:148",
         "cdk.api.write_response:59"
       ]
     },
     "analitiq.contracts.endpoints.WriteInput": {
       "schema_": [
-        "cdk.api.write_plan:169",
-        "cdk.api.write_plan:184"
+        "cdk.api.write_plan:172",
+        "cdk.api.write_plan:187"
       ]
     },
     "analitiq.contracts.endpoints.WriteOperation": {
       "batching": [
         "cdk.api.generic:853",
-        "cdk.api.write_plan:550"
+        "cdk.api.write_plan:553"
       ],
       "idempotency": [
-        "cdk.api.write_plan:429"
+        "cdk.api.write_plan:432"
       ],
       "input": [
-        "cdk.api.write_plan:169",
-        "cdk.api.write_plan:184"
+        "cdk.api.write_plan:172",
+        "cdk.api.write_plan:187"
       ],
       "params": [
-        "cdk.api.write_plan:496",
-        "cdk.api.write_plan:502",
-        "cdk.api.write_plan:537"
+        "cdk.api.write_plan:499",
+        "cdk.api.write_plan:505",
+        "cdk.api.write_plan:540"
       ],
       "request": [
         "cdk.api.request:469",
-        "cdk.api.write_plan:476"
+        "cdk.api.write_plan:479"
       ],
       "response": [
-        "cdk.api.write_plan:486",
-        "cdk.api.write_plan:491",
-        "cdk.api.write_plan:516"
+        "cdk.api.write_plan:489",
+        "cdk.api.write_plan:494",
+        "cdk.api.write_plan:519"
       ]
     },
     "analitiq.contracts.endpoints.WriteRequest": {
       "body": [
         "cdk.api.request:641",
-        "cdk.api.write_plan:512"
+        "cdk.api.write_plan:515"
       ],
       "content_type": [
         "cdk.api.request:518",
-        "cdk.api.write_plan:513"
+        "cdk.api.write_plan:516"
       ],
       "headers": [
         "cdk.api.request:525",
         "cdk.api.request:641",
-        "cdk.api.write_plan:534"
+        "cdk.api.write_plan:537"
       ],
       "headers_remove": [
         "cdk.api.request:500"
       ],
       "method": [
-        "cdk.api.write_plan:509"
+        "cdk.api.write_plan:512"
       ],
       "path": [
         "cdk.api.request:819",
-        "cdk.api.write_plan:519"
+        "cdk.api.write_plan:522"
       ],
       "path_params": [
         "cdk.api.request:641",
         "cdk.api.request:822",
-        "cdk.api.write_plan:521"
+        "cdk.api.write_plan:524"
       ],
       "query": [
         "cdk.api.request:549",
         "cdk.api.request:641",
-        "cdk.api.write_plan:533",
-        "cdk.api.write_plan:537"
+        "cdk.api.write_plan:536",
+        "cdk.api.write_plan:540"
       ],
       "transport_ref": [
         "cdk.api.request:469",
-        "cdk.api.write_plan:482",
         "cdk.api.write_plan:485",
-        "cdk.api.write_plan:510"
+        "cdk.api.write_plan:488",
+        "cdk.api.write_plan:513"
       ]
     },
     "analitiq.contracts.endpoints.WriteResponse": {
       "affected_records": [
-        "cdk.api.write_plan:141",
+        "cdk.api.write_plan:144",
         "cdk.api.write_response:113",
         "cdk.api.write_response:114"
       ],
       "error": [
-        "cdk.api.write_plan:144",
-        "cdk.api.write_plan:145",
+        "cdk.api.write_plan:147",
+        "cdk.api.write_plan:148",
         "cdk.api.write_response:110"
       ],
       "generated_keys": [
-        "cdk.api.write_plan:142",
+        "cdk.api.write_plan:145",
         "cdk.api.write_response:133",
         "cdk.api.write_response:134"
       ],
       "metadata": [
-        "cdk.api.write_plan:146",
-        "cdk.api.write_plan:147",
+        "cdk.api.write_plan:149",
+        "cdk.api.write_plan:150",
         "cdk.api.write_response:95",
         "cdk.api.write_response:101"
       ],
       "success_when": [
-        "cdk.api.write_plan:140",
+        "cdk.api.write_plan:143",
         "cdk.api.write_response:105",
         "cdk.api.write_response:106"
       ]

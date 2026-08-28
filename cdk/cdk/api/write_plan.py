@@ -133,8 +133,11 @@ class StreamWritePlan:
 def declared_expressions(declared: WriteResponse) -> list[Any]:
     """Every expression the block declares, for a check that reads them all.
 
-    Lives here rather than beside the judge: the kit imports the plan
-    module, and the judge module reaches the HTTP client.
+    The configure-time check in :func:`build_write_plan` is the caller.
+    One expression at a time, never the block: a scanner handed a map
+    reads a key named ``ref``, ``template`` or ``literal`` as an
+    expression marker and stops seeing its siblings
+    (:func:`~cdk.api.request._declared_expressions` documents the case).
     """
     nodes: list[Any] = [
         declared.success_when,

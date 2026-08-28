@@ -1013,10 +1013,7 @@ class GenericAPIConnector(BaseDestinationHandler):
     ) -> BatchWriteResult:
         """Let the declared error map judge a transport failure first."""
         if isinstance(error, (aiohttp.ClientError, asyncio.TimeoutError)):
-            status, category = failure_facts(error, error_map=self._error_map)
-            ack_status, failure_category = write_verdict(
-                status=status, category=category
-            )
+            ack_status, failure_category = self._transport_verdict(error)
             logger.error("transport error writing to API: %s", error, exc_info=True)
             return BatchWriteResult(
                 status=ack_status,
@@ -1076,10 +1073,7 @@ class GenericAPIConnector(BaseDestinationHandler):
             try:
                 received = await self._send(plan, encoded, extra_headers=headers)
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                status, category = failure_facts(err, error_map=self._error_map)
-                ack_status, failure_category = write_verdict(
-                    status=status, category=category
-                )
+                ack_status, failure_category = self._transport_verdict(err)
                 if ack_status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE:
                     logger.warning(
                         "retryable error on record %s (index %d, %d already "
@@ -1098,27 +1092,25 @@ class GenericAPIConnector(BaseDestinationHandler):
                     category=failure_category,
                 )
                 continue
-            try:
-                self._judge_response(plan, received, sent=1)
-            except DeclaredWriteFailure as err:
+            rejection = self._judge_sent(
+                plan,
+                received,
+                sent=1,
+                written=written,
+                record_ids=record_ids,
+                position=index,
+                failed_before=failures.ids,
+            )
+            if rejection is not None:
                 # The provider accepted the request and rejected the record
                 # in the body: this record's failure, and deterministic.
                 failures.add(
                     record_ids[index],
-                    err,
+                    rejection,
                     "provider rejected record",
                     category=FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED,
                 )
                 continue
-            except RequestSpecError as err:
-                # The record was accepted but the declaration cannot read
-                # the answer: unknowable whether it landed, so it is
-                # reported failed with the unsent rest.
-                raise self._unreadable_response(
-                    err,
-                    written=written,
-                    failed_ids=failures.ids + record_ids[index:],
-                ) from err
             written += 1
 
         if failures.ids:
@@ -1212,10 +1204,7 @@ class GenericAPIConnector(BaseDestinationHandler):
             try:
                 received = await self._send(plan, encoded)
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                status, category = failure_facts(err, error_map=self._error_map)
-                ack_status, failure_category = write_verdict(
-                    status=status, category=category
-                )
+                ack_status, failure_category = self._transport_verdict(err)
                 if (
                     written == 0
                     and ack_status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -1235,52 +1224,86 @@ class GenericAPIConnector(BaseDestinationHandler):
                     f"{type(err).__name__}: {err}",
                     failure_category,
                 )
-            try:
-                self._judge_response(plan, received, sent=len(chunk))
-            except DeclaredWriteFailure as err:
+            rejection = self._judge_sent(
+                plan,
+                received,
+                sent=len(chunk),
+                written=written,
+                record_ids=record_ids,
+                position=start,
+            )
+            if rejection is not None:
                 logger.warning(
                     "provider rejected batch chunk at offset %d (%d records): %s",
                     start,
                     len(chunk),
-                    err,
+                    rejection,
                 )
                 return (
                     written,
                     list(record_ids[start:]),
-                    f"{type(err).__name__}: {err}",
+                    f"{type(rejection).__name__}: {rejection}",
                     FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED,
                 )
-            except RequestSpecError as err:
-                raise self._unreadable_response(
-                    err, written=written, failed_ids=list(record_ids[start:])
-                ) from err
             written += len(chunk)
 
         return written, [], "", FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
 
-    def _judge_response(
-        self, plan: StreamWritePlan, received: Received, *, sent: int
-    ) -> None:
+    def _transport_verdict(
+        self, err: aiohttp.ClientError | asyncio.TimeoutError
+    ) -> tuple[AckStatus, FailureCategory]:
+        """Classify one transport failure through the declared error map."""
+        status, category = failure_facts(err, error_map=self._error_map)
+        return write_verdict(status=status, category=category)
+
+    def _judge_sent(
+        self,
+        plan: StreamWritePlan,
+        received: Received,
+        *,
+        sent: int,
+        written: int,
+        record_ids: list[str],
+        position: int,
+        failed_before: list[str] | None = None,
+    ) -> DeclaredWriteFailure | None:
         """Let the declared ``response`` block judge one accepted request.
 
         Nothing declared means the success status was the whole verdict.
+        A declared rejection is returned for the caller to pin on the ids
+        it covers; a block that cannot read the answer raises the
+        config-defect refusal, since whether the request landed is then
+        unknowable. That refusal reports failed everything from
+        ``position`` on plus ``failed_before``, the ids already failed
+        earlier in the loop.
+
         What the provider handed back (``generated_keys``, ``metadata``)
-        has no slot on the ack, so it surfaces on the log.
+        has no slot on the ack, so it surfaces on the debug log.
         """
         if plan.response is None:
-            return
+            return None
         if self._write_resolver is None:
             raise RuntimeError("connector not connected: no request resolver")
-        outcome = judge_write_response(
-            plan.response, received, resolver=self._write_resolver, sent=sent
-        )
+        try:
+            outcome = judge_write_response(
+                plan.response, received, resolver=self._write_resolver, sent=sent
+            )
+        except DeclaredWriteFailure as err:
+            return err
+        except RequestSpecError as err:
+            raise self._unreadable_response(
+                err,
+                written=written,
+                failed_ids=list(failed_before or []) + record_ids[position:],
+            ) from err
         if outcome.has_extractions:
-            logger.info(
+            logger.debug(
                 "API write response for %s: generated_keys=%r metadata=%r",
                 plan.endpoint,
                 outcome.generated_keys,
                 outcome.metadata,
             )
+        return None
 
     @staticmethod
     def _unreadable_response(
