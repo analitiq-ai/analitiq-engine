@@ -189,6 +189,33 @@ def _read_operation(
     return endpoint_id, read, stream_source, stream_source.endpoint_ref
 
 
+class _RecordFailures:
+    """The per-record failures of one one-by-one write, in order.
+
+    The first failure names the batch verdict: its reason and declared
+    category ride the ack, the rest are counted.
+    """
+
+    def __init__(self) -> None:
+        self.ids: list[str] = []
+        self.first_reason = ""
+        self.first_category = FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+
+    def add(
+        self,
+        record_id: str,
+        err: Exception,
+        what: str,
+        *,
+        category: FailureCategory = FailureCategory.FAILURE_CATEGORY_UNSPECIFIED,
+    ) -> None:
+        logger.warning("%s %s: %s: %s", what, record_id, type(err).__name__, err)
+        self.ids.append(record_id)
+        if not self.first_reason:
+            self.first_reason = f"{type(err).__name__}: {err}"
+            self.first_category = category
+
+
 class GenericAPIConnector(BaseDestinationHandler):
     """One API connector serving both roles, as the SQL one does for databases.
 
@@ -1031,50 +1058,21 @@ class GenericAPIConnector(BaseDestinationHandler):
         rejection instead fails just that record and the loop continues.
         """
         written = 0
-        failed_ids: list[str] = []
-        first_failure = ""
-        first_category = FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+        failures = _RecordFailures()
 
         for index, record in enumerate(records):
-            # Insert keys on the identity-derived record id (the first
-            # occurrence of an identity wins, matching the SQL insert
-            # anti-join); upsert keys on the full record content so a
-            # changed row gets a new key and the provider applies the update
-            # instead of replaying its cached response.
-            key = (
-                None
-                if plan.idempotency_in is None
-                else (
-                    record_ids[index]
-                    if plan.write_mode_key == "insert"
-                    else content_idempotency_key(record)
-                )
-            )
             try:
-                body = self._build_body(plan, record=record)
-                if plan.idempotency_in == "body" and key is not None:
-                    body = body_with_idempotency_key(plan, body, key)
-                encoded = encode_body(body, plan.content_type)
+                encoded, headers = self._prepare_record_request(
+                    plan, record, record_ids[index]
+                )
             # Two authoring defects, one verdict: the body build answers
             # every way its declaration can fail with RequestSpecError, and
             # the engine-owned idempotency key refuses a body it cannot be
             # added to with ValueError. Both are deterministic and both
             # concern this one record.
             except (RequestSpecError, ValueError) as err:
-                logger.warning(
-                    "failed to build body for record %s: %s: %s",
-                    record_ids[index],
-                    type(err).__name__,
-                    err,
-                )
-                failed_ids.append(record_ids[index])
-                first_failure = first_failure or f"{type(err).__name__}: {err}"
+                failures.add(record_ids[index], err, "failed to build body for record")
                 continue
-            headers = (
-                {plan.idempotency_name: key}
-                if plan.idempotency_in == "header" and key is not None
-                else None
-            )
             try:
                 received = await self._send(plan, encoded, extra_headers=headers)
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
@@ -1093,46 +1091,71 @@ class GenericAPIConnector(BaseDestinationHandler):
                         err,
                     )
                     raise
-                logger.warning(
-                    "failed to write record %s: %s: %s",
+                failures.add(
                     record_ids[index],
-                    type(err).__name__,
                     err,
+                    "failed to write record",
+                    category=failure_category,
                 )
-                failed_ids.append(record_ids[index])
-                if not first_failure:
-                    # The first failure names the batch verdict -- its
-                    # declared category rides the ack alongside its reason.
-                    first_category = failure_category
-                first_failure = first_failure or f"{type(err).__name__}: {err}"
                 continue
             try:
                 self._judge_response(plan, received, sent=1)
             except DeclaredWriteFailure as err:
                 # The provider accepted the request and rejected the record
                 # in the body: this record's failure, and deterministic.
-                logger.warning(
-                    "provider rejected record %s: %s", record_ids[index], err
+                failures.add(
+                    record_ids[index],
+                    err,
+                    "provider rejected record",
+                    category=FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED,
                 )
-                failed_ids.append(record_ids[index])
-                if not first_failure:
-                    first_category = FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED
-                first_failure = first_failure or f"{type(err).__name__}: {err}"
                 continue
             except RequestSpecError as err:
                 # The record was accepted but the declaration cannot read
                 # the answer: unknowable whether it landed, so it is
                 # reported failed with the unsent rest.
                 raise self._unreadable_response(
-                    err, written=written, failed_ids=failed_ids + record_ids[index:]
+                    err,
+                    written=written,
+                    failed_ids=failures.ids + record_ids[index:],
                 ) from err
             written += 1
 
-        if failed_ids:
+        if failures.ids:
             logger.warning(
-                "failed to write %d records: %s...", len(failed_ids), failed_ids[:5]
+                "failed to write %d records: %s...", len(failures.ids), failures.ids[:5]
             )
-        return written, failed_ids, first_failure, first_category
+        return written, failures.ids, failures.first_reason, failures.first_category
+
+    def _prepare_record_request(
+        self, plan: StreamWritePlan, record: dict[str, Any], record_id: str
+    ) -> tuple[bytes, dict[str, str] | None]:
+        """Build one record's encoded body and idempotency header, if any.
+
+        Insert keys on the identity-derived record id (the first occurrence
+        of an identity wins, matching the SQL insert anti-join); upsert keys
+        on the full record content so a changed row gets a new key and the
+        provider applies the update instead of replaying its cached response.
+        """
+        key = (
+            None
+            if plan.idempotency_in is None
+            else (
+                record_id
+                if plan.write_mode_key == "insert"
+                else content_idempotency_key(record)
+            )
+        )
+        body = self._build_body(plan, record=record)
+        if plan.idempotency_in == "body" and key is not None:
+            body = body_with_idempotency_key(plan, body, key)
+        encoded = encode_body(body, plan.content_type)
+        headers = (
+            {plan.idempotency_name: key}
+            if plan.idempotency_in == "header" and key is not None
+            else None
+        )
+        return encoded, headers
 
     async def _write_in_chunks(
         self,
