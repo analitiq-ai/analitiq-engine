@@ -1166,6 +1166,46 @@ class TestApiReadPathBreaks:
         document.write_text(json.dumps(parsed))
         return load_target(root)
 
+    def test_a_schema_url_from_another_environment_still_names_its_kind(
+        self, tmp_path: Path
+    ) -> None:
+        """``$schema`` names the kind; the host is informational.
+
+        The contract accepts any ``schemas.analitiq.<tld>`` host for a kind,
+        and the engine drops a ``$schema``-only mismatch and validates against
+        this environment's canonical URL -- so a connector authored against
+        the ``.ai`` URL runs unchanged on a ``.dev`` engine. A kit selecting
+        its model by exact URL would refuse the document the engine runs, and
+        fail tier 1 over the TLD its author typed.
+        """
+        root = tmp_path / "api"
+        shutil.copytree(API_REFERENCE_DIR, root)
+        document = root / "definition" / "endpoints" / "widgets.json"
+        parsed = json.loads(document.read_text())
+        parsed["$schema"] = parsed["$schema"].replace("analitiq.ai", "analitiq.dev")
+        document.write_text(json.dumps(parsed))
+
+        target = load_target(root)
+        assert check_endpoint_documents(target) == [], (
+            "a document naming its kind on another environment's host is the "
+            "same document; the kit refused what the engine accepts"
+        )
+        assert "widgets" in target.endpoints, "the document must still parse"
+
+    def test_a_schema_url_naming_no_endpoint_kind_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """Host-tolerant is not kind-tolerant: the kind still has to be one."""
+        root = tmp_path / "api"
+        shutil.copytree(API_REFERENCE_DIR, root)
+        document = root / "definition" / "endpoints" / "widgets.json"
+        parsed = json.loads(document.read_text())
+        parsed["$schema"] = "https://schemas.analitiq.ai/connector/latest.json"
+        document.write_text(json.dumps(parsed))
+
+        report = _report(check_endpoint_documents(load_target(root)))
+        assert "names none of the published endpoint contracts" in report
+
     def test_an_unknown_paging_scheme_names_the_contracts_union(
         self, tmp_path: Path
     ) -> None:

@@ -11,6 +11,7 @@ to fix — the suite never runs against a half-loaded target.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from functools import cached_property
 from importlib import metadata
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import Any, get_args
 
 from analitiq.contracts.endpoints import ApiEndpointDoc, DatabaseEndpointDoc
+from analitiq.contracts.shared.common import schema_url_pattern
 from pydantic import ValidationError
 
 from cdk._extras import MissingExtraError
@@ -63,12 +65,51 @@ def schema_url_of(model: type[EndpointDocument]) -> str:
     return str(get_args(model.model_fields["schema_url"].annotation)[0])
 
 
+def endpoint_kind_of(model: type[EndpointDocument]) -> str:
+    """Return the contract kind slug this variant governs, read off its own URL.
+
+    Derived from the model rather than restated, for the same reason
+    :func:`schema_url_of` is: a table naming the kinds would be a second
+    answer to which contract governs a document.
+    """
+    return schema_url_of(model).rsplit("/", 2)[-2]
+
+
 #: The published endpoint-document variants, by the ``$schema`` each pins.
 #: The document's own ``$schema`` is what selects one, the same fact the
 #: engine validates every artifact against.
 ENDPOINT_MODELS: dict[str, type[EndpointDocument]] = {
     schema_url_of(model): model for model in (ApiEndpointDoc, DatabaseEndpointDoc)
 }
+
+#: The same variants, by the contract's own per-kind URL pattern.
+#:
+#: ``$schema`` names the KIND, and only the kind. The contract deliberately
+#: accepts any ``schemas.analitiq.<tld>`` host for one
+#: (:func:`~analitiq.contracts.shared.common.schema_url_pattern`), so a
+#: connector authored against the canonical ``.ai`` URL is the same document
+#: on a ``.dev`` engine -- and the engine says so, dropping a ``$schema``-only
+#: mismatch and validating against this environment's canonical URL instead
+#: (``src/config/schema_validator.py``). A kit that selected its model by
+#: exact URL would refuse a document the engine runs, which makes tier 1 fail
+#: a connector for the host its author typed. Both sides read the kind
+#: through the contract's own helpers rather than through a second table.
+ENDPOINT_MODELS_BY_PATTERN: tuple[
+    tuple[re.Pattern[str], type[EndpointDocument]], ...
+] = tuple(
+    (re.compile(schema_url_pattern(endpoint_kind_of(model))), model)
+    for model in (ApiEndpointDoc, DatabaseEndpointDoc)
+)
+
+
+def _endpoint_model_for(declared_schema: object) -> type[EndpointDocument] | None:
+    """Return the variant whose kind *declared_schema* names, host notwithstanding."""
+    if not isinstance(declared_schema, str):
+        return None
+    for pattern, model in ENDPOINT_MODELS_BY_PATTERN:
+        if pattern.match(declared_schema):
+            return model
+    return None
 
 
 class ConformanceSetupError(Exception):
@@ -247,7 +288,7 @@ def _load_endpoints(
     for path in sorted(endpoint_dir.glob("*.json")):
         raw = _load_json_object(path, "endpoint document")
         declared_schema = raw.get("$schema")
-        model = ENDPOINT_MODELS.get(str(declared_schema))
+        model = _endpoint_model_for(declared_schema)
         if model is None:
             problems[path.stem] = (
                 f"{path.name} declares $schema {declared_schema!r}, which "
@@ -256,8 +297,13 @@ def _load_endpoints(
                 f"which contract governs this document"
             )
             continue
+        # Validated against the canonical URL for the kind, not the one the
+        # document advertises: the host is informational and the contract
+        # body is what governs correctness, so the engine substitutes it
+        # too rather than refusing a document over the TLD its author typed.
+        canonical = {**raw, "$schema": schema_url_of(model)}
         try:
-            endpoints[path.stem] = model.model_validate(raw)
+            endpoints[path.stem] = model.model_validate(canonical)
         except ValidationError as err:
             problems[
                 path.stem

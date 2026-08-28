@@ -49,9 +49,11 @@ def _endpoint_json(columns, *, table, schema="public", primary_keys=None):
     return document
 
 
-def _endpoint_doc(columns, **kwargs):
+def _endpoint_doc(columns, *, table, schema="public", primary_keys=None):
     """The parsed form of :func:`_endpoint_json`, for a hand-built state."""
-    return DatabaseEndpointDoc.model_validate(_endpoint_json(columns, **kwargs))
+    return DatabaseEndpointDoc.model_validate(
+        _endpoint_json(columns, table=table, schema=schema, primary_keys=primary_keys)
+    )
 
 
 def _mapper(label: str) -> TypeMapper:
