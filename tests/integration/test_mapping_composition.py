@@ -11,6 +11,7 @@ broadcasts in a single compile-and-run.
 
 import pyarrow as pa
 
+from src.engine.batch_policy import ErrorStrategy
 from src.engine.mapping import MappingDocument, compile_mapping
 
 
@@ -29,7 +30,10 @@ def _pipe(source_path, fn_name):
 
 
 def _compile(assignments):
-    return compile_mapping(MappingDocument.parse({"assignments": assignments}))
+    return compile_mapping(
+        MappingDocument.parse({"assignments": assignments}),
+        default_strategy=ErrorStrategy.FAIL,
+    )
 
 
 def _target(name, arrow_type, nullable=True, **extra):

@@ -416,13 +416,16 @@ def _rule_strategy(
     """Resolve the strategy an assignment's rules fail under.
 
     The contract's ``error_handling`` is documented as an override of the
-    pipeline ``runtime.error_handling`` default, so its absence means the
-    default, not the contract's own default value. Only ``strategy`` is read:
-    the block's retry fields describe a retry loop a deterministic rule has
-    no use for.
+    pipeline ``runtime.error_handling`` default, so only a ``strategy`` the
+    author wrote overrides it. An absent block, or a block that sets only the
+    retry fields, means the pipeline default -- never the contract model's
+    own default value, which the engine does not adopt for the pipeline block
+    either (see ``pipeline_config_prep``). Only ``strategy`` is read: the
+    block's retry fields describe a retry loop a deterministic rule has no
+    use for.
     """
     override = validation.error_handling
-    if override is None:
+    if override is None or "strategy" not in override.model_fields_set:
         return default_strategy
     return ErrorStrategy(override.strategy)
 

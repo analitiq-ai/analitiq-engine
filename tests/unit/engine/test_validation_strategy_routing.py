@@ -127,6 +127,24 @@ class TestTransformStageRouting:
         assert processor.metrics.batches_failed == 1
 
     @pytest.mark.asyncio
+    async def test_each_rejected_batch_is_named_by_its_own_sequence(self, caplog):
+        processor = _processor(_mapping({"strategy": "dlq"}), default="fail")
+
+        with caplog.at_level("ERROR", logger="src.engine.stream_processor"):
+            passed = await _run_transform(processor, [_BAD, _GOOD, _BAD])
+
+        assert passed == [[{"v": 1}]]
+        named = [
+            record.getMessage().split(": ")[1]
+            for record in caplog.records
+            if "rejected by validation" in record.getMessage()
+        ]
+        assert named == [
+            "Batch 1 rejected by validation",
+            "Batch 3 rejected by validation",
+        ]
+
+    @pytest.mark.asyncio
     async def test_no_override_takes_the_pipeline_default(self):
         processor = _processor(_mapping(None), default="dlq")
 

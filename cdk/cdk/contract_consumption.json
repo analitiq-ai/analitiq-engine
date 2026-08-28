@@ -530,12 +530,12 @@
     },
     "analitiq.contracts.stream.ConstantAssignmentValue": {
       "constant": [
-        "src.engine.mapping:444"
+        "src.engine.mapping:447"
       ]
     },
     "analitiq.contracts.stream.ConstantValue": {
       "value": [
-        "src.engine.mapping:444"
+        "src.engine.mapping:447"
       ]
     },
     "analitiq.contracts.stream.Filter": {
@@ -607,12 +607,12 @@
     },
     "analitiq.contracts.stream.StreamValidationErrorHandling": {
       "strategy": [
-        "src.engine.mapping:427"
+        "src.engine.mapping:430"
       ]
     },
     "analitiq.contracts.stream.Validation": {
       "error_handling": [
-        "src.engine.mapping:424"
+        "src.engine.mapping:427"
       ],
       "rules": [
         "src.engine.mapping:408"
@@ -620,25 +620,25 @@
     },
     "analitiq.contracts.stream.ValidationRule": {
       "field": [
-        "src.engine.mapping:1076"
+        "src.engine.mapping:1079"
       ],
       "message": [
-        "src.engine.mapping:1112"
+        "src.engine.mapping:1115"
       ],
       "type": [
-        "src.engine.mapping:1087",
-        "src.engine.mapping:1097",
-        "src.engine.mapping:1114",
-        "src.engine.mapping:1134",
-        "src.engine.mapping:1156",
-        "src.engine.mapping:1162"
+        "src.engine.mapping:1090",
+        "src.engine.mapping:1100",
+        "src.engine.mapping:1117",
+        "src.engine.mapping:1137",
+        "src.engine.mapping:1159",
+        "src.engine.mapping:1165"
       ],
       "value": [
-        "src.engine.mapping:1139",
         "src.engine.mapping:1142",
         "src.engine.mapping:1145",
-        "src.engine.mapping:1152",
-        "src.engine.mapping:1171"
+        "src.engine.mapping:1148",
+        "src.engine.mapping:1155",
+        "src.engine.mapping:1174"
       ]
     }
   },

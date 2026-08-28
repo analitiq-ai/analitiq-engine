@@ -1060,6 +1060,17 @@ class TestValidationErrorStrategy:
         )
         assert failure.strategy is default
 
+    @pytest.mark.parametrize("default", list(ErrorStrategy))
+    def test_block_without_strategy_takes_the_pipeline_default(self, default):
+        """A block that sets only retry fields overrides nothing: the contract
+        model's own ``dlq`` default is not the author's choice."""
+        failure = self._failure(
+            [{"v": None}],
+            [self._validated([_rule("not_null")], {"max_retries": 0})],
+            default=default,
+        )
+        assert failure.strategy is default
+
     def test_retry_fields_change_nothing(self):
         """A rule is deterministic; the override's retry fields are not read."""
         failure = self._failure(

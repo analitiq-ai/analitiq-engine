@@ -562,11 +562,15 @@ class StreamProcessor:
         logger.debug("Starting transform stage for stream %s", self.stream_name)
 
         batch_count = 0
+        # Every batch read, passed or rejected; names a rejected batch in
+        # its log line and dead-letter entry.
+        batch_seq = 0
         try:
             while True:
                 batch = await input_queue.get()
                 if batch is None:
                     break
+                batch_seq += 1
 
                 if self.transform is None:
                     transformed_batch = batch
@@ -582,7 +586,7 @@ class StreamProcessor:
                         # repair: the output batch was never built.
                         await self._apply_disposition(
                             disposition,
-                            batch_seq=batch_count + 1,
+                            batch_seq=batch_seq,
                             record_dicts=batch.to_pylist(),
                         )
                         continue
@@ -1015,11 +1019,15 @@ class StreamProcessor:
         logger.debug("Starting checkpoint stage for stream %s", self.stream_name)
 
         batch_count = 0
+        # Every batch read, passed or rejected; names a rejected batch in
+        # its log line and dead-letter entry.
+        batch_seq = 0
         try:
             while True:
                 batch = await input_queue.get()
                 if batch is None:
                     break
+                batch_seq += 1
 
                 # The durable checkpoint is written on destination ACK in
                 # _persist_committed_cursor; this stage only counts drained
