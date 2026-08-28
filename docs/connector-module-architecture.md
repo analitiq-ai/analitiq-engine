@@ -423,14 +423,19 @@ string-only surface (`TypeMapper`, the rule parsers, `list_*`, standalone
 access and raise `cdk.MissingExtraError` with the install hint if the extra is
 absent.
 
-The package also ships two generated contract artifacts beside the modules that
-read them: the Arrow type grammar and the conversion matrix. Both are data
+The package also ships three generated contract artifacts beside the modules
+that read them: the Arrow type grammar, the conversion matrix, and the
+contract-consumption manifest (`cdk/cdk/contract_consumption.json`, the contract
+fields the engine reads, rendered from mypy's type map by
+`scripts/contract_consumption.py` and checked current in CI). All are data
 files, so whether they land in a built distribution is a packaging decision
 rather than a code one — and a distribution missing one imports cleanly and
 fails on first use, in every consumer at once. The publish workflow therefore
-installs the built wheel into a clean environment and reads both documents back
+installs the built wheel into a clean environment and reads every document back
 through the installed package, and checks the sdist carries them too, before a
-release can proceed.
+release can proceed. The same release publishes the manifest to S3 under
+`contract-consumption/v{cdk.__version__}/`, the coordinate the contract repo
+pins it by.
 
 A connector is a **self-contained, independently releasable unit** carrying
 everything DB-specific: definition, type-map, its own driver, and as much or as

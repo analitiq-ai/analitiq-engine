@@ -6,11 +6,22 @@
 //   latest.json                  mutable manifest {version, sha256, commit, publishedAt}
 //
 // The version is carried by the artifact itself (its top-level `version`
-// field, generated from the CDK's GRAMMAR_VERSION / CONVERSION_MATRIX_VERSION)
-// so a consumer holding the bytes can name the vocabulary it got. This script
-// reads that version; it never assigns one. Each artifact's sha256 is compared
-// against its own manifest, and content that changed without a version bump
-// aborts rather than overwriting an immutable published object.
+// field, generated from the CDK's GRAMMAR_VERSION / CONVERSION_MATRIX_VERSION,
+// or cdk.__version__ for the consumption manifest) so a consumer holding the
+// bytes can name the vocabulary it got. This script reads that version; it
+// never assigns one. Each artifact's sha256 is compared against its own
+// manifest, and content that changed without a version bump aborts rather
+// than overwriting an immutable published object.
+//
+// Each artifact names the CHANNEL that publishes it, and one run syncs one
+// channel (`node sync-contracts-to-s3.mjs <channel>`):
+//   main         on push to main -- the artifact bumps its own version
+//                constant whenever its content changes, so any commit is
+//                publishable;
+//   cdk-release  at a cdk-v* tag -- the artifact's version is
+//                cdk.__version__, which moves once per release while the
+//                content moves with every PR, so a push to main would abort
+//                on an unbumped change.
 //
 // Versioning here is deliberately independent of the npm package version —
 // that digest also covers the shipped TS code, so a helper fix bumps npm
@@ -28,12 +39,11 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = resolve(pkgRoot, "..", "..");
-const typeMapDir = join(repoRoot, "cdk", "cdk", "type_map");
 
 // Prefixes are fixed, not configurable: on a shared bucket whose publisher
 // role is not prefix-scoped, a typo'd prefix variable would silently start a
@@ -41,9 +51,32 @@ const typeMapDir = join(repoRoot, "cdk", "cdk", "type_map");
 // Exported so the test suite can assert each source file exists and is
 // tracked — a stale entry otherwise surfaces only in the post-merge sync job.
 export const ARTIFACTS = [
-  { prefix: "conversion-matrix", file: "conversion_matrix.json" },
-  { prefix: "arrow-type-grammar", file: "arrow_type_grammar.json" },
+  {
+    prefix: "conversion-matrix",
+    path: "cdk/cdk/type_map/conversion_matrix.json",
+    channel: "main",
+  },
+  {
+    prefix: "arrow-type-grammar",
+    path: "cdk/cdk/type_map/arrow_type_grammar.json",
+    channel: "main",
+  },
+  {
+    prefix: "contract-consumption",
+    path: "cdk/cdk/contract_consumption.json",
+    channel: "cdk-release",
+  },
 ];
+
+export const CHANNELS = Object.freeze([...new Set(ARTIFACTS.map((a) => a.channel))]);
+
+/** The artifacts one channel publishes; an unknown channel is a usage error. */
+export function artifactsFor(channel) {
+  if (!CHANNELS.includes(channel)) {
+    throw new Error(`unknown channel ${JSON.stringify(channel)}; one of: ${CHANNELS.join(", ")}`);
+  }
+  return ARTIFACTS.filter((a) => a.channel === channel);
+}
 
 // Each component is `0` or a leading-zero-free number, as semver requires.
 // A bare \d+ would accept "01.2.3" and normalise it to 1.2.3, so the object
@@ -202,8 +235,9 @@ function requireEnv(name) {
   return value;
 }
 
-function syncArtifact(bucket, commit, { prefix, file }) {
-  const sourcePath = join(typeMapDir, file);
+function syncArtifact(bucket, commit, { prefix, path }) {
+  const sourcePath = join(repoRoot, path);
+  const file = basename(path);
   const base = `s3://${bucket}/${prefix}`;
   const content = readFileSync(sourcePath);
   const currentSha = createHash("sha256").update(content).digest("hex");
@@ -212,8 +246,8 @@ function syncArtifact(bucket, commit, { prefix, file }) {
   try {
     plan = planSync(manifestText, currentSha, JSON.parse(content).version);
   } catch (err) {
-    // Two artifacts sync in one run; without the prefix the operator cannot
-    // tell which one refused to publish.
+    // Several artifacts can sync in one run; without the prefix the operator
+    // cannot tell which one refused to publish.
     throw new Error(`${prefix}: ${err.message}`, { cause: err });
   }
 
@@ -252,6 +286,9 @@ function syncArtifact(bucket, commit, { prefix, file }) {
 }
 
 function main() {
+  const channel = process.argv[2];
+  if (!channel) throw new Error(`usage: sync-contracts-to-s3.mjs <${CHANNELS.join("|")}>`);
+  const artifacts = artifactsFor(channel);
   const bucket = requireEnv("CONVERSION_MATRIX_S3_BUCKET");
   // The commit of the checked-out tree the artifacts were read from — the
   // workflow checks out main's tip, so GITHUB_SHA (the triggering commit) can
@@ -260,7 +297,7 @@ function main() {
     cwd: repoRoot,
     encoding: "utf8",
   }).trim();
-  for (const artifact of ARTIFACTS) {
+  for (const artifact of artifacts) {
     syncArtifact(bucket, commit, artifact);
   }
 }

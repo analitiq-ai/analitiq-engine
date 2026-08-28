@@ -88,6 +88,8 @@ conversion-matrix/v{version}/conversion_matrix.json     immutable, one object pe
 conversion-matrix/latest.json                           {version, sha256, commit, publishedAt}
 arrow-type-grammar/v{version}/arrow_type_grammar.json   immutable, one object per version
 arrow-type-grammar/latest.json                          {version, sha256, commit, publishedAt}
+contract-consumption/v{version}/contract_consumption.json  immutable, one object per CDK release
+contract-consumption/latest.json                        {version, sha256, commit, publishedAt}
 ```
 
 The grid says which `source -> target` family conversions the engine permits;
@@ -99,6 +101,15 @@ canonical tables in the CDK and pinned by conformance tests — consumers
 should derive their validation from these artifacts rather than hand-writing
 it. The one part that is not fully machine-derivable is IANA timezone names,
 which additionally need a tz database on the consumer side.
+
+The consumption manifest says which contract fields the engine reads — every
+`(model, field)` pair plus the sites reading it, computed from mypy's type map
+over the engine and the CDK by `scripts/contract_consumption.py`. It is claims
+only: the contract repo decides which unread fields are defects, authoring-only
+or validator-only, and fails its own build on a field that is neither read nor
+so declared. Its `version` is `cdk.__version__`, and it publishes at the
+`cdk-v*` tag that ships the wheel carrying the same bytes — not on push to
+`main`, where the content moves with every PR under an unchanged version.
 
 Each artifact **carries its own version** in a top-level `version` field, so a
 consumer holding the bytes — from S3, from this package, or from an installed

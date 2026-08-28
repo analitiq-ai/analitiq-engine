@@ -1,0 +1,74 @@
+name: sync-contracts-s3
+
+# Syncs one channel of the engine's versioned contract artifacts to S3, one
+# leg per target environment (dev, prod). Called by the workflow that owns
+# the channel's trigger:
+#   conversion-matrix.yml   channel `main`, on push to main;
+#   publish-cdk.yml         channel `cdk-release`, at a cdk-v* tag.
+# The sync script reads each artifact's own version and reconciles against
+# the latest.json manifest on S3, so a re-run after a partial failure
+# converges on its own, and every environment publishes the same version for
+# the same content. (The first-ever run additionally needs the role to grant
+# s3:ListBucket, so a missing manifest reads as absence, not as Forbidden.)
+#
+# Authentication is GitHub OIDC (short-lived, no stored keys); the role,
+# region, and bucket come exclusively from GitHub Environment variables, so
+# no cloud identifiers live in this repo. The variables are
+# ENVIRONMENT-scoped -- each environment carries its own values under the
+# same names -- which is why the gate sits on the steps, not the job: a
+# job-level `if` is evaluated before the environment attaches and would read
+# every environment-scoped variable as empty. An unconfigured environment
+# shows as a green leg with skipped steps.
+
+on:
+  workflow_call:
+    inputs:
+      channel:
+        description: The artifact channel to sync (main, cdk-release).
+        required: true
+        type: string
+      ref:
+        description: The git ref whose artifacts are published.
+        required: true
+        type: string
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    strategy:
+      # Legs are independent: a dev hiccup must not hold back prod, or the
+      # other way round.
+      fail-fast: false
+      matrix:
+        env: [dev, prod]
+    # The job's OIDC subject claim carries this repo + environment; each
+    # account's role trust policy pins its own environment (dev role -> dev,
+    # prod role -> prod). Protection rules for an environment are a
+    # repo-settings concern, not a workflow one.
+    environment: ${{ matrix.env }}
+    concurrency:
+      group: contracts-s3-sync-${{ inputs.channel }}-${{ matrix.env }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        if: vars.CONVERSION_MATRIX_S3_ROLE_ARN != ''
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-node@v4
+        if: vars.CONVERSION_MATRIX_S3_ROLE_ARN != ''
+        with:
+          node-version: "20"
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: vars.CONVERSION_MATRIX_S3_ROLE_ARN != ''
+        with:
+          role-to-assume: ${{ vars.CONVERSION_MATRIX_S3_ROLE_ARN }}
+          aws-region: ${{ vars.CONVERSION_MATRIX_S3_REGION }}
+      - name: Sync the channel's versioned artifacts to S3 when their content changed
+        if: vars.CONVERSION_MATRIX_S3_ROLE_ARN != ''
+        working-directory: packages/conversion-matrix
+        env:
+          CONVERSION_MATRIX_S3_BUCKET: ${{ vars.CONVERSION_MATRIX_S3_BUCKET }}
+        run: node scripts/sync-contracts-to-s3.mjs ${{ inputs.channel }}
