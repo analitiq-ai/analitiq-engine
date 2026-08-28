@@ -3563,7 +3563,7 @@ class TestApiRequestBlockBreaks:
         a connector field a runtime resolves is too since RULE-CTOR-065 in
         contract 1.0.0rc22, which is what let the kit's copy go. The
         registry check is what stays -- see
-        :func:`~cdk.conformance.api_surface.unknown_function_problem`.
+        :meth:`~cdk.resolver.Resolver.unknown_function_problem`.
         """
         transport = {
             "transport_type": "http",

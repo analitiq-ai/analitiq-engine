@@ -112,7 +112,14 @@ def judge_write_response(
 
         if declared.affected_records is not None:
             affected = scoped.resolve_for_request(declared.affected_records)
-            if affected is None or affected != sent:
+            # A count is an int and nothing else: `True == 1` in Python, so
+            # a declaration pointing at a JSON boolean would otherwise pass
+            # a single-record request without the provider counting anything.
+            if (
+                isinstance(affected, bool)
+                or not isinstance(affected, int)
+                or affected != sent
+            ):
                 # Which records the provider skipped is unknown, so the
                 # whole request is reported failed rather than guessing;
                 # a replay may duplicate, which beats losing rows.

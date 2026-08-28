@@ -397,6 +397,19 @@ class TestDeclaredResponse:
         assert "affected_records resolved to 1" in result.failure_summary
         assert "carrying 2 records" in result.failure_summary
 
+    async def test_a_boolean_affected_records_is_not_a_count(self) -> None:
+        # `True == 1` in Python; a declaration pointing at a flag must not
+        # pass a single-record request on it.
+        session = FakeSession([FakeResponse(body={"accepted": True})])
+        connector = await _connected(
+            session,
+            _document(response={"affected_records": {"ref": "response.body.accepted"}}),
+        )
+        result = await _write(connector, _ids(1))
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.failed_record_ids == ("r0",)
+        assert "affected_records resolved to True" in result.failure_summary
+
     async def test_a_matching_affected_records_count_acks(self) -> None:
         session = FakeSession([FakeResponse(body={"n": 2})])
         connector = await _connected(

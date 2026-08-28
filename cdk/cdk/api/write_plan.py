@@ -130,6 +130,24 @@ class StreamWritePlan:
     response: WriteResponse | None = None
 
 
+def declared_expressions(declared: WriteResponse) -> list[Any]:
+    """Every expression the block declares, for a check that reads them all.
+
+    Lives here rather than beside the judge: the kit imports the plan
+    module, and the judge module reaches the HTTP client.
+    """
+    nodes: list[Any] = [
+        declared.success_when,
+        declared.affected_records,
+        declared.generated_keys,
+    ]
+    if declared.error is not None:
+        nodes += [declared.error.code, declared.error.message, declared.error.details]
+    if declared.metadata is not None:
+        nodes += list(declared.metadata.values())
+    return [node for node in nodes if node is not None]
+
+
 def write_mode_block(doc: ApiEndpointDoc, mode_key: WriteMode) -> WriteOperation | None:
     """Return the ``operations.write.<mode_key>`` block, or ``None``.
 
@@ -465,6 +483,15 @@ def build_write_plan(
     if problem is not None:
         return problem
     reserved = reserved_header_names(header_names_for(request.transport_ref))
+    if mode_block.response is not None:
+        # Decidable from the document alone, so refused here: found on the
+        # first write instead, the record may have landed by the time the
+        # answer cannot be read, and it is reported failed either way.
+        problem = resolver.unknown_function_problem(
+            declared_expressions(mode_block.response)
+        )
+        if problem is not None:
+            return f"response block on endpoint {endpoint_id!r}: {problem}"
     try:
         table = ParamTable.for_write(mode_block.params, resolver)
         problem = request_block_problem(
