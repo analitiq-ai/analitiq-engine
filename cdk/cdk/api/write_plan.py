@@ -26,6 +26,7 @@ from analitiq.contracts.endpoints import (
     Idempotency,
     WriteMode,
     WriteOperation,
+    WriteResponse,
 )
 
 from ..exceptions import TransportSpecError
@@ -123,6 +124,10 @@ class StreamWritePlan:
     write_mode_key: str = "insert"
     #: Retry-safety verdict, computed at configure time.
     retry_verdict: RetryVerdict | None = None
+    #: The declared ``response`` block: how the provider's answer says
+    #: whether the records landed. ``None`` means the endpoint declares
+    #: none and a success status is the whole verdict.
+    response: WriteResponse | None = None
 
 
 def write_mode_block(doc: ApiEndpointDoc, mode_key: WriteMode) -> WriteOperation | None:
@@ -481,6 +486,7 @@ def build_write_plan(
             content_type=request.content_type,
             params=table.values,
             write_mode_key=mode_key,
+            response=mode_block.response,
         )
         plan.endpoint = substitute_path(
             request.path,

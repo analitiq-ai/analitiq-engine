@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 __all__ = [
     "ApiResponseError",
     "HttpSender",
+    "Received",
     "SignedRequest",
     "encode_body",
     "failure_facts",
@@ -54,6 +55,22 @@ logger = logging.getLogger(__name__)
 
 #: Retry attempts used when the connection declares no ``max_retries``.
 DEFAULT_MAX_RETRIES = 3
+
+
+@dataclass(frozen=True)
+class Received:
+    """One successful answer, with what a declared expression can read of it.
+
+    The status and the headers travel with the payload because the
+    contract's response scope offers all three (``response.status``,
+    ``response.headers``, ``response.body``): a write's declared
+    ``success_when`` may key off any of them, and the sender is the only
+    place that still holds the response object.
+    """
+
+    status: int
+    headers: Mapping[str, str]
+    payload: Any
 
 
 @dataclass(frozen=True)
@@ -249,8 +266,8 @@ class HttpSender:
         """Close the retry client (and with it the session it wraps)."""
         await self._client.close()
 
-    async def send(self, request: SignedRequest, *, unwrap_page: bool) -> Any:
-        """Issue one request and return the decoded payload.
+    async def send(self, request: SignedRequest, *, unwrap_page: bool) -> Received:
+        """Issue one request and return the decoded answer.
 
         ``unwrap_page`` says whether the dialect's page unwrap applies.
         Only a read has pages: the hook exists to reach into a read
@@ -312,7 +329,11 @@ class HttpSender:
                     ),
                     declared_category=category,
                 )
-        return self._dialect.unwrap_page(payload) if unwrap_page else payload
+            return Received(
+                status=int(response.status),
+                headers=dict(response.headers),
+                payload=self._dialect.unwrap_page(payload) if unwrap_page else payload,
+            )
 
     async def probe(self, url: str) -> int:
         """Return the status of a bare GET, for a liveness check.

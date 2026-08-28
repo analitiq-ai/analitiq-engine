@@ -33,8 +33,16 @@ class FakeRequestInfo:
 class FakeResponse:
     """One scripted response, shaped like the client's own."""
 
-    def __init__(self, *, status: int = 200, body: Any = None, text: str | None = None):
+    def __init__(
+        self,
+        *,
+        status: int = 200,
+        body: Any = None,
+        text: str | None = None,
+        headers: dict[str, str] | None = None,
+    ):
         self.status = status
+        self.headers: dict[str, str] = dict(headers or {})
         self.method = "GET"
         self.closed = False
         self.request_info = FakeRequestInfo()
