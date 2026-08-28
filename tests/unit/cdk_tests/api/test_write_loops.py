@@ -410,9 +410,11 @@ class TestDeclaredResponse:
         assert result.status == AckStatus.ACK_STATUS_SUCCESS
 
     async def test_status_and_headers_are_in_the_response_scope(self) -> None:
+        # HTTP/2 lowercases header names; the declared `Location` must
+        # still find it, as it would on the client's own header map.
         session = FakeSession(
             [
-                FakeResponse(status=201, body={}, headers={"Location": "/items/1"}),
+                FakeResponse(status=201, body={}, headers={"location": "/items/1"}),
                 FakeResponse(status=200, body={}),
             ]
         )

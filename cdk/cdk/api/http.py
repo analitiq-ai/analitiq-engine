@@ -69,6 +69,9 @@ class Received:
     """
 
     status: int
+    #: The client's own header map, case-insensitive on purpose: HTTP/2
+    #: lowercases every name, so a declared ``response.headers.Location``
+    #: must find a ``location`` too.
     headers: Mapping[str, str]
     payload: Any
 
@@ -331,7 +334,7 @@ class HttpSender:
                 )
             return Received(
                 status=int(response.status),
-                headers=dict(response.headers),
+                headers=response.headers,
                 payload=self._dialect.unwrap_page(payload) if unwrap_page else payload,
             )
 

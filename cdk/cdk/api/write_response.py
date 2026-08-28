@@ -87,7 +87,7 @@ def judge_write_response(
     with request_spec_errors("write response"):
         scope: dict[str, Any] = {
             "body": received.payload,
-            "headers": dict(received.headers),
+            "headers": received.headers,
             "status": received.status,
         }
         scoped = resolver.with_response(scope)
