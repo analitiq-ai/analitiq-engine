@@ -90,7 +90,7 @@ def test_gate_catches_forbidden_import_forms():
     """
     assert _forbidden_modules("import grpc") == {"grpc"}
     assert _forbidden_modules("import grpc as g") == {"grpc"}
-    assert _forbidden_modules("import src.models.stream") == {"src.models.stream"}
+    assert _forbidden_modules("import src.models.resolved") == {"src.models.resolved"}
     assert "grpc" in _forbidden_modules("from grpc import aio")
     assert "src.engine" in _forbidden_modules("from src.engine import engine")
     # The evasion form: module root ``google`` is allowed; the real target is

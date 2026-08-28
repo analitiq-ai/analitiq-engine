@@ -314,7 +314,18 @@ class LiveHarness:
         )
         config = {
             "endpoint_document": self.endpoint_document(),
-            "stream_source": {"replication": replication},
+            "stream_source": {
+                # The binding a real database stream carries: connection
+                # scope, locating the suite table the write phase filled.
+                # The read parses this block as the contract's StreamSource,
+                # so the kit sends what a pipeline sends.
+                "endpoint_ref": {
+                    "scope": "connection",
+                    "connection_id": "conformance-live",
+                    "database_object": {"schema": self.schema, "name": self.table},
+                },
+                "replication": replication,
+            },
         }
         rows: list[dict[str, Any]] = []
         try:

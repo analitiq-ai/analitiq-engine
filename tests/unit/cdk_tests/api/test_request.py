@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 from analitiq.contracts.endpoints import Pagination, Param, ReadRequest
+from analitiq.contracts.stream import Filter
 from pydantic import TypeAdapter
 
 from cdk.api.exceptions import RequestSpecError
@@ -28,6 +29,16 @@ pytestmark = pytest.mark.unit
 #: the parse rather than out of a key the test sniffed for.
 _READ_REQUEST: TypeAdapter[Any] = TypeAdapter(ReadRequest)
 _PAGINATION: TypeAdapter[Any] = TypeAdapter(Pagination)
+
+
+def _filters(*declared: Mapping[str, Any]) -> list[Filter]:
+    """The stream's filters, parsed as the read path hands them over.
+
+    Same reason as ``_params``: the read reads ``field``/``value`` off the
+    contract model, so a test passing dicts would prove nothing about what
+    the read does with a real stream's filters.
+    """
+    return [Filter.model_validate(f) for f in declared]
 
 
 def _params(declared: Mapping[str, Any]) -> dict[str, Param]:
@@ -176,7 +187,7 @@ class TestReadParamTable:
                 }
             ),
             _resolver(),
-            filters=[{"field": "status", "value": "open"}],
+            filters=_filters({"field": "status", "operator": "eq", "value": "open"}),
         )
         assert table.values == {"status": "open"}
 
@@ -189,7 +200,9 @@ class TestReadParamTable:
             ParamTable.for_read(
                 _params({"cn": {"in": "query", "type": "string", "required": False}}),
                 _resolver(),
-                filters=[{"field": "customer_number", "value": "C-1"}],
+                filters=_filters(
+                    {"field": "customer_number", "operator": "eq", "value": "C-1"}
+                ),
             )
 
     def test_an_unresolved_default_omits_its_param(self, caplog) -> None:
@@ -287,7 +300,7 @@ class TestRequestBuilder:
         table = ParamTable.for_read(
             _params({"tenant": {"in": "query", "type": "string", "required": False}}),
             _resolver(),
-            filters=[{"field": "tenant", "value": "acme"}],
+            filters=_filters({"field": "tenant", "operator": "eq", "value": "acme"}),
         )
         builder = RequestBuilder(
             table,

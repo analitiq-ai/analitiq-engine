@@ -11,6 +11,7 @@ import json
 from typing import Any, cast
 
 from analitiq.contracts.endpoints import ApiEndpointDoc
+from analitiq.contracts.stream import StreamSource
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.secrets import InMemorySecretsResolver
@@ -283,4 +284,9 @@ def stream_source(
     }
     if filters:
         block["filters"] = filters
+    # Parsed here and the result thrown away, exactly as the endpoint
+    # document above is: the read path parses this block against
+    # ``StreamSource``, so a fixture the contract would refuse fails in the
+    # test that built it rather than pinning a read no engine can send.
+    StreamSource.model_validate(block)
     return block

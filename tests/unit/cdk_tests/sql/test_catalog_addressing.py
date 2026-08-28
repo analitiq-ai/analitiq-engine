@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pyarrow as pa
 import pytest
 from analitiq.contracts.endpoints import DATABASE_ENDPOINT_SCHEMA_URL
+from analitiq.contracts.stream import StreamSource
 
 from cdk.exceptions import ReadError
 from cdk.sql.capabilities import SqlCapabilities
@@ -50,6 +51,18 @@ ENDPOINT_DOC = {
     ],
     "primary_keys": ["id"],
 }
+
+#: The stream source bound to that endpoint, carrying the same locator the
+#: document does. Parsed here so a fixture short of the published contract
+#: fails where it is written rather than pinning a read no run performs.
+STREAM_SOURCE = {
+    "endpoint_ref": {
+        "scope": "connection",
+        "connection_id": "warehouse",
+        "database_object": {"catalog": "proj", "schema": "ds", "name": "events"},
+    }
+}
+StreamSource.model_validate(STREAM_SOURCE)
 
 
 #: The full-catalog, merge-capable declaration the ADBC fixtures build with.
@@ -258,7 +271,7 @@ class TestReadPathGate:
     @pytest.mark.asyncio
     async def test_catalog_with_no_declaration_fails_before_extraction(self):
         connector = GenericSQLConnector()
-        config = {"endpoint_document": ENDPOINT_DOC, "stream_source": {}}
+        config = {"endpoint_document": ENDPOINT_DOC, "stream_source": STREAM_SOURCE}
         with pytest.raises(ReadError, match="sql_capabilities.catalog"):
             await _drain(connector, _FakeRuntime(is_adbc=True), config, _checkpoint())
 
@@ -271,7 +284,7 @@ class TestReadPathCatalog:
     def _config(self):
         return {
             "endpoint_document": ENDPOINT_DOC,
-            "stream_source": {},
+            "stream_source": STREAM_SOURCE,
         }
 
     @pytest.mark.asyncio

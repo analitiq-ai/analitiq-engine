@@ -1,14 +1,15 @@
-"""The destination write-mode vocabulary is one set, restated in three places.
+"""The destination write-mode vocabulary is one set, restated across the wire.
 
 ``truncate_insert`` shipped across the CDK, the proto enum and the SQL write
-path while the engine's own :class:`src.models.WriteMode` still listed two
-modes, so a stream declaring it was rejected at destination startup by the very
-check meant to catch typos (issue #435). Nothing failed, because no test tied
-the restatements to each other.
+path while the engine kept its own two-mode ``WriteMode`` enum, so a stream
+declaring it was rejected at destination startup by the very check meant to
+catch typos (issue #435). Nothing failed, because no test tied the
+restatements to each other.
 
-The published contract is the authority here: it declares the modes a document
-may carry. These tests make every engine-side restatement answer to it, so a
-mode added to or dropped from the contract fails a test rather than a run.
+That engine enum is gone: ``src/main.py`` now checks ``write.mode`` against the
+contract's own ``WRITE_MODES``, so there is no second vocabulary left to drift
+from it. What remains restated is the proto enum the mode travels on, and this
+test makes that restatement answer to the contract.
 """
 
 from __future__ import annotations
@@ -18,16 +19,9 @@ from analitiq.contracts.endpoints import WriteMode as ContractWriteMode
 
 from cdk.types import WriteMode as ProtoWriteMode
 from src.grpc.client import DestinationGRPCClient
-from src.models import WriteMode
 
 #: The modes a contract-valid destination document may declare.
 CONTRACT_MODES = frozenset(ContractWriteMode.__args__)
-
-
-def test_engine_enum_matches_the_contract_vocabulary() -> None:
-    """``src/main.py`` rejects an unknown ``write.mode`` against this enum, so a
-    mode missing here is a contract-valid stream refused at startup."""
-    assert {mode.value for mode in WriteMode} == CONTRACT_MODES
 
 
 @pytest.mark.parametrize("mode", sorted(CONTRACT_MODES))

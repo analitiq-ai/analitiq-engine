@@ -15,6 +15,7 @@ from analitiq.contracts.endpoints import (
     DATABASE_ENDPOINT_SCHEMA_URL,
     DatabaseEndpointDoc,
 )
+from analitiq.contracts.stream import validate_endpoint_ref
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.sql.capabilities import SqlCapabilities
@@ -177,7 +178,10 @@ class TestEndpointRefDispatch:
                 "s1": {
                     "scope": "connection",
                     "connection_id": "dest-conn",
-                    "endpoint_id": "orders",
+                    # The locator is the identity of a connection-scoped
+                    # ref; its endpoint_id is derived from it, never
+                    # chosen, so the contract requires the object here.
+                    "database_object": {"schema": "public", "name": "orders"},
                 }
             }
         )
@@ -203,12 +207,39 @@ class TestEndpointRefDispatch:
             "endpoint_id": "injected",
         }
         handler._runtime = _runtime(connector_mapper=_mapper("pg"))
-        # Original registration wins — set_endpoint_refs took a defensive copy.
-        assert handler._endpoint_refs["s1"] == {
-            "scope": "connector",
-            "connection_id": "pg",
-            "endpoint_id": "transfers",
-        }
+        # Original registration wins — set_endpoint_refs parsed what it was
+        # given into its own contract ref and kept that.
+        assert handler._endpoint_refs["s1"] == validate_endpoint_ref(
+            {
+                "scope": "connector",
+                "connection_id": "pg",
+                "endpoint_id": "transfers",
+            }
+        )
+
+    def test_a_ref_the_contract_refuses_rejects_only_its_own_stream(self):
+        # Registration runs before the gRPC server exists, so a malformed
+        # ref is held against its stream and raised where the SchemaAck is,
+        # rather than killing the worker and every stream on it.
+        handler = GenericSQLConnector()
+        handler._runtime = _runtime(connector_mapper=_mapper("pg"))
+        handler.set_endpoint_refs(
+            {
+                "bad": {
+                    "scope": "somewhere-else",
+                    "connection_id": "pg",
+                    "endpoint_id": "transfers",
+                },
+                "good": {
+                    "scope": "connector",
+                    "connection_id": "pg",
+                    "endpoint_id": "transfers",
+                },
+            }
+        )
+        with pytest.raises(SchemaConfigurationError, match="EndpointRef"):
+            handler._type_mapper_for_stream("bad")
+        assert handler._type_mapper_for_stream("good").connector_slug == "pg"
 
 
 class TestColumnDefStrictness:

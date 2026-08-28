@@ -29,6 +29,7 @@ from typing import Any
 import aiohttp
 import pyarrow as pa
 from analitiq.contracts.endpoints import ApiEndpointDoc, ReadOperation, Replication
+from analitiq.contracts.stream import EndpointRef, IncrementalReplication, StreamSource
 from pydantic import ValidationError
 
 from ..base_handler import (
@@ -127,15 +128,18 @@ class _Dispatch:
 
 def _read_operation(
     config: dict[str, Any],
-) -> tuple[str, ReadOperation, dict[str, Any], Mapping[str, Any]]:
+) -> tuple[str, ReadOperation, StreamSource, EndpointRef]:
     """Read the four things a read is addressed by, refusing a document without them.
 
     All four are contract-required, so an absent one is a wiring defect
     between the engine and this connector rather than an author's mistake --
     which is why each names what is missing instead of defaulting.
 
-    ``stream_source`` and its ``endpoint_ref`` stay dicts: they belong to
-    the STREAM document, not to the endpoint document parsed here.
+    Both documents the engine hands over are parsed here, each against the
+    contract model that owns it: the endpoint document is ``ApiEndpointDoc``
+    and the stream's source block is ``StreamSource``. ``endpoint_ref`` is
+    then the parsed ref off that block, not a key looked up in it -- the
+    contract requires it, so the parse is what refuses a source without one.
     """
     doc = config.get("endpoint_document")
     if not doc:
@@ -168,14 +172,19 @@ def _read_operation(
             f"endpoint {endpoint_id!r}: operations.read is required to read "
             f"this endpoint as a source"
         )
-    stream_source = config.get("stream_source") or {}
-    endpoint_ref = stream_source.get("endpoint_ref")
-    if not endpoint_ref:
+    source_block = config.get("stream_source")
+    if not source_block:
+        raise ReadError("source config is missing 'stream_source'")
+    try:
+        stream_source = StreamSource.model_validate(source_block)
+    except ValidationError as err:
+        # Same classification as the endpoint document above: a stream
+        # source the published contract refuses is a deterministic read
+        # failure, and a bare ValidationError would be retried.
         raise ReadError(
-            "stream_source is missing 'endpoint_ref'; the source contract "
-            "requires it to declare per-field types"
-        )
-    return endpoint_id, read, stream_source, endpoint_ref
+            f"source config 'stream_source' does not satisfy StreamSource: {err}"
+        ) from err
+    return endpoint_id, read, stream_source, stream_source.endpoint_ref
 
 
 class GenericAPIConnector(BaseDestinationHandler):
@@ -479,7 +488,7 @@ class GenericAPIConnector(BaseDestinationHandler):
             table = ParamTable.for_read(
                 read.params,
                 resolver,
-                filters=stream_source.get("filters") or [],
+                filters=stream_source.filters or [],
             )
             problem = request_block_problem(
                 request_block,
@@ -499,13 +508,22 @@ class GenericAPIConnector(BaseDestinationHandler):
             if problem is not None:
                 raise ReadError(f"endpoint {endpoint_id!r}: {problem}")
 
-            replication_block = stream_source.get("replication") or {}
-            cursor_field = replication_block.get("cursor_field")
-            if replication_block.get("method") == "incremental":
+            # isinstance, not a key test: the stream's replication is a
+            # method-discriminated union, and ``cursor_field`` is a field of
+            # the incremental member alone. Narrowing on the type is what
+            # makes the attribute readable at all.
+            replication_block = stream_source.replication
+            incremental = (
+                replication_block
+                if isinstance(replication_block, IncrementalReplication)
+                else None
+            )
+            cursor_field = incremental.cursor_field if incremental else None
+            if incremental is not None:
                 await self._bind_incremental_filter(
                     table.values,
                     read.replication,
-                    replication_block,
+                    incremental,
                     checkpoint=checkpoint,
                     stream_name=stream_name,
                     partition=partition,
@@ -683,7 +701,7 @@ class GenericAPIConnector(BaseDestinationHandler):
     async def _bind_incremental_filter(
         params: dict[str, Any],
         declared_replication: Replication | None,
-        stream_replication: Mapping[str, Any],
+        stream_replication: IncrementalReplication,
         *,
         checkpoint: CheckpointStore,
         stream_name: str,
@@ -691,13 +709,13 @@ class GenericAPIConnector(BaseDestinationHandler):
     ) -> None:
         """Write the stored cursor, minus the safety window, into its param.
 
-        ``declared_replication`` is the endpoint document's block, a
-        contract model; ``stream_replication`` is the STREAM document's,
-        which this issue does not type and which stays a dict.
+        ``declared_replication`` is the endpoint document's block;
+        ``stream_replication`` is the STREAM document's. Both are contract
+        models, and the stream's is the incremental member specifically --
+        the caller narrowed it, which is what makes ``cursor_field`` a
+        field that exists here rather than one to test for.
         """
-        cursor_field = stream_replication.get("cursor_field")
-        if not cursor_field:
-            return
+        cursor_field = stream_replication.cursor_field
         param_name = cursor_param_for(declared_replication, cursor_field)
         if not param_name:
             logger.warning(
@@ -714,7 +732,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                 stream_name,
             )
             return
-        safety_window = stream_replication.get("safety_window_seconds")
+        safety_window = stream_replication.safety_window_seconds
         if safety_window is None:
             # Operational policy the engine owns and fills before the config
             # crosses the boundary. A connector never declares it, so an

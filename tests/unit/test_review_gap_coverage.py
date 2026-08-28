@@ -86,9 +86,9 @@ class TestWriteConflictKeysWiring:
                 ),
             ),
         )
-        handler._endpoint_refs = {
-            "s1": {"scope": "connector", "connection_id": "pg", "endpoint_id": "x"},
-        }
+        handler.set_endpoint_refs(
+            {"s1": {"scope": "connector", "connection_id": "pg", "endpoint_id": "x"}}
+        )
         handler.set_stream_endpoints(
             {
                 "s1": {
@@ -152,9 +152,9 @@ class TestWriteConflictKeysWiring:
                 ),
             ),
         )
-        handler._endpoint_refs = {
-            "s1": {"scope": "connector", "connection_id": "pg", "endpoint_id": "x"},
-        }
+        handler.set_endpoint_refs(
+            {"s1": {"scope": "connector", "connection_id": "pg", "endpoint_id": "x"}}
+        )
         handler.set_stream_endpoints(
             {
                 "s1": {

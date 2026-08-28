@@ -972,6 +972,24 @@ class TestFailures:
             ):
                 pass
 
+    async def test_a_stream_source_the_contract_refuses_fails_loud(self) -> None:
+        # The endpoint_ref is what picks the read type-map, so a source
+        # without one types no field at all. The refusal leaves as a
+        # ReadError naming the document that failed, never as the bare
+        # ValidationError the worker would classify as retryable.
+        connector = GenericAPIConnector()
+        with pytest.raises(ReadError, match="does not satisfy StreamSource"):
+            async for _ in connector.read_batches(
+                runtime_with(FakeSession()),
+                {
+                    "endpoint_document": endpoint_document(),
+                    "stream_source": {"primary_keys": ["id"]},
+                },
+                checkpoint=FakeCheckpoint(),
+                stream_name="items",
+            ):
+                pass
+
 
 @pytest.mark.asyncio
 class TestDecimalPrecision:

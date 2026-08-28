@@ -853,7 +853,15 @@ class TestSyncEngineReadPath:
                         {"name": "name", "native_type": "TEXT", "arrow_type": "Utf8"},
                     ],
                 },
-                "stream_source": {},
+                # The binding a database stream carries; the read parses it
+                # as the contract's StreamSource.
+                "stream_source": {
+                    "endpoint_ref": {
+                        "scope": "connection",
+                        "connection_id": "sqlite-conn",
+                        "database_object": {"name": "events"},
+                    }
+                },
             }
             connector = GenericSQLConnector()
             out = []

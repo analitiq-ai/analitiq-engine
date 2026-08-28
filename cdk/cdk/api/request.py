@@ -53,6 +53,7 @@ from analitiq.contracts.endpoints import (
     WriteOperation,
     WriteRequest,
 )
+from analitiq.contracts.stream import Filter
 
 from ..request_binding import (
     bind_param_refs,
@@ -141,7 +142,7 @@ class ParamTable:
         declared: Mapping[str, Param],
         resolver: Resolver,
         *,
-        filters: Iterable[Mapping[str, Any]] = (),
+        filters: Iterable[Filter] = (),
     ) -> ParamTable:
         """Build the read role's table: defaults, then the stream's filters.
 
@@ -157,6 +158,11 @@ class ParamTable:
         correctness failure rather than a slow read. Nothing in the contract
         links a filter to a param declaration, so this is the only place it
         can be caught, and it is caught loudly.
+
+        ``filters`` are the stream document's contract ``Filter`` models,
+        so the field a filter names is a required attribute rather than a
+        key that might be missing -- an unnamed filter never reaches here,
+        the stream's parse refuses it.
         """
         uncontrolled = {
             name: decl for name, decl in declared.items() if decl.controlled_by is None
@@ -168,9 +174,7 @@ class ParamTable:
             values = resolve_param_defaults(uncontrolled, resolver)
         table = cls(values=values, controlled_by=_controlled_by(declared))
         for declared_filter in filters:
-            target = declared_filter.get("field")
-            if not target:
-                continue
+            target = declared_filter.field
             if target not in declared:
                 raise RequestSpecError(
                     f"the stream filters on {target!r}, which "
@@ -179,7 +183,7 @@ class ParamTable:
                     f"reads the whole collection. Declared params: "
                     f"{sorted(declared)}"
                 )
-            value = declared_filter.get("value")
+            value = declared_filter.value
             if value is not None:
                 table.values[target] = value
         return table

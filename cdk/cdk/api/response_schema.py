@@ -13,11 +13,12 @@ annotated schema, and ``SchemaContract`` turns it into Arrow.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from copy import deepcopy
 from typing import Any
 
 from analitiq.contracts.endpoints import ResponseExtraction
+from analitiq.contracts.stream import EndpointRef
 
 from ..exceptions import ReadError
 from ..type_map import TypeMapper, UnmappedTypeError
@@ -74,7 +75,7 @@ def records_items_schema(
 
 def apply_read_type_map(
     items_schema: dict[str, Any],
-    endpoint_ref: Mapping[str, Any],
+    endpoint_ref: EndpointRef,
     runtime: Any,
 ) -> None:
     """Resolve each record field's ``arrow_type`` from the read type-map.
@@ -92,13 +93,15 @@ def apply_read_type_map(
     deterministic config defect, so it surfaces as a :class:`ReadError`
     rather than the raw ``RuntimeError`` the worker would classify as
     retryable.
+
+    ``endpoint_ref`` is the stream document's ``scope``-discriminated ref,
+    parsed by the read's own funnel. A ref with no scope no longer reaches
+    here: the union has no such member, so the parse refuses it before the
+    read addresses anything. ``EndpointScope(scope)`` still stands between
+    the contract's vocabulary and this CDK's, and raises on a scope the CDK
+    has no mapper family for.
     """
-    scope = endpoint_ref.get("scope")
-    if not scope:
-        raise ReadError(
-            f"stream_source endpoint_ref has no 'scope'; expected one of "
-            f"{[s.value for s in EndpointScope]}"
-        )
+    scope = endpoint_ref.scope
 
     mapper: TypeMapper | None = None
 

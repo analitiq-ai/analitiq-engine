@@ -191,9 +191,12 @@ def _upsert_handler(cls=GenericSQLConnector):
     handler._engine = MagicMock()
     handler._runtime = MagicMock()
     handler._runtime.type_mapper_for = MagicMock(return_value=MagicMock())
-    handler._endpoint_refs = {
-        "s1": {"scope": "connector", "connection_id": "c", "endpoint_id": "e"}
-    }
+    # Through the registration funnel, not onto the attribute: the handler
+    # holds parsed contract refs, and a hand-built dict would be a shape no
+    # worker can send.
+    handler.set_endpoint_refs(
+        {"s1": {"scope": "connector", "connection_id": "c", "endpoint_id": "e"}}
+    )
     handler.set_stream_endpoints(
         {
             "s1": {

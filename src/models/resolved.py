@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Annotated, Any, get_args, get_origin
 
 from analitiq.contracts.pipelines.config import ErrorHandling as ContractErrorHandling
-from analitiq.contracts.stream import Replication
+from analitiq.contracts.stream import EndpointRef, Replication
 from pydantic import BaseModel
 
 from cdk.connection_runtime import ConnectionRuntime
@@ -25,7 +25,6 @@ from src.config import settings
 from src.config.schema_validator import EndpointDocument
 from src.engine.mapping import MappingDocument
 from src.models.state import ReplicationConfig as StateReplicationConfig
-from src.models.stream import EndpointRef
 
 
 def with_effective_safety_window(stream_source: dict[str, Any]) -> dict[str, Any]:
@@ -64,6 +63,19 @@ def dump_endpoint_document(document: EndpointDocument) -> dict[str, Any]:
     the model's defaults into the wire shape.
     """
     return document.model_dump(mode="json", by_alias=True, exclude_unset=True)
+
+
+def dump_endpoint_ref(ref: EndpointRef) -> dict[str, Any]:
+    """Serialise an endpoint reference back to its authored JSON shape.
+
+    ``by_alias`` restores the contract's wire names (``database_object.schema``
+    is the ``schema_`` attribute). ``exclude_none`` rather than
+    ``exclude_unset``: a connection ref's ``endpoint_id`` is derived by the
+    contract validator, not authored, so ``exclude_unset`` would drop the very
+    handle the worker resolves the endpoint by -- while the optional locator
+    fields must stay out, because the contract rejects an explicit null there.
+    """
+    return ref.model_dump(mode="json", by_alias=True, exclude_none=True)
 
 
 def _contract_literals(model: type[BaseModel], field_name: str) -> frozenset[str]:
@@ -176,7 +188,7 @@ class ResolvedSource:
         embedded in the JSON payload.
         """
         return {
-            "endpoint_ref": self.endpoint_ref.to_dict(),
+            "endpoint_ref": dump_endpoint_ref(self.endpoint_ref),
             "connection_ref": self.connection_ref,
             "endpoint_document": dump_endpoint_document(self.endpoint_document),
             "stream_source": with_effective_safety_window(self.stream_source),

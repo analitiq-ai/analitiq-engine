@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 from analitiq.contracts.endpoints import ResponseExtraction
+from analitiq.contracts.stream import validate_endpoint_ref
 from pydantic import ValidationError
 
 from cdk.api.response_schema import (
@@ -18,7 +19,18 @@ from cdk.type_map import UnmappedTypeError
 
 pytestmark = pytest.mark.unit
 
-_ENDPOINT_REF = {"scope": "connector", "connection_id": "c", "endpoint_id": "items"}
+#: The stream's binding, parsed the way the read path hands it over: a
+#: scope-discriminated contract ref, never a dict.
+_ENDPOINT_REF = validate_endpoint_ref(
+    {"scope": "connector", "connection_id": "c", "endpoint_id": "items"}
+)
+_CONNECTION_REF = validate_endpoint_ref(
+    {
+        "scope": "connection",
+        "connection_id": "c",
+        "database_object": {"schema": "public", "name": "items"},
+    }
+)
 
 
 def _response(
@@ -146,10 +158,6 @@ class TestReadTypeMap:
         with pytest.raises(ReadError, match="no usable read type-map"):
             apply_read_type_map(items, _ENDPOINT_REF, runtime)
 
-    def test_an_endpoint_ref_without_a_scope_names_the_valid_scopes(self) -> None:
-        with pytest.raises(ReadError, match="connector"):
-            apply_read_type_map({"properties": {}}, {}, _Runtime())
-
 
 class TestNestedResolution:
     def test_it_descends_into_an_object_and_a_list(self) -> None:
@@ -188,7 +196,7 @@ class TestMapperIsScoped:
         runtime = _Runtime(_Mapper({"integer": "Int64"}))
         apply_read_type_map(
             {"properties": {"id": {"type": "integer"}}},
-            {"scope": "connection"},
+            _CONNECTION_REF,
             runtime,
         )
         assert runtime.asked == [EndpointScope.CONNECTION]
