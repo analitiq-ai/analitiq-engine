@@ -320,37 +320,7 @@ def classify(
     manifest = Manifest()
     dynamic_sites: dict[str, set[Site]] = defaultdict(set)
     for access in accesses:
-        kit = _in_scope(access.site.module, KIT_MODULES)
-        reads = manifest.kit_reads if kit else manifest.claims
-        members: dict[str, type[BaseModel]] = {}
-        for model in access.models:
-            if model in models:
-                members[model] = models[model]
-            else:
-                manifest.problems.append(
-                    f"{access.site.render()}: reads {model}, which no declared "
-                    f"root reaches; add the root the engine holds it through"
-                )
-        if access.name is None:
-            if not kit:
-                _claim_dynamic(manifest, access, members, dynamic_sites)
-            continue
-        declared_by_any = False
-        for model, declared in members.items():
-            if access.name in declared.model_fields:
-                reads[model][access.name].add(access.site)
-                declared_by_any = True
-            elif not (access.lenient or kit):
-                _classify_pydantic_name(manifest, access, model)
-        if access.lenient and access.name is not None and not declared_by_any:
-            # A defaulted getattr may miss on SOME members (a GET read has no
-            # body); missing on every member is a read of nothing -- a typo,
-            # or a field the contract renamed -- and would otherwise vanish
-            # from the manifest without a word.
-            manifest.problems.append(
-                f"{access.site.render()}: getattr {access.name!r} names a field "
-                f"no member of {', '.join(access.models)} declares"
-            )
+        _classify_access(manifest, access, models, dynamic_sites)
     for module, sites in dynamic_sites.items():
         if len(sites) > 1:
             manifest.problems.append(
@@ -360,6 +330,54 @@ def classify(
                 f"table binds which site"
             )
     return manifest
+
+
+def _reachable_members(
+    manifest: Manifest, access: Access, models: Mapping[str, type[BaseModel]]
+) -> dict[str, type[BaseModel]]:
+    """Return the receiver's members a root reaches; the others are problems."""
+    members: dict[str, type[BaseModel]] = {}
+    for model in access.models:
+        if model in models:
+            members[model] = models[model]
+        else:
+            manifest.problems.append(
+                f"{access.site.render()}: reads {model}, which no declared "
+                f"root reaches; add the root the engine holds it through"
+            )
+    return members
+
+
+def _classify_access(
+    manifest: Manifest,
+    access: Access,
+    models: Mapping[str, type[BaseModel]],
+    dynamic_sites: dict[str, set[Site]],
+) -> None:
+    """Sort one access, per member of its receiver."""
+    kit = _in_scope(access.site.module, KIT_MODULES)
+    members = _reachable_members(manifest, access, models)
+    if access.name is None:
+        if not kit:
+            _claim_dynamic(manifest, access, members, dynamic_sites)
+        return
+    reads = manifest.kit_reads if kit else manifest.claims
+    declared_by_any = False
+    for model, declared in members.items():
+        if access.name in declared.model_fields:
+            reads[model][access.name].add(access.site)
+            declared_by_any = True
+        elif not (access.lenient or kit):
+            _classify_pydantic_name(manifest, access, model)
+    if access.lenient and not declared_by_any:
+        # A defaulted getattr may miss on SOME members (a GET read has no
+        # body); missing on every member is a read of nothing -- a typo, or
+        # a field the contract renamed -- and would otherwise vanish from
+        # the manifest without a word.
+        manifest.problems.append(
+            f"{access.site.render()}: getattr {access.name!r} names a field "
+            f"no member of {', '.join(access.models)} declares"
+        )
 
 
 def _claim_dynamic(
