@@ -293,9 +293,12 @@ def table_references(result: build.BuildResult) -> dict[str, set[Site]]:
         if not _in_scope(module, RUNTIME_MODULES) or state.tree is None:
             continue
         for expr in get_subexpressions(state.tree):
-            if isinstance(expr, (NameExpr, MemberExpr)) and expr.fullname in tables:
-                if module != expr.fullname.rpartition(".")[0]:
-                    references[expr.fullname].add(Site(module, expr.line))
+            if (
+                isinstance(expr, (NameExpr, MemberExpr))
+                and expr.fullname in tables
+                and module != expr.fullname.rpartition(".")[0]
+            ):
+                references[expr.fullname].add(Site(module, expr.line))
     return references
 
 
