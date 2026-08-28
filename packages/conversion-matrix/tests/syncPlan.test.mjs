@@ -4,8 +4,10 @@
 // the version/skip decisions and the fail-loud paths are pinned here.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   manifestAbsent,
+  planBackfill,
   planSync,
   planVersionedPublish,
 } from "../scripts/sync-contracts-to-s3.mjs";
@@ -67,9 +69,28 @@ test("changed content at an unbumped version aborts instead of overwriting", () 
   assert.throws(() => planSync(manifest({}), SHA_B, "1.2.3"), /still 1\.2\.3/);
 });
 
-test("a declared version older than the published one aborts", () => {
-  assert.throws(() => planSync(manifest({}), SHA_B, "1.2.2"), /older than the published/);
-  assert.throws(() => planSync(manifest({}), SHA_B, "0.9.9"), /older than the published/);
+test("a declared version older than the published one backfills on S3", () => {
+  // Two CDK tags approved out of order: the older release's object still
+  // gets written; only latest.json is left alone.
+  assert.deepEqual(planSync(manifest({ version: "1.3.0" }), SHA_B, "1.2.3"), {
+    action: "backfill",
+    version: "1.2.3",
+  });
+});
+
+test("a backfill writes an absent object, skips an identical one, refuses a different one", () => {
+  const bytes = "artifact bytes";
+  const sha = createHash("sha256").update(bytes).digest("hex");
+  assert.deepEqual(planBackfill(null, sha, "1.2.3"), { action: "publish-object", version: "1.2.3" });
+  assert.deepEqual(planBackfill(bytes, sha, "1.2.3"), { action: "skip" });
+  assert.throws(() => planBackfill("other bytes", sha, "1.2.3"), /v1\.2\.3 is already published with different bytes/);
+});
+
+test("a declared version older than the published one aborts on a single-latest channel", () => {
+  // The npm channel has one `latest` and nowhere else to put an older
+  // version, so it keeps refusing what S3 backfills.
+  assert.throws(() => planVersionedPublish("1.2.3", SHA_A, SHA_B, "1.2.2"), /older than the published/);
+  assert.throws(() => planVersionedPublish("1.2.3", SHA_A, SHA_B, "0.9.9"), /older than the published/);
 });
 
 test("version ordering compares parts numerically, not as text", () => {
@@ -77,7 +98,10 @@ test("version ordering compares parts numerically, not as text", () => {
     action: "publish",
     version: "1.10.0",
   });
-  assert.throws(() => planSync(manifest({ version: "1.10.0" }), SHA_B, "1.9.0"), /older than/);
+  assert.deepEqual(planSync(manifest({ version: "1.10.0" }), SHA_B, "1.9.0"), {
+    action: "backfill",
+    version: "1.9.0",
+  });
 });
 
 test("unparseable manifest aborts", () => {

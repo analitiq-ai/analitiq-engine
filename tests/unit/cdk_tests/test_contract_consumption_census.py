@@ -228,3 +228,38 @@ def test_a_path_table_claims_each_step_through_every_carrier(
     }
     # A path no member starts is a dead table entry, not a silent no-op.
     assert len(manifest.problems) == 1 and "('q',)" in manifest.problems[0]
+
+
+def test_a_dump_of_an_opaque_model_is_recorded_as_its_site(
+    census: ModuleType, monkeypatch
+) -> None:
+    monkeypatch.setattr(census, "_OPAQUE_MODELS", frozenset({model_name(Leaf)}))
+    manifest, claims = _classify(
+        census,
+        _access(census, "model_dump"),
+        census.Access(census.Site("src.y", 3), (model_name(Leaf),), "authored_json"),
+    )
+    assert manifest.problems == [] and claims == {}
+    assert manifest.opaque_dumps[model_name(Leaf)] == {
+        census.Site("src.x", 7),
+        census.Site("src.y", 3),
+    }
+
+
+def test_an_opaque_registration_needs_a_dump_or_a_reading_consumer(
+    census: ModuleType,
+) -> None:
+    manifest = census.Manifest()
+    dead = census._opaque_entry("m.Leaf", "cdk.nowhere", manifest, {})
+    assert dead == {"consumer": "cdk.nowhere", "dumps": [], "entries": []}
+    assert (
+        len(manifest.problems) == 1
+        and "delete the registration" in manifest.problems[0]
+    )
+    live = census._opaque_entry(
+        "m.Leaf",
+        "cdk.reader",
+        census.Manifest(),
+        {"cdk.reader": {census.Site("cdk.reader", 9)}},
+    )
+    assert live["entries"] == ["cdk.reader:9"]

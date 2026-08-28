@@ -49,6 +49,7 @@ from analitiq.contracts.pipelines.config import Runtime as ContractRuntime
 from analitiq.contracts.stream import (
     ConnectionEndpointRef,
     EndpointRef,
+    FullRefreshReplication,
     IncrementalReplication,
 )
 from analitiq.contracts.stream import Replication as ContractReplication
@@ -93,22 +94,38 @@ logger = logging.getLogger(__name__)
 
 # The contract's replication entry is a method-discriminated union alias, not a
 # class, so validation goes through an adapter (built once, reused per stream).
-_REPLICATION_ADAPTER: TypeAdapter[Any] = TypeAdapter(ContractReplication)
+# Typed as the union's members, not ``Any``: every read below is then a typed
+# contract read the consumption census can see.
+_REPLICATION_ADAPTER: TypeAdapter[
+    FullRefreshReplication | IncrementalReplication
+] = TypeAdapter(ContractReplication)
 
 
-def _author_set(model: BaseModel, keys: tuple[str, ...]) -> dict[str, Any]:
-    """Return ``{key: value}`` for keys the author explicitly set to a non-null value.
+def _author_set(model: BaseModel, **values: Any) -> dict[str, Any]:
+    """Return the *values* whose field the author explicitly set to a non-null value.
 
     The contract models fill omitted fields with their own defaults, so consult
     ``model_fields_set`` (a reliable author-intent signal as of
     analitiq-contract-models 1.0.0rc2, infra #938) to forward only
     author-provided values. A present-but-null value is treated as unset. The
     engine keeps its own defaults for the rest, so its precedence is preserved.
+
+    The caller spells each read as a typed attribute access (``batch_size=
+    contract.batching.batch_size``) rather than handing over field names for a
+    ``getattr``: the contract-consumption census sees the former and not the
+    latter, and a read this function performed by name would be published as
+    an unread field.
     """
+    unknown = values.keys() - model.model_fields.keys()
+    if unknown:
+        raise ValueError(
+            f"{type(model).__name__} declares no field {sorted(unknown)}; "
+            f"the keyword must name the field it was read from"
+        )
     return {
-        key: getattr(model, key)
-        for key in keys
-        if key in model.model_fields_set and getattr(model, key) is not None
+        key: value
+        for key, value in values.items()
+        if key in model.model_fields_set and value is not None
     }
 
 
@@ -123,15 +140,21 @@ def _parse_runtime_config(raw: Mapping[str, Any]) -> RuntimeConfig:
     the contract's defaults. Precedence: pipeline config > env var > engine default.
     """
     contract = ContractRuntime.model_validate(dict(raw))
+    batching = contract.batching
+    error_handling = contract.error_handling
     return RuntimeConfig(
-        batching=BatchingConfig(**_author_set(contract.batching, ("batch_size",))),
+        batching=BatchingConfig(
+            **_author_set(batching, batch_size=batching.batch_size)
+        ),
         error_handling=ErrorHandlingConfig(
             **_author_set(
-                contract.error_handling,
-                ("strategy", "max_retries", "retry_delay_seconds"),
+                error_handling,
+                strategy=error_handling.strategy,
+                max_retries=error_handling.max_retries,
+                retry_delay_seconds=error_handling.retry_delay_seconds,
             )
         ),
-        **_author_set(contract, ("buffer_size",)),
+        **_author_set(contract, buffer_size=contract.buffer_size),
     )
 
 

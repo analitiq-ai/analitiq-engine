@@ -15,8 +15,10 @@ it does see but this file does not classify fails the render:
   (``DYNAMIC_ATTRIBUTE_TABLES``);
 * a walk down a path table on an ``Any``-typed receiver claims each step
   (``PATH_TABLES``) -- invisible to the type map, so registered by name;
-* ``model_dump`` receivers are ``OPAQUE`` (the dump is consumed as a JSON
-  grammar by one module) or ``transport`` (re-parsed on the far side);
+* ``model_dump`` receivers and ``authored_json`` arguments are ``OPAQUE``
+  (the dump is consumed as a JSON grammar by one module, which must still
+  read authored JSON or the registration is dead) or ``transport``
+  (re-parsed on the far side);
 * ``model_fields`` and the other pydantic introspection names are not reads.
 
 Runtime modules (``cdk.*`` minus the conformance kit, and ``src.*``) make
@@ -149,7 +151,11 @@ PATH_TABLES: Final[tuple[tuple[Any, str, str], ...]] = (
 INTROSPECTION: Final = frozenset(
     {"model_fields", "model_fields_set", "model_config", "__class__", "__name__"}
 )
-DUMPS: Final = frozenset({"model_dump", "model_dump_json"})
+DUMPS: Final = frozenset({"model_dump", "model_dump_json", "authored_json"})
+
+#: The function that turns a contract model into its authored JSON; a call
+#: to it is where a grammar consumer's reads begin.
+AUTHORED_JSON: Final = "cdk.json_utils.authored_json"
 
 
 @dataclass(frozen=True, order=True)
@@ -186,6 +192,8 @@ class Manifest:
         default_factory=lambda: defaultdict(lambda: defaultdict(set))
     )
     transport: set[Site] = field(default_factory=set)
+    #: Where each opaque model is dumped or handed to ``authored_json``.
+    opaque_dumps: dict[str, set[Site]] = field(default_factory=lambda: defaultdict(set))
     problems: list[str] = field(default_factory=list)
 
 
@@ -246,18 +254,39 @@ def census(result: build.BuildResult) -> Iterator[Access]:
                 models = _receiver_models(result.types.get(expr.expr))
                 if models:
                     yield Access(Site(module, expr.line), models, expr.name)
-            elif (
+            elif isinstance(expr, CallExpr) and isinstance(expr.callee, NameExpr):
+                callee, args = expr.callee.fullname, expr.args
+                if callee == "builtins.getattr" and len(args) >= 2:
+                    models = _receiver_models(result.types.get(args[0]))
+                    if not models:
+                        continue
+                    name = args[1].value if isinstance(args[1], StrExpr) else None
+                    yield Access(Site(module, expr.line), models, name, lenient=True)
+                elif callee == AUTHORED_JSON and args:
+                    models = _receiver_models(result.types.get(args[0]))
+                    if models:
+                        yield Access(Site(module, expr.line), models, "authored_json")
+
+
+def grammar_entries(result: build.BuildResult) -> dict[str, set[Site]]:
+    """Every ``authored_json`` call in the runtime modules, by module.
+
+    A grammar consumer (``OPAQUE``) reads a model through this call, usually
+    on an ``Any``-typed value the type map cannot attribute to a model. The
+    call itself is still visible, and is what keeps a registration live.
+    """
+    entries: dict[str, set[Site]] = defaultdict(set)
+    for module, state in result.graph.items():
+        if not _in_scope(module, RUNTIME_MODULES) or state.tree is None:
+            continue
+        for expr in get_subexpressions(state.tree):
+            if (
                 isinstance(expr, CallExpr)
                 and isinstance(expr.callee, NameExpr)
-                and expr.callee.fullname == "builtins.getattr"
-                and len(expr.args) >= 2
+                and expr.callee.fullname == AUTHORED_JSON
             ):
-                models = _receiver_models(result.types.get(expr.args[0]))
-                if not models:
-                    continue
-                name_arg = expr.args[1]
-                name = name_arg.value if isinstance(name_arg, StrExpr) else None
-                yield Access(Site(module, expr.line), models, name, lenient=True)
+                entries[module].add(Site(module, expr.line))
+    return entries
 
 
 def _table_entries(module: str, attribute: str) -> tuple[Any, ...]:
@@ -348,6 +377,7 @@ def _classify_pydantic_name(manifest: Manifest, access: Access, model: str) -> N
         )
         return
     if model in _OPAQUE_MODELS:
+        manifest.opaque_dumps[model].add(access.site)
         return
     if access.site.module in TRANSPORT_MODULES:
         manifest.transport.add(access.site)
@@ -399,15 +429,20 @@ def _render_reads(
 def build_contract_consumption() -> dict[str, Any]:
     """Build the manifest document from a fresh mypy build."""
     models = reachable_models(ROOTS)
-    for annotation, consumer in OPAQUE:
-        for model in contract_models(annotation):
-            if model_name(model) not in models:
-                raise ConsumptionRenderError(
-                    f"OPAQUE names {model_name(model)} (consumer {consumer}), which "
-                    f"no declared root reaches"
-                )
-    manifest = classify(census(type_check()), models)
+    result = type_check()
+    manifest = classify(census(result), models)
     claim_path_tables(manifest, models)
+    entries = grammar_entries(result)
+    opaque = {
+        model_name(m): _opaque_entry(model_name(m), consumer, manifest, entries)
+        for annotation, consumer in OPAQUE
+        for m in contract_models(annotation)
+    }
+    for name in opaque:
+        if name not in models:
+            manifest.problems.append(
+                f"OPAQUE names {name}, which no declared root reaches"
+            )
     if manifest.problems:
         raise ConsumptionRenderError(
             "unclassified reads on contract receivers:\n" + "\n".join(manifest.problems)
@@ -418,13 +453,37 @@ def build_contract_consumption() -> dict[str, Any]:
         "scope": {"runtime": list(RUNTIME_MODULES), "kit": list(KIT_MODULES)},
         "roots": sorted(model_name(m) for root in ROOTS for m in contract_models(root)),
         "claims": _render_reads(manifest.claims),
-        "opaque": {
-            model_name(m): consumer
-            for annotation, consumer in OPAQUE
-            for m in contract_models(annotation)
-        },
+        "opaque": opaque,
         "transport": [s.render() for s in sorted(manifest.transport)],
         "kit_reads": _render_reads(manifest.kit_reads),
+    }
+
+
+def _opaque_entry(
+    model: str,
+    consumer: str,
+    manifest: Manifest,
+    entries: Mapping[str, set[Site]],
+) -> dict[str, Any]:
+    """One opaque registration, with the sites that prove it is still read.
+
+    ``dumps`` are the sites the model itself is dumped or handed to
+    ``authored_json`` at; ``entries`` are the consumer's ``authored_json``
+    calls. A registration with neither is dead -- the engine stopped reading
+    the model as a grammar -- and would otherwise mask that model's unread
+    fields indefinitely.
+    """
+    dumps = manifest.opaque_dumps.get(model, set())
+    consumer_entries = entries.get(consumer, set())
+    if not dumps and not consumer_entries:
+        manifest.problems.append(
+            f"OPAQUE registers {model} to {consumer}, but nothing dumps the model "
+            f"and {consumer} reads no authored JSON; delete the registration"
+        )
+    return {
+        "consumer": consumer,
+        "dumps": [s.render() for s in sorted(dumps)],
+        "entries": [s.render() for s in sorted(consumer_entries)],
     }
 
 

@@ -113,11 +113,24 @@ export function compareVersions(left, right) {
  * every state that would publish bytes under a version that lies about them.
  * `publishedVersion` / `publishedSha` are null when nothing is published yet.
  *
+ * A declared version OLDER than the published one is refused by default: the
+ * npm channel has one `latest` and no other place for it. A channel that
+ * keeps one immutable object per version (S3) passes `allowOlder` and gets
+ * {action: "backfill", version} instead -- the older release's object can
+ * still be written, and the manifest is left pointing at the newer one. That
+ * is how two CDK tags approved out of order both end up published.
+ *
  * Shared rather than restated: every channel that ships these bytes -- S3, the
  * npm package -- has to hold the same line, and a second copy of the rule is
  * how one channel ends up with the invariant broken while the other refuses.
  */
-export function planVersionedPublish(publishedVersion, publishedSha, currentSha, declaredVersion) {
+export function planVersionedPublish(
+  publishedVersion,
+  publishedSha,
+  currentSha,
+  declaredVersion,
+  { allowOlder = false } = {}
+) {
   const declared = parseVersion(declaredVersion);
   if (declared === null) {
     throw new Error(
@@ -143,12 +156,32 @@ export function planVersionedPublish(publishedVersion, publishedSha, currentSha,
     );
   }
   if (order < 0) {
+    if (allowOlder) return { action: "backfill", version: declaredVersion };
     throw new Error(
       `artifact declares version ${declaredVersion}, older than the published ` +
         `${publishedVersion}; a revert must be published as a new higher version`
     );
   }
   return { action: "publish", version: declaredVersion };
+}
+
+/**
+ * Whether a backfill may write its versioned object, given that object's
+ * current text on S3 (null when absent) and the bytes to publish.
+ *
+ * Absent: write it. Identical: nothing to do. Different: two builds claim the
+ * same version with different bytes, which is the one thing a versioned
+ * channel must never let through.
+ */
+export function planBackfill(objectText, currentSha, declaredVersion) {
+  if (objectText === null) return { action: "publish-object", version: declaredVersion };
+  const publishedSha = createHash("sha256").update(objectText).digest("hex");
+  if (publishedSha === currentSha) return { action: "skip" };
+  throw new Error(
+    `v${declaredVersion} is already published with different bytes (sha256 ` +
+      `${publishedSha.slice(0, 12)} vs ${currentSha.slice(0, 12)}); a version ` +
+      `is immutable once published`
+  );
 }
 
 /**
@@ -176,7 +209,8 @@ export function planSync(manifestText, currentSha, declaredVersion) {
       manifest.version ?? null,
       manifest.sha256 ?? null,
       currentSha,
-      declaredVersion
+      declaredVersion,
+      { allowOlder: true }
     );
   } catch (err) {
     throw new Error(err.message.replace("the published copy", "latest.json on S3"), {
@@ -210,9 +244,9 @@ export function manifestAbsent(cliOutput) {
 // be matched on NoSuchKey alone. NOTE: this distinction only exists when the
 // role grants s3:ListBucket — without it S3 masks a missing key as
 // AccessDenied and the first publish dead-ends on a Forbidden fetch.
-function fetchManifestOrAbsent(bucket, key) {
+function fetchObjectOrAbsent(bucket, key) {
   const dir = mkdtempSync(join(tmpdir(), "engine-contracts-"));
-  const outfile = join(dir, "latest.json");
+  const outfile = join(dir, basename(key));
   try {
     // Only the AWS call is classified. A read failure on the file the CLI just
     // wrote is a local fault, and must not be fed to an AWS error classifier
@@ -241,10 +275,14 @@ function syncArtifact(bucket, commit, { prefix, path }) {
   const base = `s3://${bucket}/${prefix}`;
   const content = readFileSync(sourcePath);
   const currentSha = createHash("sha256").update(content).digest("hex");
-  const manifestText = fetchManifestOrAbsent(bucket, `${prefix}/latest.json`);
+  const manifestText = fetchObjectOrAbsent(bucket, `${prefix}/latest.json`);
   let plan;
   try {
     plan = planSync(manifestText, currentSha, JSON.parse(content).version);
+    if (plan.action === "backfill") {
+      const objectText = fetchObjectOrAbsent(bucket, `${prefix}/v${plan.version}/${file}`);
+      plan = { ...planBackfill(objectText, currentSha, plan.version), backfill: true };
+    }
   } catch (err) {
     // Several artifacts can sync in one run; without the prefix the operator
     // cannot tell which one refused to publish.
@@ -265,6 +303,12 @@ function syncArtifact(bucket, commit, { prefix, path }) {
     ],
     { stdio: "inherit" }
   );
+  if (plan.backfill) {
+    // An older release published after a newer one: its object is written,
+    // latest.json keeps naming the newer version.
+    console.log(`${prefix} v${plan.version} backfilled; latest.json unchanged`);
+    return;
+  }
   const manifest = JSON.stringify(
     {
       version: plan.version,

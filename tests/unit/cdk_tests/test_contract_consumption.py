@@ -112,13 +112,19 @@ def test_claims_come_from_runtime_modules_and_kit_reads_from_the_kit(
     )
 
 
-def test_opaque_models_are_reachable_and_name_an_importable_consumer(
+def test_opaque_registrations_are_reachable_and_prove_a_live_consumer(
     manifest: dict,
 ) -> None:
     reachable = reachable_models(_model(name) for name in manifest["roots"])
-    for name, consumer in manifest["opaque"].items():
+    for name, entry in manifest["opaque"].items():
         assert name in reachable, name
-        importlib.import_module(consumer)
+        importlib.import_module(entry["consumer"])
+        # A registration nothing dumps and no consumer reads is dead, and
+        # would mask that model's unread fields forever.
+        assert entry["dumps"] or entry["entries"], name
+        for site in entry["dumps"] + entry["entries"]:
+            assert _SITE.match(site), site
+        assert all(s.startswith(entry["consumer"] + ":") for s in entry["entries"])
 
 
 def test_the_known_reads_and_non_reads_hold(manifest: dict) -> None:

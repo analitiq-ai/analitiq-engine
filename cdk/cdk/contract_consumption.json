@@ -4,8 +4,8 @@
       "endpoint_id": [
         "cdk.api.generic:165",
         "cdk.api.write_plan:454",
-        "src.engine.pipeline_config_prep:597",
-        "src.engine.pipeline_config_prep:600"
+        "src.engine.pipeline_config_prep:620",
+        "src.engine.pipeline_config_prep:623"
       ],
       "operations": [
         "cdk.api.generic:169",
@@ -71,8 +71,8 @@
         "cdk.sql.generic:2040"
       ],
       "endpoint_id": [
-        "src.engine.pipeline_config_prep:597",
-        "src.engine.pipeline_config_prep:600"
+        "src.engine.pipeline_config_prep:620",
+        "src.engine.pipeline_config_prep:623"
       ],
       "primary_keys": [
         "cdk.sql.generic:1052"
@@ -449,12 +449,31 @@
         "cdk.api.write_plan:478"
       ]
     },
+    "analitiq.contracts.pipelines.config.Batching": {
+      "batch_size": [
+        "src.engine.pipeline_config_prep:147"
+      ]
+    },
+    "analitiq.contracts.pipelines.config.ErrorHandling": {
+      "max_retries": [
+        "src.engine.pipeline_config_prep:153"
+      ],
+      "retry_delay_seconds": [
+        "src.engine.pipeline_config_prep:154"
+      ],
+      "strategy": [
+        "src.engine.pipeline_config_prep:152"
+      ]
+    },
     "analitiq.contracts.pipelines.config.Runtime": {
       "batching": [
-        "src.engine.pipeline_config_prep:127"
+        "src.engine.pipeline_config_prep:143"
+      ],
+      "buffer_size": [
+        "src.engine.pipeline_config_prep:157"
       ],
       "error_handling": [
-        "src.engine.pipeline_config_prep:130"
+        "src.engine.pipeline_config_prep:144"
       ]
     },
     "analitiq.contracts.stream.AssignmentTarget": {
@@ -476,14 +495,14 @@
         "src.config.endpoint_resolver:87",
         "src.config.endpoint_resolver:102",
         "src.config.endpoint_resolver:124",
-        "src.engine.pipeline_config_prep:800"
+        "src.engine.pipeline_config_prep:823"
       ],
       "endpoint_id": [
         "src.config.endpoint_resolver:87",
         "src.config.endpoint_resolver:100",
         "src.config.endpoint_resolver:106",
-        "src.engine.pipeline_config_prep:597",
-        "src.engine.pipeline_config_prep:600"
+        "src.engine.pipeline_config_prep:620",
+        "src.engine.pipeline_config_prep:623"
       ],
       "scope": [
         "cdk.api.response_schema:104",
@@ -496,7 +515,7 @@
       "connection_id": [
         "src.config.endpoint_resolver:87",
         "src.config.endpoint_resolver:118",
-        "src.engine.pipeline_config_prep:800"
+        "src.engine.pipeline_config_prep:823"
       ],
       "endpoint_id": [
         "src.config.endpoint_resolver:87",
@@ -532,15 +551,29 @@
         "cdk.sql.generic:2439"
       ]
     },
+    "analitiq.contracts.stream.FullRefreshReplication": {
+      "method": [
+        "src.engine.pipeline_config_prep:178"
+      ],
+      "tie_breaker_fields": [
+        "src.engine.pipeline_config_prep:184"
+      ]
+    },
     "analitiq.contracts.stream.IncrementalReplication": {
       "cursor_field": [
         "cdk.api.generic:521",
         "cdk.api.generic:718",
         "cdk.sql.generic:2093",
-        "src.engine.pipeline_config_prep:157"
+        "src.engine.pipeline_config_prep:180"
+      ],
+      "method": [
+        "src.engine.pipeline_config_prep:178"
       ],
       "safety_window_seconds": [
         "cdk.api.generic:735"
+      ],
+      "tie_breaker_fields": [
+        "src.engine.pipeline_config_prep:184"
       ]
     },
     "analitiq.contracts.stream.KeysetDatabasePagination": {
@@ -778,25 +811,147 @@
     }
   },
   "opaque": {
-    "analitiq.contracts.endpoints.Column": "cdk.schema_contract",
-    "analitiq.contracts.endpoints.FunctionExpression": "cdk.resolver",
-    "analitiq.contracts.endpoints.LiteralExpression": "cdk.resolver",
-    "analitiq.contracts.endpoints.PredicateAnd": "cdk.api.predicates",
-    "analitiq.contracts.endpoints.PredicateEmpty": "cdk.api.predicates",
-    "analitiq.contracts.endpoints.PredicateEq": "cdk.api.predicates",
-    "analitiq.contracts.endpoints.PredicateExists": "cdk.api.predicates",
-    "analitiq.contracts.endpoints.PredicateGt": "cdk.api.predicates",
-    "analitiq.contracts.endpoints.PredicateGte": "cdk.api.predicates",
-    "analitiq.contracts.endpoints.PredicateLt": "cdk.api.predicates",
-    "analitiq.contracts.endpoints.PredicateLte": "cdk.api.predicates",
-    "analitiq.contracts.endpoints.PredicateMissing": "cdk.api.predicates",
-    "analitiq.contracts.endpoints.PredicateNeq": "cdk.api.predicates",
-    "analitiq.contracts.endpoints.PredicateNot": "cdk.api.predicates",
-    "analitiq.contracts.endpoints.PredicateNotEmpty": "cdk.api.predicates",
-    "analitiq.contracts.endpoints.PredicateOr": "cdk.api.predicates",
-    "analitiq.contracts.endpoints.RefExpression": "cdk.resolver",
-    "analitiq.contracts.endpoints.TemplateExpression": "cdk.resolver",
-    "analitiq.contracts.stream.AssignmentTarget": "cdk.type_map.arrow"
+    "analitiq.contracts.endpoints.Column": {
+      "consumer": "cdk.schema_contract",
+      "dumps": [
+        "cdk.sql.generic:215"
+      ],
+      "entries": []
+    },
+    "analitiq.contracts.endpoints.FunctionExpression": {
+      "consumer": "cdk.resolver",
+      "dumps": [],
+      "entries": [
+        "cdk.resolver:102",
+        "cdk.resolver:356",
+        "cdk.resolver:398"
+      ]
+    },
+    "analitiq.contracts.endpoints.LiteralExpression": {
+      "consumer": "cdk.resolver",
+      "dumps": [],
+      "entries": [
+        "cdk.resolver:102",
+        "cdk.resolver:356",
+        "cdk.resolver:398"
+      ]
+    },
+    "analitiq.contracts.endpoints.PredicateAnd": {
+      "consumer": "cdk.api.predicates",
+      "dumps": [],
+      "entries": [
+        "cdk.api.predicates:104"
+      ]
+    },
+    "analitiq.contracts.endpoints.PredicateEmpty": {
+      "consumer": "cdk.api.predicates",
+      "dumps": [],
+      "entries": [
+        "cdk.api.predicates:104"
+      ]
+    },
+    "analitiq.contracts.endpoints.PredicateEq": {
+      "consumer": "cdk.api.predicates",
+      "dumps": [],
+      "entries": [
+        "cdk.api.predicates:104"
+      ]
+    },
+    "analitiq.contracts.endpoints.PredicateExists": {
+      "consumer": "cdk.api.predicates",
+      "dumps": [],
+      "entries": [
+        "cdk.api.predicates:104"
+      ]
+    },
+    "analitiq.contracts.endpoints.PredicateGt": {
+      "consumer": "cdk.api.predicates",
+      "dumps": [],
+      "entries": [
+        "cdk.api.predicates:104"
+      ]
+    },
+    "analitiq.contracts.endpoints.PredicateGte": {
+      "consumer": "cdk.api.predicates",
+      "dumps": [],
+      "entries": [
+        "cdk.api.predicates:104"
+      ]
+    },
+    "analitiq.contracts.endpoints.PredicateLt": {
+      "consumer": "cdk.api.predicates",
+      "dumps": [],
+      "entries": [
+        "cdk.api.predicates:104"
+      ]
+    },
+    "analitiq.contracts.endpoints.PredicateLte": {
+      "consumer": "cdk.api.predicates",
+      "dumps": [],
+      "entries": [
+        "cdk.api.predicates:104"
+      ]
+    },
+    "analitiq.contracts.endpoints.PredicateMissing": {
+      "consumer": "cdk.api.predicates",
+      "dumps": [],
+      "entries": [
+        "cdk.api.predicates:104"
+      ]
+    },
+    "analitiq.contracts.endpoints.PredicateNeq": {
+      "consumer": "cdk.api.predicates",
+      "dumps": [],
+      "entries": [
+        "cdk.api.predicates:104"
+      ]
+    },
+    "analitiq.contracts.endpoints.PredicateNot": {
+      "consumer": "cdk.api.predicates",
+      "dumps": [],
+      "entries": [
+        "cdk.api.predicates:104"
+      ]
+    },
+    "analitiq.contracts.endpoints.PredicateNotEmpty": {
+      "consumer": "cdk.api.predicates",
+      "dumps": [],
+      "entries": [
+        "cdk.api.predicates:104"
+      ]
+    },
+    "analitiq.contracts.endpoints.PredicateOr": {
+      "consumer": "cdk.api.predicates",
+      "dumps": [],
+      "entries": [
+        "cdk.api.predicates:104"
+      ]
+    },
+    "analitiq.contracts.endpoints.RefExpression": {
+      "consumer": "cdk.resolver",
+      "dumps": [],
+      "entries": [
+        "cdk.resolver:102",
+        "cdk.resolver:356",
+        "cdk.resolver:398"
+      ]
+    },
+    "analitiq.contracts.endpoints.TemplateExpression": {
+      "consumer": "cdk.resolver",
+      "dumps": [],
+      "entries": [
+        "cdk.resolver:102",
+        "cdk.resolver:356",
+        "cdk.resolver:398"
+      ]
+    },
+    "analitiq.contracts.stream.AssignmentTarget": {
+      "consumer": "cdk.type_map.arrow",
+      "dumps": [
+        "src.engine.mapping:228"
+      ],
+      "entries": []
+    }
   },
   "roots": [
     "analitiq.contracts.endpoints.ApiEndpointDoc",
