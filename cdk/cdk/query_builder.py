@@ -72,6 +72,9 @@ class FilterOperator(Enum):
     ILIKE = "ilike"
     IS_NULL = "is_null"
     IS_NOT_NULL = "is_not_null"
+    CONTAINS = "contains"
+    STARTS_WITH = "starts_with"
+    ENDS_WITH = "ends_with"
 
 
 @dataclass
@@ -231,6 +234,20 @@ class QueryBuilder:
         "ilike": FilterOperator.ILIKE,
         "is_null": FilterOperator.IS_NULL,
         "is_not_null": FilterOperator.IS_NOT_NULL,
+        # The substring operators. ``neq`` is the contract's spelling of the
+        # same comparison ``ne`` names above: a stream filter's operator comes
+        # from the contract's FilterOperator vocabulary, so every value in it
+        # has to be a key here or a contract-valid stream cannot run. That is
+        # pinned by a test rather than left to review -- the map spent a
+        # release short of the contract by exactly these four names.
+        #
+        # The SQL symbols above carry no contract spelling; they are for a
+        # connector calling this builder directly, which is why the pin
+        # requires the map to COVER the vocabulary rather than to equal it.
+        "neq": FilterOperator.NE,
+        "contains": FilterOperator.CONTAINS,
+        "starts_with": FilterOperator.STARTS_WITH,
+        "ends_with": FilterOperator.ENDS_WITH,
     }
 
     def __init__(
@@ -476,6 +493,18 @@ class QueryBuilder:
             return col < value, [value]
         elif op == FilterOperator.LTE:
             return col <= value, [value]
+        elif op == FilterOperator.CONTAINS:
+            # autoescape, always: the value is stream-authored data, not a
+            # pattern, so a literal % or _ in it must match itself rather
+            # than silently becoming a wildcard and widening the result set.
+            # SQLAlchemy owns the escaping and emits the ESCAPE clause with
+            # it; spelling the pattern by hand here would be a second, worse
+            # copy of a rule the library already applies per dialect.
+            return col.contains(value, autoescape=True), [value]
+        elif op == FilterOperator.STARTS_WITH:
+            return col.startswith(value, autoescape=True), [value]
+        elif op == FilterOperator.ENDS_WITH:
+            return col.endswith(value, autoescape=True), [value]
 
         # Unreachable while every FilterOperator member has a branch above;
         # raising keeps a future enum addition from silently dropping filters.
