@@ -8,6 +8,7 @@ raised error.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -40,6 +41,19 @@ pytestmark = pytest.mark.unit
 
 _PAGINATION: TypeAdapter[Any] = TypeAdapter(Pagination)
 
+_NOW = datetime(2026, 8, 1, 9, 30, 15, tzinfo=timezone.utc)
+
+#: A record field that holds a moment, for the streams whose cursor is a
+#: timestamp rather than the integer ``id`` every fixture record carries.
+_UPDATED_AT = {
+    "updated_at": {
+        "type": "string",
+        "format": "date-time",
+        "native_type": "timestamp",
+        "arrow_type": "Utf8",
+    }
+}
+
 
 async def _read(
     session: FakeSession,
@@ -50,8 +64,9 @@ async def _read(
     batch_size: int = 100,
     error_map: dict[str, Any] | None = None,
     parameters: dict[str, Any] | None = None,
+    now: datetime = _NOW,
 ) -> list[Any]:
-    connector = GenericAPIConnector()
+    connector = GenericAPIConnector(clock=lambda: now)
     runtime = runtime_with(session, error_map=error_map, parameters=parameters)
     batches = []
     async for batch in connector.read_batches(
@@ -863,9 +878,15 @@ class TestIncremental:
             replication={
                 "supported_methods": ["full_refresh", "incremental"],
                 "cursor_mappings": [
-                    {"cursor_field": "id", "param": "since", "operator": "gte"}
+                    {"cursor_field": "id", "param": "since", "operator": "gte"},
+                    {
+                        "cursor_field": "updated_at",
+                        "param": "since",
+                        "operator": "gte",
+                    },
                 ],
             },
+            record_fields=_UPDATED_AT,
         )
 
     async def test_the_stored_cursor_binds_to_its_declared_param(self) -> None:
@@ -874,11 +895,162 @@ class TestIncremental:
             session,
             self._document(),
             source=stream_source(
-                method="incremental", cursor_field="id", safety_window=60
+                method="incremental", cursor_field="updated_at", safety_window=60
             ),
             checkpoint=FakeCheckpoint({"cursor": "2026-07-31T12:00:00Z"}),
         )
         assert sent_query(session.calls[0])["since"] == "2026-07-31T11:59:00Z"
+
+    async def test_a_window_mapping_binds_both_ends(self) -> None:
+        document = endpoint_document(
+            request={
+                "method": "GET",
+                "path": "/items",
+                "query": {"from": {"from_param": "from"}, "to": {"from_param": "to"}},
+            },
+            params={
+                name: {
+                    "in": "query",
+                    "type": "string",
+                    "required": False,
+                    "controlled_by": "replication",
+                }
+                for name in ("from", "to")
+            },
+            replication={
+                "supported_methods": ["full_refresh", "incremental"],
+                "cursor_mappings": [
+                    {
+                        "cursor_field": "updated_at",
+                        "start_param": "from",
+                        "end_param": "to",
+                        "start_operator": "gte",
+                        "end_operator": "lte",
+                        "format": "date",
+                    }
+                ],
+            },
+            record_fields=_UPDATED_AT,
+        )
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        await _read(
+            session,
+            document,
+            source=stream_source(
+                method="incremental", cursor_field="updated_at", safety_window=60
+            ),
+            checkpoint=FakeCheckpoint({"cursor": "2026-07-31T00:00:30Z"}),
+            now=datetime(2026, 8, 1, 9, 30, 15, tzinfo=timezone.utc),
+        )
+        query = sent_query(session.calls[0])
+        assert query == {"from": "2026-07-30", "to": "2026-08-01"}
+
+    async def test_a_zero_cursor_resumes_rather_than_reading_everything(
+        self,
+    ) -> None:
+        # ``0`` is the first id (or the epoch), not an absent checkpoint:
+        # absent is ``None``, which is what a store with no checkpoint
+        # answers.
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        await _read(
+            session,
+            self._document(),
+            source=stream_source(
+                method="incremental", cursor_field="id", safety_window=0
+            ),
+            checkpoint=FakeCheckpoint({"cursor": 0}),
+        )
+        assert sent_query(session.calls[0])["since"] == 0
+
+    async def test_a_nullable_cursor_field_reads_by_its_real_type(self) -> None:
+        document = self._document()
+        document["operations"]["read"]["response"]["schema"]["properties"]["records"][
+            "items"
+        ]["properties"]["updated_at"]["type"] = ["string", "null"]
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        await _read(
+            session,
+            document,
+            source=stream_source(
+                method="incremental", cursor_field="updated_at", safety_window=60
+            ),
+            checkpoint=FakeCheckpoint({"cursor": "2026-07-31T12:00:00Z"}),
+        )
+        assert sent_query(session.calls[0])["since"] == "2026-07-31T11:59:00Z"
+
+    async def test_an_epoch_bound_lands_in_a_json_body_as_a_number(self) -> None:
+        document = endpoint_document(
+            request={
+                "method": "POST",
+                "path": "/items/search",
+                "body": {"since": {"from_param": "since"}},
+            },
+            params={
+                "since": {
+                    "in": "body",
+                    "type": "integer",
+                    "required": False,
+                    "controlled_by": "replication",
+                }
+            },
+            replication={
+                "supported_methods": ["full_refresh", "incremental"],
+                "cursor_mappings": [
+                    {
+                        "cursor_field": "updated_at",
+                        "param": "since",
+                        "operator": "gte",
+                        "format": "epoch_seconds",
+                    }
+                ],
+            },
+            record_fields=_UPDATED_AT,
+        )
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        await _read(
+            session,
+            document,
+            source=stream_source(
+                method="incremental", cursor_field="updated_at", safety_window=0
+            ),
+            checkpoint=FakeCheckpoint({"cursor": "2024-07-31T12:00:00Z"}),
+        )
+        assert session.calls[0]["data"] == b'{"since":1722427200}'
+
+    async def test_a_moment_cursor_on_an_integer_field_is_refused(self) -> None:
+        # The record schema, not the value's shape, says how a checkpoint
+        # reads back: ``id`` is an integer field, so an ISO string stored
+        # against it is a defect named here rather than parsed as a date.
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        with pytest.raises(ReadError, match="declared as type 'integer'"):
+            await _read(
+                session,
+                self._document(),
+                source=stream_source(
+                    method="incremental", cursor_field="id", safety_window=60
+                ),
+                checkpoint=FakeCheckpoint({"cursor": "2026-07-31T12:00:00Z"}),
+            )
+        assert session.calls == []
+
+    async def test_a_cursor_field_the_schema_does_not_declare_is_refused(
+        self,
+    ) -> None:
+        document = self._document()
+        document["operations"]["read"]["replication"]["cursor_mappings"].append(
+            {"cursor_field": "modified", "param": "since", "operator": "gte"}
+        )
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        with pytest.raises(ReadError, match="'modified' is not declared"):
+            await _read(
+                session,
+                document,
+                source=stream_source(
+                    method="incremental", cursor_field="modified", safety_window=60
+                ),
+                checkpoint=FakeCheckpoint({"cursor": "1"}),
+            )
+        assert session.calls == []
 
     async def test_the_cursor_advances_from_each_pages_last_record(self) -> None:
         checkpoint = FakeCheckpoint({"cursor": "1"})
@@ -905,6 +1077,27 @@ class TestIncremental:
                 source=stream_source(method="incremental", cursor_field="id"),
                 checkpoint=FakeCheckpoint({"cursor": "1"}),
             )
+
+    async def test_a_mapping_facing_the_wrong_way_fails_before_the_first_run(
+        self,
+    ) -> None:
+        # Decidable from the document alone, so it is refused before a
+        # full first run establishes a checkpoint.
+        document = self._document()
+        document["operations"]["read"]["replication"]["cursor_mappings"][0][
+            "operator"
+        ] = "lt"
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        with pytest.raises(ReadError, match="an upper bound"):
+            await _read(
+                session,
+                document,
+                source=stream_source(
+                    method="incremental", cursor_field="id", safety_window=60
+                ),
+                checkpoint=FakeCheckpoint(None),
+            )
+        assert session.calls == []
 
     async def test_no_prior_cursor_reads_everything(self) -> None:
         session = FakeSession([FakeResponse(body=_rows(1))])

@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from functools import partial
 from typing import Any
 
 import aiohttp
@@ -72,7 +74,7 @@ from .page_loop import Fetch, Page, PageLoop, PageRequest
 from .query_style import declared_query_styles
 from .read_setup import build_read_strategy, stop_condition
 from .records import extract_records, resolve_response_metadata
-from .replication import cursor_param_for, effective_start
+from .replication import check_mapping_direction, cursor_bounds, cursor_mapping_for
 from .request import (
     ParamTable,
     RequestBuilder,
@@ -81,7 +83,11 @@ from .request import (
     request_block_problem,
     substitute_path,
 )
-from .response_schema import apply_read_type_map, records_items_schema
+from .response_schema import (
+    apply_read_type_map,
+    record_field_type,
+    records_items_schema,
+)
 from .urls import join_url, origin_of, require_declared_origin
 from .verdicts import declared_retry_statuses, read_verdict, write_verdict
 from .write_plan import (
@@ -98,6 +104,8 @@ from .write_response import DeclaredWriteFailure, judge_write_response
 logger = logging.getLogger(__name__)
 
 __all__ = ["GenericAPIConnector"]
+
+_utc_now: Callable[[], datetime] = partial(datetime.now, timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -239,8 +247,13 @@ class GenericAPIConnector(BaseDestinationHandler):
     #: dialect's three hooks.
     dialect_class: type[ApiDialect] = ApiDialect
 
-    def __init__(self) -> None:
-        """Construct an unconnected connector; both worker entry points do ``cls()``."""
+    def __init__(self, *, clock: Callable[[], datetime] = _utc_now) -> None:
+        """Construct an unconnected connector; both worker entry points do ``cls()``.
+
+        ``clock`` answers the run's "now", the upper bound a window mapping
+        sends. Injected so a test can pin it; the worker takes the default.
+        """
+        self._clock = clock
         self._runtime: ConnectionRuntime | None = None
         self._http: HttpSender | None = None
         #: One dispatch per transport ref, built on first use. The default
@@ -565,9 +578,13 @@ class GenericAPIConnector(BaseDestinationHandler):
                     table.values,
                     read.replication,
                     incremental,
+                    cursor_field_type=record_field_type(
+                        endpoint_id, items_schema, incremental.cursor_field
+                    ),
                     checkpoint=checkpoint,
                     stream_name=stream_name,
                     partition=partition,
+                    now=self._clock(),
                 )
 
             # Substituted here, after the incremental filter has written the
@@ -765,30 +782,37 @@ class GenericAPIConnector(BaseDestinationHandler):
         declared_replication: Replication | None,
         stream_replication: IncrementalReplication,
         *,
+        cursor_field_type: str,
         checkpoint: CheckpointStore,
         stream_name: str,
         partition: dict[str, Any],
+        now: datetime,
     ) -> None:
-        """Write the stored cursor, minus the safety window, into its param.
+        """Write the stored cursor's bounds into the params its mapping names.
 
         ``declared_replication`` is the endpoint document's block;
         ``stream_replication`` is the STREAM document's. Both are contract
         models, and the stream's is the incremental member specifically --
         the caller narrowed it, which is what makes ``cursor_field`` a
         field that exists here rather than one to test for.
+        ``cursor_field_type`` is the JSON type the record schema declares
+        for that field, which is how the stored cursor reads back.
         """
         cursor_field = stream_replication.cursor_field
-        param_name = cursor_param_for(declared_replication, cursor_field)
-        if not param_name:
+        mapping = cursor_mapping_for(declared_replication, cursor_field)
+        if mapping is None:
             logger.warning(
                 "no replication.cursor_mappings entry for cursor field %r; "
                 "running full replication",
                 cursor_field,
             )
             return
+        check_mapping_direction(mapping)
         cursor_state = await checkpoint.get_cursor(stream_name, partition)
         cursor_value = (cursor_state or {}).get("cursor")
-        if not cursor_value:
+        # Absent is ``None`` -- the store answers ``None`` for a stream with
+        # no checkpoint. ``0`` is a real cursor: the first id, or the epoch.
+        if cursor_value is None:
             logger.info(
                 "no prior cursor for stream %r; first run performs full " "replication",
                 stream_name,
@@ -805,11 +829,15 @@ class GenericAPIConnector(BaseDestinationHandler):
                 f"'safety_window_seconds'; the engine fills it before the "
                 f"config reaches a connector"
             )
-        start = effective_start(cursor_value, safety_window)
-        params[param_name] = start
-        logger.info(
-            "incremental replication: %s -> %s = %s", cursor_field, param_name, start
+        bounds = cursor_bounds(
+            mapping,
+            cursor_value,
+            safety_window,
+            cursor_field_type=cursor_field_type,
+            now=now,
         )
+        params.update(bounds)
+        logger.info("incremental replication: %s -> %s", cursor_field, bounds)
 
     # ------------------------------------------------------------------
     # Write role
