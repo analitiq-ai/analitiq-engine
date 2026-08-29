@@ -1017,6 +1017,57 @@ class TestIncremental:
         )
         assert session.calls[0]["data"] == b'{"since":1722427200}'
 
+    async def test_an_integer_cursor_reads_in_the_record_unit_and_renders_in_the_param(
+        self,
+    ) -> None:
+        # The record declares seconds, the param takes milliseconds: the
+        # stored ticks are read as seconds and the bound goes out as
+        # milliseconds, not as the stored number reinterpreted.
+        document = endpoint_document(
+            request={
+                "method": "GET",
+                "path": "/items",
+                "query": {"since": {"from_param": "since"}},
+            },
+            params={
+                "since": {
+                    "in": "query",
+                    "type": "integer",
+                    "required": False,
+                    "controlled_by": "replication",
+                }
+            },
+            replication={
+                "supported_methods": ["full_refresh", "incremental"],
+                "cursor_mappings": [
+                    {
+                        "cursor_field": "modified",
+                        "param": "since",
+                        "operator": "gte",
+                        "format": "epoch_milliseconds",
+                    }
+                ],
+            },
+            record_fields={
+                "modified": {
+                    "type": "integer",
+                    "format": "epoch_seconds",
+                    "native_type": "integer",
+                    "arrow_type": "Int64",
+                }
+            },
+        )
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        await _read(
+            session,
+            document,
+            source=stream_source(
+                method="incremental", cursor_field="modified", safety_window=0
+            ),
+            checkpoint=FakeCheckpoint({"cursor": 1722427200}),
+        )
+        assert sent_query(session.calls[0])["since"] == 1722427200000
+
     async def test_a_moment_cursor_on_an_integer_field_is_refused(self) -> None:
         # The record schema, not the value's shape, says how a checkpoint
         # reads back: ``id`` is an integer field, so an ISO string stored

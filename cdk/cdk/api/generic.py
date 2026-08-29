@@ -84,8 +84,9 @@ from .request import (
     substitute_path,
 )
 from .response_schema import (
+    FieldDeclaration,
     apply_read_type_map,
-    record_field_type,
+    record_field_declaration,
     records_items_schema,
 )
 from .urls import join_url, origin_of, require_declared_origin
@@ -578,7 +579,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                     table.values,
                     read.replication,
                     incremental,
-                    cursor_field_type=record_field_type(
+                    cursor_field=record_field_declaration(
                         endpoint_id, items_schema, incremental.cursor_field
                     ),
                     checkpoint=checkpoint,
@@ -782,7 +783,7 @@ class GenericAPIConnector(BaseDestinationHandler):
         declared_replication: Replication | None,
         stream_replication: IncrementalReplication,
         *,
-        cursor_field_type: str,
+        cursor_field: FieldDeclaration,
         checkpoint: CheckpointStore,
         stream_name: str,
         partition: dict[str, Any],
@@ -795,16 +796,17 @@ class GenericAPIConnector(BaseDestinationHandler):
         models, and the stream's is the incremental member specifically --
         the caller narrowed it, which is what makes ``cursor_field`` a
         field that exists here rather than one to test for.
-        ``cursor_field_type`` is the JSON type the record schema declares
-        for that field, which is how the stored cursor reads back.
+        ``cursor_field`` is what the record schema declares for that
+        field -- its JSON type and format -- which is how the stored
+        cursor reads back.
         """
-        cursor_field = stream_replication.cursor_field
-        mapping = cursor_mapping_for(declared_replication, cursor_field)
+        cursor_field_name = stream_replication.cursor_field
+        mapping = cursor_mapping_for(declared_replication, cursor_field_name)
         if mapping is None:
             logger.warning(
                 "no replication.cursor_mappings entry for cursor field %r; "
                 "running full replication",
-                cursor_field,
+                cursor_field_name,
             )
             return
         check_mapping_direction(mapping)
@@ -833,11 +835,11 @@ class GenericAPIConnector(BaseDestinationHandler):
             mapping,
             cursor_value,
             safety_window,
-            cursor_field_type=cursor_field_type,
+            cursor_field=cursor_field,
             now=now,
         )
         params.update(bounds)
-        logger.info("incremental replication: %s -> %s", cursor_field, bounds)
+        logger.info("incremental replication: %s -> %s", cursor_field_name, bounds)
 
     # ------------------------------------------------------------------
     # Write role

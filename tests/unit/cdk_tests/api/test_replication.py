@@ -13,6 +13,7 @@ from analitiq.contracts.endpoints import (
 from pydantic import ValidationError
 
 from cdk.api.replication import cursor_bounds, cursor_mapping_for
+from cdk.api.response_schema import FieldDeclaration
 from cdk.exceptions import ReadError
 
 pytestmark = pytest.mark.unit
@@ -85,16 +86,22 @@ def _bounds(
     safety_window_seconds: int,
     *,
     field_type: str = "string",
+    field_format: str | None = None,
     now: datetime = _NOW,
 ) -> dict[str, str | int]:
-    """``cursor_bounds`` with the cursor field's declared JSON type spelled out.
+    """``cursor_bounds`` with the cursor field's declaration spelled out.
 
-    The type is what the endpoint document declares for the record field
-    the cursor came from; a string field holds an ISO moment, an integer
-    field holds ticks or an id.
+    The type and format are what the endpoint document declares for the
+    record field the cursor came from; a string field holds an ISO
+    moment, an integer field holds ticks in its declared epoch unit, or
+    an id when it declares none.
     """
     return cursor_bounds(
-        mapping, cursor, safety_window_seconds, cursor_field_type=field_type, now=now
+        mapping,
+        cursor,
+        safety_window_seconds,
+        cursor_field=FieldDeclaration(field_type, field_format),
+        now=now,
     )
 
 
@@ -170,9 +177,58 @@ class TestFormat:
     def test_the_bound_is_rendered_in_the_declared_format(
         self, fmt: str, cursor: object, field_type: str, expected: str | int
     ) -> None:
-        assert _bounds(_single(format=fmt), cursor, 120, field_type=field_type) == {
-            "since": expected
+        field_format = fmt if field_type == "integer" else None
+        assert _bounds(
+            _single(format=fmt),
+            cursor,
+            120,
+            field_type=field_type,
+            field_format=field_format,
+        ) == {"since": expected}
+
+    @pytest.mark.parametrize(
+        ("field_format", "cursor", "fmt", "expected"),
+        [
+            ("epoch_seconds", 1722427200, "epoch_milliseconds", 1722427080000),
+            ("epoch_milliseconds", 1722427200000, "epoch_seconds", 1722427080),
+            ("epoch_seconds", 1722427200, "date-time", "2024-07-31T11:58:00Z"),
+            ("epoch_milliseconds", 1722427200000, "date", "2024-07-31"),
+        ],
+    )
+    def test_the_record_format_reads_the_ticks_and_the_mapping_format_renders(
+        self, field_format: str, cursor: int, fmt: str, expected: str | int
+    ) -> None:
+        # The stored integer is in the RECORD field's unit; the request
+        # param's format only says how the bound goes out. Reading seconds
+        # as milliseconds would put the bound near 1970.
+        bounds = _bounds(
+            _single(format=fmt),
+            cursor,
+            120,
+            field_type="integer",
+            field_format=field_format,
+        )
+        assert bounds == {"since": expected}
+
+    def test_an_integer_field_without_a_format_is_an_id(self) -> None:
+        assert _bounds(_single(), 1722427200, 120, field_type="integer") == {
+            "since": 1722427080
         }
+
+    @pytest.mark.parametrize("field_format", [None, "int64"])
+    def test_an_id_under_an_epoch_mapping_format_is_refused(
+        self, field_format: str | None
+    ) -> None:
+        # No epoch format on the record field means the integer is an id;
+        # an id has no unit to render as epoch ticks.
+        with pytest.raises(ReadError, match="is an integer id, but the mapping"):
+            _bounds(
+                _single(format="epoch_seconds"),
+                1722427200,
+                0,
+                field_type="integer",
+                field_format=field_format,
+            )
 
     def test_a_zero_cursor_is_the_first_id_not_an_absent_one(self) -> None:
         assert _bounds(_single(), 0, 0, field_type="integer") == {"since": 0}
@@ -181,7 +237,11 @@ class TestFormat:
         # A JSON body typed ``integer`` refuses ``"1722427080"``; the
         # request builder spells a query value itself.
         bounds = _bounds(
-            _single(format="epoch_seconds"), 1722427200, 120, field_type="integer"
+            _single(format="epoch_seconds"),
+            1722427200,
+            120,
+            field_type="integer",
+            field_format="epoch_seconds",
         )
         assert bounds == {"since": 1722427080}
         assert isinstance(bounds["since"], int)
@@ -190,7 +250,11 @@ class TestFormat:
         # 1722427200 - 120 as an id would be 1722427080 too; the window
         # end proves the integer became a moment.
         bounds = _bounds(
-            _window(format="epoch_seconds"), 1722427200, 120, field_type="integer"
+            _window(format="epoch_seconds"),
+            1722427200,
+            120,
+            field_type="integer",
+            field_format="epoch_seconds",
         )
         assert bounds == {"from": 1722427080, "to": int(_NOW.timestamp())}
 
@@ -222,22 +286,40 @@ class TestFormat:
         moment = "2026-07-31T12:00:00.5Z"
         rendered = _bounds(_single(format=fmt), moment, 0)["since"]
         assert isinstance(rendered, int)
-        again = _bounds(_single(format=fmt), rendered, 0, field_type="integer")
+        again = _bounds(
+            _single(format=fmt),
+            rendered,
+            0,
+            field_type="integer",
+            field_format=fmt,
+        )
         assert again == {"since": rendered}
 
     @pytest.mark.parametrize("cursor", [10**20, -(10**20)])
     def test_an_epoch_cursor_out_of_range_is_a_read_error(self, cursor: int) -> None:
         with pytest.raises(ReadError, match="outside the range a moment can hold"):
-            _bounds(_single(format="epoch_seconds"), cursor, 0, field_type="integer")
+            _bounds(
+                _single(format="epoch_seconds"),
+                cursor,
+                0,
+                field_type="integer",
+                field_format="epoch_seconds",
+            )
 
-    @pytest.mark.parametrize("fmt", ["date", "date-time"])
+    @pytest.mark.parametrize("field_format", ["date", "date-time"])
     def test_an_integer_field_under_a_calendar_format_is_refused(
-        self, fmt: str
+        self, field_format: str
     ) -> None:
         # An integer is a moment only under an epoch format, which is the
         # only place its unit is declared.
         with pytest.raises(ReadError, match="only under an epoch format"):
-            _bounds(_single(format=fmt), 1722427200, 0, field_type="integer")
+            _bounds(
+                _single(),
+                1722427200,
+                0,
+                field_type="integer",
+                field_format=field_format,
+            )
 
     def test_a_date_is_taken_from_the_cursor_in_utc(self) -> None:
         # The window end is rendered in UTC; a cursor carrying an offset
@@ -295,3 +377,22 @@ class TestWindowBounds:
         # An id has no "now" to bound the window at.
         with pytest.raises(ReadError, match="needs a timestamp cursor"):
             _bounds(_window(), "987654321", 0, field_type="integer")
+
+    def test_a_cursor_ahead_of_the_clock_past_the_safety_window_is_refused(
+        self,
+    ) -> None:
+        # A reversed range is a request the provider answers empty or
+        # rejects, and the checkpoint would never move; refused naming
+        # both bounds rather than clamped into a window that lies.
+        with pytest.raises(
+            ReadError,
+            match="start '2026-08-01T09:31:15Z' lands after its end "
+            "'2026-08-01T09:30:15Z'",
+        ):
+            _bounds(_window(), "2026-08-01T09:32:15Z", 60)
+
+    def test_a_cursor_ahead_of_the_clock_within_the_safety_window_is_sent(
+        self,
+    ) -> None:
+        bounds = _bounds(_window(), "2026-08-01T09:31:15Z", 60)
+        assert bounds == {"from": "2026-08-01T09:30:15Z", "to": "2026-08-01T09:30:15Z"}

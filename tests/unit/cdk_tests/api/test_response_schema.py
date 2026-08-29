@@ -11,7 +11,8 @@ from pydantic import ValidationError
 
 from cdk.api.response_schema import (
     apply_read_type_map,
-    record_field_type,
+    FieldDeclaration,
+    record_field_declaration,
     records_items_schema,
     resolve_field_arrow_type,
 )
@@ -195,8 +196,19 @@ class TestCursorFieldType:
         return {"properties": {"updated_at": {"type": declared}}}
 
     def test_a_plain_type_is_read_as_declared(self) -> None:
-        assert (
-            record_field_type("items", self._schema("string"), "updated_at") == "string"
+        assert record_field_declaration(
+            "items", self._schema("string"), "updated_at"
+        ) == FieldDeclaration("string", None)
+
+    @pytest.mark.parametrize(
+        ("declared", "expected"), [("epoch_seconds", "epoch_seconds"), ("", None)]
+    )
+    def test_the_format_is_read_with_the_type(
+        self, declared: str, expected: str | None
+    ) -> None:
+        schema = {"properties": {"ts": {"type": "integer", "format": declared}}}
+        assert record_field_declaration("items", schema, "ts") == FieldDeclaration(
+            "integer", expected
         )
 
     @pytest.mark.parametrize(
@@ -209,17 +221,18 @@ class TestCursorFieldType:
         # Null only says the field is nullable; the checkpoint never
         # stores None, so it says nothing about how a cursor reads back.
         assert (
-            record_field_type("items", self._schema(declared), "updated_at") == expected
+            record_field_declaration("items", self._schema(declared), "updated_at")
+            == FieldDeclaration(expected, None)
         )
 
     @pytest.mark.parametrize("declared", [["string", "integer"], ["null"], None, 7])
     def test_anything_but_one_real_type_is_refused(self, declared: Any) -> None:
         with pytest.raises(ReadError, match="needs one plain JSON type"):
-            record_field_type("items", self._schema(declared), "updated_at")
+            record_field_declaration("items", self._schema(declared), "updated_at")
 
     def test_an_undeclared_cursor_field_is_refused(self) -> None:
         with pytest.raises(ReadError, match="'missing' is not declared"):
-            record_field_type("items", self._schema("string"), "missing")
+            record_field_declaration("items", self._schema("string"), "missing")
 
 
 class TestMapperIsScoped:

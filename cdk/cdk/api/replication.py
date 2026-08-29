@@ -10,8 +10,10 @@ answers a bounded range (Stripe ``created[gte]``/``created[lte]``, Xero
 ``DateFrom``/``DateTo``) gets the range the author declared. Each bound is
 rendered in the mapping's declared ``format``; the vocabulary is read from
 the contract model, never restated here. How the stored cursor reads back
-is decided by the JSON type the endpoint's record schema declares for the
-cursor field, never sniffed from the value's shape.
+is decided by what the endpoint's record schema declares for the cursor
+field -- its JSON type, and for an integer moment its format, which names
+the unit the RECORD carries and may differ from the unit the request param
+takes -- never sniffed from the value's shape.
 
 A bound is a value, not a spelling: an epoch bound and an id bound are
 ``int`` so a JSON body carries a number, and the request builder spells a
@@ -41,6 +43,7 @@ from analitiq.contracts.endpoints import (
 from pydantic import BaseModel
 
 from ..exceptions import ReadError
+from .response_schema import FieldDeclaration
 
 __all__ = ["check_mapping_direction", "cursor_bounds", "cursor_mapping_for"]
 
@@ -69,8 +72,8 @@ _UPPER: frozenset[str] = frozenset({"lt", "lte"})
 _UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 #: The one place an epoch unit is declared: a bound is rendered as whole
-#: units since the epoch, and an integer cursor under the same format is
-#: read back as that many units after it.
+#: units since the epoch, and an integer cursor whose record field declares
+#: the same format is read back as that many units after it.
 _EPOCH_UNIT: dict[str, timedelta] = {
     "epoch_seconds": timedelta(seconds=1),
     "epoch_milliseconds": timedelta(milliseconds=1),
@@ -125,18 +128,20 @@ def cursor_mapping_for(
     return None
 
 
-def _parse_cursor(cursor: Any, field_type: str, fmt: str | None) -> datetime | int:
+def _parse_cursor(cursor: Any, field: FieldDeclaration) -> datetime | int:
     """Read a stored cursor the way the record field it came from declares.
 
     The cursor is the last record's value for the stream's cursor field,
-    and the endpoint document declares that field's JSON type -- so the
-    type says how to read it; nothing is guessed from the value's shape.
-    A ``string`` field holds an ISO-8601 moment, whatever format the
-    request param takes: a provider may answer ISO timestamps and take an
-    epoch ``since``. An ``integer`` field under an epoch format holds ticks
-    in that unit; under no format it holds a monotonic id, which comes back
-    as the ``int``. Any other case cannot be a moment and is refused
-    naming the field's type.
+    and the endpoint document declares that field's JSON type and format
+    -- so the declaration says how to read it; nothing is guessed from the
+    value's shape. A ``string`` field holds an ISO-8601 moment, whatever
+    format the request param takes: a provider may answer ISO timestamps
+    and take an epoch ``since``. An ``integer`` field whose format is an
+    epoch format holds ticks in THAT unit -- the record's, not the request
+    param's, which may render another; under a calendar format it is
+    contradictory and refused; under no epoch format it holds a monotonic
+    id, which comes back as the ``int``. Any other type cannot be a moment
+    and is refused naming the field's type.
 
     The ISO parser is dateutil's rather than the stdlib's because a cursor
     string is provider data, and narrowing what parses would start failing
@@ -144,9 +149,9 @@ def _parse_cursor(cursor: Any, field_type: str, fmt: str | None) -> datetime | i
     rendered off the cursor and one rendered off ``now`` share one
     calendar.
     """
-    if field_type == "string":
-        return _parse_iso(cursor, fmt)
-    if field_type == "integer":
+    if field.json_type == "string":
+        return _parse_iso(cursor)
+    if field.json_type == "integer":
         try:
             ticks = int(str(cursor))
         except ValueError as err:
@@ -154,13 +159,13 @@ def _parse_cursor(cursor: Any, field_type: str, fmt: str | None) -> datetime | i
                 f"cursor value {cursor!r} is not an integer; the cursor field is "
                 f"declared as type 'integer'"
             ) from err
-        unit = _EPOCH_UNIT.get(fmt) if fmt is not None else None
+        unit = _EPOCH_UNIT.get(field.format) if field.format is not None else None
         if unit is None:
-            if fmt is not None:
+            if field.format in _FORMATS:
                 raise ReadError(
-                    f"cursor field is declared as type 'integer' but the mapping "
-                    f"declares format {fmt!r}; an integer is a moment only under "
-                    f"an epoch format"
+                    f"cursor field is declared as type 'integer' with format "
+                    f"{field.format!r}; an integer is a moment only under an "
+                    f"epoch format"
                 )
             return ticks
         try:
@@ -170,15 +175,16 @@ def _parse_cursor(cursor: Any, field_type: str, fmt: str | None) -> datetime | i
             # out of range on every retry.
             raise ReadError(
                 f"cursor value {cursor!r} is outside the range a moment can "
-                f"hold; the mapping declares format {fmt!r}"
+                f"hold; the cursor field declares format {field.format!r}"
             ) from err
     raise ReadError(
-        f"cursor field is declared as type {field_type!r}, which cannot hold a "
-        f"cursor; an incremental cursor field is a string moment or an integer"
+        f"cursor field is declared as type {field.json_type!r}, which cannot "
+        f"hold a cursor; an incremental cursor field is a string moment or an "
+        f"integer"
     )
 
 
-def _parse_iso(cursor: Any, fmt: str | None) -> datetime:
+def _parse_iso(cursor: Any) -> datetime:
     from dateutil.parser import isoparse
 
     try:
@@ -187,7 +193,6 @@ def _parse_iso(cursor: Any, fmt: str | None) -> datetime:
         raise ReadError(
             f"cursor value {cursor!r} is not an ISO timestamp; the cursor field "
             f"is declared as type 'string'"
-            + (f" and the mapping declares format {fmt!r}" if fmt else "")
         ) from err
     if moment.tzinfo is None:
         return moment.replace(tzinfo=timezone.utc)
@@ -228,33 +233,50 @@ def cursor_bounds(
     cursor: Any,
     safety_window_seconds: int,
     *,
-    cursor_field_type: str,
+    cursor_field: FieldDeclaration,
     now: datetime,
 ) -> dict[str, str | int]:
     """Compute the param values an incremental run sends for its stored cursor.
 
-    ``cursor_field_type`` is the JSON type the endpoint document declares
-    for the cursor field, which decides how the stored value is read. The
+    ``cursor_field`` is what the endpoint document declares for the record
+    field the cursor came from, which decides how the stored value is
+    read; the mapping's ``format`` decides how each bound is rendered. The
     lower bound is the cursor moved back by the safety window, in its own
     vocabulary: a moment moves back by seconds, a monotonic id by that
     many ids, floored at zero. A window's upper bound is ``now``, rendered
     the same way -- an id cursor has no "now", so a window over one is
-    refused.
+    refused. A window whose start lands after its end -- a cursor ahead
+    of this clock by more than the safety window -- is refused rather than
+    sent: a reversed range is a request a provider answers empty or
+    rejects, and the checkpoint would never move.
     """
     check_mapping_direction(mapping)
     fmt = mapping.format
-    parsed = _parse_cursor(cursor, cursor_field_type, fmt)
+    parsed = _parse_cursor(cursor, cursor_field)
     if isinstance(parsed, int):
         if isinstance(mapping, WindowCursorMapping):
             raise ReadError(
                 f"cursor value {cursor!r} is an integer id; a start/end window "
-                f"mapping needs a timestamp cursor, or a declared epoch format"
+                f"mapping needs a timestamp cursor, or a record field declaring "
+                f"an epoch format"
+            )
+        if fmt is not None:
+            raise ReadError(
+                f"cursor value {cursor!r} is an integer id, but the mapping "
+                f"declares format {fmt!r}; an id is sent as itself, and a moment "
+                f"needs the record field to declare an epoch format"
             )
         return {mapping.param: max(0, parsed - safety_window_seconds)}
-    lower = _render(parsed - timedelta(seconds=safety_window_seconds), fmt)
+    start = parsed - timedelta(seconds=safety_window_seconds)
+    lower = _render(start, fmt)
     if isinstance(mapping, SingleCursorMapping):
         return {mapping.param: lower}
-    return {
-        mapping.start_param: lower,
-        mapping.end_param: _render(now.astimezone(timezone.utc), fmt),
-    }
+    end = now.astimezone(timezone.utc)
+    upper = _render(end, fmt)
+    if start > end:
+        raise ReadError(
+            f"cursor value {cursor!r} is ahead of the run clock by more than "
+            f"the safety window: the window start {lower!r} lands after its "
+            f"end {upper!r}"
+        )
+    return {mapping.start_param: lower, mapping.end_param: upper}

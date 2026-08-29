@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any
 
 from analitiq.contracts.endpoints import ResponseExtraction
@@ -27,8 +28,9 @@ from .records import split_records_ref
 
 __all__ = [
     "apply_read_type_map",
+    "FieldDeclaration",
     "declared_json_types",
-    "record_field_type",
+    "record_field_declaration",
     "records_items_schema",
     "resolve_field_arrow_type",
 ]
@@ -95,18 +97,33 @@ def declared_json_types(field: dict[str, Any]) -> list[str]:
     return []
 
 
-def record_field_type(
+@dataclass(frozen=True)
+class FieldDeclaration:
+    """What the record schema says a field holds: its JSON type and format.
+
+    Both are read in one walk of the field so no consumer pairs a type
+    from one reading with a format from another. ``format`` is whatever
+    the schema declares, or ``None``; which formats mean anything is the
+    consumer's vocabulary to apply.
+    """
+
+    json_type: str
+    format: str | None
+
+
+def record_field_declaration(
     endpoint_id: str, items_schema: dict[str, Any], cursor_field: str
-) -> str:
-    """Read the JSON type the record schema declares for the cursor field.
+) -> FieldDeclaration:
+    """Read the JSON type and format the record schema declares for the cursor field.
 
     The stored cursor is the last record's value for this field, so its
-    declared type is what says how a checkpoint reads back. A nullable
-    declaration (``["integer", "null"]``) is the one type it names: the
-    checkpoint never stores ``None``, so null says nothing about how a
-    stored value reads. A cursor field the schema does not declare, or
-    declares with no or several real types, is an authoring defect named
-    here rather than a value guessed at later.
+    declared type is what says how a checkpoint reads back, and its
+    declared format names the unit an integer moment is stored in. A
+    nullable declaration (``["integer", "null"]``) is the one type it
+    names: the checkpoint never stores ``None``, so null says nothing
+    about how a stored value reads. A cursor field the schema does not
+    declare, or declares with no or several real types, is an authoring
+    defect named here rather than a value guessed at later.
     """
     field = (items_schema.get("properties") or {}).get(cursor_field)
     if not isinstance(field, dict):
@@ -121,7 +138,8 @@ def record_field_type(
             f"type {field.get('type')!r}; a cursor field needs one plain JSON "
             f"type, nullable or not"
         )
-    return types[0]
+    fmt = field.get("format")
+    return FieldDeclaration(types[0], fmt if isinstance(fmt, str) and fmt else None)
 
 
 def apply_read_type_map(
