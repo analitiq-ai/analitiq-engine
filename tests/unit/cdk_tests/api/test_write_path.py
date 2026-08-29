@@ -160,6 +160,49 @@ class TestWriting:
 
 
 @pytest.mark.asyncio
+class TestConflictKeys:
+    """The endpoint's ``conflict_keys`` bind the upsert (issue #467)."""
+
+    async def test_an_upsert_stream_is_accepted_on_the_endpoint_declaration_alone(
+        self,
+    ) -> None:
+        # The contract gives an API stream's write block no conflict_keys,
+        # so nothing but the endpoint document may gate the handshake.
+        connector = await _connected(
+            FakeSession([]), _document(mode="upsert"), mode=WriteMode.WRITE_MODE_UPSERT
+        )
+        assert connector.last_schema_rejection is None
+        assert connector._streams["items"].conflict_keys == ["id"]
+
+    async def test_a_record_without_its_key_value_fails_just_itself(self) -> None:
+        session = FakeSession([FakeResponse(body={})])
+        connector = await _connected(
+            session, _document(mode="upsert"), mode=WriteMode.WRITE_MODE_UPSERT
+        )
+        batch = pa.RecordBatch.from_pylist([{"id": None}, {"id": 1}])
+        result = await _write(connector, batch)
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.records_written == 1
+        assert result.failed_record_ids == ("r0",)
+        assert "conflict key" in result.failure_summary
+        assert len(session.calls) == 1
+
+    async def test_a_chunk_with_a_keyless_record_is_not_sent(self) -> None:
+        session = FakeSession([FakeResponse(body={})])
+        connector = await _connected(
+            session,
+            _document(mode="upsert", batching={"max_records": 10}),
+            mode=WriteMode.WRITE_MODE_UPSERT,
+        )
+        batch = pa.RecordBatch.from_pylist([{"id": 1}, {"id": None}])
+        result = await _write(connector, batch)
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.records_written == 0
+        assert "conflict key" in result.failure_summary
+        assert session.calls == []
+
+
+@pytest.mark.asyncio
 class TestTheDeclaredRequestReachesTheWire:
     """What the write role used to drop: every declared header and query entry."""
 

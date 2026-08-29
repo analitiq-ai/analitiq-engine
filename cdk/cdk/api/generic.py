@@ -50,6 +50,7 @@ from ..types import (
     RetryVerdict,
     SchemaSpec,
 )
+from ..write_keys import require_conflict_key_values
 from .dialects import ApiDialect
 from .exceptions import ConnectorConnectionError, RequestSpecError
 from .http import (
@@ -1059,14 +1060,17 @@ class GenericAPIConnector(BaseDestinationHandler):
 
         for index, record in enumerate(records):
             try:
+                require_conflict_key_values(
+                    plan.conflict_keys, (record,), target=plan.endpoint
+                )
                 encoded, headers = self._prepare_record_request(
                     plan, record, record_ids[index]
                 )
-            # Two authoring defects, one verdict: the body build answers
-            # every way its declaration can fail with RequestSpecError, and
-            # the engine-owned idempotency key refuses a body it cannot be
-            # added to with ValueError. Both are deterministic and both
-            # concern this one record.
+            # Three defects, one verdict: the body build answers every way
+            # its declaration can fail with RequestSpecError; a record with
+            # no value for an upsert conflict key, and the engine-owned
+            # idempotency key refusing a body it cannot be added to, raise
+            # ValueError. All are deterministic and concern this one record.
             except (RequestSpecError, ValueError) as err:
                 failures.add(record_ids[index], err, "failed to build body for record")
                 continue
@@ -1183,9 +1187,15 @@ class GenericAPIConnector(BaseDestinationHandler):
         for start in range(0, len(records), chunk_size):
             chunk = records[start : start + chunk_size]
             try:
+                require_conflict_key_values(
+                    plan.conflict_keys, chunk, target=plan.endpoint
+                )
                 body = self._build_body(plan, records=chunk)
                 encoded = encode_body(body, plan.content_type)
-            except RequestSpecError as err:
+            # A chunk with a record the provider cannot match on its
+            # conflict keys fails the same way a body that cannot be built
+            # does: deterministic, and the whole chunk with it.
+            except (RequestSpecError, ValueError) as err:
                 logger.warning(
                     "failed to build body for chunk at offset %d (%d records "
                     "%s...): %s: %s",
