@@ -18,6 +18,7 @@ from __future__ import annotations
 import pyarrow as pa
 import pytest
 
+from src.engine.batch_policy import ErrorStrategy
 from src.engine.exceptions import TransformationError
 from src.engine.mapping import MappingDocument, build_output_schema, compile_mapping
 
@@ -42,7 +43,11 @@ def _run(records, assignments):
         if isinstance(records, pa.RecordBatch)
         else pa.RecordBatch.from_pylist(records)
     )
-    return compile_mapping(_document(assignments)).run(batch).to_pylist()
+    return _compile(assignments).run(batch).to_pylist()
+
+
+def _compile(assignments):
+    return compile_mapping(_document(assignments), default_strategy=ErrorStrategy.FAIL)
 
 
 class TestBuildOutputSchemaNested:
@@ -132,7 +137,7 @@ class TestNestedConstantsEndToEnd:
     ]
 
     def test_dict_constant_builds_struct_column(self):
-        out = compile_mapping(_document(self.ASSIGNMENTS)).run(
+        out = _compile(self.ASSIGNMENTS).run(
             pa.RecordBatch.from_pylist([{"id": "r1"}, {"id": "r2"}])
         )
         assert pa.types.is_struct(out.schema.field("checkAccount").type)
@@ -217,9 +222,7 @@ class TestJsonTarget:
                 },
             },
         ]
-        out = compile_mapping(_document(assignments)).run(
-            pa.RecordBatch.from_pylist([{"id": "r1"}])
-        )
+        out = _compile(assignments).run(pa.RecordBatch.from_pylist([{"id": "r1"}]))
         assert pa.types.is_large_string(out.schema.field("metadata").type)
         assert out.to_pylist() == [
             {"id": "r1", "metadata": '{"some_key": "some_value", "n": 42}'}

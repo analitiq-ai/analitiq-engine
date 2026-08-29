@@ -272,18 +272,23 @@ batch. A null value is exempt from every rule except `not_null`:
 | `range` | object with `min` and/or `max` | Numeric comparison |
 | `in_list` | array | Value must be in the supplied list |
 
-Validation is **batch-wide and fail-loud**: if any row fails any rule, the
-whole batch fails with a `TransformationError` naming the column and the
-offending rows. The transform does not route individual records — it surfaces
-the failure, and the stream-level `error_strategy` decides retry vs DLQ vs skip
-for the failed batch (see [`engine-architecture.md`](engine-architecture.md)).
+Validation is **batch-wide**: if any row fails any rule, the whole batch is
+rejected with a `ValidationFailure` naming the column and the offending rows.
+The transform does not route individual records. What the stream does with the
+rejected batch is decided by the failed rule's **effective strategy**: the
+assignment's `validate.error_handling.strategy` when declared, else the
+pipeline's `runtime.error_handling.strategy`. `fail` stops the stream, `dlq`
+dead-letters the source rows and continues, `skip` drops them and continues.
+When rules under different strategies fail on the same batch, the strictest
+one wins (`fail` over `dlq` over `skip`). The batch never reaches the
+destination (see [`engine-architecture.md`](engine-architecture.md)).
 
-Because failure handling is decided per batch and per stream, the optional
-`validate.error_handling` block the stream contract carries is control-plane
-metadata here: the engine accepts it and applies the pipeline's
-`runtime.error_handling` regardless. An assignment-scoped retry or strategy
-override has no grain to act at, since one failing row already fails the whole
-batch.
+The override's `max_retries` and `retry_delay_seconds` are not read: a rule is
+a pure function of the batch, so a retry would fail the same rows the same way.
+
+A mapping defect on the batch — an expression that cannot be evaluated, a
+rejected conversion, a null in a non-nullable column — fails the stream with a
+`TransformationError` whatever the strategies say.
 
 ## Type Conversion
 

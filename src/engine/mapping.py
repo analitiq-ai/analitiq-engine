@@ -25,12 +25,15 @@ forward-compatible protocol that tolerates unknown keys -- affordable only
 because the engine and the contract models are pinned in lockstep, and worth it
 because a dropped field is silent while a named rejection is readable.
 
-One contract field is deliberately not acted on: ``validate.error_handling``.
-Failure handling is a pipeline-runtime setting (strategy, retries, delay) the
-engine applies to a whole batch, and a validation failure fails the whole batch
-by design, so an assignment-scoped override has no grain to act at. It is
-carried for the control plane and named as inert in
-``mapping-and-transformations.md`` rather than silently absorbed.
+Each validation rule is compiled with its effective error strategy: the
+assignment's ``validate.error_handling.strategy`` when declared, else the
+pipeline's ``runtime.error_handling.strategy`` the transform was compiled
+with. A rule failure raises :class:`ValidationFailure`, which carries the
+strictest strategy among the rules that failed on the batch, and the stream
+disposes of the batch through :meth:`BatchPolicy.reject` -- fail, dead-letter
+or skip. The override's ``max_retries`` / ``retry_delay_seconds`` are not
+read: a rule is a pure function of the batch, so a retry would fail the same
+rows the same way.
 
 Type conversion has one authority. When an assignment's evaluated value lands in
 a column of a different Arrow type than the target declares, the conversion is
@@ -43,10 +46,12 @@ target type directly (``pa.array``) -- there is no source arrow_type to classify
 Nested (``Object``/``List``) and ``Json`` targets are assembled structurally, not
 through the scalar matrix.
 
-Failures are loud and batch-wide. A row that fails a validation rule, an
-expression that cannot be evaluated, an unparseable cast, or a null in a
-non-nullable column fails the whole batch with a :class:`TransformationError`.
-The engine's ``error_strategy`` -- not this module -- decides retry vs DLQ.
+Failures are loud and batch-wide. An expression that cannot be evaluated, an
+unparseable cast, or a null in a non-nullable column fails the whole batch
+with a :class:`TransformationError`, a mapping defect no strategy relaxes. A
+row that fails a validation rule fails the whole batch with a
+:class:`ValidationFailure`; the strategy it carries decides what the stream
+does with the batch.
 """
 
 from __future__ import annotations
@@ -75,8 +80,10 @@ from cdk.type_map.arrow import (
     resolve_arrow_type,
 )
 from cdk.type_map.exceptions import InvalidTypeMapError
+from src.config.utils import author_set
 
-from .exceptions import TransformationError
+from .batch_policy import ErrorStrategy
+from .exceptions import TransformationError, ValidationFailure
 
 # A compiled expression: given the source batch, return one value column.
 _ExprFn = Callable[[pa.RecordBatch], pa.Array]
@@ -128,9 +135,6 @@ class MappingAssignment(StrictModel):
     # a second engine-side spelling of the same shapes.
     target: AssignmentTarget
     value: AssignmentValue
-    # `Validation.error_handling` rides along unused: see the module docstring
-    # -- the engine handles failures per batch, so there is no assignment-scoped
-    # grain for it to change.
     validation: Validation | None = Field(default=None, alias="validate")
 
     @model_validator(mode="before")
@@ -249,6 +253,14 @@ class _Step:
     is_json: bool
 
 
+@dataclass(frozen=True)
+class _BoundRule:
+    """A validation rule with the strategy its failure is handled under."""
+
+    rule: ValidationRule
+    strategy: ErrorStrategy
+
+
 class CompiledTransform:
     """A stream's assignments compiled to vectorized column operations.
 
@@ -261,7 +273,7 @@ class CompiledTransform:
         self,
         output_schema: pa.Schema,
         steps: list[_Step],
-        rules: list[ValidationRule],
+        rules: list[_BoundRule],
     ) -> None:
         self.output_schema = output_schema
         self._steps = steps
@@ -271,9 +283,14 @@ class CompiledTransform:
         """Apply the transform to *batch*, returning the output batch.
 
         Raises :class:`TransformationError` if any column fails to build, any
-        validation rule fails on any row, any conversion is rejected, or a
-        non-nullable column ends up with nulls. The error names the column and
-        (for validation) the offending rows.
+        conversion is rejected, or a non-nullable column ends up with nulls;
+        that is a mapping defect whatever the rules say. A build or
+        conversion failure raises on the spot, before the rules have been
+        reported; a non-nullable null is collected, and the rule failures on
+        the same batch ride along in that message. Otherwise raises
+        :class:`ValidationFailure` if any rule fails on any row, naming the
+        column and the offending rows and carrying the strictest strategy
+        among the failed rules.
 
         Every column is built before any rule runs: a rule's ``field`` may
         address any declared target, not just its own assignment's, so
@@ -284,8 +301,12 @@ class CompiledTransform:
         errors: list[str] = []
         built = {step.field.name: step.build(batch) for step in self._steps}
 
-        for rule in self._rules:
-            errors.extend(_rule_errors(built, rule))
+        rule_errors: list[str] = []
+        failed_under: list[ErrorStrategy] = []
+        for bound in self._rules:
+            messages = _rule_errors(built, bound.rule)
+            rule_errors.extend(messages)
+            failed_under.extend(bound.strategy for _ in messages)
 
         arrays: list[pa.Array] = []
         for step in self._steps:
@@ -298,10 +319,11 @@ class CompiledTransform:
             arrays.append(array)
 
         if errors:
-            shown = "; ".join(errors[:5])
-            suffix = f" (+{len(errors) - 5} more)" if len(errors) > 5 else ""
-            raise TransformationError(
-                f"transform produced {len(errors)} error(s): {shown}{suffix}"
+            raise TransformationError(_summarise(errors + rule_errors))
+        if rule_errors:
+            raise ValidationFailure(
+                _summarise(rule_errors),
+                strategy=ErrorStrategy.strictest(failed_under),
             )
 
         return pa.RecordBatch.from_arrays(arrays, schema=self.output_schema)
@@ -331,11 +353,22 @@ class CompiledTransform:
         return _retype_column(value, field)
 
 
-def compile_mapping(document: MappingDocument) -> CompiledTransform:
+def _summarise(errors: list[str]) -> str:
+    """Build the batch-level message: the first few errors, plus a count of the rest."""
+    shown = "; ".join(errors[:5])
+    suffix = f" (+{len(errors) - 5} more)" if len(errors) > 5 else ""
+    return f"transform produced {len(errors)} error(s): {shown}{suffix}"
+
+
+def compile_mapping(
+    document: MappingDocument, *, default_strategy: ErrorStrategy
+) -> CompiledTransform:
     """Compile a stream's mapping into a :class:`CompiledTransform`.
 
     Static work (schema building, expression compilation, validation setup)
-    happens here once; the returned object is applied per batch. Raises
+    happens here once; the returned object is applied per batch.
+    ``default_strategy`` is the pipeline's ``runtime.error_handling.strategy``,
+    which a validation rule takes unless its assignment overrides it. Raises
     :class:`TransformationError` for an expression the AST vocabulary does not
     define. Document-shape failures are raised earlier, by
     :meth:`MappingDocument.parse`.
@@ -358,12 +391,33 @@ def compile_mapping(document: MappingDocument) -> CompiledTransform:
     # addresses any declared target (document-checked at parse), so it is
     # resolved against the built record, not its own assignment's column.
     rules = [
-        rule
+        _BoundRule(rule, _rule_strategy(assignment.validation, default_strategy))
         for assignment in assignments
         if assignment.validation is not None
         for rule in assignment.validation.rules
     ]
     return CompiledTransform(output_schema, steps, rules)
+
+
+def _rule_strategy(
+    validation: Validation, default_strategy: ErrorStrategy
+) -> ErrorStrategy:
+    """Resolve the strategy an assignment's rules fail under.
+
+    The contract's ``error_handling`` is documented as an override of the
+    pipeline ``runtime.error_handling`` default, so only a ``strategy`` the
+    author wrote overrides it. An absent block, or a block that sets only the
+    retry fields, means the pipeline default -- never the contract model's
+    own default value. Author intent is decided by the same
+    :func:`author_set` the pipeline block goes through, so the two blocks
+    cannot drift. Only ``strategy`` is read: the block's retry fields
+    describe a retry loop a deterministic rule has no use for.
+    """
+    override = validation.error_handling
+    if override is None:
+        return default_strategy
+    chosen = author_set(override, strategy=override.strategy)
+    return ErrorStrategy(chosen["strategy"]) if chosen else default_strategy
 
 
 def _compile_value(

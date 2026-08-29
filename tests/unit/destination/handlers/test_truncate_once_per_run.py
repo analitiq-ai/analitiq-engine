@@ -29,7 +29,11 @@ from cdk.sql.generic import _StreamState as SqlStreamState
 from cdk.sql.sqlalchemy_backend import SqlAlchemyBackend
 from src.engine.batch_policy import ErrorStrategy
 from src.engine.mapping import MappingDocument
-from src.engine.stream_processor import StreamProcessor, _FullRefreshCheckpoint
+from src.engine.stream_processor import (
+    SourceBatch,
+    StreamProcessor,
+    _FullRefreshCheckpoint,
+)
 
 # A fixed, timezone-aware emit instant for write_batch/send_batch calls; the
 # engine stamps this per batch (issue #353). Value is arbitrary for sinks
@@ -455,7 +459,9 @@ class TestFirstBatchDropGuard:
         from src.grpc.generated.analitiq.v1 import AckStatus
 
         input_queue: asyncio.Queue = asyncio.Queue()
-        await input_queue.put(_batch([{"id": 1, "name": "a"}]))
+        await input_queue.put(
+            SourceBatch(seq=1, batch=_batch([{"id": 1, "name": "a"}]))
+        )
         await input_queue.put(None)
         output_queue: asyncio.Queue = asyncio.Queue()
 

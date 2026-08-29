@@ -11,8 +11,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.engine.mapping import MappingDocument
-from src.engine.stream_processor import StreamProcessor
-from src.state.error_classification import ErrorCode, customer_message
+from src.engine.stream_processor import DroppedBatch, StreamProcessor
+from src.state.error_classification import ErrorCode, FailureStage, customer_message
 
 
 def _processor() -> StreamProcessor:
@@ -34,6 +34,10 @@ def _processor() -> StreamProcessor:
     )
 
 
+def _load(code: ErrorCode) -> DroppedBatch:
+    return DroppedBatch(code=code, stage=FailureStage.DESTINATION_LOAD)
+
+
 @pytest.mark.unit
 class TestClassifyCompletion:
     def test_no_failures_reports_success(self):
@@ -43,8 +47,8 @@ class TestClassifyCompletion:
     def test_partial_reports_dominant_exhausted_code(self):
         processor = _processor()
         processor.metrics.records_failed = 2
-        processor.exhausted_failure_codes.extend(
-            [ErrorCode.INTERNAL, ErrorCode.DESTINATION_WRITE_FAILED]
+        processor.dropped_batches.extend(
+            [_load(ErrorCode.INTERNAL), _load(ErrorCode.DESTINATION_WRITE_FAILED)]
         )
 
         status, code, message, detail = processor._classify_completion()
@@ -72,7 +76,7 @@ class TestClassifyCompletion:
         processor = _processor()
         processor.metrics.records_failed = 3
         processor.metrics.records_skipped = 3
-        processor.exhausted_failure_codes.append(ErrorCode.INTERNAL)
+        processor.dropped_batches.append(_load(ErrorCode.INTERNAL))
 
         status, code, _, detail = processor._classify_completion()
 
@@ -80,3 +84,36 @@ class TestClassifyCompletion:
         assert code is ErrorCode.INTERNAL
         assert "skipped (dropped)" in detail
         assert "dead-lettered" not in detail
+
+    def test_validation_drop_reports_the_transform_stage(self):
+        # A batch a validation rule rejected under dlq/skip (issue #468) is
+        # classified as the transform stage's failure, not a write failure.
+        processor = _processor()
+        processor.metrics.records_failed = 2
+        processor.dropped_batches.append(
+            DroppedBatch(code=ErrorCode.CONFIG_INVALID, stage=FailureStage.TRANSFORM)
+        )
+
+        status, code, message, detail = processor._classify_completion()
+
+        assert status == "partial"
+        assert code is ErrorCode.CONFIG_INVALID
+        assert message == customer_message(ErrorCode.CONFIG_INVALID)
+        assert detail == (
+            "transform/CONFIG_INVALID: "
+            "records dead-lettered after failing validation"
+        )
+
+    def test_mixed_skip_and_dlq_wording_names_both(self):
+        # Rules carry their own strategies, so one stream can skip one batch
+        # and dead-letter another; the detail must not claim only one.
+        processor = _processor()
+        processor.metrics.records_failed = 5
+        processor.metrics.records_skipped = 2
+        processor.dropped_batches.append(
+            DroppedBatch(code=ErrorCode.CONFIG_INVALID, stage=FailureStage.TRANSFORM)
+        )
+
+        _, _, _, detail = processor._classify_completion()
+
+        assert "dead-lettered or skipped (dropped)" in detail

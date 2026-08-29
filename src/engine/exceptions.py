@@ -2,6 +2,8 @@
 
 from cdk.types import FailureCategory
 
+from .batch_policy import ErrorStrategy
+
 
 class StreamProcessingError(Exception):
     """Exception for stream processing errors with context.
@@ -41,6 +43,21 @@ class TransformationError(StreamProcessingError):
     """Exception for data transformation errors."""
 
     pass
+
+
+class ValidationFailure(TransformationError):
+    """A batch with rows that fail a validation rule.
+
+    Raised by :meth:`src.engine.mapping.CompiledTransform.run` only when the
+    batch is otherwise sound -- every column built and converted, every
+    non-nullable column filled. ``strategy`` is the strictest effective
+    strategy among the rules that failed, and is what the stream disposes of
+    the batch under.
+    """
+
+    def __init__(self, message: str, *, strategy: ErrorStrategy) -> None:
+        super().__init__(message)
+        self.strategy = strategy
 
 
 class ConfigurationError(Exception):

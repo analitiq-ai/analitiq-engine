@@ -25,6 +25,7 @@ from analitiq.contracts.endpoint_identity import derive_db_endpoint_id
 from cdk.declarations import ConnectorDeclarationError
 from cdk.types import EndpointScope
 from src.config.schema_validator import BundleValidationError, ContractValidationError
+from src.engine.batch_policy import ErrorStrategy
 from src.engine.mapping import MappingDocument, compile_mapping
 from src.engine.pipeline_config_prep import PipelineConfigPrep, _split_stream_ref
 
@@ -474,7 +475,7 @@ class TestStreamMappingReachesTheTransform:
         batch = pa.record_batch(
             [pa.array([{"city": "Berlin"}, {"city": "Kyiv"}])], names=["address"]
         )
-        out = compile_mapping(mapping).run(batch)
+        out = compile_mapping(mapping, default_strategy=ErrorStrategy.FAIL).run(batch)
         assert out.to_pylist() == [{"city": "Berlin"}, {"city": "Kyiv"}]
 
     def test_a_mapping_the_transform_cannot_run_fails_at_config_prep(

@@ -53,7 +53,7 @@ from analitiq.contracts.stream import (
     IncrementalReplication,
 )
 from analitiq.contracts.stream import Replication as ContractReplication
-from pydantic import BaseModel, TypeAdapter
+from pydantic import TypeAdapter
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.declarations import parse_declared_concurrency, parse_declared_error_map
@@ -76,7 +76,7 @@ from src.config.endpoint_resolver import (
 from src.config.schema_validator import ContractValidationError, EndpointDocument
 from src.config.schema_validator import validate as validate_artifact
 from src.config.schema_validator import validate_bundle
-from src.config.utils import load_json_file
+from src.config.utils import author_set, load_json_file
 from src.engine.mapping import MappingDocument
 from src.models.resolved import (
     BatchingConfig,
@@ -101,34 +101,6 @@ _REPLICATION_ADAPTER: TypeAdapter[
 ] = TypeAdapter(ContractReplication)
 
 
-def _author_set(model: BaseModel, **values: Any) -> dict[str, Any]:
-    """Return the *values* whose field the author explicitly set to a non-null value.
-
-    The contract models fill omitted fields with their own defaults, so consult
-    ``model_fields_set`` (a reliable author-intent signal as of
-    analitiq-contract-models 1.0.0rc2, infra #938) to forward only
-    author-provided values. A present-but-null value is treated as unset. The
-    engine keeps its own defaults for the rest, so its precedence is preserved.
-
-    The caller spells each read as a typed attribute access (``batch_size=
-    contract.batching.batch_size``) rather than handing over field names for a
-    ``getattr``: the contract-consumption census sees the former and not the
-    latter, and a read this function performed by name would be published as
-    an unread field.
-    """
-    unknown = values.keys() - model.model_fields.keys()
-    if unknown:
-        raise ValueError(
-            f"{type(model).__name__} declares no field {sorted(unknown)}; "
-            f"the keyword must name the field it was read from"
-        )
-    return {
-        key: value
-        for key, value in values.items()
-        if key in model.model_fields_set and value is not None
-    }
-
-
 def _parse_runtime_config(raw: Mapping[str, Any]) -> RuntimeConfig:
     """Build the engine's :class:`RuntimeConfig` from a pipeline's runtime block.
 
@@ -143,18 +115,16 @@ def _parse_runtime_config(raw: Mapping[str, Any]) -> RuntimeConfig:
     batching = contract.batching
     error_handling = contract.error_handling
     return RuntimeConfig(
-        batching=BatchingConfig(
-            **_author_set(batching, batch_size=batching.batch_size)
-        ),
+        batching=BatchingConfig(**author_set(batching, batch_size=batching.batch_size)),
         error_handling=ErrorHandlingConfig(
-            **_author_set(
+            **author_set(
                 error_handling,
                 strategy=error_handling.strategy,
                 max_retries=error_handling.max_retries,
                 retry_delay_seconds=error_handling.retry_delay_seconds,
             )
         ),
-        **_author_set(contract, buffer_size=contract.buffer_size),
+        **author_set(contract, buffer_size=contract.buffer_size),
     )
 
 

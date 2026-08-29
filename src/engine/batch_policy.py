@@ -6,7 +6,11 @@ answer, and the copies disagreed (issue #428). This module is the single
 place that turns acks into a decision:
 
 * :class:`BatchPolicy` is bound once per stream from ``error_strategy`` +
-  ``max_retries`` and owns the whole send -> ack -> backoff-retry loop.
+  ``max_retries`` and owns the whole send -> ack -> backoff-retry loop. It
+  also disposes of a batch the transform rejected on a validation rule
+  (:meth:`BatchPolicy.reject`), under the strategy that rule carries, so a
+  rejected batch and an exhausted one reach their verdict through the same
+  strategy ladder.
 * The loop ends in exactly one :data:`Disposition`, a sum type whose success
   variant is the only one carrying a cursor. A failed batch cannot advance
   the checkpoint because a failure has nowhere to put one.
@@ -21,9 +25,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum, StrEnum, auto
+from typing import Final
 
 from cdk.types import FailureCategory
 
@@ -48,6 +53,22 @@ class ErrorStrategy(StrEnum):
     DLQ = "dlq"
     SKIP = "skip"
 
+    @classmethod
+    def strictest(cls, strategies: Iterable[ErrorStrategy]) -> ErrorStrategy:
+        """Pick the strategy that gives up the most, among *strategies*.
+
+        A batch is one unit: when several validation rules fail on the same
+        batch under different strategies, the batch takes the strictest
+        one -- fail over dlq over skip -- so no rule's verdict is quietly
+        relaxed by a looser neighbour. Raises ``ValueError`` on an empty
+        input, since there is no verdict to pick.
+        """
+        return max(strategies, key=_STRICTNESS.index)
+
+
+#: Loosest first; ``ErrorStrategy.strictest`` picks the last one present.
+_STRICTNESS: Final = (ErrorStrategy.SKIP, ErrorStrategy.DLQ, ErrorStrategy.FAIL)
+
 
 class FailureKind(Enum):
     """Which terminal failure the ack protocol reached.
@@ -61,6 +82,9 @@ class FailureKind(Enum):
     RETRIES_EXHAUSTED = auto()
     FATAL = auto()
     UNKNOWN_STATUS = auto()
+    #: The transform rejected the batch on a validation rule; it was never
+    #: sent.
+    VALIDATION_FAILED = auto()
 
 
 @dataclass(frozen=True)
@@ -73,7 +97,8 @@ class FailureReport:
     #: declared none -- and always UNSPECIFIED for an ack whose status the
     #: engine could not interpret, whose advisory fields are not trustworthy.
     category: FailureCategory
-    #: Sends made, including the first: ``1`` unless retries were spent.
+    #: Sends made, including the first: ``1`` unless retries were spent,
+    #: ``0`` for a batch rejected before any send.
     attempts: int
 
 
@@ -218,13 +243,37 @@ class BatchPolicy:
             )
 
         if kind is FailureKind.RETRIES_EXHAUSTED:
-            if self._error_strategy is ErrorStrategy.DLQ:
-                return DeadLetter(report)
-            if self._error_strategy is ErrorStrategy.SKIP:
-                return Skipped(report)
-            return Failed(report, dead_letter=False)
+            return _dispose(self._error_strategy, report)
 
         # A verdict the connector rendered (or an ack the engine cannot
         # read) is not made good by continuing: the stream stops whatever
         # the strategy, and only dlq preserves the rows on the way out.
         return Failed(report, dead_letter=self._error_strategy is ErrorStrategy.DLQ)
+
+    @staticmethod
+    def reject(*, strategy: ErrorStrategy, summary: str) -> Disposition:
+        """Dispose of a batch the transform rejected on a validation rule.
+
+        The rule's own effective strategy decides -- the assignment's
+        ``validate.error_handling.strategy`` override, else the pipeline
+        default the transform was compiled with -- through the same ladder
+        an exhausted batch takes. There is nothing to retry: a rule is a
+        pure function of the batch, so re-running it would fail the same
+        rows the same way.
+        """
+        report = FailureReport(
+            kind=FailureKind.VALIDATION_FAILED,
+            summary=summary,
+            category=FailureCategory.FAILURE_CATEGORY_UNSPECIFIED,
+            attempts=0,
+        )
+        return _dispose(ErrorStrategy(strategy), report)
+
+
+def _dispose(strategy: ErrorStrategy, report: FailureReport) -> Disposition:
+    """Apply the strategy ladder to a batch the destination will not get."""
+    if strategy is ErrorStrategy.DLQ:
+        return DeadLetter(report)
+    if strategy is ErrorStrategy.SKIP:
+        return Skipped(report)
+    return Failed(report, dead_letter=False)

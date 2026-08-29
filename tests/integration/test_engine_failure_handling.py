@@ -22,7 +22,7 @@ from src.engine.batch_policy import ErrorStrategy
 from src.engine.engine import StreamingEngine
 from src.engine.exceptions import StreamProcessingError, TransformationError
 from src.engine.mapping import MappingDocument
-from src.engine.stream_processor import StreamProcessor
+from src.engine.stream_processor import SourceBatch, StreamProcessor
 from src.grpc.generated.analitiq.v1 import AckStatus
 from src.models.metrics import PipelineMetrics
 from src.models.resolved import (
@@ -112,7 +112,9 @@ async def _skip_one_batch(
 
     input_queue: asyncio.Queue = asyncio.Queue()
     output_queue: asyncio.Queue = asyncio.Queue()
-    await input_queue.put(pa.RecordBatch.from_pylist([{"id": 1}]))
+    await input_queue.put(
+        SourceBatch(seq=1, batch=pa.RecordBatch.from_pylist([{"id": 1}]))
+    )
     await input_queue.put(None)
 
     mock_grpc_client.send_batch = AsyncMock(
@@ -238,7 +240,7 @@ class TestEngineFatalFailureHandling:
                 {"id": 2, "name": "Record 2"},
             ]
         )
-        await input_queue.put(test_batch)
+        await input_queue.put(SourceBatch(seq=1, batch=test_batch))
         await input_queue.put(None)  # Signal end of stream
 
         fatal_result = MockBatchResult(
@@ -287,7 +289,9 @@ class TestEngineFatalFailureHandling:
 
         input_queue = asyncio.Queue()
         output_queue = asyncio.Queue()
-        await input_queue.put(pa.RecordBatch.from_pylist([{"id": 1}]))
+        await input_queue.put(
+            SourceBatch(seq=1, batch=pa.RecordBatch.from_pylist([{"id": 1}]))
+        )
         await input_queue.put(None)
 
         inner = tag_failure(
@@ -327,7 +331,9 @@ class TestEngineFatalFailureHandling:
 
         input_queue = asyncio.Queue()
         output_queue = asyncio.Queue()
-        await input_queue.put(pa.RecordBatch.from_pylist([{"id": 1}]))
+        await input_queue.put(
+            SourceBatch(seq=1, batch=pa.RecordBatch.from_pylist([{"id": 1}]))
+        )
         await input_queue.put(None)
 
         fatal_result = MockBatchResult(
@@ -388,7 +394,7 @@ class TestEngineFatalFailureHandling:
 
         # Put batches in input queue
         test_batch = pa.RecordBatch.from_pylist([{"id": 1}, {"id": 2}])
-        await input_queue.put(test_batch)
+        await input_queue.put(SourceBatch(seq=1, batch=test_batch))
         await input_queue.put(None)
 
         # Mock gRPC client to return SUCCESS
@@ -415,7 +421,7 @@ class TestEngineFatalFailureHandling:
 
         # Assert: batch was forwarded to output queue
         output_batch = await output_queue.get()
-        assert output_batch == test_batch
+        assert output_batch.batch == test_batch
 
         # End marker
         end_marker = await output_queue.get()
@@ -434,7 +440,9 @@ class TestEngineFatalFailureHandling:
 
         input_queue = asyncio.Queue()
         output_queue = asyncio.Queue()
-        await input_queue.put(pa.RecordBatch.from_pylist([{"id": 1}]))
+        await input_queue.put(
+            SourceBatch(seq=1, batch=pa.RecordBatch.from_pylist([{"id": 1}]))
+        )
         await input_queue.put(None)
 
         success_result = MockBatchResult(
@@ -493,7 +501,9 @@ class TestEngineFatalFailureHandling:
 
         input_queue = asyncio.Queue()
         output_queue = asyncio.Queue()
-        await input_queue.put(pa.RecordBatch.from_pylist([{"id": 1}]))
+        await input_queue.put(
+            SourceBatch(seq=1, batch=pa.RecordBatch.from_pylist([{"id": 1}]))
+        )
         await input_queue.put(None)
 
         # A real committed cursor so cursor_to_state_dict decodes a hwm and the
@@ -542,7 +552,7 @@ class TestEngineFatalFailureHandling:
         input_queue = asyncio.Queue()
         output_queue = asyncio.Queue()
         test_batch = pa.RecordBatch.from_pylist([{"id": 1}])
-        await input_queue.put(test_batch)
+        await input_queue.put(SourceBatch(seq=1, batch=test_batch))
         await input_queue.put(None)
 
         replay_result = MockBatchResult(
@@ -570,7 +580,7 @@ class TestEngineFatalFailureHandling:
         # No checkpoint: only a SUCCESS ack advances the watermark.
         state_manager.save_stream_checkpoint.assert_not_called()
         # Batch forwarded downstream, then the end marker.
-        assert await output_queue.get() is test_batch
+        assert (await output_queue.get()).batch is test_batch
         assert await output_queue.get() is None
         # An idempotent replay is not new progress.
         assert pipeline_metrics.records_processed == 0
@@ -591,7 +601,7 @@ class TestEngineFatalFailureHandling:
         output_queue = asyncio.Queue()
 
         test_batch = pa.RecordBatch.from_pylist([{"id": 1}])
-        await input_queue.put(test_batch)
+        await input_queue.put(SourceBatch(seq=1, batch=test_batch))
         await input_queue.put(None)
 
         # Mock: always return RETRYABLE_FAILURE
@@ -649,7 +659,7 @@ class TestEngineFatalFailureHandling:
         output_queue = asyncio.Queue()
 
         test_batch = pa.RecordBatch.from_pylist([{"id": 1}])
-        await input_queue.put(test_batch)
+        await input_queue.put(SourceBatch(seq=1, batch=test_batch))
         await input_queue.put(None)
 
         retryable_result = MockBatchResult(
@@ -693,7 +703,9 @@ class TestEngineFatalFailureHandling:
 
         input_queue = asyncio.Queue()
         output_queue = asyncio.Queue()
-        await input_queue.put(pa.RecordBatch.from_pylist([{"id": 1}]))
+        await input_queue.put(
+            SourceBatch(seq=1, batch=pa.RecordBatch.from_pylist([{"id": 1}]))
+        )
         await input_queue.put(None)
 
         not_ready_result = MockBatchResult(
@@ -743,7 +755,9 @@ class TestEngineFatalFailureHandling:
         async def _exhaust(result):
             input_queue = asyncio.Queue()
             output_queue = asyncio.Queue()
-            await input_queue.put(pa.RecordBatch.from_pylist([{"id": 1}]))
+            await input_queue.put(
+                SourceBatch(seq=1, batch=pa.RecordBatch.from_pylist([{"id": 1}]))
+            )
             await input_queue.put(None)
             mock_grpc_client.send_batch = AsyncMock(return_value=result)
             processor = _make_processor(
@@ -778,7 +792,7 @@ class TestEngineFatalFailureHandling:
                 FailureCategory.FAILURE_CATEGORY_NOT_READY,
             )
         )
-        assert processor.exhausted_failure_codes == [ErrorCode.INTERNAL]
+        assert [d.code for d in processor.dropped_batches] == [ErrorCode.INTERNAL]
 
         # An undeclared ack takes the load stage's default whatever its
         # summary says. The first summary names a config-defect exception
@@ -790,7 +804,7 @@ class TestEngineFatalFailureHandling:
             "connection reset by peer",
         ):
             processor = await _exhaust(_retryable(summary))
-            assert processor.exhausted_failure_codes == [
+            assert [d.code for d in processor.dropped_batches] == [
                 ErrorCode.DESTINATION_WRITE_FAILED
             ]
 
@@ -884,7 +898,7 @@ class TestEngineFatalFailureHandling:
         output_queue = asyncio.Queue()
 
         test_batch = pa.RecordBatch.from_pylist([{"id": 1}, {"id": 2}, {"id": 3}])
-        await input_queue.put(test_batch)
+        await input_queue.put(SourceBatch(seq=1, batch=test_batch))
         await input_queue.put(None)
 
         # Mock: return FATAL_FAILURE
@@ -1217,7 +1231,7 @@ class TestEngineDLQOnFailure:
         output_queue = asyncio.Queue()
 
         test_batch = pa.RecordBatch.from_pylist([{"id": 1, "data": "test"}])
-        await input_queue.put(test_batch)
+        await input_queue.put(SourceBatch(seq=1, batch=test_batch))
         await input_queue.put(None)
 
         # Mock: return FATAL_FAILURE

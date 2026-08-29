@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
 from ..state.error_classification import ErrorCode, FailureStage, tag_failure
 
 
@@ -42,3 +44,31 @@ def load_json_file(
         # config phase's coarser CONFIG_INVALID tag in the runner.
         tag_failure(err, code=ErrorCode.INTERNAL, stage=FailureStage.CONFIG)
         raise
+
+
+def author_set(model: BaseModel, **values: Any) -> dict[str, Any]:
+    """Return the *values* whose field the author explicitly set to a non-null value.
+
+    The contract models fill omitted fields with their own defaults, so consult
+    ``model_fields_set`` (a reliable author-intent signal as of
+    analitiq-contract-models 1.0.0rc2, infra #938) to forward only
+    author-provided values. A present-but-null value is treated as unset. The
+    engine keeps its own defaults for the rest, so its precedence is preserved.
+
+    The caller spells each read as a typed attribute access (``batch_size=
+    contract.batching.batch_size``) rather than handing over field names for a
+    ``getattr``: the contract-consumption census sees the former and not the
+    latter, and a read this function performed by name would be published as
+    an unread field.
+    """
+    unknown = values.keys() - type(model).model_fields.keys()
+    if unknown:
+        raise ValueError(
+            f"{type(model).__name__} declares no field {sorted(unknown)}; "
+            f"the keyword must name the field it was read from"
+        )
+    return {
+        key: value
+        for key, value in values.items()
+        if key in model.model_fields_set and value is not None
+    }
