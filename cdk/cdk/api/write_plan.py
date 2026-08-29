@@ -123,6 +123,15 @@ class StreamWritePlan:
     #: of an identity wins); upsert keys on the full record content so a
     #: changed row gets a new key.
     write_mode_key: str = "insert"
+    #: The endpoint's ``conflict_keys`` -- the provider-defined natural key
+    #: an upsert matches on, each a top-level field of the write input
+    #: schema. The request block addresses the record through
+    #: ``from_input``, so the keys reach the wire inside the record: every
+    #: record this stream sends must carry a value for each. Empty for
+    #: insert, where the contract forbids the field. The endpoint is the
+    #: only source: the contract gives an API stream's write block no
+    #: ``conflict_keys`` of its own.
+    conflict_keys: list[str] = field(default_factory=list)
     #: Retry-safety verdict, computed at configure time.
     retry_verdict: RetryVerdict | None = None
     #: The declared ``response`` block: how the provider's answer says
@@ -329,8 +338,8 @@ def retry_verdict(mode_key: str, plan: StreamWritePlan) -> RetryVerdict:
         return RetryVerdict(
             semantics=RetrySemantics.RETRY_SEMANTICS_EXACTLY_ONCE,
             reason=(
-                "upsert dedups on the endpoint's conflict keys; a re-sent "
-                "record updates in place"
+                f"upsert dedups on the endpoint's conflict keys "
+                f"{plan.conflict_keys}; a re-sent record updates in place"
             ),
         )
     if plan.idempotency_in is not None:
@@ -546,6 +555,7 @@ def build_write_plan(
             params=table.values,
             write_mode_key=mode_key,
             response=mode_block.response,
+            conflict_keys=list(mode_block.conflict_keys or []),
         )
         plan.endpoint = substitute_path(
             request.path,

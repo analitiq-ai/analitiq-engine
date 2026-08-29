@@ -22,6 +22,7 @@ from cdk.sql.capabilities import SqlCapabilities
 from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.exceptions import (
     SchemaConfigurationError,
+    TlsVerificationError,
     UnsupportedDialectOperationError,
 )
 from cdk.sql.generic import GenericSQLConnector, _StreamState
@@ -108,6 +109,9 @@ async def _write(handler: GenericSQLConnector):
             SchemaConfigurationError("no conflict keys"),
             "write-config:",
             id="write-config",
+        ),
+        pytest.param(
+            TlsVerificationError("session is not encrypted"), "tls:", id="tls"
         ),
         pytest.param(AdbcConfigurationError("no driver"), "adbc:", id="adbc"),
     ],

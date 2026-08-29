@@ -817,3 +817,32 @@ class TestBodyKeyInjection:
         plan = StreamWritePlan(idempotency_in="body", idempotency_name="key")
         with pytest.raises(ValueError, match="already carries the field"):
             body_with_idempotency_key(plan, {"key": "authored"}, "abc")
+
+
+class TestConflictKeys:
+    """The endpoint's ``conflict_keys`` drive an upsert (issue #467)."""
+
+    def test_the_endpoint_declaration_reaches_the_plan(self) -> None:
+        plan = build_write_plan(
+            _document(mode="upsert"),
+            _spec(WriteMode.WRITE_MODE_UPSERT),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
+        )
+        assert isinstance(plan, StreamWritePlan)
+        assert plan.conflict_keys == ["id"]
+        assert plan.retry_verdict is not None
+        assert "['id']" in plan.retry_verdict.reason
+
+    def test_insert_carries_no_keys(self) -> None:
+        # The contract forbids the field on insert.
+        plan = build_write_plan(
+            _document(),
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
+        )
+        assert isinstance(plan, StreamWritePlan)
+        assert plan.conflict_keys == []

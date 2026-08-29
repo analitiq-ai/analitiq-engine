@@ -33,7 +33,7 @@ package.
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -65,7 +65,7 @@ from cdk.exceptions import ReadError
 from cdk.query_builder import Filter, ParamsLike, QueryBuilder, QueryConfig
 from cdk.record_identity import record_digest
 from cdk.schema_contract import SchemaContract
-from cdk.type_map import InvalidTypeMapError, TypeMapper, UnmappedTypeError
+from cdk.type_map import TypeMapError, TypeMapper
 from cdk.types import (
     AckStatus,
     CheckpointStore,
@@ -76,6 +76,7 @@ from cdk.types import (
     RetryVerdict,
     SchemaSpec,
 )
+from cdk.write_keys import MissingConflictKeyError, require_conflict_key_values
 
 from ..contract import ColumnDef
 from ._adbc_utils import _is_fatal_adbc_error
@@ -99,6 +100,78 @@ from .sqlalchemy_backend import SqlAlchemyBackend
 from .write_plan import build_stage_write_plan
 
 logger = logging.getLogger(__name__)
+
+
+#: Deterministic write defects the batch ack names as CONFIG_DEFECT. A
+#: literal tuple so static analysis can read the except site.
+_CONFIG_DEFECTS: tuple[type[Exception], ...] = (
+    TypeMapError,
+    UnsupportedDialectOperationError,
+    SchemaConfigurationError,
+    TlsVerificationError,
+    AdbcConfigurationError,
+)
+#: The summary prefix that names each defect.
+_CONFIG_DEFECT_PREFIXES: dict[type[Exception], str] = {
+    TypeMapError: "type-map",
+    UnsupportedDialectOperationError: "dialect",
+    SchemaConfigurationError: "write-config",
+    TlsVerificationError: "tls",
+    AdbcConfigurationError: "adbc",
+}
+if set(_CONFIG_DEFECT_PREFIXES) != set(_CONFIG_DEFECTS):
+    raise TypeError(
+        "_CONFIG_DEFECTS and _CONFIG_DEFECT_PREFIXES must name the same classes"
+    )
+
+
+def _config_defect_failure(
+    e: Exception, *, run_id: str, stream_id: str, batch_seq: int
+) -> BatchWriteResult:
+    """Ack a deterministic, user-fixable defect the write attempt raised.
+
+    None of these can heal between attempts against an identical request,
+    so each is fatal rather than looping forever: a type-map gap, a dialect
+    missing the requested operation (upsert with no connector package
+    installed), a stream misconfigured for this write (upsert with no
+    conflict_keys), a pool connection failing the declared TLS mode's
+    post-connect check (retrying reconnects to the same endpoint, and under
+    an active MITM is exactly wrong), or an ADBC misconfiguration. The
+    summary keeps the prefix the engine's logs and dead letters name the
+    defect by.
+    """
+    for error, declared in _CONFIG_DEFECT_PREFIXES.items():
+        if isinstance(e, error):
+            prefix = declared
+            break
+    else:
+        raise TypeError(f"{type(e).__name__} is not a config defect")
+    logger.error(
+        "%s error writing batch (run=%s, stream=%s, seq=%s): %s",
+        prefix,
+        run_id,
+        stream_id,
+        batch_seq,
+        e,
+        exc_info=True,
+    )
+    return BatchWriteResult(
+        status=AckStatus.ACK_STATUS_FATAL_FAILURE,
+        records_written=0,
+        failure_summary=f"{prefix}: {e}",
+        failure_category=FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
+    )
+
+
+def _key_rows(batch: pa.RecordBatch, keys: Sequence[str]) -> Iterator[dict[str, Any]]:
+    """Yield each row of *batch* narrowed to *keys*, as the shared check reads it.
+
+    A key column the cast did not produce is simply absent from the row, so
+    the check reports it missing like a null.
+    """
+    columns = {key: batch.column(key) for key in keys if key in batch.schema.names}
+    for i in range(batch.num_rows):
+        yield {key: column[i].as_py() for key, column in columns.items()}
 
 
 def _deadline_expired(deadline: AbstractAsyncContextManager[Any]) -> bool:
@@ -1629,6 +1702,16 @@ class GenericSQLConnector(BaseDestinationHandler):
                 # collapse — all semantics), renders the plan, and the
                 # backend executes it.
                 prepared = self._prepare_write_batch(state, record_batch)
+                # The merge matches on the conflict keys, and SQL never
+                # matches a NULL key: a record without one would insert
+                # again on every run. Refused after the cast (an absent
+                # column is typed nulls by then) and before anything lands.
+                if state.write_mode == "upsert":
+                    require_conflict_key_values(
+                        state.conflict_keys,
+                        _key_rows(prepared, state.conflict_keys),
+                        target=str(state.address),
+                    )
                 caps = self._require_declared_capabilities(state)
                 plan = build_stage_write_plan(
                     self.dialect,
@@ -1660,98 +1743,25 @@ class GenericSQLConnector(BaseDestinationHandler):
                     committed_cursor=cursor,
                 )
 
-        except (UnmappedTypeError, InvalidTypeMapError) as e:
-            # Type-map errors are deterministic — retrying cannot succeed.
-            # Classify as a fatal failure so the engine stops burning
-            # cycles on a batch that will never go through.
+        except MissingConflictKeyError as e:
+            # A record no merge can match. Deterministic data defect: the
+            # whole batch is refused before it lands, the same verdict the
+            # API path gives a record without its keys.
             logger.error(
-                "Type-map error writing batch (run=%s, stream=%s, seq=%s): %s",
+                "Conflict key missing writing batch (run=%s, stream=%s, seq=%s): %s",
                 run_id,
                 stream_id,
                 batch_seq,
                 e,
-                exc_info=True,
             )
             return BatchWriteResult(
                 status=AckStatus.ACK_STATUS_FATAL_FAILURE,
                 records_written=0,
-                failure_summary=f"type-map: {e}",
-                failure_category=FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
+                failure_summary=f"conflict-key: {e}",
             )
-        except UnsupportedDialectOperationError as e:
-            # The dialect lacks the requested operation (e.g. upsert with
-            # no connector package installed). Deterministic — fail fast.
-            logger.error(
-                "Dialect operation unsupported writing batch "
-                "(run=%s, stream=%s, seq=%s): %s",
-                run_id,
-                stream_id,
-                batch_seq,
-                e,
-                exc_info=True,
-            )
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
-                records_written=0,
-                failure_summary=f"dialect: {e}",
-                failure_category=FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
-            )
-        except SchemaConfigurationError as e:
-            # The stream is misconfigured for this write (e.g. upsert with
-            # no conflict_keys). Deterministic — retrying cannot heal it, so
-            # fail fatally instead of silently degrading or looping forever.
-            logger.error(
-                "Write configuration error (run=%s, stream=%s, seq=%s): %s",
-                run_id,
-                stream_id,
-                batch_seq,
-                e,
-                exc_info=True,
-            )
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
-                records_written=0,
-                failure_summary=f"write-config: {e}",
-                failure_category=FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
-            )
-        except TlsVerificationError as e:
-            # A pool connection opened for this write failed the declared
-            # TLS mode's post-connect check: the endpoint is serving
-            # plaintext (or was downgraded). Retrying reconnects to the
-            # same endpoint — and under an active MITM is exactly wrong —
-            # so fail fatally instead of looping.
-            logger.error(
-                "TLS verification failed writing batch "
-                "(run=%s, stream=%s, seq=%s): %s",
-                run_id,
-                stream_id,
-                batch_seq,
-                e,
-                exc_info=True,
-            )
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
-                records_written=0,
-                failure_summary=f"tls: {e}",
-                failure_category=FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
-            )
-        except AdbcConfigurationError as e:
-            # ADBC misconfiguration cannot heal between attempts; bail
-            # fatally so the engine does not retry forever.
-            logger.error(
-                "ADBC configuration error writing batch "
-                "(run=%s, stream=%s, seq=%s): %s",
-                run_id,
-                stream_id,
-                batch_seq,
-                e,
-                exc_info=True,
-            )
-            return BatchWriteResult(
-                status=AckStatus.ACK_STATUS_FATAL_FAILURE,
-                records_written=0,
-                failure_summary=f"adbc: {e}",
-                failure_category=FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
+        except _CONFIG_DEFECTS as e:
+            return _config_defect_failure(
+                e, run_id=run_id, stream_id=stream_id, batch_seq=batch_seq
             )
         except TimeoutError as e:
             return self._timeout_failure(
