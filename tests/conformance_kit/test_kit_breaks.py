@@ -1366,6 +1366,22 @@ class TestApiReadPathBreaks:
         assert "'secrets.api_key'" in report
         assert "request-time resolution never supplies" in report
 
+    def test_a_metadata_key_named_after_a_marker_cannot_hide_a_secret_read(
+        self, tmp_path: Path
+    ) -> None:
+        """Metadata keys are author names; ``ref`` as a key hides no sibling."""
+
+        def bend(read: dict[str, Any]) -> None:
+            read["response"]["metadata"] = {
+                "ref": {"literal": "x"},
+                "budget": {"ref": "secrets.api_token"},
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "'secrets.api_token'" in report
+        assert "request-time resolution never supplies" in report
+
     def test_a_stop_condition_off_the_page_scope_is_refused_at_compile(
         self, tmp_path: Path
     ) -> None:

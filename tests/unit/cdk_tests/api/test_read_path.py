@@ -1329,6 +1329,55 @@ class TestResponseMetadata:
         assert batch.num_rows == 0
         assert response_metadata_of(batch) == {"total": 0}
 
+    async def test_a_key_named_after_a_marker_cannot_hide_a_secret_read(
+        self,
+    ) -> None:
+        # Metadata KEYS are author names; a key literally named ``ref``
+        # must not turn the map into one expression node and hide the
+        # sibling that reads a scope no page ever supplies.
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        with pytest.raises(ReadError, match="'secrets.api_token'"):
+            await _read(
+                session,
+                endpoint_document(
+                    response_metadata={
+                        "ref": {"literal": "x"},
+                        "budget": {"ref": "secrets.api_token"},
+                    },
+                ),
+            )
+        assert session.calls == []
+
+    async def test_the_empty_page_that_ends_an_incremental_read_saves_no_cursor(
+        self,
+    ) -> None:
+        # The zero-row batch a declared metadata block yields carries no
+        # last record to take a cursor from; the checkpoint keeps the one
+        # the last populated page saved.
+        checkpoint = FakeCheckpoint({"cursor": "0"})
+        session = FakeSession(
+            [
+                FakeResponse(body={**_rows(2), "total": 2}),
+                FakeResponse(body={"records": [], "total": 2}),
+            ]
+        )
+        batches = await _read(
+            session,
+            endpoint_document(
+                pagination=_OFFSET,
+                request=_PAGINATION_REQUEST,
+                params=_PAGINATION_PARAMS,
+                response_fields=self._TOTAL_FIELD,
+                response_metadata={"total": {"ref": "response.body.total"}},
+            ),
+            source=stream_source(
+                method="incremental", cursor_field="id", safety_window=0
+            ),
+            checkpoint=checkpoint,
+        )
+        assert [b.num_rows for b in batches] == [2, 0]
+        assert checkpoint.saved == [{"cursor": 1}]
+
     async def test_a_read_declaring_no_metadata_carries_none(self) -> None:
         session = FakeSession([FakeResponse(body=_rows(1))])
         (batch,) = await _read(session, endpoint_document())

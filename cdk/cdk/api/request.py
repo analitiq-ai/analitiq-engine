@@ -46,6 +46,7 @@ from urllib.parse import quote
 
 from analitiq.contracts.endpoints import (
     ApiEndpointDoc,
+    Expression,
     Pagination,
     Param,
     ReadOperation,
@@ -481,7 +482,7 @@ def request_block_problem(
     controlled_by: Mapping[str, str] = MappingProxyType({}),
     declared_params: Mapping[str, Param] = MappingProxyType({}),
     pagination: Pagination | None = None,
-    metadata: Mapping[str, Any] | None = None,
+    metadata: Mapping[str, Expression] | None = None,
 ) -> str | None:
     """Why this request block cannot be sent as declared, or ``None``.
 
@@ -655,7 +656,7 @@ def _secret_read_problem(
     request_block: ReadRequest | WriteRequest,
     declared_params: Mapping[str, Param],
     pagination: Pagination | None,
-    metadata: Mapping[str, Any] | None,
+    metadata: Mapping[str, Expression] | None,
     resolver: Resolver,
 ) -> str | None:
     """Why an operation reads what no request can carry, or ``None``.
@@ -704,7 +705,15 @@ def _secret_read_problem(
             if unfillable(path, page=False)
         }
         | {path for path in scope_paths(pagination) if unfillable(path, page=True)}
-        | {path for path in scope_paths(metadata) if unfillable(path, page=True)}
+        # Walked per VALUE: the map's keys are author names, and a key
+        # named ``ref`` or ``literal`` would otherwise make the whole map
+        # read as one expression node, hiding every sibling.
+        | {
+            path
+            for expression in (metadata or {}).values()
+            for path in scope_paths(expression)
+            if unfillable(path, page=True)
+        }
     )
     if not reads:
         return None
