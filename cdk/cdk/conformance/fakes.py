@@ -84,7 +84,7 @@ _MINIMAL_TRANSPORTS: dict[str, dict[str, Any]] = {
         },
     },
     "api": {"transport_type": "http", "base_url": "https://api.example.test"},
-    "file": {"transport_type": "file", "path": "/tmp/out", "format": "jsonl"},
+    "file": {"transport_type": "file", "path": "/data/out", "format": "jsonl"},
     "stdout": {"transport_type": "stdout"},
 }
 
