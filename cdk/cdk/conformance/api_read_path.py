@@ -302,6 +302,7 @@ def _compile_read(
         controlled_by=table.controlled_by,
         declared_params=read.params,
         pagination=read.pagination,
+        metadata=read.response.metadata,
         endpoint=label,
     )
     if problem is not None:
@@ -322,7 +323,9 @@ def _compile_read(
         raise ReadError(scope_problem)
     # The kit never resolves a metadata expression (it fetches no page), so
     # a function name only the engine's closed registry could refuse would
-    # otherwise certify and die on the connector's first page.
+    # otherwise certify and die on the connector's first page. A metadata
+    # value reading a scope no page supplies (secrets, auth) is refused
+    # above, by the shared request_block_problem walk.
     metadata_nodes = [
         authored_json(expression)
         for expression in (read.response.metadata or {}).values()

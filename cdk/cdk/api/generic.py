@@ -543,6 +543,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                 controlled_by=table.controlled_by,
                 declared_params=read.params,
                 pagination=pagination,
+                metadata=read.response.metadata,
                 endpoint=endpoint_id,
             )
             if problem is not None:

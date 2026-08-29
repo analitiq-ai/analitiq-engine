@@ -1344,6 +1344,28 @@ class TestApiReadPathBreaks:
         assert "response.metadata" in report
         assert "unknown derived function 'no_such_function'" in report
 
+    def test_a_metadata_value_reading_a_secret_is_refused_at_compile(
+        self, tmp_path: Path
+    ) -> None:
+        """A page supplies no secrets; the metadata value is judged, not deferred.
+
+        The read resolver's scope excludes secrets and auth by design, and a
+        metadata value resolves per page through that scope, so the ref
+        would land None on every page of a certified connector. The same
+        never-fillable walk that refuses a body or a pagination value reading
+        a secret refuses this one.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["response"]["metadata"] = {
+                "budget": {"template": "${secrets.api_key}"}
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "'secrets.api_key'" in report
+        assert "request-time resolution never supplies" in report
+
     def test_a_stop_condition_off_the_page_scope_is_refused_at_compile(
         self, tmp_path: Path
     ) -> None:
