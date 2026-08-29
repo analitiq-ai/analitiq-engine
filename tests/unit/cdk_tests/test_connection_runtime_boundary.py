@@ -13,6 +13,17 @@ import json
 from unittest.mock import AsyncMock
 
 import pytest
+from analitiq.contracts.connection import ConnectionInput
+from analitiq.contracts.connector import Connector
+from contract_documents import (
+    adbc_transport,
+    connection_document,
+    connector_document,
+    contract_input,
+    http_transport,
+    sqlalchemy_transport,
+)
+from pydantic import ValidationError
 
 from cdk.connection_runtime import ConnectionRuntime, _PreResolvedSecretsResolver
 from cdk.exceptions import TransportSpecError
@@ -24,10 +35,10 @@ def _resolver(secrets=None):
 
 def _transportless_runtime(**overrides):
     kwargs = dict(
-        raw_config={
-            "path": "/tmp/out",
-            "secret_refs": {"API_TOKEN": "connections/x/token"},
-        },
+        connection=connection_document(
+            parameters={"path": "/tmp/out"},
+            secret_refs={"API_TOKEN": "env:API_TOKEN"},
+        ),
         connection_id="my-file",
         connector_id="filedrop",
         connector_type="file",
@@ -39,27 +50,25 @@ def _transportless_runtime(**overrides):
 
 def _http_runtime():
     return ConnectionRuntime(
-        raw_config={
-            "parameters": {"region": "eu"},
-            "secret_refs": {"API_TOKEN": "connections/x/token"},
-        },
+        connection=connection_document(
+            parameters={"region": "eu"},
+            secret_refs={"API_TOKEN": "env:API_TOKEN"},
+        ),
         connection_id="my-api",
         connector_id="demo",
         connector_type="api",
         resolver=_resolver({"API_TOKEN": "tok-123"}),
-        connector_definition={
-            "connector_id": "demo",
-            "default_transport": "api",
-            "transports": {
-                "api": {
-                    "transport_type": "http",
-                    "base_url": "https://api.example.com",
-                    "headers": {
+        connector=connector_document(
+            "api",
+            connector_id="demo",
+            transports={
+                "api": http_transport(
+                    headers={
                         "Authorization": {"template": "Bearer ${secrets.API_TOKEN}"}
-                    },
-                }
+                    }
+                )
             },
-        },
+        ),
     )
 
 
@@ -75,8 +84,12 @@ class TestResolveSpec:
         assert payload["connector_type"] == "file"
         assert payload["transport_specs"] is None
         assert payload["default_transport_ref"] is None
-        # Secrets arrive as resolved values, not references.
-        assert payload["resolved_config"]["API_TOKEN"] == "tok-123"
+        # Secrets arrive as resolved values, not references, beside the
+        # connection's authored parameters.
+        assert payload["resolved_config"] == {
+            "parameters": {"path": "/tmp/out"},
+            "secrets": {"API_TOKEN": "tok-123"},
+        }
 
     async def test_transport_payload_resolves_secrets_into_values(self):
         runtime = _http_runtime()
@@ -109,16 +122,13 @@ class TestResolveSpec:
         with pytest.raises(SecretNotFoundError, match="API_TOKEN"):
             await runtime.resolve_spec()
 
-    async def test_connection_config_crosses_without_secret_bearing_blocks(self):
+    async def test_connection_config_crosses_without_secret_pointers(self):
         runtime = ConnectionRuntime(
-            raw_config={
-                "parameters": {"account_id": "acc-42"},
-                "selections": {"profile": "main"},
-                "max_retries": 7,
-                "secret_refs": {"API_TOKEN": "connections/x/token"},
-                "auth": {"type": "oauth2"},
-                "auth_state": {"refresh_token": "rt-secret"},
-            },
+            connection=connection_document(
+                parameters={"account_id": "acc-42"},
+                selections={"profile": "main"},
+                secret_refs={"API_TOKEN": "env:API_TOKEN"},
+            ),
             connection_id="my-api",
             connector_id="demo",
             connector_type="api",
@@ -127,16 +137,25 @@ class TestResolveSpec:
         payload = await runtime.resolve_spec()
 
         config = payload["connection_config"]
-        # Non-secret scopes and top-level settings cross: connector code
-        # resolves connection.parameters.* refs and handler settings from
-        # the worker runtime's raw_config.
+        # The authored scopes cross, as the contract document the worker
+        # parses again: connector code resolves connection.parameters.* refs
+        # from the worker runtime's connection.
         assert config["parameters"] == {"account_id": "acc-42"}
         assert config["selections"] == {"profile": "main"}
-        assert config["max_retries"] == 7
-        # Secret pointers and auth material never cross.
+        assert ConnectionInput.model_validate(config).connector_id == "test-connector"
+        # Secret pointers never cross.
         assert "secret_refs" not in config
-        assert "auth" not in config
-        assert "auth_state" not in config
+
+    def test_a_connection_field_outside_the_contract_cannot_be_read(self):
+        # The connection document is the contract's model: a handler setting
+        # the contract does not declare (``max_retries``, ``auth``) has no
+        # place on it, so no engine read of it can exist.
+        with pytest.raises(ValidationError, match="max_retries"):
+            ConnectionInput.model_validate({"connector_id": "demo", "max_retries": 7})
+        with pytest.raises(ValidationError, match="auth"):
+            ConnectionInput.model_validate(
+                {"connector_id": "demo", "auth": {"type": "oauth2"}}
+            )
 
 
 class TestWorkerSideRuntime:
@@ -155,7 +174,7 @@ class TestWorkerSideRuntime:
         # materialize() must take the pre-resolved branch: if it fell
         # through to secret loading, the placeholder resolver would raise.
         await worker_runtime.materialize()
-        assert worker_runtime.resolved_config["API_TOKEN"] == "tok-123"
+        assert worker_runtime.resolved_config["secrets"]["API_TOKEN"] == "tok-123"
         assert worker_runtime.connector_type == "file"
         assert worker_runtime.connection_id == "my-file"
 
@@ -171,7 +190,8 @@ class TestWorkerSideRuntime:
                 "connector_id": "filedrop",
                 "connector_type": "file",
                 "connection_config": {
-                    "secret_refs": {"API_TOKEN": "sidecar:API_TOKEN"}
+                    "connector_id": "filedrop",
+                    "secret_refs": {"API_TOKEN": "sidecar:API_TOKEN"},
                 },
                 "transport_specs": None,
                 "resolved_config": None,
@@ -190,7 +210,10 @@ class TestWorkerSideRuntime:
                 "connection_id": "my-file",
                 "connector_id": "filedrop",
                 "connector_type": "file",
-                "connection_config": {"path": "/tmp/out"},
+                "connection_config": {
+                    "connector_id": "filedrop",
+                    "parameters": {"path": "/tmp/out"},
+                },
                 "transport_specs": None,
                 "resolved_config": None,
             }
@@ -198,12 +221,28 @@ class TestWorkerSideRuntime:
         with pytest.raises(RuntimeError, match="pre-resolved worker runtime"):
             await worker_runtime.materialize()
 
-    async def test_rebuilt_runtime_restores_connection_config_as_raw_config(self):
+    def test_worker_refuses_a_connection_config_outside_the_contract(self):
+        # The payload's connection_config is parsed as the contract's
+        # connection document; a payload carrying anything else is
+        # malformed and refused at the boundary, not read as settings.
+        with pytest.raises(ValidationError, match="connector_id"):
+            ConnectionRuntime.from_resolved_payload(
+                {
+                    "connection_id": "my-file",
+                    "connector_id": "filedrop",
+                    "connector_type": "file",
+                    "connection_config": {"path": "/tmp/out"},
+                    "transport_specs": None,
+                    "resolved_config": None,
+                }
+            )
+
+    async def test_rebuilt_runtime_restores_the_connection_document(self):
         runtime = ConnectionRuntime(
-            raw_config={
-                "parameters": {"account_id": "acc-42"},
-                "secret_refs": {"API_TOKEN": "connections/x/token"},
-            },
+            connection=connection_document(
+                parameters={"account_id": "acc-42"},
+                secret_refs={"API_TOKEN": "env:API_TOKEN"},
+            ),
             connection_id="my-api",
             connector_id="demo",
             connector_type="api",
@@ -213,17 +252,19 @@ class TestWorkerSideRuntime:
         worker_runtime = ConnectionRuntime.from_resolved_payload(payload)
 
         # connection.parameters.* refs must resolve inside the worker.
-        assert worker_runtime.raw_config["parameters"] == {"account_id": "acc-42"}
-        assert "secret_refs" not in worker_runtime.raw_config
+        assert worker_runtime.connection.parameters == {"account_id": "acc-42"}
+        assert worker_runtime.connection.secret_refs == {}
+        assert worker_runtime.connector is None
 
     async def test_driver_hint_survives_the_round_trip(self):
         payload = {
             "connection_id": "my-pg",
             "connector_id": "postgres",
             "connector_type": "database",
+            "connection_config": {"connector_id": "postgres"},
             "driver_hint": "postgresql",
             "transport_spec": None,
-            "resolved_config": {"host": "db"},
+            "resolved_config": {"parameters": {"host": "db"}, "secrets": {}},
         }
         worker_runtime = ConnectionRuntime.from_resolved_payload(payload)
         assert worker_runtime.driver == "postgresql"
@@ -238,31 +279,24 @@ class TestConnectionContractValidation:
 
     def _runtime(self, *, parameters, contract_inputs):
         return ConnectionRuntime(
-            raw_config={"parameters": parameters, "secret_refs": {}},
+            connection=connection_document(parameters=parameters, secret_refs={}),
             connection_id="c1",
             connector_id="demo",
             connector_type="database",
             resolver=_resolver({}),
-            connector_definition={
-                "connector_id": "demo",
-                "connection_contract": {"inputs": contract_inputs},
-            },
+            connector=connector_document(
+                "database",
+                connector_id="demo",
+                connection_contract={"inputs": contract_inputs},
+            ),
         )
 
     def test_missing_required_parameter_raises(self):
         runtime = self._runtime(
             parameters={"warehouse": "wh"},
             contract_inputs={
-                "account": {
-                    "required": True,
-                    "source": "user",
-                    "storage": "connection.parameters",
-                },
-                "warehouse": {
-                    "required": False,
-                    "source": "user",
-                    "storage": "connection.parameters",
-                },
+                "account": contract_input(required=True),
+                "warehouse": contract_input(required=False),
             },
         )
         with pytest.raises(TransportSpecError, match="account"):
@@ -272,16 +306,8 @@ class TestConnectionContractValidation:
         runtime = self._runtime(
             parameters={"account": "abc"},
             contract_inputs={
-                "account": {
-                    "required": True,
-                    "source": "user",
-                    "storage": "connection.parameters",
-                },
-                "role": {
-                    "required": False,
-                    "source": "user",
-                    "storage": "connection.parameters",
-                },
+                "account": contract_input(required=True),
+                "role": contract_input(required=False),
             },
         )
         runtime._validate_connection_contract({})  # no raise
@@ -290,12 +316,8 @@ class TestConnectionContractValidation:
         runtime = self._runtime(
             parameters={"account": "abc"},
             contract_inputs={
-                "account": {
-                    "required": True,
-                    "source": "user",
-                    "storage": "connection.parameters",
-                },
-                "password": {"required": True, "source": "user", "storage": "secrets"},
+                "account": contract_input(required=True),
+                "password": contract_input(required=True, storage="secrets"),
             },
         )
         with pytest.raises(TransportSpecError, match="password"):
@@ -310,16 +332,8 @@ class TestConnectionContractValidation:
         # (The transport-resolution drop logic relies on *every* required
         # input being present, not just the user-sourced ones.)
         inputs = {
-            "account": {
-                "required": True,
-                "source": "user",
-                "storage": "connection.parameters",
-            },
-            "region": {
-                "required": True,
-                "source": "platform",
-                "storage": "connection.parameters",
-            },
+            "account": contract_input(required=True),
+            "region": contract_input(required=True, source="platform"),
         }
         with pytest.raises(TransportSpecError, match="region"):
             self._runtime(
@@ -333,42 +347,30 @@ class TestConnectionContractValidation:
             {}
         )  # no raise
 
-    def test_required_input_unknown_storage_fails_loud(self):
-        # A required input whose storage is not one the connection carries
-        # (the schema's storage enum is closed to connection.parameters /
-        # secrets) is a malformed connector definition -- fail loud, never
-        # silently skip.
-        runtime = self._runtime(
-            parameters={"account": "abc"},
-            contract_inputs={
-                "account": {
-                    "required": True,
-                    "source": "user",
-                    "storage": "connection.parameters",
+    def test_an_input_stored_outside_the_two_scopes_is_refused_by_the_contract(
+        self,
+    ):
+        # The contract closes ``storage`` to the two scopes a connection
+        # carries; a definition storing a required input anywhere else is
+        # refused at validation, before a runtime exists to check it.
+        with pytest.raises(ValidationError, match="storage"):
+            connector_document(
+                "database",
+                connection_contract={
+                    "inputs": {
+                        "bogus": contract_input(
+                            required=True, storage="connection.discovered"
+                        )
+                    }
                 },
-                "bogus": {
-                    "required": True,
-                    "source": "user",
-                    "storage": "connection.discovered",
-                },
-            },
-        )
-        with pytest.raises(TransportSpecError, match="unknown storage"):
-            runtime._validate_connection_contract({})
+            )
 
-    def test_null_parameters_block_still_enforces_required(self):
-        # A connection with no (or null) parameters block must still raise
-        # for a required connection.parameters input -- this exercises the
-        # ``self._raw_config.get("parameters") or {}`` coalescing.
+    def test_empty_parameters_block_still_enforces_required(self):
+        # A connection with no parameters block must still raise for a
+        # required connection.parameters input.
         runtime = self._runtime(
             parameters=None,
-            contract_inputs={
-                "account": {
-                    "required": True,
-                    "source": "user",
-                    "storage": "connection.parameters",
-                },
-            },
+            contract_inputs={"account": contract_input(required=True)},
         )
         with pytest.raises(TransportSpecError, match="account"):
             runtime._validate_connection_contract({})
@@ -379,25 +381,19 @@ class TestConnectionContractValidation:
         # not just the private helper.
         runtime = self._runtime(
             parameters={},
-            contract_inputs={
-                "account": {
-                    "required": True,
-                    "source": "user",
-                    "storage": "connection.parameters",
-                },
-            },
+            contract_inputs={"account": contract_input(required=True)},
         )
         with pytest.raises(TransportSpecError, match="account"):
             await runtime.resolve_spec()
 
-    def test_no_contract_is_unconstrained(self):
+    def test_no_inputs_is_unconstrained(self):
         runtime = ConnectionRuntime(
-            raw_config={"parameters": {}},
+            connection=connection_document(parameters={}),
             connection_id="c1",
             connector_id="demo",
             connector_type="database",
             resolver=_resolver({}),
-            connector_definition={"connector_id": "demo"},
+            connector=connector_document("database", connector_id="demo"),
         )
         runtime._validate_connection_contract({})  # no raise
 
@@ -405,46 +401,52 @@ class TestConnectionContractValidation:
 class TestDriverDerivation:
     """``ConnectionRuntime.driver`` derives through the merged transports."""
 
-    def test_driver_supplied_via_transport_defaults_derives(self):
+    def _runtime(self, connector: Connector) -> ConnectionRuntime:
+        return ConnectionRuntime(
+            connection=connection_document(parameters={}),
+            connection_id="c1",
+            connector_id="demo",
+            connector_type="database",
+            resolver=_resolver({}),
+            connector=connector,
+        )
+
+    def test_transport_type_supplied_via_transport_defaults_derives(self):
         """Defaults-supplied fields must derive exactly as they materialize.
 
         The materialization path merges ``transport_defaults`` before
         resolving a transport; the pre-materialization derivation reads
-        through the same merged view, so a connector supplying driver or
-        transport_type through defaults cannot derive as driverless.
+        through the same merged view, so the defaults block's fields
+        (``transport_type`` is the one it may carry) apply to the derived
+        driver too.
         """
-        runtime = ConnectionRuntime(
-            raw_config={"parameters": {}},
-            connection_id="c1",
-            connector_id="demo",
-            connector_type="database",
-            resolver=_resolver({}),
-            connector_definition={
-                "connector_id": "demo",
-                "default_transport": "sqlalchemy",
-                "transport_defaults": {
-                    "transport_type": "sqlalchemy",
-                    "driver": "postgresql+asyncpg",
+        runtime = self._runtime(
+            connector_document(
+                "database",
+                transport_defaults={"transport_type": "sqlalchemy"},
+                transports={
+                    "database": {
+                        "transport_type": "sqlalchemy",
+                        "driver": "postgresql+asyncpg",
+                    }
                 },
-                "transports": {"sqlalchemy": {"dsn": {"kind": "url_template"}}},
-            },
+            )
         )
         assert runtime.driver == "postgresql"
 
-    def test_block_fields_override_defaults(self):
-        runtime = ConnectionRuntime(
-            raw_config={"parameters": {}},
-            connection_id="c1",
-            connector_id="demo",
-            connector_type="database",
-            resolver=_resolver({}),
-            connector_definition={
-                "connector_id": "demo",
-                "default_transport": "adbc",
-                "transport_defaults": {"driver": "postgresql+asyncpg"},
-                "transports": {
-                    "adbc": {"transport_type": "adbc", "driver": "snowflake"}
-                },
-            },
+    def test_adbc_driver_derives_as_declared(self):
+        runtime = self._runtime(
+            connector_document(
+                "database", transports={"adbc": adbc_transport("snowflake")}
+            )
         )
         assert runtime.driver == "snowflake"
+
+    def test_sqlalchemy_driver_splits_off_the_dbapi(self):
+        runtime = self._runtime(
+            connector_document(
+                "database",
+                transports={"database": sqlalchemy_transport("mysql+aiomysql")},
+            )
+        )
+        assert runtime.driver == "mysql"

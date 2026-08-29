@@ -37,10 +37,12 @@ import os
 import sys
 from typing import Any
 
-from analitiq.contracts.endpoints import WRITE_MODES
-
 from src.config import settings
-from src.models.resolved import dump_endpoint_document, dump_endpoint_ref
+from src.models.resolved import (
+    dump_endpoint_document,
+    dump_endpoint_ref,
+    write_conflict_keys,
+)
 
 # Set up logging
 log_level = settings.log_level()
@@ -232,22 +234,13 @@ async def run_destination_mode() -> None:
                 continue
             stream_id = stream.stream_id
             endpoint_refs[stream_id] = dump_endpoint_ref(dest.endpoint_ref)
-            # The mode is checked against the contract's own vocabulary only to
-            # reject an unknown value at startup (format validation) — the
-            # engine no longer derives or enforces conflict keys, so a
-            # misconfigured upsert surfaces loudly at the write path rather
-            # than being silently downgraded here.
-            mode_value = dest.write.get("mode") or "upsert"
-            if mode_value not in WRITE_MODES:
-                raise ValueError(
-                    f"Stream {stream_id!r} destination has unknown write.mode "
-                    f"{mode_value!r}; expected one of {list(WRITE_MODES)}"
-                )
-            stream_write_modes[stream_id] = str(mode_value)
+            # The mode is the contract's own vocabulary (validated with the
+            # stream); the engine neither derives nor enforces conflict keys,
+            # so a misconfigured upsert surfaces loudly at the write path
+            # rather than being silently downgraded here.
+            stream_write_modes[stream_id] = dest.write.mode
             stream_endpoints[stream_id] = dump_endpoint_document(dest.endpoint_document)
-            stream_conflict_keys[stream_id] = list(
-                dest.write.get("conflict_keys") or []
-            )
+            stream_conflict_keys[stream_id] = write_conflict_keys(dest.write)
             break
     logger.info(
         "Registered %d stream(s) targeting %s",

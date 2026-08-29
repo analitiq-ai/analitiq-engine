@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pyarrow as pa
 import pytest
-from analitiq.contracts.stream import validate_endpoint_ref
+from analitiq.contracts.stream import StreamSource, validate_endpoint_ref
 
 from cdk.types import FailureCategory
 from src.engine.batch_policy import ErrorStrategy
@@ -38,6 +38,12 @@ from src.state.error_classification import (
     classify_for_metrics,
     read_failure_tag,
     tag_failure,
+)
+
+#: The contract source block every fixture stream reads through; the load
+#: stage reads replication and primary keys off the typed resolved source.
+_STREAM_SOURCE = StreamSource.model_validate(
+    {"endpoint_ref": {"scope": "connector", "connection_id": "c", "endpoint_id": "e"}}
 )
 
 
@@ -194,7 +200,7 @@ def sample_stream_config():
                 connection_ref="conn",
                 runtime=_mock_runtime(),
                 endpoint_document={},
-                stream_source={},
+                stream_source=_STREAM_SOURCE,
                 replication=ReplicationConfig(
                     method="incremental", cursor_field="updated_at"
                 ),
@@ -466,7 +472,7 @@ class TestEngineFatalFailureHandling:
             connection_ref="conn",
             runtime=_mock_runtime(),
             endpoint_document={},
-            stream_source={},
+            stream_source=_STREAM_SOURCE,
             replication=None,
             primary_keys=["id"],
         )

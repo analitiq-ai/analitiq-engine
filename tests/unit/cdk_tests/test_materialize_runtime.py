@@ -9,6 +9,7 @@ raises, preserving the original exception type for the caller's classification.
 from __future__ import annotations
 
 import pytest
+from contract_documents import connection_document
 
 from cdk.connection_runtime import (
     DETERMINISTIC_CONNECT_ERRORS,
@@ -21,7 +22,7 @@ from cdk.secrets.resolvers.memory import InMemorySecretsResolver
 
 def _runtime() -> ConnectionRuntime:
     return ConnectionRuntime(
-        raw_config={"host": "h", "parameters": {}},
+        connection=connection_document(parameters={"host": "h"}),
         connection_id="c",
         connector_id="test-connector",
         connector_type="api",

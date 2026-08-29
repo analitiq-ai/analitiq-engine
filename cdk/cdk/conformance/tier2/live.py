@@ -37,6 +37,7 @@ from typing import Any
 
 import pyarrow as pa
 import pytest
+from analitiq.contracts.connection import ConnectionInput
 from analitiq.contracts.endpoints import DatabaseEndpointDoc
 
 from cdk.connection_runtime import ConnectionRuntime
@@ -137,12 +138,12 @@ class LiveHarness:
         """Build a fresh trusted-side runtime for one phase."""
         document = self.document
         return ConnectionRuntime(
-            raw_config=dict(document["config"]),
+            connection=ConnectionInput.model_validate(document["config"]),
             connection_id=str(document.get("connection_id") or "conformance-live"),
             connector_id=self.target.connector_id,
             connector_type=self.target.kind,
             resolver=SchemeSecretsResolver(self.document_path.parent),
-            connector_definition=self.target.definition,
+            connector=self.target.connector,
             connector_type_mapper=self.target.type_mapper,
         )
 

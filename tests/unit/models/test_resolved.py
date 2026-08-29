@@ -5,7 +5,8 @@ from unittest.mock import MagicMock
 
 import pytest
 from analitiq.contracts.pipelines.config import ErrorHandling as ContractErrorHandling
-from analitiq.contracts.stream import Replication
+from analitiq.contracts.pipelines.config import Runtime as ContractRuntime
+from analitiq.contracts.stream import Replication, StreamSource
 from pydantic import BaseModel, Field, TypeAdapter, create_model
 
 from src.engine.mapping import MappingDocument
@@ -187,8 +188,6 @@ class TestResolvedModelGuards:
             pipeline_id=pipeline_id,
             name="n",
             display_name=None,
-            description=None,
-            status="active",
             connections=PipelineConnections(source="src", destinations=["d"]),
         )
 
@@ -203,12 +202,6 @@ class TestResolvedModelGuards:
         return ResolvedStream(
             stream_id=stream_id,
             stream_version=1,
-            pipeline_id="p1",
-            display_name=None,
-            description=None,
-            status="active",
-            is_enabled=True,
-            tags=[],
             source=MagicMock(),
             destinations=[MagicMock()],
             mapping=MappingDocument(),
@@ -219,29 +212,54 @@ class TestResolvedModelGuards:
             self._stream(stream_id="")
 
 
+def _runtime_block(block: dict) -> ContractRuntime:
+    """A pipeline's runtime block as the contract validates it."""
+    return ContractRuntime.model_validate(block)
+
+
+def _source_block(block: dict) -> StreamSource:
+    """A stream's source block as the contract validates it.
+
+    Connection-scoped (a database table): the contract reserves
+    ``tie_breaker_fields`` for database sources.
+    """
+    return StreamSource.model_validate(
+        {
+            "endpoint_ref": {
+                "scope": "connection",
+                "connection_id": "c",
+                "database_object": {"schema": "public", "name": "t"},
+            },
+            **block,
+        }
+    )
+
+
 class TestParseRuntimeConfig:
     def test_empty_block_yields_defaults(self):
-        cfg = _parse_runtime_config({})
+        cfg = _parse_runtime_config(_runtime_block({}))
         assert cfg.batching.batch_size == 1000
         assert cfg.error_handling.strategy == "fail"
         assert cfg.buffer_size == 5000
 
     def test_partial_block_merges_with_defaults(self):
-        cfg = _parse_runtime_config({"batching": {"batch_size": 50}})
+        cfg = _parse_runtime_config(_runtime_block({"batching": {"batch_size": 50}}))
         assert cfg.batching.batch_size == 50
         assert cfg.buffer_size == 5000  # untouched keys keep their defaults
 
     def test_full_block_is_typed(self):
         cfg = _parse_runtime_config(
-            {
-                "batching": {"batch_size": 200},
-                "error_handling": {
-                    "strategy": "dlq",
-                    "max_retries": 5,
-                    "retry_delay_seconds": 1,
-                },
-                "buffer_size": 1234,
-            }
+            _runtime_block(
+                {
+                    "batching": {"batch_size": 200},
+                    "error_handling": {
+                        "strategy": "dlq",
+                        "max_retries": 5,
+                        "retry_delay_seconds": 1,
+                    },
+                    "buffer_size": 1234,
+                }
+            )
         )
         assert cfg.batching.batch_size == 200
         assert cfg.error_handling.strategy == "dlq"
@@ -252,7 +270,7 @@ class TestParseRuntimeConfig:
         # Now validated against the contract model, so an out-of-enum strategy
         # is rejected by the contract (authority) before the engine type.
         with pytest.raises(ValueError, match="strategy"):
-            _parse_runtime_config({"error_handling": {"strategy": "nope"}})
+            _runtime_block({"error_handling": {"strategy": "nope"}})
 
     def test_retired_batching_key_is_rejected_not_ignored(self):
         # max_concurrent_batches was dropped from the contract (issue #436).
@@ -260,14 +278,14 @@ class TestParseRuntimeConfig:
         # silently dropped: the author asked for something the engine no longer
         # offers, and a silent drop reads as if the request was honoured.
         with pytest.raises(ValueError, match="max_concurrent_batches"):
-            _parse_runtime_config(
+            _runtime_block(
                 {"batching": {"batch_size": 200, "max_concurrent_batches": 4}}
             )
 
     def test_out_of_range_max_retries_fails_loud(self):
         # The contract caps max_retries (le=5); the parser enforces it.
         with pytest.raises(ValueError, match="max_retries"):
-            _parse_runtime_config({"error_handling": {"max_retries": 9}})
+            _runtime_block({"error_handling": {"max_retries": 9}})
 
     def test_omitted_fields_use_engine_defaults_not_contract(self, monkeypatch):
         """Omitted runtime fields fall through to the engine's (env-overridable)
@@ -280,7 +298,7 @@ class TestParseRuntimeConfig:
         """
         monkeypatch.setenv("ANALITIQ_RETRY_DELAY_SECONDS", "42")
         monkeypatch.setenv("ANALITIQ_ERROR_STRATEGY", "skip")
-        cfg = _parse_runtime_config({})
+        cfg = _parse_runtime_config(_runtime_block({}))
         # engine env values, not the contract's retry_delay=5 / strategy='dlq'
         assert cfg.error_handling.retry_delay_seconds == 42
         assert cfg.error_handling.strategy == "skip"
@@ -293,7 +311,9 @@ class TestParseRuntimeConfig:
         # falls through to the engine's env-overridable default. The env
         # override makes the two paths discriminating.
         monkeypatch.setenv("ANALITIQ_RETRY_DELAY_SECONDS", "42")
-        cfg = _parse_runtime_config({"error_handling": {"retry_delay_seconds": None}})
+        cfg = _parse_runtime_config(
+            _runtime_block({"error_handling": {"retry_delay_seconds": None}})
+        )
         assert cfg.error_handling.retry_delay_seconds == 5
 
 
@@ -346,27 +366,31 @@ class TestReplicationConfig:
 
 class TestParseReplication:
     def test_absent_replication_yields_none(self):
-        assert _parse_replication({"primary_keys": ["id"]}) is None
+        assert _parse_replication(_source_block({"primary_keys": ["id"]})) is None
 
     def test_null_replication_yields_none(self):
-        assert _parse_replication({"replication": None}) is None
+        assert _parse_replication(_source_block({"replication": None})) is None
 
     def test_incremental_block_is_typed(self):
         cfg = _parse_replication(
-            {
-                "replication": {
-                    "method": "incremental",
-                    "cursor_field": "updated_at",
-                    "tie_breaker_fields": ["id"],
+            _source_block(
+                {
+                    "replication": {
+                        "method": "incremental",
+                        "cursor_field": "updated_at",
+                        "tie_breaker_fields": ["id"],
+                    }
                 }
-            }
+            )
         )
         assert cfg.method == "incremental"
         assert cfg.cursor_field == "updated_at"
         assert cfg.tie_breaker_fields == ["id"]
 
     def test_full_refresh_without_cursor(self):
-        cfg = _parse_replication({"replication": {"method": "full_refresh"}})
+        cfg = _parse_replication(
+            _source_block({"replication": {"method": "full_refresh"}})
+        )
         assert cfg.method == "full_refresh"
         assert cfg.cursor_field is None
 
@@ -374,7 +398,7 @@ class TestParseReplication:
         # method is contract-required; the contract model rejects a block that
         # omits it (a malformed block must not pass silently).
         with pytest.raises(ValueError, match="method"):
-            _parse_replication({"replication": {"cursor_field": "updated_at"}})
+            _source_block({"replication": {"cursor_field": "updated_at"}})
 
 
 class TestEffectiveSafetyWindow:

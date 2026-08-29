@@ -31,6 +31,8 @@ import logging
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
+from analitiq.contracts.connection import ConnectionInput
+from analitiq.contracts.connector import Connector, DatabaseConnector
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -39,6 +41,7 @@ if TYPE_CHECKING:
 
 from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.exceptions import TransportSpecError
+from cdk.json_utils import authored_json
 from cdk.rate_limiter import RateLimiter
 from cdk.resolver import (
     REQUEST_CONNECTION_SUBTREES,
@@ -69,32 +72,23 @@ logger = logging.getLogger(__name__)
 #: transport-phase deferral from them, so the kit cannot defer a field
 #: (``connection.hostname``, say) that connect() will refuse to resolve.
 #: Materialization is a superset of request time by construction: everything
-#: a request may read, plus the credential-bearing blocks only the trusted
-#: side sees. Derived, so a subtree added to the request scope cannot go
-#: missing here -- which would fail a transport expression at connect() that
-#: the identical request expression resolves.
-MATERIALIZATION_CONNECTION_SUBTREES = REQUEST_CONNECTION_SUBTREES + (
-    "secret_refs",
-    "auth_state",
-)
-MATERIALIZATION_CONNECTION_SCALARS = ("name", "status")
+#: a request may read, plus the secret pointers only the trusted side sees.
+#: Derived, so a subtree added to the request scope cannot go missing here --
+#: which would fail a transport expression at connect() that the identical
+#: request expression resolves. Every name is a field of the connection
+#: contract (``ConnectionInput``): the scope is read off the typed document,
+#: so a name the contract does not declare cannot be listed here.
+MATERIALIZATION_CONNECTION_SUBTREES = REQUEST_CONNECTION_SUBTREES + ("secret_refs",)
 
 #: The non-connection scopes materialization also fills: the resolved secret
-#: store and the connection's auth block (``_build_resolution_context``'s
-#: ``secrets=`` / ``auth=`` arguments). Stated here beside the builder so the
-#: kit's transport deferral derives from it instead of restating it.
-MATERIALIZATION_SECRET_SCOPES = ("secrets", "auth")
+#: store (``_build_resolution_context``'s ``secrets=`` argument). Stated here
+#: beside the builder so the kit's transport deferral derives from it instead
+#: of restating it. The resolver's ``auth`` scope is contract-sanctioned but
+#: the connection document carries no auth block, so nothing fills it here.
+MATERIALIZATION_SECRET_SCOPES = ("secrets",)
 
 
-# Connection-JSON blocks that must never cross into a worker: secret
-# pointers and auth material. Everything else (parameters, selections,
-# discovered, top-level settings) is non-secret by the connection contract
-# and connector code resolves it at request time (``connection.parameters.*``
-# refs, handler settings such as ``max_retries``).
-_SECRET_BEARING_CONFIG_KEYS = frozenset({"secret_refs", "auth", "auth_state"})
-
-
-def _derive_dialect(connector_definition: Mapping[str, Any] | None) -> str | None:
+def _derive_dialect(connector: Connector | None) -> str | None:
     """Return the base SQL dialect (e.g. ``postgresql``) from a definition.
 
     Returns ``None`` if it is not a database connector.
@@ -103,11 +97,11 @@ def _derive_dialect(connector_definition: Mapping[str, Any] | None) -> str | Non
     dialect/driver under ``transports[default].driver``; the SQLAlchemy
     flavour is composite (``base+async_driver``) so we split on ``+``.
     """
-    if not connector_definition:
+    if connector is None:
         return None
-    transports = merged_transports(connector_definition)
-    default_ref = connector_definition.get("default_transport")
-    if not default_ref or default_ref not in transports:
+    transports = merged_transports(connector)
+    default_ref = connector.default_transport
+    if default_ref not in transports:
         return None
     transport = transports[default_ref]
     transport_type = transport.get("transport_type")
@@ -144,21 +138,24 @@ class ConnectionRuntime:
     """Connector-driven connection lifecycle with shared ownership.
 
     Constructed by :class:`~src.engine.pipeline_config_prep.PipelineConfigPrep`
-    with the saved connection JSON, the connector definition, and a
-    per-connection secrets resolver. ``materialize()`` is idempotent and
-    safe to call from multiple consumers; the underlying transport is
-    only disposed when the last reference is released.
+    with the validated connection document, the validated connector
+    definition, and a per-connection secrets resolver. Both documents are
+    the contract's own models: every connection or connector field this
+    runtime reads is a typed read, which is what the contract-consumption
+    census counts. ``materialize()`` is idempotent and safe to call from
+    multiple consumers; the underlying transport is only disposed when the
+    last reference is released.
     """
 
     def __init__(
         self,
         *,
-        raw_config: Mapping[str, Any],
+        connection: ConnectionInput,
         connection_id: str,
         connector_id: str,
         connector_type: str,
         resolver: SecretsResolver,
-        connector_definition: Mapping[str, Any] | None = None,
+        connector: Connector | None = None,
         driver: str | None = None,
         connector_type_mapper: TypeMapper | None = None,
         connection_type_mapper: TypeMapper | None = None,
@@ -176,42 +173,34 @@ class ConnectionRuntime:
                 f"connector_id must be a non-empty string, got {connector_id!r}"
             )
 
-        self._raw_config: dict[str, Any] = dict(raw_config)
+        self._connection = connection
         self._connection_id = connection_id
         self._connector_id = connector_id
         self._connector_type = connector_type
-        self._connector_definition: dict[str, Any] | None = (
-            dict(connector_definition) if connector_definition else None
-        )
+        self._connector = connector
         # The connector's declared ``sql_capabilities`` block (issue #390),
-        # carried verbatim: the published contract validates it engine-side,
-        # ``cdk.sql`` parses it at consumption. Kept as data here so the
-        # core runtime stays independent of the SQL surface (same reason
-        # ``materialize`` takes ``sql_dialect`` untyped). Worker-side
-        # runtimes get it restored from the resolved payload in
-        # :meth:`from_resolved_payload`.
+        # carried as the JSON its author wrote: the published contract
+        # validates it engine-side, ``cdk.sql.capabilities`` parses that
+        # grammar at consumption. Kept as data here so the core runtime
+        # stays independent of the SQL surface (same reason ``materialize``
+        # takes ``sql_dialect`` untyped). Only a database connector declares
+        # it. Worker-side runtimes get it restored from the resolved payload
+        # in :meth:`from_resolved_payload`.
         self._declared_sql_capabilities: dict[str, Any] | None = (
-            copy.deepcopy(self._connector_definition.get("sql_capabilities"))
-            if self._connector_definition
-            and self._connector_definition.get("sql_capabilities") is not None
+            authored_json(connector.sql_capabilities)
+            if isinstance(connector, DatabaseConnector)
             else None
         )
-        # Connector-level declared facts (issue #401), carried verbatim like
-        # the sql_capabilities block: ``error_map`` (the driver's failure
-        # taxonomy) and ``concurrency`` (the system's connection ceiling).
-        # ``cdk.declarations`` parses them at consumption; absence is
-        # additive — no declared mapping / no declared ceiling.
+        # Connector-level declared facts (issue #401), carried the same way:
+        # ``error_map`` (the driver's failure taxonomy) and ``concurrency``
+        # (the system's connection ceiling). ``cdk.declarations`` parses
+        # them at consumption; absence is additive — no declared mapping /
+        # no declared ceiling.
         self._declared_error_map: dict[str, Any] | None = (
-            copy.deepcopy(self._connector_definition.get("error_map"))
-            if self._connector_definition
-            and self._connector_definition.get("error_map") is not None
-            else None
+            authored_json(connector.error_map) if connector is not None else None
         )
         self._declared_concurrency: dict[str, Any] | None = (
-            copy.deepcopy(self._connector_definition.get("concurrency"))
-            if self._connector_definition
-            and self._connector_definition.get("concurrency") is not None
-            else None
+            authored_json(connector.concurrency) if connector is not None else None
         )
         self._driver_override = driver
         self._resolver = resolver
@@ -289,7 +278,7 @@ class ConnectionRuntime:
             return self._transport_dialect
         if self._driver_override is not None:
             return self._driver_override
-        return _derive_dialect(self._connector_definition)
+        return _derive_dialect(self._connector)
 
     @property
     def driver_string(self) -> str | None:
@@ -304,16 +293,18 @@ class ConnectionRuntime:
         return self._transport_driver
 
     @property
-    def raw_config(self) -> dict[str, Any]:
-        return copy.deepcopy(self._raw_config)
+    def connection(self) -> ConnectionInput:
+        """The validated connection document this runtime was built from.
+
+        On a worker-side runtime it is the sanitized document that arrived
+        in the resolved payload: no secret pointers.
+        """
+        return self._connection
 
     @property
-    def connector_definition(self) -> dict[str, Any] | None:
-        return (
-            copy.deepcopy(self._connector_definition)
-            if self._connector_definition
-            else None
-        )
+    def connector(self) -> Connector | None:
+        """The validated connector definition; ``None`` on a worker-side runtime."""
+        return self._connector
 
     @property
     def declared_sql_capabilities(self) -> dict[str, Any] | None:
@@ -441,13 +432,20 @@ class ConnectionRuntime:
         if runtime_values:
             runtime_scope.update(runtime_values)
         context = ResolutionContext(
-            connection={
-                key: dict(self._raw_config.get(key) or {})
-                for key in REQUEST_CONNECTION_SUBTREES
-            },
+            connection=self._connection_subtrees(REQUEST_CONNECTION_SUBTREES),
             runtime=runtime_scope,
         )
         return Resolver(context, functions=DEFAULT_FUNCTIONS)
+
+    def _connection_subtrees(self, names: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """Return the named connection-document subtrees as resolver scope mappings.
+
+        The one dynamic read of the connection document: *names* is one of
+        the scope tables declared at the top of this module, each a field of
+        the connection contract, and the census claims the table's names
+        through this site.
+        """
+        return {name: dict(getattr(self._connection, name)) for name in names}
 
     # ------------------------------------------------------------------
     # Materialization
@@ -503,17 +501,15 @@ class ConnectionRuntime:
         secrets = await self._load_secrets()
         self._validate_connection_contract(secrets)
 
-        definition = self._connector_definition
-        has_transports = bool(definition and definition.get("transports"))
-
-        if has_transports and definition is not None:
+        connector = self._connector
+        if connector is not None and connector.transports:
             context = self._build_resolution_context(secrets)
             try:
                 (
                     self._default_transport_ref,
                     self._transport_specs,
                 ) = resolve_transport_specs(
-                    definition,
+                    connector,
                     transport_refs=transport_refs,
                     context=context,
                 )
@@ -729,23 +725,20 @@ class ConnectionRuntime:
         secrets = await self._load_secrets()
         self._validate_connection_contract(secrets)
 
-        definition = self._connector_definition
-        has_transports = bool(definition and definition.get("transports"))
+        connector = self._connector
 
         payload: dict[str, Any] = {
             "connection_id": self._connection_id,
             "connector_id": self._connector_id,
             "connector_type": self._connector_type,
-            "driver_hint": _derive_dialect(self._connector_definition),
-            # Non-secret connection fields, restored as the worker
-            # runtime's raw_config: connector code resolves
-            # ``connection.parameters.*`` refs and reads handler settings
-            # from it at request time.
-            "connection_config": {
-                key: value
-                for key, value in self._raw_config.items()
-                if key not in _SECRET_BEARING_CONFIG_KEYS
-            },
+            "driver_hint": _derive_dialect(connector),
+            # The connection document minus its secret pointers, parsed
+            # again as the contract's ``ConnectionInput`` by the worker
+            # runtime: connector code resolves ``connection.parameters.*``
+            # refs from it at request time.
+            "connection_config": self._connection.model_dump(
+                mode="json", by_alias=True, exclude_unset=True, exclude={"secret_refs"}
+            ),
             "transport_specs": None,
             "default_transport_ref": None,
             "resolved_config": None,
@@ -758,11 +751,11 @@ class ConnectionRuntime:
             "error_map": self.declared_error_map,
             "concurrency": self.declared_concurrency,
         }
-        if has_transports and definition is not None:
+        if connector is not None and connector.transports:
             context = self._build_resolution_context(secrets)
             try:
                 default_ref, specs = resolve_transport_specs(
-                    definition, transport_refs=transport_refs, context=context
+                    connector, transport_refs=transport_refs, context=context
                 )
             finally:
                 self._scrub_secrets()
@@ -784,12 +777,16 @@ class ConnectionRuntime:
 
         The worker side of :meth:`resolve_spec`: no connector definition and
         a resolver that refuses to resolve — every value the worker may use
-        arrived in the payload. ``raw_config`` is the payload's sanitized
-        ``connection_config`` (no secret refs, no auth material), so
-        connector code can still resolve ``connection.parameters.*`` refs.
+        arrived in the payload. ``connection`` is the payload's sanitized
+        ``connection_config`` (no secret refs) parsed as the contract's
+        connection document, so connector code can still resolve
+        ``connection.parameters.*`` refs; a payload whose document does not
+        satisfy the contract is malformed and refused here.
         """
         runtime = cls(
-            raw_config=dict(payload.get("connection_config") or {}),
+            connection=ConnectionInput.model_validate(
+                payload.get("connection_config") or {}
+            ),
             connection_id=payload["connection_id"],
             connector_id=payload["connector_id"],
             connector_type=payload["connector_type"],
@@ -1072,12 +1069,8 @@ class ConnectionRuntime:
         (no pre-resolved artifacts) cannot materialize from an empty config
         instead of failing its invalid bootstrap.
         """
-        secret_refs = self._raw_config.get("secret_refs") or {}
-        if not isinstance(secret_refs, Mapping):
-            raise TypeError(
-                f"connection {self._connection_id!r}: `secret_refs` must be an object"
-            )
-        secrets = await self._resolver.resolve(self._connection_id, dict(secret_refs))
+        secret_refs = dict(self._connection.secret_refs)
+        secrets = await self._resolver.resolve(self._connection_id, secret_refs)
         if not isinstance(secrets, Mapping):
             raise TypeError(
                 f"Secrets resolver for {self._connection_id} returned "
@@ -1115,46 +1108,25 @@ class ConnectionRuntime:
         Every required input is checked, regardless of ``source`` — both
         ``user`` (operator-supplied) and ``platform`` (control-plane-supplied)
         inputs are provisioned at connection setup and stored in
-        ``connection.parameters`` or ``secrets``, the scopes available here.
-        Post-auth outputs (``connection.selections`` / ``connection.discovered``)
-        are not contract *inputs* and so never appear in ``inputs``. A required
-        input that declares any other storage is a malformed connector
-        definition and fails loud. Connectors with no contract (or an older
-        definition lacking one) are not constrained.
+        ``connection.parameters`` or ``secrets``, the scopes available here
+        and the only two the contract's ``storage`` enum permits. Post-auth
+        outputs (``connection.selections`` / ``connection.discovered``) are
+        not contract *inputs* and so never appear in ``inputs``. A worker-side
+        runtime carries no definition and is not constrained.
         """
-        definition = self._connector_definition
-        if not definition:
+        connector = self._connector
+        if connector is None:
             return
-        contract = definition.get("connection_contract")
-        if not isinstance(contract, Mapping):
-            return
-        inputs = contract.get("inputs")
-        if not isinstance(inputs, Mapping):
-            return
-
         scopes: dict[str, Mapping[str, Any]] = {
-            "connection.parameters": self._raw_config.get("parameters") or {},
+            "connection.parameters": self._connection.parameters,
             "secrets": secrets,
         }
         missing = []
-        for name, spec in inputs.items():
-            if not isinstance(spec, Mapping):
+        for name, spec in connector.connection_contract.inputs.items():
+            if not spec.required:
                 continue
-            if not spec.get("required"):
-                continue
-            storage = spec.get("storage")
-            scope = scopes.get(storage) if isinstance(storage, str) else None
-            if scope is None:
-                # A required input must store its value where the connection
-                # carries it (connection.parameters or secrets); the schema's
-                # storage enum permits nothing else. Any other value is a
-                # malformed connector definition -- fail loud, never skip.
-                raise TransportSpecError(
-                    f"connection {self._connection_id!r} ({self._connector_id}) "
-                    f"declares required input {name!r} with unknown storage "
-                    f"{storage!r}; expected one of {sorted(scopes)}"
-                )
-            if scope.get(name) is None:
+            storage = spec.storage
+            if scopes[storage].get(name) is None:
                 missing.append(f"{name} ({storage})")
         if missing:
             raise TransportSpecError(
@@ -1166,42 +1138,31 @@ class ConnectionRuntime:
     def _build_resolution_context(
         self, secrets: Mapping[str, Any]
     ) -> ResolutionContext:
-        """Assemble a typed :class:`ResolutionContext` from the connection JSON."""
-        connection_scope: dict[str, Any] = {
-            key: dict(self._raw_config.get(key) or {})
-            for key in MATERIALIZATION_CONNECTION_SUBTREES
-        }
-        # Top-level scalar fields that connector value expressions may
-        # reference directly (e.g. ``connection.name`` for logging
-        # decorators). Address fields live in transports.
-        connection_scope.update(
-            {
-                key: self._raw_config.get(key)
-                for key in MATERIALIZATION_CONNECTION_SCALARS
-            }
-        )
+        """Assemble a typed :class:`ResolutionContext` from the contract documents.
+
+        The ``connector`` scope is the definition as its author wrote it: the
+        contract lets a value expression reference any ``connector.*`` path,
+        so the whole document is in scope, as JSON, for the resolver to walk.
+        """
         return ResolutionContext(
-            connector=self._connector_definition or {},
-            connection=connection_scope,
+            connector=authored_json(self._connector) or {},
+            connection=self._connection_subtrees(MATERIALIZATION_CONNECTION_SUBTREES),
             secrets=dict(secrets),
-            auth=dict(self._raw_config.get("auth") or {}),
             runtime={RUNTIME_CONNECTION_ID: self._connection_id},
         )
 
     def _merge_secrets_into_config(self, secrets: Mapping[str, Any]) -> dict[str, Any]:
-        """Merge secrets into a flat resolved-config dict.
+        """Build the resolved config the transportless kinds consume.
 
         Serves file/s3/stdout consumers, which expose ``resolved_config``
-        directly instead of a transport object.
+        directly instead of a transport object: the connection's authored
+        ``parameters`` and the resolved secret values, under the two scope
+        names a value expression would address them by.
         """
-        resolved = copy.deepcopy(self._raw_config)
-        resolved.setdefault("parameters", {})
-        # Surface secrets at the top level for handlers that look them up
-        # directly. This is intentionally generic: each secret key maps to
-        # its value verbatim, no provider-specific shaping.
-        for name, value in secrets.items():
-            resolved.setdefault(name, value)
-        return resolved
+        return {
+            "parameters": dict(self._connection.parameters),
+            "secrets": dict(secrets),
+        }
 
     def _scrub_secrets(self) -> None:
         # For transport-driven connector types we never expose

@@ -1,5 +1,12 @@
 """Render or check the ``contract-consumption`` manifest the engine publishes.
 
+A field is claimed when the engine reads it by any means it actually uses;
+a field the manifest does not claim is one no runtime path reads. That is
+the manifest's contract, and it holds because every contract document the
+engine loads is held as its typed model from validation onwards (pipeline,
+stream, connection, connector, endpoint documents), so every read is a
+typed attribute access -- or one of the dynamic shapes classified below.
+
 A read is an attribute access whose receiver mypy types as an
 ``analitiq.contracts`` model. The census builds ``cdk`` and ``src`` once
 with mypy's type map exported and records every such access as
@@ -50,6 +57,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
+from analitiq.contracts.connection import ConnectionInput
+from analitiq.contracts.connector import (
+    Concurrency,
+    Connector,
+    ErrorMap,
+    SqlCapabilities,
+    Transport,
+    TransportDefaults,
+)
 from analitiq.contracts.endpoints import (
     ApiEndpointDoc,
     Column,
@@ -58,17 +74,8 @@ from analitiq.contracts.endpoints import (
     Pagination,
     Predicate,
 )
-from analitiq.contracts.pipelines.config import Runtime
-from analitiq.contracts.stream import (
-    AssignmentTarget,
-    ConstantAssignmentValue,
-    EndpointRef,
-    Filter,
-    Replication,
-    StreamSource,
-    Validation,
-    ValidationRule,
-)
+from analitiq.contracts.pipelines.config import PipelineInput
+from analitiq.contracts.stream import AssignmentTarget, StreamInput
 from mypy import build
 from mypy.main import process_options
 from mypy.nodes import CallExpr
@@ -100,22 +107,18 @@ CONTRACT_DISTRIBUTION: Final = "analitiq-contract-models"
 RUNTIME_MODULES: Final = ("cdk", "src")
 KIT_MODULES: Final = ("cdk.conformance",)
 
-#: The contract documents and typed stream sub-blocks the engine holds. A
-#: read on a model unreachable from these fails the render.
+#: The contract documents the engine holds: the four authored artifacts it
+#: loads from disk and the two endpoint-document variants they reference.
+#: Every other model the engine reads is reachable from one of these through
+#: the contract's own field annotations; a read on a model unreachable from
+#: these fails the render.
 ROOTS: Final[tuple[Any, ...]] = (
+    PipelineInput,
+    StreamInput,
+    ConnectionInput,
+    Connector,
     ApiEndpointDoc,
     DatabaseEndpointDoc,
-    StreamSource,
-    Filter,
-    Replication,
-    EndpointRef,
-    Runtime,
-    AssignmentTarget,
-    # The constant variant only: the engine's MappingDocument replaces the
-    # contract's expression variant with its own ExpressionValue model.
-    ConstantAssignmentValue,
-    Validation,
-    ValidationRule,
 )
 
 #: Models the engine consumes as a JSON grammar (``model_dump`` /
@@ -126,15 +129,30 @@ OPAQUE: Final[tuple[tuple[Any, str], ...]] = (
     (Expression, "cdk.resolver"),
     (Column, "cdk.schema_contract"),
     (AssignmentTarget, "cdk.type_map.arrow"),
+    # A transport block is a grammar the transport factory walks (DSN
+    # templates, bindings, TLS, options), merged over the defaults block.
+    (Transport, "cdk.transport_factory"),
+    (TransportDefaults, "cdk.transport_factory"),
+    # The declared connector facts are parsed by their own readers on both
+    # sides of the worker boundary, from the JSON the author wrote.
+    (SqlCapabilities, "cdk.sql.capabilities"),
+    (ErrorMap, "cdk.declarations"),
+    (Concurrency, "cdk.declarations"),
+    # The contract lets a value expression reference any ``connector.*``
+    # path, so the whole definition is the resolver's ``connector`` scope.
+    (Connector, "cdk.resolver"),
 )
 
 _OPAQUE_MODELS: Final = frozenset(
     model_name(m) for annotation, _ in OPAQUE for m in contract_models(annotation)
 )
 
-#: Modules whose ``model_dump`` calls carry a document across the process
-#: boundary, where it is parsed again as the same contract model.
-TRANSPORT_MODULES: Final = frozenset({"src.models.resolved"})
+#: Modules whose ``model_dump`` calls carry a document to a reader that
+#: parses it again as the same contract model: the worker bootstrap and the
+#: published bundle validator (``src.models.resolved``), and the resolved
+#: connection payload a worker rebuilds its runtime from
+#: (``cdk.connection_runtime``).
+TRANSPORT_MODULES: Final = frozenset({"src.models.resolved", "cdk.connection_runtime"})
 
 #: ``getattr(receiver, name)`` with a non-literal name, by the module it
 #: happens in, to the table that supplies the names. The type map sees the
@@ -143,6 +161,12 @@ TRANSPORT_MODULES: Final = frozenset({"src.models.resolved"})
 #: its own registration rather than inheriting this one's table.
 DYNAMIC_ATTRIBUTE_TABLES: Final[Mapping[str, tuple[str, str]]] = {
     "cdk.api.request": ("cdk.api.request", "_REQUEST_SLOTS"),
+    # The resolver scopes read off the connection document; the request-time
+    # table is a prefix of this one, so the superset claims both.
+    "cdk.connection_runtime": (
+        "cdk.connection_runtime",
+        "MATERIALIZATION_CONNECTION_SUBTREES",
+    ),
 }
 
 #: Tables of attribute paths walked on an ``Any``-typed receiver: the
@@ -217,7 +241,11 @@ def _receiver_models(typ: Type | None) -> tuple[str, ...]:
     proper = get_proper_type(typ)
     if isinstance(proper, Instance):
         name = proper.type.fullname
-        return (name,) if name.startswith(CONTRACT_PACKAGE) else ()
+        # An enum member (a ``kind`` discriminator's value) is a value the
+        # document holds, not a document being read.
+        if proper.type.is_enum or not name.startswith(CONTRACT_PACKAGE):
+            return ()
+        return (name,)
     if isinstance(proper, UnionType):
         return tuple(m for item in proper.items for m in _receiver_models(item))
     # Anything else -- a class object (``TypeType``), ``Any``, a callable -- is

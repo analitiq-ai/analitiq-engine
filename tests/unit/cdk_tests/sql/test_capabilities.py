@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from analitiq.contracts.endpoints import DATABASE_ENDPOINT_SCHEMA_URL
+from contract_documents import connection_document, connector_document
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.sql.capabilities import (
@@ -456,22 +457,20 @@ class TestConnectBinding:
 class TestPayloadChannel:
     """The declared block crosses the trusted/worker boundary verbatim."""
 
-    def _trusted_runtime(self, definition):
+    def _trusted_runtime(self, **declared):
         return ConnectionRuntime(
-            raw_config={"path": "/tmp/out"},
+            connection=connection_document(),
             connection_id="db-1",
             connector_id="demo",
             connector_type="database",
             resolver=AsyncMock(resolve=AsyncMock(return_value={})),
-            connector_definition=definition,
+            connector=connector_document("database", **declared),
         )
 
     @pytest.mark.asyncio
     async def test_declared_block_rides_resolve_spec_and_rebuilds(self):
         declared = caps_block(catalog="read", merge_form="insert_on_conflict")
-        runtime = self._trusted_runtime(
-            {"connector_id": "demo", "sql_capabilities": declared}
-        )
+        runtime = self._trusted_runtime(sql_capabilities=declared)
         assert runtime.declared_sql_capabilities == declared
 
         payload = runtime_payload = await runtime.resolve_spec()
@@ -485,7 +484,7 @@ class TestPayloadChannel:
 
     @pytest.mark.asyncio
     async def test_undeclared_stays_undeclared_across_the_boundary(self):
-        runtime = self._trusted_runtime({"connector_id": "demo"})
+        runtime = self._trusted_runtime()
         assert runtime.declared_sql_capabilities is None
         payload = await runtime.resolve_spec()
         assert payload["sql_capabilities"] is None

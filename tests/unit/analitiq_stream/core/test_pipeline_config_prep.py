@@ -352,7 +352,6 @@ class TestCreateConfigHappyPath:
 
         assert pipeline_config.pipeline_id == PIPELINE_ID
         assert pipeline_config.display_name == "Demo Pipeline"
-        assert pipeline_config.status == "active"
         assert pipeline_config.connections.source == CONNECTION_SRC_ID
         assert pipeline_config.connections.destinations == [CONNECTION_DST_ID]
 
@@ -373,7 +372,7 @@ class TestCreateConfigHappyPath:
         assert len(endpoints) == 2
 
         assert len(connectors) == 1
-        assert connectors[0]["connector_id"] == CONNECTOR_ID
+        assert connectors[0].connector_id == CONNECTOR_ID
 
     def test_runtime_injection_is_shared_across_source_and_destination(
         self, pipeline_tree: Path

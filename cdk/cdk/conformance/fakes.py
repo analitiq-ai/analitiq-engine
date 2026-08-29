@@ -68,3 +68,43 @@ class NoSecretsResolver(SecretsResolver):
 
     async def close(self) -> None:
         """Nothing to release."""
+
+
+#: One transport block per kind, the smallest the contract accepts. The
+#: sqlalchemy DSN binds a literal host so a definition materializes with
+#: no connection parameters at all.
+_MINIMAL_TRANSPORTS: dict[str, dict[str, Any]] = {
+    "database": {
+        "transport_type": "sqlalchemy",
+        "driver": "postgresql+asyncpg",
+        "dsn": {
+            "kind": "url_template",
+            "template": "postgresql+asyncpg://u:p@{host}:5432/d",
+            "bindings": {"host": {"value": "h", "encoding": "host"}},
+        },
+    },
+    "api": {"transport_type": "http", "base_url": "https://api.example.test"},
+    "file": {"transport_type": "file", "path": "/tmp/out", "format": "jsonl"},
+    "stdout": {"transport_type": "stdout"},
+}
+
+
+def minimal_connector_definition(
+    kind: str, connector_id: str, **extra: Any
+) -> dict[str, Any]:
+    """Return the smallest contract-valid definition of *kind*, plus *extra*.
+
+    A test standing up a connector authors one the published contract
+    accepts, the way the engine loads one; this is the one statement of
+    which blocks that takes.
+    """
+    return {
+        "kind": kind,
+        "connector_id": connector_id,
+        "version": "1.0.0",
+        "auth": {"type": "none"},
+        "connection_contract": {},
+        "default_transport": kind,
+        "transports": {kind: _MINIMAL_TRANSPORTS[kind]},
+        **extra,
+    }

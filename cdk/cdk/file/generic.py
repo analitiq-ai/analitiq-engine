@@ -176,29 +176,32 @@ class GenericFileConnector(BaseDestinationHandler):
 
         runtime.acquire()
         await runtime.materialize()
-        connection_config = runtime.resolved_config
+        # The connection's authored ``parameters`` block carries every
+        # setting this connector reads: the contract's connection document
+        # has no other place for connector settings.
+        parameters = runtime.resolved_config["parameters"]
         self._runtime = runtime
 
         try:
-            await storage.connect(connection_config)
+            await storage.connect(parameters)
 
             # Create formatter
-            file_format = connection_config.get("file_format", "jsonl")
+            file_format = parameters.get("file_format", "jsonl")
             self._formatter = get_formatter(file_format)
 
             # Configure formatter with any format-specific options
-            formatter_config = connection_config.get("formatter_config", {})
+            formatter_config = parameters.get("formatter_config", {})
             self._formatter.configure(formatter_config)
 
             # Store path template if provided
-            self._path_template = connection_config.get("path_template")
+            self._path_template = parameters.get("path_template")
 
             # Retain only the non-secret fields needed after connect().
             # write_batch() uses path or prefix (as fallback) for build_path().
             # _path_template is stored separately above.
             self._config = {
-                "path": connection_config.get("path", ""),
-                "prefix": connection_config.get("prefix", ""),
+                "path": parameters.get("path", ""),
+                "prefix": parameters.get("prefix", ""),
             }
         finally:
             runtime.scrub_resolved_config()

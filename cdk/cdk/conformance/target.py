@@ -18,9 +18,10 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any, get_args
 
+from analitiq.contracts.connector import Connector
 from analitiq.contracts.endpoints import ApiEndpointDoc, DatabaseEndpointDoc
 from analitiq.contracts.shared.common import schema_url_pattern
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from cdk._extras import MissingExtraError
 from cdk.registry import (
@@ -142,6 +143,9 @@ class ConformanceTarget:
     root: Path
     definition_dir: Path
     definition: dict[str, Any]
+    #: The definition as the contract's model: what the engine holds a
+    #: connector as, and what a runtime built for a check is given.
+    connector: Connector
     connector_id: str
     kind: str
     declared_capabilities: SqlCapabilities | None
@@ -167,7 +171,7 @@ class ConformanceTarget:
         defaults are applied — so what the kit reads and what the engine
         materializes are the same blocks by construction.
         """
-        return merged_transports(self.definition)
+        return merged_transports(self.connector)
 
     @property
     def has_write_map(self) -> bool:
@@ -528,6 +532,15 @@ def load_target(
         raise ConformanceSetupError(
             f"{definition_dir / CONNECTOR_DEFINITION_FILENAME} declares no kind"
         )
+    # The published contract is the authority on a definition's shape: the
+    # engine refuses a definition it rejects, so the kit cannot certify one.
+    try:
+        connector: Connector = TypeAdapter(Connector).validate_python(definition)
+    except ValidationError as err:
+        raise ConformanceSetupError(
+            f"{definition_dir / CONNECTOR_DEFINITION_FILENAME} does not satisfy "
+            f"the connector contract: {err}"
+        ) from err
 
     try:
         capabilities = parse_declared_capabilities(
@@ -545,6 +558,7 @@ def load_target(
         root=root,
         definition_dir=definition_dir,
         definition=definition,
+        connector=connector,
         connector_id=connector_id,
         kind=kind,
         declared_capabilities=capabilities,

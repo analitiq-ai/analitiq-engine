@@ -13,8 +13,11 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from contract_documents import connector_document, http_transport
+from pydantic import ValidationError
 
 from cdk.exceptions import TransportSpecError
+from cdk.json_utils import authored_json
 from cdk.resolver import ResolutionContext
 from cdk.transport_factory import (
     build_transport_from_spec,
@@ -33,37 +36,32 @@ from cdk.transport_factory import (
 
 class TestResolveTransportSpec:
     def test_default_transport_used_when_ref_not_given(self):
-        connector = {
-            "connector_id": "demo",
-            "default_transport": "api",
-            "transports": {
-                "api": {
-                    "transport_type": "http",
-                    "base_url": "https://api.example.com",
-                }
-            },
-        }
-        ctx = ResolutionContext(connector=connector)
+        connector = connector_document(
+            "api",
+            connector_id="demo",
+            transports={"api": http_transport("https://api.example.com")},
+        )
+        ctx = ResolutionContext(connector=authored_json(connector))
         spec = resolve_transport_spec(connector, context=ctx)
         assert spec["transport_type"] == "http"
         assert spec["base_url"] == "https://api.example.com"
 
     def test_transport_defaults_merged_into_named_transport(self):
-        connector = {
-            "connector_id": "demo",
-            "default_transport": "api",
-            "transport_defaults": {
+        connector = connector_document(
+            "api",
+            connector_id="demo",
+            transport_defaults={
                 "transport_type": "http",
                 "headers": {"Accept": "application/json"},
             },
-            "transports": {
-                "api": {
-                    "base_url": "https://api.example.com",
-                    "headers": {"Authorization": "Bearer x"},
-                }
+            transports={
+                "api": http_transport(
+                    "https://api.example.com",
+                    headers={"Authorization": "Bearer x"},
+                )
             },
-        }
-        ctx = ResolutionContext(connector=connector)
+        )
+        ctx = ResolutionContext(connector=authored_json(connector))
         spec = resolve_transport_spec(connector, context=ctx)
         assert spec["transport_type"] == "http"
         assert spec["headers"] == {
@@ -72,57 +70,47 @@ class TestResolveTransportSpec:
         }
 
     def test_transport_specific_value_overrides_default(self):
-        connector = {
-            "connector_id": "demo",
-            "default_transport": "api",
-            "transport_defaults": {
-                "headers": {"Authorization": "Bearer default"},
+        connector = connector_document(
+            "api",
+            connector_id="demo",
+            transport_defaults={"headers": {"Authorization": "Bearer default"}},
+            transports={
+                "api": http_transport(
+                    "https://api.example.com",
+                    headers={"Authorization": "Basic specific"},
+                )
             },
-            "transports": {
-                "api": {
-                    "transport_type": "http",
-                    "base_url": "https://api.example.com",
-                    "headers": {"Authorization": "Basic specific"},
-                }
-            },
-        }
-        ctx = ResolutionContext(connector=connector)
+        )
+        ctx = ResolutionContext(connector=authored_json(connector))
         spec = resolve_transport_spec(connector, context=ctx)
         assert spec["headers"]["Authorization"] == "Basic specific"
 
     def test_unknown_transport_ref_rejected(self):
-        connector = {
-            "connector_id": "demo",
-            "default_transport": "api",
-            "transports": {"api": {"transport_type": "http", "base_url": "https://x"}},
-        }
-        ctx = ResolutionContext(connector=connector)
+        connector = connector_document(
+            "api", connector_id="demo", transports={"api": http_transport("https://x")}
+        )
+        ctx = ResolutionContext(connector=authored_json(connector))
         with pytest.raises(KeyError, match="not in declared transports"):
             resolve_transport_spec(connector, transport_ref="other", context=ctx)
 
-    def test_no_transports_block_rejected(self):
-        ctx = ResolutionContext()
-        with pytest.raises(TransportSpecError, match="has no `transports` block"):
-            resolve_transport_spec({"connector_id": "demo"}, context=ctx)
-
-    def test_no_default_transport_rejected(self):
-        connector = {
-            "connector_id": "demo",
-            "transports": {"api": {"transport_type": "http", "base_url": "https://x"}},
-        }
-        ctx = ResolutionContext(connector=connector)
-        with pytest.raises(TransportSpecError, match="default_transport not declared"):
-            resolve_transport_spec(connector, context=ctx)
-
-    def test_missing_transport_type_rejected(self):
-        connector = {
-            "connector_id": "demo",
-            "default_transport": "api",
-            "transports": {"api": {"base_url": "https://x"}},
-        }
-        ctx = ResolutionContext(connector=connector)
-        with pytest.raises(TransportSpecError, match="transport_type"):
-            resolve_transport_spec(connector, context=ctx)
+    @pytest.mark.parametrize(
+        "bend, field",
+        [
+            ({"transports": {}}, "transport"),
+            ({"default_transport": "other"}, "default_transport"),
+            ({"transports": {"api": {"base_url": "https://x"}}}, "transport_type"),
+        ],
+        ids=["no-transports", "undeclared-default", "no-transport-type"],
+    )
+    def test_a_definition_the_contract_refuses_never_reaches_selection(
+        self, bend, field
+    ):
+        # Selection reads a validated document: an empty transports block, a
+        # default naming no declared transport, or a block without its type
+        # discriminator is the contract's refusal, before any transport is
+        # chosen.
+        with pytest.raises(ValidationError, match=field):
+            connector_document("api", connector_id="demo", **bend)
 
 
 # Transport kind registry (register / build / unregister lifecycle)
@@ -201,9 +189,11 @@ class TestTransportKindRegistry:
     @pytest.mark.asyncio
     async def test_register_build_unregister_cycle(self):
         # Full lifecycle: a plugin-style registration teaches the engine a
-        # new kind; the resolve phase renders the spec and the build phase
-        # constructs from it; unregister cleans up; afterwards the kind is
-        # rejected.
+        # new kind; the build phase constructs from a resolved spec of that
+        # kind; unregister cleans up; afterwards the kind is rejected. The
+        # resolve phase is reached through a connector document, and the
+        # contract closes ``transport_type`` to its own kinds, so a
+        # registered kind is exercised from the spec side.
         sentinel = object()
         resolve_phase = MagicMock(
             return_value={"transport_type": "test_kind", "marker": "value"}
@@ -214,36 +204,18 @@ class TestTransportKindRegistry:
         )
         try:
             assert "test_kind" in registered_transport_kinds()
-
-            connector = {
-                "connector_id": "demo",
-                "default_transport": "api",
-                "transports": {
-                    "api": {"transport_type": "test_kind", "marker": "value"}
-                },
-            }
-            ctx = ResolutionContext(connector=connector)
-            result = await build_transport_from_spec(
-                resolve_transport_spec(connector, context=ctx)
-            )
-            assert result is sentinel
-            resolve_phase.assert_called_once()
+            resolved = {"transport_type": "test_kind", "marker": "value"}
+            assert await build_transport_from_spec(resolved) is sentinel
             build_phase.assert_awaited_once()
-            (resolved,) = build_phase.await_args.args
-            assert resolved["transport_type"] == "test_kind"
-            assert resolved["marker"] == "value"
+            (built_from,) = build_phase.await_args.args
+            assert built_from["transport_type"] == "test_kind"
+            assert built_from["marker"] == "value"
         finally:
             unregister_transport_kind("test_kind")
 
         assert "test_kind" not in registered_transport_kinds()
-        connector = {
-            "connector_id": "demo",
-            "default_transport": "api",
-            "transports": {"api": {"transport_type": "test_kind"}},
-        }
-        ctx = ResolutionContext(connector=connector)
         with pytest.raises(NotImplementedError, match="Unsupported transport_type"):
-            resolve_transport_spec(connector, context=ctx)
+            await build_transport_from_spec({"transport_type": "test_kind"})
 
 
 # ---------------------------------------------------------------------------

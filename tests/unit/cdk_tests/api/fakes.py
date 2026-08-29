@@ -12,6 +12,7 @@ from typing import Any, cast
 
 from analitiq.contracts.endpoints import ApiEndpointDoc
 from analitiq.contracts.stream import StreamSource
+from contract_documents import connection_document
 from multidict import CIMultiDict
 
 from cdk.connection_runtime import ConnectionRuntime
@@ -122,7 +123,7 @@ def runtime_with(
     declared headers are judged against.
     """
     runtime = ConnectionRuntime(
-        raw_config={"host": base_url, "parameters": parameters or {}},
+        connection=connection_document(parameters=parameters or {}),
         connection_id="test-conn",
         connector_id="test-connector",
         connector_type="api",

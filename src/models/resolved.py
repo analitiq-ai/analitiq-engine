@@ -6,9 +6,12 @@ translation helpers in ``src.runner``), and only at the ``WorkerReadable``
 boundary are the contract documents serialised back to JSON-safe dicts
 (:func:`dump_endpoint_document`).
 
-``ConnectionRuntime`` and the resolved endpoint document (a typed contract
-model) live as explicit typed fields rather than ``_runtime`` /
-``_endpoint`` magic dict keys.
+``ConnectionRuntime`` and the contract documents (endpoint document, stream
+source, destination write block) live as explicit typed fields rather than
+``_runtime`` / ``_endpoint`` magic dict keys. The dumps below are the one
+place a document is serialised again: for the worker bootstrap and for the
+published bundle validator, both of which parse it back as the same contract
+model.
 """
 
 from __future__ import annotations
@@ -16,8 +19,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Annotated, Any, get_args, get_origin
 
+from analitiq.contracts.connection import ConnectionInput
 from analitiq.contracts.pipelines.config import ErrorHandling as ContractErrorHandling
-from analitiq.contracts.stream import EndpointRef, Replication
+from analitiq.contracts.pipelines.config import PipelineInput
+from analitiq.contracts.stream import (
+    ApiWrite,
+    DatabaseConflictKeyedWrite,
+    DatabaseKeylessWrite,
+    EndpointRef,
+    Replication,
+    StreamInput,
+    StreamMapping,
+    StreamSource,
+)
 from pydantic import BaseModel
 
 from cdk.connection_runtime import ConnectionRuntime
@@ -52,17 +66,38 @@ def with_effective_safety_window(stream_source: dict[str, Any]) -> dict[str, Any
     return filled
 
 
-def dump_endpoint_document(document: EndpointDocument) -> dict[str, Any]:
-    """Serialise a typed endpoint document back to its authored JSON shape.
+#: The authored documents serialised again for a reader that parses them
+#: back: the endpoint document and stream source the worker bootstrap
+#: carries to the connector, the run bundle the published validator checks,
+#: and the stream mapping the engine's own
+#: :class:`~src.engine.mapping.MappingDocument` reads (its assignment
+#: targets, constants and validation rules are the contract's models,
+#: parsed from the authored JSON).
+AuthoredDocument = (
+    EndpointDocument
+    | StreamSource
+    | PipelineInput
+    | StreamInput
+    | ConnectionInput
+    | StreamMapping
+)
 
-    This is the one dump used everywhere a contract endpoint document
-    crosses the engine boundary (worker bootstrap, CDK handlers).
-    ``by_alias`` restores contract field names (``$schema``, ``schema``);
-    ``exclude_unset`` keeps fields the author omitted out of the payload,
-    so the dumped document round-trips the authored one instead of baking
-    the model's defaults into the wire shape.
+
+def dump_authored(document: AuthoredDocument) -> dict[str, Any]:
+    """Serialise an authored document for a reader that parses it back.
+
+    The one dump for every document that crosses a boundary whole. The
+    reader parses the JSON into the same contract models, so ``by_alias``
+    restores the contract's field names (``$schema``, ``schema``) and
+    ``exclude_unset`` keeps the author's omissions omitted, never baking the
+    model's defaults into the wire shape.
     """
     return document.model_dump(mode="json", by_alias=True, exclude_unset=True)
+
+
+def dump_endpoint_document(document: EndpointDocument) -> dict[str, Any]:
+    """Serialise a typed endpoint document back to its authored JSON shape."""
+    return dump_authored(document)
 
 
 def dump_endpoint_ref(ref: EndpointRef) -> dict[str, Any]:
@@ -167,15 +202,15 @@ class ResolvedSource:
     """Source side of a resolved stream — runtime object and contract docs.
 
     ``replication`` and ``primary_keys`` are the engine-internal typed view of
-    the source-read policy (parsed from ``stream_source``); the raw
-    ``stream_source`` document still travels to the connector unchanged.
+    the source-read policy (read off ``stream_source``); the contract
+    ``stream_source`` block still travels to the connector whole.
     """
 
     endpoint_ref: EndpointRef
     connection_ref: str
     runtime: ConnectionRuntime
     endpoint_document: EndpointDocument
-    stream_source: dict[str, Any]
+    stream_source: StreamSource
     replication: ReplicationConfig | None = None
     primary_keys: list[str] = field(default_factory=list)
 
@@ -191,8 +226,28 @@ class ResolvedSource:
             "endpoint_ref": dump_endpoint_ref(self.endpoint_ref),
             "connection_ref": self.connection_ref,
             "endpoint_document": dump_endpoint_document(self.endpoint_document),
-            "stream_source": with_effective_safety_window(self.stream_source),
+            "stream_source": with_effective_safety_window(
+                dump_authored(self.stream_source)
+            ),
         }
+
+
+#: A destination's authored ``write`` block, in every shape the stream
+#: contract declares it: the API shape, and the database shapes with and
+#: without conflict keys.
+DestinationWrite = ApiWrite | DatabaseKeylessWrite | DatabaseConflictKeyedWrite
+
+
+def write_conflict_keys(write: DestinationWrite) -> list[str]:
+    """Return the conflict keys a write block authors; empty for every other shape.
+
+    Only a database upsert carries them (the contract requires them there and
+    forbids them elsewhere); an API upsert takes its natural key from the
+    endpoint document instead, so it answers empty here.
+    """
+    if isinstance(write, DatabaseConflictKeyedWrite):
+        return list(write.conflict_keys)
+    return []
 
 
 @dataclass
@@ -203,21 +258,20 @@ class ResolvedDestination:
     connection_ref: str
     runtime: ConnectionRuntime
     endpoint_document: EndpointDocument
-    write: dict[str, Any]
+    write: DestinationWrite
 
 
 @dataclass
 class ResolvedStream:
-    """Fully resolved stream — typed source/destinations and metadata."""
+    """Fully resolved stream — typed source/destinations and mapping.
+
+    Carries what the run reads and nothing else: a stream's display name,
+    description, status and tags are authoring metadata the engine never
+    acts on (the bundle validator gates on status before this is built).
+    """
 
     stream_id: str
     stream_version: int
-    pipeline_id: str | None
-    display_name: str | None
-    description: str | None
-    status: str
-    is_enabled: bool
-    tags: list[str]
     source: ResolvedSource
     destinations: list[ResolvedDestination]
     mapping: MappingDocument
@@ -320,20 +374,16 @@ class PipelineConnections:
 class ResolvedPipeline:
     """Resolved pipeline-level configuration.
 
-    ``schedule`` and ``engine_config`` stay raw dicts on purpose: they are
-    opaque control-plane passthroughs (scheduler hint, vCPU/memory sizing)
-    that the engine never reads, so there is no structure to type.
+    Carries what the run reads and nothing else. A pipeline's schedule and
+    engine sizing are control-plane facts (scheduler hint, vCPU/memory) the
+    engine never acts on, and its description, status and tags are authoring
+    metadata: none of them is carried, so none is read.
     """
 
     pipeline_id: str
     name: str
     display_name: str | None
-    description: str | None
-    status: str
     connections: PipelineConnections
-    tags: list[str] = field(default_factory=list)
-    schedule: dict[str, Any] = field(default_factory=dict)
-    engine_config: dict[str, Any] = field(default_factory=dict)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
 
     def __post_init__(self) -> None:

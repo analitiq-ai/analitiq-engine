@@ -149,7 +149,7 @@ def _build_destination_config(destination: ResolvedDestination) -> dict[str, Any
     destination container, which loads the contract endpoint document via
     ``PipelineConfigPrep``.
     """
-    return {"write_mode": destination.write.get("mode", "upsert")}
+    return {"write_mode": destination.write.mode}
 
 
 # ---------------------------------------------------------------------------
