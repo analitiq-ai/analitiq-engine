@@ -101,7 +101,6 @@ from .api_surface import (
     definition_resolver,
     fillable_at_request_time,
     read_operations,
-    unknown_function_problem,
     unread_endpoints,
 )
 from .target import ConformanceTarget
@@ -562,7 +561,7 @@ def _materialize_first_request(
     page two against it.
     """
     body = getattr(probe.request, "body", None)
-    problem = None if body is None else unknown_function_problem(body, probe.resolver)
+    problem = None if body is None else probe.resolver.unknown_function_problem(body)
     if problem is not None:
         raise ReadError(problem)
     return _encoded(

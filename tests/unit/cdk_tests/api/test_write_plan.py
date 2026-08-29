@@ -64,6 +64,7 @@ def _document(
     query: dict[str, Any] | None = None,
     params: dict[str, Any] | None = None,
     content_type: str | None = None,
+    response: dict[str, Any] | None = None,
 ) -> ApiEndpointDoc:
     """Author a write document in wire form and parse it as production does."""
     # The contract requires every write body to address the in-flight
@@ -112,6 +113,8 @@ def _document(
         block["idempotency"] = idempotency
     if params is not None:
         block["params"] = params
+    if response is not None:
+        block["response"] = response
     if mode == "upsert":
         block["conflict_keys"] = ["id"]
     raw = {
@@ -180,6 +183,77 @@ class TestTheAliasedFieldsAreReadFromTheAuthoredDocument:
         )
         assert isinstance(plan, StreamWritePlan)
         assert (plan.method, plan.endpoint, plan.max_records) == ("POST", "/items", 50)
+
+
+class TestDeclaredResponseRefusals:
+    def test_an_unknown_function_in_the_response_block_is_refused_at_configure(
+        self,
+    ) -> None:
+        # Decidable from the document alone: found on the first write
+        # instead, the record may already have landed.
+        outcome = build_write_plan(
+            _document(
+                response={
+                    "success_when": {
+                        "eq": [
+                            {"function": "no_such_function", "input": {"literal": 1}},
+                            1,
+                        ]
+                    }
+                }
+            ),
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
+        )
+        assert isinstance(outcome, str)
+        assert "response block" in outcome
+        assert "unknown derived function 'no_such_function'" in outcome
+
+    def test_a_reference_outside_the_write_scope_is_refused_at_configure(
+        self,
+    ) -> None:
+        # `response.records` is a read-side spelling; a write response
+        # carries body, headers, status and metadata and nothing else, so
+        # this resolves to nothing on every batch and each would be
+        # reported as a provider rejection.
+        outcome = build_write_plan(
+            _document(
+                response={"success_when": {"not_empty": {"ref": "response.records"}}}
+            ),
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
+        )
+        assert isinstance(outcome, str)
+        assert "response block" in outcome
+        assert "reads 'response.records'" in outcome
+
+    @pytest.mark.parametrize(
+        "ref",
+        [
+            "response.body.ok",
+            "response.headers.Location",
+            "response.status",
+            "response.metadata.batch_id",
+        ],
+    )
+    def test_every_write_scope_key_is_accepted(self, ref: str) -> None:
+        plan = build_write_plan(
+            _document(
+                response={
+                    "metadata": {"batch_id": {"ref": "response.body.id"}},
+                    "success_when": {"exists": {"ref": ref}},
+                }
+            ),
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
+        )
+        assert isinstance(plan, StreamWritePlan)
 
 
 class TestModeDispatch:

@@ -55,6 +55,7 @@ from .exceptions import ConnectorConnectionError, RequestSpecError
 from .http import (
     DEFAULT_MAX_RETRIES,
     HttpSender,
+    Received,
     SignedRequest,
     encode_body,
     failure_facts,
@@ -85,6 +86,7 @@ from .write_plan import (
     reserved_header_names,
     write_mode_block,
 )
+from .write_response import DeclaredWriteFailure, judge_write_response
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +187,33 @@ def _read_operation(
             f"source config 'stream_source' does not satisfy StreamSource: {err}"
         ) from err
     return endpoint_id, read, stream_source, stream_source.endpoint_ref
+
+
+class _RecordFailures:
+    """The per-record failures of one one-by-one write, in order.
+
+    The first failure names the batch verdict: its reason and declared
+    category ride the ack, the rest are counted.
+    """
+
+    def __init__(self) -> None:
+        self.ids: list[str] = []
+        self.first_reason = ""
+        self.first_category = FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+
+    def add(
+        self,
+        record_id: str,
+        err: Exception,
+        what: str,
+        *,
+        category: FailureCategory = FailureCategory.FAILURE_CATEGORY_UNSPECIFIED,
+    ) -> None:
+        logger.warning("%s %s: %s: %s", what, record_id, type(err).__name__, err)
+        self.ids.append(record_id)
+        if not self.first_reason:
+            self.first_reason = f"{type(err).__name__}: {err}"
+            self.first_category = category
 
 
 class GenericAPIConnector(BaseDestinationHandler):
@@ -685,7 +714,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                 content_type=prepared.content_type,
             )
             try:
-                payload = await dispatch.sender.send(signed, unwrap_page=True)
+                received = await dispatch.sender.send(signed, unwrap_page=True)
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
                 status, category = failure_facts(err, error_map=self._error_map)
                 raise read_verdict(
@@ -693,6 +722,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                     status=status,
                     category=category,
                 ) from err
+            payload = received.payload
             return Page(records=extract_records(payload, records_ref), payload=payload)
 
         return fetch
@@ -983,10 +1013,7 @@ class GenericAPIConnector(BaseDestinationHandler):
     ) -> BatchWriteResult:
         """Let the declared error map judge a transport failure first."""
         if isinstance(error, (aiohttp.ClientError, asyncio.TimeoutError)):
-            status, category = failure_facts(error, error_map=self._error_map)
-            ack_status, failure_category = write_verdict(
-                status=status, category=category
-            )
+            ack_status, failure_category = self._transport_verdict(error)
             logger.error("transport error writing to API: %s", error, exc_info=True)
             return BatchWriteResult(
                 status=ack_status,
@@ -1028,58 +1055,25 @@ class GenericAPIConnector(BaseDestinationHandler):
         rejection instead fails just that record and the loop continues.
         """
         written = 0
-        failed_ids: list[str] = []
-        first_failure = ""
-        first_category = FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+        failures = _RecordFailures()
 
         for index, record in enumerate(records):
-            # Insert keys on the identity-derived record id (the first
-            # occurrence of an identity wins, matching the SQL insert
-            # anti-join); upsert keys on the full record content so a
-            # changed row gets a new key and the provider applies the update
-            # instead of replaying its cached response.
-            key = (
-                None
-                if plan.idempotency_in is None
-                else (
-                    record_ids[index]
-                    if plan.write_mode_key == "insert"
-                    else content_idempotency_key(record)
-                )
-            )
             try:
-                body = self._build_body(plan, record=record)
-                if plan.idempotency_in == "body" and key is not None:
-                    body = body_with_idempotency_key(plan, body, key)
-                encoded = encode_body(body, plan.content_type)
+                encoded, headers = self._prepare_record_request(
+                    plan, record, record_ids[index]
+                )
             # Two authoring defects, one verdict: the body build answers
             # every way its declaration can fail with RequestSpecError, and
             # the engine-owned idempotency key refuses a body it cannot be
             # added to with ValueError. Both are deterministic and both
             # concern this one record.
             except (RequestSpecError, ValueError) as err:
-                logger.warning(
-                    "failed to build body for record %s: %s: %s",
-                    record_ids[index],
-                    type(err).__name__,
-                    err,
-                )
-                failed_ids.append(record_ids[index])
-                first_failure = first_failure or f"{type(err).__name__}: {err}"
+                failures.add(record_ids[index], err, "failed to build body for record")
                 continue
-            headers = (
-                {plan.idempotency_name: key}
-                if plan.idempotency_in == "header" and key is not None
-                else None
-            )
             try:
-                await self._send(plan, encoded, extra_headers=headers)
-                written += 1
+                received = await self._send(plan, encoded, extra_headers=headers)
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                status, category = failure_facts(err, error_map=self._error_map)
-                ack_status, failure_category = write_verdict(
-                    status=status, category=category
-                )
+                ack_status, failure_category = self._transport_verdict(err)
                 if ack_status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE:
                     logger.warning(
                         "retryable error on record %s (index %d, %d already "
@@ -1091,24 +1085,69 @@ class GenericAPIConnector(BaseDestinationHandler):
                         err,
                     )
                     raise
-                logger.warning(
-                    "failed to write record %s: %s: %s",
+                failures.add(
                     record_ids[index],
-                    type(err).__name__,
                     err,
+                    "failed to write record",
+                    category=failure_category,
                 )
-                failed_ids.append(record_ids[index])
-                if not first_failure:
-                    # The first failure names the batch verdict -- its
-                    # declared category rides the ack alongside its reason.
-                    first_category = failure_category
-                first_failure = first_failure or f"{type(err).__name__}: {err}"
-
-        if failed_ids:
-            logger.warning(
-                "failed to write %d records: %s...", len(failed_ids), failed_ids[:5]
+                continue
+            rejection = self._judge_sent(
+                plan,
+                received,
+                sent=1,
+                written=written,
+                record_ids=record_ids,
+                position=index,
+                failed_before=failures.ids,
             )
-        return written, failed_ids, first_failure, first_category
+            if rejection is not None:
+                # The provider accepted the request and rejected the record
+                # in the body: this record's failure, and deterministic.
+                failures.add(
+                    record_ids[index],
+                    rejection,
+                    "provider rejected record",
+                    category=FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED,
+                )
+                continue
+            written += 1
+
+        if failures.ids:
+            logger.warning(
+                "failed to write %d records: %s...", len(failures.ids), failures.ids[:5]
+            )
+        return written, failures.ids, failures.first_reason, failures.first_category
+
+    def _prepare_record_request(
+        self, plan: StreamWritePlan, record: dict[str, Any], record_id: str
+    ) -> tuple[bytes, dict[str, str] | None]:
+        """Build one record's encoded body and idempotency header, if any.
+
+        Insert keys on the identity-derived record id (the first occurrence
+        of an identity wins, matching the SQL insert anti-join); upsert keys
+        on the full record content so a changed row gets a new key and the
+        provider applies the update instead of replaying its cached response.
+        """
+        key = (
+            None
+            if plan.idempotency_in is None
+            else (
+                record_id
+                if plan.write_mode_key == "insert"
+                else content_idempotency_key(record)
+            )
+        )
+        body = self._build_body(plan, record=record)
+        if plan.idempotency_in == "body" and key is not None:
+            body = body_with_idempotency_key(plan, body, key)
+        encoded = encode_body(body, plan.content_type)
+        headers = (
+            {plan.idempotency_name: key}
+            if plan.idempotency_in == "header" and key is not None
+            else None
+        )
+        return encoded, headers
 
     async def _write_in_chunks(
         self,
@@ -1118,10 +1157,12 @@ class GenericAPIConnector(BaseDestinationHandler):
     ) -> tuple[int, list[str], str, FailureCategory]:
         """Write records in chunks of at most ``max_records``.
 
-        Per-item partial failure inside a 2xx response body is NOT
-        inspected: no endpoint contract declares where a per-item error
-        array lives, so the response shape is opaque and a 2xx means the
-        provider accepted the whole chunk.
+        Per-item partial failure inside a 2xx response body is visible
+        only through the endpoint's declared ``response`` block: the
+        contract names no per-item id extraction, so a chunk whose body
+        fails ``success_when`` or whose ``affected_records`` disagrees
+        with the chunk size is reported failed as a whole. Without a
+        declaration a 2xx means the provider accepted the whole chunk.
 
         Any chunk failure stops the loop: the verdict is already fatal, the
         engine dead-letters the batch and a restart replays it, so every
@@ -1161,12 +1202,9 @@ class GenericAPIConnector(BaseDestinationHandler):
                     FailureCategory.FAILURE_CATEGORY_UNSPECIFIED,
                 )
             try:
-                await self._send(plan, encoded)
+                received = await self._send(plan, encoded)
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                status, category = failure_facts(err, error_map=self._error_map)
-                ack_status, failure_category = write_verdict(
-                    status=status, category=category
-                )
+                ack_status, failure_category = self._transport_verdict(err)
                 if (
                     written == 0
                     and ack_status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
@@ -1186,9 +1224,104 @@ class GenericAPIConnector(BaseDestinationHandler):
                     f"{type(err).__name__}: {err}",
                     failure_category,
                 )
+            rejection = self._judge_sent(
+                plan,
+                received,
+                sent=len(chunk),
+                written=written,
+                record_ids=record_ids,
+                position=start,
+            )
+            if rejection is not None:
+                logger.warning(
+                    "provider rejected batch chunk at offset %d (%d records): %s",
+                    start,
+                    len(chunk),
+                    rejection,
+                )
+                return (
+                    written,
+                    list(record_ids[start:]),
+                    f"{type(rejection).__name__}: {rejection}",
+                    FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED,
+                )
             written += len(chunk)
 
         return written, [], "", FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
+
+    def _transport_verdict(
+        self, err: aiohttp.ClientError | asyncio.TimeoutError
+    ) -> tuple[AckStatus, FailureCategory]:
+        """Classify one transport failure through the declared error map."""
+        status, category = failure_facts(err, error_map=self._error_map)
+        return write_verdict(status=status, category=category)
+
+    def _judge_sent(
+        self,
+        plan: StreamWritePlan,
+        received: Received,
+        *,
+        sent: int,
+        written: int,
+        record_ids: list[str],
+        position: int,
+        failed_before: list[str] | None = None,
+    ) -> DeclaredWriteFailure | None:
+        """Let the declared ``response`` block judge one accepted request.
+
+        Nothing declared means the success status was the whole verdict.
+        A declared rejection is returned for the caller to pin on the ids
+        it covers; a block that cannot read the answer raises the
+        config-defect refusal, since whether the request landed is then
+        unknowable. That refusal reports failed everything from
+        ``position`` on plus ``failed_before``, the ids already failed
+        earlier in the loop.
+
+        What the provider handed back (``generated_keys``, ``metadata``)
+        has no slot on the ack, so it surfaces on the debug log.
+        """
+        if plan.response is None:
+            return None
+        if self._write_resolver is None:
+            raise RuntimeError("connector not connected: no request resolver")
+        try:
+            outcome = judge_write_response(
+                plan.response, received, resolver=self._write_resolver, sent=sent
+            )
+        except DeclaredWriteFailure as err:
+            return err
+        except RequestSpecError as err:
+            raise self._unreadable_response(
+                err,
+                written=written,
+                failed_ids=list(failed_before or []) + record_ids[position:],
+            ) from err
+        if outcome.has_extractions:
+            logger.debug(
+                "API write response for %s: generated_keys=%r metadata=%r",
+                plan.endpoint,
+                outcome.generated_keys,
+                outcome.metadata,
+            )
+        return None
+
+    @staticmethod
+    def _unreadable_response(
+        err: RequestSpecError, *, written: int, failed_ids: list[str]
+    ) -> BatchRejected:
+        """Build the refusal for a declared response block that cannot be read.
+
+        An authoring defect, so the configuration owns the fix; the
+        records already counted stay written and everything from the
+        unjudged request on is reported failed, because whether it landed
+        cannot be known from a body the declaration cannot read.
+        """
+        return BatchRejected(
+            f"write response could not be read: {err}",
+            category=FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT,
+            records_written=written,
+            failed_record_ids=tuple(failed_ids),
+        )
 
     def _build_body(
         self,
@@ -1218,7 +1351,7 @@ class GenericAPIConnector(BaseDestinationHandler):
         plan: StreamWritePlan,
         body: bytes,
         extra_headers: Mapping[str, str] | None = None,
-    ) -> Any:
+    ) -> Received:
         """Send one write request through the shared sender.
 
         Takes finished bytes. Encoding lives with the body build instead,

@@ -88,28 +88,28 @@ class TestSend:
     async def test_it_returns_the_decoded_payload(self) -> None:
         session = FakeSession([FakeResponse(body={"records": [{"id": 1}]})])
         sender = _sender(session)
-        payload = await sender.send(
+        received = await sender.send(
             SignedRequest(method="GET", url=f"{BASE_URL}/items"), unwrap_page=True
         )
-        assert payload == {"records": [{"id": 1}]}
+        assert received.payload == {"records": [{"id": 1}]}
+        assert received.status == 200
 
     @pytest.mark.parametrize("status", [200, 201, 202, 206])
     async def test_any_status_below_400_is_a_success(self, status: int) -> None:
         # A read endpoint answering 202 is a legitimate provider; failing a
         # whole stream on it is the engine second-guessing HTTP.
         session = FakeSession([FakeResponse(status=status, body={"records": []})])
-        assert await _sender(session).send(
+        received = await _sender(session).send(
             SignedRequest(method="GET", url=f"{BASE_URL}/items"), unwrap_page=True
-        ) == {"records": []}
+        )
+        assert received.payload == {"records": []}
 
     async def test_an_empty_body_decodes_to_nothing_rather_than_raising(self) -> None:
         session = FakeSession([FakeResponse(status=204, text="")])
-        assert (
-            await _sender(session).send(
-                SignedRequest(method="GET", url=f"{BASE_URL}/items"), unwrap_page=True
-            )
-            is None
+        received = await _sender(session).send(
+            SignedRequest(method="GET", url=f"{BASE_URL}/items"), unwrap_page=True
         )
+        assert received.payload is None
 
     async def test_a_failing_status_raises_carrying_the_status(self) -> None:
         session = FakeSession([FakeResponse(status=404, body={"error": "nope"})])
@@ -172,10 +172,10 @@ class TestSend:
                 return body["result"]
 
         session = FakeSession([FakeResponse(body={"result": {"records": [{"id": 1}]}})])
-        payload = await _sender(session, dialect=Provider()).send(
+        received = await _sender(session, dialect=Provider()).send(
             SignedRequest(method="GET", url=f"{BASE_URL}/items"), unwrap_page=True
         )
-        assert payload == {"records": [{"id": 1}]}
+        assert received.payload == {"records": [{"id": 1}]}
 
     async def test_the_dialect_signs_the_final_request(self) -> None:
         class Provider(ApiDialect):
@@ -251,9 +251,10 @@ class TestSend:
             [FakeResponse(status=503, body={}), FakeResponse(body={"ok": True})]
         )
         sender = _sender(session, retry_statuses={503}, max_retries=2)
-        assert await sender.send(
+        received = await sender.send(
             SignedRequest(method="GET", url=f"{BASE_URL}/items"), unwrap_page=True
-        ) == {"ok": True}
+        )
+        assert received.payload == {"ok": True}
         assert len(session.calls) == 2
 
     async def test_a_status_outside_the_set_is_attempted_once(self) -> None:
@@ -287,14 +288,14 @@ class TestOnlyAReadHasPages:
 
     async def test_a_read_gets_the_envelope_unwrapped(self) -> None:
         session = FakeSession([FakeResponse(body={"result": {"records": []}})])
-        payload = await _sender(session, dialect=self._Enveloped()).send(
+        received = await _sender(session, dialect=self._Enveloped()).send(
             SignedRequest(method="GET", url=f"{BASE_URL}/items"), unwrap_page=True
         )
-        assert payload == {"records": []}
+        assert received.payload == {"records": []}
 
     async def test_a_write_response_is_returned_as_it_came(self) -> None:
         session = FakeSession([FakeResponse(body={"id": 7})])
-        payload = await _sender(session, dialect=self._Enveloped()).send(
+        received = await _sender(session, dialect=self._Enveloped()).send(
             SignedRequest(method="POST", url=f"{BASE_URL}/items"), unwrap_page=False
         )
-        assert payload == {"id": 7}
+        assert received.payload == {"id": 7}

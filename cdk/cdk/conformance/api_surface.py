@@ -57,7 +57,6 @@ __all__ = [
     "dispatch_transport_refs",
     "fillable_at_request_time",
     "read_operations",
-    "unknown_function_problem",
     "unread_endpoints",
 ]
 
@@ -311,40 +310,6 @@ def materialization_resolver(target: ConformanceTarget) -> Resolver:
     )
 
 
-def unknown_function_problem(node: Any, resolver: Resolver) -> str | None:
-    """Name the first ``function`` node *resolver* has no function for, or ``None``.
-
-    The one thing about an expression's grammar the contract does NOT
-    settle. It refuses a malformed node -- two markers, a stray sibling on
-    a ``ref``, an undocumented sibling on a ``function`` -- before a
-    document reaches the kit, so reading any of that here would be a second
-    answer to a question already answered. It does not know the function
-    REGISTRY, which is engine-owned and closed: a name outside it resolves
-    on no run, and a deferred node the kit never resolves would otherwise
-    carry the typo past every check and die on the connector's first
-    request.
-
-    The whole declaration is walked, because a name can sit at any depth.
-    A ``literal`` is opaque data, so a function spelled inside one is not
-    one.
-    """
-    walk = lambda child: unknown_function_problem(child, resolver)  # noqa: E731
-    if isinstance(node, list):
-        return next((p for p in map(walk, node) if p), None)
-    if not isinstance(node, Mapping):
-        return None
-    if "literal" in node:
-        return None
-    name = node.get("function")
-    if name is not None and not resolver.knows_function(name):
-        return (
-            f"unknown derived function {name!r}; the registry is closed "
-            f"and engine-owned, so this resolves on no run "
-            f"(registered: {resolver.function_names})"
-        )
-    return next((p for p in map(walk, node.values()) if p), None)
-
-
 def dispatch_transport_refs(target: ConformanceTarget) -> list[str]:
     """Every transport this connector's reads dispatch through, default first.
 
@@ -396,7 +361,7 @@ def api_base_url(
     base_url = block.get("base_url")
     if isinstance(base_url, str):
         return base_url or None
-    if unknown_function_problem(base_url, materialization_resolver(target)) is not None:
+    if materialization_resolver(target).unknown_function_problem(base_url) is not None:
         return None
     # The same classification the base-url ladder reports on, rather than a
     # second reading of it: anything that does not settle from the definition
@@ -533,7 +498,7 @@ def _base_url_violations(
     # `user:pass@` puts the password in a log line otherwise -- including
     # in the refusal that fires BECAUSE it carries one.
     shown = redact_credentials(declared)
-    grammar = unknown_function_problem(declared, materialization_resolver(target))
+    grammar = materialization_resolver(target).unknown_function_problem(declared)
     if grammar is not None:
         # Judged before the deferral: a malformed node is malformed whatever
         # scope it reads, and resolve_http_spec() raises on it at connect()
@@ -619,7 +584,7 @@ def _transport_header_violations(
         ]
     violations: list[Violation] = []
     for name, value in sorted(declared.items()):
-        grammar = unknown_function_problem(value, materialization_resolver(target))
+        grammar = materialization_resolver(target).unknown_function_problem(value)
         if grammar is not None:
             violations.append(
                 Violation(
@@ -689,7 +654,7 @@ def _spec_value(
     send (``drops_if_null``, as in :func:`_transport_deferral`).
     """
     resolver = materialization_resolver(target)
-    if unknown_function_problem(declared, resolver) is not None:
+    if resolver.unknown_function_problem(declared) is not None:
         return STAND_IN_ORIGIN
     problems, defers = _transport_deferral(
         target, declared, drops_if_null=drops_if_null

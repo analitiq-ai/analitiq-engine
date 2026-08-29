@@ -26,11 +26,12 @@ from analitiq.contracts.endpoints import (
     Idempotency,
     WriteMode,
     WriteOperation,
+    WriteResponse,
 )
 
 from ..exceptions import TransportSpecError
 from ..record_identity import record_digest
-from ..resolver import Resolver
+from ..resolver import Resolver, scope_paths
 from ..transport_factory import require_wire_safe_header_name
 from ..types import RetrySemantics, RetryVerdict, SchemaSpec
 from .body import FORM_CONTENT_TYPE, media_type
@@ -43,6 +44,7 @@ from .request import (
     request_block_problem,
     substitute_path,
 )
+from .write_response import WRITE_SCOPE_KEYS
 
 __all__ = [
     "WRITE_MODE_KEYS",
@@ -123,6 +125,59 @@ class StreamWritePlan:
     write_mode_key: str = "insert"
     #: Retry-safety verdict, computed at configure time.
     retry_verdict: RetryVerdict | None = None
+    #: The declared ``response`` block: how the provider's answer says
+    #: whether the records landed. ``None`` means the endpoint declares
+    #: none and a success status is the whole verdict.
+    response: WriteResponse | None = None
+
+
+_RESPONSE_PREFIX = "response."
+
+
+def declared_expressions(declared: WriteResponse) -> list[Any]:
+    """Every expression the block declares, for a check that reads them all.
+
+    The configure-time check in :func:`build_write_plan` is the caller.
+    One expression at a time, never the block: a scanner handed a map
+    reads a key named ``ref``, ``template`` or ``literal`` as an
+    expression marker and stops seeing its siblings
+    (:func:`~cdk.api.request._declared_expressions` documents the case).
+    """
+    nodes: list[Any] = [
+        declared.success_when,
+        declared.affected_records,
+        declared.generated_keys,
+    ]
+    if declared.error is not None:
+        nodes += [declared.error.code, declared.error.message, declared.error.details]
+    if declared.metadata is not None:
+        nodes += list(declared.metadata.values())
+    return [node for node in nodes if node is not None]
+
+
+def response_scope_problem(declared: WriteResponse) -> str | None:
+    """Why the block reads what no write response carries, or ``None``.
+
+    The contract resolves ``response.body`` paths against the declared
+    response schema and leaves the other sub-scopes to their engine-side
+    owner; on the write path that owner is
+    :func:`~cdk.api.write_response.write_response_scope`. A reference
+    outside it resolves to nothing on every response, so ``success_when``
+    holds false on every batch and each is reported as a provider
+    rejection for what is an authoring defect. Judged here, before the
+    first write, through the same walker the read-path kit uses.
+    """
+    for lookup in dict.fromkeys(scope_paths(declared_expressions(declared))):
+        if not lookup.startswith(_RESPONSE_PREFIX):
+            continue
+        scope = lookup[len(_RESPONSE_PREFIX) :].split(".")[0]
+        if scope not in WRITE_SCOPE_KEYS:
+            return (
+                f"reads {lookup!r}, but a write response carries only "
+                f"{', '.join(repr(k) for k in WRITE_SCOPE_KEYS)} under "
+                f"'response'; this resolves to nothing on every response"
+            )
+    return None
 
 
 def write_mode_block(doc: ApiEndpointDoc, mode_key: WriteMode) -> WriteOperation | None:
@@ -460,6 +515,15 @@ def build_write_plan(
     if problem is not None:
         return problem
     reserved = reserved_header_names(header_names_for(request.transport_ref))
+    if mode_block.response is not None:
+        # Decidable from the document alone, so refused here: found on the
+        # first write instead, the record may have landed by the time the
+        # answer cannot be read, and it is reported failed either way.
+        problem = resolver.unknown_function_problem(
+            declared_expressions(mode_block.response)
+        ) or response_scope_problem(mode_block.response)
+        if problem is not None:
+            return f"response block on endpoint {endpoint_id!r}: {problem}"
     try:
         table = ParamTable.for_write(mode_block.params, resolver)
         problem = request_block_problem(
@@ -481,6 +545,7 @@ def build_write_plan(
             content_type=request.content_type,
             params=table.values,
             write_mode_key=mode_key,
+            response=mode_block.response,
         )
         plan.endpoint = substitute_path(
             request.path,

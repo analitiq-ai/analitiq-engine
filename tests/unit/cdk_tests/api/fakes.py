@@ -12,6 +12,7 @@ from typing import Any, cast
 
 from analitiq.contracts.endpoints import ApiEndpointDoc
 from analitiq.contracts.stream import StreamSource
+from multidict import CIMultiDict
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.secrets import InMemorySecretsResolver
@@ -33,8 +34,17 @@ class FakeRequestInfo:
 class FakeResponse:
     """One scripted response, shaped like the client's own."""
 
-    def __init__(self, *, status: int = 200, body: Any = None, text: str | None = None):
+    def __init__(
+        self,
+        *,
+        status: int = 200,
+        body: Any = None,
+        text: str | None = None,
+        headers: dict[str, str] | None = None,
+    ):
         self.status = status
+        # The client hands back a case-insensitive map; so does the fake.
+        self.headers = CIMultiDict(headers or {})
         self.method = "GET"
         self.closed = False
         self.request_info = FakeRequestInfo()

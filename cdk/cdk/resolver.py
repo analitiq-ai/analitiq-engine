@@ -324,6 +324,42 @@ class Resolver:
         """The registered function names, for a message that lists them."""
         return sorted(self._functions)
 
+    def unknown_function_problem(self, node: Any) -> str | None:
+        """Name the first ``function`` node this resolver has no function for.
+
+        The one thing about an expression's grammar the contract does NOT
+        settle. It refuses a malformed node before a document reaches the
+        engine, so reading any of that here would be a second answer to a
+        question already answered. The registry is engine-owned and closed:
+        a name outside it resolves on no run, so a declaration is judged
+        here, before its first request, rather than on the run that
+        reaches it.
+
+        The whole declaration is walked, because a name can sit at any
+        depth. A ``literal`` is opaque data, so a function spelled inside
+        one is not one. A contract model is walked as the JSON its author
+        wrote, as resolving it would.
+        """
+        node = authored_json(node)
+        if isinstance(node, list):
+            return next(
+                (p for p in map(self.unknown_function_problem, node) if p), None
+            )
+        if not isinstance(node, Mapping):
+            return None
+        if "literal" in node:
+            return None
+        name = node.get("function")
+        if name is not None and not self.knows_function(name):
+            return (
+                f"unknown derived function {name!r}; the registry is closed "
+                f"and engine-owned, so this resolves on no run "
+                f"(registered: {self.function_names})"
+            )
+        return next(
+            (p for p in map(self.unknown_function_problem, node.values()) if p), None
+        )
+
     def with_response(self, response: Mapping[str, Any]) -> Resolver:
         """Return a resolver whose ``response`` scope holds *response*.
 
