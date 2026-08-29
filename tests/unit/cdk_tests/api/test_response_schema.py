@@ -10,8 +10,8 @@ from analitiq.contracts.stream import validate_endpoint_ref
 from pydantic import ValidationError
 
 from cdk.api.response_schema import (
-    apply_read_type_map,
     FieldDeclaration,
+    apply_read_type_map,
     record_field_declaration,
     records_items_schema,
     resolve_field_arrow_type,
@@ -220,10 +220,9 @@ class TestCursorFieldType:
     ) -> None:
         # Null only says the field is nullable; the checkpoint never
         # stores None, so it says nothing about how a cursor reads back.
-        assert (
-            record_field_declaration("items", self._schema(declared), "updated_at")
-            == FieldDeclaration(expected, None)
-        )
+        assert record_field_declaration(
+            "items", self._schema(declared), "updated_at"
+        ) == FieldDeclaration(expected, None)
 
     @pytest.mark.parametrize("declared", [["string", "integer"], ["null"], None, 7])
     def test_anything_but_one_real_type_is_refused(self, declared: Any) -> None:

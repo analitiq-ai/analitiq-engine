@@ -213,7 +213,7 @@ def _parse_iso(cursor: Any) -> datetime:
 
 
 def _bound_format(mapping: CursorMapping, cursor_field: FieldDeclaration) -> str:
-    """The format a bound is rendered in.
+    """Pick the format a bound is rendered in.
 
     The mapping's declared format wins. With none declared the bound keeps
     the cursor's own vocabulary: a record field declaring an epoch format
