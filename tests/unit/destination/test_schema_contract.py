@@ -790,6 +790,16 @@ class TestSchemaContractNestedObject:
         batch = contract.from_pylist([{"tags": ["a", "b", "c"]}])
         assert batch.column("tags")[0].as_py() == '["a", "b", "c"]'
 
+    def test_json_marker_refuses_a_number_float_cannot_hold(self):
+        # The lossless parse makes 1e400 a Decimal; narrowing it would write
+        # Infinity, which is not JSON. Refused naming the column and row.
+        schema = {"properties": {"tags": {"type": "object", "arrow_type": "Json"}}}
+        contract = SchemaContract(schema)
+        with pytest.raises(
+            ValueError, match="column 'tags' row 0: .*not JSON compliant"
+        ):
+            contract.from_pylist([{"tags": {"big": Decimal("1e400")}}])
+
     def test_json_marker_rejects_non_dict_non_list_value(self):
         # A Json column accepts only dict, list, or None — anything else
         # is an author mistake. The encoder must surface it with the

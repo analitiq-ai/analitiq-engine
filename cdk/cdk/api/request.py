@@ -46,6 +46,7 @@ from urllib.parse import quote
 
 from analitiq.contracts.endpoints import (
     ApiEndpointDoc,
+    Expression,
     Pagination,
     Param,
     ReadOperation,
@@ -481,6 +482,7 @@ def request_block_problem(
     controlled_by: Mapping[str, str] = MappingProxyType({}),
     declared_params: Mapping[str, Param] = MappingProxyType({}),
     pagination: Pagination | None = None,
+    metadata: Mapping[str, Expression] | None = None,
 ) -> str | None:
     """Why this request block cannot be sent as declared, or ``None``.
 
@@ -492,9 +494,10 @@ def request_block_problem(
     the never-fillable walk judges what this phase actually supplies rather
     than a restatement of it.
 
-    ``declared_params`` and ``pagination`` are the operation's other
-    expression carriers: a param ``default`` or a pagination value reading
-    a never-request-time scope is the same silent omission a request slot's
+    ``declared_params``, ``pagination`` and ``metadata`` (a read's
+    ``response.metadata``) are the operation's other expression carriers: a
+    param ``default``, a pagination value or a metadata value reading a
+    never-request-time scope is the same silent omission a request slot's
     would be, so the one secret-read walk covers all of them.
     """
     removals = request_block.headers_remove
@@ -518,7 +521,9 @@ def request_block_problem(
     problem = unsupported_media_type(getattr(request_block, "content_type", None))
     if problem is not None:
         return problem
-    problem = _secret_read_problem(request_block, declared_params, pagination, resolver)
+    problem = _secret_read_problem(
+        request_block, declared_params, pagination, metadata, resolver
+    )
     if problem is not None:
         return problem
     problem = _header_map_problem(
@@ -651,6 +656,7 @@ def _secret_read_problem(
     request_block: ReadRequest | WriteRequest,
     declared_params: Mapping[str, Param],
     pagination: Pagination | None,
+    metadata: Mapping[str, Expression] | None,
     resolver: Resolver,
 ) -> str | None:
     """Why an operation reads what no request can carry, or ``None``.
@@ -672,6 +678,9 @@ def _secret_read_problem(
     ``response.*`` resolves to nothing on every run, and ``resolve_page_size``
     answers that by warning and taking the engine's batch size instead, so
     the stream pages at a size nobody authored and still reports success.
+    A read's ``response.metadata`` resolves per page through the same
+    page scope, so it is judged like the pagination block: a value reading
+    ``secrets.*`` would be ``None`` on every page the read ever served.
     """
     # The runtime keys THIS phase supplies, read off the resolver the phase
     # built rather than restated: the read passes batch_size, the write does
@@ -696,6 +705,15 @@ def _secret_read_problem(
             if unfillable(path, page=False)
         }
         | {path for path in scope_paths(pagination) if unfillable(path, page=True)}
+        # Walked per VALUE: the map's keys are author names, and a key
+        # named ``ref`` or ``literal`` would otherwise make the whole map
+        # read as one expression node, hiding every sibling.
+        | {
+            path
+            for expression in (metadata or {}).values()
+            for path in scope_paths(expression)
+            if unfillable(path, page=True)
+        }
     )
     if not reads:
         return None

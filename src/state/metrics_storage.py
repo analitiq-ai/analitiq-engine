@@ -30,7 +30,8 @@ class PipelineMetricsRecord(BaseModel):
 
     This schema is designed for structured log queries with the following
     considerations:
-    - All fields are flat (no nested objects) for easy querying
+    - All fields are flat (no nested objects) for easy querying, except
+      ``response_metadata``, one level of author-named keys
     - Timestamps are ISO 8601 strings
     - Numeric fields use appropriate types for aggregation
     """
@@ -75,6 +76,14 @@ class PipelineMetricsRecord(BaseModel):
     # Batch metrics
     batches_processed: int = Field(
         default=0, ge=0, description="Number of batches processed"
+    )
+    response_metadata: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "The source's declared response.metadata as resolved on the last "
+            "page read (a provider-reported total, a rate-limit budget); None "
+            "when the source declares none"
+        ),
     )
 
     # Status
@@ -127,6 +136,7 @@ def create_metrics_record(
     records_processed: int = 0,
     records_failed: int = 0,
     batches_processed: int = 0,
+    response_metadata: dict[str, Any] | None = None,
     status: str = "success",
     error_code: ErrorCode | None = None,
     error_message: str | None = None,
@@ -145,6 +155,7 @@ def create_metrics_record(
         records_processed: Number of successfully processed records
         records_failed: Number of failed records
         batches_processed: Number of batches processed
+        response_metadata: The source's resolved response.metadata off the last page
         status: Execution status (success, failed, partial)
         error_code: Stable, customer-safe failure category if failed
         error_message: Short, customer-safe failure message if failed
@@ -174,6 +185,7 @@ def create_metrics_record(
         records_skipped=records_skipped,
         records_total=records_total,
         batches_processed=batches_processed,
+        response_metadata=response_metadata,
         status=status,
         error_code=error_code,
         error_message=error_message,

@@ -12,12 +12,13 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from ..exceptions import TransportSpecError, UnresolvedValueError
+from ..exceptions import ReadError, TransportSpecError, UnresolvedValueError
 
 __all__ = [
     "ApiConnectorError",
     "ConnectorConnectionError",
     "RequestSpecError",
+    "read_spec_errors",
     "request_spec_errors",
 ]
 
@@ -95,3 +96,21 @@ def request_spec_errors(context: str) -> Iterator[None]:
         raise
     except _AUTHORING_DEFECTS as err:
         raise RequestSpecError(f"{context}: {err}") from err
+
+
+@contextmanager
+def read_spec_errors(context: str) -> Iterator[None]:
+    """Fail the read for any authoring defect raised inside.
+
+    :func:`request_spec_errors` classifies the defect where it happens;
+    this turns the result into the :class:`~cdk.exceptions.ReadError` the
+    traversal's callers already handle. Every per-page expression the read
+    resolves -- a pagination expression, the stop condition, a
+    ``response.metadata`` key -- crosses this one boundary, so a defect in
+    any of them fails the stream the same way.
+    """
+    try:
+        with request_spec_errors(context):
+            yield
+    except RequestSpecError as err:
+        raise ReadError(str(err)) from err

@@ -10,7 +10,7 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from .json_utils import decode_json_fields
+from .json_utils import decimals_to_float, decode_json_fields
 from .type_map import resolve_arrow_type
 from .type_map.arrow import classify_arrow_conversion, first_blocked_nested_leaf
 from .type_map.exceptions import InvalidTypeMapError
@@ -36,22 +36,105 @@ def _is_json_field(field_def: dict[str, Any]) -> bool:
     return field_def.get("arrow_type") == _JSON_ARROW_TYPE
 
 
-def _decimals_to_float(value: Any) -> Any:
-    """Replace every ``Decimal`` with ``float`` inside an opaque ``Json`` blob.
+def _is_date_or_timestamp(arrow_type: pa.DataType) -> bool:
+    return bool(pa.types.is_timestamp(arrow_type) or pa.types.is_date(arrow_type))
 
-    A ``Json`` column carries no per-field type, so its interior numbers were
-    plain floats before the API reader began parsing JSON with
-    ``parse_float=Decimal``. ``json.dumps`` cannot serialize a ``Decimal``, so
-    narrow them back to float, reproducing the pre-change blob bytes exactly
-    (``float(Decimal(token))`` equals the old ``float(token)``).
+
+def _is_temporal(arrow_type: pa.DataType) -> bool:
+    return bool(_is_date_or_timestamp(arrow_type) or pa.types.is_time(arrow_type))
+
+
+def _is_nested(arrow_type: pa.DataType) -> bool:
+    return bool(
+        pa.types.is_struct(arrow_type)
+        or pa.types.is_list(arrow_type)
+        or pa.types.is_large_list(arrow_type)
+    )
+
+
+def _has_strings(values: list[Any]) -> bool:
+    return any(isinstance(v, str) for v in values if v is not None)
+
+
+def _all_null_column(field: pa.Field, values: list[Any]) -> pa.Array:
+    """Build an all-None column as typed nulls; refuse it if the column is required."""
+    if not field.nullable:
+        raise ValueError(
+            f"column {field.name!r} is non-nullable but every source value is None"
+        )
+    return pa.nulls(len(values), type=field.type)
+
+
+def _parse_with_source_format(
+    field: pa.Field, values: list[Any], source_format: str
+) -> pa.Array:
+    """Parse string values by the declared ``source_format`` into a date/timestamp."""
+    for v in values:
+        if v is not None and not isinstance(v, str):
+            raise TypeError(
+                f"column {field.name!r} declares source_format but a "
+                f"non-string value of type {type(v).__name__} was found; "
+                f"source_format only applies to string inputs"
+            )
+    string_col = pa.array(values, type=pa.string())
+    unit = getattr(field.type, "unit", None) or (
+        "us" if pa.types.is_timestamp(field.type) else "s"
+    )
+    parsed = pc.strptime(string_col, format=source_format, unit=unit)
+    if parsed.type == field.type:
+        return parsed
+    tz = getattr(field.type, "tz", None)
+    if tz and not getattr(parsed.type, "tz", None):
+        parsed = pc.assume_timezone(parsed, tz)
+    return pc.cast(parsed, field.type, safe=False)
+
+
+def _build_decimal_column(field: pa.Field, values: list[Any]) -> pa.Array:
+    converted = [None if v is None else Decimal(str(v)) for v in values]
+    return pa.array(converted, type=field.type)
+
+
+def _build_nested_column(field: pa.Field, values: list[Any]) -> pa.Array:
+    """Build a struct/list column, checking every leaf against its declared type.
+
+    Nested Object/List columns bypass ``_build_numeric_column``'s per-row
+    guards: pyarrow builds the array directly from Python values. Walk the
+    declared type per leaf to narrow Decimals onto float leaves and reject a
+    non-integer landing on an Int leaf (which pyarrow would otherwise
+    silently truncate), naming the column path and row.
     """
-    if isinstance(value, Decimal):
-        return float(value)
-    if isinstance(value, dict):
-        return {k: _decimals_to_float(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_decimals_to_float(v) for v in value]
-    return value
+    prepared = [
+        _prepare_nested_value(v, field.type, field.name, row)
+        for row, v in enumerate(values)
+    ]
+    return pa.array(prepared, type=field.type)
+
+
+def _encode_json_column(field: pa.Field, values: list[Any]) -> pa.Array:
+    """Encode an opaque ``Json`` column's values as JSON text.
+
+    A Json column may carry only None, a dict, or a list. Anything else (int,
+    datetime, raw string) is an author mistake -- fail loud with the offending
+    row index so the source author can locate the bad value, rather than
+    letting a string round-trip through the decoder where ``json.loads``
+    would raise far from the source.
+    """
+    serialized: list[Any] = []
+    for row, v in enumerate(values):
+        if v is None:
+            serialized.append(None)
+        elif isinstance(v, (dict, list)):
+            try:
+                serialized.append(json.dumps(decimals_to_float(v), allow_nan=False))
+            except ValueError as err:
+                raise ValueError(f"column {field.name!r} row {row}: {err}") from err
+        else:
+            raise ValueError(
+                f"column {field.name!r} declared arrow_type='Json' "
+                f"but row {row} carries {type(v).__name__}; only "
+                f"dict, list, or None are accepted"
+            )
+    return pa.array(serialized, type=field.type)
 
 
 def _prepare_nested_value(
@@ -342,88 +425,22 @@ class SchemaContract:
         values: list[Any],
         field_def: dict[str, Any],
     ) -> pa.Array:
-        source_format = field_def.get("source_format")
+        """Dispatch one column's Python values to the builder for its type."""
         if all(v is None for v in values):
-            if not field.nullable:
-                raise ValueError(
-                    f"column {field.name!r} is non-nullable but every "
-                    f"source value is None"
-                )
-            return pa.nulls(len(values), type=field.type)
-
+            return _all_null_column(field, values)
         if _is_json_field(field_def):
-            # Opaque JSON blob: a Json column may carry only None, a dict,
-            # or a list. Anything else (int, datetime, raw string) is an
-            # author mistake — fail loud with the offending row index so
-            # the source author can locate the bad value, rather than
-            # letting a string round-trip through the decoder where
-            # ``json.loads`` would raise far from the source.
-            serialized: list[Any] = []
-            for row, v in enumerate(values):
-                if v is None:
-                    serialized.append(None)
-                elif isinstance(v, (dict, list)):
-                    serialized.append(json.dumps(_decimals_to_float(v)))
-                else:
-                    raise ValueError(
-                        f"column {field.name!r} declared arrow_type='Json' "
-                        f"but row {row} carries {type(v).__name__}; only "
-                        f"dict, list, or None are accepted"
-                    )
-            return pa.array(serialized, type=field.type)
-
-        if source_format and (
-            pa.types.is_timestamp(field.type) or pa.types.is_date(field.type)
-        ):
-            for v in values:
-                if v is not None and not isinstance(v, str):
-                    raise TypeError(
-                        f"column {field.name!r} declares source_format but a "
-                        f"non-string value of type {type(v).__name__} was found; "
-                        f"source_format only applies to string inputs"
-                    )
-            string_col = pa.array(values, type=pa.string())
-            unit = getattr(field.type, "unit", None) or (
-                "us" if pa.types.is_timestamp(field.type) else "s"
-            )
-            parsed = pc.strptime(string_col, format=source_format, unit=unit)
-            if parsed.type == field.type:
-                return parsed
-            tz = getattr(field.type, "tz", None)
-            if tz and not getattr(parsed.type, "tz", None):
-                parsed = pc.assume_timezone(parsed, tz)
-            return pc.cast(parsed, field.type, safe=False)
-
+            return _encode_json_column(field, values)
+        source_format = field_def.get("source_format")
+        if source_format and _is_date_or_timestamp(field.type):
+            return _parse_with_source_format(field, values, source_format)
         if pa.types.is_decimal(field.type):
-            converted = [None if v is None else Decimal(str(v)) for v in values]
-            return pa.array(converted, type=field.type)
-
-        if (
-            pa.types.is_timestamp(field.type)
-            or pa.types.is_date(field.type)
-            or pa.types.is_time(field.type)
-        ) and any(isinstance(v, str) for v in values if v is not None):
+            return _build_decimal_column(field, values)
+        if _is_temporal(field.type) and _has_strings(values):
             return SchemaContract._build_temporal_from_strings(field, values)
-
         if pa.types.is_integer(field.type) or pa.types.is_floating(field.type):
             return SchemaContract._build_numeric_column(field, values)
-
-        if (
-            pa.types.is_struct(field.type)
-            or pa.types.is_list(field.type)
-            or pa.types.is_large_list(field.type)
-        ):
-            # Nested Object/List columns bypass _build_numeric_column's per-row
-            # guards: pyarrow builds the array directly from Python values. Walk
-            # the declared type per leaf to narrow Decimals onto float leaves and
-            # reject a non-integer landing on an Int leaf (which pyarrow would
-            # otherwise silently truncate), naming the column path and row.
-            prepared = [
-                _prepare_nested_value(v, field.type, field.name, row)
-                for row, v in enumerate(values)
-            ]
-            return pa.array(prepared, type=field.type)
-
+        if _is_nested(field.type):
+            return _build_nested_column(field, values)
         return pa.array(values, type=field.type)
 
     @staticmethod

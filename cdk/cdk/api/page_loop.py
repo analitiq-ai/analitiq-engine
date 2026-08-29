@@ -24,7 +24,14 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-__all__ = ["Page", "PageLoop", "PageRequest", "PaginationStrategy"]
+__all__ = [
+    "Page",
+    "PageLoop",
+    "PageRequest",
+    "PaginationStrategy",
+    "Resolve",
+    "StopCondition",
+]
 
 
 @dataclass(frozen=True)
@@ -84,6 +91,9 @@ class PaginationStrategy(Protocol):
 #: Answers "does the author's stop condition hold for this page?".
 StopCondition = Callable[[Page], bool]
 
+#: Resolves a declared value expression against the page it was written for.
+Resolve = Callable[[Any, Page | None], Any]
+
 #: Issues one request and returns what came back.
 Fetch = Callable[[PageRequest], Awaitable[Page]]
 
@@ -121,7 +131,7 @@ class PageLoop:
         # running against a document that could not have validated.
         self._stop_when = stop_when
 
-    def __aiter__(self) -> AsyncIterator[list[dict[str, Any]]]:
+    def __aiter__(self) -> AsyncIterator[Page]:
         """Return the traversal.
 
         A plain method, not an ``async def``: the protocol asks ``__aiter__``
@@ -132,12 +142,24 @@ class PageLoop:
         """
         return self._pages()
 
-    async def _pages(self) -> AsyncIterator[list[dict[str, Any]]]:
-        """Yield each page's records until one of the three rules fires."""
+    async def _pages(self) -> AsyncIterator[Page]:
+        """Yield each page until one of the three rules fires.
+
+        The whole page, not its records alone: the caller turns the records
+        into a batch, and the declared ``response.metadata`` that batch
+        carries is written against the body the records came out of.
+
+        The empty page that ends the traversal is yielded too, before the
+        loop returns: a provider reports its total or its remaining budget
+        on that page as on any other (``{"records": [], "total": 0}``), and
+        the caller decides whether an empty page is worth a batch. It is
+        neither evaluated for stopping nor advanced from -- it is the end.
+        """
         request: PageRequest | None = self._strategy.first()
         while request is not None:
             page = await self._fetch(request)
             if not page.records:
+                yield page
                 return
             # Both decisions are made before the caller sees the records.
             # The caller may commit what it receives, so a page this loop
@@ -150,5 +172,5 @@ class PageLoop:
             # follow -- and asking for one there would fail a read that had
             # just been told it was complete.
             following = None if self._stop_when(page) else self._strategy.advance(page)
-            yield page.records
+            yield page
             request = following

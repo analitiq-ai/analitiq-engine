@@ -1313,6 +1313,75 @@ class TestApiReadPathBreaks:
         assert "'response.headers.x-next'" in report
         assert "carries only 'body', 'record_count'" in report
 
+    def test_a_metadata_value_off_the_page_scope_is_refused_at_compile(
+        self, tmp_path: Path
+    ) -> None:
+        """The metadata half: a header-borne budget would be None on every page."""
+
+        def bend(read: dict[str, Any]) -> None:
+            read["response"]["metadata"] = {
+                "remaining": {"ref": "response.headers.x-rate-limit-remaining"}
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "response.metadata 'remaining'" in report
+        assert "'response.headers.x-rate-limit-remaining'" in report
+        assert "resolves to nothing on every page" in report
+
+    def test_a_metadata_function_outside_the_registry_is_refused_at_compile(
+        self, tmp_path: Path
+    ) -> None:
+        """The kit resolves no metadata expression, so the registry check must."""
+
+        def bend(read: dict[str, Any]) -> None:
+            read["response"]["metadata"] = {
+                "total": {"function": "no_such_function", "input": {"literal": "x"}}
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "response.metadata" in report
+        assert "unknown derived function 'no_such_function'" in report
+
+    def test_a_metadata_value_reading_a_secret_is_refused_at_compile(
+        self, tmp_path: Path
+    ) -> None:
+        """A page supplies no secrets; the metadata value is judged, not deferred.
+
+        The read resolver's scope excludes secrets and auth by design, and a
+        metadata value resolves per page through that scope, so the ref
+        would land None on every page of a certified connector. The same
+        never-fillable walk that refuses a body or a pagination value reading
+        a secret refuses this one.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["response"]["metadata"] = {
+                "budget": {"template": "${secrets.api_key}"}
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "'secrets.api_key'" in report
+        assert "request-time resolution never supplies" in report
+
+    def test_a_metadata_key_named_after_a_marker_cannot_hide_a_secret_read(
+        self, tmp_path: Path
+    ) -> None:
+        """Metadata keys are author names; ``ref`` as a key hides no sibling."""
+
+        def bend(read: dict[str, Any]) -> None:
+            read["response"]["metadata"] = {
+                "ref": {"literal": "x"},
+                "budget": {"ref": "secrets.api_token"},
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "'secrets.api_token'" in report
+        assert "request-time resolution never supplies" in report
+
     def test_a_stop_condition_off_the_page_scope_is_refused_at_compile(
         self, tmp_path: Path
     ) -> None:

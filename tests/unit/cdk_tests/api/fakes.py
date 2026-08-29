@@ -201,6 +201,7 @@ def endpoint_json(
     records_ref: str = "response.body.records",
     response_fields: dict[str, Any] | None = None,
     record_fields: dict[str, Any] | None = None,
+    response_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """A read endpoint document around ``/items``, unparsed.
 
@@ -214,7 +215,8 @@ def endpoint_json(
     resolves every ``response.body.<path>`` a document references against
     this schema, so a paging value naming a field the schema does not
     declare is an authoring defect rather than a shortcut a fixture may
-    take.
+    take. ``response_metadata`` is the read's declared metadata block, its
+    values expressions over the same body.
     """
     record_properties: dict[str, Any] = {
         "id": {"type": "integer", "native_type": "integer", "arrow_type": "Int64"},
@@ -237,6 +239,8 @@ def endpoint_json(
             "records": {"ref": records_ref},
         },
     }
+    if response_metadata:
+        read["response"]["metadata"] = response_metadata
     if params:
         read["params"] = params
     if pagination:

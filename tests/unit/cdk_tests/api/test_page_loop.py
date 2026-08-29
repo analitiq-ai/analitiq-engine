@@ -55,15 +55,37 @@ def _rows(n: int) -> list[dict[str, Any]]:
 
 
 async def _drain(loop: PageLoop) -> list[list[dict[str, Any]]]:
-    return [records async for records in loop]
+    return [page.records async for page in loop]
 
 
 class TestStopping:
     @pytest.mark.asyncio
     async def test_an_empty_page_ends_the_traversal(self) -> None:
+        # The empty page is yielded before the loop ends: it may carry the
+        # declared response metadata, and the caller decides what an empty
+        # page is worth.
         fetch = _ScriptedFetch([Page(_rows(2)), Page([])])
         loop = PageLoop(_Counting(9), fetch=fetch, stop_when=lambda page: False)
-        assert await _drain(loop) == [_rows(2)]
+        assert await _drain(loop) == [_rows(2), []]
+
+    @pytest.mark.asyncio
+    async def test_the_empty_page_is_neither_evaluated_nor_advanced_from(self) -> None:
+        seen: list[str] = []
+
+        class _Recording(_Counting):
+            def advance(self, page: Page) -> PageRequest | None:
+                seen.append("advance")
+                return super().advance(page)
+
+        def stop_when(page: Page) -> bool:
+            seen.append("stop_when")
+            return False
+
+        fetch = _ScriptedFetch([Page(_rows(1)), Page([])])
+        loop = PageLoop(_Recording(9), fetch=fetch, stop_when=stop_when)
+        await _drain(loop)
+        assert seen == ["stop_when", "advance"]
+        assert len(fetch.requests) == 2
 
     @pytest.mark.asyncio
     async def test_a_short_page_does_not_end_the_traversal(self) -> None:
@@ -125,7 +147,7 @@ class TestLoopOrder:
 
         fetch = _ScriptedFetch([Page(_rows(1)), Page(_rows(1))])
         loop = PageLoop(_Recording(2), fetch=fetch, stop_when=lambda page: False)
-        async for _records in loop:
+        async for _page in loop:
             seen.append("yield")
         assert seen == ["advance", "yield", "advance", "yield"]
 
@@ -143,8 +165,8 @@ class TestLoopOrder:
         loop = PageLoop(_Stuck(9), fetch=fetch, stop_when=lambda page: False)
         yielded: list[Any] = []
         with pytest.raises(ValueError, match="order_by_field"):
-            async for records in loop:
-                yielded.append(records)
+            async for page in loop:
+                yielded.append(page.records)
         assert yielded == []
 
     @pytest.mark.asyncio
@@ -195,8 +217,8 @@ class TestNothingIsDecidedAfterTheCallerHasTheRecords:
         )
         seen: list[list[dict[str, Any]]] = []
         with pytest.raises(ValueError, match="stop condition"):
-            async for records in loop:
-                seen.append(records)
+            async for page in loop:
+                seen.append(page.records)
         assert seen == [], "the page reached the caller before the read failed"
 
     async def test_a_stopping_page_is_never_advanced_from(self) -> None:
