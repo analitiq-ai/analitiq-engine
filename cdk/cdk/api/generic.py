@@ -798,7 +798,11 @@ class GenericAPIConnector(BaseDestinationHandler):
         field that exists here rather than one to test for.
         ``cursor_field`` is what the record schema declares for that
         field -- its JSON type and format -- which is how the stored
-        cursor reads back.
+        cursor reads back. The caller reads it before this runs, so a
+        cursor field the record schema does not declare fails the read
+        even when no mapping names it: an incremental stream over an
+        undeclared field is a document defect, not a full-replication
+        fallback.
         """
         cursor_field_name = stream_replication.cursor_field
         mapping = cursor_mapping_for(declared_replication, cursor_field_name)

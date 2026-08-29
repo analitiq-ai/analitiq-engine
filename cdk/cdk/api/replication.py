@@ -19,12 +19,16 @@ A bound is a value, not a spelling: an epoch bound and an id bound are
 ``int`` so a JSON body carries a number, and the request builder spells a
 query or path value when it puts it on the wire.
 
-The operators say which way each bound faces. The engine sends the same
-value whether a bound is inclusive or not -- inclusiveness is the
-provider's fact, and the safety window already re-reads the boundary --
-but a bound facing the wrong way is refused: a single mapping whose
-operator is ``lt``/``lte`` bounds the read from above and leaves an
-incremental stream nothing to resume from.
+The operators say which way each bound faces. Under ``date-time`` the
+engine sends the same value whether a bound is inclusive or not --
+inclusiveness is the provider's fact, and the safety window already
+re-reads the boundary. Under a format that truncates -- ``date`` and the
+epoch formats -- an exclusive lower bound is rendered one unit earlier:
+``gt`` on the floored value would exclude the whole unit the cursor sits
+in, and every record after the cursor inside that unit with it. A bound
+facing the wrong way is refused: a single mapping whose operator is
+``lt``/``lte`` bounds the read from above and leaves an incremental
+stream nothing to resume from.
 """
 
 from __future__ import annotations
@@ -68,6 +72,9 @@ if _FORMATS != _literal_values(WindowCursorMapping, "format"):
 _LOWER: frozenset[str] = frozenset({"gt", "gte"})
 _UPPER: frozenset[str] = frozenset({"lt", "lte"})
 
+#: The format a bound goes out in when the mapping declares none.
+_DEFAULT_FORMAT = "date-time"
+
 
 _UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
@@ -108,6 +115,12 @@ if set(_RENDER) != set(_FORMATS):
     raise TypeError(
         f"cursor formats {sorted(set(_FORMATS) ^ set(_RENDER))} have no renderer"
     )
+
+#: The formats that truncate a moment, and the unit each truncates to. An
+#: exclusive lower bound under one of these moves back a unit before it is
+#: rendered, so ``gt`` on the floored value cannot exclude the cursor's
+#: own unit. ``date-time`` truncates nothing and is absent.
+_TRUNCATION_UNIT: dict[str, timedelta] = {"date": timedelta(days=1), **_EPOCH_UNIT}
 
 
 def cursor_mapping_for(
@@ -199,8 +212,36 @@ def _parse_iso(cursor: Any) -> datetime:
     return moment.astimezone(timezone.utc)
 
 
-def _render(moment: datetime, fmt: str | None) -> str | int:
-    return _RENDER[fmt](moment) if fmt is not None else _iso(moment)
+def _bound_format(mapping: CursorMapping, cursor_field: FieldDeclaration) -> str:
+    """The format a bound is rendered in.
+
+    The mapping's declared format wins. With none declared the bound keeps
+    the cursor's own vocabulary: a record field declaring an epoch format
+    renders epoch ticks in that unit, and a string moment renders ISO.
+    """
+    if mapping.format is not None:
+        return mapping.format
+    if cursor_field.format in _EPOCH_UNIT:
+        return cursor_field.format
+    return _DEFAULT_FORMAT
+
+
+def _lands_after(lower: str | int, upper: str | int) -> bool:
+    """Whether the rendered lower bound sorts after the rendered upper bound.
+
+    Compared as rendered, not as moments: under a truncating format two
+    moments a few seconds apart render to one value, and a window whose
+    ends render equal is a valid single-unit request, not a reversed one.
+    Both come from one renderer, so they share a type, and in every format
+    the rendered order is the moments' order.
+    """
+    if isinstance(lower, int) and isinstance(upper, int):
+        return lower > upper
+    if isinstance(lower, str) and isinstance(upper, str):
+        return lower > upper
+    raise TypeError(
+        f"bounds {lower!r} and {upper!r} were rendered in different formats"
+    )
 
 
 def check_mapping_direction(mapping: CursorMapping) -> None:
@@ -245,13 +286,15 @@ def cursor_bounds(
     vocabulary: a moment moves back by seconds, a monotonic id by that
     many ids, floored at zero. A window's upper bound is ``now``, rendered
     the same way -- an id cursor has no "now", so a window over one is
-    refused. A window whose start lands after its end -- a cursor ahead
-    of this clock by more than the safety window -- is refused rather than
-    sent: a reversed range is a request a provider answers empty or
-    rejects, and the checkpoint would never move.
+    refused. An exclusive lower bound under a truncating format goes out
+    one unit earlier, so the provider's ``gt`` cannot skip the unit the
+    cursor sits in. A window whose rendered start lands after its
+    rendered end -- a cursor ahead of this clock by more than the safety
+    window -- is refused rather than sent: a reversed range is a request
+    a provider answers empty or rejects, and the checkpoint would never
+    move.
     """
     check_mapping_direction(mapping)
-    fmt = mapping.format
     parsed = _parse_cursor(cursor, cursor_field)
     if isinstance(parsed, int):
         if isinstance(mapping, WindowCursorMapping):
@@ -260,20 +303,27 @@ def cursor_bounds(
                 f"mapping needs a timestamp cursor, or a record field declaring "
                 f"an epoch format"
             )
-        if fmt is not None:
+        if mapping.format is not None:
             raise ReadError(
                 f"cursor value {cursor!r} is an integer id, but the mapping "
-                f"declares format {fmt!r}; an id is sent as itself, and a moment "
-                f"needs the record field to declare an epoch format"
+                f"declares format {mapping.format!r}; an id is sent as itself, "
+                f"and a moment needs the record field to declare an epoch format"
             )
         return {mapping.param: max(0, parsed - safety_window_seconds)}
+    fmt = _bound_format(mapping, cursor_field)
+    render = _RENDER[fmt]
     start = parsed - timedelta(seconds=safety_window_seconds)
-    lower = _render(start, fmt)
+    if isinstance(mapping, SingleCursorMapping):
+        start_operator: str = mapping.operator
+    else:
+        start_operator = mapping.start_operator
+    if start_operator == "gt" and fmt in _TRUNCATION_UNIT:
+        start -= _TRUNCATION_UNIT[fmt]
+    lower = render(start)
     if isinstance(mapping, SingleCursorMapping):
         return {mapping.param: lower}
-    end = now.astimezone(timezone.utc)
-    upper = _render(end, fmt)
-    if start > end:
+    upper = render(now.astimezone(timezone.utc))
+    if _lands_after(lower, upper):
         raise ReadError(
             f"cursor value {cursor!r} is ahead of the run clock by more than "
             f"the safety window: the window start {lower!r} lands after its "

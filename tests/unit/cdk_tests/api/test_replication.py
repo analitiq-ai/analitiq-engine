@@ -150,12 +150,34 @@ class TestSingleBound:
         with pytest.raises(ReadError, match=f"declared as type {field_type!r}"):
             _bounds(_single(), "1", 0, field_type=field_type)
 
-    def test_gt_and_gte_send_the_same_value(self) -> None:
+    def test_gt_and_gte_send_the_same_value_under_date_time(self) -> None:
         # Inclusiveness is the provider's fact; the safety window already
-        # re-reads the boundary.
+        # re-reads the boundary, and date-time truncates nothing.
         gt = _bounds(_single(operator="gt"), "2026-07-31T12:00:00Z", 0)
         gte = _bounds(_single(operator="gte"), "2026-07-31T12:00:00Z", 0)
         assert gt == gte == {"since": "2026-07-31T12:00:00Z"}
+
+    def test_gt_under_a_date_format_goes_out_one_day_earlier(self) -> None:
+        # gt on the floored day would exclude the cursor's whole day, and
+        # with it every record written after 23:00 on the 28th.
+        bounds = _bounds(
+            _single(operator="gt", format="date"), "2026-08-28T23:00:00Z", 120
+        )
+        assert bounds == {"since": "2026-08-27"}
+
+    def test_gt_under_an_epoch_format_goes_out_one_tick_earlier(self) -> None:
+        bounds = _bounds(
+            _single(operator="gt", format="epoch_seconds"),
+            "2026-08-28T23:00:00.700Z",
+            0,
+        )
+        assert bounds == {"since": 1787957999}
+
+    def test_a_window_start_gt_steps_back_the_same_way(self) -> None:
+        bounds = _bounds(
+            _window(start_operator="gt", format="date"), "2026-07-31T23:00:00Z", 0
+        )
+        assert bounds == {"from": "2026-07-30", "to": "2026-08-01"}
 
     @pytest.mark.parametrize("operator", ["lt", "lte"])
     def test_an_upper_bound_alone_cannot_resume_a_read(self, operator: str) -> None:
@@ -209,6 +231,25 @@ class TestFormat:
             field_format=field_format,
         )
         assert bounds == {"since": expected}
+
+    def test_an_undeclared_mapping_format_keeps_an_epoch_cursors_unit(
+        self,
+    ) -> None:
+        # The record field says the cursor is epoch seconds; with no format
+        # on the mapping the bound goes out in that same vocabulary, as a
+        # number, not as an ISO spelling of the moment.
+        bounds = _bounds(
+            _single(),
+            1722427200,
+            120,
+            field_type="integer",
+            field_format="epoch_seconds",
+        )
+        assert bounds == {"since": 1722427080}
+
+    def test_an_undeclared_mapping_format_keeps_an_iso_cursor_iso(self) -> None:
+        bounds = _bounds(_single(), "2026-07-31T12:00:00Z", 120)
+        assert bounds == {"since": "2026-07-31T11:58:00Z"}
 
     def test_an_integer_field_without_a_format_is_an_id(self) -> None:
         assert _bounds(_single(), 1722427200, 120, field_type="integer") == {
@@ -396,3 +437,10 @@ class TestWindowBounds:
     ) -> None:
         bounds = _bounds(_window(), "2026-08-01T09:31:15Z", 60)
         assert bounds == {"from": "2026-08-01T09:30:15Z", "to": "2026-08-01T09:30:15Z"}
+
+    def test_a_window_is_compared_as_rendered_not_as_moments(self) -> None:
+        # A sub-day clock skew past the safety window still renders both
+        # ends to the same day under ``date``; that is a valid one-day
+        # request, not a start after its end.
+        bounds = _bounds(_window(format="date"), "2026-08-01T10:30:00Z", 60)
+        assert bounds == {"from": "2026-08-01", "to": "2026-08-01"}
