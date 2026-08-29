@@ -479,7 +479,7 @@
     "analitiq.contracts.stream.AssignmentTarget": {
       "arrow_type": [
         "src.engine.mapping:239",
-        "src.engine.mapping:378"
+        "src.engine.mapping:380"
       ],
       "nullable": [
         "src.engine.mapping:242"
@@ -530,12 +530,12 @@
     },
     "analitiq.contracts.stream.ConstantAssignmentValue": {
       "constant": [
-        "src.engine.mapping:435"
+        "src.engine.mapping:437"
       ]
     },
     "analitiq.contracts.stream.ConstantValue": {
       "value": [
-        "src.engine.mapping:435"
+        "src.engine.mapping:437"
       ]
     },
     "analitiq.contracts.stream.Filter": {
@@ -607,38 +607,38 @@
     },
     "analitiq.contracts.stream.StreamValidationErrorHandling": {
       "strategy": [
-        "src.engine.mapping:417"
+        "src.engine.mapping:419"
       ]
     },
     "analitiq.contracts.stream.Validation": {
       "error_handling": [
-        "src.engine.mapping:414"
+        "src.engine.mapping:416"
       ],
       "rules": [
-        "src.engine.mapping:395"
+        "src.engine.mapping:397"
       ]
     },
     "analitiq.contracts.stream.ValidationRule": {
       "field": [
-        "src.engine.mapping:1067"
+        "src.engine.mapping:1069"
       ],
       "message": [
-        "src.engine.mapping:1103"
+        "src.engine.mapping:1105"
       ],
       "type": [
-        "src.engine.mapping:1078",
-        "src.engine.mapping:1088",
-        "src.engine.mapping:1105",
-        "src.engine.mapping:1125",
-        "src.engine.mapping:1147",
-        "src.engine.mapping:1153"
+        "src.engine.mapping:1080",
+        "src.engine.mapping:1090",
+        "src.engine.mapping:1107",
+        "src.engine.mapping:1127",
+        "src.engine.mapping:1149",
+        "src.engine.mapping:1155"
       ],
       "value": [
-        "src.engine.mapping:1130",
-        "src.engine.mapping:1133",
-        "src.engine.mapping:1136",
-        "src.engine.mapping:1143",
-        "src.engine.mapping:1162"
+        "src.engine.mapping:1132",
+        "src.engine.mapping:1135",
+        "src.engine.mapping:1138",
+        "src.engine.mapping:1145",
+        "src.engine.mapping:1164"
       ]
     }
   },

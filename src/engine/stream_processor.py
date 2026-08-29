@@ -118,6 +118,23 @@ class DroppedBatch:
     stage: FailureStage
 
 
+@dataclass(frozen=True)
+class SourceBatch:
+    """One batch travelling the stage queues, named by its source sequence.
+
+    ``seq`` is stamped once, as the extract stage reads the batch, and
+    follows it through transform and load: every log line, dead-letter
+    summary and batch metric names the batch by this number, so a batch
+    the transform stage dropped never renumbers the ones behind it. The
+    sequence the load stage puts on the wire is a separate, internal
+    counter -- the destination truncates on wire batch 1, so it must count
+    only batches that were actually sent.
+    """
+
+    seq: int
+    batch: pa.RecordBatch
+
+
 class StreamProcessor:
     """Runs one stream's extract-transform-load-checkpoint pipeline.
 
@@ -199,7 +216,9 @@ class StreamProcessor:
         self.stream_dlq: DeadLetterQueue | None = None
 
         # Set by _load_stage when its batch loop drains with zero batches on
-        # a truncate_insert stream. run() sends the synthetic empty batch
+        # a truncate_insert stream and the transform stage dropped none (a
+        # refresh whose every batch was rejected fails instead). run() sends
+        # the synthetic empty batch
         # only AFTER gather succeeds — a failed extract (which also
         # propagates the None sentinel into the batch loop) never triggers
         # the truncate (issue #312).
@@ -511,8 +530,8 @@ class StreamProcessor:
                 partition=partition,
                 batch_size=self.batch_size,
             ):
-                await queue.put(batch)
                 batch_count += 1
+                await queue.put(SourceBatch(seq=batch_count, batch=batch))
                 logger.debug(
                     "Stream %s: Extracted batch %s with %s records",
                     self.stream_name,
@@ -562,15 +581,12 @@ class StreamProcessor:
         logger.debug("Starting transform stage for stream %s", self.stream_name)
 
         batch_count = 0
-        # Every batch read, passed or rejected; names a rejected batch in
-        # its log line and dead-letter entry.
-        batch_seq = 0
         try:
             while True:
-                batch = await input_queue.get()
-                if batch is None:
+                item = await input_queue.get()
+                if item is None:
                     break
-                batch_seq += 1
+                batch = item.batch
 
                 if self.transform is None:
                     transformed_batch = batch
@@ -586,7 +602,8 @@ class StreamProcessor:
                         # repair: the output batch was never built.
                         await self._apply_disposition(
                             disposition,
-                            batch_seq=batch_seq,
+                            batch_seq=item.seq,
+                            wire_seq=None,
                             record_dicts=batch.to_pylist(),
                         )
                         continue
@@ -595,7 +612,9 @@ class StreamProcessor:
                         self.metrics.batches_failed += 1
                         raise
 
-                await output_queue.put(transformed_batch)
+                await output_queue.put(
+                    SourceBatch(seq=item.seq, batch=transformed_batch)
+                )
                 batch_count += 1
 
                 self.pipeline_metrics.increment_batches_processed()
@@ -688,14 +707,19 @@ class StreamProcessor:
 
         logger.info("Stream %s: Starting gRPC load stage", self.stream_name)
 
-        batch_seq = 0
+        # Counts batches put on the wire. The destination truncates on wire
+        # batch 1 (issue #307), so this must skip the batches the transform
+        # stage dropped; those keep their source sequence for naming.
+        wire_seq = 0
         try:
             while True:
-                batch = await input_queue.get()
-                if batch is None:
+                item = await input_queue.get()
+                if item is None:
                     break
+                batch = item.batch
+                batch_seq = item.seq
 
-                batch_seq += 1
+                wire_seq += 1
 
                 # Materialize once for record-id generation, cursor
                 # extraction, and DLQ payloads. The Arrow batch travels
@@ -739,7 +763,7 @@ class StreamProcessor:
 
                 disposition = await self.batch_policy.run(
                     self._bind_send(
-                        batch_seq=batch_seq,
+                        batch_seq=wire_seq,
                         record_batch=batch,
                         record_ids=record_ids,
                         cursor=cursor,
@@ -750,17 +774,23 @@ class StreamProcessor:
                 if await self._apply_disposition(
                     disposition,
                     batch_seq=batch_seq,
+                    wire_seq=wire_seq,
                     record_dicts=record_dicts,
                 ):
-                    await output_queue.put(batch)
+                    await output_queue.put(item)
 
-            # Record that the batch loop drained with zero batches on a
-            # truncate_insert stream. A failed extract also propagates the
-            # None sentinel here, so this flag alone cannot prove a clean
-            # read — run() sends the synthetic batch only AFTER gather
-            # succeeds, which is what keeps a failed extract from ever
-            # triggering the truncate (issue #312).
-            if batch_seq == 0 and self._is_truncate_insert():
+            if wire_seq == 0 and self._is_truncate_insert():
+                # Nothing reached the wire on a full refresh. Either the
+                # source was empty -- then the destination still has to be
+                # truncated, and run() sends the synthetic batch only AFTER
+                # gather succeeds, so a failed extract (which also propagates
+                # the None sentinel here) never triggers it (issue #312) --
+                # or the transform stage dropped every batch under dlq/skip.
+                # A refresh whose every row was rejected must not empty the
+                # destination and must not count as partial success: it
+                # fails, exactly as a dropped wire batch 1 does.
+                if self.dropped_batches:
+                    raise self._every_batch_rejected()
                 self.zero_batch_truncate_needed = True
 
             # Signal end of stream
@@ -768,7 +798,7 @@ class StreamProcessor:
             logger.info(
                 "Stream %s: gRPC load stage completed with %s batches",
                 self.stream_name,
-                batch_seq,
+                wire_seq,
             )
 
         except Exception as e:
@@ -826,15 +856,18 @@ class StreamProcessor:
         disposition: Disposition,
         *,
         batch_seq: int,
+        wire_seq: int | None,
         record_dicts: list[dict[str, Any]],
     ) -> bool:
         """Carry out the policy's verdict for one batch.
 
-        The single reaction ladder, shared by the batch loop and the
-        zero-batch synthetic truncate. Returns True when the batch stands
-        and should flow to the next stage; returns False when it was
-        dropped and the stream continues without it; raises when the stream
-        must stop.
+        The single reaction ladder, shared by the transform stage, the load
+        stage's batch loop and the zero-batch synthetic truncate.
+        ``batch_seq`` is the source sequence that names the batch;
+        ``wire_seq`` is the sequence it was sent under, None when it never
+        reached the wire. Returns True when the batch stands and should
+        flow to the next stage; returns False when it was dropped and the
+        stream continues without it; raises when the stream must stop.
         """
         if isinstance(disposition, Committed):
             cursor_data, hwm = self._persist_committed_cursor(disposition.cursor)
@@ -900,14 +933,14 @@ class StreamProcessor:
                     stage=FailureStage.DESTINATION_LOAD,
                 )
             )
-            if batch_seq == 1 and self._is_truncate_insert():
-                # The destination truncates on batch_seq 1 (issue #307).
+            if wire_seq == 1 and self._is_truncate_insert():
+                # The destination truncates on wire batch 1 (issue #307).
                 # Dropping the first batch and continuing would let batch 2
                 # append onto the PREVIOUS refresh's rows -- stale data mixed
                 # into a partial snapshot. A full refresh that cannot start
                 # must fail the stream, whatever the strategy decided.
                 raise StreamProcessingError(
-                    f"Batch 1 of a truncate_insert stream failed after "
+                    f"Batch {batch_seq} of a truncate_insert stream failed after "
                     f"{report.attempts} attempts; dropping it would append "
                     f"the rest of the refresh onto the previous run's rows: "
                     f"{report.summary}",
@@ -983,7 +1016,9 @@ class StreamProcessor:
             label=f"Stream {self.stream_name}: synthetic truncate batch",
         )
         try:
-            await self._apply_disposition(disposition, batch_seq=1, record_dicts=[])
+            await self._apply_disposition(
+                disposition, batch_seq=1, wire_seq=1, record_dicts=[]
+            )
         except Exception as e:
             # This send runs outside the load stage, so the stage tag its
             # except clause applies has to be applied here instead --
@@ -1062,13 +1097,7 @@ class StreamProcessor:
             logger.info("Stream %s completed successfully", self.stream_name)
             return "success", None, None, None
 
-        error_code = dominant_error_code(d.code for d in self.dropped_batches)
-        if error_code is None:
-            error_code = ErrorCode.DESTINATION_WRITE_FAILED
-        stage = next(
-            (d.stage for d in self.dropped_batches if d.code is error_code),
-            FailureStage.DESTINATION_LOAD,
-        )
+        error_code, stage = self._dominant_dropped_cause()
         # 'skip' drops batches without a DLQ entry, so those records are NOT
         # recoverable; do not imply dead-lettering. Rules carry their own
         # strategies, so one stream can have both skipped and dead-lettered
@@ -1094,6 +1123,35 @@ class StreamProcessor:
             action,
         )
         return "partial", error_code, customer_message(error_code), error_detail
+
+    def _dominant_dropped_cause(self) -> tuple[ErrorCode, FailureStage]:
+        """Name the code and stage of a run's dropped batches as a whole."""
+        error_code = dominant_error_code(d.code for d in self.dropped_batches)
+        if error_code is None:
+            error_code = ErrorCode.DESTINATION_WRITE_FAILED
+        stage = next(
+            (d.stage for d in self.dropped_batches if d.code is error_code),
+            FailureStage.DESTINATION_LOAD,
+        )
+        return error_code, stage
+
+    def _every_batch_rejected(self) -> StreamProcessingError:
+        """Build the failure for a refresh whose every batch was dropped before load.
+
+        Tagged with the dropped batches' own cause (the transform stage,
+        for a validation rejection) so the load stage's boundary tag --
+        no-overwrite -- cannot relabel it a destination failure.
+        """
+        code, stage = self._dominant_dropped_cause()
+        failure = StreamProcessingError(
+            f"every batch of a truncate_insert stream was dropped before "
+            f"load ({len(self.dropped_batches)} batch(es), "
+            f"{self.metrics.records_failed} records); refusing to truncate "
+            f"the destination for a refresh that landed nothing",
+            stream_id=self.stream_id,
+        )
+        tag_failure(failure, code=code, stage=stage)
+        return failure
 
     async def _disconnect(self) -> None:
         """Disconnect the destination client, logging (not raising) failures."""

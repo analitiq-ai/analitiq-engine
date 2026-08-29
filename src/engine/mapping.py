@@ -284,8 +284,10 @@ class CompiledTransform:
 
         Raises :class:`TransformationError` if any column fails to build, any
         conversion is rejected, or a non-nullable column ends up with nulls;
-        that is a mapping defect whatever the rules say, so rule failures on
-        the same batch ride along in its message. Otherwise raises
+        that is a mapping defect whatever the rules say. A build or
+        conversion failure raises on the spot, before the rules have been
+        reported; a non-nullable null is collected, and the rule failures on
+        the same batch ride along in that message. Otherwise raises
         :class:`ValidationFailure` if any rule fails on any row, naming the
         column and the offending rows and carrying the strictest strategy
         among the failed rules.
