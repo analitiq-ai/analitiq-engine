@@ -225,7 +225,9 @@ class TestWorkerSideRuntime:
         # The payload's connection_config is parsed as the contract's
         # connection document; a payload carrying anything else is
         # malformed and refused at the boundary, not read as settings.
-        with pytest.raises(ValidationError, match="connector_id"):
+        with pytest.raises(
+            ValueError, match="my-file.*connection_config"
+        ):
             ConnectionRuntime.from_resolved_payload(
                 {
                     "connection_id": "my-file",

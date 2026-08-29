@@ -75,7 +75,7 @@ from analitiq.contracts.endpoints import (
     Predicate,
 )
 from analitiq.contracts.pipelines.config import PipelineInput
-from analitiq.contracts.stream import AssignmentTarget, StreamInput
+from analitiq.contracts.stream import AssignmentTarget, StreamInput, StreamMapping
 from mypy import build
 from mypy.main import process_options
 from mypy.nodes import CallExpr
@@ -129,6 +129,9 @@ OPAQUE: Final[tuple[tuple[Any, str], ...]] = (
     (Expression, "cdk.resolver"),
     (Column, "cdk.schema_contract"),
     (AssignmentTarget, "cdk.type_map.arrow"),
+    # The stream mapping is the engine's own MappingDocument's grammar,
+    # parsed from the authored JSON.
+    (StreamMapping, "src.engine.mapping"),
     # A transport block is a grammar the transport factory walks (DSN
     # templates, bindings, TLS, options), merged over the defaults block.
     (Transport, "cdk.transport_factory"),

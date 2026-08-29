@@ -8,10 +8,11 @@ boundary are the contract documents serialised back to JSON-safe dicts
 
 ``ConnectionRuntime`` and the contract documents (endpoint document, stream
 source, destination write block) live as explicit typed fields rather than
-``_runtime`` / ``_endpoint`` magic dict keys. The dumps below are the one
-place a document is serialised again: for the worker bootstrap and for the
-published bundle validator, both of which parse it back as the same contract
-model.
+``_runtime`` / ``_endpoint`` magic dict keys. :func:`dump_authored` is where
+the engine serialises a document again (the connection runtime's worker
+payload is the other): the worker bootstrap and the published bundle
+validator parse it back as the same contract model, and the stream mapping
+is parsed by the engine's own ``MappingDocument``.
 """
 
 from __future__ import annotations
@@ -87,10 +88,11 @@ def dump_authored(document: AuthoredDocument) -> dict[str, Any]:
     """Serialise an authored document for a reader that parses it back.
 
     The one dump for every document that crosses a boundary whole. The
-    reader parses the JSON into the same contract models, so ``by_alias``
-    restores the contract's field names (``$schema``, ``schema``) and
-    ``exclude_unset`` keeps the author's omissions omitted, never baking the
-    model's defaults into the wire shape.
+    reader parses the JSON back -- into the same contract model, or, for the
+    mapping, into the engine's ``MappingDocument`` reading of that grammar --
+    so ``by_alias`` restores the contract's field names (``$schema``,
+    ``schema``) and ``exclude_unset`` keeps the author's omissions omitted,
+    never baking the model's defaults into the wire shape.
     """
     return document.model_dump(mode="json", by_alias=True, exclude_unset=True)
 
@@ -267,7 +269,8 @@ class ResolvedStream:
 
     Carries what the run reads and nothing else: a stream's display name,
     description, status and tags are authoring metadata the engine never
-    acts on (the bundle validator gates on status before this is built).
+    acts on (the bundle validator requires an active pipeline with at least
+    one active stream; per-stream status is not acted on by the engine).
     """
 
     stream_id: str

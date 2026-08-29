@@ -1,6 +1,6 @@
 """ConnectionRuntime — connector-driven connection materialization.
 
-A :class:`ConnectionRuntime` ties together a saved connection JSON, the
+A :class:`ConnectionRuntime` ties together the validated connection document, the
 connector definition that describes how to use it, and the secret store
 that fills in credential values. It is the single place the engine touches
 provider configuration: everything provider-specific is encoded in the
@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from analitiq.contracts.connection import ConnectionInput
 from analitiq.contracts.connector import Connector, DatabaseConnector
+from pydantic import ValidationError
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -470,8 +471,10 @@ class ConnectionRuntime:
         session-init statements (``session_init_sql``): without a dialect
         no session state is pinned.
 
-        Connectors without a ``transports`` block (file/s3/stdout) expose
-        ``resolved_config`` directly — they have no shared transport.
+        A connector whose transports the factory has no kind for (the
+        contract's file/s3/stdout transports are not registered there yet)
+        cannot materialize; the ``resolved_config`` branch below serves a
+        runtime built without a connector definition.
 
         ``transport_refs`` names the non-default transports this run's
         operations dispatch through (their ``request.transport_ref``).
@@ -521,8 +524,7 @@ class ConnectionRuntime:
                 self._scrub_secrets()
             await self._open_default_transport(sql_dialect=sql_dialect)
         else:
-            # file/s3/stdout connectors: expose ``resolved_config``
-            # directly. They have no transports block by design.
+            # No transport to build: expose ``resolved_config`` directly.
             self._resolved_config = self._merge_secrets_into_config(secrets)
 
         self._materialized = True
@@ -783,10 +785,15 @@ class ConnectionRuntime:
         ``connection.parameters.*`` refs; a payload whose document does not
         satisfy the contract is malformed and refused here.
         """
+        try:
+            connection = ConnectionInput.model_validate(payload["connection_config"])
+        except ValidationError as err:
+            raise ValueError(
+                f"worker bootstrap for connection {payload['connection_id']!r}: "
+                f"connection_config does not satisfy the connection contract: {err}"
+            ) from err
         runtime = cls(
-            connection=ConnectionInput.model_validate(
-                payload.get("connection_config") or {}
-            ),
+            connection=connection,
             connection_id=payload["connection_id"],
             connector_id=payload["connector_id"],
             connector_type=payload["connector_type"],
@@ -1156,8 +1163,8 @@ class ConnectionRuntime:
 
         Serves file/s3/stdout consumers, which expose ``resolved_config``
         directly instead of a transport object: the connection's authored
-        ``parameters`` and the resolved secret values, under the two scope
-        names a value expression would address them by.
+        ``parameters`` (the connection subtree) and the resolved secret
+        values (the ``secrets`` scope), each under its own name.
         """
         return {
             "parameters": dict(self._connection.parameters),

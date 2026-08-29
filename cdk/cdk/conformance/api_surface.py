@@ -284,7 +284,7 @@ def fillable_at_request_time(declared: Any) -> bool:
     restated: an expression defers exactly when everything it reads is a
     connection value a run's request resolution will fill. One reading
     ``secrets.*``, ``auth.*`` -- or a connection field outside the supplied
-    subtrees, like ``connection.name`` -- resolves on no run, so it is a
+    subtrees, like ``connection.hostname`` -- resolves on no run, so it is a
     defect to report, never a value to defer.
     """
     paths = scope_paths(declared)

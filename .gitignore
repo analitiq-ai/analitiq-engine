@@ -173,8 +173,11 @@ cython_debug/
 # Config directories - populated at runtime (connectors from GitHub, connections user-created, pipelines via manifest).
 # Anchored to the project root so the rules don't accidentally match
 # src/destination/connectors/ (which IS source code we ship).
+/connectors
 /connectors/
+/connections
 /connections/
+/pipelines
 /pipelines/
 
 # Runtime state files - These contain pipeline execution state and should not be committed
