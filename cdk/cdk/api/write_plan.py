@@ -31,7 +31,7 @@ from analitiq.contracts.endpoints import (
 
 from ..exceptions import TransportSpecError
 from ..record_identity import record_digest
-from ..resolver import Resolver
+from ..resolver import Resolver, scope_paths
 from ..transport_factory import require_wire_safe_header_name
 from ..types import RetrySemantics, RetryVerdict, SchemaSpec
 from .body import FORM_CONTENT_TYPE, media_type
@@ -44,6 +44,7 @@ from .request import (
     request_block_problem,
     substitute_path,
 )
+from .write_response import WRITE_SCOPE_KEYS
 
 __all__ = [
     "WRITE_MODE_KEYS",
@@ -130,6 +131,9 @@ class StreamWritePlan:
     response: WriteResponse | None = None
 
 
+_RESPONSE_PREFIX = "response."
+
+
 def declared_expressions(declared: WriteResponse) -> list[Any]:
     """Every expression the block declares, for a check that reads them all.
 
@@ -149,6 +153,31 @@ def declared_expressions(declared: WriteResponse) -> list[Any]:
     if declared.metadata is not None:
         nodes += list(declared.metadata.values())
     return [node for node in nodes if node is not None]
+
+
+def response_scope_problem(declared: WriteResponse) -> str | None:
+    """Why the block reads what no write response carries, or ``None``.
+
+    The contract resolves ``response.body`` paths against the declared
+    response schema and leaves the other sub-scopes to their engine-side
+    owner; on the write path that owner is
+    :func:`~cdk.api.write_response.write_response_scope`. A reference
+    outside it resolves to nothing on every response, so ``success_when``
+    holds false on every batch and each is reported as a provider
+    rejection for what is an authoring defect. Judged here, before the
+    first write, through the same walker the read-path kit uses.
+    """
+    for lookup in dict.fromkeys(scope_paths(declared_expressions(declared))):
+        if not lookup.startswith(_RESPONSE_PREFIX):
+            continue
+        scope = lookup[len(_RESPONSE_PREFIX) :].split(".")[0]
+        if scope not in WRITE_SCOPE_KEYS:
+            return (
+                f"reads {lookup!r}, but a write response carries only "
+                f"{', '.join(repr(k) for k in WRITE_SCOPE_KEYS)} under "
+                f"'response'; this resolves to nothing on every response"
+            )
+    return None
 
 
 def write_mode_block(doc: ApiEndpointDoc, mode_key: WriteMode) -> WriteOperation | None:
@@ -492,7 +521,7 @@ def build_write_plan(
         # answer cannot be read, and it is reported failed either way.
         problem = resolver.unknown_function_problem(
             declared_expressions(mode_block.response)
-        )
+        ) or response_scope_problem(mode_block.response)
         if problem is not None:
             return f"response block on endpoint {endpoint_id!r}: {problem}"
     try:

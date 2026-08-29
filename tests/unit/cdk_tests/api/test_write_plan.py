@@ -211,6 +211,50 @@ class TestDeclaredResponseRefusals:
         assert "response block" in outcome
         assert "unknown derived function 'no_such_function'" in outcome
 
+    def test_a_reference_outside_the_write_scope_is_refused_at_configure(
+        self,
+    ) -> None:
+        # `response.records` is a read-side spelling; a write response
+        # carries body, headers, status and metadata and nothing else, so
+        # this resolves to nothing on every batch and each would be
+        # reported as a provider rejection.
+        outcome = build_write_plan(
+            _document(
+                response={"success_when": {"not_empty": {"ref": "response.records"}}}
+            ),
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
+        )
+        assert isinstance(outcome, str)
+        assert "response block" in outcome
+        assert "reads 'response.records'" in outcome
+
+    @pytest.mark.parametrize(
+        "ref",
+        [
+            "response.body.ok",
+            "response.headers.Location",
+            "response.status",
+            "response.metadata.batch_id",
+        ],
+    )
+    def test_every_write_scope_key_is_accepted(self, ref: str) -> None:
+        plan = build_write_plan(
+            _document(
+                response={
+                    "metadata": {"batch_id": {"ref": "response.body.id"}},
+                    "success_when": {"exists": {"ref": ref}},
+                }
+            ),
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
+        )
+        assert isinstance(plan, StreamWritePlan)
+
 
 class TestModeDispatch:
     def test_the_declared_mode_selects_its_block(self) -> None:

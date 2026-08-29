@@ -16,16 +16,34 @@ predicate runs through the one evaluator the read side's ``stop_when`` uses.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from analitiq.contracts.endpoints import WriteError, WriteResponse
 
 from ..resolver import Resolver
 from .exceptions import request_spec_errors
-from .http import Received
 from .predicates import evaluate_predicate
 
-__all__ = ["DeclaredWriteFailure", "WriteOutcome", "judge_write_response"]
+if TYPE_CHECKING:
+    # A type only: importing the client module would drag aiohttp into
+    # the write plan, which the conformance kit loads with no HTTP client.
+    from .http import Received
+
+__all__ = [
+    "WRITE_SCOPE_KEYS",
+    "DeclaredWriteFailure",
+    "WriteOutcome",
+    "judge_write_response",
+    "write_response_scope",
+]
+
+#: The keys of the ``response`` scope a write's declared expressions read,
+#: named once for :func:`write_response_scope` and :data:`WRITE_SCOPE_KEYS`
+#: alike, as the read path names its page scope.
+_SCOPE_BODY = "body"
+_SCOPE_HEADERS = "headers"
+_SCOPE_STATUS = "status"
+_SCOPE_METADATA = "metadata"
 
 
 class DeclaredWriteFailure(Exception):
@@ -47,6 +65,31 @@ class WriteOutcome:
     @property
     def has_extractions(self) -> bool:
         return self.generated_keys is not None or self.metadata is not None
+
+
+def write_response_scope(
+    received: Received, metadata: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Build the ``response`` scope a write's declared expressions resolve against.
+
+    ``metadata`` is the block's own resolved ``metadata`` map, present once
+    it has been read so the other expressions can address the declared
+    keys under ``response.metadata.<key>``, which the contract admits on a
+    write response. Built here and nowhere else so the configure-time
+    check in :func:`~cdk.api.write_plan.build_write_plan` refuses exactly
+    the references a run could never resolve.
+    """
+    return {
+        _SCOPE_BODY: received.payload,
+        _SCOPE_HEADERS: received.headers,
+        _SCOPE_STATUS: received.status,
+        _SCOPE_METADATA: metadata,
+    }
+
+
+#: What :func:`write_response_scope` carries under ``response``. Every
+#: declared write-response reference must anchor at one of these.
+WRITE_SCOPE_KEYS = (_SCOPE_BODY, _SCOPE_HEADERS, _SCOPE_STATUS, _SCOPE_METADATA)
 
 
 def _failure_detail(declared: WriteError | None, resolver: Resolver, body: Any) -> str:
@@ -85,22 +128,16 @@ def judge_write_response(
     build does: that is a configuration failure, not a rejected record.
     """
     with request_spec_errors("write response"):
-        scope: dict[str, Any] = {
-            "body": received.payload,
-            "headers": received.headers,
-            "status": received.status,
-        }
-        scoped = resolver.with_response(scope)
+        scoped = resolver.with_response(write_response_scope(received))
         metadata: dict[str, Any] | None = None
         if declared.metadata is not None:
             # Resolved first so the other expressions can read the declared
-            # keys under `response.metadata.<key>`, which the contract
-            # admits on a write response.
+            # keys under `response.metadata.<key>`.
             metadata = {
                 key: scoped.resolve_for_request(expression)
                 for key, expression in declared.metadata.items()
             }
-            scoped = resolver.with_response({**scope, "metadata": metadata})
+            scoped = resolver.with_response(write_response_scope(received, metadata))
 
         if declared.success_when is not None and not evaluate_predicate(
             declared.success_when, scoped.resolve_for_request
