@@ -19,6 +19,7 @@ from typing import Any
 
 import pyarrow as pa
 
+from cdk.batch_metadata import response_metadata_of
 from cdk.contract import Readable
 from cdk.types import CheckpointStore
 
@@ -108,6 +109,11 @@ class StreamMetrics:
     records_skipped: int = 0
     batches_processed: int = 0
     batches_failed: int = 0
+    # The last page's resolved ``response.metadata`` -- a provider's total
+    # count, its remaining rate-limit budget. Last, not first: the final
+    # page is the one whose totals describe the whole read. None when the
+    # source declares no metadata.
+    response_metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -530,6 +536,11 @@ class StreamProcessor:
                 partition=partition,
                 batch_size=self.batch_size,
             ):
+                # Read before the batch is published: transform and load run
+                # concurrently with extract, so a slot that fails to decode
+                # after the put could be committed downstream before the
+                # failure is observed.
+                response_metadata = response_metadata_of(batch)
                 batch_count += 1
                 await queue.put(SourceBatch(seq=batch_count, batch=batch))
                 logger.debug(
@@ -538,6 +549,14 @@ class StreamProcessor:
                     batch_count,
                     len(batch),
                 )
+                if response_metadata is not None:
+                    self.metrics.response_metadata = response_metadata
+                    logger.info(
+                        "Stream %s: batch %s response metadata %s",
+                        self.stream_name,
+                        batch_count,
+                        response_metadata,
+                    )
 
             # Signal end of stream
             await queue.put(None)
@@ -1224,6 +1243,7 @@ class StreamProcessor:
                 records_failed=self.metrics.records_failed,
                 records_skipped=self.metrics.records_skipped,
                 batches_processed=self.metrics.batches_processed,
+                response_metadata=self.metrics.response_metadata,
                 status=status,
                 error_code=error_code,
                 error_message=error_message,

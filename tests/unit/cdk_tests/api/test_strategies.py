@@ -354,5 +354,5 @@ class TestThroughTheLoop:
                 fetch=_scripted([Page(_rows(2)), Page(_rows(2, start=2)), Page([])]),
                 stop_when=lambda page: False,
             )
-            collected = [records async for records in loop]
-            assert collected == [_rows(2), _rows(2, start=2)], block["type"]
+            collected = [page.records async for page in loop]
+            assert collected == [_rows(2), _rows(2, start=2), []], block["type"]

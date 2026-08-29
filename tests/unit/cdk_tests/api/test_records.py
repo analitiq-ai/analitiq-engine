@@ -10,12 +10,33 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from analitiq.contracts.endpoints import ResponseExtraction
 
 from cdk.api.page_loop import Page
-from cdk.api.records import extract_records, page_scope, split_records_ref, walk_path
+from cdk.api.records import (
+    extract_records,
+    page_scope,
+    resolve_response_metadata,
+    split_records_ref,
+    walk_path,
+)
 from cdk.exceptions import ReadError
+from cdk.resolver import ResolutionContext, Resolver
 
 pytestmark = pytest.mark.unit
+
+
+def _metadata(block: dict[str, Any]) -> dict[str, Any]:
+    """The block as the contract parses it, so the test resolves models."""
+    extraction = ResponseExtraction.model_validate(
+        {
+            "records": {"ref": "response.body.records"},
+            "schema": {"type": "object", "properties": {"records": {"type": "array"}}},
+            "metadata": block,
+        }
+    )
+    assert extraction.metadata is not None
+    return extraction.metadata
 
 
 class TestSplitRecordsRef:
@@ -121,3 +142,38 @@ class TestASuccessWithNoBody:
         # read as a complete one.
         with pytest.raises(ReadError, match="carries no records"):
             extract_records("not a page", "response.body")
+
+
+class TestResolveResponseMetadata:
+    """The declared block, resolved through the page's own scope."""
+
+    def _resolver(self) -> Resolver:
+        return Resolver(ResolutionContext())
+
+    def test_every_declared_key_lands_in_the_result(self) -> None:
+        page = Page(records=[{"id": 1}], payload={"records": [{"id": 1}], "total": 9})
+        declared = _metadata(
+            {
+                "total": {"ref": "response.body.total"},
+                "count": {"ref": "response.record_count"},
+                "fixed": {"literal": "x"},
+            }
+        )
+        assert resolve_response_metadata(declared, self._resolver(), page) == {
+            "total": 9,
+            "count": 1,
+            "fixed": "x",
+        }
+
+    def test_a_missing_value_is_none(self) -> None:
+        page = Page(records=[{"id": 1}], payload={"records": [{"id": 1}]})
+        declared = _metadata({"total": {"ref": "response.body.total"}})
+        assert resolve_response_metadata(declared, self._resolver(), page) == {
+            "total": None
+        }
+
+    def test_an_authoring_defect_is_a_read_error_naming_the_key(self) -> None:
+        page = Page(records=[{"id": 1}], payload={"records": [{"id": 1}]})
+        declared = _metadata({"nope": {"function": "no_such_function"}})
+        with pytest.raises(ReadError, match="response.metadata 'nope'"):
+            resolve_response_metadata(declared, self._resolver(), page)

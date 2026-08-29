@@ -15,17 +15,23 @@ naming the mistake.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any
+
+from analitiq.contracts.endpoints import Expression
 
 from ..exceptions import ReadError
 from ..resolver import Resolver
-from .page_loop import Page
+from .exceptions import read_spec_errors
+from .page_loop import Page, Resolve
 
 __all__ = [
     "PAGE_SCOPE_KEYS",
     "extract_records",
+    "page_expression_resolver",
     "page_resolver",
     "page_scope",
+    "resolve_response_metadata",
     "split_records_ref",
     "walk_path",
 ]
@@ -154,3 +160,46 @@ def page_resolver(resolver: Resolver, page: Page | None) -> Resolver:
     copy is a rule that drifts.
     """
     return resolver if page is None else resolver.with_response(page_scope(page))
+
+
+def page_expression_resolver(resolver: Resolver, label: str) -> Resolve:
+    """Resolve one declared expression against a page, failing as a read error.
+
+    The one way a per-page expression is resolved: through the page scope
+    :func:`page_resolver` builds and across the
+    :func:`~cdk.api.exceptions.read_spec_errors` boundary, so a defect
+    inside it is classified where it happens rather than by whichever catch
+    site happened to list its exception type. *label* names what the
+    message attributes the defect to.
+    """
+
+    def resolve(expr: Any, page: Page | None) -> Any:
+        with read_spec_errors(label):
+            return page_resolver(resolver, page).resolve_for_request(expr)
+
+    return resolve
+
+
+def resolve_response_metadata(
+    declared: Mapping[str, Expression],
+    resolver: Resolver,
+    page: Page,
+) -> dict[str, Any]:
+    """Resolve the read's declared ``response.metadata`` against one page.
+
+    Every declared key lands in the result, through the same page scope and
+    the same request-time policy ``stop_when`` and ``next_cursor`` use: a
+    ``ref`` the provider did not send this page is ``None`` and a
+    ``template`` over one renders its placeholder empty (the contract's rule
+    7, with the resolver's warning), because a provider that omits its
+    total on one page has not made the records on it wrong. An authoring
+    defect -- an unknown scope, a template over an object -- is a
+    :class:`~cdk.exceptions.ReadError` naming the key, since it never heals
+    on a retry.
+    """
+    return {
+        key: page_expression_resolver(resolver, f"response.metadata {key!r}")(
+            expression, page
+        )
+        for key, expression in declared.items()
+    }

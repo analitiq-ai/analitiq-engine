@@ -38,7 +38,7 @@ from analitiq.contracts.endpoints import (
     Pagination,
 )
 
-from .page_loop import Page, PageRequest, PaginationStrategy
+from .page_loop import Page, PageRequest, PaginationStrategy, Resolve
 from .records import walk_path
 
 __all__ = [
@@ -73,9 +73,6 @@ PRE_PAGE_VALUE_PATHS: tuple[tuple[str, ...], ...] = (
 #: recognizing THIS refusal (the conformance kit's arming drives) matches
 #: the raise site's own words instead of a copied string that drifts.
 KEYSET_REFUSAL_MARKER = "keyset.order_by_field"
-
-#: Resolves a declared value expression against the page it was written for.
-Resolve = Callable[[Any, Page | None], Any]
 
 #: Resolves a provider-supplied next-page URL against the page it came from.
 #: Injected rather than imported: the rules about a URL -- the same-origin

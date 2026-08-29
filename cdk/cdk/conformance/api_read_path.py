@@ -317,10 +317,19 @@ def _compile_read(
     # connector declares a dispatchable transport for.
     origin = api_base_url(target, request_block.transport_ref) or STAND_IN_ORIGIN
     pagination = read.pagination
-    if pagination is not None:
-        scope_problem = _page_scope_problem(pagination)
-        if scope_problem is not None:
-            raise ReadError(scope_problem)
+    scope_problem = _page_scope_problem(read)
+    if scope_problem is not None:
+        raise ReadError(scope_problem)
+    # The kit never resolves a metadata expression (it fetches no page), so
+    # a function name only the engine's closed registry could refuse would
+    # otherwise certify and die on the connector's first page.
+    metadata_nodes = [
+        authored_json(expression)
+        for expression in (read.response.metadata or {}).values()
+    ]
+    function_problem = resolver.unknown_function_problem(metadata_nodes)
+    if function_problem is not None:
+        raise ReadError(f"response.metadata: {function_problem}")
     probe = _ReadProbe(
         label=label,
         read=read,
@@ -339,8 +348,8 @@ def _compile_read(
     )
 
 
-def _page_scope_problem(pagination: Pagination) -> str | None:
-    """Why a pagination reference addresses what no page carries, or ``None``.
+def _page_scope_problem(read: ReadOperation) -> str | None:
+    """Why a per-page reference addresses what no page carries, or ``None``.
 
     The half of the retired reference check the contract did not take:
     RULE-ENDP-023 resolves ``response.body`` paths against the declared
@@ -353,21 +362,29 @@ def _page_scope_problem(pagination: Pagination) -> str | None:
     condition on it holds at page one and the stream stops there reporting
     success; an ``exists`` condition never holds and the read runs to
     exhaustion; a next cursor or link resolves to nothing and the
-    traversal ends after one page.
+    traversal ends after one page. A ``response.metadata`` value on it is
+    ``None`` on every page, so a header-borne rate-limit budget would be
+    declared and never surface.
     """
-    for lookup in dict.fromkeys(scope_paths(pagination)):
-        if not lookup.startswith(_RESPONSE_PREFIX):
-            continue
-        scope = lookup[len(_RESPONSE_PREFIX) :].split(".")[0]
-        if scope not in _PAGE_SCOPE_KEYS:
-            return (
-                f"pagination reads {lookup!r}, but a read's page carries "
-                f"only {', '.join(repr(k) for k in _PAGE_SCOPE_KEYS)} under "
-                f"'response' -- the contract reserves the other response "
-                f"sub-scopes for the engine, and the read path does not put "
-                f"them in the page scope. This resolves to nothing on every "
-                f"page."
-            )
+    blocks: list[tuple[str, Any]] = []
+    if read.pagination is not None:
+        blocks.append(("pagination", read.pagination))
+    for key, expression in (read.response.metadata or {}).items():
+        blocks.append((f"response.metadata {key!r}", expression))
+    for block, node in blocks:
+        for lookup in dict.fromkeys(scope_paths(node)):
+            if not lookup.startswith(_RESPONSE_PREFIX):
+                continue
+            scope = lookup[len(_RESPONSE_PREFIX) :].split(".")[0]
+            if scope not in _PAGE_SCOPE_KEYS:
+                return (
+                    f"{block} reads {lookup!r}, but a read's page carries "
+                    f"only {', '.join(repr(k) for k in _PAGE_SCOPE_KEYS)} "
+                    f"under 'response' -- the contract reserves the other "
+                    f"response sub-scopes for the engine, and the read path "
+                    f"does not put them in the page scope. This resolves to "
+                    f"nothing on every page."
+                )
     return None
 
 

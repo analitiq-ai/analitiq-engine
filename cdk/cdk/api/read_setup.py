@@ -20,41 +20,20 @@ which is why the read settles all of it before a single page is fetched.
 from __future__ import annotations
 
 from functools import partial
-from typing import Any
 
 from analitiq.contracts.endpoints import Pagination, Predicate
 
 from ..exceptions import ReadError
 from ..resolver import Resolver
-from .exceptions import RequestSpecError, request_spec_errors
+from .exceptions import RequestSpecError, read_spec_errors, request_spec_errors
 from .page_loop import Page, PaginationStrategy, StopCondition
 from .predicates import evaluate_predicate
-from .records import page_resolver
+from .records import page_expression_resolver, page_resolver
 from .request import ParamTable
-from .strategies import Resolve, build_strategy, resolve_page_size
+from .strategies import build_strategy, resolve_page_size
 from .urls import follow_url
 
-__all__ = ["build_read_strategy", "page_expression_resolver", "stop_condition"]
-
-
-def page_expression_resolver(resolver: Resolver) -> Resolve:
-    """Adapt the read's resolver to what a strategy asks of it.
-
-    The resolution boundary is :func:`~cdk.api.exceptions.request_spec_errors`,
-    the same one the request build uses, so a defect inside a pagination
-    expression is classified where it happens rather than by whichever
-    catch site happened to list its exception type. The read error is what
-    the traversal's callers already handle.
-    """
-
-    def resolve(expr: Any, page: Page | None) -> Any:
-        try:
-            with request_spec_errors("pagination expression"):
-                return page_resolver(resolver, page).resolve_for_request(expr)
-        except RequestSpecError as err:
-            raise ReadError(str(err)) from err
-
-    return resolve
+__all__ = ["build_read_strategy", "stop_condition"]
 
 
 def stop_condition(declared: Predicate | None, resolver: Resolver) -> StopCondition:
@@ -65,13 +44,12 @@ def stop_condition(declared: Predicate | None, resolver: Resolver) -> StopCondit
             # No pagination block, so the strategy already ends the
             # traversal after its one page.
             return False
-        try:
-            with request_spec_errors("pagination stop_when"):
-                return evaluate_predicate(
-                    declared, page_resolver(resolver, page).resolve_for_request
-                )
-        except RequestSpecError as err:
-            raise ReadError(str(err)) from err
+        # The whole predicate sits inside the boundary, not only its
+        # operands: an incomparable pair is the evaluator's own defect.
+        with read_spec_errors("pagination stop_when"):
+            return evaluate_predicate(
+                declared, page_resolver(resolver, page).resolve_for_request
+            )
 
     return stop_when
 
@@ -120,7 +98,7 @@ def build_read_strategy(
                 pagination,
                 url=url,
                 base_params=base_params,
-                resolve=page_expression_resolver(resolver),
+                resolve=page_expression_resolver(resolver, "pagination expression"),
                 follow_url=partial(follow_url, origin=origin),
             )
     except RequestSpecError as err:

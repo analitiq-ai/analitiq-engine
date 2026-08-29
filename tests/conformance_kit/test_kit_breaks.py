@@ -1313,6 +1313,37 @@ class TestApiReadPathBreaks:
         assert "'response.headers.x-next'" in report
         assert "carries only 'body', 'record_count'" in report
 
+    def test_a_metadata_value_off_the_page_scope_is_refused_at_compile(
+        self, tmp_path: Path
+    ) -> None:
+        """The metadata half: a header-borne budget would be None on every page."""
+
+        def bend(read: dict[str, Any]) -> None:
+            read["response"]["metadata"] = {
+                "remaining": {"ref": "response.headers.x-rate-limit-remaining"}
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "response.metadata 'remaining'" in report
+        assert "'response.headers.x-rate-limit-remaining'" in report
+        assert "resolves to nothing on every page" in report
+
+    def test_a_metadata_function_outside_the_registry_is_refused_at_compile(
+        self, tmp_path: Path
+    ) -> None:
+        """The kit resolves no metadata expression, so the registry check must."""
+
+        def bend(read: dict[str, Any]) -> None:
+            read["response"]["metadata"] = {
+                "total": {"function": "no_such_function", "input": {"literal": "x"}}
+            }
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "response.metadata" in report
+        assert "unknown derived function 'no_such_function'" in report
+
     def test_a_stop_condition_off_the_page_scope_is_refused_at_compile(
         self, tmp_path: Path
     ) -> None:

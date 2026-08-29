@@ -1,11 +1,35 @@
 """JSON helpers shared by the CDK (Json-typed column decoding, authored form)."""
 
 import json
+from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel
 
-__all__ = ["authored_json", "decode_json_fields"]
+__all__ = ["authored_json", "decimals_to_float", "decode_json_fields"]
+
+
+def decimals_to_float(value: Any) -> Any:
+    """Replace every ``Decimal`` with ``float`` inside a value bound for JSON.
+
+    The API reader parses bodies with ``parse_float=Decimal`` so a row value
+    reaches its typed column exact. Anything that leaves the CDK as a JSON
+    document instead -- a ``Json`` column's blob, a batch's response
+    metadata -- carries no per-field type, so a number in it is a JSON
+    number: ``json.dumps`` cannot spell a ``Decimal`` and a string would
+    turn the provider's number into text. This is the one rule for that
+    narrowing; ``float(Decimal(token))`` equals ``float(token)``. The dump
+    itself refuses a non-finite result (``allow_nan=False``): ``1e400``
+    narrows to infinity and a permissive parser hands ``NaN`` through as a
+    float, and neither is a token JSON can spell.
+    """
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, dict):
+        return {k: decimals_to_float(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [decimals_to_float(v) for v in value]
+    return value
 
 
 def authored_json(value: Any) -> Any:

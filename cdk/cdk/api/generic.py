@@ -28,7 +28,12 @@ from typing import Any
 
 import aiohttp
 import pyarrow as pa
-from analitiq.contracts.endpoints import ApiEndpointDoc, ReadOperation, Replication
+from analitiq.contracts.endpoints import (
+    ApiEndpointDoc,
+    Expression,
+    ReadOperation,
+    Replication,
+)
 from analitiq.contracts.stream import EndpointRef, IncrementalReplication, StreamSource
 from pydantic import ValidationError
 
@@ -38,6 +43,7 @@ from ..base_handler import (
     BatchWriteResult,
     LandingBatch,
 )
+from ..batch_metadata import with_response_metadata
 from ..connection_runtime import ConnectionRuntime
 from ..exceptions import ReadError, TransportSpecError
 from ..json_utils import decode_json_fields
@@ -52,7 +58,7 @@ from ..types import (
 )
 from ..write_keys import require_conflict_key_values
 from .dialects import ApiDialect
-from .exceptions import ConnectorConnectionError, RequestSpecError
+from .exceptions import ConnectorConnectionError, RequestSpecError, read_spec_errors
 from .http import (
     DEFAULT_MAX_RETRIES,
     HttpSender,
@@ -65,7 +71,7 @@ from .http import (
 from .page_loop import Fetch, Page, PageLoop, PageRequest
 from .query_style import declared_query_styles
 from .read_setup import build_read_strategy, stop_condition
-from .records import extract_records
+from .records import extract_records, resolve_response_metadata
 from .replication import cursor_param_for, effective_start
 from .request import (
     ParamTable,
@@ -98,14 +104,18 @@ __all__ = ["GenericAPIConnector"]
 class _ReadPlan:
     """What one read needs, settled before its first request goes out.
 
-    The three things the drain reads: the loop to walk, the contract that
-    turns each page into Arrow, and the field whose last value advances the
-    checkpoint (``None`` for a full refresh).
+    What the drain reads: the loop to walk, the contract that turns each
+    page into Arrow, the field whose last value advances the checkpoint
+    (``None`` for a full refresh), and the declared ``response.metadata``
+    with the resolver that reads it per page (``None`` when the endpoint
+    declares none).
     """
 
     loop: PageLoop
     schema: SchemaContract
     cursor_field: str | None
+    metadata: Mapping[str, Expression] | None
+    resolver: Resolver
 
 
 @dataclass(frozen=True)
@@ -626,6 +636,8 @@ class GenericAPIConnector(BaseDestinationHandler):
             ),
             schema=schema_contract,
             cursor_field=cursor_field,
+            metadata=read.response.metadata,
+            resolver=resolver,
         )
 
     async def _read_pages(
@@ -651,10 +663,28 @@ class GenericAPIConnector(BaseDestinationHandler):
 
         batch_count = 0
         try:
-            async for records in loop:
-                yield schema_contract.from_pylist(records)
+            async for page in loop:
+                records = page.records
+                if not records and plan.metadata is None:
+                    # The empty page that ends the read has nothing to
+                    # carry: no rows, and no declared values to report.
+                    continue
+                batch = schema_contract.from_pylist(records)
+                if plan.metadata is not None:
+                    # Resolved before the yield, like the stop condition: a
+                    # declared expression that cannot resolve fails the page
+                    # while the engine has committed nothing from it. An
+                    # empty page is yielded as an empty batch so the values
+                    # it reports (a total of 0, the budget left after the
+                    # last request) reach the engine.
+                    resolved = resolve_response_metadata(
+                        plan.metadata, plan.resolver, page
+                    )
+                    with read_spec_errors("response.metadata"):
+                        batch = with_response_metadata(batch, resolved)
+                yield batch
                 batch_count += 1
-                if cursor_field:
+                if cursor_field and records:
                     cursor_value = records[-1].get(cursor_field)
                     if cursor_value is not None:
                         await checkpoint.save_cursor(

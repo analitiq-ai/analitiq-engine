@@ -89,6 +89,10 @@ message RecordBatch {
 
 `emitted_at_unix_ms` is the engine's per-batch emit instant (UTC epoch milliseconds), stamped once in the load stage and re-sent unchanged on every retry of the same batch (`src/engine/stream_processor.py`). The servicer decodes it to a timezone-aware `datetime` and hands it to `write_batch` as `emitted_at`. A time-partitioned destination (file/S3) resolves its `{year}/{month}/{day}/{hour}` placeholders from this value rather than its own write-time clock, so a replayed batch resolves the same output path and overwrites in place instead of drifting into a new partition directory across an hour/day boundary. Sinks without time-based partitioning ignore it; a sink whose `path_template` actually substitutes a time placeholder fails the batch loud if the value is unstamped (epoch 0).
 
+#### Batch-level metadata rides the Arrow schema
+
+An API read's declared `response.metadata` (a provider-reported total, a rate-limit budget) is resolved once per page by the CDK read loop and written into the Arrow schema metadata of the batch that page became, under the key `analitiq.response_metadata` as one JSON object (`cdk/cdk/batch_metadata.py`). Arrow IPC carries schema metadata inside `payload`, so the values cross the source worker -> engine hop with no wire field of their own. The engine's extract stage reads the slot off every batch as it arrives, logs it, and the last page's values land on the stream's metrics record as `response_metadata`. The empty page that ends a read is yielded as a zero-row batch when metadata is declared, so a provider's `total: 0` or its final rate-limit budget still lands; a read that declares no metadata skips that page and its batches carry no key. The transform stage produces the mapping's own schema, so the key goes no further than extract; destinations never see it.
+
 ### Cursor (opaque token)
 
 ```protobuf

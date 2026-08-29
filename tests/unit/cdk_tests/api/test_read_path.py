@@ -19,6 +19,7 @@ from cdk.api import GenericAPIConnector
 from cdk.api.page_loop import PaginationStrategy
 from cdk.api.read_setup import build_read_strategy
 from cdk.api.request import ParamTable
+from cdk.batch_metadata import response_metadata_of
 from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.exceptions import ReadError, TransientReadError
 from cdk.resolver import ResolutionContext, Resolver
@@ -1268,3 +1269,137 @@ class TestBuildingTheAdapterTouchesNothingItWasGiven:
         table = ParamTable(values={"tenant": "acme"})
         self._strategy(table)
         assert table.values == {"tenant": "acme"}
+
+
+@pytest.mark.asyncio
+class TestResponseMetadata:
+    """``response.metadata`` is resolved per page and rides the batch.
+
+    The block used to be declared, validated and never read (issue #469).
+    Each page's values land in the batch's schema-metadata slot
+    (``cdk.batch_metadata``), which the Arrow IPC bytes carry across every
+    hop without a wire field of their own.
+    """
+
+    _METADATA = {
+        "total": {"ref": "response.body.total"},
+        "label": {"template": "page of ${response.body.total}"},
+        "count": {"ref": "response.record_count"},
+    }
+    _TOTAL_FIELD = {"total": {"type": "integer"}}
+
+    async def test_each_page_carries_its_own_resolved_values(self) -> None:
+        session = FakeSession(
+            [
+                FakeResponse(body={**_rows(2), "total": 3}),
+                FakeResponse(body={**_rows(1, start=2), "total": 3}),
+                FakeResponse(body={"records": [], "total": 3}),
+            ]
+        )
+        batches = await _read(
+            session,
+            endpoint_document(
+                pagination=_OFFSET,
+                request=_PAGINATION_REQUEST,
+                params=_PAGINATION_PARAMS,
+                response_fields=self._TOTAL_FIELD,
+                response_metadata=self._METADATA,
+            ),
+        )
+        # The empty page that ends the read is a batch too: it carries no
+        # rows, but the values the provider reported on it.
+        assert [response_metadata_of(b) for b in batches] == [
+            {"total": 3, "label": "page of 3", "count": 2},
+            {"total": 3, "label": "page of 3", "count": 1},
+            {"total": 3, "label": "page of 3", "count": 0},
+        ]
+        assert [b.num_rows for b in batches] == [2, 1, 0]
+
+    async def test_an_empty_first_page_still_reports_its_values(self) -> None:
+        # ``{"records": [], "total": 0}``: without a batch the engine would
+        # record no metadata at all for a read whose provider said "zero".
+        session = FakeSession([FakeResponse(body={"records": [], "total": 0})])
+        (batch,) = await _read(
+            session,
+            endpoint_document(
+                response_fields=self._TOTAL_FIELD,
+                response_metadata={"total": {"ref": "response.body.total"}},
+            ),
+        )
+        assert batch.num_rows == 0
+        assert response_metadata_of(batch) == {"total": 0}
+
+    async def test_a_read_declaring_no_metadata_carries_none(self) -> None:
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        (batch,) = await _read(session, endpoint_document())
+        assert response_metadata_of(batch) is None
+
+    async def test_a_read_declaring_no_metadata_skips_the_empty_page(self) -> None:
+        session = FakeSession(
+            [FakeResponse(body=_rows(1)), FakeResponse(body=_rows(0))]
+        )
+        batches = await _read(
+            session,
+            endpoint_document(
+                pagination=_OFFSET,
+                request=_PAGINATION_REQUEST,
+                params=_PAGINATION_PARAMS,
+            ),
+        )
+        assert [b.num_rows for b in batches] == [1]
+
+    async def test_a_value_the_provider_omitted_is_none_not_a_failure(self) -> None:
+        # The contract's request-time rule: a declared value the body does
+        # not carry resolves to nothing. A provider that drops its total on
+        # one page has not made that page's records wrong.
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        (batch,) = await _read(
+            session,
+            endpoint_document(
+                response_fields=self._TOTAL_FIELD,
+                response_metadata={"total": {"ref": "response.body.total"}},
+            ),
+        )
+        assert response_metadata_of(batch) == {"total": None}
+
+    async def test_an_authoring_defect_fails_the_read_naming_the_key(self) -> None:
+        # A template over an object is a defect no retry heals, and it is
+        # reported before the page is yielded -- the engine has committed
+        # nothing from a page whose declaration it cannot honour.
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        with pytest.raises(ReadError, match="response.metadata 'whole'") as caught:
+            await _read(
+                session,
+                endpoint_document(
+                    response_metadata={"whole": {"template": "${response.body}"}},
+                ),
+            )
+        assert "scalars" in str(caught.value)
+
+    async def test_a_number_outside_binary64_range_fails_the_page(self) -> None:
+        session = FakeSession(
+            [FakeResponse(text='{"records": [{"id": 1, "name": "n1"}], "big": 1e400}')]
+        )
+        with pytest.raises(ReadError, match="response.metadata.*not JSON compliant"):
+            await _read(
+                session,
+                endpoint_document(
+                    response_fields={"big": {"type": "number"}},
+                    response_metadata={"big": {"ref": "response.body.big"}},
+                ),
+            )
+
+    async def test_a_fractional_value_stays_a_number(self) -> None:
+        # Scripted as text: the body is parsed losslessly into a Decimal,
+        # which the slot narrows back to the JSON number the provider sent.
+        session = FakeSession(
+            [FakeResponse(text='{"records": [{"id": 1, "name": "n1"}], "ratio": 0.25}')]
+        )
+        (batch,) = await _read(
+            session,
+            endpoint_document(
+                response_fields={"ratio": {"type": "number"}},
+                response_metadata={"ratio": {"ref": "response.body.ratio"}},
+            ),
+        )
+        assert response_metadata_of(batch) == {"ratio": 0.25}
