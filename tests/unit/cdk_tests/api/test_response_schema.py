@@ -10,7 +10,9 @@ from analitiq.contracts.stream import validate_endpoint_ref
 from pydantic import ValidationError
 
 from cdk.api.response_schema import (
+    FieldDeclaration,
     apply_read_type_map,
+    record_field_declaration,
     records_items_schema,
     resolve_field_arrow_type,
 )
@@ -187,6 +189,49 @@ class TestNestedResolution:
         field = {"type": ["string", "null"]}
         resolve_field_arrow_type(field, "name", lambda: _Mapper({"string": "Utf8"}))
         assert field["arrow_type"] == "Utf8"
+
+
+class TestCursorFieldType:
+    def _schema(self, declared: Any) -> dict[str, Any]:
+        return {"properties": {"updated_at": {"type": declared}}}
+
+    def test_a_plain_type_is_read_as_declared(self) -> None:
+        assert record_field_declaration(
+            "items", self._schema("string"), "updated_at"
+        ) == FieldDeclaration("string", None)
+
+    @pytest.mark.parametrize(
+        ("declared", "expected"), [("epoch_seconds", "epoch_seconds"), ("", None)]
+    )
+    def test_the_format_is_read_with_the_type(
+        self, declared: str, expected: str | None
+    ) -> None:
+        schema = {"properties": {"ts": {"type": "integer", "format": declared}}}
+        assert record_field_declaration("items", schema, "ts") == FieldDeclaration(
+            "integer", expected
+        )
+
+    @pytest.mark.parametrize(
+        ("declared", "expected"),
+        [(["string", "null"], "string"), (["null", "integer"], "integer")],
+    )
+    def test_a_nullable_union_is_its_real_member(
+        self, declared: list[str], expected: str
+    ) -> None:
+        # Null only says the field is nullable; the checkpoint never
+        # stores None, so it says nothing about how a cursor reads back.
+        assert record_field_declaration(
+            "items", self._schema(declared), "updated_at"
+        ) == FieldDeclaration(expected, None)
+
+    @pytest.mark.parametrize("declared", [["string", "integer"], ["null"], None, 7])
+    def test_anything_but_one_real_type_is_refused(self, declared: Any) -> None:
+        with pytest.raises(ReadError, match="needs one plain JSON type"):
+            record_field_declaration("items", self._schema(declared), "updated_at")
+
+    def test_an_undeclared_cursor_field_is_refused(self) -> None:
+        with pytest.raises(ReadError, match="'missing' is not declared"):
+            record_field_declaration("items", self._schema("string"), "missing")
 
 
 class TestMapperIsScoped:

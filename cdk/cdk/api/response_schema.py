@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any
 
 from analitiq.contracts.endpoints import ResponseExtraction
@@ -25,7 +26,14 @@ from ..type_map import TypeMapper, UnmappedTypeError
 from ..types import EndpointScope
 from .records import split_records_ref
 
-__all__ = ["apply_read_type_map", "records_items_schema", "resolve_field_arrow_type"]
+__all__ = [
+    "apply_read_type_map",
+    "FieldDeclaration",
+    "declared_json_types",
+    "record_field_declaration",
+    "records_items_schema",
+    "resolve_field_arrow_type",
+]
 
 
 def records_items_schema(
@@ -71,6 +79,67 @@ def records_items_schema(
             f"{records_ref!r} (no 'properties' under the addressed items)"
         )
     return deepcopy(items)
+
+
+def declared_json_types(field: dict[str, Any]) -> list[str]:
+    """Read the non-null JSON types a field's ``type`` declares, in declared order.
+
+    One reading of JSON Schema's ``type`` for every consumer here: a plain
+    string is one type, a list is a union whose ``null`` member only says
+    the field is nullable -- ``["string", "null"]`` is a string field. A
+    ``type`` that is neither yields nothing.
+    """
+    declared = field.get("type")
+    if isinstance(declared, str):
+        return [declared]
+    if isinstance(declared, list):
+        return [t for t in declared if isinstance(t, str) and t != "null"]
+    return []
+
+
+@dataclass(frozen=True)
+class FieldDeclaration:
+    """What the record schema says a field holds: its JSON type and format.
+
+    Both are read in one walk of the field so no consumer pairs a type
+    from one reading with a format from another. ``format`` is whatever
+    the schema declares, or ``None``; which formats mean anything is the
+    consumer's vocabulary to apply.
+    """
+
+    json_type: str
+    format: str | None
+
+
+def record_field_declaration(
+    endpoint_id: str, items_schema: dict[str, Any], cursor_field: str
+) -> FieldDeclaration:
+    """Read the JSON type and format the record schema declares for the cursor field.
+
+    The stored cursor is the last record's value for this field, so its
+    declared type is what says how a checkpoint reads back, and its
+    declared format names the unit an integer moment is stored in. A
+    nullable declaration (``["integer", "null"]``) is the one type it
+    names: the checkpoint never stores ``None``, so null says nothing
+    about how a stored value reads. A cursor field the schema does not
+    declare, or declares with no or several real types, is an authoring
+    defect named here rather than a value guessed at later.
+    """
+    field = (items_schema.get("properties") or {}).get(cursor_field)
+    if not isinstance(field, dict):
+        raise ReadError(
+            f"endpoint {endpoint_id!r}: cursor field {cursor_field!r} is not "
+            f"declared under the record schema's properties"
+        )
+    types = declared_json_types(field)
+    if len(types) != 1:
+        raise ReadError(
+            f"endpoint {endpoint_id!r}: cursor field {cursor_field!r} declares "
+            f"type {field.get('type')!r}; a cursor field needs one plain JSON "
+            f"type, nullable or not"
+        )
+    fmt = field.get("format")
+    return FieldDeclaration(types[0], fmt if isinstance(fmt, str) and fmt else None)
 
 
 def apply_read_type_map(
@@ -145,10 +214,8 @@ def resolve_field_arrow_type(
     because a hand-annotated container can still hold children that do not.
     """
     if not field.get("arrow_type"):
-        json_type = field.get("type")
-        if isinstance(json_type, list):
-            json_type = next((t for t in json_type if t != "null"), None)
-        if isinstance(json_type, str):
+        json_type = next(iter(declared_json_types(field)), None)
+        if json_type is not None:
             fmt = field.get("format")
             native = f"{json_type}:{fmt}" if isinstance(fmt, str) and fmt else json_type
             try:
