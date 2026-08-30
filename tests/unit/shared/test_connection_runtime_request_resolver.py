@@ -12,18 +12,21 @@ from __future__ import annotations
 
 import base64
 
+from analitiq.contracts.connection import ConnectionInput
+from contract_documents import connection_document
+
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.secrets import InMemorySecretsResolver
 
 
-def _runtime(raw_config=None) -> ConnectionRuntime:
+def _runtime(connection: ConnectionInput | None = None) -> ConnectionRuntime:
     return ConnectionRuntime(
-        raw_config=raw_config
-        or {
-            "parameters": {"region": "eu", "token": "tok"},
-            "selections": {"org": "acme"},
-            "discovered": {"account_id": "a-1"},
-        },
+        connection=connection
+        or connection_document(
+            parameters={"region": "eu", "plan": "gold"},
+            selections={"org": "acme"},
+            discovered={"account_id": "a-1"},
+        ),
         connection_id="conn-1",
         connector_id="testapi",
         connector_type="api",
@@ -56,13 +59,15 @@ class TestRequestResolverScopes:
         out = resolver.resolve_for_request(
             {
                 "function": "base64_encode",
-                "input": {"ref": "connection.parameters.token"},
+                "input": {"ref": "connection.parameters.plan"},
             }
         )
-        assert out == base64.b64encode(b"tok").decode("ascii")
+        assert out == base64.b64encode(b"gold").decode("ascii")
 
     def test_missing_config_blocks_yield_empty_scopes(self):
-        resolver = _runtime(raw_config={"host": "h"}).request_resolver()
+        resolver = _runtime(
+            connection=connection_document(parameters={"host": "h"})
+        ).request_resolver()
         out = resolver.resolve_for_request(
             {"v": {"ref": "connection.parameters.anything"}}
         )

@@ -12,6 +12,7 @@ reading as green.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -28,6 +29,7 @@ from cdk.conformance import (
     check_type_map_round_trip,
     load_target,
 )
+from cdk.conformance.fakes import minimal_connector_definition
 from cdk.conformance.roundtrip import probe_canonicals, render_probe
 from cdk.conformance.target import ConformanceTarget
 from cdk.conformance.tier1 import test_definition as kit_definition
@@ -183,7 +185,7 @@ class TestThinConnectorPassesVacuously:
         definition_dir = tmp_path / "definition"
         definition_dir.mkdir()
         (definition_dir / "connector.json").write_text(
-            '{"kind": "database", "connector_id": "conformance-thin"}'
+            json.dumps(minimal_connector_definition("database", "conformance-thin"))
         )
         (definition_dir / "type-map-read.json").write_text(
             '[{"match": "exact", "native": "TEXT", "canonical": "Utf8"}]'
@@ -206,11 +208,12 @@ class TestUnassessableKindIsNotAPass:
 
     Tier 1 now assesses two kinds — a database renders SQL, an api drives
     its read path — so the gate is demonstrated end to end with a kind it
-    carries checks for neither of: that connector collects nothing but
-    skips, and pytest exits 0 on an all-skipped run. A required status
-    check that goes green for an artifact it structurally cannot evaluate
-    reports "not assessed" as "passed"; the verdict has to come from the
-    kit, not from a kind branch in every connector repo's CI.
+    carries checks for neither of (a contract-valid ``file`` connector):
+    that connector collects nothing but skips, and pytest exits 0 on an
+    all-skipped run. A required status check that goes green for an
+    artifact it structurally cannot evaluate reports "not assessed" as
+    "passed"; the verdict has to come from the kit, not from a kind branch
+    in every connector repo's CI.
     """
 
     def test_an_unassessed_kind_fails_tier1_naming_the_reason(
@@ -220,7 +223,7 @@ class TestUnassessableKindIsNotAPass:
         definition_dir = tmp_path / "definition"
         definition_dir.mkdir()
         (definition_dir / "connector.json").write_text(
-            '{"kind": "conformance-unassessed", "connector_id": "unassessed"}'
+            json.dumps(minimal_connector_definition("file", "unassessed"))
         )
         (definition_dir / "type-map-read.json").write_text(
             '[{"match": "exact", "native": "TEXT", "canonical": "Utf8"}]'
@@ -279,7 +282,7 @@ class TestUnassessableKindIsNotAPass:
         definition_dir = tmp_path / "definition"
         definition_dir.mkdir()
         (definition_dir / "connector.json").write_text(
-            '{"kind": "api", "connector_id": "conformance-api-no-map"}'
+            json.dumps(minimal_connector_definition("api", "conformance-api-no-map"))
         )
         target = load_target(tmp_path)
         assert not target.is_database

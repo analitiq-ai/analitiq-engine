@@ -36,6 +36,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Union
 
+from analitiq.contracts.connector import Connector
 from sqlalchemy import create_engine, event
 from sqlalchemy import text as _sa_text
 from sqlalchemy.engine import Engine, make_url
@@ -48,6 +49,7 @@ if TYPE_CHECKING:
 from cdk._extras import reraise_for_missing_extra
 from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.exceptions import TransportSpecError, UnresolvedValueError
+from cdk.json_utils import authored_json
 from cdk.rate_limiter import RateLimiter
 from cdk.resolver import ResolutionContext, Resolver
 from cdk.sql.dialects import dialect_overrides
@@ -272,46 +274,40 @@ def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[st
     return out
 
 
-def merged_transports(connector: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+def merged_transports(connector: Connector) -> dict[str, dict[str, Any]]:
     """Return every transport block with ``transport_defaults`` deep-merged.
 
     The one place ``transport_defaults`` is applied: transport selection
     (:func:`_select_transport`), the pre-materialization driver
     derivation (``ConnectionRuntime.driver``), and the conformance
     suite's transport view all read through this function, so no
-    consumer can disagree about what a block declares. Non-object
-    entries are dropped — they cannot describe a transport.
+    consumer can disagree about what a block declares.
+
+    The blocks are read as the JSON their author wrote: a transport block is
+    a grammar this module walks (DSN templates, bindings, TLS, options),
+    not a set of fields the engine reads one by one.
     """
-    transports = connector.get("transports") or {}
-    defaults = connector.get("transport_defaults") or {}
-    if not isinstance(defaults, Mapping):
-        defaults = {}
+    defaults = authored_json(connector.transport_defaults) or {}
     return {
-        ref: _deep_merge(defaults, block)
-        for ref, block in transports.items()
-        if isinstance(block, Mapping)
+        ref: _deep_merge(defaults, authored_json(block))
+        for ref, block in connector.transports.items()
     }
 
 
 def _select_transport(
-    connector: Mapping[str, Any], transport_ref: str | None
+    connector: Connector, transport_ref: str | None
 ) -> tuple[str, Mapping[str, Any]]:
     """Pick the ``transports[ref]`` block, applying ``transport_defaults``."""
-    transports = connector.get("transports") or {}
+    transports = connector.transports
     if not transports:
         raise TransportSpecError(
-            f"Connector {connector.get('connector_id')!r} has no `transports` block; "
+            f"Connector {connector.connector_id!r} has no `transports` block; "
             f"cannot materialize transport"
         )
-    ref = transport_ref or connector.get("default_transport")
-    if not ref:
-        raise TransportSpecError(
-            f"Connector {connector.get('connector_id')!r}: transport_ref not given "
-            f"and default_transport not declared"
-        )
+    ref = transport_ref or connector.default_transport
     if ref not in transports:
         raise KeyError(
-            f"Connector {connector.get('connector_id')!r}: transport {ref!r} not in "
+            f"Connector {connector.connector_id!r}: transport {ref!r} not in "
             f"declared transports {sorted(transports)}"
         )
     merged = merged_transports(connector)[ref]
@@ -1253,7 +1249,7 @@ register_transport_kind(
 
 
 def resolve_transport_specs(
-    connector: Mapping[str, Any],
+    connector: Connector,
     *,
     transport_refs: Iterable[str] = (),
     context: ResolutionContext,
@@ -1288,7 +1284,7 @@ def resolve_transport_specs(
 
 
 def resolve_transport_spec(
-    connector: Mapping[str, Any],
+    connector: Connector,
     *,
     transport_ref: str | None = None,
     context: ResolutionContext,
@@ -1305,7 +1301,7 @@ def resolve_transport_spec(
     if not transport_type:
         raise TransportSpecError(
             f"Resolved transport spec missing `transport_type`; connector "
-            f"{connector.get('connector_id')!r}, transport {transport_ref!r}"
+            f"{connector.connector_id!r}, transport {transport_ref!r}"
         )
     kind = _TRANSPORT_KINDS.get(transport_type)
     if kind is None:

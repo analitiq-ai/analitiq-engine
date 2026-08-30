@@ -9,6 +9,8 @@ transports rather than the legacy ``${PLACEHOLDER}`` expansion path.
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from analitiq.contracts.connector import Connector
+from contract_documents import connection_document, connector_document
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.secrets import SchemeSecretsResolver
@@ -27,38 +29,13 @@ def _resolver(value: dict | None = None) -> AsyncMock:
     return mock
 
 
-def _db_connector(slug: str = "pg") -> dict:
-    """Minimal connector spec with a sqlalchemy transports block."""
-    return {
-        "slug": slug,
-        "connector_type": "database",
-        "default_transport": "database",
-        "transports": {
-            "database": {
-                "transport_type": "sqlalchemy",
-                "driver": "postgresql+asyncpg",
-                "dsn": {
-                    "kind": "url_template",
-                    "template": "postgresql+asyncpg://u:p@h:5432/d",
-                    "bindings": {},
-                },
-            }
-        },
-    }
+def _db_connector() -> Connector:
+    """Minimal connector definition with a sqlalchemy transports block."""
+    return connector_document("database")
 
 
-def _api_connector() -> dict:
-    return {
-        "slug": "wise-test",
-        "connector_type": "api",
-        "default_transport": "api",
-        "transports": {
-            "api": {
-                "transport_type": "http",
-                "base_url": "https://api.example.com",
-            }
-        },
-    }
+def _api_connector() -> Connector:
+    return connector_document("api")
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +46,7 @@ def _api_connector() -> dict:
 class TestConnectionRuntimeMetadata:
     def test_connector_type_available(self):
         runtime = ConnectionRuntime(
-            raw_config={"parameters": {"host": "h"}},
+            connection=connection_document(parameters={"host": "h"}),
             connection_id="conn-1",
             connector_id="test-connector",
             connector_type="database",
@@ -84,28 +61,27 @@ class TestConnectionRuntimeMetadata:
         """When ``driver`` is not passed, it falls out of the connector's
         default sqlalchemy transport."""
         runtime = ConnectionRuntime(
-            raw_config={"parameters": {}},
+            connection=connection_document(parameters={}),
             connection_id="conn-1",
             connector_id="test-connector",
             connector_type="database",
             resolver=AsyncMock(),
-            connector_definition=_db_connector(),
+            connector=_db_connector(),
         )
         assert runtime.driver == "postgresql"
 
-    def test_raw_config_returns_deep_copy(self):
-        config = {"parameters": {"port": 5432}}
+    def test_connection_is_the_validated_document(self):
+        connection = connection_document(parameters={"port": 5432})
         runtime = ConnectionRuntime(
-            raw_config=config,
+            connection=connection,
             connection_id="conn-1",
             connector_id="test-connector",
             connector_type="database",
             driver="postgresql",
             resolver=AsyncMock(),
         )
-        result = runtime.raw_config
-        assert result == config
-        assert result is not config
+        assert runtime.connection is connection
+        assert runtime.connection.parameters == {"port": 5432}
 
     @pytest.mark.parametrize("connector_type", ["", None, 42])
     def test_non_string_connector_type_raises(self, connector_type):
@@ -113,7 +89,7 @@ class TestConnectionRuntimeMetadata:
             ValueError, match="connector_type must be a non-empty string"
         ):
             ConnectionRuntime(
-                raw_config={},
+                connection=connection_document(),
                 connection_id="conn-1",
                 connector_id="test-connector",
                 connector_type=connector_type,
@@ -126,7 +102,7 @@ class TestConnectionRuntimeMetadata:
         to the built-ins (e.g. from an entry-point connector package) must
         construct (#137)."""
         runtime = ConnectionRuntime(
-            raw_config={},
+            connection=connection_document(),
             connection_id="conn-1",
             connector_id="test-connector",
             connector_type="graphql",
@@ -151,12 +127,12 @@ class TestConnectionRuntimeMaterialize:
             is_async=True,
         )
         runtime = ConnectionRuntime(
-            raw_config={"parameters": {"host": "h", "port": 5432}},
+            connection=connection_document(parameters={"host": "h", "port": 5432}),
             connection_id="conn-db",
             connector_id="test-connector",
             connector_type="database",
             resolver=_resolver({"password": "secret"}),
-            connector_definition=_db_connector(),
+            connector=_db_connector(),
         )
         with patch(
             "cdk.connection_runtime.build_transport_from_spec",
@@ -178,12 +154,12 @@ class TestConnectionRuntimeMaterialize:
             rate_limiter=None,
         )
         runtime = ConnectionRuntime(
-            raw_config={"parameters": {}},
+            connection=connection_document(parameters={}),
             connection_id="conn-api",
             connector_id="test-connector",
             connector_type="api",
             resolver=_resolver({"api_key": "t"}),
-            connector_definition=_api_connector(),
+            connector=_api_connector(),
         )
         with patch(
             "cdk.connection_runtime.build_transport_from_spec",
@@ -196,7 +172,7 @@ class TestConnectionRuntimeMaterialize:
     @pytest.mark.asyncio
     async def test_materialize_is_idempotent(self):
         runtime = ConnectionRuntime(
-            raw_config={"file_format": "jsonl"},
+            connection=connection_document(parameters={"file_format": "jsonl"}),
             connection_id="conn-1",
             connector_id="test-connector",
             connector_type="stdout",
@@ -210,7 +186,7 @@ class TestConnectionRuntimeMaterialize:
     @pytest.mark.asyncio
     async def test_transport_accessors_raise_before_materialize(self):
         runtime = ConnectionRuntime(
-            raw_config={},
+            connection=connection_document(),
             connection_id="conn-1",
             connector_id="test-connector",
             connector_type="database",
@@ -230,10 +206,10 @@ class TestConnectionRuntimeMaterialize:
         the value supplied only via the environment -- no sidecar file."""
         monkeypatch.setenv("PG_PASSWORD", "from-the-env")
         runtime = ConnectionRuntime(
-            raw_config={
-                "path": "/tmp/out",
-                "secret_refs": {"password": "env:PG_PASSWORD"},
-            },
+            connection=connection_document(
+                secret_refs={"password": "env:PG_PASSWORD"},
+                parameters={"path": "/tmp/out"},
+            ),
             connection_id="conn-env",
             connector_id="test-connector",
             connector_type="file",
@@ -241,7 +217,7 @@ class TestConnectionRuntimeMaterialize:
         )
         runtime.acquire()
         await runtime.materialize()
-        assert runtime.resolved_config["password"] == "from-the-env"
+        assert runtime.resolved_config["secrets"]["password"] == "from-the-env"
 
     @pytest.mark.asyncio
     async def test_declared_secret_with_missing_source_fails(
@@ -251,15 +227,14 @@ class TestConnectionRuntimeMaterialize:
         var) fails materialization loudly through the real resolver."""
         monkeypatch.delenv("ANALITIQ_TEST_UNSET_VAR", raising=False)
         runtime = ConnectionRuntime(
-            raw_config={
-                "parameters": {},
-                "secret_refs": {"password": "env:ANALITIQ_TEST_UNSET_VAR"},
-            },
+            connection=connection_document(
+                parameters={}, secret_refs={"password": "env:ANALITIQ_TEST_UNSET_VAR"}
+            ),
             connection_id="conn-missing",
             connector_id="test-connector",
             connector_type="database",
             resolver=SchemeSecretsResolver(tmp_path),
-            connector_definition=_db_connector(),
+            connector=_db_connector(),
         )
         with pytest.raises(SecretNotFoundError, match="ANALITIQ_TEST_UNSET_VAR"):
             await runtime.materialize()
@@ -269,15 +244,14 @@ class TestConnectionRuntimeMaterialize:
         """The resolver is a pluggable boundary: a result missing a declared
         ref (a non-conforming resolver) must fail loud, not silently proceed."""
         runtime = ConnectionRuntime(
-            raw_config={
-                "parameters": {},
-                "secret_refs": {"password": "env:X", "token": "env:Y"},
-            },
+            connection=connection_document(
+                parameters={}, secret_refs={"password": "env:X", "token": "env:Y"}
+            ),
             connection_id="conn-partial",
             connector_id="test-connector",
             connector_type="database",
             resolver=_resolver({"password": "only-this"}),  # `token` missing
-            connector_definition=_db_connector(),
+            connector=_db_connector(),
         )
         with pytest.raises(SecretNotFoundError, match="token"):
             await runtime.materialize()
@@ -287,10 +261,10 @@ class TestConnectionRuntimeMaterialize:
         """Only declared refs survive: a resolver returning extra keys must not
         surface undeclared secrets into resolved_config (and the worker)."""
         runtime = ConnectionRuntime(
-            raw_config={
-                "path": "/tmp/out",
-                "secret_refs": {"declared": "sidecar:declared"},
-            },
+            connection=connection_document(
+                secret_refs={"declared": "sidecar:declared"},
+                parameters={"path": "/tmp/out"},
+            ),
             connection_id="conn-extra",
             connector_id="test-connector",
             connector_type="file",
@@ -298,8 +272,7 @@ class TestConnectionRuntimeMaterialize:
         )
         runtime.acquire()
         await runtime.materialize()
-        assert runtime.resolved_config["declared"] == "keep"
-        assert "undeclared" not in runtime.resolved_config
+        assert runtime.resolved_config["secrets"] == {"declared": "keep"}
 
 
 # ---------------------------------------------------------------------------
@@ -314,12 +287,12 @@ class TestConnectionRuntimeSyncEngine:
 
     def _materializable_runtime(self):
         return ConnectionRuntime(
-            raw_config={"parameters": {}},
+            connection=connection_document(parameters={}),
             connection_id="conn-db",
             connector_id="test-connector",
             connector_type="database",
             resolver=_resolver(),
-            connector_definition=_db_connector(),
+            connector=_db_connector(),
         )
 
     def _sync_transport(self, engine):
@@ -391,12 +364,12 @@ class TestConnectionRuntimeClose:
             is_async=True,
         )
         runtime = ConnectionRuntime(
-            raw_config={"parameters": {}},
+            connection=connection_document(parameters={}),
             connection_id="conn-db",
             connector_id="test-connector",
             connector_type="database",
             resolver=_resolver(),
-            connector_definition=_db_connector(),
+            connector=_db_connector(),
         )
         with patch(
             "cdk.connection_runtime.build_transport_from_spec",
@@ -416,12 +389,12 @@ class TestConnectionRuntimeClose:
             rate_limiter=None,
         )
         runtime = ConnectionRuntime(
-            raw_config={"parameters": {}},
+            connection=connection_document(parameters={}),
             connection_id="conn-api",
             connector_id="test-connector",
             connector_type="api",
             resolver=_resolver(),
-            connector_definition=_api_connector(),
+            connector=_api_connector(),
         )
         with patch(
             "cdk.connection_runtime.build_transport_from_spec",
@@ -442,12 +415,12 @@ class TestConnectionRuntimeClose:
             is_async=True,
         )
         runtime = ConnectionRuntime(
-            raw_config={"parameters": {}},
+            connection=connection_document(parameters={}),
             connection_id="conn-db",
             connector_id="test-connector",
             connector_type="database",
             resolver=_resolver(),
-            connector_definition=_db_connector(),
+            connector=_db_connector(),
         )
         with patch(
             "cdk.connection_runtime.build_transport_from_spec",
@@ -467,10 +440,10 @@ class TestScrubResolvedConfig:
     @pytest.mark.asyncio
     async def test_scrub_clears_resolved_config_for_file_type(self):
         runtime = ConnectionRuntime(
-            raw_config={
-                "path": "/tmp/out",
-                "secret_refs": {"SECRET": "sidecar:SECRET"},
-            },
+            connection=connection_document(
+                secret_refs={"SECRET": "sidecar:SECRET"},
+                parameters={"path": "/tmp/out"},
+            ),
             connection_id="conn-file",
             connector_id="test-connector",
             connector_type="file",
@@ -478,16 +451,16 @@ class TestScrubResolvedConfig:
         )
         runtime.acquire()
         await runtime.materialize()
-        # Secret values are merged into the legacy resolved_config dict
-        # (the same passthrough behavior file handlers depend on).
-        assert runtime.resolved_config["SECRET"] == "s3cr3t"
+        # Secret values ride the resolved_config dict beside the authored
+        # parameters, the shape the file handlers read.
+        assert runtime.resolved_config["secrets"]["SECRET"] == "s3cr3t"
         runtime.scrub_resolved_config()
         assert runtime._resolved_config is None
 
     @pytest.mark.asyncio
     async def test_scrub_waits_for_all_acquirers(self):
         runtime = ConnectionRuntime(
-            raw_config={"path": "/tmp/out"},
+            connection=connection_document(parameters={"path": "/tmp/out"}),
             connection_id="conn-shared",
             connector_id="test-connector",
             connector_type="file",
@@ -504,7 +477,9 @@ class TestScrubResolvedConfig:
     @pytest.mark.asyncio
     async def test_resolved_config_accessible_before_scrub(self):
         runtime = ConnectionRuntime(
-            raw_config={"path": "/data", "file_format": "jsonl"},
+            connection=connection_document(
+                parameters={"path": "/data", "file_format": "jsonl"}
+            ),
             connection_id="conn-stdout",
             connector_id="test-connector",
             connector_type="stdout",
@@ -513,13 +488,13 @@ class TestScrubResolvedConfig:
         runtime.acquire()
         await runtime.materialize()
         cfg = runtime.resolved_config
-        assert cfg["path"] == "/data"
-        assert cfg["file_format"] == "jsonl"
+        assert cfg["parameters"]["path"] == "/data"
+        assert cfg["parameters"]["file_format"] == "jsonl"
 
     @pytest.mark.asyncio
     async def test_close_resets_scrub_counter(self):
         runtime = ConnectionRuntime(
-            raw_config={"path": "/tmp"},
+            connection=connection_document(parameters={"path": "/tmp"}),
             connection_id="conn-reset",
             connector_id="test-connector",
             connector_type="file",
@@ -533,7 +508,7 @@ class TestScrubResolvedConfig:
 
     def test_scrub_before_materialize_is_ignored(self):
         runtime = ConnectionRuntime(
-            raw_config={"path": "/tmp"},
+            connection=connection_document(parameters={"path": "/tmp"}),
             connection_id="conn-early",
             connector_id="test-connector",
             connector_type="file",
@@ -546,7 +521,7 @@ class TestScrubResolvedConfig:
     @pytest.mark.asyncio
     async def test_scrub_with_zero_ref_count_clears_immediately(self):
         runtime = ConnectionRuntime(
-            raw_config={"path": "/tmp"},
+            connection=connection_document(parameters={"path": "/tmp"}),
             connection_id="conn-zero-ref",
             connector_id="test-connector",
             connector_type="file",
@@ -571,12 +546,12 @@ class TestScrubResolvedConfig:
             is_async=True,
         )
         runtime = ConnectionRuntime(
-            raw_config={"parameters": {}},
+            connection=connection_document(parameters={}),
             connection_id="conn-db",
             connector_id="test-connector",
             connector_type="database",
             resolver=_resolver(),
-            connector_definition=_db_connector(),
+            connector=_db_connector(),
         )
         with patch(
             "cdk.connection_runtime.build_transport_from_spec",
@@ -591,7 +566,7 @@ class TestScrubResolvedConfig:
     @pytest.mark.asyncio
     async def test_excess_scrub_calls_are_harmless(self):
         runtime = ConnectionRuntime(
-            raw_config={"path": "/tmp"},
+            connection=connection_document(parameters={"path": "/tmp"}),
             connection_id="conn-excess",
             connector_id="test-connector",
             connector_type="file",
@@ -607,7 +582,7 @@ class TestScrubResolvedConfig:
     @pytest.mark.asyncio
     async def test_resolved_config_error_message_after_scrub(self):
         runtime = ConnectionRuntime(
-            raw_config={"path": "/tmp"},
+            connection=connection_document(parameters={"path": "/tmp"}),
             connection_id="conn-msg",
             connector_id="test-connector",
             connector_type="file",

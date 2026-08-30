@@ -15,6 +15,7 @@ miss, for both read and write directions.
 from unittest.mock import Mock
 
 import pytest
+from contract_documents import connection_document
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.type_map import TypeMapper
@@ -55,7 +56,7 @@ def _runtime(
     connection_mapper: TypeMapper | None = None,
 ) -> ConnectionRuntime:
     return ConnectionRuntime(
-        raw_config={},
+        connection=connection_document(),
         connection_id="test-conn",
         connector_id="test-connector",
         connector_type="database",

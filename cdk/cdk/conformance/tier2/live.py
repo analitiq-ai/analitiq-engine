@@ -12,16 +12,19 @@ The live connection document is JSON::
       "connection_id": "conformance-live",
       "schema": "public",
       "config": {
-        "host": "localhost", "port": 5432, "database": "conformance",
-        "username": "conformance",
+        "parameters": {
+          "host": "localhost", "port": 5432, "database": "conformance",
+          "username": "conformance"
+        },
         "secret_refs": {"password": "env:CONFORMANCE_DB_PASSWORD"}
       }
     }
 
-``config`` is the connection's transport config exactly as a saved
-connection carries it (``secret_refs`` included; ``env:`` / ``file:`` /
-``sidecar:`` schemes resolve relative to the document's directory).
-``schema`` names the namespace the suite creates its tables in.
+``config`` is the connection document as a saved connection carries it
+(``parameters``, ``secret_refs``; ``env:`` / ``file:`` / ``sidecar:``
+schemes resolve relative to the document's directory), minus
+``connector_id``, which the target under test supplies. ``schema`` names
+the namespace the suite creates its tables in.
 """
 
 from __future__ import annotations
@@ -37,6 +40,7 @@ from typing import Any
 
 import pyarrow as pa
 import pytest
+from analitiq.contracts.connection import ConnectionInput
 from analitiq.contracts.endpoints import DatabaseEndpointDoc
 
 from cdk.connection_runtime import ConnectionRuntime
@@ -137,12 +141,14 @@ class LiveHarness:
         """Build a fresh trusted-side runtime for one phase."""
         document = self.document
         return ConnectionRuntime(
-            raw_config=dict(document["config"]),
+            connection=ConnectionInput.model_validate(
+                {"connector_id": self.target.connector_id, **document["config"]}
+            ),
             connection_id=str(document.get("connection_id") or "conformance-live"),
             connector_id=self.target.connector_id,
             connector_type=self.target.kind,
             resolver=SchemeSecretsResolver(self.document_path.parent),
-            connector_definition=self.target.definition,
+            connector=self.target.connector,
             connector_type_mapper=self.target.type_mapper,
         )
 

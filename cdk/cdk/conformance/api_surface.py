@@ -24,13 +24,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from analitiq.contracts.connection import ConnectionInput
 from analitiq.contracts.endpoints import ApiEndpointDoc, ReadOperation
 
 from cdk.api.exceptions import RequestSpecError, request_spec_errors
 from cdk.api.request import request_supplies
 from cdk.api.urls import redact_credentials
 from cdk.connection_runtime import (
-    MATERIALIZATION_CONNECTION_SCALARS,
     MATERIALIZATION_CONNECTION_SUBTREES,
     MATERIALIZATION_SECRET_SCOPES,
     ConnectionRuntime,
@@ -66,17 +66,14 @@ READS_CHECK = "api-has-reads"
 #: What only a CONNECTION brings to transport materialization: exactly the
 #: connection-document fields ``_build_resolution_context`` puts in scope
 #: (derived from its own statement, never restated -- an unknown field like
-#: ``connection.hostname`` is stray, not deferred), the secrets and auth it
-#: carries, and, as an exact key, the per-connection
-#: ``runtime.connection_id``. An expression reading one is deferred: a
-#: definition-only run cannot say the value, and that says nothing about
-#: the connector.
+#: ``connection.hostname`` is stray, not deferred), the secrets it carries,
+#: and, as an exact key, the per-connection ``runtime.connection_id``. An
+#: expression reading one is deferred: a definition-only run cannot say the
+#: value, and that says nothing about the connector.
 _TRANSPORT_DEFERRED_SCOPES = tuple(
     f"connection.{subtree}." for subtree in MATERIALIZATION_CONNECTION_SUBTREES
 ) + tuple(f"{scope}." for scope in MATERIALIZATION_SECRET_SCOPES)
-_TRANSPORT_DEFERRED_KEYS = tuple(
-    f"connection.{scalar}" for scalar in MATERIALIZATION_CONNECTION_SCALARS
-) + (f"runtime.{RUNTIME_CONNECTION_ID}",)
+_TRANSPORT_DEFERRED_KEYS = (f"runtime.{RUNTIME_CONNECTION_ID}",)
 
 
 def _definition_settled(path: str) -> bool:
@@ -269,12 +266,12 @@ def definition_resolver(
     drive executing one resolve identically.
     """
     runtime = ConnectionRuntime(
-        raw_config={},
+        connection=ConnectionInput(connector_id=target.connector_id),
         connection_id="conformance-definition",
         connector_id=target.connector_id,
         connector_type=target.kind,
         resolver=NoSecretsResolver(),
-        connector_definition=target.definition,
+        connector=target.connector,
     )
     return runtime.request_resolver(runtime_values=runtime_values)
 
@@ -287,7 +284,7 @@ def fillable_at_request_time(declared: Any) -> bool:
     restated: an expression defers exactly when everything it reads is a
     connection value a run's request resolution will fill. One reading
     ``secrets.*``, ``auth.*`` -- or a connection field outside the supplied
-    subtrees, like ``connection.name`` -- resolves on no run, so it is a
+    subtrees, like ``connection.hostname`` -- resolves on no run, so it is a
     defect to report, never a value to defer.
     """
     paths = scope_paths(declared)

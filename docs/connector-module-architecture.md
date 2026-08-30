@@ -427,7 +427,10 @@ The package also ships three generated contract artifacts beside the modules
 that read them: the Arrow type grammar, the conversion matrix, and the
 contract-consumption manifest (`cdk/cdk/contract_consumption.json`, the contract
 fields the engine reads, rendered from mypy's type map by
-`tools/contract_consumption.py` and checked current in CI). All are data
+`tools/contract_consumption.py` and checked current in CI; a field is claimed
+when the engine reads it by any means it actually uses, and an unclaimed field
+is one no runtime path reads -- every loaded document is held as its typed
+contract model, so there is no dict path the census cannot see). All are data
 files, so whether they land in a built distribution is a packaging decision
 rather than a code one — and a distribution missing one imports cleanly and
 fails on first use, in every consumer at once. The publish workflow therefore

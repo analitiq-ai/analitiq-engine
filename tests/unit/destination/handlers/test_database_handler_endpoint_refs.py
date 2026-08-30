@@ -16,6 +16,7 @@ from analitiq.contracts.endpoints import (
     DatabaseEndpointDoc,
 )
 from analitiq.contracts.stream import validate_endpoint_ref
+from contract_documents import connection_document
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.sql.capabilities import SqlCapabilities
@@ -72,7 +73,7 @@ def _runtime(
     connection_mapper: TypeMapper | None = None,
 ) -> ConnectionRuntime:
     return ConnectionRuntime(
-        raw_config={},
+        connection=connection_document(),
         connection_id="dest-conn",
         connector_id="test-connector",
         connector_type="database",

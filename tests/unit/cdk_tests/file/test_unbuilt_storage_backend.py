@@ -12,6 +12,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 import pytest
+from contract_documents import connection_document
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.file import StorageBackendNotBuiltError
@@ -20,9 +21,9 @@ from cdk.file.local_backend import LocalFileStorage
 from cdk.registry import build_registries
 
 
-def _runtime(kind: str, config: dict[str, object]) -> ConnectionRuntime:
+def _runtime(kind: str, parameters: dict[str, object]) -> ConnectionRuntime:
     return ConnectionRuntime(
-        raw_config=config,
+        connection=connection_document(parameters=parameters),
         connection_id=f"conn-{kind}",
         connector_id=kind,
         connector_type=kind,

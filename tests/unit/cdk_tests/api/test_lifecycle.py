@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from contract_documents import connection_document
 
 from cdk.api import GenericAPIConnector
 from cdk.api.exceptions import ConnectorConnectionError
@@ -23,9 +24,9 @@ from .fakes import BASE_URL, FakeSession, runtime_with
 pytestmark = pytest.mark.unit
 
 
-def _unmaterialized(config: dict[str, Any]) -> ConnectionRuntime:
+def _unmaterialized(parameters: dict[str, Any]) -> ConnectionRuntime:
     return ConnectionRuntime(
-        raw_config=config,
+        connection=connection_document(parameters=parameters),
         connection_id="test-conn",
         connector_id="test-connector",
         connector_type="api",
@@ -53,7 +54,7 @@ class TestConnect:
         assert connector._http._rate_limiter is limiter
 
     @pytest.mark.parametrize(
-        "config", [{"invalid": "config"}, {"parameters": {}}], ids=["junk", "no-host"]
+        "config", [{"invalid": "config"}, {}], ids=["junk", "no-host"]
     )
     async def test_a_failed_materialization_is_named_as_a_connection_failure(
         self, config: dict[str, Any]

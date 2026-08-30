@@ -4,7 +4,13 @@ from unittest.mock import MagicMock
 
 import pytest
 from analitiq.contracts.endpoints import ApiEndpointDoc, DatabaseEndpointDoc
-from analitiq.contracts.stream import validate_endpoint_ref
+from analitiq.contracts.stream import (
+    ApiWrite,
+    DatabaseConflictKeyedWrite,
+    DatabaseKeylessWrite,
+    StreamSource,
+    validate_endpoint_ref,
+)
 
 from src.engine.mapping import MappingDocument
 from src.models.resolved import (
@@ -16,7 +22,9 @@ from src.models.resolved import (
     ResolvedSource,
     ResolvedStream,
     RuntimeConfig,
+    dump_authored,
     dump_endpoint_document,
+    write_conflict_keys,
 )
 from src.runner import (
     _build_config_dict,
@@ -97,6 +105,20 @@ def _make_runtime(connector_type="database"):
     return rt
 
 
+def _stream_source(**block) -> StreamSource:
+    """A contract-valid stream source over the connector-scoped ref."""
+    return StreamSource.model_validate(
+        {
+            "endpoint_ref": {
+                "scope": "connector",
+                "connection_id": "conn",
+                "endpoint_id": "ep",
+            },
+            **block,
+        }
+    )
+
+
 def _make_source(connector_type="database", stream_source=None, endpoint_document=None):
     """ResolvedSource over a typed endpoint document and mock runtime."""
     ref = _make_endpoint_ref()
@@ -110,7 +132,10 @@ def _make_source(connector_type="database", stream_source=None, endpoint_documen
         connection_ref="conn-1",
         runtime=rt,
         endpoint_document=endpoint_document,
-        stream_source=stream_source or {"replication": {"cursor_field": "updated_at"}},
+        stream_source=stream_source
+        or _stream_source(
+            replication={"method": "incremental", "cursor_field": "updated_at"}
+        ),
     )
 
 
@@ -125,7 +150,7 @@ def _make_destination(write=None):
         connection_ref="dest-1",
         runtime=rt,
         endpoint_document=_database_endpoint_doc(),
-        write=write or {"mode": "upsert"},
+        write=write or DatabaseConflictKeyedWrite(mode="upsert", conflict_keys=["id"]),
     )
 
 
@@ -137,12 +162,6 @@ def _make_stream(
     return ResolvedStream(
         stream_id=stream_id,
         stream_version=stream_version,
-        pipeline_id="test-pipeline",
-        display_name=None,
-        description=None,
-        status="active",
-        is_enabled=True,
-        tags=[],
         source=src,
         destinations=[dest],
         mapping=MappingDocument.parse(mapping or {}),
@@ -156,8 +175,6 @@ def _make_pipeline(
         pipeline_id=pipeline_id,
         name="Test Pipeline",
         display_name=display_name,
-        description=None,
-        status="active",
         connections=PipelineConnections(source="src-conn", destinations=["dst-conn"]),
         runtime=runtime or RuntimeConfig(),
     )
@@ -187,20 +204,39 @@ class TestDumpEndpointDocument:
 
 
 class TestBuildDestinationConfig:
-    def test_explicit_write_mode(self):
-        dest = _make_destination(write={"mode": "insert"})
+    def test_database_insert_mode(self):
+        dest = _make_destination(write=DatabaseKeylessWrite(mode="insert"))
         result = _build_destination_config(dest)
         assert result == {"write_mode": "insert"}
 
-    def test_default_write_mode_when_absent(self):
-        dest = _make_destination(write={})
+    def test_api_write_mode(self):
+        dest = _make_destination(write=ApiWrite(mode="upsert"))
         result = _build_destination_config(dest)
         assert result == {"write_mode": "upsert"}
 
     def test_truncate_insert_mode(self):
-        dest = _make_destination(write={"mode": "truncate_insert"})
+        dest = _make_destination(write=DatabaseKeylessWrite(mode="truncate_insert"))
         result = _build_destination_config(dest)
         assert result == {"write_mode": "truncate_insert"}
+
+
+class TestWriteConflictKeys:
+    """The stream's conflict keys come from the database upsert block alone."""
+
+    def test_database_upsert_carries_its_keys(self):
+        write = DatabaseConflictKeyedWrite(
+            mode="upsert", conflict_keys=["tenant", "id"]
+        )
+        assert write_conflict_keys(write) == ["tenant", "id"]
+
+    @pytest.mark.parametrize(
+        "write",
+        [DatabaseKeylessWrite(mode="insert"), ApiWrite(mode="upsert")],
+        ids=["database-insert", "api-upsert"],
+    )
+    def test_every_other_shape_answers_empty(self, write):
+        # An API upsert keys on the endpoint's natural key, never the stream.
+        assert write_conflict_keys(write) == []
 
 
 class TestTranslateSourceConfig:
@@ -225,7 +261,9 @@ class TestTranslateSourceConfig:
     def test_api_kind_gets_same_pass_through(self):
         """The api kind carries the identical contract-document shape; the
         connector reads filters directly off ``stream_source``."""
-        stream_source = {"filters": [{"field": "x"}]}
+        stream_source = _stream_source(
+            filters=[{"field": "x", "operator": "eq", "value": 1}]
+        )
         source = _make_source(connector_type="api", stream_source=stream_source)
         stream = _make_stream(connector_type="api")
 
@@ -237,7 +275,9 @@ class TestTranslateSourceConfig:
         assert result["endpoint_document"] == dump_endpoint_document(
             source.endpoint_document
         )
-        assert result["stream_source"] is stream_source
+        # The wire carries the authored shape, which parses back to the model.
+        assert result["stream_source"] == dump_authored(stream_source)
+        assert StreamSource.model_validate(result["stream_source"]) == stream_source
 
     def test_non_built_in_kind_passes_through_database_shape(self):
         """Non-built-in connector kinds pass through the same contract-document
@@ -253,7 +293,7 @@ class TestTranslateSourceConfig:
         assert result["endpoint_document"] == dump_endpoint_document(
             source.endpoint_document
         )
-        assert result["stream_source"] is source.stream_source
+        assert result["stream_source"]["replication"]["cursor_field"] == "updated_at"
 
     @pytest.mark.parametrize("kind", ["nosql", "graphql", "file", "sftp", "custom-db"])
     def test_non_built_in_kind_never_raises(self, kind):

@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar, cast
 
 from analitiq.contracts.connection import ConnectionInput
 from analitiq.contracts.connector import Connector
@@ -35,15 +35,19 @@ from analitiq.contracts.stream import StreamInput
 from analitiq.validator import validate_pipeline_bundle
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from cdk.contract_consumption import contract_models
 from src.config.utils import load_json_file
 
 logger = logging.getLogger(__name__)
 
 
-# The two endpoint-document variants. Endpoint documents are the artifacts
-# the engine carries as typed models end-to-end (issue #349); the other kinds
-# are validated the same way but their call sites still consume the raw dict.
+# The two endpoint-document variants. Every artifact kind is carried as its
+# typed contract model from validation onwards (issues #349, #475): the engine
+# reads contract fields as attributes, never through the raw dict, which is
+# what lets the contract-consumption census see each read.
 EndpointDocument = ApiEndpointDoc | DatabaseEndpointDoc
+
+_Document = TypeVar("_Document", bound=BaseModel)
 
 # One model per artifact kind. The model is the authored-document ("Input")
 # variant, matching what the engine loads from disk and what the published
@@ -142,6 +146,52 @@ def validate(
         )
     logger.debug("Contract %r validated %s", kind, source)
     return model
+
+
+def validate_as(
+    kind: str,
+    model: type[_Document],
+    document: dict[str, Any],
+    *,
+    source: str = "<inline>",
+) -> _Document:
+    """Validate ``document`` as ``kind`` and return it as ``model``.
+
+    The typed entry for the single-model kinds: the caller names the class
+    it holds the artifact as, and a registry entry that validates to another
+    class is a wiring defect surfaced here rather than a misattributed read
+    downstream.
+    """
+    validated = validate(kind, document, source=source)
+    if not isinstance(validated, model):
+        raise ValueError(
+            f"artifact kind {kind!r} validated to {type(validated).__name__}, "
+            f"not {model.__name__}"
+        )
+    return validated
+
+
+def validate_pipeline(document: dict[str, Any], *, source: str) -> PipelineInput:
+    return validate_as("pipeline", PipelineInput, document, source=source)
+
+
+def validate_stream(document: dict[str, Any], *, source: str) -> StreamInput:
+    return validate_as("stream", StreamInput, document, source=source)
+
+
+def validate_connection(document: dict[str, Any], *, source: str) -> ConnectionInput:
+    return validate_as("connection", ConnectionInput, document, source=source)
+
+
+def validate_connector(document: dict[str, Any], *, source: str) -> Connector:
+    """Validate a connector definition; the union alias is the kind-tagged model."""
+    validated = validate("connector", document, source=source)
+    if not isinstance(validated, tuple(contract_models(Connector))):
+        raise ValueError(
+            f"artifact kind 'connector' validated to {type(validated).__name__}, "
+            "not a connector document model"
+        )
+    return cast(Connector, validated)
 
 
 def validate_file(kind: str, path: Path) -> BaseModel:

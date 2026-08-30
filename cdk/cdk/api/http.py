@@ -53,7 +53,7 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-#: Retry attempts used when the connection declares no ``max_retries``.
+#: The retry budget every HTTP sender uses; a connection document declares none.
 DEFAULT_MAX_RETRIES = 3
 
 

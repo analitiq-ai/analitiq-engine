@@ -1,9 +1,15 @@
-"""The file and stdout connectors keep no secret on self._config after connect()."""
+"""The file and stdout connectors keep no secret on self._config after connect().
+
+Both read their settings from the connection's authored ``parameters``
+block -- the one place the connection contract carries connector settings
+-- and the resolved secret values travel beside it under ``secrets``.
+"""
 
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from contract_documents import connection_document
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.file.generic import GenericFileConnector
@@ -15,23 +21,39 @@ from cdk.stdout.generic import GenericStdoutConnector
 _EMITTED_AT = datetime(2026, 7, 21, 9, 0, 0, tzinfo=timezone.utc)
 
 
-def _make_file_runtime(*, raw_config=None):
+def _make_file_runtime(*, parameters=None):
     """Create a file-type ConnectionRuntime with mock resolver."""
-    config = raw_config or {
-        "path": "/tmp/output",
-        "prefix": "data/",
-        "file_format": "jsonl",
-        "formatter_config": {},
-        "path_template": None,
-        "secret_field": "${MY_SECRET}",
-    }
     return ConnectionRuntime(
-        raw_config=config,
+        connection=connection_document(
+            parameters=parameters
+            or {
+                "path": "/tmp/output",
+                "prefix": "data/",
+                "file_format": "jsonl",
+                "formatter_config": {},
+                "path_template": None,
+            },
+            secret_refs={"MY_SECRET": "env:MY_SECRET"},
+        ),
         connection_id="conn-file-test",
         connector_id="test-connector",
         connector_type="file",
         driver=None,
         resolver=AsyncMock(resolve=AsyncMock(return_value={"MY_SECRET": "top-secret"})),
+    )
+
+
+def _make_stdout_runtime(*, parameters=None, secrets=None):
+    return ConnectionRuntime(
+        connection=connection_document(
+            parameters=parameters or {"file_format": "jsonl", "formatter_config": {}},
+            secret_refs={name: f"env:{name}" for name in (secrets or {})},
+        ),
+        connection_id="conn-stream-test",
+        connector_id="test-connector",
+        connector_type="stdout",
+        driver=None,
+        resolver=AsyncMock(resolve=AsyncMock(return_value=dict(secrets or {}))),
     )
 
 
@@ -56,12 +78,14 @@ class TestFileConnectorSecretRetention:
         # longer names the lookup site would leave the real backend writing
         # to the real filesystem, and every assertion below would still pass.
         mock_storage.connect.assert_awaited_once()
+        # The storage backend is handed the authored parameters, nothing else.
+        assert mock_storage.connect.await_args.args[0]["path"] == "/tmp/output"
         assert set(handler._config.keys()) == {"path", "prefix"}
         assert handler._config["path"] == "/tmp/output"
         assert handler._config["prefix"] == "data/"
 
     @pytest.mark.asyncio
-    async def test_secret_fields_not_in_config(self):
+    async def test_secret_values_not_in_config(self):
         runtime = _make_file_runtime()
         handler = GenericFileConnector()
 
@@ -74,8 +98,10 @@ class TestFileConnectorSecretRetention:
             await handler.connect(runtime)
 
         mock_storage.connect.assert_awaited_once()
-        assert "secret_field" not in handler._config
-        assert "MY_SECRET" not in str(handler._config.values())
+        assert "MY_SECRET" not in handler._config
+        assert "top-secret" not in str(handler._config.values())
+        # Nor did the resolved secret reach the storage backend's config.
+        assert "MY_SECRET" not in mock_storage.connect.await_args.args[0]
 
     @pytest.mark.asyncio
     async def test_runtime_resolved_config_scrubbed_after_connect(self):
@@ -161,18 +187,7 @@ class TestStdoutConnectorSecretRetention:
 
     @pytest.mark.asyncio
     async def test_config_is_empty_after_connect(self):
-        runtime = ConnectionRuntime(
-            raw_config={
-                "file_format": "jsonl",
-                "formatter_config": {},
-                "api_key": "${KEY}",
-            },
-            connection_id="conn-stream-test",
-            connector_id="test-connector",
-            connector_type="stdout",
-            driver=None,
-            resolver=AsyncMock(resolve=AsyncMock(return_value={"KEY": "secret-key"})),
-        )
+        runtime = _make_stdout_runtime(secrets={"KEY": "secret-key"})
         handler = GenericStdoutConnector()
         await handler.connect(runtime)
 
@@ -180,14 +195,7 @@ class TestStdoutConnectorSecretRetention:
 
     @pytest.mark.asyncio
     async def test_runtime_resolved_config_scrubbed_after_connect(self):
-        runtime = ConnectionRuntime(
-            raw_config={"file_format": "jsonl"},
-            connection_id="conn-stream-test",
-            connector_id="test-connector",
-            connector_type="stdout",
-            driver=None,
-            resolver=AsyncMock(resolve=AsyncMock(return_value={})),
-        )
+        runtime = _make_stdout_runtime(parameters={"file_format": "jsonl"})
         handler = GenericStdoutConnector()
         await handler.connect(runtime)
 
@@ -195,16 +203,8 @@ class TestStdoutConnectorSecretRetention:
 
     @pytest.mark.asyncio
     async def test_secrets_scrubbed_on_connect_failure(self):
-        runtime = ConnectionRuntime(
-            raw_config={
-                "file_format": "unsupported_format_xyz",
-                "formatter_config": {},
-            },
-            connection_id="conn-stream-fail",
-            connector_id="test-connector",
-            connector_type="stdout",
-            driver=None,
-            resolver=AsyncMock(resolve=AsyncMock(return_value={})),
+        runtime = _make_stdout_runtime(
+            parameters={"file_format": "unsupported_format_xyz", "formatter_config": {}}
         )
         handler = GenericStdoutConnector()
 

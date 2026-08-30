@@ -267,9 +267,6 @@ class GenericAPIConnector(BaseDestinationHandler):
         #: client, and the loser is never closed.
         self._dispatch_lock = asyncio.Lock()
 
-        #: The connection's retry budget, read once so every sender this
-        #: connector opens gets the one the connection declared.
-        self._max_retries: int = DEFAULT_MAX_RETRIES
         self.dialect: ApiDialect | None = None
         # None rather than "": join_url("", "/v1/x") answers "/v1/x", a
         # relative URL the client rejects with an unhelpful error instead of
@@ -310,9 +307,6 @@ class GenericAPIConnector(BaseDestinationHandler):
             # nowhere else.
             self.dialect = self.dialect_class.for_runtime(runtime)
             await runtime.materialize()
-            self._max_retries = runtime.raw_config.get(
-                "max_retries", DEFAULT_MAX_RETRIES
-            )
             # Through the same call every later request goes through, so
             # the default transport is opened, wrapped and cached in one
             # place: a second construction site here is a second sender
@@ -367,7 +361,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                     rate_limiter=transport.rate_limiter,
                     dialect=dialect,
                     retry_statuses=declared_retry_statuses(dialect.error_map),
-                    max_retries=self._max_retries,
+                    max_retries=DEFAULT_MAX_RETRIES,
                 ),
                 base_url=transport.base_url,
                 origin=origin_of(transport.base_url),

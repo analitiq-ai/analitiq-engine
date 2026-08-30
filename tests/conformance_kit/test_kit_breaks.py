@@ -18,9 +18,9 @@ from urllib.parse import urljoin
 
 import pytest
 from _pytest.outcomes import Skipped
-from analitiq.contracts.connector import HttpTransport
+from analitiq.contracts.connector import Connector, HttpTransport
 from analitiq.contracts.endpoints import ApiEndpointDoc
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 import cdk.registry
 from cdk.api import read_setup, strategies
@@ -42,6 +42,7 @@ from cdk.conformance import (
 from cdk.conformance import target as target_module
 from cdk.conformance import violation_report
 from cdk.conformance.api_surface import api_base_url
+from cdk.conformance.fakes import minimal_connector_definition
 from cdk.conformance.target import (
     ConformanceSetupError,
     ConformanceTarget,
@@ -694,12 +695,12 @@ class TestTargetKindGate:
         assert "databse" in report
         assert "database-shaped" in report
 
-    def test_genuinely_new_kind_passes_through(self, tmp_path: Any) -> None:
-        """A registry-discovered kind with no SQL surface is not flagged."""
+    def test_a_kind_with_no_sql_surface_passes_through(self, tmp_path: Any) -> None:
+        """A contract kind with no SQL surface is not flagged."""
         definition_dir = tmp_path / "definition"
         definition_dir.mkdir()
         (definition_dir / "connector.json").write_text(
-            '{"kind": "queue", "connector_id": "conformance-queue"}'
+            json.dumps(minimal_connector_definition("stdout", "conformance-stdout"))
         )
         target = load_target(tmp_path)
         assert check_declaration_consistency(target) == []
@@ -1038,6 +1039,9 @@ class TestAnApiTargetSkipsTheSqlChecks:
             root=Path("."),
             definition_dir=Path("."),
             definition={"kind": "api", "connector_id": "probe"},
+            connector=TypeAdapter(Connector).validate_python(
+                minimal_connector_definition("api", "probe")
+            ),
             connector_id="probe",
             kind="api",
             declared_capabilities=None,
@@ -1680,16 +1684,14 @@ class TestApiReadPathBreaks:
         transport stops exactly those reads, while the default's stops
         every stream at connect(). A message quoting the larger
         consequence for both would send the author looking for a
-        connection that never breaks.
+        connection that never breaks. The contract lets an http transport
+        omit ``base_url``; only the build says the session cannot open.
         """
         root = tmp_path / "api"
         shutil.copytree(API_REFERENCE_DIR, root)
         connector = root / "definition" / "connector.json"
         definition = json.loads(connector.read_text())
-        definition["transports"]["files"] = {
-            "transport_type": "http",
-            "base_url": {"literal": ""},
-        }
+        definition["transports"]["files"] = {"transport_type": "http"}
         connector.write_text(json.dumps(definition))
         document = root / "definition" / "endpoints" / "widgets.json"
         parsed = json.loads(document.read_text())
@@ -2288,21 +2290,19 @@ class TestApiTransportBreaks:
         return load_target(root)
 
     def test_a_default_transport_that_is_not_declared(self, tmp_path: Path) -> None:
-        target = self._bent_definition(
-            tmp_path, lambda d: d.update(default_transport="oauth")
-        )
-        report = _report(check_read_transport_selection(target))
-        assert "'oauth'" in report
-        assert "no stream on this connector reaches its first request" in report
+        """The contract, not the kit, refuses a default no block declares."""
+        with pytest.raises(ConformanceSetupError, match="RULE-CTOR-001"):
+            self._bent_definition(
+                tmp_path, lambda d: d.update(default_transport="oauth")
+            )
 
     def test_a_default_transport_of_another_type(self, tmp_path: Path) -> None:
-        target = self._bent_definition(
-            tmp_path,
-            lambda d: d["transports"]["api"].update(transport_type="sqlalchemy"),
-        )
-        report = _report(check_read_transport_selection(target))
-        assert "'sqlalchemy'" in report
-        assert "no session" in report
+        """An api connector's transport union has no sqlalchemy member."""
+        with pytest.raises(ConformanceSetupError, match="sqlalchemy"):
+            self._bent_definition(
+                tmp_path,
+                lambda d: d["transports"]["api"].update(transport_type="sqlalchemy"),
+            )
 
 
 class TestApiRequestBodyBreaks:
@@ -2609,35 +2609,36 @@ class TestApiBaseUrlBreaks:
 
     _bent_definition = staticmethod(TestApiTransportBreaks._bent_definition)
 
-    @pytest.mark.parametrize("declared", [None, ""])
-    def test_a_default_transport_with_no_usable_base_url(
-        self, tmp_path: Path, declared: object
-    ) -> None:
-        def bend(definition: dict[str, Any]) -> None:
-            block = definition["transports"]["api"]
-            if declared is None:
-                block.pop("base_url")
-            else:
-                block["base_url"] = declared
-
-        target = self._bent_definition(tmp_path, bend)
+    def test_a_default_transport_with_no_usable_base_url(self, tmp_path: Path) -> None:
+        """The contract lets ``base_url`` be omitted; the build cannot."""
+        target = self._bent_definition(
+            tmp_path, lambda d: d["transports"]["api"].pop("base_url")
+        )
         report = _report(check_read_transport_selection(target))
         assert "no usable base_url" in report
+
+    def test_a_base_url_that_is_empty_is_refused_by_the_contract(
+        self, tmp_path: Path
+    ) -> None:
+        """``""`` is decidable from the document, so the contract owns it."""
+        with pytest.raises(ConformanceSetupError, match="base_url"):
+            self._bent_definition(
+                tmp_path, lambda d: d["transports"]["api"].update(base_url="")
+            )
 
     def test_a_base_url_literal_that_is_empty_is_not_a_usable_one(
         self, tmp_path: Path
     ) -> None:
         """A mapping is not the same as a value: this one resolves to ''.
 
-        Reading the declaration for truthiness certifies a connector whose
-        ``connect()`` cannot open a session, because the transport build
-        rejects the empty string.
+        The contract decides it from the document alone and refuses the
+        definition, so the kit never sees it.
         """
-        target = self._bent_definition(
-            tmp_path, lambda d: d["transports"]["api"].update(base_url={"literal": ""})
-        )
-        report = _report(check_read_transport_selection(target))
-        assert "no usable base_url" in report
+        with pytest.raises(ConformanceSetupError, match="base_url"):
+            self._bent_definition(
+                tmp_path,
+                lambda d: d["transports"]["api"].update(base_url={"literal": ""}),
+            )
 
     def test_a_base_url_expression_that_cannot_resolve_names_why(
         self, tmp_path: Path
@@ -2703,45 +2704,46 @@ class TestApiBaseUrlBreaks:
         assert "no query or fragment" in report
 
     def test_a_settled_path_declared_null_is_refused(self, tmp_path: Path) -> None:
-        """A declared null resolves to nothing, which substitutes nowhere."""
+        """A declared null resolves to nothing, which substitutes nowhere.
+
+        ``display_name`` is a nullable field of the contract, so a
+        definition pointing its origin at it is one the engine loads.
+        """
 
         def bend(definition: dict[str, Any]) -> None:
-            definition["optional_origin"] = None
+            definition["display_name"] = None
             definition["transports"]["api"]["base_url"] = {
                 "template": (
-                    "https://${connection.parameters.host}"
-                    "/${connector.optional_origin}"
+                    "https://${connection.parameters.host}" "/${connector.display_name}"
                 )
             }
 
         target = self._bent_definition(tmp_path, bend)
         report = _report(check_read_transport_selection(target))
-        assert "'connector.optional_origin'" in report
+        assert "'connector.display_name'" in report
         assert "declares it null" in report
 
     @pytest.mark.parametrize(
-        ("declared", "quoted"),
+        "declared",
         [
-            # None of these parses, so none can be asked where its userinfo
-            # ends. Only the one that could HAVE userinfo is withheld.
-            ("https://user@", False),
-            ("https://:443", True),
-            ("https://api.example.test:abc", True),
-            ("https://api.example.test:99999999", True),
-            ("https://[abc", True),
+            "https://:443",
+            "https://api.example.test:abc",
+            "https://api.example.test:99999999",
+            "https://[abc",
         ],
     )
     def test_a_base_url_no_http_client_can_open_is_refused(
-        self, tmp_path: Path, declared: str, quoted: bool
+        self, tmp_path: Path, declared: str
     ) -> None:
         """Whether the string is a URL at all is yarl's answer, not ours.
 
-        Userinfo or a port with no host behind it, a port that is not a
-        number, an unclosed IPv6 literal: yarl refuses each, and yarl is
-        what aiohttp builds every request URL with -- so a value it refuses
-        is one the connector could never send. Asserted on the outcome
-        rather than on a phrase, because the phrasing is the library's now
-        and a hand-written copy of it is what this deleted.
+        A port with no host behind it, a port that is not a number, an
+        unclosed IPv6 literal: yarl refuses each, and yarl is what aiohttp
+        builds every request URL with -- so a value it refuses is one the
+        connector could never send. Asserted on the outcome rather than on
+        a phrase, because the phrasing is the library's now and a
+        hand-written copy of it is what this deleted. (Userinfo with no
+        host behind it is the contract's refusal, RULE-CTOR-066.)
         """
         target = self._bent_definition(
             tmp_path,
@@ -2749,48 +2751,55 @@ class TestApiBaseUrlBreaks:
         )
         report = _report(check_read_transport_selection(target))
         assert "no usable base_url" in report
-        assert (repr(declared) in report) is quoted
+        assert repr(declared) in report
+
+    def test_a_base_url_that_is_only_userinfo_is_refused_by_the_contract(
+        self, tmp_path: Path
+    ) -> None:
+        """``https://user@`` carries userinfo in authored text: RULE-CTOR-066."""
+        with pytest.raises(ConformanceSetupError, match="RULE-CTOR-066"):
+            self._bent_definition(
+                tmp_path,
+                lambda d: d["transports"]["api"].update(base_url="https://user@"),
+            )
 
     def test_a_base_url_carrying_credentials_is_refused(self, tmp_path: Path) -> None:
         """Basic auth comes off EACH request's URL, so page two loses it.
 
-        A provider's absolute next link omits the userinfo, and the origin
-        guard cannot notice -- ``origin()`` strips it, so both sides compare
-        equal while the credentials are gone. The read 401s on page two
-        looking like a provider fault.
+        A literal pair is decidable from the document, so the contract
+        refuses it (RULE-CTOR-066) before the kit loads the definition.
         """
-        target = self._bent_definition(
-            tmp_path,
-            lambda d: d["transports"]["api"].update(
-                base_url="https://user:pass@api.example.test"
-            ),
-        )
-        report = _report(check_read_transport_selection(target))
-        assert "must carry no credentials" in report
-        assert "pass" not in report, "the refusal must not log the password"
+        with pytest.raises(ConformanceSetupError, match="RULE-CTOR-066"):
+            self._bent_definition(
+                tmp_path,
+                lambda d: d["transports"]["api"].update(
+                    base_url="https://user:pass@api.example.test"
+                ),
+            )
 
     def test_a_base_url_resolving_to_credentials_is_refused(
         self, tmp_path: Path
     ) -> None:
         """The half no document rule can reach.
 
-        The literal spelling is refused by the contract
-        (analitiq-ai/claude-code-plugins#175). A validator cannot resolve an
-        expression, so this spelling -- credentials arriving through a
-        template -- is only visible where the resolved value is, which is
-        here.
+        The literal spelling, and userinfo in a template's authored
+        authority, are refused by the contract (RULE-CTOR-066). A validator
+        cannot resolve an expression, so credentials arriving whole through
+        a resolved ``connector.*`` field are only visible where the resolved
+        value is, which is here.
         """
         target = self._bent_definition(
             tmp_path,
             lambda d: (
-                d.update(cred="user:pass"),
+                d.update(description="https://user:pass@api.example.test"),
                 d["transports"]["api"].update(
-                    base_url={"template": "https://${connector.cred}@api.example.test"}
+                    base_url={"template": "${connector.description}"}
                 ),
             ),
         )
         report = _report(check_read_transport_selection(target))
         assert "must carry no credentials" in report
+        assert "pass" not in report, "the refusal must not log the password"
 
     def test_a_dead_connector_path_in_a_mixed_node_is_not_carried_past(
         self, tmp_path: Path
@@ -2899,25 +2908,22 @@ class TestApiBaseUrlBreaks:
     def test_a_mixed_scope_base_url_is_refused_by_the_stray_path(
         self, tmp_path: Path
     ) -> None:
-        """One deferrable path must not carry an undeferrable one past.
+        """A scope no runtime declares is decidable from the document.
 
-        The connection half resolves fine in production; the ``bogus.``
-        half fails ``resolve_http_spec()`` at connect() on every
-        connection, so the node as a whole defers on no run -- and the
-        violation names the path no phase supplies, not the half the
-        connection fills.
+        The contract refuses the ``bogus.`` placeholder (RULE-CTOR-057)
+        whatever the deferrable half beside it resolves to.
         """
-        target = self._bent_definition(
-            tmp_path,
-            lambda d: d["transports"]["api"].update(
-                base_url={
-                    "template": "https://${connection.parameters.host}/${bogus.value}"
-                }
-            ),
-        )
-        report = _report(check_read_transport_selection(target))
-        assert "'bogus.value'" in report
-        assert "'connection.parameters.host'" not in report
+        with pytest.raises(ConformanceSetupError, match="RULE-CTOR-057"):
+            self._bent_definition(
+                tmp_path,
+                lambda d: d["transports"]["api"].update(
+                    base_url={
+                        "template": (
+                            "https://${connection.parameters.host}/${bogus.value}"
+                        )
+                    }
+                ),
+            )
 
     def test_a_statically_resolvable_base_url_arms_the_real_origin(
         self, tmp_path: Path
@@ -3009,40 +3015,34 @@ class TestApiBaseUrlBreaks:
         )
         assert check_read_transport_selection(target) == []
 
-    def test_the_rest_of_the_transport_spec_is_driven_not_restated(
+    def test_a_partial_rate_limit_is_refused_by_the_contract(
         self, tmp_path: Path
     ) -> None:
-        """resolve_http_spec judges what the value ladders do not carry.
+        """A ``rate_limit`` missing its window is a document defect."""
+        with pytest.raises(ConformanceSetupError, match="rate_limit"):
+            self._bent_definition(
+                tmp_path,
+                lambda d: d["transports"]["api"].update(
+                    rate_limit={"max_requests": 10}
+                ),
+            )
 
-        A malformed `rate_limit` fails connect() on every connection; the
-        drive hands the block to the engine's own build, so the finding
-        comes from the function rather than a field-by-field restatement.
-        """
-        target = self._bent_definition(
-            tmp_path,
-            lambda d: d["transports"]["api"].update(rate_limit={"max_requests": 10}),
-        )
-        report = _report(check_read_transport_selection(target))
-        assert "does not materialize" in report
-        assert "rate_limit" in report
-
-    def test_a_coercion_the_build_overflows_on_is_still_a_finding(
+    def test_a_rate_limit_no_int_can_hold_is_refused_by_the_contract(
         self, tmp_path: Path
     ) -> None:
-        """JSON can spell `1e999`; `int(inf)` raises OverflowError.
+        """JSON can spell ``1e999``; the contract's ``int`` field cannot hold it.
 
-        An escape here would abandon the whole transport check and every
-        finding after it -- the drive's catch has to hold the build's
-        unwrapped coercions, arithmetic included.
+        The overflow the build would otherwise raise on is caught by the
+        contract, not the drive (``timeout_seconds`` keeps the drive's own
+        overflow case, which the contract does not bound).
         """
-        target = self._bent_definition(
-            tmp_path,
-            lambda d: d["transports"]["api"].update(
-                rate_limit={"max_requests": 1e999, "time_window_seconds": 60}
-            ),
-        )
-        report = _report(check_read_transport_selection(target))
-        assert "does not materialize" in report
+        with pytest.raises(ConformanceSetupError, match="rate_limit"):
+            self._bent_definition(
+                tmp_path,
+                lambda d: d["transports"]["api"].update(
+                    rate_limit={"max_requests": 1e999, "time_window_seconds": 60}
+                ),
+            )
 
 
 class TestApiTransportHeaderBreaks:
@@ -3051,11 +3051,11 @@ class TestApiTransportHeaderBreaks:
     _bent_definition = staticmethod(TestApiTransportBreaks._bent_definition)
 
     def test_headers_that_are_not_an_object(self, tmp_path: Path) -> None:
-        target = self._bent_definition(
-            tmp_path, lambda d: d["transports"]["api"].update(headers=[])
-        )
-        report = _report(check_read_transport_selection(target))
-        assert "declares headers as []" in report
+        """The contract types ``headers`` as an object."""
+        with pytest.raises(ConformanceSetupError, match="headers"):
+            self._bent_definition(
+                tmp_path, lambda d: d["transports"]["api"].update(headers=[])
+            )
 
     def test_a_header_value_that_cannot_resolve_names_why(self, tmp_path: Path) -> None:
         target = self._bent_definition(
@@ -3092,16 +3092,14 @@ class TestApiTransportHeaderBreaks:
     def test_a_header_whose_name_is_not_a_token_is_refused(
         self, tmp_path: Path
     ) -> None:
-        """A field NAME reaches the wire too, and the client judges it."""
-        target = self._bent_definition(
-            tmp_path,
-            lambda d: d["transports"]["api"].update(
-                headers={"Bad\nName": {"literal": "x"}}
-            ),
-        )
-        report = _report(check_read_transport_selection(target))
-        assert "does not materialize" in report
-        assert "not an HTTP token" in report
+        """A field NAME reaches the wire too; the contract's key pattern says so."""
+        with pytest.raises(ConformanceSetupError, match="headers"):
+            self._bent_definition(
+                tmp_path,
+                lambda d: d["transports"]["api"].update(
+                    headers={"Bad\nName": {"literal": "x"}}
+                ),
+            )
 
     def test_a_header_value_carrying_a_line_break_is_refused(
         self, tmp_path: Path
@@ -3123,12 +3121,12 @@ class TestApiTransportHeaderBreaks:
         assert "no HTTP client will send" in report
 
     def test_headers_the_connection_supplies_are_clean(self, tmp_path: Path) -> None:
-        """Transport materialization has secrets and auth in scope; defer both."""
+        """Transport materialization has the secret store in scope; defer it."""
         target = self._bent_definition(
             tmp_path,
             lambda d: d["transports"]["api"].update(
                 headers={
-                    "Authorization": {"template": "Bearer ${auth.access_token}"},
+                    "Authorization": {"template": "Bearer ${secrets.access_token}"},
                     "X-Api-Key": {"ref": "secrets.api_key"},
                     "X-Static": {"literal": "v1"},
                 }
@@ -3167,11 +3165,11 @@ class TestApiTransportHeaderBreaks:
         target = self._bent_definition(
             tmp_path,
             lambda d: (
-                d.update(optional=None),
+                d.update(display_name=None),
                 d["transports"]["api"].update(
                     headers={
                         "Authorization": {
-                            "template": "Bearer ${connector.optional}-"
+                            "template": "Bearer ${connector.display_name}-"
                             "${connection.parameters.token}"
                         }
                     }
@@ -3179,7 +3177,7 @@ class TestApiTransportHeaderBreaks:
             ),
         )
         report = _report(check_read_transport_selection(target))
-        assert "'connector.optional'" in report
+        assert "'connector.display_name'" in report
         assert "declares it null" in report
 
     def test_an_optional_header_the_definition_leaves_null_is_clean(
@@ -3196,9 +3194,9 @@ class TestApiTransportHeaderBreaks:
         target = self._bent_definition(
             tmp_path,
             lambda d: (
-                d.update(optional_header=None),
+                d.update(display_name=None),
                 d["transports"]["api"].update(
-                    headers={"X-Optional": {"ref": "connector.optional_header"}}
+                    headers={"X-Optional": {"ref": "connector.display_name"}}
                 ),
             ),
         )
@@ -3211,75 +3209,68 @@ class TestApiTransportHeaderBreaks:
         target = self._bent_definition(
             tmp_path,
             lambda d: (
-                d.update(origin=None),
-                d["transports"]["api"].update(base_url={"ref": "connector.origin"}),
+                d.update(display_name=None),
+                d["transports"]["api"].update(
+                    base_url={"ref": "connector.display_name"}
+                ),
             ),
         )
         report = _report(check_read_transport_selection(target))
-        assert "'connector.origin'" in report
+        assert "'connector.display_name'" in report
         assert "resolves to nothing" in report
 
     def test_a_mixed_scope_header_is_refused_by_the_stray_path(
         self, tmp_path: Path
     ) -> None:
-        """A secrets read beside an unknown scope defers nothing.
+        """A secrets read beside an unknown scope is refused by the contract.
 
-        connect() resolves the whole value; the ``bogus.`` half fails it on
-        every connection, so the header is a defect named by the path no
-        phase supplies.
+        The ``bogus.`` placeholder leads with no declared scope
+        (RULE-CTOR-057), decidable from the document alone.
         """
-        target = self._bent_definition(
-            tmp_path,
-            lambda d: d["transports"]["api"].update(
-                headers={
-                    "Authorization": {
-                        "template": "Bearer ${secrets.api_key}-${bogus.value}"
+        with pytest.raises(ConformanceSetupError, match="RULE-CTOR-057"):
+            self._bent_definition(
+                tmp_path,
+                lambda d: d["transports"]["api"].update(
+                    headers={
+                        "Authorization": {
+                            "template": "Bearer ${secrets.api_key}-${bogus.value}"
+                        }
                     }
-                }
-            ),
-        )
-        report = _report(check_read_transport_selection(target))
-        assert "'Authorization'" in report
-        assert "'bogus.value'" in report
+                ),
+            )
 
-    def test_a_base_url_scope_that_does_not_exist_does_not_stop_the_run(
+    def test_a_base_url_scope_that_does_not_exist_is_refused_by_name(
         self, tmp_path: Path
     ) -> None:
-        """A typo in the scope name is refused, and refused by name.
+        """A typo in the scope name is refused by the contract, and by name.
 
-        ``"connectio."`` is not ``"connection."``, so it is a stray path --
-        neither deferred nor definition-settled -- and the violation names
-        it. A check that raised out instead would report neither this
-        defect nor the second transport's beside it -- one authoring
-        mistake hiding another, in a different block.
+        ``"connectio."`` is not ``"connection."``: neither it nor the
+        second transport's ``"nowhere."`` leads with a declared scope, and
+        the contract reports both -- one authoring mistake does not hide
+        another in a different block.
         """
-        root = tmp_path / "api"
-        shutil.copytree(API_REFERENCE_DIR, root)
-        connector = root / "definition" / "connector.json"
-        definition = json.loads(connector.read_text())
-        definition["transports"]["api"]["base_url"] = {"ref": "connectio.base_url"}
-        definition["transports"]["files"] = {
-            "transport_type": "http",
-            "base_url": {"ref": "nowhere.base_url"},
-        }
-        connector.write_text(json.dumps(definition))
-        document = root / "definition" / "endpoints" / "widgets.json"
-        parsed = json.loads(document.read_text())
-        parsed["operations"]["read"]["request"]["transport_ref"] = "files"
-        document.write_text(json.dumps(parsed))
 
-        report = _report(check_read_transport_selection(load_target(root)))
-        assert "connectio" in report
-        assert "nowhere" in report, "the transport after it was still judged"
+        def bend(definition: dict[str, Any]) -> None:
+            definition["transports"]["api"]["base_url"] = {"ref": "connectio.base_url"}
+            definition["transports"]["files"] = {
+                "transport_type": "http",
+                "base_url": {"ref": "nowhere.base_url"},
+            }
+
+        with pytest.raises(ConformanceSetupError) as raised:
+            self._bent_definition(tmp_path, bend)
+        message = str(raised.value)
+        assert "connectio" in message
+        assert "nowhere" in message, "the transport after it was still judged"
 
     def test_a_transport_header_the_connection_supplies_is_not_resolved(
         self, tmp_path: Path
     ) -> None:
-        """Only the base URL is resolved, so an auth header is no obstacle."""
+        """Only the base URL is resolved, so a secret-bearing header is no obstacle."""
         target = self._bent_definition(
             tmp_path,
             lambda d: d["transports"]["api"]["headers"].update(
-                Authorization={"template": "Bearer ${auth.access_token}"}
+                Authorization={"template": "Bearer ${secrets.access_token}"}
             ),
         )
         assert check_read_transport_selection(target) == []
@@ -3742,7 +3733,7 @@ class TestApiRequestBlockBreaks:
     def test_a_connection_field_outside_the_request_subtrees_is_refused(
         self, tmp_path: Path
     ) -> None:
-        """`connection.name` exists at materialization, not at request time.
+        """A connection field outside the request subtrees resolves on no run.
 
         The request resolver builds exactly parameters/selections/discovered,
         so a binding reading any other connection field resolves on no run

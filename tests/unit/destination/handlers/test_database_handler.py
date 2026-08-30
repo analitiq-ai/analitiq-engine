@@ -6,9 +6,16 @@ mocked :class:`SqlAlchemyTransport`.
 """
 
 import ssl
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from analitiq.contracts.connector import Connector
+from contract_documents import (
+    connection_document,
+    connector_document,
+    sqlalchemy_transport,
+)
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.sql.generic import GenericSQLConnector
@@ -30,39 +37,29 @@ def base_config():
             "database": "test_db",
             "username": "test_user",
         },
-        "secret_refs": {"password": "tests/postgres/password"},
+        "secret_refs": {"password": "sidecar:password"},
     }
 
 
-def _connector_def(driver: str = "postgresql+asyncpg") -> dict:
-    return {
-        "slug": "postgres",
-        "connector_type": "database",
-        "default_transport": "database",
-        "transports": {
-            "database": {
-                "transport_type": "sqlalchemy",
-                "driver": driver,
-                "dsn": {
-                    "kind": "url_template",
-                    "template": f"{driver}://u:p@h:5432/d",
-                    "bindings": {},
-                },
-            }
-        },
-    }
+def _connector_def(driver: str = "postgresql+asyncpg") -> Connector:
+    return connector_document(
+        "database", transports={"database": sqlalchemy_transport(driver)}
+    )
 
 
-def _make_runtime(config, *, connector_def=None):
+def _make_runtime(config: dict[str, Any], *, connector_def: Connector | None = None):
     resolver = AsyncMock()
     resolver.resolve = AsyncMock(return_value={"password": "test_password"})
     return ConnectionRuntime(
-        raw_config=config,
+        connection=connection_document(
+            parameters=config.get("parameters"),
+            secret_refs=config.get("secret_refs"),
+        ),
         connection_id="test-conn",
         connector_id="test-connector",
         connector_type="database",
         resolver=resolver,
-        connector_definition=connector_def or _connector_def(),
+        connector=connector_def or _connector_def(),
     )
 
 
@@ -174,22 +171,21 @@ class TestDatabaseHandlerConnect:
         }
         runtime = _make_runtime(
             sqlite_config,
-            connector_def={
-                "slug": "sqlite",
-                "connector_type": "database",
-                "default_transport": "database",
-                "transports": {
-                    "database": {
-                        "transport_type": "sqlalchemy",
-                        "driver": "sqlite+aiosqlite",
-                        "dsn": {
-                            "kind": "url_template",
-                            "template": "sqlite+aiosqlite:///:memory:",
-                            "bindings": {},
+            connector_def=connector_document(
+                "database",
+                transports={
+                    "database": sqlalchemy_transport(
+                        "sqlite+aiosqlite",
+                        template="sqlite+aiosqlite:///{database}",
+                        bindings={
+                            "database": {
+                                "value": {"ref": "connection.parameters.database"},
+                                "encoding": "raw",
+                            }
                         },
-                    }
+                    )
                 },
-            },
+            ),
         )
         # Reset resolver to return empty dict — sqlite has no secrets.
         runtime._resolver.resolve = AsyncMock(return_value={})
@@ -223,7 +219,7 @@ class TestDatabaseHandlerURLEncoding:
                 "database": "test_db",
                 "username": "user",
             },
-            "secret_refs": {"password": "tests/postgres/password"},
+            "secret_refs": {"password": "sidecar:password"},
         }
         runtime = _make_runtime(config)
         # Override the resolver to return a tricky password.

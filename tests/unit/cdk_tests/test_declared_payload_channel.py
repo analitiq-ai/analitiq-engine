@@ -11,6 +11,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 import pytest
+from contract_documents import connection_document, connector_document
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.declarations import parse_declared_concurrency, parse_declared_error_map
@@ -22,26 +23,20 @@ ERROR_MAP = {
 CONCURRENCY = {"max_connections": 4}
 
 
-def _trusted_runtime(definition):
+def _trusted_runtime(**declared):
     return ConnectionRuntime(
-        raw_config={"path": "/tmp/out"},
+        connection=connection_document(),
         connection_id="db-1",
         connector_id="demo",
         connector_type="database",
         resolver=AsyncMock(resolve=AsyncMock(return_value={})),
-        connector_definition=definition,
+        connector=connector_document("database", **declared),
     )
 
 
 @pytest.mark.asyncio
 async def test_declared_blocks_ride_resolve_spec_and_rebuild():
-    runtime = _trusted_runtime(
-        {
-            "connector_id": "demo",
-            "error_map": ERROR_MAP,
-            "concurrency": CONCURRENCY,
-        }
-    )
+    runtime = _trusted_runtime(error_map=ERROR_MAP, concurrency=CONCURRENCY)
     assert runtime.declared_error_map == ERROR_MAP
     assert runtime.declared_concurrency == CONCURRENCY
 
@@ -60,7 +55,7 @@ async def test_declared_blocks_ride_resolve_spec_and_rebuild():
 
 @pytest.mark.asyncio
 async def test_undeclared_stays_undeclared_across_the_boundary():
-    runtime = _trusted_runtime({"connector_id": "demo"})
+    runtime = _trusted_runtime()
     assert runtime.declared_error_map is None
     assert runtime.declared_concurrency is None
     payload = await runtime.resolve_spec()
@@ -72,7 +67,7 @@ async def test_undeclared_stays_undeclared_across_the_boundary():
 
 
 def test_restored_blocks_do_not_share_state_with_the_payload():
-    runtime = _trusted_runtime({"connector_id": "demo", "error_map": ERROR_MAP})
+    runtime = _trusted_runtime(error_map=ERROR_MAP)
     copied = runtime.declared_error_map
     assert copied is not None
     copied["sqlstate"]["08"] = "mutated"

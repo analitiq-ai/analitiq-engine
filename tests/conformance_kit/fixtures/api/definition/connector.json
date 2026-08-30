@@ -4,6 +4,10 @@
   "display_name": "Conformance Reference (HTTP API-shaped)",
   "description": "Reference connector for the kit's own acceptance tests: a well-formed kind 'api' definition carrying no database surface, used to pin that a run the suite cannot assess fails instead of passing on skips.",
   "version": "0.0.1",
+  "auth": {
+    "type": "none"
+  },
+  "connection_contract": {},
   "default_transport": "api",
   "transports": {
     "api": {

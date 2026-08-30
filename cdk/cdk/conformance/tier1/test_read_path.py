@@ -18,6 +18,7 @@ must not be supplied by the defect it gates).
 from __future__ import annotations
 
 import pytest
+from analitiq.contracts.connection import ConnectionInput
 
 from cdk.conformance.fakes import NoSecretsResolver
 from cdk.conformance.skips import require_dialect
@@ -41,12 +42,12 @@ def _declared_driver(target: ConformanceTarget) -> str:
     inapplicable check.
     """
     runtime = ConnectionRuntime(
-        raw_config={},
+        connection=ConnectionInput(connector_id=target.connector_id),
         connection_id="conformance-definition",
         connector_id=target.connector_id,
         connector_type=target.kind,
         resolver=NoSecretsResolver(),
-        connector_definition=target.definition,
+        connector=target.connector,
     )
     driver = runtime.driver
     if not driver:

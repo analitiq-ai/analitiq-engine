@@ -1,13 +1,23 @@
 """The published ``contract-consumption`` manifest: contract fields the engine reads.
 
-Every endpoint-document and stream-block read in the engine is a typed
-attribute access on an ``analitiq.contracts`` model, so "which contract
-fields does the engine use" is a static-analysis question. The answer is
-rendered once per release into ``contract_consumption.json`` beside this
-module (by ``tools/contract_consumption.py``, from mypy's type map) and
-shipped in the wheel, the way the Arrow type grammar and the conversion
-matrix are. The contract repo pins it by version and sha256 and fails a
-build when a field is neither read here nor declared authoring-only.
+Every contract document the engine loads -- pipeline, stream, connection,
+connector, endpoint -- is held as its typed ``analitiq.contracts`` model
+from validation onwards, so every read is a typed attribute access and
+"which contract fields does the engine use" is a static-analysis question.
+The answer is rendered once per release into ``contract_consumption.json``
+beside this module (by ``tools/contract_consumption.py``, from mypy's type
+map) and shipped in the wheel, the way the Arrow type grammar and the
+conversion matrix are. The contract repo pins it by version and sha256 and
+fails a build when a field is neither read here nor declared authoring-only.
+
+The manifest's contract, beside its shape: a field is claimed when the
+engine reads it by any means it actually uses -- a typed attribute, a
+``getattr`` over a registered table, a walk down a registered path table --
+and a field no ``claims`` entry names is one no runtime path reads, not one
+read in a way the census does not look for. ``opaque`` names the models a
+consumer reads as a JSON grammar rather than field by field; ``transport``
+is re-serialisation only, a document dumped for a reader that parses it
+back as the same model.
 
 The manifest is claims only: what the engine reads. Which unread fields are
 defects, authoring metadata or validator-only is the contract repo's

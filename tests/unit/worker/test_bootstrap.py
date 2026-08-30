@@ -32,8 +32,9 @@ def _minimal_raw(**overrides):
             "connector_id": "postgres",
             "connector_type": "database",
             "driver_hint": "postgresql",
+            "connection_config": {"connector_id": "postgres"},
             "transport_spec": None,
-            "resolved_config": {"host": "db"},
+            "resolved_config": {"parameters": {"host": "db"}, "secrets": {}},
         },
     }
     raw.update(overrides)

@@ -81,17 +81,19 @@ class GenericStdoutConnector(BaseDestinationHandler):
         self._runtime = runtime
         runtime.acquire()
         await runtime.materialize()
-        connection_config = runtime.resolved_config
+        # The connection's authored ``parameters`` block carries every
+        # setting this connector reads.
+        parameters = runtime.resolved_config["parameters"]
 
         try:
             # Get format from config, default to jsonl
-            file_format = connection_config.get("file_format", "jsonl")
+            file_format = parameters.get("file_format", "jsonl")
 
             # Create formatter
             self._formatter = get_formatter(file_format)
 
             # Configure formatter with any format-specific options
-            formatter_config = connection_config.get("formatter_config", {})
+            formatter_config = parameters.get("formatter_config", {})
             self._formatter.configure(formatter_config)
 
             # Do not retain resolved config — it may contain secrets and is

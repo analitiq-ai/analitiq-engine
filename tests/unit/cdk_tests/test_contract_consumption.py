@@ -107,9 +107,13 @@ def test_claims_come_from_runtime_modules_and_kit_reads_from_the_kit(
     kit = "cdk.conformance"
     assert all(not m.startswith(kit) for m in modules("claims"))
     assert all(m.startswith(kit) for m in modules("kit_reads"))
-    assert all(
-        m.startswith("src.") for m in {s.split(":")[0] for s in manifest["transport"]}
-    )
+    # Transport is re-serialisation for a reader that parses the document
+    # back: the engine's resolved models (worker bootstrap, bundle
+    # validator) and the connection runtime's worker payload.
+    assert {s.split(":")[0] for s in manifest["transport"]} <= {
+        "src.models.resolved",
+        "cdk.connection_runtime",
+    }
 
 
 def test_opaque_registrations_are_reachable_and_prove_a_live_consumer(
