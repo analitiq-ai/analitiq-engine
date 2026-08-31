@@ -124,7 +124,10 @@ streaming = [
 # The connector conformance suite (issue #391): tier 1 contract tests and
 # the tier 2 live suite a connector repo runs in its own CI.
 # `pytest --pyargs cdk.conformance.tier1 --connector-dir .`
-conformance = ["pytest", "pyarrow"]
+# jsonschema because the kit compiles a read the way the engine does: it
+# builds a real ParamTable, which carries the ParamChecker that judges a
+# resolved value against its declared constraints.
+conformance = ["pytest", "pyarrow", "jsonschema"]
 
 [build-system]
 requires = ["poetry-core"]
