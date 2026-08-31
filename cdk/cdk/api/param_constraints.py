@@ -78,6 +78,17 @@ _KEYWORDS: dict[str, str] = {
 #: :func:`_bounds_fragment`.
 _ORDERING_KEYWORDS: frozenset[str] = frozenset({"minimum", "maximum"})
 
+#: Equality, like ordering, compares rather than describes -- and compares
+#: numbers, so it joins the exact-decimal fragment for the same reason
+#: :func:`_bounds_fragment` exists.
+_COMPARING_KEYWORDS: frozenset[str] = _ORDERING_KEYWORDS | {"enum"}
+
+#: The keywords whose failure is about a size. The size is reported with the
+#: refusal because a count is not the content -- see :func:`_unmet`.
+_SIZE_KEYWORDS: frozenset[str] = frozenset(
+    {"minLength", "maxLength", "minItems", "maxItems"}
+)
+
 #: Two separate things, kept apart because only one of them is a decision.
 #:
 #: The decision: ``Param.format`` is a free-form ``str`` in the contract and
@@ -388,7 +399,7 @@ def _shape_fragment(param: Param) -> dict[str, Any]:
     return {
         keyword: value
         for keyword, value in _declared_keywords(param).items()
-        if keyword not in _ORDERING_KEYWORDS
+        if keyword not in _COMPARING_KEYWORDS
     }
 
 
@@ -411,10 +422,23 @@ def _bounds_fragment(param: Param) -> dict[str, Any]:
     from text, one model, no comparison across two.
     """
     return {
-        keyword: Decimal(str(value))
+        keyword: _exact_members(value) if keyword == "enum" else Decimal(str(value))
         for keyword, value in _declared_keywords(param).items()
-        if keyword in _ORDERING_KEYWORDS
+        if keyword in _COMPARING_KEYWORDS
     }
+
+
+def _exact_members(members: Any) -> Any:
+    """Put an ``enum``'s numeric members into the model its values are compared in.
+
+    Equality has the float/decimal problem ordering has: a declared ``0.1``
+    is the binary float nearest it, a keyset value is a ``Decimal`` parsed
+    from decimal text, and the two are not equal. Non-numeric members are
+    untouched -- a string is a string in either model.
+    """
+    if not isinstance(members, list):
+        return members
+    return [_as_exact_decimal(m) for m in members]
 
 
 def _as_exact_decimal(value: Any) -> Any:
@@ -447,7 +471,21 @@ def _missing(name: str, *, endpoint: str) -> str:
 def _unmet(
     name: str, error: jsonschema.exceptions.ValidationError, *, endpoint: str
 ) -> str:
-    """Name the param, the keyword it broke, what was declared and what came."""
+    """Name the param, the keyword it broke, and what was declared -- not the value.
+
+    The value is deliberately absent, and so is jsonschema's own message,
+    which embeds it. A param carries whatever its declaration resolves to,
+    and secret-valued params are a supported request shape: a bearer token,
+    an API key, an opaque continuation token. This message becomes a
+    ``RequestSpecError``, which fails the stream and is logged -- and the
+    worker's log redactor masks DSN-shaped credentials only, so anything
+    rendered here reaches the run log as written.
+
+    What is left is enough to act on: which param, which endpoint, which
+    keyword, what the document declared, and the shape of what arrived. For
+    the length and size keywords the measured size is reported too, since a
+    count is not the content.
+    """
     # The bound is repr'd as the author wrote it, not as the Decimal this
     # module compares it in: `maximum=100.0` is the document, and
     # `maximum=Decimal('100.0')` is an implementation detail the author
@@ -455,8 +493,18 @@ def _unmet(
     declared = error.validator_value
     if isinstance(declared, Decimal):
         declared = float(declared)
+    if isinstance(declared, list):
+        declared = [float(m) if isinstance(m, Decimal) else m for m in declared]
+    measured = ""
+    if error.validator in _SIZE_KEYWORDS:
+        try:
+            measured = f", size {len(error.instance)}"
+        except TypeError:
+            measured = ""
     return (
         f"param {name!r} for endpoint {endpoint!r} declares "
-        f"{error.validator}={declared!r} and resolved to "
-        f"{error.instance!r}: {error.message}"
+        f"{error.validator}={declared!r}, and the value it resolved to "
+        f"({type(error.instance).__name__}{measured}) does not satisfy it. "
+        f"The value itself is not shown: a param may carry a credential or an "
+        f"opaque token, and this message is logged"
     )

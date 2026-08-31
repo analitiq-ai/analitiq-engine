@@ -117,7 +117,9 @@ class TestEnum:
             _checker(status=_param(enum=["open", "closed"])), {"status": "void"}
         )
         assert "enum=['open', 'closed']" in message
-        assert "'void'" in message
+        # The value is named by TYPE, never rendered -- see TestAValueIsNeverLogged.
+        assert "'void'" not in message
+        assert "(str)" in message
 
 
 class TestFormat:
@@ -175,7 +177,8 @@ class TestRanges:
             _checker(limit=_param(type="integer", maximum=100)), {"limit": 500}
         )
         assert "maximum=100.0" in message
-        assert "500" in message
+        assert "500" not in message
+        assert "(int)" in message
 
 
 class TestLengths:
@@ -244,6 +247,46 @@ class TestAggregation:
         )
         assert "pattern=" in message
         assert "minLength=" in message
+
+
+class TestAValueIsNeverLogged:
+    """A refusal says which param and what was declared, never what arrived.
+
+    Secret-valued params are a supported request shape -- a bearer token, an
+    API key, an opaque continuation token -- and this message becomes a
+    `RequestSpecError` that fails the stream and is logged. The worker's log
+    redactor masks DSN-shaped credentials only, so anything rendered here
+    reaches the run log as written.
+    """
+
+    #: Stands in for a credential without being shaped like one. A realistic
+    #: key literal here is a real finding for the repository's secret scan --
+    #: which cannot tell a test fixture from a leak, and should not try.
+    _CANARY = "canary-value-that-must-never-be-logged"
+
+    def test_a_secret_value_does_not_reach_the_message(self) -> None:
+        secret = self._CANARY
+        message = _refusal(
+            _checker(token=_param(type="string", pattern="^tok_")), {"token": secret}
+        )
+        assert secret not in message
+        assert "token" in message and "pattern=" in message
+
+    def test_jsonschemas_own_message_is_not_passed_through(self) -> None:
+        # jsonschema renders the instance in `err.message` too, so the
+        # refusal is built rather than forwarded.
+        message = _refusal(
+            _checker(q=_param(type="string", enum=["a"])), {"q": self._CANARY}
+        )
+        assert self._CANARY not in message
+        assert "is not one of" not in message
+
+    def test_a_size_failure_reports_the_size_not_the_content(self) -> None:
+        message = _refusal(
+            _checker(q=_param(type="string", maxLength=4)), {"q": self._CANARY}
+        )
+        assert self._CANARY not in message
+        assert "size 38" in message
 
 
 class TestABoundIsComparedInOneNumberModel:

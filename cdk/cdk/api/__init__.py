@@ -45,7 +45,17 @@ def __getattr__(name: str) -> Any:
                 exc,
                 feature=f"cdk.api.{name}",
                 extra="api",
-                modules=("aiohttp", "aiohttp_retry", "orjson", "pyarrow"),
+                modules=(
+                    "aiohttp",
+                    "aiohttp_retry",
+                    "orjson",
+                    "pyarrow",
+                    # The request build judges a resolved value against the
+                    # constraints its param declares, which are JSON Schema
+                    # keywords; without it the import fails as a raw
+                    # ModuleNotFoundError instead of naming the extra.
+                    "jsonschema",
+                ),
             )
         return getattr(generic, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
