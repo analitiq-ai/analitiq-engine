@@ -272,6 +272,75 @@ class TestReadParamTable:
                 endpoint="/items",
             )
 
+    def test_a_binding_that_drops_a_required_param_is_refused(self) -> None:
+        # The value is present and admissible in the table; it is the wire
+        # BINDING that resolves to nothing -- a function wrapping the
+        # {from_param} whose input it cannot map. The key is then dropped and
+        # the declared narrowing is absent from a request the provider
+        # answers in full.
+        table = ParamTable.for_read(
+            _params(
+                {
+                    "tenant": {
+                        "in": "query",
+                        "type": "string",
+                        "required": True,
+                        "default": {"literal": "acme"},
+                    }
+                }
+            ),
+            _resolver(),
+            endpoint="/items",
+        )
+        builder = RequestBuilder(
+            table,
+            raw_body=None,
+            resolver=_resolver(),
+            endpoint="/items",
+            declared_query={
+                "tenantId": {
+                    "function": "lookup",
+                    "input": {"from_param": "tenant"},
+                    "map": {"other": "x"},
+                }
+            },
+        )
+        with pytest.raises(RequestSpecError, match="wire route of required"):
+            builder.for_page({})
+
+    def test_an_optional_params_binding_is_still_omitted(self) -> None:
+        # The contract's omit-unresolved rule, untouched: only a REQUIRED
+        # param's route is refused, because only there is the omission a
+        # narrowing that vanishes.
+        table = ParamTable.for_read(
+            _params(
+                {
+                    "tenant": {
+                        "in": "query",
+                        "type": "string",
+                        "required": False,
+                        "default": {"literal": "acme"},
+                    }
+                }
+            ),
+            _resolver(),
+            endpoint="/items",
+        )
+        builder = RequestBuilder(
+            table,
+            raw_body=None,
+            resolver=_resolver(),
+            endpoint="/items",
+            declared_query={
+                "tenantId": {
+                    "function": "lookup",
+                    "input": {"from_param": "tenant"},
+                    "map": {"other": "x"},
+                }
+            },
+        )
+        assert builder.for_page({}).query == {}
+
     def test_a_filter_on_an_empty_collection_is_refused(self) -> None:
         # `in []` selects no records; an empty collection serializes to no
         # query pairs, so the request would carry no filter and the provider

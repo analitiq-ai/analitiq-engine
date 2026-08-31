@@ -420,29 +420,33 @@ class TestABoundIsComparedInOneNumberModel:
             )
 
 
-class TestFormatIsCheckedOnlyWhereThisTreeHasAChecker:
-    """Pinned, because a module comment states it as fact.
+class TestTheEnforcedFormatSetIsFixed:
+    """Which formats are enforced is this module's decision, not the venv's.
 
-    ``FormatChecker`` judges the formats it has a checker FOR, and several
-    standard ones -- ``date-time`` most of all, the format an endpoint author
-    is likeliest to write -- need optional packages this tree does not
-    install. A transitive dependency adding one would silently start
-    enforcing them and make that comment false with no test failing, so the
-    observation is a test rather than a sentence.
+    `FormatChecker()` inherits whatever checkers happen to be registered in
+    the interpreter, and several standard formats register theirs only when an
+    optional package is installed. A connector pulling `rfc3339-validator` in
+    for its own reasons would have `date-time` enforced inside its worker and
+    nowhere else, so the same document would pass in one consumer and fail in
+    another.
     """
 
-    def test_a_registered_format_refuses_a_bad_value(self) -> None:
+    def test_the_registry_is_exactly_what_is_declared(self) -> None:
+        from cdk.api.param_constraints import _ENFORCED_FORMATS, _FORMAT_CHECKER
+
+        assert sorted(_FORMAT_CHECKER.checkers) == sorted(_ENFORCED_FORMATS)
+
+    def test_an_enforced_format_refuses_a_bad_value(self) -> None:
         assert "format='date'" in _refusal(
             _checker(day=_param(format="date")), {"day": "not-a-date"}
         )
 
-    def test_date_time_is_annotation_only_here(self) -> None:
-        _checker(at=_param(format="date-time")).check({"at": "not-a-timestamp"})
-
-    def test_a_provider_specific_format_name_is_annotation_only(self) -> None:
-        # `int64`, `money`, `xero-date`: outside JSON Schema's registry, and
-        # refusing them would fail documents for being descriptive.
-        _checker(amount=_param(format="money")).check({"amount": "anything"})
+    def test_a_format_outside_the_set_is_annotation_only(self) -> None:
+        # `date-time` is a standard format this engine does not enforce, and
+        # `money` is a provider's own. Both describe rather than refuse, and
+        # neither changes if a package appears in the environment.
+        checker = _checker(at=_param(format="date-time"), amount=_param(format="money"))
+        checker.check_values({"at": "not-a-timestamp", "amount": "not-money"})
 
 
 class TestReuse:

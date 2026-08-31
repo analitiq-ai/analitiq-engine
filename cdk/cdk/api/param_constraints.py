@@ -39,7 +39,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import Any, Final
 
 import jsonschema
 from analitiq.contracts.endpoints import Param
@@ -90,24 +90,37 @@ _SIZE_KEYWORDS: frozenset[str] = frozenset(
     {"minLength", "maxLength", "minItems", "maxItems"}
 )
 
-#: Two separate things, kept apart because only one of them is a decision.
+#: The formats this engine enforces, named rather than inherited.
 #:
-#: The decision: ``Param.format`` is a free-form ``str`` in the contract and
-#: providers name their own (``int64``, ``money``, ``xero-date``), so a name
-#: outside JSON Schema's registry is the author saying something to a reader
-#: and refusing it would fail documents for being descriptive. Attaching a
-#: checker at all is what makes a format enforced where the library knows it
-#: and annotation everywhere else.
+#: ``Param.format`` is a free-form ``str`` in the contract and providers name
+#: their own (``int64``, ``money``, ``xero-date``), so a name outside this set
+#: is the author saying something to a reader and is carried as documentation
+#: -- refusing it would fail documents for being descriptive. What IS in the
+#: set is enforced.
 #:
-#: The environment fact: a checker judges only the formats it has a CHECKER
-#: for, and several standard ones -- ``date-time`` above all, the format an
-#: endpoint author is likeliest to write, and ``uri`` -- need optional
-#: packages this tree does not install. Observed against jsonschema 4.25.1,
-#: which registers ``date``, ``time``, ``uuid``, ``email``, ``ipv4``,
-#: ``ipv6``, ``regex`` and the JSON-pointer pair here. That is an install, not
-#: an intent, so it is pinned by tests rather than by this comment:
-#: ``TestFormatIsCheckedOnlyWhereThisTreeHasAChecker``.
-_FORMAT_CHECKER = jsonschema.FormatChecker()
+#: Listed explicitly because ``FormatChecker()`` inherits whatever checkers
+#: happen to be registered in the interpreter, and several standard formats
+#: (``date-time``, ``uri``) register theirs only when an optional package is
+#: installed. A connector pulling ``rfc3339-validator`` in for its own reasons
+#: would then have ``date-time`` enforced inside its worker and nowhere else,
+#: so the same document would pass in one consumer and fail in another. These
+#: are the formats jsonschema can check with no optional dependency, which is
+#: what every consumer of this CDK has.
+_ENFORCED_FORMATS: Final[tuple[str, ...]] = (
+    "date",
+    "email",
+    "idn-email",
+    "idn-hostname",
+    "ipv4",
+    "ipv6",
+    "json-pointer",
+    "regex",
+    "relative-json-pointer",
+    "time",
+    "uuid",
+)
+
+_FORMAT_CHECKER = jsonschema.FormatChecker(formats=_ENFORCED_FORMATS)
 
 
 @dataclass(frozen=True)

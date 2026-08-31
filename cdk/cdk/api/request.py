@@ -66,6 +66,7 @@ from analitiq.contracts.stream import Filter
 from ..request_binding import (
     bind_param_refs,
     bind_record_inputs,
+    collect_from_param_names,
     resolve_param_defaults,
 )
 from ..resolver import REQUEST_CONNECTION_SUBTREES, Resolver, scope_paths
@@ -152,6 +153,10 @@ class ParamTable:
     #: over along with everything else :meth:`_plan_read` does for it.
     checker: ParamChecker
     values: dict[str, Any] = field(default_factory=dict)
+    #: The params the author declared ``required``, minus the ones a loop
+    #: owns. Read by the binding walk: a key that resolves to nothing is
+    #: dropped, unless it is the wire route of one of these.
+    required: frozenset[str] = frozenset()
     #: Every param a loop owns, mapped to the loop that owns it
     #: (``controlled_by``). Read by exactly one caller:
     #: :func:`request_block_problem`, which refuses a path placeholder bound
@@ -248,6 +253,7 @@ class ParamTable:
             values=values,
             controlled_by=_controlled_by(declared),
             checker=ParamChecker.for_params(declared, endpoint=endpoint),
+            required=_required_names(declared),
         )
         seen: dict[str, str] = {}
         for declared_filter in filters:
@@ -345,6 +351,21 @@ class ParamTable:
         return table
 
 
+def _required_names(declared: Mapping[str, Param]) -> frozenset[str]:
+    """Return the declared params whose absence from the request is a defect.
+
+    A ``controlled_by`` param is left out for the reason it is exempt from
+    the presence check: the pagination and replication loops decide when
+    their param is in flight, so a binding of theirs resolving to nothing on
+    page one is the scheme working, not a narrowing lost.
+    """
+    return frozenset(
+        name
+        for name, decl in declared.items()
+        if decl.required and decl.controlled_by is None
+    )
+
+
 def _controlled_by(declared: Mapping[str, Param]) -> dict[str, str]:
     """Map each declared param a loop owns to the loop that owns it."""
     return {
@@ -368,6 +389,7 @@ def bind_request_values(
     block: str,
     endpoint: str,
     styles: Mapping[str, QueryStyle] = MappingProxyType({}),
+    required: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Resolve one declared request map (headers / query / path_params).
 
@@ -427,6 +449,24 @@ def bind_request_values(
         elif bound is None and Resolver.is_expression_node(node):
             # The per-request policy: an expression with nothing to resolve
             # omits its key rather than going onto the wire raw.
+            #
+            # Unless the key is the wire route of a param the author declared
+            # REQUIRED. The value can be present and admissible in the table
+            # and still never reach the provider -- a binding that wraps
+            # {from_param} in a function that cannot resolve drops the whole
+            # key -- and dropping it is the declared narrowing disappearing
+            # from a request that then answers the full collection. Omission
+            # is right for an optional binding and wrong for this one, so the
+            # rule reads the declaration rather than applying to both.
+            lost = sorted(collect_from_param_names(value) & required)
+            if lost:
+                raise RequestSpecError(
+                    f"request.{block}[{name!r}] for endpoint {endpoint!r} is "
+                    f"the wire route of required param(s) {lost}, and its "
+                    f"expression resolved to nothing -- so the key is not sent "
+                    f"and the narrowing those params declare is absent from a "
+                    f"request the provider answers in full"
+                )
             logger.warning(
                 "request.%s for endpoint %r: dropping %r -- its expression "
                 "resolved to nothing",
@@ -1011,6 +1051,7 @@ def bind_query_and_headers(
     resolver: Resolver,
     endpoint: str,
     query_styles: Mapping[str, QueryStyle] = MappingProxyType({}),
+    required: frozenset[str] = frozenset(),
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Build the query string and the header map one request sends.
 
@@ -1038,6 +1079,7 @@ def bind_query_and_headers(
                 resolver=resolver,
                 block="headers",
                 endpoint=endpoint,
+                required=required,
             ).items()
         }
     query = bind_request_values(
@@ -1047,6 +1089,7 @@ def bind_query_and_headers(
         block="query",
         endpoint=endpoint,
         styles=query_styles,
+        required=required,
     )
     return query, headers
 
@@ -1158,6 +1201,7 @@ class RequestBuilder:
             resolver=self._resolver,
             endpoint=self._endpoint,
             query_styles=self._query_styles,
+            required=self._table.required,
         )
         if self._raw_body is None or not sends_declared_body:
             return PreparedRequest(query=query, headers=headers, body=None)

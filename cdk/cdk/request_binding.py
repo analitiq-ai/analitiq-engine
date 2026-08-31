@@ -106,6 +106,33 @@ def bind_param_refs(spec: Any, params: Mapping[str, Any]) -> Any:
     return spec
 
 
+def collect_from_param_names(spec: Any) -> set[str]:
+    """All ``from_param`` names a declared expression reads.
+
+    Walks the same structure :func:`bind_param_refs` binds, and stops at a
+    ``literal`` node for the same reason it does -- what is inside one is a
+    value, not an expression. Used to answer which declared params a binding
+    depends on, which is how a key that resolved to nothing can say whether
+    dropping it loses a REQUIRED narrowing or an optional one.
+    """
+    names: set[str] = set()
+    if isinstance(spec, Mapping):
+        if "from_param" in spec:
+            name = spec["from_param"]
+            if isinstance(name, str) and name:
+                names.add(name)
+            return names
+        if "literal" in spec:
+            return names
+        for value in spec.values():
+            names |= collect_from_param_names(value)
+        return names
+    if isinstance(spec, list):
+        for item in spec:
+            names |= collect_from_param_names(item)
+    return names
+
+
 def collect_from_input_selectors(spec: Any) -> set:
     """All ``from_input`` selector strings authored in a body spec.
 

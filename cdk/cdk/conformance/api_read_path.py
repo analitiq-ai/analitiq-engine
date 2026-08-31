@@ -293,6 +293,14 @@ def _compile_read(
     declared_path = request_block.path
 
     table = ParamTable.for_read(read.params, resolver, endpoint=label)
+    # Deferred on the value, never on the declaration -- the rule this module
+    # applies to a path, a body and a base URL alike. A definition-only
+    # compile has the declared defaults and nothing else, so a required param
+    # a stream filter or a connection supplies has no value here and can never
+    # have one; the binding that reads it therefore resolves to nothing, and
+    # refusing that would report every correct connector. The run asks
+    # presence where it holds those values.
+    table.required = frozenset()
     problem = request_block_problem(
         request_block,
         reserved_headers=reserved_header_names(
