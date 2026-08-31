@@ -182,6 +182,7 @@ class TestReadParamTable:
                         "in": "query",
                         "type": "string",
                         "required": False,
+                        "operators": ["eq"],
                         "default": {"literal": "all"},
                     }
                 }
@@ -190,6 +191,90 @@ class TestReadParamTable:
             filters=_filters({"field": "status", "operator": "eq", "value": "open"}),
         )
         assert table.values == {"status": "open"}
+
+    def test_a_filter_the_param_does_not_declare_the_operator_for_is_refused(
+        self,
+    ) -> None:
+        # The operator has no rendering on this transport: the value goes
+        # out bound to a query key either way, so `gt` and `lt` built the
+        # identical request and one of the two streams was always wrong.
+        # The endpoint declares what comparing the param means; the stream
+        # is held to it.
+        with pytest.raises(RequestSpecError, match="'gt'"):
+            ParamTable.for_read(
+                _params(
+                    {
+                        "amount": {
+                            "in": "query",
+                            "type": "number",
+                            "required": False,
+                            "operators": ["eq"],
+                        }
+                    }
+                ),
+                _resolver(),
+                filters=_filters(
+                    {"field": "amount", "operator": "gt", "value": 100}
+                ),
+            )
+
+    def test_a_filter_on_a_param_declaring_no_operators_is_refused(self) -> None:
+        # Absence of `operators` is how the endpoint says the param is not
+        # stream-filterable, not an empty permission to send anything.
+        with pytest.raises(RequestSpecError, match="not stream-filterable"):
+            ParamTable.for_read(
+                _params(
+                    {"region": {"in": "query", "type": "string", "required": False}}
+                ),
+                _resolver(),
+                filters=_filters(
+                    {"field": "region", "operator": "eq", "value": "eu"}
+                ),
+            )
+
+    def test_a_filter_on_a_loop_owned_param_is_refused(self) -> None:
+        # The contract forbids a `controlled_by` param from declaring
+        # `operators`, so a filter aimed at one the pagination loop owns
+        # lands on the same refusal instead of being overwritten on page
+        # one -- a narrowing the stream declared and never got.
+        with pytest.raises(RequestSpecError, match="not stream-filterable"):
+            ParamTable.for_read(
+                _params(
+                    {
+                        "cursor": {
+                            "in": "query",
+                            "type": "string",
+                            "required": False,
+                            "controlled_by": "pagination",
+                        }
+                    }
+                ),
+                _resolver(),
+                filters=_filters(
+                    {"field": "cursor", "operator": "eq", "value": "abc"}
+                ),
+            )
+
+    def test_a_filter_carrying_no_value_is_refused(self) -> None:
+        # The contract cannot tell an omitted `value` from an explicit null
+        # for a non-unary operator, so this shape validates. Dropping it
+        # silently is the whole-collection read the refusals above exist
+        # to prevent.
+        with pytest.raises(RequestSpecError, match="no value"):
+            ParamTable.for_read(
+                _params(
+                    {
+                        "status": {
+                            "in": "query",
+                            "type": "string",
+                            "required": False,
+                            "operators": ["eq"],
+                        }
+                    }
+                ),
+                _resolver(),
+                filters=_filters({"field": "status", "operator": "eq"}),
+            )
 
     def test_a_filter_naming_no_declared_param_is_refused(self) -> None:
         # A filter reaches the provider as a declared param bound by a
@@ -298,7 +383,16 @@ class TestRequestBuilder:
         # A next URL replaces the request, not the connection: the headers
         # say how this connection talks to the provider.
         table = ParamTable.for_read(
-            _params({"tenant": {"in": "query", "type": "string", "required": False}}),
+            _params(
+                {
+                    "tenant": {
+                        "in": "query",
+                        "type": "string",
+                        "required": False,
+                        "operators": ["eq"],
+                    }
+                }
+            ),
             _resolver(),
             filters=_filters({"field": "tenant", "operator": "eq", "value": "acme"}),
         )

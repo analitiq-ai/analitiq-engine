@@ -160,6 +160,26 @@ class ParamTable:
         links a filter to a param declaration, so this is the only place it
         can be caught, and it is caught loudly.
 
+        A filter's OPERATOR is checked here and never rendered, because on
+        this transport it has no rendering: a param reaches the provider as
+        a value bound into a query key, a header or a path segment, and
+        ``?updated_since=X`` carries no spelling of "greater than" the
+        engine could choose -- the provider's own parameter decides what
+        comparing it means. So the endpoint declares the comparison each
+        param stands for, in ``Param.operators``, and the honest reading of
+        a filter's operator is to hold the stream to that declaration.
+        Silently binding the value under a different operator is the defect
+        this replaces: ``amount gt 100`` and ``amount lt 100`` built the
+        identical request, and one of the two streams was always wrong.
+
+        A param declaring no ``operators`` at all is not stream-filterable
+        (the contract says so, and a ``controlled_by`` param is forbidden to
+        declare any -- so a filter aimed at one the pagination or
+        replication loop owns lands here rather than being overwritten on
+        page one). ``is_null``, ``is_not_null``, ``like`` and ``ilike`` are
+        in the stream's filter vocabulary and in no param's: they are the
+        SQL path's, and no declared set can admit them here.
+
         ``filters`` are the stream document's contract ``Filter`` models,
         so the field a filter names is a required attribute rather than a
         key that might be missing -- an unnamed filter never reaches here,
@@ -184,9 +204,38 @@ class ParamTable:
                     f"reads the whole collection. Declared params: "
                     f"{sorted(declared)}"
                 )
+            declaration = declared[target]
+            if declaration.operators is None:
+                raise RequestSpecError(
+                    f"the stream filters on {target!r} with operator "
+                    f"{declared_filter.operator!r}, but "
+                    f"operations.read.params[{target!r}] declares no "
+                    f"`operators`, which is how the endpoint says the param "
+                    f"is not stream-filterable"
+                )
+            if declared_filter.operator not in declaration.operators:
+                raise RequestSpecError(
+                    f"the stream filters on {target!r} with operator "
+                    f"{declared_filter.operator!r}, which "
+                    f"operations.read.params[{target!r}] does not declare; "
+                    f"the param stands for {sorted(declaration.operators)} "
+                    f"and the value would otherwise go out under a "
+                    f"comparison the provider never agreed to"
+                )
             value = declared_filter.value
-            if value is not None:
-                table.values[target] = value
+            if value is None:
+                # Reachable: the contract lets a non-unary filter carry a
+                # null value because pydantic cannot tell an omitted key
+                # from an explicit ``None``, and the unary operators that
+                # legitimately have no value are already refused above.
+                # Dropping it silently is the whole-collection read again.
+                raise RequestSpecError(
+                    f"the stream filters on {target!r} with operator "
+                    f"{declared_filter.operator!r} and no value, so nothing "
+                    f"can be sent for it and the stream would read the whole "
+                    f"collection while reporting success"
+                )
+            table.values[target] = value
         return table
 
     @classmethod
