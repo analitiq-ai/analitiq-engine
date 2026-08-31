@@ -367,6 +367,89 @@ class TestIdempotencyRefusals:
         assert problem is not None and "JSON-object request body" in problem
 
 
+class TestDeclaredWriteParamConstraints:
+    """A write's params are judged once, and that once covers every record.
+
+    The read role has a per-page net behind it; a write plan does not. Its
+    params are the declared defaults and nothing else, so the table built at
+    plan build is the table every record on the stream ships under.
+    """
+
+    def test_a_required_write_param_that_resolves_to_nothing_is_refused(
+        self,
+    ) -> None:
+        doc = _document(
+            headers={"X-Tenant": {"from_param": "tenant"}},
+            params={
+                "tenant": {
+                    "in": "header",
+                    "type": "string",
+                    "required": True,
+                    "default": {"ref": "connection.parameters.tenant"},
+                }
+            },
+        )
+        outcome = build_write_plan(
+            doc,
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
+        )
+        assert isinstance(outcome, str)
+        assert "declared required" in outcome
+
+    def test_a_write_param_default_outside_its_declared_range_is_refused(
+        self,
+    ) -> None:
+        doc = _document(
+            headers={"X-Batch": {"from_param": "size"}},
+            params={
+                "size": {
+                    "in": "header",
+                    "type": "integer",
+                    "required": False,
+                    "maximum": 100,
+                    "default": {"literal": 500},
+                }
+            },
+        )
+        outcome = build_write_plan(
+            doc,
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
+        )
+        assert isinstance(outcome, str)
+        assert "maximum=100" in outcome
+
+    def test_a_write_param_satisfying_its_declaration_plans(self) -> None:
+        doc = _document(
+            headers={"X-Batch": {"from_param": "size"}},
+            params={
+                "size": {
+                    "in": "header",
+                    "type": "integer",
+                    "required": True,
+                    "maximum": 100,
+                    "default": {"literal": 50},
+                }
+            },
+        )
+        outcome = build_write_plan(
+            doc,
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
+        )
+        assert not isinstance(outcome, str)
+        # Headers go out as text; the declared type judges the value the
+        # binding resolved, not the string the header carries.
+        assert outcome.headers["X-Batch"] == "50"
+
+
 class TestTheRequestTheStreamWillActuallySend:
     """The write path binds the same three maps the read path does.
 

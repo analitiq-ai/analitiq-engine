@@ -147,6 +147,11 @@ async def build_bootstrap(
     connection_payload = await runtime.resolve_spec(transport_refs=transport_refs)
     return {
         "role": role,
+        # The connector runs in the worker, so the run's declared verbosity
+        # has to reach it: engine and destination shells both apply it to
+        # themselves, and without this the half of the run that builds every
+        # request would stay at INFO whatever the pipeline asked for.
+        "log_level": logging.getLevelName(logging.getLogger().getEffectiveLevel()),
         "kind": runtime.connector_type,
         "connector_id": runtime.connector_id,
         "connection": connection_payload,

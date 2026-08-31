@@ -774,6 +774,31 @@ class TestReplicationMethodSupport:
         assert "declares no replication block" in message
         assert "['full_refresh']" in message
 
+    def test_an_omitted_stream_replication_block_is_checked_as_full_refresh(
+        self, pipeline_tree: Path
+    ) -> None:
+        # The block is optional, and omitting it reads exactly like declaring
+        # `full_refresh` -- the read path finds no cursor to bind and fetches
+        # everything. So it is checked as one: otherwise omitting the block
+        # would be the way around this rule, and an endpoint that serves only
+        # incremental would be read in full on every run.
+        stream_doc = _stream_doc(STREAM_ID)
+        stream_doc["source"].pop("replication", None)
+        _write_json(
+            pipeline_tree / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json",
+            stream_doc,
+        )
+        _write_source_endpoint(
+            pipeline_tree, _replicating_endpoint_doc(ENDPOINT_SRC, ["incremental"])
+        )
+
+        with pytest.raises(ValueError) as caught:
+            PipelineConfigPrep().create_config()
+
+        message = str(caught.value)
+        assert "'full_refresh'" in message
+        assert "['incremental']" in message
+
     def test_a_database_source_endpoint_is_not_checked(self) -> None:
         # ``DatabaseEndpointDoc`` carries no Replication block: a database
         # stream's incrementality comes from a cursor COLUMN, so there is no

@@ -54,6 +54,12 @@ class WorkerBootstrap:
     stream_endpoints: dict[str, Any]
     stream_conflict_keys: dict[str, list[str]]
     source_config: dict[str, Any]
+    #: The verbosity the run declared. The connector executes in this
+    #: process, so every line the read path emits -- the request build, the
+    #: page loop, "cursor not advanced" -- is emitted here and nowhere else.
+    #: It travels in the bootstrap rather than the environment because
+    #: ``spawn_worker`` deliberately hands the child a minimal one.
+    log_level: str
 
     def build_runtime(self) -> ConnectionRuntime:
         """Rebuild the connection runtime from the resolved payload."""
@@ -96,6 +102,10 @@ def parse_bootstrap(raw: dict[str, Any]) -> WorkerBootstrap:
         stream_endpoints=dict(raw.get("stream_endpoints") or {}),
         stream_conflict_keys=dict(raw.get("stream_conflict_keys") or {}),
         source_config=dict(raw.get("source_config") or {}),
+        # Defaulted, not required: a bootstrap is written by this repo's own
+        # shell, and a worker whose payload predates the field logs at the
+        # level it always did rather than refusing to start.
+        log_level=str(raw.get("log_level") or "INFO"),
     )
 
 

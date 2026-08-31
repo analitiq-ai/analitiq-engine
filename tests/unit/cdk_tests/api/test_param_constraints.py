@@ -231,9 +231,11 @@ class TestAggregation:
             status=_param(enum=["open"]),
         )
         message = _refusal(checker, {"limit": 500, "status": "void"})
-        assert "'since'" in message
-        assert "'limit'" in message
-        assert "'status'" in message
+        # Each named with the reason it failed, not merely named: a checker
+        # reporting "missing" for all three would satisfy the names alone.
+        assert "'since'" in message and "declared required" in message
+        assert "'limit'" in message and "maximum=100" in message
+        assert "'status'" in message and "enum=['open']" in message
 
     def test_several_keywords_on_one_param_are_all_reported(self) -> None:
         message = _refusal(
@@ -241,6 +243,31 @@ class TestAggregation:
         )
         assert "pattern=" in message
         assert "minLength=" in message
+
+
+class TestFormatIsCheckedOnlyWhereThisTreeHasAChecker:
+    """Pinned, because a module comment states it as fact.
+
+    ``FormatChecker`` judges the formats it has a checker FOR, and several
+    standard ones -- ``date-time`` most of all, the format an endpoint author
+    is likeliest to write -- need optional packages this tree does not
+    install. A transitive dependency adding one would silently start
+    enforcing them and make that comment false with no test failing, so the
+    observation is a test rather than a sentence.
+    """
+
+    def test_a_registered_format_refuses_a_bad_value(self) -> None:
+        assert "format='date'" in _refusal(
+            _checker(day=_param(format="date")), {"day": "not-a-date"}
+        )
+
+    def test_date_time_is_annotation_only_here(self) -> None:
+        _checker(at=_param(format="date-time")).check({"at": "not-a-timestamp"})
+
+    def test_a_provider_specific_format_name_is_annotation_only(self) -> None:
+        # `int64`, `money`, `xero-date`: outside JSON Schema's registry, and
+        # refusing them would fail documents for being descriptive.
+        _checker(amount=_param(format="money")).check({"amount": "anything"})
 
 
 class TestReuse:

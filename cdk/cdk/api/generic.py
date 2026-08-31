@@ -601,6 +601,21 @@ class GenericAPIConnector(BaseDestinationHandler):
                 ),
                 endpoint=endpoint_id,
             )
+
+            # Presence is answered here and only here: this is the caller
+            # holding everything a run can produce -- the defaults resolved
+            # against a real connection, the stream's filters, and the cursor
+            # the bind above just wrote. The conformance kit compiles the same
+            # read with none of those and so cannot ask this question, and a
+            # page cannot either; both judge the values they hold instead.
+            #
+            # After the path substitution, not before, for the reason the
+            # write plan orders these the same way: an empty value bound into
+            # a path segment has a sharper answer than "resolved to nothing"
+            # -- it names the placeholder and says the request would address
+            # the whole collection -- and the sharper answer should be the one
+            # the author reads.
+            table.checker.check(table.values)
         except RequestSpecError as err:
             raise ReadError(f"endpoint {endpoint_id!r}: {err}") from err
 

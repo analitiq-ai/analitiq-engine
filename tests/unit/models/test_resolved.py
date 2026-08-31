@@ -524,3 +524,97 @@ class TestEffectiveSafetyWindow:
         source = {"replication": {"method": "incremental"}}
         with_effective_safety_window(source)
         assert "safety_window_seconds" not in source["replication"]
+
+
+class TestTheRunInstallsTheLevelItResolved:
+    """The two halves joined: a config carrying a level, and a run applying it.
+
+    Tested at the call sites because that is what was missing -- deleting
+    either `apply_log_level(...)` line left every other test in this suite
+    green, so the suite proved the helper worked and the config was populated
+    and nothing proved a run installed anything.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _restore_root_level(self):
+        root = logging.getLogger()
+        original = root.level
+        yield
+        root.setLevel(original)
+
+    def test_both_run_modes_apply_the_pipelines_level(self) -> None:
+        # Read as source: the engine and the destination sidecar each load the
+        # same pipeline document, so each must install the same level -- a run
+        # debugged at DEBUG on one side of the gRPC boundary and INFO on the
+        # other is half a run.
+        import inspect
+
+        import src.main as main_module
+        import src.runner as runner_module
+
+        for module in (runner_module, main_module):
+            source = inspect.getsource(module)
+            assert (
+                "apply_log_level(pipeline_config.runtime.logging.log_level)" in source
+            ), f"{module.__name__} loads the document and must install its level"
+
+    def test_the_worker_applies_the_level_its_bootstrap_carries(self) -> None:
+        # The connector runs in the worker subprocess, which is where the
+        # whole read path logs. `spawn_worker` hands the child a minimal
+        # environment on purpose, so the level travels in the bootstrap.
+        import inspect
+
+        import src.worker.__main__ as worker_main
+        import src.worker.shell as shell_module
+
+        assert "apply_log_level(bootstrap.log_level)" in inspect.getsource(worker_main)
+        assert '"log_level"' in inspect.getsource(shell_module)
+
+    def test_a_worker_bootstrap_round_trips_the_level(self) -> None:
+        from src.worker.bootstrap import parse_bootstrap
+
+        raw = {
+            "role": "source",
+            "kind": "api",
+            "connector_id": "widgets",
+            "uds_path": "/tmp/w.sock",
+            "connection": {"connection_id": "c-1"},
+            "log_level": "DEBUG",
+        }
+        assert parse_bootstrap(raw).log_level == "DEBUG"
+
+    def test_a_bootstrap_without_a_level_logs_the_way_it_always_did(self) -> None:
+        from src.worker.bootstrap import parse_bootstrap
+
+        raw = {
+            "role": "source",
+            "kind": "api",
+            "connector_id": "widgets",
+            "uds_path": "/tmp/w.sock",
+            "connection": {"connection_id": "c-1"},
+        }
+        assert parse_bootstrap(raw).log_level == "INFO"
+
+
+class TestOneLogLevelVocabulary:
+    """One env var, one set of names, whichever end reads it.
+
+    `getattr(logging, name, INFO)` accepted WARN, FATAL and NOTSET and read
+    anything else as INFO. Once a pipeline's own block falls through to the
+    same variable, a deployment setting WARN would have started fine and then
+    failed every pipeline at config parse, with a message about a level no
+    document mentions.
+    """
+
+    def test_a_name_logging_knows_but_the_contract_does_not_is_refused(self) -> None:
+        from src.shared.logging_level import require_log_level
+
+        assert hasattr(logging, "WARN")
+        with pytest.raises(ValueError, match="WARN"):
+            require_log_level("WARN")
+
+    def test_every_contract_level_is_accepted(self) -> None:
+        from src.shared.logging_level import VALID_LOG_LEVELS, require_log_level
+
+        for level in VALID_LOG_LEVELS:
+            assert require_log_level(level) == level

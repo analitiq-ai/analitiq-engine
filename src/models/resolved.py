@@ -22,7 +22,6 @@ from typing import Annotated, Any, get_args, get_origin
 
 from analitiq.contracts.connection import ConnectionInput
 from analitiq.contracts.pipelines.config import ErrorHandling as ContractErrorHandling
-from analitiq.contracts.pipelines.config import Logging as ContractLogging
 from analitiq.contracts.pipelines.config import PipelineInput
 from analitiq.contracts.stream import (
     ApiWrite,
@@ -41,6 +40,7 @@ from src.config import settings
 from src.config.schema_validator import EndpointDocument
 from src.engine.mapping import MappingDocument
 from src.models.state import ReplicationConfig as StateReplicationConfig
+from src.shared.logging_level import require_log_level
 
 
 def with_effective_safety_window(stream_source: dict[str, Any]) -> dict[str, Any]:
@@ -343,15 +343,6 @@ class ErrorHandlingConfig:
             )
 
 
-# The published pipeline contract's log-level enum. Read from the contract for
-# the same reason as the error strategies, and it also guards the default
-# source: ``LOG_LEVEL`` comes from the deployment environment and nothing else
-# checks it, so a typo there would otherwise be swallowed by the
-# ``getattr(logging, ..., logging.INFO)`` fallback in ``src.main`` and the run
-# would log at a level nobody asked for.
-_VALID_LOG_LEVELS = _contract_literals(ContractLogging, "log_level")
-
-
 @dataclass(frozen=True)
 class LoggingConfig:
     """Verbosity for a pipeline run.
@@ -361,22 +352,19 @@ class LoggingConfig:
     logging keeps the runtime block's one precedence rule rather than becoming
     a special case: pipeline config > env var > engine default.
 
-    The contract's ``metrics_enabled`` is deliberately not carried. Metrics are
-    the run's own accounting that the control plane reads, so a pipeline
-    document able to switch them off would produce runs indistinguishable from
-    unrecorded ones; disabling them is a deployment decision, never a
-    tenant-authored one. The contract is dropping the field (issue #477) and
-    the engine reads it nowhere.
+    The contract's ``metrics_enabled`` is deliberately not carried, and the
+    engine reads it nowhere. Metrics are the run's own accounting that the
+    control plane reads, so a pipeline document able to switch them off would
+    produce runs indistinguishable from unrecorded ones; disabling them is a
+    deployment decision, never a tenant-authored one.
     """
 
     log_level: str = field(default_factory=settings.log_level)
 
     def __post_init__(self) -> None:
-        if self.log_level not in _VALID_LOG_LEVELS:
-            raise ValueError(
-                f"Unknown log level {self.log_level!r}; "
-                f"expected one of {sorted(_VALID_LOG_LEVELS)}"
-            )
+        # The same check the process start applies to ``LOG_LEVEL``: one
+        # vocabulary, whichever end the value came from.
+        require_log_level(self.log_level)
 
 
 @dataclass(frozen=True)

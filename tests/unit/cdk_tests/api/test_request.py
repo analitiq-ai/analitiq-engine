@@ -11,6 +11,7 @@ from analitiq.contracts.stream import Filter
 from pydantic import TypeAdapter
 
 from cdk.api.exceptions import RequestSpecError
+from cdk.api.param_constraints import ParamChecker
 from cdk.api.request import (
     ParamTable,
     RequestBuilder,
@@ -24,6 +25,17 @@ from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.resolver import ResolutionContext, Resolver
 
 pytestmark = pytest.mark.unit
+
+
+def _no_params() -> ParamChecker:
+    """The checker a table with no declarations behind it carries.
+
+    Spelled out at each site rather than defaulted on the field: a checker
+    that refuses nothing is exactly what ``ParamTable.checker`` being required
+    exists to stop anyone getting by accident.
+    """
+    return ParamChecker.for_params({}, endpoint="/items")
+
 
 #: Both are discriminated unions, so which branch a block is comes out of
 #: the parse rather than out of a key the test sniffed for.
@@ -205,7 +217,10 @@ class TestReadParamTable:
         # identical request and one of the two streams was always wrong.
         # The endpoint declares what comparing the param means; the stream
         # is held to it.
-        with pytest.raises(RequestSpecError, match="'gt'"):
+        # Matched on the phrase unique to THIS refusal: the no-value message
+        # interpolates the operator too, so matching the operator alone would
+        # pass for a regression that dropped the value instead.
+        with pytest.raises(RequestSpecError, match="does not declare"):
             ParamTable.for_read(
                 _params(
                     {
@@ -255,6 +270,31 @@ class TestReadParamTable:
                 _resolver(),
                 filters=_filters({"field": "cursor", "operator": "eq", "value": "abc"}),
                 endpoint="/items",
+            )
+
+    def test_two_filters_on_one_param_are_refused(self) -> None:
+        # A param carries one value: the second filter overwrote the first,
+        # `?amount=100` went out, and the read narrowed by half of what the
+        # stream declared while reporting success. Two bounds on one field
+        # need two params for the endpoint to bind them to.
+        with pytest.raises(RequestSpecError, match="twice"):
+            ParamTable.for_read(
+                _params(
+                    {
+                        "amount": {
+                            "in": "query",
+                            "type": "number",
+                            "required": False,
+                            "operators": ["gte", "lte"],
+                        }
+                    }
+                ),
+                _resolver(),
+                endpoint="/items",
+                filters=_filters(
+                    {"field": "amount", "operator": "gte", "value": 10},
+                    {"field": "amount", "operator": "lte", "value": 100},
+                ),
             )
 
     def test_a_filter_carrying_no_value_is_refused(self) -> None:
@@ -417,17 +457,49 @@ class TestRequestBuilder:
         assert prepared.body is None
         assert prepared.query == {}
 
-    def test_a_required_param_that_resolved_to_nothing_refuses_the_page(
+    def test_a_required_param_that_resolved_to_nothing_refuses_the_read(
         self,
     ) -> None:
-        # The page would otherwise go out without it and the provider would
-        # answer the collection this param was narrowing -- a 200 the loop
-        # accepts and commits.
+        # Presence is the table's question, not the page's: the page carries
+        # only the loop's values for that page, so it cannot tell an absent
+        # required param from one the loop has not set yet. The read path asks
+        # it once, holding everything a run can produce.
         table = ParamTable.for_read(
             _params({"since": {"in": "query", "type": "string", "required": True}}),
             _resolver(),
             endpoint="/items",
         )
+        with pytest.raises(RequestSpecError, match="declared required"):
+            table.checker.check(table.values)
+
+    def test_an_empty_string_does_not_satisfy_a_required_param(self) -> None:
+        # `url_encode` answers "" for an input that resolved to nothing, so
+        # `?tenant=` is reachable without anyone authoring an empty literal --
+        # and a provider reads it as no filter and answers the whole
+        # collection. `substitute_path` already refuses an empty path segment
+        # in those terms; a query param is the same intent.
+        table = ParamTable.for_read(
+            _params({"tenant": {"in": "query", "type": "string", "required": True}}),
+            _resolver(),
+            endpoint="/items",
+        )
+        table.values["tenant"] = ""
+        with pytest.raises(RequestSpecError, match="declared required"):
+            table.checker.check(table.values)
+
+    def test_a_page_carrying_no_value_for_a_required_param_still_builds(
+        self,
+    ) -> None:
+        # The mirror of the above, and the reason the two questions are split:
+        # a continuation page binds nothing of its own, and refusing it for an
+        # absence the read already judged would fail page two of a read whose
+        # page one was accepted.
+        table = ParamTable.for_read(
+            _params({"since": {"in": "query", "type": "string", "required": True}}),
+            _resolver(),
+            endpoint="/items",
+        )
+        table.values["since"] = "2026-01-01"
         builder = RequestBuilder(
             table,
             raw_body=None,
@@ -435,8 +507,7 @@ class TestRequestBuilder:
             endpoint="/items",
             declared_query={"since": {"from_param": "since"}},
         )
-        with pytest.raises(RequestSpecError, match="declared required"):
-            builder.for_page({})
+        assert builder.for_page({}, sends_declared_body=False).query == {}
 
     def test_a_loop_owned_required_param_does_not_refuse_page_one(self) -> None:
         # Page one of a cursor scheme carries no cursor by construction. The
@@ -539,7 +610,7 @@ class TestRequestBuilder:
         # Reading with a null body sends a request the endpoint did not
         # describe; the read path never checked this before.
         builder = RequestBuilder(
-            ParamTable(),
+            ParamTable(_no_params()),
             raw_body={"ref": "connection.parameters.absent"},
             resolver=_resolver(),
             endpoint="/items",

@@ -4039,6 +4039,12 @@ class TestApiRequestBlockBreaks:
             # controlled_by pagination, so it is absent when the read
             # compiles and that object once the loop has advanced.
             read["params"]["page_token"]["in"] = "body"
+            # Declared for the object it now carries. Left at ``string`` the
+            # param's own constraint check refuses the mapping one rule
+            # earlier, which is a different rule doing a different job -- the
+            # document has to be wrong in exactly the one way this test is
+            # about.
+            read["params"]["page_token"]["type"] = "object"
             read["request"]["query"].pop("pageToken", None)
             read["request"]["body"] = {"cursor": {"from_param": "page_token"}}
 

@@ -17,7 +17,11 @@ point at which the omission becomes visible; the only place it is still
 knowable is here, before the request goes out.
 
 The remaining nine fields are literally JSON Schema keywords, so they are
-handed to a JSON Schema implementation rather than re-checked here. A hand
+handed to a JSON Schema implementation rather than re-checked here. So is
+``type``, which the contract already required and which the table below
+carries as a tenth: it was read before this module (``cdk.api.query_style``
+settles a collection's wire spelling from it), never enforced against a
+value. A hand
 written ``pattern`` test is a second regex dialect, a hand written
 ``minimum`` test is a second number model, and both would drift from the
 meaning the published contract took from JSON Schema in the first place.
@@ -33,6 +37,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 import jsonschema
@@ -67,18 +72,24 @@ _KEYWORDS: dict[str, str] = {
     "max_items": "maxItems",
 }
 
-#: Format is annotation-only unless a checker is attached, and even attached it
-#: only judges the formats it has a checker FOR. Observed against jsonschema
-#: 4.25.1: ``format: "int64"`` on a string validates clean, as does the
-#: standard ``date-time`` (its checker needs an optional dependency this tree
-#: does not install), while ``date`` and ``uuid`` do fail a bad value. That is
-#: the behaviour this module wants and the reason the checker is attached at
-#: all: ``Param.format`` is a free-form ``str`` in the contract, providers name
-#: their own (``int64``, ``money``, ``xero-date``), and a name outside JSON
-#: Schema's registry is the author saying something to a reader -- refusing it
-#: would fail documents for being descriptive. So a format is enforced where
-#: the library knows it and ignored where it does not.
-_FORMATS = jsonschema.FormatChecker()
+#: Two separate things, kept apart because only one of them is a decision.
+#:
+#: The decision: ``Param.format`` is a free-form ``str`` in the contract and
+#: providers name their own (``int64``, ``money``, ``xero-date``), so a name
+#: outside JSON Schema's registry is the author saying something to a reader
+#: and refusing it would fail documents for being descriptive. Attaching a
+#: checker at all is what makes a format enforced where the library knows it
+#: and annotation everywhere else.
+#:
+#: The environment fact: a checker judges only the formats it has a CHECKER
+#: for, and several standard ones -- ``date-time`` above all, the format an
+#: endpoint author is likeliest to write, and ``uri`` -- need optional
+#: packages this tree does not install. Observed against jsonschema 4.25.1,
+#: which registers ``date``, ``time``, ``uuid``, ``email``, ``ipv4``,
+#: ``ipv6``, ``regex`` and the JSON-pointer pair here. That is an install, not
+#: an intent, so it is pinned by tests rather than by this comment:
+#: ``TestFormatIsCheckedOnlyWhereThisTreeHasAChecker``.
+_FORMAT_CHECKER = jsonschema.FormatChecker()
 
 
 @dataclass(frozen=True)
@@ -127,7 +138,7 @@ class ParamChecker:
             fragment = _fragment(param)
             try:
                 jsonschema.Draft202012Validator.check_schema(
-                    fragment, format_checker=_FORMATS
+                    fragment, format_checker=_FORMAT_CHECKER
                 )
             except jsonschema.exceptions.SchemaError as err:
                 raise RequestSpecError(
@@ -142,17 +153,28 @@ class ParamChecker:
                 # legitimately carries no cursor. Holding the author's
                 # ``required`` against the engine's own loop would report a
                 # defect on page one of a correct document, and report it to
-                # the one person who cannot fix it. A value the loop DOES set
-                # is judged like any other.
+                # the one person who cannot fix it.
+                #
+                # It stops at ``required`` on purpose. Absence is the loop's
+                # to decide; a VALUE is not -- once the loop has set one, the
+                # author's declaration is the only statement about what that
+                # param may carry, and a token breaking it is as wrong as any
+                # other value breaking it.
                 required=param.required and param.controlled_by is None,
                 validator=jsonschema.Draft202012Validator(
-                    fragment, format_checker=_FORMATS
+                    fragment, format_checker=_FORMAT_CHECKER
                 ),
             )
         return cls(rules, endpoint=endpoint)
 
     def check(self, values: Mapping[str, Any]) -> None:
-        """Refuse the request unless every declared param is satisfied.
+        """Refuse unless every declared param is present and admissible.
+
+        Both halves, for a caller holding every value the run can produce:
+        the declared defaults resolved against a real connection, the
+        stream's filters, and the replication cursor. Only such a caller can
+        read absence as a defect -- see :meth:`check_values` for the one that
+        cannot.
 
         Walks the DECLARED params, not the resolved ones, because the absence
         of a required name is the failure that matters most and absence is
@@ -160,21 +182,53 @@ class ParamChecker:
 
         A param that resolved to nothing -- missing from the table, or present
         as ``None`` -- is the same state twice: the request build sends
-        neither, so both are "the param is not in this request". Required, that
-        is a refusal; optional, there is no value to hold to the remaining
-        constraints and the param is skipped rather than failed against a
-        ``type`` it was never going to carry.
+        neither, so both are "the param is not in this request".
         """
-        problems: list[str] = []
-        for name, rule in self._rules.items():
-            if values.get(name) is None:
-                if rule.required:
-                    problems.append(_missing(name, endpoint=self._endpoint))
-                continue
-            problems.extend(
-                _unmet(name, err, endpoint=self._endpoint)
-                for err in rule.validator.iter_errors(values[name])
-            )
+        self._raise(
+            [
+                _missing(name, endpoint=self._endpoint)
+                for name, rule in self._rules.items()
+                if rule.required and _resolved_to_nothing(values.get(name))
+            ]
+            + self._unmet_in(values)
+        )
+
+    def check_values(self, values: Mapping[str, Any]) -> None:
+        """Refuse unless every value PRESENT is one its declaration admits.
+
+        Says nothing about absence, because two callers cannot read absence
+        the same way. A page carries the loop's values for that page and no
+        others, and the conformance kit compiles a read with no connection at
+        all -- its rule, which predates this module, is that a value only a
+        run supplies is deferred rather than reported ("deferred on the value,
+        never on the declaration"). Judging presence from either would refuse
+        a correct document: page one of a cursor scheme carries no cursor, and
+        a definition-only compile carries no connection parameter.
+
+        What each of them CAN answer is whether the value it does hold is one
+        the declaration admits, and that is the same question on every page
+        and in the kit as in a run. :meth:`check` is presence and this.
+        """
+        self._raise(self._unmet_in(values))
+
+    def _unmet_in(self, values: Mapping[str, Any]) -> list[str]:
+        """Every declared param whose present value breaks its own schema.
+
+        A param that resolved to nothing carries no value to judge, so it is
+        skipped rather than failed against a ``type`` it was never going to
+        carry. A name in *values* the document does not declare is not this
+        class's business: the request build decides which values it has a
+        place to put, and a value nothing binds is refused there.
+        """
+        return [
+            _unmet(name, err, endpoint=self._endpoint)
+            for name, rule in self._rules.items()
+            if values.get(name) is not None
+            for err in rule.validator.iter_errors(_as_json_value(values[name]))
+        ]
+
+    def _raise(self, problems: list[str]) -> None:
+        """Report every problem at once, or return having found none."""
         if problems:
             # Joined rather than raised as an ExceptionGroup: every member is
             # the same defect class with the same handling (RequestSpecError,
@@ -182,6 +236,54 @@ class ParamChecker:
             # nothing to branch on and cost every log reader a traceback tree.
             # The surrounding request build reports the same way.
             raise RequestSpecError("; ".join(problems))
+
+
+def _as_json_value(value: Any) -> Any:
+    """Render a value in the JSON type model the declared ``type`` is written in.
+
+    Only ``Decimal`` needs it, and it is the engine's own doing rather than an
+    author's: responses are parsed with ``parse_float=Decimal`` so a numeric
+    ordering value survives a keyset page without losing digits, and that
+    Decimal goes straight back out as the next page's param. To a JSON Schema
+    validator a ``Decimal`` is neither ``integer`` nor ``number``, so a param
+    correctly declared ``type: integer`` would refuse page two of a read whose
+    page one had already committed rows -- blaming the author's document for a
+    value this engine produced.
+
+    Converted by the same rule JSON itself uses, which ``_fragment`` already
+    relies on: a number with a zero fractional part IS an integer, so an exact
+    Decimal becomes ``int`` and any other becomes ``float``. The value that
+    goes on the wire is untouched -- the query encoder renders the Decimal, so
+    nothing is rounded by this; it is read here and nowhere else.
+    """
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
+    return value
+
+
+def _resolved_to_nothing(value: Any) -> bool:
+    """Whether *value* is the absence a required param must not be sent with.
+
+    ``None`` is the obvious one. The empty string and the empty collection are
+    the same absence wearing a value's clothes, and they are reachable without
+    anyone authoring one: ``url_encode`` answers ``""`` for an input that
+    resolved to nothing, so a required param defaulting through it sends
+    ``?tenant=`` -- which most providers read as no filter at all and answer
+    the whole collection for, the 200 this module exists to prevent.
+
+    Not a new rule, either: :func:`~cdk.api.request.substitute_path` already
+    refuses an empty path segment in these terms, naming ``url_encode`` as the
+    route. A query param and a path segment are the same intent, so they get
+    the same answer.
+
+    ``0`` and ``False`` are values, not absences, and are left alone -- the
+    first id and an explicit "no" are both things an author means to send.
+    """
+    if value is None:
+        return True
+    if isinstance(value, str | list | tuple | dict | set):
+        return len(value) == 0
+    return False
 
 
 def _fragment(param: Param) -> dict[str, Any]:

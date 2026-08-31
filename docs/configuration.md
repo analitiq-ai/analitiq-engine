@@ -36,8 +36,8 @@ process-wide with the environment variable. New runtime overrides use the
 `ANALITIQ_` prefix; `LOG_LEVEL` keeps its established name because the
 deployment already sets it.
 
-The contract's `logging.metrics_enabled` is not in this table: it is being
-dropped from the contract and the engine reads it nowhere. Metrics are the
+The contract's `logging.metrics_enabled` is not in this table: the engine
+reads it nowhere, on purpose. Metrics are the
 run's own accounting that the control plane reads, so a pipeline able to
 switch them off would produce runs indistinguishable from unrecorded ones.
 

@@ -13,11 +13,13 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from analitiq.contracts.endpoints import Pagination
+from analitiq.contracts.endpoints import Pagination, Param
 from pydantic import TypeAdapter
 
 from cdk.api import GenericAPIConnector
+from cdk.api.exceptions import RequestSpecError
 from cdk.api.page_loop import PaginationStrategy
+from cdk.api.param_constraints import ParamChecker
 from cdk.api.read_setup import build_read_strategy
 from cdk.api.request import ParamTable
 from cdk.batch_metadata import response_metadata_of
@@ -38,6 +40,17 @@ from .fakes import (
 )
 
 pytestmark = pytest.mark.unit
+
+
+def _no_params() -> ParamChecker:
+    """The checker a table with no declarations behind it carries.
+
+    Spelled out at each site rather than defaulted on the field: a checker
+    that refuses nothing is exactly what ``ParamTable.checker`` being required
+    exists to stop anyone getting by accident.
+    """
+    return ParamChecker.for_params({}, endpoint="/items")
+
 
 _PAGINATION: TypeAdapter[Any] = TypeAdapter(Pagination)
 
@@ -872,6 +885,88 @@ class TestPaging:
 
 
 @pytest.mark.asyncio
+class TestDeclaredParamConstraints:
+    """What a read refuses before it sends, and what it lets through.
+
+    The read path is the only caller that can judge a required param's
+    presence: it holds the defaults resolved against a real connection, the
+    stream's filters and the cursor. A page holds one page's values and the
+    conformance kit holds no connection at all, so both judge values only.
+    """
+
+    async def test_a_required_param_that_resolves_to_nothing_fails_the_read(
+        self,
+    ) -> None:
+        # Sent without it, the provider answers the collection this param was
+        # narrowing -- a 200 the loop accepts and commits. Nothing goes out.
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        document = endpoint_document(
+            request={
+                "method": "GET",
+                "path": "/items",
+                "query": {"since": {"from_param": "since"}},
+            },
+            params={
+                "since": {
+                    "in": "query",
+                    "type": "string",
+                    "required": True,
+                    "default": {"ref": "connection.parameters.missing"},
+                }
+            },
+        )
+        with pytest.raises(ReadError, match="declared required"):
+            await _read(session, document)
+        assert session.calls == []
+
+    async def test_a_filter_value_the_declaration_refuses_fails_the_read(
+        self,
+    ) -> None:
+        # A string where the document declared an integer is the commonest
+        # hand-authored shape, and the one a vacuous `minimum` would let past.
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        document = endpoint_document(
+            request={
+                "method": "GET",
+                "path": "/items",
+                "query": {"limit": {"from_param": "limit"}},
+            },
+            params={
+                "limit": {
+                    "in": "query",
+                    "type": "integer",
+                    "required": False,
+                    "maximum": 100,
+                    "operators": ["eq"],
+                }
+            },
+        )
+        source = stream_source()
+        source["filters"] = [{"field": "limit", "operator": "eq", "value": "5"}]
+        with pytest.raises(ReadError, match="type='integer'"):
+            await _read(session, document, source=source)
+        assert session.calls == []
+
+    async def test_a_decimal_page_value_satisfies_an_integer_param(self) -> None:
+        # Responses are parsed with parse_float=Decimal so a keyset ordering
+        # value survives the round trip, and that Decimal goes straight back
+        # out as the next page's param. Judged as JSON judges it -- a zero
+        # fractional part IS an integer -- page two builds; judged as a
+        # Decimal it would fail a read whose page one had already committed.
+        checker = ParamChecker.for_params(
+            {
+                "after": Param.model_validate(
+                    {"in": "query", "type": "integer", "required": False}
+                )
+            },
+            endpoint="/items",
+        )
+        checker.check_values({"after": Decimal("9901")})
+        with pytest.raises(RequestSpecError, match="type='integer'"):
+            checker.check_values({"after": Decimal("9901.5")})
+
+
+@pytest.mark.asyncio
 class TestIncremental:
     def _document(self) -> dict[str, Any]:
         return endpoint_document(
@@ -1573,11 +1668,13 @@ class TestBuildingTheAdapterTouchesNothingItWasGiven:
         )
 
     def test_the_page_size_is_on_the_first_request(self) -> None:
-        first = self._strategy(ParamTable(values={"tenant": "acme"})).first()
+        first = self._strategy(
+            ParamTable(_no_params(), values={"tenant": "acme"})
+        ).first()
         assert first.params == {"tenant": "acme", "offset": 0, "limit": 25}
 
     def test_the_page_size_is_not_written_into_the_callers_table(self) -> None:
-        table = ParamTable(values={"tenant": "acme"})
+        table = ParamTable(_no_params(), values={"tenant": "acme"})
         self._strategy(table)
         assert table.values == {"tenant": "acme"}
 

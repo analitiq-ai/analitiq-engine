@@ -1,11 +1,18 @@
 """Everything between the declared params and the bytes on the wire.
 
 One param table serves both roles: the read builds it from
-``operations.read.params`` and layers the pagination exclusion and the
-stream's filter overrides on top; the write builds it from
+``operations.read.params``, leaving out what the pagination and replication
+loops own and taking the stream's filters on top; the write builds it from
 ``operations.write.<mode>.params``. Both resolve defaults through the same
 CDK helper, so an unresolved default is omitted and warned about
-identically.
+identically -- and both carry the same
+:class:`~cdk.api.param_constraints.ParamChecker`, which is what turns that
+omission into a refusal for a param the endpoint declared ``required``.
+
+A filter is not an override. It names a param the endpoint declared, under
+an operator that param declared, exactly once; each of those three is a
+refusal here rather than a value quietly reaching the wire under a
+comparison, or in a quantity, the stream did not ask for.
 
 The contract's three request binding maps -- ``headers``, ``query`` and
 ``path_params`` -- share one grammar, so they share one reader
@@ -121,12 +128,6 @@ class PreparedRequest:
     content_type: str | None = None
 
 
-#: The checker a table built without declarations carries. Only tests build
-#: one; production tables come from :meth:`ParamTable.for_read` or
-#: :meth:`ParamTable.for_write`, both of which compile the operation's own.
-_NO_DECLARATIONS = ParamChecker.for_params({}, endpoint="<no declarations>")
-
-
 @dataclass
 class ParamTable:
     """The declared params' resolved values.
@@ -136,15 +137,15 @@ class ParamTable:
     is the only way a param reaches the wire.
     """
 
-    values: dict[str, Any] = field(default_factory=dict)
     #: What the declaring operation says every one of these values may be,
     #: compiled once. It travels ON the table because the table is what the
     #: request is built from: a checker passed alongside could be forgotten
     #: at one of the two call sites, and the value that skipped it is exactly
-    #: the one nobody looks at again. A table built with no declarations --
-    #: only tests do that -- carries a checker that declares nothing and so
-    #: refuses nothing.
-    checker: ParamChecker = field(default_factory=lambda: _NO_DECLARATIONS)
+    #: the one nobody looks at again. Required, and first, for the same
+    #: reason: a default would be a checker that refuses nothing, which is the
+    #: forgetting this field exists to make impossible.
+    checker: ParamChecker
+    values: dict[str, Any] = field(default_factory=dict)
     #: Every param a loop owns, mapped to the loop that owns it
     #: (``controlled_by``). Read by exactly one caller:
     #: :func:`request_block_problem`, which refuses a path placeholder bound
@@ -192,14 +193,34 @@ class ParamTable:
         (the contract says so, and a ``controlled_by`` param is forbidden to
         declare any -- so a filter aimed at one the pagination or
         replication loop owns lands here rather than being overwritten on
-        page one). ``is_null``, ``is_not_null``, ``like`` and ``ilike`` are
-        in the stream's filter vocabulary and in no param's: they are the
-        SQL path's, and no declared set can admit them here.
+        page one). ``is_null``, ``is_not_null``, ``like`` and ``ilike`` never
+        reach this check at all: they are the SQL path's operators, and the
+        stream document's own scope validator refuses them on a connector
+        source before a ``StreamSource`` exists.
+
+        What this cannot do, and does not claim to: tell two members of one
+        declared set apart. A param declaring ``["gt", "lt"]`` admits both,
+        and both still bind the same value to the same key -- the engine has
+        no wire form for the difference, so at most one of those two is
+        truthful and the document is the only place that can say which. The
+        engine holds a filter to the set; whether a SET is honest is
+        decidable from the endpoint document alone and belongs to the
+        contract's validator. Some sets genuinely are honest -- ``["eq",
+        "in"]`` is told apart by the value's own shape, a scalar against a
+        collection -- which is why this is not a cardinality rule here.
+
+        Two filters on ONE param is the case this can answer, and does: a
+        param carries one value, so the second silently overwrote the first
+        and the read narrowed by half of what the stream declared.
 
         ``filters`` are the stream document's contract ``Filter`` models,
         so the field a filter names is a required attribute rather than a
         key that might be missing -- an unnamed filter never reaches here,
         the stream's parse refuses it.
+
+        ``endpoint`` names the document in every refusal this table's checker
+        raises later, on a page that may be the hundredth: by then the caller
+        has long stopped being able to say which endpoint it was reading.
         """
         uncontrolled = {
             name: decl for name, decl in declared.items() if decl.controlled_by is None
@@ -214,6 +235,7 @@ class ParamTable:
             controlled_by=_controlled_by(declared),
             checker=ParamChecker.for_params(declared, endpoint=endpoint),
         )
+        seen: dict[str, str] = {}
         for declared_filter in filters:
             target = declared_filter.field
             if target not in declared:
@@ -226,12 +248,19 @@ class ParamTable:
                 )
             declaration = declared[target]
             if declaration.operators is None:
+                owner = declaration.controlled_by
                 raise RequestSpecError(
                     f"the stream filters on {target!r} with operator "
                     f"{declared_filter.operator!r}, but "
                     f"operations.read.params[{target!r}] declares no "
                     f"`operators`, which is how the endpoint says the param "
                     f"is not stream-filterable"
+                    + (
+                        f" -- it is owned by the {owner} loop, which the "
+                        f"contract forbids from declaring any"
+                        if owner is not None
+                        else ""
+                    )
                 )
             if declared_filter.operator not in declaration.operators:
                 raise RequestSpecError(
@@ -242,6 +271,17 @@ class ParamTable:
                     f"and the value would otherwise go out under a "
                     f"comparison the provider never agreed to"
                 )
+            if target in seen:
+                raise RequestSpecError(
+                    f"the stream filters on {target!r} twice, with operators "
+                    f"{seen[target]!r} and {declared_filter.operator!r}; a param "
+                    f"carries one value, so the second would overwrite the "
+                    f"first and the read would narrow by half of what the "
+                    f"stream declared while reporting success. Two bounds on "
+                    f"one field need two params for the endpoint to bind them "
+                    f"to -- a start/end pair"
+                )
+            seen[target] = declared_filter.operator
             value = declared_filter.value
             if value is None:
                 # Reachable: the contract lets a non-unary filter carry a
@@ -266,7 +306,8 @@ class ParamTable:
 
         Write params are request-construction inputs feeding the body's
         ``from_param`` bindings, not stream filters, so nothing is layered
-        on top.
+        on top. ``endpoint`` names the document in the checker's refusals,
+        as it does for the read role.
         """
         with request_spec_errors("a write param's declared default"):
             values = resolve_param_defaults(declared, resolver, context="write param")
@@ -1075,13 +1116,12 @@ class RequestBuilder:
         # bindings read the table too: a header bound to a declared param
         # must carry the same value on page two as on page one.
         binding_params = {**self._table.values, **page_params}
-        # Per page, not once: this is the only point at which every value the
-        # request can carry exists together -- the declared defaults and the
-        # stream's filters from the table, the cursor the replication bind
-        # wrote into it, and the limit/offset/token the pagination loop
-        # produced for THIS page. A check at table-build time would judge the
-        # first two and let the loops' own values through unjudged.
-        self._table.checker.check(binding_params)
+        # Values only, and per page: a page carries the loop's values for THIS
+        # page, so it is the only point at which they can be judged at all --
+        # but it is also a caller that cannot read absence, because page one
+        # of a cursor scheme carries no cursor. Presence is answered once, by
+        # the caller holding everything a run can produce.
+        self._table.checker.check_values(binding_params)
         query, headers = bind_query_and_headers(
             params=binding_params,
             # A continuation replaces the whole request, query string

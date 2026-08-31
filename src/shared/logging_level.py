@@ -14,6 +14,35 @@ serving it come to log at different levels.
 """
 
 import logging
+from typing import Final, get_args
+
+from analitiq.contracts.pipelines.config import Logging
+
+#: The levels a run may be set to, taken from the published contract rather
+#: than from ``logging``'s own attributes. One vocabulary for one env var: the
+#: import-time configuration and the per-pipeline block read the same
+#: ``LOG_LEVEL``, and ``getattr(logging, name, INFO)`` would accept ``WARN``,
+#: ``FATAL`` and ``NOTSET`` for the first while the second refused them -- so a
+#: deployment setting ``LOG_LEVEL=WARN`` would start fine and then fail every
+#: pipeline at config parse, with a message about a level no document mentions.
+VALID_LOG_LEVELS: Final[frozenset[str]] = frozenset(
+    get_args(Logging.model_fields["log_level"].annotation)
+)
+
+
+def require_log_level(level: str) -> str:
+    """Return *level* if the contract declares it, else refuse naming the set.
+
+    Called at process start on the environment's value and again on a
+    pipeline's declared one, so an unusable level fails where it was written
+    rather than being silently read as INFO.
+    """
+    if level not in VALID_LOG_LEVELS:
+        raise ValueError(
+            f"Unknown log level {level!r}; "
+            f"expected one of {sorted(VALID_LOG_LEVELS)}"
+        )
+    return level
 
 
 def apply_log_level(level: str) -> None:

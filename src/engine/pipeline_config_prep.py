@@ -213,10 +213,17 @@ def _check_replication_support(
         f"does not support; it supports {sorted(supported)}"
     )
     if declared is None:
+        # Two shapes reach here: a read operation with no replication block,
+        # and no read operation at all. Naming a block on an operation that
+        # does not exist would send the author looking for the wrong thing.
+        missing = (
+            "declares no replication block"
+            if read is not None
+            else "has no read operation"
+        )
         raise ValueError(
-            f"Stream {stream_id!r} {unsupported} -- the endpoint's read "
-            f"operation declares no replication block, so it can carry no "
-            f"cursor bound and serves full refresh only."
+            f"Stream {stream_id!r} {unsupported} -- the endpoint {missing}, "
+            f"so it can carry no cursor bound and serves full refresh only."
         )
     raise ValueError(f"Stream {stream_id!r} {unsupported}.")
 

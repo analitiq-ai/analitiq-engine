@@ -43,12 +43,17 @@ from src.models.resolved import (
     dump_endpoint_ref,
     write_conflict_keys,
 )
-from src.shared.logging_level import apply_log_level
+from src.shared.logging_level import apply_log_level, require_log_level
 
-# Set up logging
-log_level = settings.log_level()
+# Set up logging. The environment's level is held to the contract's vocabulary
+# here rather than read through ``getattr(logging, name, INFO)``: that accepted
+# WARN, FATAL and NOTSET and silently degraded anything else to INFO, so a
+# deployment typo logged at a level nobody asked for -- and, once a pipeline's
+# own block reads the same variable, would have started the process fine and
+# then failed every pipeline at config parse instead.
+log_level = require_log_level(settings.log_level())
 logging.basicConfig(
-    level=getattr(logging, log_level, logging.INFO),
+    level=log_level,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )

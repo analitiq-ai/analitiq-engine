@@ -18,6 +18,7 @@ import logging
 import sys
 
 from cdk.registry import build_registries
+from src.shared.logging_level import apply_log_level
 from src.worker.bootstrap import WorkerBootstrap, read_bootstrap_from_stdin
 
 logger = logging.getLogger("src.worker")
@@ -97,6 +98,12 @@ def main() -> int:
         format="[worker] %(asctime)s %(name)s %(levelname)s %(message)s",
     )
     bootstrap = read_bootstrap_from_stdin()
+    # The run's declared verbosity, applied as soon as the payload carrying
+    # it is parsed. Everything above is emitted at INFO because there is
+    # nothing to read the level from yet -- the same order the engine's own
+    # shells use, and the reason a bootstrap that cannot be read still says
+    # so.
+    apply_log_level(bootstrap.log_level)
     if bootstrap.role == "destination":
         return asyncio.run(_run_destination(bootstrap))
     return asyncio.run(_run_source(bootstrap))

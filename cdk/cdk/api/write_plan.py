@@ -545,15 +545,6 @@ def build_write_plan(
         )
         if problem is not None:
             return problem
-        # After the block walk, not before it: a default reading a scope that
-        # write-time resolution never fills is the same omission with a far
-        # better answer -- it names the unfillable path -- and the walk above
-        # is where that answer lives. This one takes what is left: a param
-        # that resolved to nothing for any other reason, and a resolved value
-        # the declaration does not admit. Checked once here rather than per
-        # record: a write's params are the declared defaults and nothing else,
-        # so this table is the table every record is written with.
-        table.checker.check(table.values)
 
         plan = StreamWritePlan(
             method=request.method,
@@ -577,6 +568,19 @@ def build_write_plan(
             ),
             endpoint=endpoint_id,
         )
+
+        # Last of the three, deliberately. A default reading a scope that
+        # write-time resolution never fills is caught by the block walk above,
+        # which names the unfillable path; an empty value bound into a path
+        # segment is caught by the substitution, which names the placeholder.
+        # Both are sharper answers to the same omission, so this one takes
+        # what is left: a param that resolved to nothing for any other reason,
+        # and a resolved value the declaration does not admit. Checked once
+        # rather than per record -- a write's params are the declared defaults
+        # and nothing else, so this table is the table every record is
+        # written with.
+        table.checker.check(table.values)
+
         # The same binder the read role's pages go through, so a declared
         # query key or header reaches the wire whichever role sends it.
         plan.query, plan.headers = bind_query_and_headers(
