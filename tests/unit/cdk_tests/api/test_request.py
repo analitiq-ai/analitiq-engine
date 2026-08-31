@@ -272,6 +272,49 @@ class TestReadParamTable:
                 endpoint="/items",
             )
 
+    def test_a_filter_on_an_empty_collection_is_refused(self) -> None:
+        # `in []` selects no records; an empty collection serializes to no
+        # query pairs, so the request would carry no filter and the provider
+        # would answer everything -- the exact inversion of the ask.
+        with pytest.raises(RequestSpecError, match="empty collection"):
+            ParamTable.for_read(
+                _params(
+                    {
+                        "ids": {
+                            "in": "query",
+                            "type": "array",
+                            "required": False,
+                            "style": "form",
+                            "explode": True,
+                            "operators": ["in"],
+                        }
+                    }
+                ),
+                _resolver(),
+                endpoint="/items",
+                filters=_filters({"field": "ids", "operator": "in", "value": []}),
+            )
+
+    def test_a_filter_on_a_populated_collection_passes(self) -> None:
+        table = ParamTable.for_read(
+            _params(
+                {
+                    "ids": {
+                        "in": "query",
+                        "type": "array",
+                        "required": False,
+                        "style": "form",
+                        "explode": True,
+                        "operators": ["in"],
+                    }
+                }
+            ),
+            _resolver(),
+            endpoint="/items",
+            filters=_filters({"field": "ids", "operator": "in", "value": [1, 2]}),
+        )
+        assert table.values["ids"] == [1, 2]
+
     def test_two_filters_on_one_param_are_refused(self) -> None:
         # A param carries one value: the second filter overwrote the first,
         # `?amount=100` went out, and the read narrowed by half of what the
@@ -472,19 +515,73 @@ class TestRequestBuilder:
         with pytest.raises(RequestSpecError, match="declared required"):
             table.checker.check(table.values)
 
-    def test_an_empty_string_does_not_satisfy_a_required_param(self) -> None:
-        # `url_encode` answers "" for an input that resolved to nothing, so
-        # `?tenant=` is reachable without anyone authoring an empty literal --
-        # and a provider reads it as no filter and answers the whole
-        # collection. `substitute_path` already refuses an empty path segment
-        # in those terms; a query param is the same intent.
+    def test_a_required_param_defaulting_through_url_encode_is_refused(
+        self,
+    ) -> None:
+        # The route that made an empty string look like absence: `url_encode`
+        # answered "" for an input that resolved to nothing, so `?tenant=`
+        # went out and a provider read it as no filter at all. Fixed where it
+        # happens -- the function answers None, the binding omits the key, and
+        # `required` sees the absence it is there to catch.
         table = ParamTable.for_read(
-            _params({"tenant": {"in": "query", "type": "string", "required": True}}),
+            _params(
+                {
+                    "tenant": {
+                        "in": "query",
+                        "type": "string",
+                        "required": True,
+                        "default": {
+                            "function": "url_encode",
+                            "input": {"ref": "connection.parameters.absent"},
+                        },
+                    }
+                }
+            ),
             _resolver(),
             endpoint="/items",
         )
-        table.values["tenant"] = ""
+        assert "tenant" not in table.values
         with pytest.raises(RequestSpecError, match="declared required"):
+            table.checker.check(table.values)
+
+    def test_an_empty_string_is_a_value_its_declaration_may_admit(self) -> None:
+        # Emptiness is not absence: the binding emits "", so the param IS in
+        # the request, and whether an empty one is allowed is what `minLength`
+        # is for. A required header legitimately sent empty must not be
+        # refused for being empty.
+        table = ParamTable.for_read(
+            _params(
+                {
+                    "note": {
+                        "in": "header",
+                        "type": "string",
+                        "required": True,
+                        "default": {"literal": ""},
+                    }
+                }
+            ),
+            _resolver(),
+            endpoint="/items",
+        )
+        table.checker.check(table.values)
+
+    def test_an_empty_string_is_refused_when_min_length_forbids_it(self) -> None:
+        table = ParamTable.for_read(
+            _params(
+                {
+                    "note": {
+                        "in": "header",
+                        "type": "string",
+                        "required": True,
+                        "minLength": 1,
+                        "default": {"literal": ""},
+                    }
+                }
+            ),
+            _resolver(),
+            endpoint="/items",
+        )
+        with pytest.raises(RequestSpecError, match="minLength=1"):
             table.checker.check(table.values)
 
     def test_a_page_carrying_no_value_for_a_required_param_still_builds(

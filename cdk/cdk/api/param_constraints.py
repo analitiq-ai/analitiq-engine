@@ -156,6 +156,13 @@ class ParamChecker:
         """
         rules: dict[str, _ParamRule] = {}
         for name, param in declared.items():
+            unusable = _unusable_bound(param)
+            if unusable is not None:
+                raise RequestSpecError(
+                    f"param {name!r} for endpoint {endpoint!r} declares "
+                    f"{unusable}, which orders against nothing: no value could "
+                    f"satisfy it and none could fail it"
+                )
             fragment = _shape_fragment(param)
             bounds = _bounds_fragment(param)
             try:
@@ -209,12 +216,22 @@ class ParamChecker:
         A param that resolved to nothing -- missing from the table, or present
         as ``None`` -- is the same state twice: the request build sends
         neither, so both are "the param is not in this request".
+
+        ``None`` and nothing else. An empty string, an empty list and an
+        empty object are VALUES: the binding emits them, so the param is in
+        the request, and whether an empty one is admissible is what
+        ``minLength`` and ``minItems`` are for -- a required header sent as
+        ``""`` is a thing an endpoint may legitimately declare. Reading
+        emptiness as absence here was compensating for ``url_encode``
+        answering ``""`` for an unresolved input, which is fixed where it
+        happens: that function now answers ``None``, so this one has a single
+        signal to read.
         """
         _refuse(
             [
                 _missing(name, endpoint=self._endpoint)
                 for name, rule in self._rules.items()
-                if rule.required and _resolved_to_nothing(values.get(name))
+                if rule.required and values.get(name) is None
             ]
             + self._unmet_in(values)
         )
@@ -334,29 +351,26 @@ def _as_json_value(value: Any) -> Any:
     return value
 
 
-def _resolved_to_nothing(value: Any) -> bool:
-    """Whether *value* is the absence a required param must not be sent with.
+def _unusable_bound(param: Param) -> str | None:
+    """Return the declared bound that cannot order anything, or ``None``.
 
-    ``None`` is the obvious one. The empty string and the empty collection are
-    the same absence wearing a value's clothes, and they are reachable without
-    anyone authoring one: ``url_encode`` answers ``""`` for an input that
-    resolved to nothing, so a required param defaulting through it sends
-    ``?tenant=`` -- which most providers read as no filter at all and answer
-    the whole collection for, the 200 this module exists to prevent.
+    ``json.loads`` accepts the non-standard ``NaN`` and ``Infinity``
+    literals and the contract types both bounds as a plain float, so
+    ``"minimum": NaN`` is a document that parses. It compiles as a schema
+    too -- it is a number -- and then every comparison against it raises
+    ``InvalidOperation`` out of the validator, a builtin escaping a module
+    whose whole error vocabulary is ``RequestSpecError``.
 
-    Not a new rule, either: :func:`~cdk.api.request.substitute_path` already
-    refuses an empty path segment in these terms, naming ``url_encode`` as the
-    route. A query param and a path segment are the same intent, so they get
-    the same answer.
-
-    ``0`` and ``False`` are values, not absences, and are left alone -- the
-    first id and an explicit "no" are both things an author means to send.
+    Refused here, once per operation, rather than per value: it is a fact
+    about the document, true before any request is built, and the author is
+    the only one who can act on it.
     """
-    if value is None:
-        return True
-    if isinstance(value, str | list | tuple | dict | set):
-        return len(value) == 0
-    return False
+    declared = _declared_keywords(param)
+    for keyword in _ORDERING_KEYWORDS:
+        bound = declared.get(keyword)
+        if bound is not None and not math.isfinite(bound):
+            return f"{keyword}={bound!r}"
+    return None
 
 
 def _declared_keywords(param: Param) -> dict[str, Any]:

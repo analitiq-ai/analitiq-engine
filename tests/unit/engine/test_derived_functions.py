@@ -202,9 +202,13 @@ class TestUrlEncode:
         }
         assert url_encode_function(node, _resolver()) == "a/b"
 
-    def test_none_resolves_to_empty_string(self):
+    def test_none_encodes_to_nothing(self):
+        # Not "": `None` is the one thing this engine reads as "resolved to
+        # nothing", and every binding omits a key carrying it. An empty
+        # string walks past that and goes out as `?tenant=`, which a
+        # provider reads as no filter at all.
         node = {"function": "url_encode", "input": {"literal": None}}
-        assert url_encode_function(node, _resolver()) == ""
+        assert url_encode_function(node, _resolver()) is None
 
     def test_integer_value_stringified_then_encoded(self):
         node = {"function": "url_encode", "input": {"literal": 5432}}

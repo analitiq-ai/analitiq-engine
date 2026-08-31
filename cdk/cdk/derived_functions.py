@@ -106,7 +106,7 @@ def base64_encode_function(node: Mapping[str, Any], resolver: Resolver) -> str:
     return _base64.b64encode(data).decode("ascii")
 
 
-def url_encode_function(node: Mapping[str, Any], resolver: Resolver) -> str:
+def url_encode_function(node: Mapping[str, Any], resolver: Resolver) -> str | None:
     """Percent-encode a value for use inside a URL component.
 
     The default ``safe`` characters are empty so every reserved character
@@ -118,10 +118,20 @@ def url_encode_function(node: Mapping[str, Any], resolver: Resolver) -> str:
     substitutes into ``request.path``, so encoding one here sends ``a%252Fb``
     where the provider expects ``a%2Fb``. A ``path_params`` binding that
     calls this is refused at plan time.
+
+    An input that resolves to nothing encodes to nothing: ``None`` in,
+    ``None`` out. Encoding it to ``""`` instead made an unresolved value a
+    PRESENT one, which is the single thing this engine reads ``None`` to
+    mean -- ``resolve_param_defaults`` and ``bind_request_values`` both omit
+    a key whose value is ``None``, and an empty string walks past both. What
+    followed was a request going out with ``?tenant=``, which a provider
+    reads as no filter at all, and two separate consumers growing a rule
+    about empty strings to compensate. One signal for "nothing", raised
+    where it happens.
     """
     value = resolver.resolve(_require(node, "input"))
     if value is None:
-        return ""
+        return None
     if not isinstance(value, (str, int, float, bool)):
         raise TypeError(
             f"`url_encode` input must resolve to a scalar, got "

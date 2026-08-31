@@ -11,6 +11,7 @@ than a request that quietly widens the read.
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from typing import Any
 
@@ -247,6 +248,30 @@ class TestAggregation:
         )
         assert "pattern=" in message
         assert "minLength=" in message
+
+
+class TestABoundMustBeAbleToOrder:
+    """A bound that orders against nothing is refused with the document.
+
+    `json.loads` accepts the non-standard `NaN`/`Infinity` literals and the
+    contract types both bounds as a plain float, so such a document parses
+    and compiles as a schema. Every comparison against it then raised
+    `InvalidOperation` -- a builtin escaping a module whose whole error
+    vocabulary is `RequestSpecError`.
+    """
+
+    @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+    def test_a_non_finite_bound_is_refused_at_build_time(self, literal: str) -> None:
+        declared = json.loads(
+            '{"in":"query","type":"number","required":false,"minimum":' + literal + "}"
+        )
+        with pytest.raises(RequestSpecError, match="orders against nothing"):
+            _checker(x=Param.model_validate(declared))
+
+    def test_a_finite_bound_still_compiles(self) -> None:
+        _checker(x=_param(type="number", minimum=1, maximum=100)).check_values(
+            {"x": 50}
+        )
 
 
 class TestAValueIsNeverLogged:

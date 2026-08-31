@@ -217,6 +217,13 @@ class ParamTable:
         param carries one value, so the second silently overwrote the first
         and the read narrowed by half of what the stream declared.
 
+        So is an empty collection, for the same reason one step further on.
+        ``in []`` selects no records, and an empty collection serializes to
+        no query pairs -- so the request goes out carrying no filter and the
+        provider answers everything, which is the exact inversion of what the
+        stream asked for. No wire spelling of "match nothing" exists to send
+        instead, so it is refused rather than approximated.
+
         ``filters`` are the stream document's contract ``Filter`` models,
         so the field a filter names is a required attribute rather than a
         key that might be missing -- an unnamed filter never reaches here,
@@ -287,6 +294,15 @@ class ParamTable:
                 )
             seen[target] = declared_filter.operator
             value = declared_filter.value
+            if isinstance(value, list | tuple | set) and not value:
+                raise RequestSpecError(
+                    f"the stream filters on {target!r} with operator "
+                    f"{declared_filter.operator!r} and an empty collection, "
+                    f"which selects no records -- but an empty collection "
+                    f"serializes to no query pairs, so the request would carry "
+                    f"no filter at all and the provider would answer the whole "
+                    f"collection. There is no wire spelling of 'match nothing'"
+                )
             if value is None:
                 # Reachable: the contract lets a non-unary filter carry a
                 # null value because pydantic cannot tell an omitted key
@@ -489,8 +505,9 @@ def substitute_path(path: str, values: Mapping[str, Any], *, endpoint: str) -> s
     An empty segment is refused alongside a missing one. ``/Contact/{id}``
     with an empty ``id`` addresses the whole collection: a read then fetches
     every record instead of one, and a PUT or PATCH targets the collection.
-    ``url_encode`` returns ``""`` for an unbound input, so the empty case is
-    reachable without anyone declaring it.
+    Reachable without anyone writing an empty literal: a template whose
+    placeholder resolves to nothing renders the rest of itself, so a path
+    param bound to one arrives as a shorter string or an empty one.
 
     A dot segment is refused for the same reason one step further on.
     Percent-encoding does not contain ``.`` -- it is unreserved, so ``quote``
