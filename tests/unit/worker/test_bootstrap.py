@@ -27,6 +27,9 @@ def _minimal_raw(**overrides):
         "kind": "database",
         "connector_id": "postgres",
         "uds_path": "/tmp/w/worker.sock",
+        # The run's verbosity travels with the payload; the shell always
+        # writes it, so it is required here like every other field.
+        "log_level": "INFO",
         "connection": {
             "connection_id": "my-pg",
             "connector_id": "postgres",
@@ -74,7 +77,9 @@ class TestParseBootstrap:
         with pytest.raises(ValueError, match="bootstrap.role"):
             parse_bootstrap(_minimal_raw(role=role))
 
-    @pytest.mark.parametrize("key", ["kind", "connector_id", "uds_path", "connection"])
+    @pytest.mark.parametrize(
+        "key", ["kind", "connector_id", "uds_path", "connection", "log_level"]
+    )
     def test_missing_required_field_rejected(self, key):
         raw = _minimal_raw()
         del raw[key]

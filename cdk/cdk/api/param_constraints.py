@@ -35,6 +35,7 @@ schema per page would put the cost of the whole check on the read loop.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
@@ -184,7 +185,7 @@ class ParamChecker:
         as ``None`` -- is the same state twice: the request build sends
         neither, so both are "the param is not in this request".
         """
-        self._raise(
+        _refuse(
             [
                 _missing(name, endpoint=self._endpoint)
                 for name, rule in self._rules.items()
@@ -209,7 +210,7 @@ class ParamChecker:
         the declaration admits, and that is the same question on every page
         and in the kit as in a run. :meth:`check` is presence and this.
         """
-        self._raise(self._unmet_in(values))
+        _refuse(self._unmet_in(values))
 
     def _unmet_in(self, values: Mapping[str, Any]) -> list[str]:
         """Every declared param whose present value breaks its own schema.
@@ -220,44 +221,87 @@ class ParamChecker:
         class's business: the request build decides which values it has a
         place to put, and a value nothing binds is refused there.
         """
-        return [
-            _unmet(name, err, endpoint=self._endpoint)
-            for name, rule in self._rules.items()
-            if values.get(name) is not None
-            for err in rule.validator.iter_errors(_as_json_value(values[name]))
-        ]
+        problems: list[str] = []
+        for name, rule in self._rules.items():
+            value = values.get(name)
+            if value is None:
+                continue
+            unorderable = _non_finite_problem(name, value, endpoint=self._endpoint)
+            if unorderable is not None:
+                # Reported instead of validated, not as well: the comparisons
+                # below are what cannot be trusted for this value.
+                problems.append(unorderable)
+                continue
+            problems.extend(
+                _unmet(name, err, endpoint=self._endpoint)
+                for err in rule.validator.iter_errors(_as_json_value(value))
+            )
+        return problems
 
-    def _raise(self, problems: list[str]) -> None:
-        """Report every problem at once, or return having found none."""
-        if problems:
-            # Joined rather than raised as an ExceptionGroup: every member is
-            # the same defect class with the same handling (RequestSpecError,
-            # non-retryable, fails the stream), so a group would give a caller
-            # nothing to branch on and cost every log reader a traceback tree.
-            # The surrounding request build reports the same way.
-            raise RequestSpecError("; ".join(problems))
+
+def _refuse(problems: list[str]) -> None:
+    """Report every problem at once, or return having found none.
+
+    Joined rather than raised as an ExceptionGroup: every member is the same
+    defect class with the same handling (``RequestSpecError``, non-retryable,
+    fails the stream), so a group would give a caller nothing to branch on and
+    cost every log reader a traceback tree. The surrounding request build
+    reports the same way.
+    """
+    if problems:
+        raise RequestSpecError("; ".join(problems))
+
+
+def _non_finite_problem(name: str, value: Any, *, endpoint: str) -> str | None:
+    """Why this value cannot be compared to anything, or ``None``.
+
+    ``NaN`` compares false against every bound, so a schema declaring
+    ``minimum: 1, maximum: 100`` accepts it: the keyset loop would advance on
+    a garbage cursor having satisfied every constraint the author wrote. It
+    arrives without anyone authoring one -- a provider body carrying the
+    non-standard ``NaN`` / ``Infinity`` literals decodes to Python floats,
+    and the keyset strategy walks the last record's value into the next
+    page's param. ``Decimal("NaN")`` is worse: comparing it raises
+    ``InvalidOperation`` out of the validator, a builtin escaping a module
+    whose whole error vocabulary is ``RequestSpecError``.
+
+    So it is named here rather than left to the schema, which cannot refuse
+    what it cannot order.
+    """
+    if isinstance(value, Decimal):
+        finite = value.is_finite()
+    elif isinstance(value, float):
+        finite = math.isfinite(value)
+    else:
+        return None
+    if finite:
+        return None
+    return (
+        f"param {name!r} for endpoint {endpoint!r} resolved to {value!r}, which "
+        f"orders against nothing: every declared bound would 'hold' for it and "
+        f"the request would go out carrying it"
+    )
 
 
 def _as_json_value(value: Any) -> Any:
     """Render a value in the JSON type model the declared ``type`` is written in.
 
-    Only ``Decimal`` needs it, and it is the engine's own doing rather than an
-    author's: responses are parsed with ``parse_float=Decimal`` so a numeric
-    ordering value survives a keyset page without losing digits, and that
-    Decimal goes straight back out as the next page's param. To a JSON Schema
-    validator a ``Decimal`` is neither ``integer`` nor ``number``, so a param
-    correctly declared ``type: integer`` would refuse page two of a read whose
-    page one had already committed rows -- blaming the author's document for a
-    value this engine produced.
+    One conversion, and only one: an exactly integral ``Decimal`` becomes an
+    ``int``. JSON Schema's ``integer`` is an ``isinstance`` test, so a
+    ``Decimal("9901")`` -- which is what a keyset param carries after a
+    response parsed with ``parse_float=Decimal`` -- would otherwise fail a
+    param correctly declared ``type: integer``, on page two of a read whose
+    page one had already committed rows.
 
-    Converted by the same rule JSON itself uses, which ``_fragment`` already
-    relies on: a number with a zero fractional part IS an integer, so an exact
-    Decimal becomes ``int`` and any other becomes ``float``. The value that
-    goes on the wire is untouched -- the query encoder renders the Decimal, so
-    nothing is rounded by this; it is read here and nowhere else.
+    Everything else is handed over untouched, and that is the point.
+    ``Decimal`` is a ``numbers.Number``, so the validator judges it as a
+    ``number`` and compares it against ``minimum`` / ``maximum`` at full
+    precision. Converting to ``float`` first would round the JUDGEMENT --
+    ``Decimal("100.0000000000000000001")`` passing ``maximum: 100`` -- and it
+    would round it exactly where the digits were being kept on purpose.
     """
-    if isinstance(value, Decimal):
-        return int(value) if value == value.to_integral_value() else float(value)
+    if isinstance(value, Decimal) and value == value.to_integral_value():
+        return int(value)
     return value
 
 

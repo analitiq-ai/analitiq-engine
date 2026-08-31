@@ -37,6 +37,7 @@ from typing import Any
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.type_map import TypeMapper
 from cdk.type_map.loader import build_type_mapper
+from src.shared.logging_level import require_log_level
 
 _ROLES = ("source", "destination")
 
@@ -81,7 +82,7 @@ def parse_bootstrap(raw: dict[str, Any]) -> WorkerBootstrap:
     role = raw.get("role")
     if role not in _ROLES:
         raise ValueError(f"bootstrap.role must be one of {_ROLES}, got {role!r}")
-    for key in ("kind", "connector_id", "uds_path", "connection"):
+    for key in ("kind", "connector_id", "uds_path", "connection", "log_level"):
         if not raw.get(key):
             raise ValueError(f"bootstrap.{key} is required")
 
@@ -102,10 +103,13 @@ def parse_bootstrap(raw: dict[str, Any]) -> WorkerBootstrap:
         stream_endpoints=dict(raw.get("stream_endpoints") or {}),
         stream_conflict_keys=dict(raw.get("stream_conflict_keys") or {}),
         source_config=dict(raw.get("source_config") or {}),
-        # Defaulted, not required: a bootstrap is written by this repo's own
-        # shell, and a worker whose payload predates the field logs at the
-        # level it always did rather than refusing to start.
-        log_level=str(raw.get("log_level") or "INFO"),
+        # Required and validated like every other field, not defaulted. The
+        # payload is written by ``build_bootstrap`` in the parent of this very
+        # process, from the same image, so there is no older payload for a
+        # default to rescue -- and a default would silently restore the exact
+        # bug the level was added to fix: the half of the run that builds
+        # every request logging at INFO while the pipeline asked for DEBUG.
+        log_level=require_log_level(raw["log_level"]),
     )
 
 

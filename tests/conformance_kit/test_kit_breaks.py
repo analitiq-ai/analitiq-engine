@@ -3805,6 +3805,58 @@ class TestApiRequestBlockBreaks:
         target = self._broken(tmp_path, "widgets", bend)
         assert check_api_read_compiles(target) == []
 
+    def test_a_required_query_param_a_stream_filter_supplies_is_not_a_finding(
+        self, tmp_path: Path
+    ) -> None:
+        """Presence is a question the kit cannot ask, so it must not answer it.
+
+        The kit compiles a definition-only read: no connection, and
+        deliberately no stream filters. A ``required`` param a filter fills
+        therefore resolves to nothing here and can never resolve to anything
+        else -- so reporting it would fail every registry connector whose
+        params come from the stream, for being correct. The engine asks
+        presence where it holds those values; the kit judges what did resolve.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["params"]["company_id"] = {
+                "in": "query",
+                "type": "string",
+                "required": True,
+                "operators": ["eq"],
+            }
+            read["request"]["query"]["companyId"] = {"from_param": "company_id"}
+
+        target = self._broken(tmp_path, "widgets", bend)
+        assert check_api_read_compiles(target) == []
+
+    def test_a_declared_default_the_declaration_refuses_is_still_a_finding(
+        self, tmp_path: Path
+    ) -> None:
+        """The other half: a value the definition DID settle is judged here.
+
+        Deferral is on the value, never on the declaration. This default
+        resolves without a connection, resolves to the same thing on every
+        run, and breaks the range the same document declares -- so the kit
+        reports it rather than waiting for a request to fail.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["params"]["window"] = {
+                "in": "query",
+                "type": "integer",
+                "required": False,
+                "maximum": 100,
+                "default": {"literal": 500},
+            }
+            read["request"]["query"]["window"] = {"from_param": "window"}
+
+        target = self._broken(tmp_path, "widgets", bend)
+        assert any(
+            "maximum=100" in violation.message
+            for violation in check_api_read_compiles(target)
+        )
+
     def test_a_path_placeholder_the_pagination_loop_owns_is_refused(
         self, tmp_path: Path
     ) -> None:

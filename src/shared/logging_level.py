@@ -14,9 +14,11 @@ serving it come to log at different levels.
 """
 
 import logging
-from typing import Final, get_args
+from typing import Final
 
 from analitiq.contracts.pipelines.config import Logging
+
+from src.shared.contract_literals import contract_literals
 
 #: The levels a run may be set to, taken from the published contract rather
 #: than from ``logging``'s own attributes. One vocabulary for one env var: the
@@ -25,9 +27,7 @@ from analitiq.contracts.pipelines.config import Logging
 #: ``FATAL`` and ``NOTSET`` for the first while the second refused them -- so a
 #: deployment setting ``LOG_LEVEL=WARN`` would start fine and then fail every
 #: pipeline at config parse, with a message about a level no document mentions.
-VALID_LOG_LEVELS: Final[frozenset[str]] = frozenset(
-    get_args(Logging.model_fields["log_level"].annotation)
-)
+VALID_LOG_LEVELS: Final[frozenset[str]] = contract_literals(Logging, "log_level")
 
 
 def require_log_level(level: str) -> str:

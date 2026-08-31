@@ -33,13 +33,13 @@ from analitiq.contracts.stream import (
     StreamMapping,
     StreamSource,
 )
-from pydantic import BaseModel
 
 from cdk.connection_runtime import ConnectionRuntime
 from src.config import settings
 from src.config.schema_validator import EndpointDocument
 from src.engine.mapping import MappingDocument
 from src.models.state import ReplicationConfig as StateReplicationConfig
+from src.shared.contract_literals import contract_literals
 from src.shared.logging_level import require_log_level
 
 
@@ -116,33 +116,6 @@ def dump_endpoint_ref(ref: EndpointRef) -> dict[str, Any]:
     return ref.model_dump(mode="json", by_alias=True, exclude_none=True)
 
 
-def _contract_literals(model: type[BaseModel], field_name: str) -> frozenset[str]:
-    """Read one contract model field's ``Literal`` vocabulary.
-
-    Restating a contract enum in engine code is how a contract-valid document
-    starts being rejected: the contract gains a value, the copy does not, and
-    nothing fails until an author hits it. Reading the annotation keeps one
-    source.
-
-    Every shape this cannot read raises here, naming the model and the field.
-    These run at import, so the alternative to a loud failure is an engine that
-    starts up and rejects documents the contract permits.
-    """
-    fields = getattr(model, "model_fields", None)
-    if fields is None or field_name not in fields:
-        raise RuntimeError(
-            f"{model!r} does not declare a {field_name!r} field; the contract "
-            "changed shape and this reader must follow it"
-        )
-    values = get_args(fields[field_name].annotation)
-    if not values or not all(isinstance(value, str) for value in values):
-        raise RuntimeError(
-            f"{model.__name__}.{field_name} is not a Literal of strings; the "
-            "contract changed shape and this reader must follow it"
-        )
-    return frozenset(values)
-
-
 def _variant_literals(annotation: Any, field_name: str) -> frozenset[str]:
     """Read *field_name*'s vocabulary across every variant of a union annotation.
 
@@ -161,7 +134,7 @@ def _variant_literals(annotation: Any, field_name: str) -> frozenset[str]:
             "reader must follow it"
         )
     return frozenset().union(
-        *(_contract_literals(variant, field_name) for variant in variants)
+        *(contract_literals(variant, field_name) for variant in variants)
     )
 
 
@@ -309,7 +282,7 @@ class BatchingConfig:
 # contract rather than narrowed to what the engine branches on, so a
 # contract-valid pipeline is never rejected at this boundary. The engine's own
 # *default* is separate and deliberately differs from the contract's.
-_VALID_ERROR_STRATEGIES = _contract_literals(ContractErrorHandling, "strategy")
+_VALID_ERROR_STRATEGIES = contract_literals(ContractErrorHandling, "strategy")
 
 
 @dataclass(frozen=True)

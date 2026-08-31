@@ -139,11 +139,15 @@ class ParamTable:
 
     #: What the declaring operation says every one of these values may be,
     #: compiled once. It travels ON the table because the table is what the
-    #: request is built from: a checker passed alongside could be forgotten
-    #: at one of the two call sites, and the value that skipped it is exactly
-    #: the one nobody looks at again. Required, and first, for the same
-    #: reason: a default would be a checker that refuses nothing, which is the
-    #: forgetting this field exists to make impossible.
+    #: request is built from, so no request can be built without the
+    #: declarations that judge it in hand; required and first, because a
+    #: default would be a checker that refuses nothing.
+    #:
+    #: That reaches the VALUES on every page, through
+    #: :meth:`RequestBuilder.for_page`. Presence -- is a required param here
+    #: at all -- is asked once, by the two callers that can answer it, and a
+    #: connector overriding the whole read on the CDK base takes that call
+    #: over along with everything else :meth:`_plan_read` does for it.
     checker: ParamChecker
     values: dict[str, Any] = field(default_factory=dict)
     #: Every param a loop owns, mapped to the loop that owns it

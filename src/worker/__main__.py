@@ -99,10 +99,11 @@ def main() -> int:
     )
     bootstrap = read_bootstrap_from_stdin()
     # The run's declared verbosity, applied as soon as the payload carrying
-    # it is parsed. Everything above is emitted at INFO because there is
-    # nothing to read the level from yet -- the same order the engine's own
-    # shells use, and the reason a bootstrap that cannot be read still says
-    # so.
+    # it is parsed -- and held to the contract's vocabulary by that parse, so
+    # this is not a second reader of a level. Everything above is emitted at
+    # INFO because there is nothing to read the level from yet: the same order
+    # the engine's own shells use, and the reason a bootstrap that cannot be
+    # read still says so.
     apply_log_level(bootstrap.log_level)
     if bootstrap.role == "destination":
         return asyncio.run(_run_destination(bootstrap))

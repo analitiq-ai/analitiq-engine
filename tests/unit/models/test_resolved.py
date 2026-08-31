@@ -21,11 +21,11 @@ from src.models.resolved import (
     ResolvedPipeline,
     ResolvedStream,
     RuntimeConfig,
-    _contract_literals,
     _variant_literals,
     with_effective_safety_window,
 )
 from src.models.state import ReplicationConfig as StateReplicationConfig
+from src.shared.contract_literals import contract_literals
 from src.shared.logging_level import apply_log_level
 
 
@@ -47,7 +47,7 @@ class TestContractLiterals:
         class Model(BaseModel):
             kind: Literal["a", "b"]
 
-        assert _contract_literals(Model, "kind") == {"a", "b"}
+        assert contract_literals(Model, "kind") == {"a", "b"}
 
     @pytest.mark.parametrize(
         "annotation", [str, int, str | None, list[str], Literal[1, 2]]
@@ -57,20 +57,20 @@ class TestContractLiterals:
         # loudly; an empty vocabulary would reject every value instead.
         model = create_model("Model", kind=(annotation, ...))
         with pytest.raises(RuntimeError, match="not a Literal of strings"):
-            _contract_literals(model, "kind")
+            contract_literals(model, "kind")
 
     def test_rejects_a_renamed_or_dropped_field(self):
         # A renamed field is at least as likely as a retyped one, and must
         # reach the same explanation rather than a bare KeyError.
         model = create_model("Model", kind=(Literal["a"], ...))
         with pytest.raises(RuntimeError, match="does not declare a 'method' field"):
-            _contract_literals(model, "method")
+            contract_literals(model, "method")
 
     def test_rejects_a_variant_that_is_not_a_model(self):
         # An Optional variant puts NoneType in the union; reading model_fields
         # off it must explain, not raise AttributeError.
         with pytest.raises(RuntimeError, match="does not declare"):
-            _contract_literals(type(None), "method")
+            contract_literals(type(None), "method")
 
 
 class TestVariantLiterals:
@@ -125,14 +125,14 @@ class TestErrorHandlingConfig:
         # first failed batch, rather than at config time. This is the only
         # place the set is written down, so a contract that adds one fails
         # here and gets a code path before it can reach a pipeline.
-        assert _contract_literals(ContractErrorHandling, "strategy") == {
+        assert contract_literals(ContractErrorHandling, "strategy") == {
             "fail",
             "dlq",
             "skip",
         }
 
     @pytest.mark.parametrize(
-        "strategy", sorted(_contract_literals(ContractErrorHandling, "strategy"))
+        "strategy", sorted(contract_literals(ContractErrorHandling, "strategy"))
     )
     def test_accepts_every_contract_strategy(self, strategy):
         # Must accept the published pipeline contract enum exactly, so a
@@ -583,7 +583,10 @@ class TestTheRunInstallsTheLevelItResolved:
         }
         assert parse_bootstrap(raw).log_level == "DEBUG"
 
-    def test_a_bootstrap_without_a_level_logs_the_way_it_always_did(self) -> None:
+    def test_a_bootstrap_without_a_level_is_refused(self) -> None:
+        # Required like every other field it travels with. A default would
+        # restore the bug the field was added to fix -- the worker logging at
+        # INFO while the pipeline asked for DEBUG -- silently and forever.
         from src.worker.bootstrap import parse_bootstrap
 
         raw = {
@@ -593,7 +596,22 @@ class TestTheRunInstallsTheLevelItResolved:
             "uds_path": "/tmp/w.sock",
             "connection": {"connection_id": "c-1"},
         }
-        assert parse_bootstrap(raw).log_level == "INFO"
+        with pytest.raises(ValueError, match="log_level"):
+            parse_bootstrap(raw)
+
+    def test_a_bootstrap_level_outside_the_contract_is_refused(self) -> None:
+        from src.worker.bootstrap import parse_bootstrap
+
+        raw = {
+            "role": "source",
+            "kind": "api",
+            "connector_id": "widgets",
+            "uds_path": "/tmp/w.sock",
+            "connection": {"connection_id": "c-1"},
+            "log_level": "WARN",
+        }
+        with pytest.raises(ValueError, match="WARN"):
+            parse_bootstrap(raw)
 
 
 class TestOneLogLevelVocabulary:
