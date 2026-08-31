@@ -45,6 +45,7 @@ import jsonschema
 from analitiq.contracts.endpoints import Param
 
 from .exceptions import RequestSpecError
+from .query_style import QueryStyle, declared_style, reaches_the_wire
 
 __all__ = ["ParamChecker"]
 
@@ -114,6 +115,9 @@ class _ParamRule:
     """One param's compiled constraint set."""
 
     required: bool
+    #: The param's declared collection spelling, or ``None`` when it has one
+    #: value per key. Read to answer whether a value reaches the wire at all.
+    style: QueryStyle | None
     #: Everything but the bounds, judged on the value as it arrived.
     shape: jsonschema.Draft202012Validator
     #: ``minimum`` / ``maximum`` only, judged on the value as an exact
@@ -191,6 +195,7 @@ class ParamChecker:
                 # param may carry, and a token breaking it is as wrong as any
                 # other value breaking it.
                 required=param.required and param.controlled_by is None,
+                style=declared_style(param),
                 shape=jsonschema.Draft202012Validator(
                     fragment, format_checker=_FORMAT_CHECKER
                 ),
@@ -231,7 +236,7 @@ class ParamChecker:
             [
                 _missing(name, endpoint=self._endpoint)
                 for name, rule in self._rules.items()
-                if rule.required and values.get(name) is None
+                if rule.required and not _reaches_the_request(values.get(name), rule)
             ]
             + self._unmet_in(values)
         )
@@ -373,6 +378,25 @@ def _unusable_bound(param: Param) -> str | None:
     return None
 
 
+def _reaches_the_request(value: Any, rule: _ParamRule) -> bool:
+    """Whether this value actually lands in the request being built.
+
+    ``None`` never does -- every binding omits a key carrying it. Nor does a
+    collection whose declared spelling serializes it to no query pairs: an
+    empty array under exploded ``form``, an empty object under
+    ``deepObject``. Those look present in the table and are absent on the
+    wire, which for a required param is the narrowing that silently
+    disappears and the provider answers the whole collection for.
+
+    Asked of :func:`~cdk.api.query_style.reaches_the_wire`, which asks the
+    serializer, because which shapes vanish is not uniform: the same empty
+    array under ``explode: false`` sends ``ids=`` and does reach.
+    """
+    if value is None:
+        return False
+    return reaches_the_wire(value, rule.style)
+
+
 def _declared_keywords(param: Param) -> dict[str, Any]:
     """Every constraint the param actually declares, under its JSON Schema name.
 
@@ -443,31 +467,44 @@ def _bounds_fragment(param: Param) -> dict[str, Any]:
 
 
 def _exact_members(members: Any) -> Any:
-    """Put an ``enum``'s numeric members into the model its values are compared in.
+    """Put an ``enum``'s members into the model its values are compared in.
 
-    Equality has the float/decimal problem ordering has: a declared ``0.1``
-    is the binary float nearest it, a keyset value is a ``Decimal`` parsed
-    from decimal text, and the two are not equal. Non-numeric members are
-    untouched -- a string is a string in either model.
+    Equality has the float/decimal problem ordering has: a declared ``0.1`` is
+    the binary float nearest it, a value off the wire is a ``Decimal`` parsed
+    from decimal text, and the two are not equal. Every member goes through
+    the same recursive normaliser the instance does, so a member that is a
+    list or an object is normalised at depth rather than handed back whole.
     """
     if not isinstance(members, list):
         return members
-    return [_as_exact_decimal(m) for m in members]
+    return [_as_exact_decimal(member) for member in members]
 
 
 def _as_exact_decimal(value: Any) -> Any:
-    """Put a number into the decimal model the bounds are compared in.
+    """Put every number in *value* into the decimal model the bounds compare in.
 
     A ``float`` goes through ``str`` for the same reason the bound does: the
     author and the provider both wrote decimal text, and ``str`` is what
-    recovers it. A ``Decimal`` is already exact. Everything else is handed over
-    untouched -- the bounds keywords ignore a non-number, which is what makes
-    it safe for this fragment to carry no ``type`` of its own.
+    recovers it. A ``Decimal`` is already exact.
+
+    Recursive through JSON's containers, because "one number model" is a claim
+    about the whole value or it is not a claim at all: an ``enum`` of arrays
+    holds its numbers one level down, the response parser supplies ``Decimal``
+    at that same depth, and comparing ``[Decimal("0.1")]`` with ``[0.1]``
+    answers unequal for a value the author declared valid. Normalising only
+    the outermost number left the rule true at the top and false underneath.
+
+    Bools are left alone: ``bool`` is an ``int`` subclass, and JSON Schema
+    tells the two apart.
     """
     if isinstance(value, bool):
         return value
     if isinstance(value, float):
         return Decimal(str(value))
+    if isinstance(value, Mapping):
+        return {key: _as_exact_decimal(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_as_exact_decimal(item) for item in value]
     return value
 
 

@@ -250,6 +250,47 @@ class TestAggregation:
         assert "minLength=" in message
 
 
+class TestARequiredParamMustReachTheWire:
+    """Present in the table is not the same as present in the request.
+
+    An empty array under exploded `form`, and an empty object under
+    `deepObject`, serialize to no query pairs at all -- so the required
+    narrowing is absent from the request however present it looks here, and
+    the provider answers the whole collection. The same empty array under
+    `explode: false` sends `ids=` and does reach, which is why this asks the
+    serializer rather than keeping a list of shapes.
+    """
+
+    @pytest.mark.parametrize(
+        ("declared", "value"),
+        [
+            ({"type": "array", "style": "form", "explode": True}, []),
+            ({"type": "object", "style": "deepObject", "explode": True}, {}),
+            ({"type": "object", "style": "form", "explode": True}, {}),
+        ],
+    )
+    def test_a_value_serializing_to_no_pairs_does_not_satisfy_required(
+        self, declared: dict[str, Any], value: Any
+    ) -> None:
+        message = _refusal(
+            _checker(ids=_param(required=True, **declared)), {"ids": value}
+        )
+        assert "'ids'" in message and "required" in message
+
+    def test_an_empty_array_that_still_sends_satisfies_required(self) -> None:
+        _checker(
+            ids=_param(required=True, type="array", style="form", explode=False)
+        ).check({"ids": []})
+
+    def test_a_populated_collection_satisfies_required(self) -> None:
+        _checker(
+            ids=_param(required=True, type="array", style="form", explode=True)
+        ).check({"ids": [1]})
+
+    def test_a_scalar_query_param_is_unaffected(self) -> None:
+        _checker(q=_param(required=True, type="string")).check({"q": ""})
+
+
 class TestABoundMustBeAbleToOrder:
     """A bound that orders against nothing is refused with the document.
 
@@ -342,6 +383,22 @@ class TestABoundIsComparedInOneNumberModel:
         checker = _checker(x=_param(type="number", minimum=0.1, maximum=0.3))
         checker.check_values({"x": 0.1})
         checker.check_values({"x": 0.3})
+
+    def test_a_nested_number_is_normalised_too(self) -> None:
+        # "One number model" is a claim about the whole value or it is not a
+        # claim: an enum of arrays holds its numbers a level down, and the
+        # response parser supplies Decimal at that same depth.
+        declared = {"type": "array", "style": "form", "explode": True}
+        checker = _checker(ids=_param(enum=[[0.1], [0.2]], **declared))
+        checker.check_values({"ids": [Decimal("0.1")]})
+        checker.check_values({"ids": [0.1]})
+        assert "enum=" in _refusal(checker, {"ids": [Decimal("0.9")]})
+
+    def test_a_nested_number_in_an_object_member_is_normalised(self) -> None:
+        checker = _checker(
+            f=_param(type="object", style="deepObject", explode=True, enum=[{"v": 0.1}])
+        )
+        checker.check_values({"f": {"v": Decimal("0.1")}})
 
     def test_a_decimal_past_the_bound_is_still_refused(self) -> None:
         # Exactness cuts both ways: the digits that make the boundary pass

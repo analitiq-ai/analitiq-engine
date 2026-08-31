@@ -138,12 +138,30 @@ class WorkerHandle:
 
 
 async def _forward_stderr(handle_label: str, stream: asyncio.StreamReader) -> None:
+    """Relay the worker's own log lines, without judging their severity again.
+
+    Every line here has already passed the worker's threshold, which is the
+    level the run declared -- the shell hands it over in the bootstrap. Logged
+    at INFO, the parent then applied its OWN threshold to the result, so a
+    pipeline declaring WARNING or above dropped every worker line the worker
+    had just decided to emit: connector errors and startup tracebacks
+    included, which is the opposite of what raising the level asks for.
+
+    Emitted at the parent's effective level instead. The shell is not claiming
+    a severity it cannot know -- a traceback continuation line carries none --
+    it is declining to filter twice, and the volume still tracks the level the
+    operator set because the worker is filtering on the same one.
+    """
+    level = logger.getEffectiveLevel()
     while True:
         line = await stream.readline()
         if not line:
             return
-        logger.info(
-            "[%s] %s", handle_label, redact(line.decode(errors="replace").rstrip())
+        logger.log(
+            level,
+            "[%s] %s",
+            handle_label,
+            redact(line.decode(errors="replace").rstrip()),
         )
 
 

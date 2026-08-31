@@ -76,6 +76,8 @@ from .param_constraints import ParamChecker
 from .query_style import (
     QueryStyle,
     declared_query_styles,
+    declared_style,
+    reaches_the_wire,
     serialize_query_value,
     unserializable_style_problem,
 )
@@ -217,12 +219,13 @@ class ParamTable:
         param carries one value, so the second silently overwrote the first
         and the read narrowed by half of what the stream declared.
 
-        So is an empty collection, for the same reason one step further on.
-        ``in []`` selects no records, and an empty collection serializes to
-        no query pairs -- so the request goes out carrying no filter and the
-        provider answers everything, which is the exact inversion of what the
-        stream asked for. No wire spelling of "match nothing" exists to send
-        instead, so it is refused rather than approximated.
+        So is a value that serializes to nothing, for the same reason one
+        step further on. ``in []`` selects no records, and under an exploded
+        ``form`` array it produces no query pairs at all -- so the request
+        goes out carrying no filter and the provider answers everything, the
+        exact inversion of what the stream asked for. Which shapes vanish is
+        the serializer's answer, not a list kept here: the same empty array
+        under ``explode: false`` sends ``ids=`` and does reach.
 
         ``filters`` are the stream document's contract ``Filter`` models,
         so the field a filter names is a required attribute rather than a
@@ -294,14 +297,17 @@ class ParamTable:
                 )
             seen[target] = declared_filter.operator
             value = declared_filter.value
-            if isinstance(value, list | tuple | set) and not value:
+            if value is not None and not reaches_the_wire(
+                value, declared_style(declaration)
+            ):
                 raise RequestSpecError(
                     f"the stream filters on {target!r} with operator "
-                    f"{declared_filter.operator!r} and an empty collection, "
-                    f"which selects no records -- but an empty collection "
-                    f"serializes to no query pairs, so the request would carry "
-                    f"no filter at all and the provider would answer the whole "
-                    f"collection. There is no wire spelling of 'match nothing'"
+                    f"{declared_filter.operator!r} and a value that serializes "
+                    f"to nothing under the param's declared spelling, so the "
+                    f"request would carry no filter at all and the provider "
+                    f"would answer the whole collection -- the inversion of "
+                    f"what the filter asked for. There is no wire spelling of "
+                    f"'match nothing' to send instead"
                 )
             if value is None:
                 # Reachable: the contract lets a non-unary filter carry a

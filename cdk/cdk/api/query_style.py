@@ -37,6 +37,7 @@ from .exceptions import RequestSpecError
 Sendable = Callable[[str, Any], Any]
 
 __all__ = [
+    "reaches_the_wire",
     "QueryStyle",
     "Sendable",
     "declared_query_styles",
@@ -171,6 +172,55 @@ def unserializable_style_problem(
             f"value of this param could be sent"
         )
     return None
+
+
+def declared_style(param: Param) -> QueryStyle | None:
+    """Return the param's own collection spelling, or ``None`` when it has none.
+
+    The contract requires ``style``/``explode`` on a query param typed
+    ``array`` or ``object`` and defines them nowhere else, so a scalar query
+    param and every header, path and body param answer ``None`` -- they carry
+    one value per key and always reach the wire.
+
+    Distinct from :func:`declared_query_styles`, which keys by the QUERY KEY a
+    binding lands under and needs the request block to know it. This one is
+    the same reading from the param alone, for callers asking about the param
+    rather than about the wire name.
+    """
+    if param.location != "query" or param.style is None or param.explode is None:
+        return None
+    return QueryStyle(param.type, param.style, param.explode)
+
+
+def reaches_the_wire(value: Any, style: QueryStyle | None) -> bool:
+    """Whether sending *value* under *style* puts anything on the query string.
+
+    Asked of the real serializer rather than answered from a table of which
+    shapes vanish, because the answer is not obvious and is not uniform: an
+    empty array under exploded ``form`` produces no pairs at all, and so does
+    an empty object under ``deepObject`` -- while the same empty array under
+    ``form`` with ``explode: false`` produces ``ids=``, which IS a pair. A
+    param that serializes to nothing is absent from the request however
+    present it looks in the table, and a required one being absent is the
+    whole-collection read this package exists to prevent.
+
+    ``None`` for *style* is every param without a declared collection
+    spelling -- a scalar query param, and every header, path and body param.
+    Those carry their value as itself, so they always reach.
+    """
+    if style is None:
+        return True
+    serialized = serialize_query_value(
+        "probe", value, style, endpoint="probe", sendable=lambda _key, item: item
+    )
+    # The serializer always answers a mapping of wire keys, and
+    # ``query_pairs`` flattens a list value into one pair per item -- so a key
+    # holding an empty list carries nothing, and the mapping being non-empty
+    # is not the question. The pairs it would yield are.
+    return any(
+        bool(value) if isinstance(value, list) else True
+        for value in serialized.values()
+    )
 
 
 def serialize_query_value(

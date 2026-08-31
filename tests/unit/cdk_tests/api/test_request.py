@@ -276,7 +276,7 @@ class TestReadParamTable:
         # `in []` selects no records; an empty collection serializes to no
         # query pairs, so the request would carry no filter and the provider
         # would answer everything -- the exact inversion of the ask.
-        with pytest.raises(RequestSpecError, match="empty collection"):
+        with pytest.raises(RequestSpecError, match="serializes to nothing"):
             ParamTable.for_read(
                 _params(
                     {
@@ -294,6 +294,29 @@ class TestReadParamTable:
                 endpoint="/items",
                 filters=_filters({"field": "ids", "operator": "in", "value": []}),
             )
+
+    def test_a_filter_on_an_empty_collection_that_still_sends_passes(self) -> None:
+        # The same empty array under `explode: false` serializes to `ids=`,
+        # which IS a pair -- so it reaches the provider and the refusal above
+        # must not fire. Which shapes vanish is the serializer's answer.
+        table = ParamTable.for_read(
+            _params(
+                {
+                    "ids": {
+                        "in": "query",
+                        "type": "array",
+                        "required": False,
+                        "style": "form",
+                        "explode": False,
+                        "operators": ["in"],
+                    }
+                }
+            ),
+            _resolver(),
+            endpoint="/items",
+            filters=_filters({"field": "ids", "operator": "in", "value": []}),
+        )
+        assert table.values["ids"] == []
 
     def test_a_filter_on_a_populated_collection_passes(self) -> None:
         table = ParamTable.for_read(
