@@ -184,7 +184,10 @@ def test_check_reports_stale_with_the_claims_that_moved(
     moved = json.loads(json.dumps(committed))
     param = "analitiq.contracts.endpoints.Param"
     del moved["claims"][param]["style"]
-    moved["claims"][param]["operators"] = ["cdk.api.query_style:1"]
+    # A name no contract field can carry: what is pinned here is the diff
+    # report, and picking a real field would re-break this test the day the
+    # engine starts reading it.
+    moved["claims"][param]["not-a-field"] = ["cdk.api.query_style:1"]
     monkeypatch.setattr(
         census,
         "render_contract_consumption",
@@ -192,7 +195,7 @@ def test_check_reports_stale_with_the_claims_that_moved(
     )
     assert census.main(["--check"]) == 1
     out = capsys.readouterr()
-    assert f"+ {param}.operators" in out.out and f"- {param}.style" in out.out
+    assert f"+ {param}.not-a-field" in out.out and f"- {param}.style" in out.out
     assert "stale" in out.err
 
 

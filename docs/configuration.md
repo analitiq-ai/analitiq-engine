@@ -33,12 +33,19 @@ Environment variables are read on use (not at import), so a value placed in a
 
 Set these per pipeline under the `runtime` block of `pipeline.json`, or
 process-wide with the environment variable. New runtime overrides use the
-`ANALITIQ_` prefix.
+`ANALITIQ_` prefix; `LOG_LEVEL` keeps its established name because the
+deployment already sets it.
+
+The contract's `logging.metrics_enabled` is not in this table: it is being
+dropped from the contract and the engine reads it nowhere. Metrics are the
+run's own accounting that the control plane reads, so a pipeline able to
+switch them off would produce runs indistinguishable from unrecorded ones.
 
 | Setting | `runtime` key | Env var | Default | Controls |
 |---|---|---|---|---|
 | Batch size | `batching.batch_size` | `ANALITIQ_BATCH_SIZE` | `1000` | Records read from the source and shipped per batch. |
 | Buffer size | `buffer_size` | `ANALITIQ_BUFFER_SIZE` | `5000` | Queue depth between the extract, transform, and load stages. |
+| Log level | `logging.log_level` | `LOG_LEVEL` | `INFO` | Verbosity of the run: `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`. The env var is also the level the process logs at before the pipeline document is loaded; the declared level replaces it in both run modes once it is. |
 | Error strategy | `error_handling.strategy` | `ANALITIQ_ERROR_STRATEGY` | `fail` | What happens to a batch that exhausts its retries: `fail` (raise and stop the stream), `dlq` (write to the dead-letter queue and continue), or `skip` (drop the batch and continue). |
 | Max retries | `error_handling.max_retries` | `ANALITIQ_MAX_RETRIES` | `3` | Retry attempts on a retryable failure before the error strategy applies. |
 | Retry delay | `error_handling.retry_delay_seconds` | `ANALITIQ_RETRY_DELAY_SECONDS` | `5` | Base seconds for the exponential backoff between retries. |
@@ -71,7 +78,6 @@ names are an established deployment contract and are unchanged.
 
 | Setting | Env var | Default | Controls |
 |---|---|---|---|
-| Log level | `LOG_LEVEL` | `INFO` | Logging level for the process. |
 | Run mode | `RUN_MODE` | `source` | Process role: `source` (engine) or `destination` (gRPC server). |
 | Destination index | `DESTINATION_INDEX` | `0` | Which destination from the pipeline config to serve. |
 | Pipeline id | `PIPELINE_ID` | _(required)_ | Pipeline id from `pipelines/manifest.json` to execute. |

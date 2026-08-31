@@ -131,13 +131,14 @@ def test_opaque_registrations_are_reachable_and_prove_a_live_consumer(
         assert all(s.startswith(entry["consumer"] + ":") for s in entry["entries"])
 
 
-def test_the_known_reads_and_non_reads_hold(manifest: dict) -> None:
-    # The state issue #460 was opened on: the reads it verified, and the
-    # unread field the typing refactor found. A census that stops seeing
-    # these has lost its receiver types, not the engine its reads.
+def test_the_known_reads_hold(manifest: dict) -> None:
+    # The state issue #460 was opened on, as issue #477 left it: the reads
+    # #460 verified, plus ``operators`` -- the field that refactor found
+    # unread and the request builder now checks a filter's operator against.
+    # A census that stops seeing these has lost its receiver types, not the
+    # engine its reads.
     param = manifest["claims"]["analitiq.contracts.endpoints.Param"]
-    assert "style" in param and "explode" in param
-    assert "operators" not in param
+    assert "style" in param and "explode" in param and "operators" in param
     request = manifest["claims"]["analitiq.contracts.endpoints.GetReadRequest"]
     assert "transport_ref" in request
 

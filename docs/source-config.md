@@ -17,7 +17,7 @@ the CDK / connector design in
 |----------|----------|-------------|
 | `PIPELINE_ID` | Yes | Pipeline ID matching an entry in `pipelines/manifest.json` |
 | `RUN_MODE` | No | `source` (default) or `destination` |
-| `LOG_LEVEL` | No | `INFO` (default) |
+| `LOG_LEVEL` | No | `INFO` (default). The level before the pipeline is loaded, and the default for a pipeline that declares no `runtime.logging.log_level` |
 | `ENV` | No | `loc` (default) — `loc` skips the remote config fetch; configs must be on disk |
 | `DESTINATION_GRPC_HOST` | No | Hostname of the destination gRPC server (when running with a remote destination) |
 | `DESTINATION_GRPC_PORT` | No | `50051` (default) |
@@ -100,7 +100,7 @@ pipelines with `status: "active"` are executable.
     "runtime": {
       "buffer_size": 5000,
       "batching": { "batch_size": 200 },
-      "logging": { "log_level": "INFO", "metrics_enabled": true },
+      "logging": { "log_level": "INFO" },
       "error_handling": { "strategy": "dlq", "max_retries": 3, "retry_delay_seconds": 5 }
     }
   },

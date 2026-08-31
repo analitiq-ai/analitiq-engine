@@ -1,5 +1,6 @@
 """Unit tests for the typed resolved-runtime models and their invariants."""
 
+import logging
 from typing import Annotated, Literal
 from unittest.mock import MagicMock
 
@@ -14,6 +15,7 @@ from src.engine.pipeline_config_prep import _parse_replication, _parse_runtime_c
 from src.models.resolved import (
     BatchingConfig,
     ErrorHandlingConfig,
+    LoggingConfig,
     PipelineConnections,
     ReplicationConfig,
     ResolvedPipeline,
@@ -24,6 +26,7 @@ from src.models.resolved import (
     with_effective_safety_window,
 )
 from src.models.state import ReplicationConfig as StateReplicationConfig
+from src.shared.logging_level import apply_log_level
 
 
 class TestBatchingConfig:
@@ -240,6 +243,7 @@ class TestParseRuntimeConfig:
         cfg = _parse_runtime_config(_runtime_block({}))
         assert cfg.batching.batch_size == 1000
         assert cfg.error_handling.strategy == "fail"
+        assert cfg.logging.log_level == "INFO"
         assert cfg.buffer_size == 5000
 
     def test_partial_block_merges_with_defaults(self):
@@ -257,6 +261,7 @@ class TestParseRuntimeConfig:
                         "max_retries": 5,
                         "retry_delay_seconds": 1,
                     },
+                    "logging": {"log_level": "WARNING"},
                     "buffer_size": 1234,
                 }
             )
@@ -264,6 +269,7 @@ class TestParseRuntimeConfig:
         assert cfg.batching.batch_size == 200
         assert cfg.error_handling.strategy == "dlq"
         assert cfg.error_handling.max_retries == 5
+        assert cfg.logging.log_level == "WARNING"
         assert cfg.buffer_size == 1234
 
     def test_invalid_value_fails_loud(self):
@@ -315,6 +321,86 @@ class TestParseRuntimeConfig:
             _runtime_block({"error_handling": {"retry_delay_seconds": None}})
         )
         assert cfg.error_handling.retry_delay_seconds == 5
+
+    def test_author_set_log_level_wins_over_the_env_default(self, monkeypatch):
+        # Precedence for the whole runtime block is pipeline > env > engine
+        # default, and logging is not a special case: the env var is set to a
+        # different level so only the author's value can produce this result.
+        monkeypatch.setenv("LOG_LEVEL", "ERROR")
+        cfg = _parse_runtime_config(_runtime_block({"logging": {"log_level": "DEBUG"}}))
+        assert cfg.logging.log_level == "DEBUG"
+
+    def test_omitted_log_level_falls_through_to_the_env_var(self, monkeypatch):
+        # An omitted key stays out of `model_fields_set`, so the contract's own
+        # default ("INFO") must not be forwarded -- LOG_LEVEL is what a
+        # pipeline declaring nothing runs at.
+        monkeypatch.setenv("LOG_LEVEL", "ERROR")
+        cfg = _parse_runtime_config(_runtime_block({}))
+        assert cfg.logging.log_level == "ERROR"
+
+    def test_empty_logging_block_still_falls_through_to_the_env_var(self, monkeypatch):
+        # `"logging": {}` sets the sub-block but not the key inside it; author
+        # intent is read from the sub-block, so this is an omission too.
+        monkeypatch.setenv("LOG_LEVEL", "ERROR")
+        cfg = _parse_runtime_config(_runtime_block({"logging": {}}))
+        assert cfg.logging.log_level == "ERROR"
+
+    def test_metrics_enabled_is_not_carried(self):
+        # Declined in issue #477: metrics are the run's accounting, so no
+        # engine-side reading of the field may appear. The contract still
+        # renders it today; carrying it here would be the read.
+        cfg = _parse_runtime_config(
+            _runtime_block({"logging": {"metrics_enabled": False}})
+        )
+        assert not hasattr(cfg.logging, "metrics_enabled")
+
+
+class TestLoggingConfig:
+    def test_default_reads_the_env_var(self, monkeypatch):
+        monkeypatch.setenv("LOG_LEVEL", "CRITICAL")
+        assert LoggingConfig().log_level == "CRITICAL"
+
+    def test_rejects_a_level_outside_the_contract_enum(self, monkeypatch):
+        # LOG_LEVEL is deployment-supplied and nothing else checks it; without
+        # this the run would silently log at INFO through the getattr fallback
+        # in src.main.
+        monkeypatch.setenv("LOG_LEVEL", "VERBOSE")
+        with pytest.raises(ValueError, match="Unknown log level"):
+            LoggingConfig()
+
+
+class TestApplyLogLevel:
+    """The declared level has to change what a record does, not just a field."""
+
+    @pytest.fixture(autouse=True)
+    def _restore_root_level(self):
+        root = logging.getLogger()
+        original = root.level
+        yield
+        root.setLevel(original)
+
+    def test_declared_level_makes_the_root_logger_emit_it(self, caplog):
+        # caplog's handler sits on the root logger at NOTSET, so what reaches
+        # it is decided by the root logger's level alone -- the same gate the
+        # engine's own stdout handler sits behind. No `caplog.at_level` here:
+        # it would set the very level under test.
+        emitter = logging.getLogger("test.apply_log_level")
+        apply_log_level("WARNING")
+        caplog.clear()
+        emitter.debug("before")
+        assert caplog.messages == []
+
+        apply_log_level("DEBUG")
+        assert logging.getLogger().level == logging.DEBUG
+        assert emitter.getEffectiveLevel() == logging.DEBUG
+
+        emitter.debug("after")
+        assert caplog.messages == ["after"]
+
+    def test_declared_level_also_silences(self):
+        apply_log_level("ERROR")
+        assert logging.getLogger("test.apply_log_level").isEnabledFor(logging.ERROR)
+        assert not logging.getLogger("test.apply_log_level").isEnabledFor(logging.INFO)
 
 
 class TestReplicationConfig:

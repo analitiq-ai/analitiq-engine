@@ -48,18 +48,24 @@ __all__ = ["ParamChecker"]
 #: means. Order is fixed because it is the order the validator reports failures
 #: in, and a message that reorders itself between runs is a message no test can
 #: pin.
-_KEYWORDS: tuple[tuple[str, str], ...] = (
-    ("type", "type"),
-    ("enum", "enum"),
-    ("format", "format"),
-    ("pattern", "pattern"),
-    ("minimum", "minimum"),
-    ("maximum", "maximum"),
-    ("min_length", "minLength"),
-    ("max_length", "maxLength"),
-    ("min_items", "minItems"),
-    ("max_items", "maxItems"),
-)
+#:
+#: A mapping rather than a tuple of pairs because its KEYS are what the
+#: consumption census reads: the ``getattr`` below takes its name from here,
+#: so this table is what tells the census which ``Param`` fields the engine
+#: claims. It is registered in ``tools/contract_consumption.py``'s
+#: ``DYNAMIC_ATTRIBUTE_TABLES``, which iterates the table for those names.
+_KEYWORDS: dict[str, str] = {
+    "type": "type",
+    "enum": "enum",
+    "format": "format",
+    "pattern": "pattern",
+    "minimum": "minimum",
+    "maximum": "maximum",
+    "min_length": "minLength",
+    "max_length": "maxLength",
+    "min_items": "minItems",
+    "max_items": "maxItems",
+}
 
 #: Format is annotation-only unless a checker is attached, and even attached it
 #: only judges the formats it has a checker FOR. Observed against jsonschema
@@ -201,7 +207,7 @@ def _fragment(param: Param) -> dict[str, Any]:
     fractional part is one, and the contract's vocabulary is JSON's.
     """
     fragment: dict[str, Any] = {}
-    for attribute, keyword in _KEYWORDS:
+    for attribute, keyword in _KEYWORDS.items():
         declared = getattr(param, attribute)
         if declared is not None:
             fragment[keyword] = declared

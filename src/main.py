@@ -43,6 +43,7 @@ from src.models.resolved import (
     dump_endpoint_ref,
     write_conflict_keys,
 )
+from src.shared.logging_level import apply_log_level
 
 # Set up logging
 log_level = settings.log_level()
@@ -173,6 +174,11 @@ async def run_destination_mode() -> None:
         resolved_endpoints,
         _connectors,
     ) = config_prep.create_config()
+
+    # The destination loads the same pipeline document as the engine, so it
+    # honours the same declared verbosity -- a run debugged at DEBUG has to be
+    # debugged on both sides of the gRPC boundary or half the run is missing.
+    apply_log_level(pipeline_config.runtime.logging.log_level)
 
     # Get destination connection from pipeline config
     destinations = pipeline_config.connections.destinations

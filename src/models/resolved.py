@@ -22,6 +22,7 @@ from typing import Annotated, Any, get_args, get_origin
 
 from analitiq.contracts.connection import ConnectionInput
 from analitiq.contracts.pipelines.config import ErrorHandling as ContractErrorHandling
+from analitiq.contracts.pipelines.config import Logging as ContractLogging
 from analitiq.contracts.pipelines.config import PipelineInput
 from analitiq.contracts.stream import (
     ApiWrite,
@@ -342,18 +343,55 @@ class ErrorHandlingConfig:
             )
 
 
+# The published pipeline contract's log-level enum. Read from the contract for
+# the same reason as the error strategies, and it also guards the default
+# source: ``LOG_LEVEL`` comes from the deployment environment and nothing else
+# checks it, so a typo there would otherwise be swallowed by the
+# ``getattr(logging, ..., logging.INFO)`` fallback in ``src.main`` and the run
+# would log at a level nobody asked for.
+_VALID_LOG_LEVELS = _contract_literals(ContractLogging, "log_level")
+
+
+@dataclass(frozen=True)
+class LoggingConfig:
+    """Verbosity for a pipeline run.
+
+    The default comes from :mod:`src.config.settings` (``LOG_LEVEL``) and
+    applies only when a pipeline's ``runtime.logging`` block omits the key, so
+    logging keeps the runtime block's one precedence rule rather than becoming
+    a special case: pipeline config > env var > engine default.
+
+    The contract's ``metrics_enabled`` is deliberately not carried. Metrics are
+    the run's own accounting that the control plane reads, so a pipeline
+    document able to switch them off would produce runs indistinguishable from
+    unrecorded ones; disabling them is a deployment decision, never a
+    tenant-authored one. The contract is dropping the field (issue #477) and
+    the engine reads it nowhere.
+    """
+
+    log_level: str = field(default_factory=settings.log_level)
+
+    def __post_init__(self) -> None:
+        if self.log_level not in _VALID_LOG_LEVELS:
+            raise ValueError(
+                f"Unknown log level {self.log_level!r}; "
+                f"expected one of {sorted(_VALID_LOG_LEVELS)}"
+            )
+
+
 @dataclass(frozen=True)
 class RuntimeConfig:
     """Pipeline runtime tuning.
 
-    ``batching`` / ``error_handling`` are typed sub-configs (closed, known
-    key sets) so consumers read attributes instead of ``dict.get(...)`` with
-    per-call-site defaults -- the defaults live once, in
+    ``batching`` / ``error_handling`` / ``logging`` are typed sub-configs
+    (closed, known key sets) so consumers read attributes instead of
+    ``dict.get(...)`` with per-call-site defaults -- the defaults live once, in
     :mod:`src.config.settings`.
     """
 
     batching: BatchingConfig = field(default_factory=BatchingConfig)
     error_handling: ErrorHandlingConfig = field(default_factory=ErrorHandlingConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
     buffer_size: int = field(default_factory=settings.default_buffer_size)
 
     def __post_init__(self) -> None:

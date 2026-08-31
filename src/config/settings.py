@@ -3,7 +3,7 @@
 Every tunable default the engine ships with lives here, once. Two kinds of
 default are collected:
 
-* **Runtime tuning** (batch size, buffer, error handling) -- the
+* **Runtime tuning** (batch size, buffer, error handling, log level) -- the
   per-pipeline knobs. These are layered: a pipeline's ``runtime`` block wins,
   then the matching environment variable, then the built-in default returned
   here. The overlay happens in
@@ -62,6 +62,21 @@ def default_batch_size() -> int:
 def default_buffer_size() -> int:
     """Queue depth between pipeline stages (``ANALITIQ_BUFFER_SIZE``)."""
     return _int_env("ANALITIQ_BUFFER_SIZE", 5000)
+
+
+def log_level() -> str:
+    """Process logging verbosity (``LOG_LEVEL``).
+
+    Two roles, one value. It is the level ``src.main`` configures logging at
+    before any pipeline document is read, and it is the default a pipeline's
+    ``runtime.logging.log_level`` falls through to when the author omits one,
+    so the block keeps its single precedence rule. It keeps its established
+    name rather than taking the ``ANALITIQ_`` prefix of the newer runtime
+    overrides, because the deployment already sets ``LOG_LEVEL``. The value is
+    checked against the contract's enum by
+    :class:`src.models.resolved.LoggingConfig`.
+    """
+    return os.getenv("LOG_LEVEL", "INFO").upper()
 
 
 def default_error_strategy() -> str:
@@ -168,11 +183,6 @@ def worker_rlimit_as_mb() -> int | None:
 # ---------------------------------------------------------------------------
 # Process orchestration (main.py)
 # ---------------------------------------------------------------------------
-
-
-def log_level() -> str:
-    """Return the process logging level (``LOG_LEVEL``)."""
-    return os.getenv("LOG_LEVEL", "INFO").upper()
 
 
 def destination_index() -> int:

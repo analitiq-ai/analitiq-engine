@@ -27,6 +27,7 @@ from src.models.resolved import (
 )
 
 from .engine.pipeline_config_prep import PipelineConfigPrep
+from .shared.logging_level import apply_log_level
 from .shared.run_id import get_or_generate_run_id
 from .state.error_classification import (
     ErrorCode,
@@ -203,6 +204,11 @@ class PipelineRunner:
                 _resolved_endpoints,
                 _connectors,
             ) = pipeline_config_prep.create_config()
+
+            # From here on the run logs at the verbosity the pipeline asked
+            # for; everything above was emitted at the process-start level
+            # because no document had said otherwise yet.
+            apply_log_level(pipeline_config.runtime.logging.log_level)
 
             # Translate the resolved contract into the engine config dict. This
             # still validates config (e.g. a stream with no destinations), so it

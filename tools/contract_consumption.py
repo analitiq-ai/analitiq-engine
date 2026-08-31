@@ -164,6 +164,10 @@ TRANSPORT_MODULES: Final = frozenset({"src.models.resolved", "cdk.connection_run
 #: its own registration rather than inheriting this one's table.
 DYNAMIC_ATTRIBUTE_TABLES: Final[Mapping[str, tuple[str, str]]] = {
     "cdk.api.request": ("cdk.api.request", "_REQUEST_SLOTS"),
+    # The param constraint keywords, whose names are the ``Param`` attributes
+    # they are read from: the table maps each to the JSON Schema keyword it
+    # renders as, so its KEYS are the claim.
+    "cdk.api.param_constraints": ("cdk.api.param_constraints", "_KEYWORDS"),
     # The resolver scopes read off the connection document; the request-time
     # table is a prefix of this one, so the superset claims both.
     "cdk.connection_runtime": (

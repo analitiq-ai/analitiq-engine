@@ -244,7 +244,7 @@ setting controls, its default, and how to override it - is in
 | `PIPELINE_ID` | *(required)* | Pipeline ID from `manifest.json` |
 | `RUN_MODE` | `source` | `source` or `destination` |
 | `ENV` | `local` | Environment: `local`, `dev`, `prod` |
-| `LOG_LEVEL` | `INFO` | Logging level |
+| `LOG_LEVEL` | `INFO` | Logging level, until the pipeline's `runtime.logging.log_level` overrides it |
 | `DESTINATION_GRPC_HOST` | | Destination service host (engine mode) |
 | `DESTINATION_GRPC_PORT` | `50051` | gRPC port (engine mode) |
 | `GRPC_PORT` | `50051` | gRPC listen port (destination mode) |
