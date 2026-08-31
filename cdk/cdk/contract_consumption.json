@@ -934,7 +934,7 @@
     },
     "analitiq.contracts.stream.ApiWrite": {
       "mode": [
-        "src.main:252",
+        "src.main:263",
         "src.runner:153"
       ]
     },
@@ -1005,13 +1005,13 @@
         "src.models.resolved:225"
       ],
       "mode": [
-        "src.main:252",
+        "src.main:263",
         "src.runner:153"
       ]
     },
     "analitiq.contracts.stream.DatabaseKeylessWrite": {
       "mode": [
-        "src.main:252",
+        "src.main:263",
         "src.runner:153"
       ]
     },
