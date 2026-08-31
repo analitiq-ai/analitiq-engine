@@ -28,7 +28,10 @@ epoch formats -- an exclusive lower bound is rendered one unit earlier:
 in, and every record after the cursor inside that unit with it. A bound
 facing the wrong way is refused: a single mapping whose operator is
 ``lt``/``lte`` bounds the read from above and leaves an incremental
-stream nothing to resume from.
+stream nothing to resume from. A cursor field the endpoint maps no
+param for at all is refused on the same grounds and for a sharper
+reason: without a mapping every run re-reads the whole collection and
+reports success, so the defect never surfaces on its own.
 """
 
 from __future__ import annotations
@@ -124,21 +127,38 @@ _TRUNCATION_UNIT: dict[str, timedelta] = {"date": timedelta(days=1), **_EPOCH_UN
 
 
 def cursor_mapping_for(
-    replication: Replication | None, cursor_field: str
-) -> CursorMapping | None:
-    """Return the mapping declared for the stream's cursor field, or ``None``.
+    replication: Replication | None, cursor_field: str, *, endpoint: str
+) -> CursorMapping:
+    """Return the mapping the endpoint declares for the stream's cursor field.
 
-    ``None`` means the endpoint declares no mapping for this cursor field,
-    which the caller reports as running full replication -- loudly, because
-    an incremental stream silently reading everything is the failure mode
-    this answer exists to make visible.
+    There is no "not declared" answer. A mapping is what names the param a
+    cursor bound goes out in, so an incremental stream whose cursor field
+    has none reads the whole collection on every run -- and reports success
+    doing it, forever, because a full read always succeeds. That is a broken
+    pairing between two documents, not a degraded mode to fall back to: the
+    endpoint says it serves ``incremental`` (the engine refuses the stream at
+    configure time when it does not) and then declares nothing to serve it
+    with. Refusing here makes the defect visible on the first run instead of
+    hiding it in a checkpoint that never moves.
+
+    The refusal names the fields the endpoint DOES map, because the usual
+    cause is the stream naming a sibling field -- ``modified_at`` against a
+    document that maps ``updated_at`` -- and the answer is in that list.
     """
     if replication is None:
-        return None
+        raise ReadError(
+            f"endpoint {endpoint!r} declares no read replication block, so it "
+            f"maps no cursor field; the stream reads incrementally on "
+            f"{cursor_field!r} and has no param to send a cursor bound in"
+        )
     for mapping in replication.cursor_mappings:
         if mapping.cursor_field == cursor_field:
             return mapping
-    return None
+    raise ReadError(
+        f"endpoint {endpoint!r} declares no replication.cursor_mappings entry "
+        f"for cursor field {cursor_field!r}; it maps "
+        f"{sorted(m.cursor_field for m in replication.cursor_mappings)}"
+    )
 
 
 def _parse_cursor(cursor: Any, field: FieldDeclaration) -> datetime | int:

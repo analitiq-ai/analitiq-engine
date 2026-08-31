@@ -536,6 +536,7 @@ class GenericAPIConnector(BaseDestinationHandler):
             table = ParamTable.for_read(
                 read.params,
                 resolver,
+                endpoint=endpoint_id,
                 filters=stream_source.filters or [],
             )
             problem = request_block_problem(
@@ -579,6 +580,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                     checkpoint=checkpoint,
                     stream_name=stream_name,
                     partition=partition,
+                    endpoint=endpoint_id,
                     now=self._clock(),
                 )
 
@@ -781,6 +783,7 @@ class GenericAPIConnector(BaseDestinationHandler):
         checkpoint: CheckpointStore,
         stream_name: str,
         partition: dict[str, Any],
+        endpoint: str,
         now: datetime,
     ) -> None:
         """Write the stored cursor's bounds into the params its mapping names.
@@ -796,17 +799,18 @@ class GenericAPIConnector(BaseDestinationHandler):
         cursor field the record schema does not declare fails the read
         even when no mapping names it: an incremental stream over an
         undeclared field is a document defect, not a full-replication
-        fallback.
+        fallback. A field the record schema declares but the endpoint maps
+        no param for fails the same way, in ``cursor_mapping_for``.
+
+        The one thing that legitimately produces a full read here is a
+        stream with no stored cursor: a first run has nothing to resume
+        from, so it reads everything and leaves the checkpoint the next
+        run resumes on.
         """
         cursor_field_name = stream_replication.cursor_field
-        mapping = cursor_mapping_for(declared_replication, cursor_field_name)
-        if mapping is None:
-            logger.warning(
-                "no replication.cursor_mappings entry for cursor field %r; "
-                "running full replication",
-                cursor_field_name,
-            )
-            return
+        mapping = cursor_mapping_for(
+            declared_replication, cursor_field_name, endpoint=endpoint
+        )
         check_mapping_direction(mapping)
         cursor_state = await checkpoint.get_cursor(stream_name, partition)
         cursor_value = (cursor_state or {}).get("cursor")

@@ -159,6 +159,62 @@ def _parse_replication(source: StreamSource) -> ReplicationConfig | None:
     )
 
 
+def _check_replication_support(
+    stream_id: str, source: StreamSource, endpoint: EndpointDocument
+) -> None:
+    """Refuse a stream whose replication method its source endpoint cannot serve.
+
+    The endpoint document says which methods the read supports
+    (``operations.read.replication.supported_methods``) and the stream says
+    which one it selected; until both are read together nothing compares
+    them, so an incremental stream against a read that cannot carry a cursor
+    bound runs -- and re-reads the whole collection on every run while still
+    reporting success. That is the one failure this refusal exists to
+    prevent, so it happens at configure time, before a run establishes a
+    checkpoint that would make the next run look like it resumed.
+
+    An endpoint that declares no replication block supports full refresh and
+    nothing else: with no ``cursor_mappings`` there is no param for a cursor
+    bound to land in. Defaulting the vocabulary to ``{"full_refresh"}`` in
+    that case leaves one membership test covering both shapes rather than
+    two branches that could drift apart.
+
+    A stream that omits its replication block reads exactly like one
+    declaring ``full_refresh`` -- the read path finds no cursor to bind and
+    fetches everything -- so it is checked as one. The contract permits the
+    omission "only when the source supports full_refresh"; leaving it
+    unchecked would make omitting the block the way around this rule.
+
+    A database endpoint is skipped because ``DatabaseEndpointDoc`` carries no
+    ``Replication`` block at all: a database stream's incrementality comes
+    from a cursor COLUMN rendered into the read's WHERE clause, not from a
+    per-endpoint method vocabulary, so there is nothing here to check it
+    against.
+    """
+    if not isinstance(endpoint, ApiEndpointDoc):
+        return
+    read = endpoint.operations.read
+    declared = read.replication if read is not None else None
+    supported: set[str] = (
+        set(declared.supported_methods) if declared is not None else {"full_refresh"}
+    )
+    method: str = source.replication.method if source.replication else "full_refresh"
+    if method in supported:
+        return
+    label = endpoint_ref_label(source.endpoint_ref)
+    unsupported = (
+        f"selects replication method {method!r}, which source endpoint {label} "
+        f"does not support; it supports {sorted(supported)}"
+    )
+    if declared is None:
+        raise ValueError(
+            f"Stream {stream_id!r} {unsupported} -- the endpoint's read "
+            f"operation declares no replication block, so it can carry no "
+            f"cursor bound and serves full refresh only."
+        )
+    raise ValueError(f"Stream {stream_id!r} {unsupported}.")
+
+
 # Matches the endpoint variant name in a $schema URL.
 # The trailing boundary is either "/" or end-of-string so that both
 # "https://schemas.analitiq.ai/api-endpoint/latest.json" and
@@ -797,6 +853,7 @@ class PipelineConfigPrep:
             source_runtime,
             source_endpoint,
         ) = self._resolve_endpoint_block(source)
+        _check_replication_support(stream_id, source, source_endpoint)
 
         resolved_source = ResolvedSource(
             endpoint_ref=source_endpoint_ref,

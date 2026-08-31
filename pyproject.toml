@@ -57,6 +57,14 @@ orjson = "^3.9.0"
 # Data processing and validation
 pydantic = "^2.0.0"
 
+# An API operation's declared param constraints (enum, pattern, minimum,
+# minLength, ...) ARE JSON Schema keywords, so cdk.api.param_constraints
+# checks a resolved value with a JSON Schema validator instead of nine
+# hand-written checks. Declared here as well as in the CDK's [api] extra
+# because the engine installs the CDK from the shared packages list, not
+# from the published wheel's extras.
+jsonschema = "^4.18.0"
+
 # Published Analitiq contract packages (PyPI). The engine validates on-disk
 # artifacts against these offline, so it never fetches a schema at runtime:
 #   - contract-models: the single source of artifact shape
@@ -246,6 +254,7 @@ module = [
     "msgpack.*",
     "pyarrow.*",
     "dateutil.*",
+    "jsonschema.*",
 ]
 ignore_missing_imports = true
 

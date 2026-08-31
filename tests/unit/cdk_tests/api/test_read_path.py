@@ -142,6 +142,19 @@ _DECIMAL_AMOUNT = {
     }
 }
 
+#: The param an incremental read's lower bound lands in. Declared next to
+#: the pagination params by the documents that serve both loops at once.
+#: Typed ``integer`` because the fixtures using it cursor on ``id``, a
+#: monotonic id whose bound is sent as the integer it is.
+_SINCE_PARAM = {
+    "since": {
+        "in": "query",
+        "type": "integer",
+        "required": False,
+        "controlled_by": "replication",
+    },
+}
+
 _PAGINATION_PARAMS = {
     "skip": {
         "in": "query",
@@ -865,20 +878,34 @@ class TestIncremental:
             request={
                 "method": "GET",
                 "path": "/items",
-                "query": {"since": {"from_param": "since"}},
+                "query": {
+                    "since": {"from_param": "since"},
+                    "since_id": {"from_param": "since_id"},
+                },
             },
+            # Two params, not one bound twice: a monotonic id bound is an
+            # integer and a moment bound is a rendered string, and a param
+            # declares one type. A document binding both cursor fields to a
+            # single `type: string` param sends an integer under it, which
+            # the request build now refuses.
             params={
                 "since": {
                     "in": "query",
                     "type": "string",
                     "required": False,
                     "controlled_by": "replication",
-                }
+                },
+                "since_id": {
+                    "in": "query",
+                    "type": "integer",
+                    "required": False,
+                    "controlled_by": "replication",
+                },
             },
             replication={
                 "supported_methods": ["full_refresh", "incremental"],
                 "cursor_mappings": [
-                    {"cursor_field": "id", "param": "since", "operator": "gte"},
+                    {"cursor_field": "id", "param": "since_id", "operator": "gte"},
                     {
                         "cursor_field": "updated_at",
                         "param": "since",
@@ -960,7 +987,7 @@ class TestIncremental:
             ),
             checkpoint=FakeCheckpoint({"cursor": 0}),
         )
-        assert sent_query(session.calls[0])["since"] == 0
+        assert sent_query(session.calls[0])["since_id"] == 0
 
     async def test_a_nullable_cursor_field_reads_by_its_real_type(self) -> None:
         document = self._document()
@@ -1100,6 +1127,46 @@ class TestIncremental:
                     method="incremental", cursor_field="modified", safety_window=60
                 ),
                 checkpoint=FakeCheckpoint({"cursor": "1"}),
+            )
+        assert session.calls == []
+
+    async def test_a_cursor_field_the_endpoint_maps_no_param_for_is_refused(
+        self,
+    ) -> None:
+        # ``name`` is a real record field, so the read gets past the record
+        # schema -- and the endpoint declares no param to send a bound for
+        # it in. Reading everything under an incremental stream reports
+        # success forever, so it is refused, and the refusal names what the
+        # endpoint does map.
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        with pytest.raises(ReadError, match=r"\['id', 'updated_at'\]") as err:
+            await _read(
+                session,
+                self._document(),
+                source=stream_source(
+                    method="incremental", cursor_field="name", safety_window=60
+                ),
+                checkpoint=FakeCheckpoint({"cursor": "a"}),
+            )
+        assert "'name'" in str(err.value)
+        assert "'items'" in str(err.value)
+        assert session.calls == []
+
+    async def test_an_endpoint_with_no_replication_block_refuses_an_incremental_read(
+        self,
+    ) -> None:
+        # The engine refuses this pairing at configure time; the connector
+        # refuses it again rather than reading the whole collection when a
+        # document reaches it anyway.
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        with pytest.raises(ReadError, match="no read replication block"):
+            await _read(
+                session,
+                endpoint_document(),
+                source=stream_source(
+                    method="incremental", cursor_field="id", safety_window=60
+                ),
+                checkpoint=FakeCheckpoint({"cursor": 1}),
             )
         assert session.calls == []
 
@@ -1609,8 +1676,24 @@ class TestResponseMetadata:
             session,
             endpoint_document(
                 pagination=_OFFSET,
-                request=_PAGINATION_REQUEST,
-                params=_PAGINATION_PARAMS,
+                request={
+                    **_PAGINATION_REQUEST,
+                    "query": {
+                        **_PAGINATION_REQUEST["query"],
+                        "since": {"from_param": "since"},
+                    },
+                },
+                # The endpoint has to be able to serve the incremental read
+                # this test performs: a cursor field it maps no param for is
+                # refused, so the document declares the mapping and the param
+                # the bound lands in alongside the pagination params.
+                params={**_PAGINATION_PARAMS, **_SINCE_PARAM},
+                replication={
+                    "supported_methods": ["full_refresh", "incremental"],
+                    "cursor_mappings": [
+                        {"cursor_field": "id", "param": "since", "operator": "gte"}
+                    ],
+                },
                 response_fields=self._TOTAL_FIELD,
                 response_metadata={"total": {"ref": "response.body.total"}},
             ),

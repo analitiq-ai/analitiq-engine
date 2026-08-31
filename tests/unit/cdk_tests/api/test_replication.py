@@ -51,21 +51,32 @@ def _window(**overrides: object) -> WindowCursorMapping:
 
 class TestCursorMapping:
     def test_a_single_mapping_is_found_by_its_cursor_field(self) -> None:
-        mapping = cursor_mapping_for(_replication(_SINGLE), "updated_at")
+        mapping = cursor_mapping_for(
+            _replication(_SINGLE), "updated_at", endpoint="items"
+        )
         assert isinstance(mapping, SingleCursorMapping)
         assert mapping.param == "since"
 
     def test_a_window_mapping_is_found_by_its_cursor_field(self) -> None:
-        mapping = cursor_mapping_for(_replication(_WINDOW), "updated_at")
+        mapping = cursor_mapping_for(
+            _replication(_WINDOW), "updated_at", endpoint="items"
+        )
         assert isinstance(mapping, WindowCursorMapping)
         assert (mapping.start_param, mapping.end_param) == ("from", "to")
 
     def test_the_first_mapping_for_the_field_wins(self) -> None:
-        mapping = cursor_mapping_for(_replication(_WINDOW, _SINGLE), "updated_at")
+        mapping = cursor_mapping_for(
+            _replication(_WINDOW, _SINGLE), "updated_at", endpoint="items"
+        )
         assert isinstance(mapping, WindowCursorMapping)
 
-    def test_an_undeclared_block_answers_nothing(self) -> None:
-        assert cursor_mapping_for(None, "updated_at") is None
+    def test_an_undeclared_block_is_refused(self) -> None:
+        # Nothing to bind a bound to, so the read would fetch the whole
+        # collection every run and report success doing it.
+        with pytest.raises(ReadError, match="no read replication block") as err:
+            cursor_mapping_for(None, "updated_at", endpoint="items")
+        assert "'items'" in str(err.value)
+        assert "'updated_at'" in str(err.value)
 
     def test_a_block_declaring_no_mapping_at_all_is_unrepresentable(self) -> None:
         # ``None`` is the only "nothing declared" state left. A parsed block
@@ -77,7 +88,12 @@ class TestCursorMapping:
             Replication(supported_methods=["incremental"], cursor_mappings=[])
 
     def test_another_fields_mapping_is_not_borrowed(self) -> None:
-        assert cursor_mapping_for(_replication(_SINGLE), "created_at") is None
+        # The refusal names what the endpoint does map: the usual cause is a
+        # stream naming a sibling of a field that is mapped.
+        with pytest.raises(ReadError, match="'created_at'") as err:
+            cursor_mapping_for(_replication(_SINGLE), "created_at", endpoint="items")
+        assert "['updated_at']" in str(err.value)
+        assert "'items'" in str(err.value)
 
 
 def _bounds(

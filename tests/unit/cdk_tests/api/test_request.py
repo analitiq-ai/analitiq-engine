@@ -101,6 +101,7 @@ class TestReadParamTable:
                 }
             ),
             _resolver(),
+            endpoint="/items",
         )
         assert table.values == {"profile": 42}
 
@@ -128,6 +129,7 @@ class TestReadParamTable:
                 ResolutionContext(connection={"parameters": {"token": "tok-123"}}),
                 functions=DEFAULT_FUNCTIONS,
             ),
+            endpoint="/items",
         )
         assert table.values == {"auth": base64.b64encode(b"tok-123").decode("ascii")}
 
@@ -152,6 +154,7 @@ class TestReadParamTable:
                 }
             ),
             Resolver(ResolutionContext(connection={"parameters": {"org": "acme"}})),
+            endpoint="/items",
         )
         assert table.values == {"scope": "acme/"}
 
@@ -171,6 +174,7 @@ class TestReadParamTable:
                 }
             ),
             _resolver(),
+            endpoint="/items",
         )
         assert table.values == {}
 
@@ -189,6 +193,7 @@ class TestReadParamTable:
             ),
             _resolver(),
             filters=_filters({"field": "status", "operator": "eq", "value": "open"}),
+            endpoint="/items",
         )
         assert table.values == {"status": "open"}
 
@@ -213,9 +218,8 @@ class TestReadParamTable:
                     }
                 ),
                 _resolver(),
-                filters=_filters(
-                    {"field": "amount", "operator": "gt", "value": 100}
-                ),
+                filters=_filters({"field": "amount", "operator": "gt", "value": 100}),
+                endpoint="/items",
             )
 
     def test_a_filter_on_a_param_declaring_no_operators_is_refused(self) -> None:
@@ -227,9 +231,8 @@ class TestReadParamTable:
                     {"region": {"in": "query", "type": "string", "required": False}}
                 ),
                 _resolver(),
-                filters=_filters(
-                    {"field": "region", "operator": "eq", "value": "eu"}
-                ),
+                filters=_filters({"field": "region", "operator": "eq", "value": "eu"}),
+                endpoint="/items",
             )
 
     def test_a_filter_on_a_loop_owned_param_is_refused(self) -> None:
@@ -250,9 +253,8 @@ class TestReadParamTable:
                     }
                 ),
                 _resolver(),
-                filters=_filters(
-                    {"field": "cursor", "operator": "eq", "value": "abc"}
-                ),
+                filters=_filters({"field": "cursor", "operator": "eq", "value": "abc"}),
+                endpoint="/items",
             )
 
     def test_a_filter_carrying_no_value_is_refused(self) -> None:
@@ -274,6 +276,7 @@ class TestReadParamTable:
                 ),
                 _resolver(),
                 filters=_filters({"field": "status", "operator": "eq"}),
+                endpoint="/items",
             )
 
     def test_a_filter_naming_no_declared_param_is_refused(self) -> None:
@@ -288,6 +291,7 @@ class TestReadParamTable:
                 filters=_filters(
                     {"field": "customer_number", "operator": "eq", "value": "C-1"}
                 ),
+                endpoint="/items",
             )
 
     def test_an_unresolved_default_omits_its_param(self, caplog) -> None:
@@ -304,6 +308,7 @@ class TestReadParamTable:
                     }
                 ),
                 _resolver(),
+                endpoint="/items",
             )
         assert table.values == {}
         assert "parameter omitted" in caplog.text
@@ -333,6 +338,7 @@ class TestRequestBuilder:
                 }
             ),
             _resolver(),
+            endpoint="/items",
         )
         builder = RequestBuilder(
             table,
@@ -353,6 +359,7 @@ class TestRequestBuilder:
         table = ParamTable.for_read(
             _params({"limit": {"in": "query", "type": "integer", "required": False}}),
             _resolver(),
+            endpoint="/items",
         )
         builder = RequestBuilder(
             table,
@@ -367,6 +374,7 @@ class TestRequestBuilder:
         table = ParamTable.for_read(
             _params({"tenant": {"in": "query", "type": "string", "required": False}}),
             _resolver(),
+            endpoint="/items",
         )
         builder = RequestBuilder(
             table,
@@ -395,6 +403,7 @@ class TestRequestBuilder:
             ),
             _resolver(),
             filters=_filters({"field": "tenant", "operator": "eq", "value": "acme"}),
+            endpoint="/items",
         )
         builder = RequestBuilder(
             table,
@@ -408,6 +417,86 @@ class TestRequestBuilder:
         assert prepared.body is None
         assert prepared.query == {}
 
+    def test_a_required_param_that_resolved_to_nothing_refuses_the_page(
+        self,
+    ) -> None:
+        # The page would otherwise go out without it and the provider would
+        # answer the collection this param was narrowing -- a 200 the loop
+        # accepts and commits.
+        table = ParamTable.for_read(
+            _params({"since": {"in": "query", "type": "string", "required": True}}),
+            _resolver(),
+            endpoint="/items",
+        )
+        builder = RequestBuilder(
+            table,
+            raw_body=None,
+            resolver=_resolver(),
+            endpoint="/items",
+            declared_query={"since": {"from_param": "since"}},
+        )
+        with pytest.raises(RequestSpecError, match="declared required"):
+            builder.for_page({})
+
+    def test_a_loop_owned_required_param_does_not_refuse_page_one(self) -> None:
+        # Page one of a cursor scheme carries no cursor by construction. The
+        # loop owns when its param is in flight, so holding the author's
+        # `required` against it would refuse the first page of every correct
+        # document.
+        table = ParamTable.for_read(
+            _params(
+                {
+                    "page_token": {
+                        "in": "query",
+                        "type": "string",
+                        "required": True,
+                        "controlled_by": "pagination",
+                    }
+                }
+            ),
+            _resolver(),
+            endpoint="/items",
+        )
+        builder = RequestBuilder(
+            table,
+            raw_body=None,
+            resolver=_resolver(),
+            endpoint="/items",
+            declared_query={"token": {"from_param": "page_token"}},
+        )
+        assert builder.for_page({}).query == {}
+        assert builder.for_page({"page_token": "t-2"}).query == {"token": "t-2"}
+
+    def test_a_page_value_outside_its_declared_range_refuses_the_page(self) -> None:
+        # The check runs per page because this is the only point at which the
+        # loop's own values exist: a table-build check would judge the
+        # defaults and let the paging limit through unjudged.
+        table = ParamTable.for_read(
+            _params(
+                {
+                    "limit": {
+                        "in": "query",
+                        "type": "integer",
+                        "required": False,
+                        "controlled_by": "pagination",
+                        "maximum": 100,
+                    }
+                }
+            ),
+            _resolver(),
+            endpoint="/items",
+        )
+        builder = RequestBuilder(
+            table,
+            raw_body=None,
+            resolver=_resolver(),
+            endpoint="/items",
+            declared_query={"page[limit]": {"from_param": "limit"}},
+        )
+        assert builder.for_page({"limit": 100}).query == {"page[limit]": 100}
+        with pytest.raises(RequestSpecError, match="maximum=100"):
+            builder.for_page({"limit": 500})
+
     def test_a_continuation_carrying_params_still_sends_no_query(self) -> None:
         # The continuation URL carries its own query, and a param reaches
         # the wire only through a binding that names it. A page's params
@@ -416,6 +505,7 @@ class TestRequestBuilder:
         table = ParamTable.for_read(
             _params({"limit": {"in": "query", "type": "integer", "required": False}}),
             _resolver(),
+            endpoint="/items",
         )
         builder = RequestBuilder(
             table,
@@ -433,6 +523,7 @@ class TestRequestBuilder:
         table = ParamTable.for_read(
             _params({"offset": {"in": "body", "type": "integer", "required": False}}),
             _resolver(),
+            endpoint="/items",
         )
         builder = RequestBuilder(
             table,

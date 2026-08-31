@@ -534,7 +534,7 @@ def build_write_plan(
         if problem is not None:
             return f"response block on endpoint {endpoint_id!r}: {problem}"
     try:
-        table = ParamTable.for_write(mode_block.params, resolver)
+        table = ParamTable.for_write(mode_block.params, resolver, endpoint=endpoint_id)
         problem = request_block_problem(
             request,
             reserved_headers=reserved,
@@ -545,6 +545,15 @@ def build_write_plan(
         )
         if problem is not None:
             return problem
+        # After the block walk, not before it: a default reading a scope that
+        # write-time resolution never fills is the same omission with a far
+        # better answer -- it names the unfillable path -- and the walk above
+        # is where that answer lives. This one takes what is left: a param
+        # that resolved to nothing for any other reason, and a resolved value
+        # the declaration does not admit. Checked once here rather than per
+        # record: a write's params are the declared defaults and nothing else,
+        # so this table is the table every record is written with.
+        table.checker.check(table.values)
 
         plan = StreamWritePlan(
             method=request.method,

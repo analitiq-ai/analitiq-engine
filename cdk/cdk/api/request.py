@@ -65,6 +65,7 @@ from ..resolver import REQUEST_CONNECTION_SUBTREES, Resolver, scope_paths
 from ..transport_factory import require_wire_safe_header
 from .body import unsupported_media_type
 from .exceptions import RequestSpecError, request_spec_errors
+from .param_constraints import ParamChecker
 from .query_style import (
     QueryStyle,
     declared_query_styles,
@@ -120,6 +121,12 @@ class PreparedRequest:
     content_type: str | None = None
 
 
+#: The checker a table built without declarations carries. Only tests build
+#: one; production tables come from :meth:`ParamTable.for_read` or
+#: :meth:`ParamTable.for_write`, both of which compile the operation's own.
+_NO_DECLARATIONS = ParamChecker.for_params({}, endpoint="<no declarations>")
+
+
 @dataclass
 class ParamTable:
     """The declared params' resolved values.
@@ -130,6 +137,14 @@ class ParamTable:
     """
 
     values: dict[str, Any] = field(default_factory=dict)
+    #: What the declaring operation says every one of these values may be,
+    #: compiled once. It travels ON the table because the table is what the
+    #: request is built from: a checker passed alongside could be forgotten
+    #: at one of the two call sites, and the value that skipped it is exactly
+    #: the one nobody looks at again. A table built with no declarations --
+    #: only tests do that -- carries a checker that declares nothing and so
+    #: refuses nothing.
+    checker: ParamChecker = field(default_factory=lambda: _NO_DECLARATIONS)
     #: Every param a loop owns, mapped to the loop that owns it
     #: (``controlled_by``). Read by exactly one caller:
     #: :func:`request_block_problem`, which refuses a path placeholder bound
@@ -143,6 +158,7 @@ class ParamTable:
         declared: Mapping[str, Param],
         resolver: Resolver,
         *,
+        endpoint: str,
         filters: Iterable[Filter] = (),
     ) -> ParamTable:
         """Build the read role's table: defaults, then the stream's filters.
@@ -193,7 +209,11 @@ class ParamTable:
         # as whichever builtin the resolver happened to raise.
         with request_spec_errors("a read param's declared default"):
             values = resolve_param_defaults(uncontrolled, resolver)
-        table = cls(values=values, controlled_by=_controlled_by(declared))
+        table = cls(
+            values=values,
+            controlled_by=_controlled_by(declared),
+            checker=ParamChecker.for_params(declared, endpoint=endpoint),
+        )
         for declared_filter in filters:
             target = declared_filter.field
             if target not in declared:
@@ -239,7 +259,9 @@ class ParamTable:
         return table
 
     @classmethod
-    def for_write(cls, declared: Mapping[str, Param], resolver: Resolver) -> ParamTable:
+    def for_write(
+        cls, declared: Mapping[str, Param], resolver: Resolver, *, endpoint: str
+    ) -> ParamTable:
         """Build the write role's table.
 
         Write params are request-construction inputs feeding the body's
@@ -248,7 +270,12 @@ class ParamTable:
         """
         with request_spec_errors("a write param's declared default"):
             values = resolve_param_defaults(declared, resolver, context="write param")
-        return cls(values=values, controlled_by=_controlled_by(declared))
+        table = cls(
+            values=values,
+            controlled_by=_controlled_by(declared),
+            checker=ParamChecker.for_params(declared, endpoint=endpoint),
+        )
+        return table
 
 
 def _controlled_by(declared: Mapping[str, Param]) -> dict[str, str]:
@@ -1048,6 +1075,13 @@ class RequestBuilder:
         # bindings read the table too: a header bound to a declared param
         # must carry the same value on page two as on page one.
         binding_params = {**self._table.values, **page_params}
+        # Per page, not once: this is the only point at which every value the
+        # request can carry exists together -- the declared defaults and the
+        # stream's filters from the table, the cursor the replication bind
+        # wrote into it, and the limit/offset/token the pagination loop
+        # produced for THIS page. A check at table-build time would judge the
+        # first two and let the loops' own values through unjudged.
+        self._table.checker.check(binding_params)
         query, headers = bind_query_and_headers(
             params=binding_params,
             # A continuation replaces the whole request, query string

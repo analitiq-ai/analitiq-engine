@@ -292,7 +292,7 @@ def _compile_read(
     request_block = read.request
     declared_path = request_block.path
 
-    table = ParamTable.for_read(read.params, resolver)
+    table = ParamTable.for_read(read.params, resolver, endpoint=label)
     problem = request_block_problem(
         request_block,
         reserved_headers=reserved_header_names(

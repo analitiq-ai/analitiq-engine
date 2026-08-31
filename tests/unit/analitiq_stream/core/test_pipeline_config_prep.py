@@ -21,13 +21,19 @@ from typing import Any
 import pyarrow as pa
 import pytest
 from analitiq.contracts.endpoint_identity import derive_db_endpoint_id
+from analitiq.contracts.endpoints import DatabaseEndpointDoc
+from analitiq.contracts.stream import StreamSource
 
 from cdk.declarations import ConnectorDeclarationError
 from cdk.types import EndpointScope
 from src.config.schema_validator import BundleValidationError, ContractValidationError
 from src.engine.batch_policy import ErrorStrategy
 from src.engine.mapping import MappingDocument, compile_mapping
-from src.engine.pipeline_config_prep import PipelineConfigPrep, _split_stream_ref
+from src.engine.pipeline_config_prep import (
+    PipelineConfigPrep,
+    _check_replication_support,
+    _split_stream_ref,
+)
 
 # ---------------------------------------------------------------------------
 # Contract validation
@@ -138,6 +144,65 @@ def _endpoint_doc(endpoint_id: str) -> dict[str, Any]:
             },
         },
     }
+
+
+def _replicating_endpoint_doc(
+    endpoint_id: str, supported_methods: list[str]
+) -> dict[str, Any]:
+    """The same read, declaring the replication methods it can serve.
+
+    A ``Replication`` block is only well-formed with a cursor mapping, a
+    param for the bound to land in and a record field to take the cursor
+    from, so all three come with it -- the contract refuses the block
+    without them, and a fixture that skipped them would pin a document no
+    endpoint can publish.
+    """
+    document = _endpoint_doc(endpoint_id)
+    read = document["operations"]["read"]
+    read["request"]["query"] = {"since": {"from_param": "since"}}
+    read["params"] = {
+        "since": {
+            "in": "query",
+            "type": "string",
+            "required": False,
+            "controlled_by": "replication",
+        }
+    }
+    read["response"]["schema"]["items"]["properties"]["updated_at"] = {
+        "type": "string",
+        "format": "date-time",
+        "native_type": "timestamp",
+        "arrow_type": "Utf8",
+    }
+    read["replication"] = {
+        "supported_methods": supported_methods,
+        "cursor_mappings": [
+            {"cursor_field": "updated_at", "param": "since", "operator": "gte"}
+        ],
+    }
+    return document
+
+
+def _write_source_endpoint(root: Path, document: dict[str, Any]) -> None:
+    """Replace the source endpoint document the fixture tree wrote."""
+    _write_json(
+        root
+        / "connectors"
+        / CONNECTOR_ID
+        / "definition"
+        / "endpoints"
+        / f"{ENDPOINT_SRC}.json",
+        document,
+    )
+
+
+def _write_stream_replication(root: Path, replication: dict[str, Any]) -> None:
+    """Rewrite the fixture stream with the replication block it selects."""
+    stream_doc = _stream_doc(STREAM_ID)
+    stream_doc["source"]["replication"] = replication
+    _write_json(
+        root / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json", stream_doc
+    )
 
 
 def _type_map_rules() -> list:
@@ -613,14 +678,15 @@ class TestStreamVersionParsing:
         (API), and the contract reserves that field for database sources
         (RULE-STRM-014), so it carries through as ``None``.
         """
-        stream_doc = _stream_doc(STREAM_ID)
-        stream_doc["source"]["replication"] = {
-            "method": "incremental",
-            "cursor_field": "updated_at",
-        }
-        _write_json(
-            pipeline_tree / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json",
-            stream_doc,
+        # The source endpoint has to declare that it serves ``incremental``:
+        # a stream selecting a method the endpoint does not support is
+        # refused before it is parsed (TestReplicationMethodSupport).
+        _write_source_endpoint(
+            pipeline_tree,
+            _replicating_endpoint_doc(ENDPOINT_SRC, ["full_refresh", "incremental"]),
+        )
+        _write_stream_replication(
+            pipeline_tree, {"method": "incremental", "cursor_field": "updated_at"}
         )
 
         prep = PipelineConfigPrep()
@@ -632,6 +698,102 @@ class TestStreamVersionParsing:
         assert src.replication.method == "incremental"
         assert src.replication.cursor_field == "updated_at"
         assert src.replication.tie_breaker_fields is None
+
+
+# ---------------------------------------------------------------------------
+# Replication method support
+#
+# The endpoint document says which methods its read serves and the stream
+# says which one it selected. Nothing compared them until this check, so an
+# incremental stream against a read that cannot carry a cursor bound ran and
+# re-read the whole collection every time while reporting success.
+# ---------------------------------------------------------------------------
+
+
+class TestReplicationMethodSupport:
+    def test_a_method_the_endpoint_declares_is_accepted(
+        self, pipeline_tree: Path
+    ) -> None:
+        _write_source_endpoint(
+            pipeline_tree,
+            _replicating_endpoint_doc(ENDPOINT_SRC, ["full_refresh", "incremental"]),
+        )
+        _write_stream_replication(
+            pipeline_tree, {"method": "incremental", "cursor_field": "updated_at"}
+        )
+
+        _, stream_configs, _, _, _ = PipelineConfigPrep().create_config()
+
+        assert stream_configs[0].source.replication is not None
+        assert stream_configs[0].source.replication.method == "incremental"
+
+    def test_a_method_outside_the_declared_set_is_refused(
+        self, pipeline_tree: Path
+    ) -> None:
+        _write_source_endpoint(
+            pipeline_tree, _replicating_endpoint_doc(ENDPOINT_SRC, ["full_refresh"])
+        )
+        _write_stream_replication(
+            pipeline_tree, {"method": "incremental", "cursor_field": "updated_at"}
+        )
+
+        with pytest.raises(ValueError) as caught:
+            PipelineConfigPrep().create_config()
+
+        message = str(caught.value)
+        # The message has to carry all four facts, or the operator cannot
+        # tell which of the two documents to change.
+        assert STREAM_ID in message
+        assert f"connector:{CONNECTION_SRC_ID}/{ENDPOINT_SRC}" in message
+        assert "'incremental'" in message
+        assert "['full_refresh']" in message
+
+    def test_full_refresh_against_an_endpoint_with_no_replication_block_is_accepted(
+        self, pipeline_tree: Path
+    ) -> None:
+        # The fixture endpoint declares no replication block: full refresh is
+        # what such a read serves, and it is the whole of what it serves.
+        _write_stream_replication(pipeline_tree, {"method": "full_refresh"})
+
+        _, stream_configs, _, _, _ = PipelineConfigPrep().create_config()
+
+        assert stream_configs[0].source.replication is not None
+        assert stream_configs[0].source.replication.method == "full_refresh"
+
+    def test_incremental_against_an_endpoint_with_no_replication_block_is_refused(
+        self, pipeline_tree: Path
+    ) -> None:
+        _write_stream_replication(
+            pipeline_tree, {"method": "incremental", "cursor_field": "updated_at"}
+        )
+
+        with pytest.raises(ValueError) as caught:
+            PipelineConfigPrep().create_config()
+
+        message = str(caught.value)
+        assert "declares no replication block" in message
+        assert "['full_refresh']" in message
+
+    def test_a_database_source_endpoint_is_not_checked(self) -> None:
+        # ``DatabaseEndpointDoc`` carries no Replication block: a database
+        # stream's incrementality comes from a cursor COLUMN, so there is no
+        # declared method vocabulary here to check the stream against.
+        source = StreamSource.model_validate(
+            {
+                "endpoint_ref": {
+                    "scope": "connection",
+                    "connection_id": CONNECTION_SRC_ID,
+                    "endpoint_id": ENDPOINT_DST_CONNECTION,
+                    "database_object": DST_DATABASE_OBJECT,
+                },
+                "replication": {"method": "incremental", "cursor_field": "id"},
+            }
+        )
+        endpoint = DatabaseEndpointDoc.model_validate(
+            _database_endpoint_doc(DST_DATABASE_OBJECT)
+        )
+
+        _check_replication_support(STREAM_ID, source, endpoint)
 
 
 # ---------------------------------------------------------------------------
