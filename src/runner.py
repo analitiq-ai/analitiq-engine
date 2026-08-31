@@ -164,7 +164,12 @@ class PipelineRunner:
     """
 
     def __init__(self) -> None:
-        load_dotenv()  # must precede os.getenv so .env-based configs work
+        # ``src.main`` loads the ``.env`` at process start, before anything
+        # reads the environment. Repeated here for a runner constructed
+        # directly -- a test, a script -- which never passes through it;
+        # ``load_dotenv`` does not override a variable already set, so the
+        # second call cannot disagree with the first.
+        load_dotenv()
         pipeline_id = os.getenv("PIPELINE_ID")
         if not pipeline_id:
             raise ValueError("PIPELINE_ID environment variable is required")

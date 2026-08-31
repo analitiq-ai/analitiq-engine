@@ -37,13 +37,24 @@ import os
 import sys
 from typing import Any
 
-from src.config import settings
-from src.models.resolved import (
+from dotenv import load_dotenv
+
+# Before anything reads the environment, including the log level three
+# statements down. Both run modes enter through this module, so loading it
+# here is what makes a ``.env`` mean the same thing on both sides of the gRPC
+# boundary: loaded in the source runner alone, a ``.env`` supplying
+# ``LOG_LEVEL=DEBUG`` gave the engine DEBUG and the destination the built-in
+# default, and every other variable it supplied was read by one process and
+# not the other.
+load_dotenv()
+
+from src.config import settings  # noqa: E402
+from src.models.resolved import (  # noqa: E402
     dump_endpoint_document,
     dump_endpoint_ref,
     write_conflict_keys,
 )
-from src.shared.logging_level import apply_log_level, require_log_level
+from src.shared.logging_level import apply_log_level, require_log_level  # noqa: E402
 
 # Set up logging. The environment's level is held to the contract's vocabulary
 # here rather than read through ``getattr(logging, name, INFO)``: that accepted
