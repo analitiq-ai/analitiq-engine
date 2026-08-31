@@ -65,13 +65,18 @@ _KEYWORDS: dict[str, str] = {
     "enum": "enum",
     "format": "format",
     "pattern": "pattern",
-    "minimum": "minimum",
-    "maximum": "maximum",
     "min_length": "minLength",
     "max_length": "maxLength",
     "min_items": "minItems",
     "max_items": "maxItems",
+    "minimum": "minimum",
+    "maximum": "maximum",
 }
+
+#: The two that ORDER a value rather than describe its shape, and so are the
+#: two that cannot be judged in the same number model as the rest. See
+#: :func:`_bounds_fragment`.
+_ORDERING_KEYWORDS: frozenset[str] = frozenset({"minimum", "maximum"})
 
 #: Two separate things, kept apart because only one of them is a decision.
 #:
@@ -98,7 +103,11 @@ class _ParamRule:
     """One param's compiled constraint set."""
 
     required: bool
-    validator: jsonschema.Draft202012Validator
+    #: Everything but the bounds, judged on the value as it arrived.
+    shape: jsonschema.Draft202012Validator
+    #: ``minimum`` / ``maximum`` only, judged on the value as an exact
+    #: decimal. Separate because these two compare rather than describe.
+    bounds: jsonschema.Draft202012Validator
 
 
 class ParamChecker:
@@ -136,11 +145,13 @@ class ParamChecker:
         """
         rules: dict[str, _ParamRule] = {}
         for name, param in declared.items():
-            fragment = _fragment(param)
+            fragment = _shape_fragment(param)
+            bounds = _bounds_fragment(param)
             try:
-                jsonschema.Draft202012Validator.check_schema(
-                    fragment, format_checker=_FORMAT_CHECKER
-                )
+                for candidate in (fragment, bounds):
+                    jsonschema.Draft202012Validator.check_schema(
+                        candidate, format_checker=_FORMAT_CHECKER
+                    )
             except jsonschema.exceptions.SchemaError as err:
                 raise RequestSpecError(
                     f"param {name!r} for endpoint {endpoint!r} declares "
@@ -162,8 +173,11 @@ class ParamChecker:
                 # param may carry, and a token breaking it is as wrong as any
                 # other value breaking it.
                 required=param.required and param.controlled_by is None,
-                validator=jsonschema.Draft202012Validator(
+                shape=jsonschema.Draft202012Validator(
                     fragment, format_checker=_FORMAT_CHECKER
+                ),
+                bounds=jsonschema.Draft202012Validator(
+                    bounds, format_checker=_FORMAT_CHECKER
                 ),
             )
         return cls(rules, endpoint=endpoint)
@@ -234,7 +248,11 @@ class ParamChecker:
                 continue
             problems.extend(
                 _unmet(name, err, endpoint=self._endpoint)
-                for err in rule.validator.iter_errors(_as_json_value(value))
+                for err in rule.shape.iter_errors(_as_json_value(value))
+            )
+            problems.extend(
+                _unmet(name, err, endpoint=self._endpoint)
+                for err in rule.bounds.iter_errors(_as_exact_decimal(value))
             )
         return problems
 
@@ -330,12 +348,27 @@ def _resolved_to_nothing(value: Any) -> bool:
     return False
 
 
-def _fragment(param: Param) -> dict[str, Any]:
-    """Render one ``Param``'s declared constraints as a JSON Schema fragment.
+def _declared_keywords(param: Param) -> dict[str, Any]:
+    """Every constraint the param actually declares, under its JSON Schema name.
 
-    Every key the param leaves unset is omitted rather than emitted as null: a
+    The one place this module reads a ``Param`` attribute by a name from
+    ``_KEYWORDS``, which is what lets the consumption census see the whole
+    table as the claim: a second such site in this module and it can no longer
+    tell which table binds which read. The two fragments below filter this
+    result rather than reading the param again.
+
+    A key the param leaves unset is omitted rather than emitted as null: a
     fragment carrying ``"pattern": null`` is not a schema, and an omitted
     keyword is exactly JSON Schema's own spelling of "unconstrained".
+    """
+    declared = {
+        keyword: getattr(param, attribute) for attribute, keyword in _KEYWORDS.items()
+    }
+    return {keyword: value for keyword, value in declared.items() if value is not None}
+
+
+def _shape_fragment(param: Param) -> dict[str, Any]:
+    """Render everything the param says about a value's SHAPE, as JSON Schema.
 
     ``type`` is always present -- the contract requires it -- and it is
     enforced as declared, with no widening for a value that merely looks like
@@ -344,20 +377,60 @@ def _fragment(param: Param) -> dict[str, Any]:
     elsewhere in this package (``cdk.api.query_style`` settles a collection's
     wire spelling from it and refuses a value of the other shape), so accepting
     a string here would make one field mean two things depending on which
-    reader looked at it. And ``minimum``/``maximum`` are defined over numbers
-    only: a string admitted under ``type: integer`` sails past every range the
-    author declared, which turns this module into the silent pass it exists to
-    remove. A config expression yielding a string for an integer param is a
-    defect in the config and is fixed there. JSON's own leniency is kept as-is:
-    ``1.0`` satisfies ``integer`` because JSON Schema says a number with a zero
+    reader looked at it. And the bounds are defined over numbers only: a string
+    admitted under ``type: integer`` sails past every range the author
+    declared, which turns this module into the silent pass it exists to remove.
+    A config expression yielding a string for an integer param is a defect in
+    the config and is fixed there. JSON's own leniency is kept as-is: ``1.0``
+    satisfies ``integer`` because JSON Schema says a number with a zero
     fractional part is one, and the contract's vocabulary is JSON's.
     """
-    fragment: dict[str, Any] = {}
-    for attribute, keyword in _KEYWORDS.items():
-        declared = getattr(param, attribute)
-        if declared is not None:
-            fragment[keyword] = declared
-    return fragment
+    return {
+        keyword: value
+        for keyword, value in _declared_keywords(param).items()
+        if keyword not in _ORDERING_KEYWORDS
+    }
+
+
+def _bounds_fragment(param: Param) -> dict[str, Any]:
+    """Render ``minimum`` / ``maximum`` for comparison against exact decimals.
+
+    Its own fragment because these two ORDER a value where every other keyword
+    describes one, and ordering is the only thing here that two number models
+    disagree about. The contract types both as ``StrictFloat``, so the author's
+    ``0.1`` reaches the engine as the binary float nearest to it -- which is
+    NOT ``0.1``. A keyset cursor arrives as a ``Decimal`` parsed from the
+    provider's own decimal text, and Python compares the two exactly:
+    ``Decimal("0.1") < 0.1`` is true. A cursor sitting exactly on a declared
+    fractional bound would be refused, on page two of a read whose page one had
+    already committed rows.
+
+    So the bound is put back into decimal text (``Decimal(str(...))``, which
+    recovers the literal the author wrote for every float Python reprs) and the
+    value is put into the same model by :func:`_as_exact_decimal`. Both sides
+    from text, one model, no comparison across two.
+    """
+    return {
+        keyword: Decimal(str(value))
+        for keyword, value in _declared_keywords(param).items()
+        if keyword in _ORDERING_KEYWORDS
+    }
+
+
+def _as_exact_decimal(value: Any) -> Any:
+    """Put a number into the decimal model the bounds are compared in.
+
+    A ``float`` goes through ``str`` for the same reason the bound does: the
+    author and the provider both wrote decimal text, and ``str`` is what
+    recovers it. A ``Decimal`` is already exact. Everything else is handed over
+    untouched -- the bounds keywords ignore a non-number, which is what makes
+    it safe for this fragment to carry no ``type`` of its own.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        return Decimal(str(value))
+    return value
 
 
 def _missing(name: str, *, endpoint: str) -> str:
@@ -375,8 +448,15 @@ def _unmet(
     name: str, error: jsonschema.exceptions.ValidationError, *, endpoint: str
 ) -> str:
     """Name the param, the keyword it broke, what was declared and what came."""
+    # The bound is repr'd as the author wrote it, not as the Decimal this
+    # module compares it in: `maximum=100.0` is the document, and
+    # `maximum=Decimal('100.0')` is an implementation detail the author
+    # cannot act on.
+    declared = error.validator_value
+    if isinstance(declared, Decimal):
+        declared = float(declared)
     return (
         f"param {name!r} for endpoint {endpoint!r} declares "
-        f"{error.validator}={error.validator_value!r} and resolved to "
+        f"{error.validator}={declared!r} and resolved to "
         f"{error.instance!r}: {error.message}"
     )

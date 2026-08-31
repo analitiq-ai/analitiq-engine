@@ -11,6 +11,7 @@ than a request that quietly widens the read.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -243,6 +244,55 @@ class TestAggregation:
         )
         assert "pattern=" in message
         assert "minLength=" in message
+
+
+class TestABoundIsComparedInOneNumberModel:
+    """A value sitting exactly on a declared bound passes, from either side.
+
+    The contract types `minimum`/`maximum` as floats, so an author's `0.1`
+    reaches the engine as the binary float nearest it -- which is not `0.1`.
+    A keyset cursor arrives as a Decimal parsed from the provider's decimal
+    text. Compared across the two models, `Decimal("0.1") < 0.1` is true and a
+    cursor exactly on its declared floor is refused on page two of a read
+    whose page one had already committed.
+    """
+
+    def test_a_decimal_on_its_declared_minimum_passes(self) -> None:
+        _checker(x=_param(type="number", minimum=0.1)).check_values(
+            {"x": Decimal("0.1")}
+        )
+
+    def test_a_decimal_on_its_declared_maximum_passes(self) -> None:
+        _checker(x=_param(type="number", maximum=0.3)).check_values(
+            {"x": Decimal("0.3")}
+        )
+
+    def test_a_float_on_its_declared_bound_still_passes(self) -> None:
+        # The other side of the same coin: putting the BOUND into decimal
+        # text without doing the same to the value would swap which of the
+        # two is wrongly refused.
+        checker = _checker(x=_param(type="number", minimum=0.1, maximum=0.3))
+        checker.check_values({"x": 0.1})
+        checker.check_values({"x": 0.3})
+
+    def test_a_decimal_past_the_bound_is_still_refused(self) -> None:
+        # Exactness cuts both ways: the digits that make the boundary pass
+        # are the digits that make one ulp past it fail.
+        message = _refusal(
+            _checker(x=_param(type="number", maximum=100)),
+            {"x": Decimal("100.0000000000000000001")},
+        )
+        # Reported as the author wrote the bound, not as the Decimal the
+        # comparison happens in.
+        assert "maximum=100.0" in message
+
+    def test_a_non_finite_value_orders_against_nothing_and_is_refused(self) -> None:
+        # NaN compares false against every bound, so a param declaring both
+        # would "satisfy" them and the keyset loop would advance on it.
+        for value in (float("nan"), Decimal("NaN"), Decimal("Infinity")):
+            assert "orders against nothing" in _refusal(
+                _checker(x=_param(type="number", minimum=1, maximum=100)), {"x": value}
+            )
 
 
 class TestFormatIsCheckedOnlyWhereThisTreeHasAChecker:

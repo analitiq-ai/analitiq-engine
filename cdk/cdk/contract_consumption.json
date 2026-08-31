@@ -533,7 +533,7 @@
     },
     "analitiq.contracts.endpoints.Param": {
       "controlled_by": [
-        "cdk.api.param_constraints:164",
+        "cdk.api.param_constraints:175",
         "cdk.api.request:230",
         "cdk.api.request:255",
         "cdk.api.request:329",
@@ -544,32 +544,32 @@
         "cdk.request_binding:74"
       ],
       "enum": [
-        "cdk.api.param_constraints:357"
+        "cdk.api.param_constraints:365"
       ],
       "explode": [
         "cdk.api.query_style:121",
         "cdk.api.query_style:124"
       ],
       "format": [
-        "cdk.api.param_constraints:357"
+        "cdk.api.param_constraints:365"
       ],
       "max_items": [
-        "cdk.api.param_constraints:357"
+        "cdk.api.param_constraints:365"
       ],
       "max_length": [
-        "cdk.api.param_constraints:357"
+        "cdk.api.param_constraints:365"
       ],
       "maximum": [
-        "cdk.api.param_constraints:357"
+        "cdk.api.param_constraints:365"
       ],
       "min_items": [
-        "cdk.api.param_constraints:357"
+        "cdk.api.param_constraints:365"
       ],
       "min_length": [
-        "cdk.api.param_constraints:357"
+        "cdk.api.param_constraints:365"
       ],
       "minimum": [
-        "cdk.api.param_constraints:357"
+        "cdk.api.param_constraints:365"
       ],
       "operators": [
         "cdk.api.request:254",
@@ -577,17 +577,17 @@
         "cdk.api.request:274"
       ],
       "pattern": [
-        "cdk.api.param_constraints:357"
+        "cdk.api.param_constraints:365"
       ],
       "required": [
-        "cdk.api.param_constraints:164"
+        "cdk.api.param_constraints:175"
       ],
       "style": [
         "cdk.api.query_style:121",
         "cdk.api.query_style:124"
       ],
       "type": [
-        "cdk.api.param_constraints:357",
+        "cdk.api.param_constraints:365",
         "cdk.api.query_style:124"
       ]
     },

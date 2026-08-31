@@ -21,6 +21,13 @@ click>=8.0.0
 # gRPC for destination streaming
 grpcio>=1.60.0
 grpcio-tools>=1.60.0
+# An API operation's declared param constraints ARE JSON Schema keywords, so
+# cdk.api.param_constraints checks a resolved value with a JSON Schema
+# validator. Unconditional on the API request path: declared here as well as
+# in the two pyprojects because the image installs this file, not them, and
+# reaching it only through analitiq-validator's own tree is luck, not a
+# dependency.
+jsonschema>=4.18.0
 
 # Serialization formats for gRPC payloads
 msgpack>=1.0.0
