@@ -12,6 +12,7 @@ from pydantic import TypeAdapter
 
 from cdk.api.exceptions import RequestSpecError
 from cdk.api.param_constraints import ParamChecker
+from cdk.api.query_style import declared_query_styles
 from cdk.api.request import (
     REQUIRED_BY_DECLARATION,
     ParamTable,
@@ -690,6 +691,42 @@ class TestARequiredParamMustReachTheWire:
         assert builder.for_page({}).body == {"page": {}}
         with pytest.raises(RequestSpecError, match="wire route of"):
             builder.for_page({"cursor": "page-two"})
+
+    def test_a_loop_supplied_value_that_serializes_to_nothing_is_refused(
+        self,
+    ) -> None:
+        """The binding succeeds and the wire still carries nothing.
+
+        An empty array under exploded `form` binds without complaint and then
+        produces no query pairs, so the expression-drop guard never fires and
+        the page goes out identical to the one before it. Whether a value
+        lands is the serializer's answer, so it is asked of the serializer.
+        """
+        declared = _params(
+            {
+                "after": {
+                    "in": "query",
+                    "type": "array",
+                    "required": False,
+                    "style": "form",
+                    "explode": True,
+                    "controlled_by": "pagination",
+                }
+            }
+        )
+        declared_query = {"after": {"from_param": "after"}}
+        builder = RequestBuilder(
+            ParamTable.for_read(declared, _resolver(), endpoint="/items"),
+            raw_body=None,
+            resolver=_resolver(),
+            endpoint="/items",
+            declared_query=declared_query,
+            query_styles=declared_query_styles(declared_query, declared),
+        )
+        assert builder.for_page({}).query == {}
+        with pytest.raises(RequestSpecError, match="serializes to nothing"):
+            builder.for_page({"after": []})
+        assert builder.for_page({"after": ["k"]}).query == {"after": ["k"]}
 
     def test_a_loop_supplied_value_that_does_reach_the_wire_is_sent(self) -> None:
         builder = RequestBuilder(

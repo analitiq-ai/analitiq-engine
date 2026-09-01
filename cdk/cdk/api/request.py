@@ -159,6 +159,11 @@ class ParamTable:
     #: owns. Read by the binding walk: a key that resolves to nothing is
     #: dropped, unless it is the wire route of one of these.
     required: frozenset[str] = frozenset()
+    #: Each declared param's wire spelling, or ``None`` where it has one
+    #: value per key. Read to answer whether a value LANDS in the request --
+    #: a question the binding's success cannot answer, because an empty
+    #: collection binds fine and then serializes to no query pairs at all.
+    styles: dict[str, QueryStyle | None] = field(default_factory=dict)
     #: Every param a loop owns, mapped to the loop that owns it
     #: (``controlled_by``). Read by exactly one caller:
     #: :func:`request_block_problem`, which refuses a path placeholder bound
@@ -196,6 +201,35 @@ class ParamTable:
             if values.get(name) is not None:
                 reasons[name] = SUPPLIED_BY_LOOP.format(loop=loop)
         return reasons
+
+    def unsendable_loop_value(self, values: Mapping[str, Any]) -> str | None:
+        """Why a value the loop set cannot land in the request, or ``None``.
+
+        The binding guard reads whether an expression resolved; this reads
+        whether what it resolved TO survives serialization. They are different
+        failures with the same consequence: an empty array under exploded
+        ``form``, or an empty object under ``deepObject``, binds without
+        complaint and then produces no query pairs, so the page goes out
+        without the value the loop computed for it -- the request that fetched
+        the page before, forever.
+
+        Asked of :func:`~cdk.api.query_style.reaches_the_wire`, the same
+        function :class:`~cdk.api.param_constraints.ParamChecker` asks of a
+        declared-required value, because "does this land in the request" has
+        to have one answer: which shapes vanish is the serializer's to say,
+        and a second opinion here is a rule that disagrees with the wire.
+        """
+        for name, loop in self.controlled_by.items():
+            value = values.get(name)
+            if value is None or reaches_the_wire(value, self.styles.get(name)):
+                continue
+            return (
+                f"the {loop} loop supplied {value!r} for param {name!r}, which "
+                f"serializes to nothing under the param's declared spelling: "
+                f"the request would go out without it, identical to the one "
+                f"before it, and the read would never advance"
+            )
+        return None
 
     @classmethod
     def for_read(
@@ -291,6 +325,7 @@ class ParamTable:
             values = resolve_param_defaults(uncontrolled, resolver)
         table = cls(
             values=values,
+            styles=_declared_styles(declared),
             controlled_by=_controlled_by(declared),
             checker=ParamChecker.for_params(declared, endpoint=endpoint),
             required=_required_names(declared),
@@ -387,6 +422,7 @@ class ParamTable:
             values = resolve_param_defaults(declared, resolver, context="write param")
         table = cls(
             values=values,
+            styles=_declared_styles(declared),
             controlled_by=_controlled_by(declared),
             checker=ParamChecker.for_params(declared, endpoint=endpoint),
             required=_required_names(declared),
@@ -508,6 +544,11 @@ def _required_names(declared: Mapping[str, Param]) -> frozenset[str]:
         for name, decl in declared.items()
         if decl.required and decl.controlled_by is None
     )
+
+
+def _declared_styles(declared: Mapping[str, Param]) -> dict[str, QueryStyle | None]:
+    """Each declared param's wire spelling, or ``None`` where it has one."""
+    return {name: declared_style(decl) for name, decl in declared.items()}
 
 
 def _controlled_by(declared: Mapping[str, Param]) -> dict[str, str]:
@@ -1336,6 +1377,9 @@ class RequestBuilder:
         # the caller holding everything a run can produce.
         self._table.checker.check_values(binding_params)
         must_reach = self._table.must_reach(binding_params)
+        unsendable = self._table.unsendable_loop_value(binding_params)
+        if unsendable is not None:
+            raise RequestSpecError(f"endpoint {self._endpoint!r}: {unsendable}")
         query, headers = bind_query_and_headers(
             params=binding_params,
             # A continuation replaces the whole request, query string

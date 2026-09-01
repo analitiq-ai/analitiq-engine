@@ -534,6 +534,19 @@ class TestTheEnforcedFormatSetIsFixed:
             _checker(day=_param(format="date")), {"day": "not-a-date"}
         )
 
+    def test_time_is_annotation_because_its_checker_is_the_wrong_draft(
+        self,
+    ) -> None:
+        """`time` is the one name always registered under semantics the
+        contract's reader would not expect.
+
+        The Draft 2020-12 checker needs `rfc3339-validator`; the one that is
+        always there is Draft 3's `strptime("%H:%M:%S")`, which refuses
+        `12:00:00Z`. Enforcing it would refuse a valid time under a rule
+        nobody wrote.
+        """
+        _checker(at=_param(format="time")).check_values({"at": "12:00:00Z"})
+
     def test_a_format_outside_the_set_is_annotation_only(self) -> None:
         # `date-time` is a standard format this engine does not enforce, and
         # `money` is a provider's own. Both describe rather than refuse, and

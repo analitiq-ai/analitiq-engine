@@ -125,6 +125,16 @@ _SIZE_KEYWORDS: frozenset[str] = frozenset(
 #: are the conditional ones (jsonschema registers each inside a
 #: ``with suppress(ImportError)`` block); a param declaring one of those is
 #: carried as documentation like any other unregistered name.
+#:
+#: ``time`` is absent for a second reason, and it is the sharper one. The name
+#: IS always registered -- but by the DRAFT 3 checker, which is
+#: ``strptime("%H:%M:%S")`` and refuses ``12:00:00Z`` and ``12:00:00+01:00``.
+#: The Draft 2020-12 checker, which is the one this module's validator is
+#: built for and the one the contract's readers would expect, needs
+#: ``rfc3339-validator`` and registers under the same name. So enforcing
+#: ``time`` would refuse a valid time under a rule nobody wrote, which is
+#: worse than not enforcing it: a wrong answer beats a missing one only when
+#: the answer is right.
 _ENFORCED_FORMATS: Final[tuple[str, ...]] = (
     "date",
     "email",
@@ -132,7 +142,6 @@ _ENFORCED_FORMATS: Final[tuple[str, ...]] = (
     "ipv4",
     "ipv6",
     "regex",
-    "time",
     "uuid",
 )
 
