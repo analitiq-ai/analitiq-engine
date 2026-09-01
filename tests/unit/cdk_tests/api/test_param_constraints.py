@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -328,6 +329,25 @@ class TestABoundMustBeAbleToOrder:
         with pytest.raises(RequestSpecError, match="an interval no value is inside"):
             _checker(x=_param(type="number", minimum=10, maximum=1))
 
+    @pytest.mark.parametrize(
+        ("floor", "ceiling", "declared"),
+        [
+            ("minLength", "maxLength", {"type": "string"}),
+            (
+                "minItems",
+                "maxItems",
+                {"type": "array", "style": "form", "explode": True},
+            ),
+        ],
+    )
+    def test_an_inverted_size_interval_is_refused_at_build_time(
+        self, floor: str, ceiling: str, declared: dict[str, Any]
+    ) -> None:
+        # An author who can invert the numeric pair can invert either size
+        # pair, and the answer must not depend on which one they chose.
+        with pytest.raises(RequestSpecError, match="an interval no value is inside"):
+            _checker(x=_param(**declared, **{floor: 10, ceiling: 1}))
+
     def test_a_single_point_interval_is_usable(self) -> None:
         # `minimum == maximum` admits exactly one value, which is a narrowing
         # an author may legitimately write.
@@ -520,6 +540,32 @@ class TestTheEnforcedFormatSetIsFixed:
         # neither changes if a package appears in the environment.
         checker = _checker(at=_param(format="date-time"), amount=_param(format="money"))
         checker.check_values({"at": "not-a-timestamp", "amount": "not-money"})
+
+
+class TestTheDocumentedSetIsThePinnedOne:
+    """`docs/source-config.md` tells connector authors which formats refuse.
+
+    Prose is a copy of a decision made in code, and this copy already drifted
+    once: it promised `json-pointer` enforcement that the module deliberately
+    does not do, so an author would have written a document expecting a
+    refusal that never comes. A copy that cannot be generated has to be
+    pinned, or it drifts again the next time the set changes.
+    """
+
+    def test_the_docs_name_exactly_the_enforced_formats(self) -> None:
+        from cdk.api.param_constraints import _ENFORCED_FORMATS
+
+        doc = (
+            Path(__file__).resolve().parents[4] / "docs" / "source-config.md"
+        ).read_text()
+        promised = re.search(
+            r"`format` is enforced for the formats the engine has a checker "
+            r"for \(([^)]*)\)",
+            doc,
+        )
+        assert promised is not None, "the docs no longer state which formats refuse"
+        named = re.findall(r"`([^`]+)`", promised.group(1))
+        assert sorted(named) == sorted(_ENFORCED_FORMATS)
 
 
 class TestReuse:

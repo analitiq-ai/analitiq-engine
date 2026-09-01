@@ -13,6 +13,7 @@ from pydantic import TypeAdapter
 from cdk.api.exceptions import RequestSpecError
 from cdk.api.param_constraints import ParamChecker
 from cdk.api.request import (
+    REQUIRED_BY_DECLARATION,
     ParamTable,
     RequestBuilder,
     bind_query_and_headers,
@@ -305,7 +306,7 @@ class TestReadParamTable:
                 }
             },
         )
-        with pytest.raises(RequestSpecError, match="wire route of required"):
+        with pytest.raises(RequestSpecError, match="wire route of"):
             builder.for_page({})
 
     def test_an_optional_params_binding_is_still_omitted(self) -> None:
@@ -539,7 +540,7 @@ class TestARequiredParamMustReachTheWire:
             resolver=_resolver(),
             endpoint="/items",
         )
-        with pytest.raises(RequestSpecError, match="wire route of required"):
+        with pytest.raises(RequestSpecError, match="wire route of"):
             builder.for_page({})
 
     def test_the_refusal_names_the_body_field_that_would_be_dropped(self) -> None:
@@ -561,7 +562,7 @@ class TestARequiredParamMustReachTheWire:
             resolver=_resolver(),
             endpoint="/items",
         )
-        with pytest.raises(RequestSpecError, match="wire route of required"):
+        with pytest.raises(RequestSpecError, match="wire route of"):
             builder.for_page({})
 
     def test_a_required_param_that_does_reach_the_body_is_sent(self) -> None:
@@ -601,15 +602,89 @@ class TestARequiredParamMustReachTheWire:
         )
         assert builder.for_page({}).body == {"keep": 1, "filter": {}}
 
+    @staticmethod
+    def _cursor_table() -> ParamTable:
+        """A read whose cursor the pagination loop owns and nothing declares
+        required -- the shape every cursor scheme is authored in."""
+        return ParamTable.for_read(
+            _params(
+                {
+                    "cursor": {
+                        "in": "query",
+                        "type": "string",
+                        "required": False,
+                        "controlled_by": "pagination",
+                    }
+                }
+            ),
+            _resolver(),
+            endpoint="/items",
+        )
+
+    def test_page_one_may_carry_no_value_for_a_loop_owned_param(self) -> None:
+        # Absence is the loop's to decide, and a cursor scheme's first page
+        # has no cursor by construction. The binding is dropped, as the
+        # per-request policy says.
+        builder = RequestBuilder(
+            self._cursor_table(),
+            raw_body=None,
+            resolver=_resolver(),
+            endpoint="/items",
+            declared_query={"cursor": self._unresolvable("cursor")},
+        )
+        assert builder.for_page({}).query == {}
+
+    def test_a_binding_that_drops_the_value_the_loop_supplied_is_refused(
+        self,
+    ) -> None:
+        """The exemption is spent once the loop has put a value in flight.
+
+        Dropped here, the request that goes out is the one that fetched the
+        page before it: the strategy keeps advancing its own token, the
+        provider keeps answering page one, and `stop_when` keeps seeing a next
+        token. The loop does not end and every record in it is a duplicate.
+        """
+        builder = RequestBuilder(
+            self._cursor_table(),
+            raw_body=None,
+            resolver=_resolver(),
+            endpoint="/items",
+            declared_query={"cursor": self._unresolvable("cursor")},
+        )
+        with pytest.raises(RequestSpecError) as raised:
+            builder.for_page({"cursor": "page-two"})
+        assert "pagination loop supplied it for this page" in str(raised.value)
+
+    def test_a_body_paginated_page_is_held_to_the_same_rule(self) -> None:
+        builder = RequestBuilder(
+            self._cursor_table(),
+            raw_body={"page": {"after": self._unresolvable("cursor")}},
+            resolver=_resolver(),
+            endpoint="/items",
+        )
+        assert builder.for_page({}).body == {"page": {}}
+        with pytest.raises(RequestSpecError, match="wire route of"):
+            builder.for_page({"cursor": "page-two"})
+
+    def test_a_loop_supplied_value_that_does_reach_the_wire_is_sent(self) -> None:
+        builder = RequestBuilder(
+            self._cursor_table(),
+            raw_body=None,
+            resolver=_resolver(),
+            endpoint="/items",
+            declared_query={"cursor": {"from_param": "cursor"}},
+        )
+        assert builder.for_page({"cursor": "page-two"}).query == {"cursor": "page-two"}
+
     def test_a_write_body_field_that_drops_a_required_param_is_refused(self) -> None:
-        with pytest.raises(RequestSpecError, match="wire route of required"):
+        with pytest.raises(RequestSpecError, match="wire route of"):
             build_write_body(
                 body_spec={"tenantId": self._unresolvable("tenant")},
                 endpoint="/items",
                 params={"tenant": "acme"},
                 resolver=_resolver(),
                 record={"id": 1},
-                required=frozenset({"tenant"}),
+                must_reach={"tenant": REQUIRED_BY_DECLARATION},
             )
 
     def test_a_write_body_that_carries_the_required_param_is_built(self) -> None:
@@ -622,7 +697,7 @@ class TestARequiredParamMustReachTheWire:
             params={"tenant": "acme"},
             resolver=_resolver(),
             record={"id": 1},
-            required=frozenset({"tenant"}),
+            must_reach={"tenant": REQUIRED_BY_DECLARATION},
         ) == {"tenantId": "acme", "item": {"id": 1}}
 
 

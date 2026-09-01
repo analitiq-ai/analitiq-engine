@@ -97,10 +97,11 @@ class StreamWritePlan:
     #: The declared write params' resolved values, feeding the body's
     #: ``from_param`` bindings.
     params: dict[str, Any] = field(default_factory=dict)
-    #: The write params the endpoint declared ``required``. Travels with the
-    #: values because the body is built per record, and the body is the one
-    #: wire route whose dropped field is only nameable from the declaration.
-    required_params: frozenset[str] = frozenset()
+    #: The write params whose value has to land in the request, mapped to
+    #: why -- :meth:`ParamTable.must_reach`. Travels with the values because
+    #: the body is built per record, and the body is the one wire route whose
+    #: dropped field is only nameable from the declaration.
+    must_reach_params: dict[str, str] = field(default_factory=dict)
     #: ``batching.max_records`` -- the provider's per-request maximum.
     #: ``None`` means the endpoint declares no batching block, so every
     #: record is sent as its own request.
@@ -557,7 +558,7 @@ def build_write_plan(
             body_spec=request.body,
             content_type=request.content_type,
             params=table.values,
-            required_params=table.required,
+            must_reach_params=table.must_reach(table.values),
             write_mode_key=mode_key,
             response=mode_block.response,
             conflict_keys=list(mode_block.conflict_keys or []),
@@ -599,7 +600,8 @@ def build_write_plan(
             # read role does, so a key that is its only wire route cannot be
             # dropped here either: a tenant or routing value the endpoint
             # declared must-send, gone from every request in the batch.
-            required=table.required,
+            # The plan carries the same map to the per-record body build.
+            must_reach=plan.must_reach_params,
         )
     except RequestSpecError as err:
         # An unbound placeholder, a param default reading a scope nothing

@@ -484,7 +484,7 @@ class TestDeclaredWriteParamConstraints:
             resolver=_resolver(),
         )
         assert isinstance(outcome, str)
-        assert "wire route of required" in outcome
+        assert "wire route of" in outcome
 
     def test_an_optional_write_params_header_is_still_omitted(self) -> None:
         doc = _document(

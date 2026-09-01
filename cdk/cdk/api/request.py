@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from functools import partial
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Final
 from urllib.parse import quote
 
 from analitiq.contracts.endpoints import (
@@ -165,6 +165,37 @@ class ParamTable:
     #: to one -- see :func:`_controlled_placeholder_problem` for why both
     #: loops are the same defect there.
     controlled_by: dict[str, str] = field(default_factory=dict)
+
+    def must_reach(self, values: Mapping[str, Any]) -> dict[str, str]:
+        """Every param whose value has to land in the request built from *values*.
+
+        Two rules, and the second is why this is asked of a value table rather
+        than read off the declarations once.
+
+        The author's, first: a param declared ``required`` must reach the
+        provider, or the narrowing it carries is absent from a request
+        answered in full.
+
+        The loop's, second: a param a LOOP owns must reach the provider on
+        every page the loop actually set it for. Its absence is the loop's to
+        decide -- page one of a cursor scheme carries no cursor, which is why
+        such a param is exempt from the author's rule -- but once a value is
+        in flight the exemption is spent. A binding that drops the cursor the
+        strategy just computed sends the request that fetched the page before
+        it, and every page after that: the strategy keeps advancing its own
+        token, the provider keeps answering page one, and ``stop_when`` keeps
+        seeing a next token. That loop does not end and every record in it is
+        a duplicate.
+
+        The same line :class:`~cdk.api.param_constraints.ParamChecker` draws
+        for the same reason -- absence is the loop's, a value is the
+        declaration's -- so the two answers cannot disagree about a page.
+        """
+        reasons = {name: REQUIRED_BY_DECLARATION for name in self.required}
+        for name, loop in self.controlled_by.items():
+            if values.get(name) is not None:
+                reasons[name] = SUPPLIED_BY_LOOP.format(loop=loop)
+        return reasons
 
     @classmethod
     def for_read(
@@ -354,34 +385,47 @@ class ParamTable:
         return table
 
 
-def _lost_required_problem(
-    declared: Any, *, required: frozenset[str], where: str, endpoint: str
-) -> str | None:
-    """Why dropping this declared expression loses a required narrowing.
+#: Why a param's value must reach the wire, keyed by what put it in flight.
+#: Both are one sentence in the refusal, because an author reading it has to
+#: know which of the two rules they broke: theirs, or the loop's.
+REQUIRED_BY_DECLARATION: Final[str] = (
+    "the endpoint declares it required, so the narrowing it carries would be "
+    "absent from a request the provider answers in full"
+)
+SUPPLIED_BY_LOOP: Final[str] = (
+    "the {loop} loop supplied it for this page, so the request would go out "
+    "identical to the one before it and the read would never advance"
+)
 
-    ``None`` when the expression routes no required param, so dropping it is
-    the per-request omission policy working as the contract describes it.
+
+def _lost_required_problem(
+    declared: Any, *, must_reach: Mapping[str, str], where: str, endpoint: str
+) -> str | None:
+    """Why dropping this declared expression breaks the request it is part of.
+
+    ``None`` when the expression routes no param that must reach the wire, so
+    dropping it is the per-request omission policy working as the contract
+    describes it.
 
     The wording lives here because three sites ask the same question of the
     same declaration -- a query key, a header, and a field of a declared body
     -- and an author reading the refusal has one defect to fix whichever of
     them found it.
     """
-    lost = sorted(collect_from_param_names(declared) & required)
+    lost = sorted(collect_from_param_names(declared) & set(must_reach))
     if not lost:
         return None
+    reasons = "; ".join(f"{name!r}: {must_reach[name]}" for name in lost)
     return (
-        f"{where} for endpoint {endpoint!r} is the wire route of required "
-        f"param(s) {lost}, and its expression resolved to nothing -- so it is "
-        f"not sent and the narrowing those params declare is absent from a "
-        f"request the provider answers in full"
+        f"{where} for endpoint {endpoint!r} is the wire route of {lost}, and "
+        f"its expression resolved to nothing -- so it is not sent. {reasons}"
     )
 
 
 def refuse_dropped_required(
     body_spec: Any,
     *,
-    required: frozenset[str],
+    must_reach: Mapping[str, str],
     params: Mapping[str, Any],
     resolver: Resolver,
     endpoint: str,
@@ -407,14 +451,14 @@ def refuse_dropped_required(
     the one worth naming. Plain objects and arrays are structure, and are
     walked through.
     """
-    if not required:
+    if not must_reach:
         return
 
     def walk(node: Any, where: str) -> None:
         node = authored_json(node)
         if Resolver.is_expression_node(node):
             problem = _lost_required_problem(
-                node, required=required, where=where, endpoint=endpoint
+                node, must_reach=must_reach, where=where, endpoint=endpoint
             )
             if problem is None:
                 return
@@ -469,7 +513,7 @@ def bind_request_values(
     block: str,
     endpoint: str,
     styles: Mapping[str, QueryStyle] = MappingProxyType({}),
-    required: frozenset[str] = frozenset(),
+    must_reach: Mapping[str, str] = MappingProxyType({}),
 ) -> dict[str, Any]:
     """Resolve one declared request map (headers / query / path_params).
 
@@ -540,7 +584,7 @@ def bind_request_values(
             # rule reads the declaration rather than applying to both.
             problem = _lost_required_problem(
                 value,
-                required=required,
+                must_reach=must_reach,
                 where=f"request.{block}[{name!r}]",
                 endpoint=endpoint,
             )
@@ -1130,7 +1174,7 @@ def bind_query_and_headers(
     resolver: Resolver,
     endpoint: str,
     query_styles: Mapping[str, QueryStyle] = MappingProxyType({}),
-    required: frozenset[str] = frozenset(),
+    must_reach: Mapping[str, str] = MappingProxyType({}),
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Build the query string and the header map one request sends.
 
@@ -1158,7 +1202,7 @@ def bind_query_and_headers(
                 resolver=resolver,
                 block="headers",
                 endpoint=endpoint,
-                required=required,
+                must_reach=must_reach,
             ).items()
         }
     query = bind_request_values(
@@ -1168,7 +1212,7 @@ def bind_query_and_headers(
         block="query",
         endpoint=endpoint,
         styles=query_styles,
-        required=required,
+        must_reach=must_reach,
     )
     return query, headers
 
@@ -1271,6 +1315,7 @@ class RequestBuilder:
         # of a cursor scheme carries no cursor. Presence is answered once, by
         # the caller holding everything a run can produce.
         self._table.checker.check_values(binding_params)
+        must_reach = self._table.must_reach(binding_params)
         query, headers = bind_query_and_headers(
             params=binding_params,
             # A continuation replaces the whole request, query string
@@ -1280,7 +1325,7 @@ class RequestBuilder:
             resolver=self._resolver,
             endpoint=self._endpoint,
             query_styles=self._query_styles,
-            required=self._table.required,
+            must_reach=must_reach,
         )
         if self._raw_body is None or not sends_declared_body:
             return PreparedRequest(query=query, headers=headers, body=None)
@@ -1299,7 +1344,7 @@ class RequestBuilder:
             # is indistinguishable from one the author never wrote.
             refuse_dropped_required(
                 self._raw_body,
-                required=self._table.required,
+                must_reach=must_reach,
                 params=body_params,
                 resolver=self._resolver,
                 endpoint=self._endpoint,
@@ -1324,7 +1369,7 @@ def build_write_body(
     resolver: Resolver,
     record: dict[str, Any] | None = None,
     records: list[dict[str, Any]] | None = None,
-    required: frozenset[str] = frozenset(),
+    must_reach: Mapping[str, str] = MappingProxyType({}),
 ) -> Any:
     """Build one write request body for the in-flight record(s).
 
@@ -1347,7 +1392,7 @@ def build_write_body(
     with request_spec_errors(f"request.body for endpoint {endpoint!r}"):
         refuse_dropped_required(
             body_spec,
-            required=required,
+            must_reach=must_reach,
             params=params,
             resolver=resolver,
             endpoint=endpoint,

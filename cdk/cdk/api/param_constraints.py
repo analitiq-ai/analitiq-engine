@@ -79,6 +79,15 @@ _KEYWORDS: dict[str, str] = {
 #: :func:`_bounds_fragment`.
 _ORDERING_KEYWORDS: frozenset[str] = frozenset({"minimum", "maximum"})
 
+#: Every declared pair that is a floor and a ceiling over the same quantity.
+#: Each admits an inversion no value can be inside, and JSON Schema will not
+#: say so: it judges one keyword at a time. See :func:`_unusable_bound`.
+_INTERVALS: Final[tuple[tuple[str, str], ...]] = (
+    ("minimum", "maximum"),
+    ("minLength", "maxLength"),
+    ("minItems", "maxItems"),
+)
+
 #: Equality, like ordering, compares rather than describes -- and compares
 #: numbers, so it joins the exact-decimal fragment for the same reason
 #: :func:`_bounds_fragment` exists.
@@ -389,10 +398,13 @@ def _unusable_bound(param: Param) -> str | None:
     raises ``InvalidOperation`` out of the validator, a builtin escaping a
     module whose whole error vocabulary is ``RequestSpecError``.
 
-    An INVERTED interval -- ``minimum: 10, maximum: 1``. ``check_schema``
-    accepts it because JSON Schema validates each keyword's shape, never
-    whether two of them can hold at once, so nothing else in this module
-    would ever say so. Left to the values, it surfaces as a refusal of
+    An INVERTED interval -- ``minimum: 10, maximum: 1``, and the same
+    inversion of the two lengths or the two item counts. ``check_schema``
+    accepts each because JSON Schema validates one keyword's shape at a
+    time, never whether two of them can hold at once, so nothing else in
+    this module would ever say so. All three pairs, because an author who
+    can write one can write the others and the answer must not depend on
+    which pair they chose. Left to the values, it surfaces as a refusal of
     whatever the run happened to resolve, on whichever page first carried
     one: a param a loop owns is absent on page one, so the read commits that
     page and dies on page two, reporting a value the author did not write
@@ -406,12 +418,14 @@ def _unusable_bound(param: Param) -> str | None:
                 f"{keyword}={bound!r}, which orders against nothing: no value "
                 f"could satisfy it and none could fail it"
             )
-    low, high = declared.get("minimum"), declared.get("maximum")
-    if low is not None and high is not None and low > high:
-        return (
-            f"minimum={low!r} above maximum={high!r}, an interval no value is "
-            f"inside: every value this param could carry would be refused"
-        )
+    for floor, ceiling in _INTERVALS:
+        low, high = declared.get(floor), declared.get(ceiling)
+        if low is not None and high is not None and low > high:
+            return (
+                f"{floor}={low!r} above {ceiling}={high!r}, an interval no "
+                f"value is inside: every value this param could carry would "
+                f"be refused"
+            )
     return None
 
 
