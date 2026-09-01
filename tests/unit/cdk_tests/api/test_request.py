@@ -365,6 +365,31 @@ class TestReadParamTable:
                 filters=_filters({"field": "ids", "operator": "in", "value": []}),
             )
 
+    def test_an_empty_exclusion_selects_what_an_omitted_filter_selects(self) -> None:
+        # `not_in []` excludes no records, which is the whole collection --
+        # exactly what the provider answers for a filter that is not sent. The
+        # records are the same either way, so refusing it would fail a document
+        # that behaves as written. The operator is what separates this from
+        # `in []`, so it is what the rule reads.
+        table = ParamTable.for_read(
+            _params(
+                {
+                    "ids": {
+                        "in": "query",
+                        "type": "array",
+                        "required": False,
+                        "style": "form",
+                        "explode": True,
+                        "operators": ["in", "not_in"],
+                    }
+                }
+            ),
+            _resolver(),
+            endpoint="/items",
+            filters=_filters({"field": "ids", "operator": "not_in", "value": []}),
+        )
+        assert table.values["ids"] == []
+
     def test_a_filter_on_an_empty_collection_that_still_sends_passes(self) -> None:
         # The same empty array under `explode: false` serializes to `ids=`,
         # which IS a pair -- so it reaches the provider and the refusal above

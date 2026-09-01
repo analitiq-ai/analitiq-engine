@@ -258,12 +258,19 @@ class ParamTable:
         and the read narrowed by half of what the stream declared.
 
         So is a value that serializes to nothing, for the same reason one
-        step further on. ``in []`` selects no records, and under an exploded
-        ``form`` array it produces no query pairs at all -- so the request
-        goes out carrying no filter and the provider answers everything, the
-        exact inversion of what the stream asked for. Which shapes vanish is
-        the serializer's answer, not a list kept here: the same empty array
-        under ``explode: false`` sends ``ids=`` and does reach.
+        step further on -- but only where sending nothing means something
+        else. ``in []`` selects no records, and under an exploded ``form``
+        array it produces no query pairs at all, so the request goes out
+        carrying no filter and the provider answers everything: the exact
+        inversion of what the stream asked for, and there is no wire spelling
+        of "match nothing" to send instead. ``not_in []`` excludes no
+        records, which is the whole collection, which is what an omitted
+        filter returns -- the same records either way, so refusing it would
+        fail a document that behaves exactly as written. The operator is
+        what separates the two, so it is what the rule reads. Which shapes
+        vanish is still the serializer's answer, not a list kept here: the
+        same empty array under ``explode: false`` sends ``ids=`` and does
+        reach.
 
         ``filters`` are the stream document's contract ``Filter`` models,
         so the field a filter names is a required attribute rather than a
@@ -336,8 +343,10 @@ class ParamTable:
                 )
             seen[target] = declared_filter.operator
             value = declared_filter.value
-            if value is not None and not reaches_the_wire(
-                value, declared_style(declaration)
+            if (
+                value is not None
+                and declared_filter.operator not in _OMISSION_IS_THE_SAME_SELECTION
+                and not reaches_the_wire(value, declared_style(declaration))
             ):
                 raise RequestSpecError(
                     f"the stream filters on {target!r} with operator "
@@ -383,6 +392,17 @@ class ParamTable:
             required=_required_names(declared),
         )
         return table
+
+
+#: The filter operators whose value, when it serializes to nothing, selects
+#: the same records as sending no filter at all.
+#:
+#: Only ``not_in``, and only because of what an EMPTY exclusion means: exclude
+#: nothing, which is the whole collection, which is what the provider answers
+#: for an absent filter. Every other operator inverts under omission --
+#: ``in []`` asks for no records and gets all of them -- so a value that
+#: vanishes is a stream reading the opposite of what it declared.
+_OMISSION_IS_THE_SAME_SELECTION: Final[frozenset[str]] = frozenset({"not_in"})
 
 
 #: Why a param's value must reach the wire, keyed by what put it in flight.
