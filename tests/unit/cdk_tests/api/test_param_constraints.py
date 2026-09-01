@@ -12,7 +12,12 @@ than a request that quietly widens the read.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+import textwrap
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -314,6 +319,22 @@ class TestABoundMustBeAbleToOrder:
             {"x": 50}
         )
 
+    def test_an_inverted_interval_is_refused_at_build_time(self) -> None:
+        """`check_schema` accepts `minimum: 10, maximum: 1` -- it validates each
+        keyword's shape, never whether two of them can hold at once. Left to the
+        values it surfaces on whichever page first carries one, which for a param
+        a loop owns is page two, after page one has committed.
+        """
+        with pytest.raises(RequestSpecError, match="an interval no value is inside"):
+            _checker(x=_param(type="number", minimum=10, maximum=1))
+
+    def test_a_single_point_interval_is_usable(self) -> None:
+        # `minimum == maximum` admits exactly one value, which is a narrowing
+        # an author may legitimately write.
+        checker = _checker(x=_param(type="number", minimum=5, maximum=5))
+        checker.check_values({"x": 5})
+        assert "maximum" in _refusal(checker, {"x": 6})
+
 
 class TestAValueIsNeverLogged:
     """A refusal says which param and what was declared, never what arrived.
@@ -435,6 +456,58 @@ class TestTheEnforcedFormatSetIsFixed:
         from cdk.api.param_constraints import _ENFORCED_FORMATS, _FORMAT_CHECKER
 
         assert sorted(_FORMAT_CHECKER.checkers) == sorted(_ENFORCED_FORMATS)
+
+    def test_every_enforced_format_has_a_checker_in_a_bare_install(self) -> None:
+        """The declared set must hold in the install the extras actually produce.
+
+        `FormatChecker(formats=...)` indexes the registry eagerly, so naming a
+        format whose checker jsonschema registers only when an optional package
+        is present is not a weaker check -- it is a `KeyError` while importing
+        this module, and `analitiq-cdk[api]` that cannot be imported at all.
+        The developer venv hides it: something else pulls `jsonpointer` and
+        `idna` in, and the same wheel then fails in a connector's.
+
+        Run in a subprocess with those packages blocked, because jsonschema
+        registers its checkers at import time and this process has already
+        imported it.
+        """
+        blocked = (
+            "jsonpointer",
+            "idna",
+            "rfc3339_validator",
+            "rfc3987",
+            "uri_template",
+            "webcolors",
+            "isoduration",
+            "fqdn",
+        )
+        script = textwrap.dedent(
+            f"""
+            import sys
+
+            class Blocker:
+                def find_spec(self, name, path=None, target=None):
+                    if name.split(".")[0] in {blocked!r}:
+                        raise ImportError(name)
+                    return None
+
+            sys.meta_path.insert(0, Blocker())
+            from cdk.api.param_constraints import _ENFORCED_FORMATS, _FORMAT_CHECKER
+
+            assert sorted(_FORMAT_CHECKER.checkers) == sorted(_ENFORCED_FORMATS), (
+                sorted(_FORMAT_CHECKER.checkers)
+            )
+            """
+        )
+        completed = subprocess.run(  # noqa: S603
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=Path(__file__).resolve().parents[4],
+            env={**os.environ, "PYTHONPATH": "cdk"},
+        )
+        assert completed.returncode == 0, completed.stderr
 
     def test_an_enforced_format_refuses_a_bad_value(self) -> None:
         assert "format='date'" in _refusal(

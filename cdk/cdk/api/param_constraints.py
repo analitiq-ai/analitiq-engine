@@ -103,19 +103,26 @@ _SIZE_KEYWORDS: frozenset[str] = frozenset(
 #: (``date-time``, ``uri``) register theirs only when an optional package is
 #: installed. A connector pulling ``rfc3339-validator`` in for its own reasons
 #: would then have ``date-time`` enforced inside its worker and nowhere else,
-#: so the same document would pass in one consumer and fail in another. These
-#: are the formats jsonschema can check with no optional dependency, which is
-#: what every consumer of this CDK has.
+#: so the same document would pass in one consumer and fail in another.
+#:
+#: So the set is exactly the formats jsonschema registers with NO optional
+#: package, which is what every consumer of this CDK has. Naming a
+#: conditionally-registered one here would not merely make its enforcement
+#: depend on the environment: ``FormatChecker(formats=...)`` indexes the
+#: registry eagerly, so an absent checker is a ``KeyError`` raised while
+#: importing this module, and the whole ``api`` extra fails to import.
+#: ``date-time``, ``duration``, ``hostname``, ``idn-hostname``, ``iri``,
+#: ``json-pointer``, ``relative-json-pointer``, ``uri`` and ``uri-template``
+#: are the conditional ones (jsonschema registers each inside a
+#: ``with suppress(ImportError)`` block); a param declaring one of those is
+#: carried as documentation like any other unregistered name.
 _ENFORCED_FORMATS: Final[tuple[str, ...]] = (
     "date",
     "email",
     "idn-email",
-    "idn-hostname",
     "ipv4",
     "ipv6",
-    "json-pointer",
     "regex",
-    "relative-json-pointer",
     "time",
     "uuid",
 )
@@ -176,9 +183,7 @@ class ParamChecker:
             unusable = _unusable_bound(param)
             if unusable is not None:
                 raise RequestSpecError(
-                    f"param {name!r} for endpoint {endpoint!r} declares "
-                    f"{unusable}, which orders against nothing: no value could "
-                    f"satisfy it and none could fail it"
+                    f"param {name!r} for endpoint {endpoint!r} declares " f"{unusable}"
                 )
             fragment = _shape_fragment(param)
             bounds = _bounds_fragment(param)
@@ -370,24 +375,43 @@ def _as_json_value(value: Any) -> Any:
 
 
 def _unusable_bound(param: Param) -> str | None:
-    """Return the declared bound that cannot order anything, or ``None``.
+    """Return why this param's declared bounds cannot judge a value, or ``None``.
 
-    ``json.loads`` accepts the non-standard ``NaN`` and ``Infinity``
-    literals and the contract types both bounds as a plain float, so
-    ``"minimum": NaN`` is a document that parses. It compiles as a schema
-    too -- it is a number -- and then every comparison against it raises
-    ``InvalidOperation`` out of the validator, a builtin escaping a module
-    whose whole error vocabulary is ``RequestSpecError``.
+    Two document defects, both facts about the declaration alone and so both
+    answered once per operation rather than per value. Each is true before
+    any request is built, and the author is the only one who can act on
+    either.
 
-    Refused here, once per operation, rather than per value: it is a fact
-    about the document, true before any request is built, and the author is
-    the only one who can act on it.
+    A NON-FINITE bound. ``json.loads`` accepts the non-standard ``NaN`` and
+    ``Infinity`` literals and the contract types both bounds as a plain
+    float, so ``"minimum": NaN`` is a document that parses. It compiles as a
+    schema too -- it is a number -- and then every comparison against it
+    raises ``InvalidOperation`` out of the validator, a builtin escaping a
+    module whose whole error vocabulary is ``RequestSpecError``.
+
+    An INVERTED interval -- ``minimum: 10, maximum: 1``. ``check_schema``
+    accepts it because JSON Schema validates each keyword's shape, never
+    whether two of them can hold at once, so nothing else in this module
+    would ever say so. Left to the values, it surfaces as a refusal of
+    whatever the run happened to resolve, on whichever page first carried
+    one: a param a loop owns is absent on page one, so the read commits that
+    page and dies on page two, reporting a value the author did not write
+    rather than the interval they did.
     """
     declared = _declared_keywords(param)
     for keyword in _ORDERING_KEYWORDS:
         bound = declared.get(keyword)
         if bound is not None and not math.isfinite(bound):
-            return f"{keyword}={bound!r}"
+            return (
+                f"{keyword}={bound!r}, which orders against nothing: no value "
+                f"could satisfy it and none could fail it"
+            )
+    low, high = declared.get("minimum"), declared.get("maximum")
+    if low is not None and high is not None and low > high:
+        return (
+            f"minimum={low!r} above maximum={high!r}, an interval no value is "
+            f"inside: every value this param could carry would be refused"
+        )
     return None
 
 

@@ -449,6 +449,71 @@ class TestDeclaredWriteParamConstraints:
         # binding resolved, not the string the header carries.
         assert outcome.headers["X-Batch"] == "50"
 
+    def test_a_header_that_drops_a_required_write_param_is_refused(self) -> None:
+        """The value resolves, the BINDING does not.
+
+        A required param whose default resolves cleanly still reaches the
+        provider only through the expression that carries it, and an
+        expression resolving to nothing drops its key. On the read role that
+        is a narrowing lost; here it is every record in the stream sent
+        without the tenant or routing value the endpoint declared must-send,
+        each answered 2xx by a provider that read it as somebody else's.
+        """
+        doc = _document(
+            headers={
+                "X-Tenant": {
+                    "function": "lookup",
+                    "input": {"from_param": "tenant"},
+                    "map": {"someone-else": "x"},
+                }
+            },
+            params={
+                "tenant": {
+                    "in": "header",
+                    "type": "string",
+                    "required": True,
+                    "default": {"literal": "acme"},
+                }
+            },
+        )
+        outcome = build_write_plan(
+            doc,
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
+        )
+        assert isinstance(outcome, str)
+        assert "wire route of required" in outcome
+
+    def test_an_optional_write_params_header_is_still_omitted(self) -> None:
+        doc = _document(
+            headers={
+                "X-Tenant": {
+                    "function": "lookup",
+                    "input": {"from_param": "tenant"},
+                    "map": {"someone-else": "x"},
+                }
+            },
+            params={
+                "tenant": {
+                    "in": "header",
+                    "type": "string",
+                    "required": False,
+                    "default": {"literal": "acme"},
+                }
+            },
+        )
+        outcome = build_write_plan(
+            doc,
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
+        )
+        assert not isinstance(outcome, str)
+        assert "X-Tenant" not in outcome.headers
+
 
 class TestTheRequestTheStreamWillActuallySend:
     """The write path binds the same three maps the read path does.

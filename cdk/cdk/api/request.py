@@ -63,6 +63,7 @@ from analitiq.contracts.endpoints import (
 )
 from analitiq.contracts.stream import Filter
 
+from ..json_utils import authored_json
 from ..request_binding import (
     bind_param_refs,
     bind_record_inputs,
@@ -97,6 +98,7 @@ __all__ = [
     "endpoint_transport_refs",
     "param_bindings",
     "path_placeholders",
+    "refuse_dropped_required",
     "request_block_problem",
     "request_supplies",
     "substitute_path",
@@ -347,8 +349,86 @@ class ParamTable:
             values=values,
             controlled_by=_controlled_by(declared),
             checker=ParamChecker.for_params(declared, endpoint=endpoint),
+            required=_required_names(declared),
         )
         return table
+
+
+def _lost_required_problem(
+    declared: Any, *, required: frozenset[str], where: str, endpoint: str
+) -> str | None:
+    """Why dropping this declared expression loses a required narrowing.
+
+    ``None`` when the expression routes no required param, so dropping it is
+    the per-request omission policy working as the contract describes it.
+
+    The wording lives here because three sites ask the same question of the
+    same declaration -- a query key, a header, and a field of a declared body
+    -- and an author reading the refusal has one defect to fix whichever of
+    them found it.
+    """
+    lost = sorted(collect_from_param_names(declared) & required)
+    if not lost:
+        return None
+    return (
+        f"{where} for endpoint {endpoint!r} is the wire route of required "
+        f"param(s) {lost}, and its expression resolved to nothing -- so it is "
+        f"not sent and the narrowing those params declare is absent from a "
+        f"request the provider answers in full"
+    )
+
+
+def refuse_dropped_required(
+    body_spec: Any,
+    *,
+    required: frozenset[str],
+    params: Mapping[str, Any],
+    resolver: Resolver,
+    endpoint: str,
+) -> None:
+    """Refuse a declared body that drops the wire route of a required param.
+
+    The body is the third route from a param to the provider, and until this
+    it was the unguarded one. ``resolve_for_request`` omits a field whose
+    expression does not resolve -- the contract's per-request policy -- so a
+    ``{from_param}`` wrapped in a function that cannot resolve leaves the
+    field out of a body that is otherwise well formed. On a read that is the
+    declared narrowing gone from a request the provider answers in full; on a
+    write it is every record sent without the tenant or routing value the
+    endpoint declared it must carry. Both are silent, and both are the defect
+    the query and header binder already refuses.
+
+    Walks the DECLARED spec rather than comparing bodies before and after,
+    because only the declaration says which param a missing field was the
+    route for -- the resolved body no longer has the field to ask about.
+
+    The walk stops at the outermost expression node: an expression is
+    resolved as a whole, so that node is the field that would be dropped and
+    the one worth naming. Plain objects and arrays are structure, and are
+    walked through.
+    """
+    if not required:
+        return
+
+    def walk(node: Any, where: str) -> None:
+        node = authored_json(node)
+        if Resolver.is_expression_node(node):
+            problem = _lost_required_problem(
+                node, required=required, where=where, endpoint=endpoint
+            )
+            if problem is None:
+                return
+            if resolver.resolve_for_request(bind_param_refs(node, params)) is None:
+                raise RequestSpecError(problem)
+            return
+        if isinstance(node, Mapping):
+            for key, value in node.items():
+                walk(value, f"{where}[{key!r}]")
+        elif isinstance(node, list):
+            for index, item in enumerate(node):
+                walk(item, f"{where}[{index}]")
+
+    walk(body_spec, "request.body")
 
 
 def _required_names(declared: Mapping[str, Param]) -> frozenset[str]:
@@ -458,15 +538,14 @@ def bind_request_values(
             # from a request that then answers the full collection. Omission
             # is right for an optional binding and wrong for this one, so the
             # rule reads the declaration rather than applying to both.
-            lost = sorted(collect_from_param_names(value) & required)
-            if lost:
-                raise RequestSpecError(
-                    f"request.{block}[{name!r}] for endpoint {endpoint!r} is "
-                    f"the wire route of required param(s) {lost}, and its "
-                    f"expression resolved to nothing -- so the key is not sent "
-                    f"and the narrowing those params declare is absent from a "
-                    f"request the provider answers in full"
-                )
+            problem = _lost_required_problem(
+                value,
+                required=required,
+                where=f"request.{block}[{name!r}]",
+                endpoint=endpoint,
+            )
+            if problem is not None:
+                raise RequestSpecError(problem)
             logger.warning(
                 "request.%s for endpoint %r: dropping %r -- its expression "
                 "resolved to nothing",
@@ -1206,13 +1285,26 @@ class RequestBuilder:
         if self._raw_body is None or not sends_declared_body:
             return PreparedRequest(query=query, headers=headers, body=None)
         with request_spec_errors(f"request.body for endpoint {self._endpoint!r}"):
-            bound = bind_param_refs(
+            # The same map the query and the headers bind from. A body
+            # binding a declared param is the same question as a query key
+            # binding one, so it cannot see a smaller set of values: reading
+            # only the page's own params left a POST read's body without the
+            # stream's filters for any caller whose strategy did not happen
+            # to carry the table forward.
+            body_params = {
+                name: _body_number(name, value, self._endpoint)
+                for name, value in binding_params.items()
+            }
+            # Before the body is resolved, because after it the dropped field
+            # is indistinguishable from one the author never wrote.
+            refuse_dropped_required(
                 self._raw_body,
-                {
-                    name: _body_number(name, value, self._endpoint)
-                    for name, value in page_params.items()
-                },
+                required=self._table.required,
+                params=body_params,
+                resolver=self._resolver,
+                endpoint=self._endpoint,
             )
+            bound = bind_param_refs(self._raw_body, body_params)
             body = _require_body(
                 self._resolver.resolve_for_request(bound), self._endpoint
             )
@@ -1232,6 +1324,7 @@ def build_write_body(
     resolver: Resolver,
     record: dict[str, Any] | None = None,
     records: list[dict[str, Any]] | None = None,
+    required: frozenset[str] = frozenset(),
 ) -> Any:
     """Build one write request body for the in-flight record(s).
 
@@ -1252,6 +1345,13 @@ def build_write_body(
     if body_spec is None:
         return record if record is not None else records
     with request_spec_errors(f"request.body for endpoint {endpoint!r}"):
+        refuse_dropped_required(
+            body_spec,
+            required=required,
+            params=params,
+            resolver=resolver,
+            endpoint=endpoint,
+        )
         bound = bind_param_refs(body_spec, dict(params))
         bound = bind_record_inputs(bound, record=record, records=records)
         return _require_body(resolver.resolve_for_request(bound), endpoint)

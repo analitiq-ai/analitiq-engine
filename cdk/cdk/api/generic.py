@@ -1432,6 +1432,7 @@ class GenericAPIConnector(BaseDestinationHandler):
             resolver=self._write_resolver,
             record=record,
             records=records,
+            required=plan.required_params,
         )
 
     async def _send(

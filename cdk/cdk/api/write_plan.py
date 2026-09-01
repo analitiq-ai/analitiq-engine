@@ -97,6 +97,10 @@ class StreamWritePlan:
     #: The declared write params' resolved values, feeding the body's
     #: ``from_param`` bindings.
     params: dict[str, Any] = field(default_factory=dict)
+    #: The write params the endpoint declared ``required``. Travels with the
+    #: values because the body is built per record, and the body is the one
+    #: wire route whose dropped field is only nameable from the declaration.
+    required_params: frozenset[str] = frozenset()
     #: ``batching.max_records`` -- the provider's per-request maximum.
     #: ``None`` means the endpoint declares no batching block, so every
     #: record is sent as its own request.
@@ -553,6 +557,7 @@ def build_write_plan(
             body_spec=request.body,
             content_type=request.content_type,
             params=table.values,
+            required_params=table.required,
             write_mode_key=mode_key,
             response=mode_block.response,
             conflict_keys=list(mode_block.conflict_keys or []),
@@ -590,6 +595,11 @@ def build_write_plan(
             resolver=resolver,
             endpoint=endpoint_id,
             query_styles=declared_query_styles(request.query, mode_block.params),
+            # The write role declares ``required`` for the same reason the
+            # read role does, so a key that is its only wire route cannot be
+            # dropped here either: a tenant or routing value the endpoint
+            # declared must-send, gone from every request in the batch.
+            required=table.required,
         )
     except RequestSpecError as err:
         # An unbound placeholder, a param default reading a scope nothing

@@ -489,6 +489,143 @@ class TestReadParamTable:
         assert "parameter omitted" in caplog.text
 
 
+class TestARequiredParamMustReachTheWire:
+    """A required param has three wire routes, and all three are guarded.
+
+    The value can be present and admissible in the table and still never
+    reach the provider: a query key, a header or a body field whose
+    expression wraps the ``{from_param}`` in something that cannot resolve
+    is DROPPED, which is the contract's per-request policy working as
+    written. For an optional binding that is right. For a required one it is
+    the declared narrowing disappearing from a request the provider answers
+    in full -- or, on the write role, every record in the batch sent without
+    the tenant or routing value the endpoint said it must carry.
+
+    The query and header routes are covered above and in the write plan's
+    own tests; these are the body, which resolves through a different call.
+    """
+
+    @staticmethod
+    def _read_table() -> ParamTable:
+        return ParamTable.for_read(
+            _params(
+                {
+                    "tenant": {
+                        "in": "query",
+                        "type": "string",
+                        "required": True,
+                        "default": {"literal": "acme"},
+                    }
+                }
+            ),
+            _resolver(),
+            endpoint="/items",
+        )
+
+    @staticmethod
+    def _unresolvable(param: str) -> dict[str, Any]:
+        """A binding that reads *param* and cannot resolve: a lookup whose map
+        has no entry for the value it is handed."""
+        return {
+            "function": "lookup",
+            "input": {"from_param": param},
+            "map": {"someone-else": "x"},
+        }
+
+    def test_a_read_body_field_that_drops_a_required_param_is_refused(self) -> None:
+        builder = RequestBuilder(
+            self._read_table(),
+            raw_body={"filter": {"tenantId": self._unresolvable("tenant")}},
+            resolver=_resolver(),
+            endpoint="/items",
+        )
+        with pytest.raises(RequestSpecError, match="wire route of required"):
+            builder.for_page({})
+
+    def test_the_refusal_names_the_body_field_that_would_be_dropped(self) -> None:
+        builder = RequestBuilder(
+            self._read_table(),
+            raw_body={"filter": {"tenantId": self._unresolvable("tenant")}},
+            resolver=_resolver(),
+            endpoint="/items",
+        )
+        with pytest.raises(RequestSpecError) as raised:
+            builder.for_page({})
+        assert "'filter'" in str(raised.value)
+        assert "'tenantId'" in str(raised.value)
+
+    def test_a_body_field_inside_an_array_is_reached(self) -> None:
+        builder = RequestBuilder(
+            self._read_table(),
+            raw_body={"filters": [{"eq": self._unresolvable("tenant")}]},
+            resolver=_resolver(),
+            endpoint="/items",
+        )
+        with pytest.raises(RequestSpecError, match="wire route of required"):
+            builder.for_page({})
+
+    def test_a_required_param_that_does_reach_the_body_is_sent(self) -> None:
+        builder = RequestBuilder(
+            self._read_table(),
+            raw_body={"filter": {"tenantId": {"from_param": "tenant"}}},
+            resolver=_resolver(),
+            endpoint="/items",
+        )
+        assert builder.for_page({}).body == {"filter": {"tenantId": "acme"}}
+
+    def test_an_optional_params_body_field_is_still_omitted(self) -> None:
+        # The omit-unresolved rule, untouched: only a REQUIRED param's route
+        # is refused, because only there is the omission a narrowing lost.
+        table = ParamTable.for_read(
+            _params(
+                {
+                    "tenant": {
+                        "in": "query",
+                        "type": "string",
+                        "required": False,
+                        "default": {"literal": "acme"},
+                    }
+                }
+            ),
+            _resolver(),
+            endpoint="/items",
+        )
+        builder = RequestBuilder(
+            table,
+            raw_body={
+                "keep": {"literal": 1},
+                "filter": {"tenantId": self._unresolvable("tenant")},
+            },
+            resolver=_resolver(),
+            endpoint="/items",
+        )
+        assert builder.for_page({}).body == {"keep": 1, "filter": {}}
+
+    def test_a_write_body_field_that_drops_a_required_param_is_refused(self) -> None:
+        with pytest.raises(RequestSpecError, match="wire route of required"):
+            build_write_body(
+                body_spec={"tenantId": self._unresolvable("tenant")},
+                endpoint="/items",
+                params={"tenant": "acme"},
+                resolver=_resolver(),
+                record={"id": 1},
+                required=frozenset({"tenant"}),
+            )
+
+    def test_a_write_body_that_carries_the_required_param_is_built(self) -> None:
+        assert build_write_body(
+            body_spec={
+                "tenantId": {"from_param": "tenant"},
+                "item": {"from_input": "record"},
+            },
+            endpoint="/items",
+            params={"tenant": "acme"},
+            resolver=_resolver(),
+            record={"id": 1},
+            required=frozenset({"tenant"}),
+        ) == {"tenantId": "acme", "item": {"id": 1}}
+
+
 class TestRequestBuilder:
     def test_a_declared_param_reaches_the_wire_only_through_its_binding(self) -> None:
         # The contract requires every declared param to be referenced by
