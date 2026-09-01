@@ -47,7 +47,7 @@ from analitiq.contracts.endpoints import Param
 from .exceptions import RequestSpecError
 from .query_style import QueryStyle, declared_style, reaches_the_wire
 
-__all__ = ["ParamChecker"]
+__all__ = ["ParamChecker", "required_of"]
 
 #: ``Param`` attribute -> the JSON Schema keyword it IS. The pairs differ only
 #: where the contract spells a keyword in snake_case under an alias, so this is
@@ -217,20 +217,7 @@ class ParamChecker:
                     f"No value of this param could be judged"
                 ) from err
             rules[name] = _ParamRule(
-                # A param a loop owns is exempt from ``required``, and only
-                # from that: the pagination and replication loops decide when
-                # their param is in flight, and page one of a cursor scheme
-                # legitimately carries no cursor. Holding the author's
-                # ``required`` against the engine's own loop would report a
-                # defect on page one of a correct document, and report it to
-                # the one person who cannot fix it.
-                #
-                # It stops at ``required`` on purpose. Absence is the loop's
-                # to decide; a VALUE is not -- once the loop has set one, the
-                # author's declaration is the only statement about what that
-                # param may carry, and a token breaking it is as wrong as any
-                # other value breaking it.
-                required=param.required and param.controlled_by is None,
+                required=required_of(param),
                 style=declared_style(param),
                 shape=jsonschema.Draft202012Validator(
                     fragment, format_checker=_FORMAT_CHECKER
@@ -272,7 +259,8 @@ class ParamChecker:
             [
                 _missing(name, endpoint=self._endpoint)
                 for name, rule in self._rules.items()
-                if rule.required and not _reaches_the_request(values.get(name), rule)
+                if rule.required
+                and not _reaches_the_request(values.get(name), rule.style)
             ]
             + self._unmet_in(values)
         )
@@ -294,6 +282,18 @@ class ParamChecker:
         and in the kit as in a run. :meth:`check` is presence and this.
         """
         _refuse(self._unmet_in(values))
+
+    def reaches_the_request(self, name: str, value: Any) -> bool:
+        """Whether *value* for the declared param *name* lands in the request.
+
+        The same question :meth:`check` asks of a required param, asked by
+        name so a caller holding a value the author did not declare required
+        -- one a loop set for this page -- gets the same answer from the same
+        place. A name this operation does not declare has no declared
+        spelling, so it is judged as the scalar it is.
+        """
+        rule = self._rules.get(name)
+        return _reaches_the_request(value, rule.style if rule is not None else None)
 
     def _unmet_in(self, values: Mapping[str, Any]) -> list[str]:
         """Every declared param whose present value breaks its own schema.
@@ -438,7 +438,30 @@ def _unusable_bound(param: Param) -> str | None:
     return None
 
 
-def _reaches_the_request(value: Any, rule: _ParamRule) -> bool:
+def required_of(param: Param) -> bool:
+    """Whether a missing value for this param is a defect the author declared.
+
+    A param a loop owns is exempt from ``required``, and only from that: the
+    pagination and replication loops decide when their param is in flight,
+    and page one of a cursor scheme legitimately carries no cursor. Holding
+    the author's ``required`` against the engine's own loop would report a
+    defect on page one of a correct document, and report it to the one person
+    who cannot fix it.
+
+    It stops at ``required`` on purpose. Absence is the loop's to decide; a
+    VALUE is not -- once the loop has set one, the author's declaration is the
+    only statement about what that param may carry, and a token breaking it is
+    as wrong as any other value breaking it.
+
+    Public, and the only statement of this rule. The request build asks the
+    same question when it decides which names a binding may not drop, and two
+    modules deriving one rule from ``required`` and ``controlled_by`` is how
+    they come to disagree about a page.
+    """
+    return param.required and param.controlled_by is None
+
+
+def _reaches_the_request(value: Any, style: QueryStyle | None) -> bool:
     """Whether this value actually lands in the request being built.
 
     ``None`` never does -- every binding omits a key carrying it. Nor does a
@@ -454,7 +477,7 @@ def _reaches_the_request(value: Any, rule: _ParamRule) -> bool:
     """
     if value is None:
         return False
-    return reaches_the_wire(value, rule.style)
+    return reaches_the_wire(value, style)
 
 
 def _declared_keywords(param: Param) -> dict[str, Any]:

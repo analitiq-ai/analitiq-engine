@@ -74,12 +74,10 @@ from ..resolver import REQUEST_CONNECTION_SUBTREES, Resolver, scope_paths
 from ..transport_factory import require_wire_safe_header
 from .body import unsupported_media_type
 from .exceptions import RequestSpecError, request_spec_errors
-from .param_constraints import ParamChecker
+from .param_constraints import ParamChecker, required_of
 from .query_style import (
     QueryStyle,
     declared_query_styles,
-    declared_style,
-    reaches_the_wire,
     serialize_query_value,
     unserializable_style_problem,
 )
@@ -159,11 +157,6 @@ class ParamTable:
     #: owns. Read by the binding walk: a key that resolves to nothing is
     #: dropped, unless it is the wire route of one of these.
     required: frozenset[str] = frozenset()
-    #: Each declared param's wire spelling, or ``None`` where it has one
-    #: value per key. Read to answer whether a value LANDS in the request --
-    #: a question the binding's success cannot answer, because an empty
-    #: collection binds fine and then serializes to no query pairs at all.
-    styles: dict[str, QueryStyle | None] = field(default_factory=dict)
     #: Every param a loop owns, mapped to the loop that owns it
     #: (``controlled_by``). Read by exactly one caller:
     #: :func:`request_block_problem`, which refuses a path placeholder bound
@@ -221,7 +214,7 @@ class ParamTable:
         """
         for name, loop in self.controlled_by.items():
             value = values.get(name)
-            if value is None or reaches_the_wire(value, self.styles.get(name)):
+            if value is None or self.checker.reaches_the_request(name, value):
                 continue
             return (
                 f"the {loop} loop supplied {value!r} for param {name!r}, which "
@@ -325,7 +318,6 @@ class ParamTable:
             values = resolve_param_defaults(uncontrolled, resolver)
         table = cls(
             values=values,
-            styles=_declared_styles(declared),
             controlled_by=_controlled_by(declared),
             checker=ParamChecker.for_params(declared, endpoint=endpoint),
             required=_required_names(declared),
@@ -381,7 +373,7 @@ class ParamTable:
             if (
                 value is not None
                 and declared_filter.operator not in _OMISSION_IS_THE_SAME_SELECTION
-                and not reaches_the_wire(value, declared_style(declaration))
+                and not table.checker.reaches_the_request(target, value)
             ):
                 raise RequestSpecError(
                     f"the stream filters on {target!r} with operator "
@@ -422,7 +414,6 @@ class ParamTable:
             values = resolve_param_defaults(declared, resolver, context="write param")
         table = cls(
             values=values,
-            styles=_declared_styles(declared),
             controlled_by=_controlled_by(declared),
             checker=ParamChecker.for_params(declared, endpoint=endpoint),
             required=_required_names(declared),
@@ -534,21 +525,12 @@ def refuse_dropped_required(
 def _required_names(declared: Mapping[str, Param]) -> frozenset[str]:
     """Return the declared params whose absence from the request is a defect.
 
-    A ``controlled_by`` param is left out for the reason it is exempt from
-    the presence check: the pagination and replication loops decide when
-    their param is in flight, so a binding of theirs resolving to nothing on
-    page one is the scheme working, not a narrowing lost.
+    Asked of :func:`~cdk.api.param_constraints.required_of`, which is where
+    the rule lives: the value checker draws the same line for the same reason
+    -- a loop decides when its param is in flight -- and a second derivation
+    here is how the two come to disagree about a page.
     """
-    return frozenset(
-        name
-        for name, decl in declared.items()
-        if decl.required and decl.controlled_by is None
-    )
-
-
-def _declared_styles(declared: Mapping[str, Param]) -> dict[str, QueryStyle | None]:
-    """Each declared param's wire spelling, or ``None`` where it has one."""
-    return {name: declared_style(decl) for name, decl in declared.items()}
+    return frozenset(name for name, decl in declared.items() if required_of(decl))
 
 
 def _controlled_by(declared: Mapping[str, Param]) -> dict[str, str]:
