@@ -533,7 +533,7 @@
     },
     "analitiq.contracts.endpoints.Param": {
       "controlled_by": [
-        "cdk.api.param_constraints:216",
+        "cdk.api.param_constraints:215",
         "cdk.api.request:247",
         "cdk.api.request:273",
         "cdk.api.request:445",
@@ -545,7 +545,7 @@
         "cdk.request_binding:74"
       ],
       "enum": [
-        "cdk.api.param_constraints:452"
+        "cdk.api.param_constraints:451"
       ],
       "explode": [
         "cdk.api.query_style:122",
@@ -554,28 +554,28 @@
         "cdk.api.query_style:192"
       ],
       "format": [
-        "cdk.api.param_constraints:452"
+        "cdk.api.param_constraints:451"
       ],
       "location": [
         "cdk.api.query_style:190"
       ],
       "max_items": [
-        "cdk.api.param_constraints:452"
+        "cdk.api.param_constraints:451"
       ],
       "max_length": [
-        "cdk.api.param_constraints:452"
+        "cdk.api.param_constraints:451"
       ],
       "maximum": [
-        "cdk.api.param_constraints:452"
+        "cdk.api.param_constraints:451"
       ],
       "min_items": [
-        "cdk.api.param_constraints:452"
+        "cdk.api.param_constraints:451"
       ],
       "min_length": [
-        "cdk.api.param_constraints:452"
+        "cdk.api.param_constraints:451"
       ],
       "minimum": [
-        "cdk.api.param_constraints:452"
+        "cdk.api.param_constraints:451"
       ],
       "operators": [
         "cdk.api.request:272",
@@ -583,10 +583,10 @@
         "cdk.api.request:292"
       ],
       "pattern": [
-        "cdk.api.param_constraints:452"
+        "cdk.api.param_constraints:451"
       ],
       "required": [
-        "cdk.api.param_constraints:216",
+        "cdk.api.param_constraints:215",
         "cdk.api.request:445"
       ],
       "style": [
@@ -596,7 +596,7 @@
         "cdk.api.query_style:192"
       ],
       "type": [
-        "cdk.api.param_constraints:452",
+        "cdk.api.param_constraints:451",
         "cdk.api.query_style:125",
         "cdk.api.query_style:192"
       ]
