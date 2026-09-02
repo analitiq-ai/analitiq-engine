@@ -1870,6 +1870,32 @@ class TestApiReadPathBreaks:
         )
         assert check_read_transport_selection(target) == []
 
+    def test_a_required_param_with_no_default_still_compiles_clean(
+        self, tmp_path: Path
+    ) -> None:
+        """Presence is not the kit's question.
+
+        Only a caller holding the connection, the secrets and the stream's
+        filters can tell a param that resolved to nothing from one this
+        build was never going to see -- and the kit's definition-only run
+        holds none of the three. It builds the same param table the live
+        read does and judges admissibility only, so a required param with
+        no default compiles clean here and is caught instead by the live
+        read (``check_required``, driven end to end in
+        ``tests/unit/cdk_tests/api/test_read_path.py``).
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["params"]["account"] = {
+                "in": "query",
+                "type": "string",
+                "required": True,
+            }
+            read["request"]["query"]["account"] = {"from_param": "account"}
+
+        target = self._broken(tmp_path, "widgets", bend)
+        assert check_api_read_compiles(target) == []
+
 
 class TestApiScriptedPageTakesTheDeclaredTypes:
     """The page a drive scripts carries the types the connector declared.
@@ -4039,6 +4065,11 @@ class TestApiRequestBlockBreaks:
             # controlled_by pagination, so it is absent when the read
             # compiles and that object once the loop has advanced.
             read["params"]["page_token"]["in"] = "body"
+            # Declared as the object the provider hands back, so this
+            # exercises the ENCODER rather than the param's own type rule:
+            # a token declared ``string`` and arriving as a mapping is
+            # refused one step earlier, which is a different check.
+            read["params"]["page_token"]["type"] = "object"
             read["request"]["query"].pop("pageToken", None)
             read["request"]["body"] = {"cursor": {"from_param": "page_token"}}
 

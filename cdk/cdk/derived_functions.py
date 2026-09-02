@@ -106,7 +106,7 @@ def base64_encode_function(node: Mapping[str, Any], resolver: Resolver) -> str:
     return _base64.b64encode(data).decode("ascii")
 
 
-def url_encode_function(node: Mapping[str, Any], resolver: Resolver) -> str:
+def url_encode_function(node: Mapping[str, Any], resolver: Resolver) -> str | None:
     """Percent-encode a value for use inside a URL component.
 
     The default ``safe`` characters are empty so every reserved character
@@ -118,10 +118,18 @@ def url_encode_function(node: Mapping[str, Any], resolver: Resolver) -> str:
     substitutes into ``request.path``, so encoding one here sends ``a%252Fb``
     where the provider expects ``a%2Fb``. A ``path_params`` binding that
     calls this is refused at plan time.
+
+    An unresolved input answers ``None``, not ``""``: ``None`` is how every
+    other expression says "nothing resolved", and it is what the per-request
+    omit rule reads to drop the key rather than send it empty. Answering
+    ``""`` made this function the one place an absent value became a
+    present, empty one -- and every reader downstream then had to treat
+    emptiness as absence, which would put ``minLength`` and ``minItems``
+    beyond reach.
     """
     value = resolver.resolve(_require(node, "input"))
     if value is None:
-        return ""
+        return None
     if not isinstance(value, (str, int, float, bool)):
         raise TypeError(
             f"`url_encode` input must resolve to a scalar, got "

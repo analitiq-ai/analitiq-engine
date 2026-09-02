@@ -40,6 +40,7 @@ from src.config import settings
 from src.config.schema_validator import EndpointDocument
 from src.engine.mapping import MappingDocument
 from src.models.state import ReplicationConfig as StateReplicationConfig
+from src.shared.logging_setup import resolve_level
 
 
 def with_effective_safety_window(stream_source: dict[str, Any]) -> dict[str, Any]:
@@ -343,18 +344,34 @@ class ErrorHandlingConfig:
 
 
 @dataclass(frozen=True)
+class LoggingConfig:
+    """Log level for the whole run.
+
+    The default is ``LOG_LEVEL`` -- the same level that governs everything
+    logged before the pipeline document is loaded -- so a pipeline declaring
+    no level leaves the process where it started.
+    """
+
+    log_level: str = field(default_factory=settings.log_level)
+
+    def __post_init__(self) -> None:
+        resolve_level(self.log_level)
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     """Pipeline runtime tuning.
 
-    ``batching`` / ``error_handling`` are typed sub-configs (closed, known
-    key sets) so consumers read attributes instead of ``dict.get(...)`` with
-    per-call-site defaults -- the defaults live once, in
+    ``batching`` / ``error_handling`` / ``logging`` are typed sub-configs
+    (closed, known key sets) so consumers read attributes instead of
+    ``dict.get(...)`` with per-call-site defaults -- the defaults live once, in
     :mod:`src.config.settings`.
     """
 
     batching: BatchingConfig = field(default_factory=BatchingConfig)
     error_handling: ErrorHandlingConfig = field(default_factory=ErrorHandlingConfig)
     buffer_size: int = field(default_factory=settings.default_buffer_size)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
 
     def __post_init__(self) -> None:
         if self.buffer_size <= 0:

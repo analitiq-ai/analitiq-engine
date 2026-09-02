@@ -412,7 +412,7 @@ capabilities are opt-in extras:
 | Extra | Pulls | Enables |
 |---|---|---|
 | `[arrow]` | `pyarrow` | Arrow columnar read/write batches |
-| `[api]` | `aiohttp`, `aiohttp-retry`, `orjson`, `python-dateutil` | the HTTP transport and the generic API connector |
+| `[api]` | `aiohttp`, `aiohttp-retry`, `orjson`, `python-dateutil`, `jsonschema[format-nongpl]` | the HTTP transport and the generic API connector. `jsonschema` enforces a declared param's value keywords with the same implementation the published schema is written for; `format-nongpl`, never `format`, because the latter pulls a GPLv3 dependency into an Apache-2.0 package |
 | `[streaming]` | `[arrow]` + `[api]` | both of the above |
 
 Imports are lazy at the package seams (`cdk/sql/__init__.py`,

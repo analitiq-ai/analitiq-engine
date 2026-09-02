@@ -18,6 +18,7 @@ import logging
 import sys
 
 from cdk.registry import build_registries
+from src.shared.logging_setup import apply_log_level
 from src.worker.bootstrap import WorkerBootstrap, read_bootstrap_from_stdin
 
 logger = logging.getLogger("src.worker")
@@ -97,6 +98,10 @@ def main() -> int:
         format="[worker] %(asctime)s %(name)s %(levelname)s %(message)s",
     )
     bootstrap = read_bootstrap_from_stdin()
+    # The worker's environment is stripped of LOG_LEVEL, so the level the run
+    # is executing at reaches it only here -- INFO covers the bootstrap read
+    # above, which is the only thing logged before this point.
+    apply_log_level(bootstrap.log_level)
     if bootstrap.role == "destination":
         return asyncio.run(_run_destination(bootstrap))
     return asyncio.run(_run_source(bootstrap))

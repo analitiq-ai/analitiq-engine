@@ -83,6 +83,19 @@ aiofiles = { version = "^23.0.0", optional = true }
 # Optional: S3 / S3-compatible object store for s3:// secret refs
 # (cdk.secrets.resolvers.scheme.SchemeSecretsResolver s3 scheme).
 boto3 = { version = "^1.26.0", optional = true }
+# Optional: a declared param's value keywords (enum, format, pattern, the
+# numeric bounds, the length and item bounds) are published as JSON Schema
+# at schemas.analitiq.ai and enforced with the reference implementation, so
+# a document that satisfies the published artifact cannot fail here.
+# ``format-nongpl``, never ``format``: the latter pulls rfc3987, which is
+# GPLv3, and this package ships to PyPI under Apache-2.0. The nongpl extra
+# carries the same maintained checkers under permissive licences, and its
+# set is what cdk.api.param_rules names explicitly.
+# Optional rather than core because jsonschema pulls attrs, referencing,
+# jsonschema-specifications and rpds-py, the last a compiled extension: a
+# pure-SQL connector never runs this check and must not carry a
+# platform-specific wheel for it.
+jsonschema = { version = "^4.20", extras = ["format-nongpl"], optional = true }
 # Optional: the connector conformance suite (cdk.conformance) a connector
 # repo runs in its own CI against the pinned CDK version (issue #391).
 pytest = { version = ">=7.0", optional = true }
@@ -96,7 +109,14 @@ arrow = ["pyarrow"]
 # GenericAPIConnector reads into Arrow batches and inherits the Arrow-based
 # destination handler -- `analitiq-cdk[api]` is what cdk.api's import error
 # tells the user to install, so it has to be enough to import it.
-api = ["aiohttp", "aiohttp-retry", "orjson", "python-dateutil", "pyarrow"]
+api = [
+    "aiohttp",
+    "aiohttp-retry",
+    "orjson",
+    "python-dateutil",
+    "pyarrow",
+    "jsonschema",
+]
 # The file / s3 destination family (cdk.file). pyarrow rides along because
 # GenericFileConnector inherits the Arrow-based destination handler --
 # `analitiq-cdk[file]` is what cdk.file's import error names, so it has to be
@@ -114,11 +134,17 @@ streaming = [
     "orjson",
     "python-dateutil",
     "aiofiles",
+    "jsonschema",
 ]
 # The connector conformance suite (issue #391): tier 1 contract tests and
 # the tier 2 live suite a connector repo runs in its own CI.
 # `pytest --pyargs cdk.conformance.tier1 --connector-dir .`
-conformance = ["pytest", "pyarrow"]
+# jsonschema rides along because the api tier drives an endpoint's read
+# through `cdk.api.request`, which judges a declared param's value keywords
+# with it. Without it the kit could not build a request at all -- and a kit
+# that judged params by different rules than the run would certify a
+# document the run then refuses.
+conformance = ["pytest", "pyarrow", "jsonschema"]
 
 [build-system]
 requires = ["poetry-core"]

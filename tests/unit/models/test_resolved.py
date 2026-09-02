@@ -14,6 +14,7 @@ from src.engine.pipeline_config_prep import _parse_replication, _parse_runtime_c
 from src.models.resolved import (
     BatchingConfig,
     ErrorHandlingConfig,
+    LoggingConfig,
     PipelineConnections,
     ReplicationConfig,
     ResolvedPipeline,
@@ -149,11 +150,22 @@ class TestErrorHandlingConfig:
             ErrorHandlingConfig(retry_delay_seconds=-1)
 
 
+class TestLoggingConfig:
+    def test_default_is_the_log_level_env_var(self, monkeypatch):
+        monkeypatch.setenv("LOG_LEVEL", "warning")
+        assert LoggingConfig().log_level == "WARNING"
+
+    def test_unknown_level_fails_loud(self):
+        with pytest.raises(ValueError, match="Unknown log level"):
+            LoggingConfig(log_level="DEGUB")
+
+
 class TestRuntimeConfig:
     def test_defaults_compose_sub_configs(self):
         cfg = RuntimeConfig()
         assert isinstance(cfg.batching, BatchingConfig)
         assert isinstance(cfg.error_handling, ErrorHandlingConfig)
+        assert isinstance(cfg.logging, LoggingConfig)
         assert cfg.buffer_size == 5000
 
     def test_rejects_non_positive_buffer(self):
@@ -241,6 +253,22 @@ class TestParseRuntimeConfig:
         assert cfg.batching.batch_size == 1000
         assert cfg.error_handling.strategy == "fail"
         assert cfg.buffer_size == 5000
+
+    def test_declared_log_level_supersedes_the_env_var(self, monkeypatch):
+        monkeypatch.setenv("LOG_LEVEL", "ERROR")
+        cfg = _parse_runtime_config(_runtime_block({"logging": {"log_level": "DEBUG"}}))
+        assert cfg.logging.log_level == "DEBUG"
+
+    def test_undeclared_log_level_falls_through_to_the_env_var(self, monkeypatch):
+        # The contract model injects its own "INFO" default for an omitted
+        # log_level; forwarding that would silence a run the operator set
+        # LOG_LEVEL=DEBUG for, so only an author-set value may be forwarded.
+        monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+        assert _parse_runtime_config(_runtime_block({})).logging.log_level == "DEBUG"
+        assert (
+            _parse_runtime_config(_runtime_block({"logging": {}})).logging.log_level
+            == "DEBUG"
+        )
 
     def test_partial_block_merges_with_defaults(self):
         cfg = _parse_runtime_config(_runtime_block({"batching": {"batch_size": 50}}))

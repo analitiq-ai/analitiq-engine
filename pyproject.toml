@@ -57,6 +57,15 @@ orjson = "^3.9.0"
 # Data processing and validation
 pydantic = "^2.0.0"
 
+# A declared param's JSON-Schema value keywords (enum, format, pattern, the
+# numeric bounds, the length and item bounds) are enforced by the reference
+# implementation, because that is the artifact published at
+# schemas.analitiq.ai and the one external authors write against.
+# ``format-nongpl``, never ``format``: the latter pulls rfc3987 (GPLv3).
+# Declared here rather than inherited transitively -- the CDK puts it behind
+# its [api] extra, and the engine always runs that surface.
+jsonschema = {version = "^4.20", extras = ["format-nongpl"]}
+
 # Published Analitiq contract packages (PyPI). The engine validates on-disk
 # artifacts against these offline, so it never fetches a schema at runtime:
 #   - contract-models: the single source of artifact shape
@@ -126,6 +135,10 @@ flake8 = "^6.0.0"
 # its type map, an internal surface that moves between releases. The
 # pre-commit hook pins the same version.
 mypy = "1.17.1"
+# jsonschema ships no inline types; the census refuses to render over a
+# build with errors, so the stubs are a dev requirement rather than a
+# per-import ignore.
+types-jsonschema = "^4.20"
 isort = "^5.12.0"
 pre-commit = "^3.3.0"
 sphinx = "^7.0.0"

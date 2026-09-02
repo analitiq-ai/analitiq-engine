@@ -534,7 +534,7 @@ def build_write_plan(
         if problem is not None:
             return f"response block on endpoint {endpoint_id!r}: {problem}"
     try:
-        table = ParamTable.for_write(mode_block.params, resolver)
+        table = ParamTable.for_write(mode_block.params, resolver, endpoint=endpoint_id)
         problem = request_block_problem(
             request,
             reserved_headers=reserved,

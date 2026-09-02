@@ -37,17 +37,26 @@ import os
 import sys
 from typing import Any
 
+from dotenv import load_dotenv
+
 from src.config import settings
 from src.models.resolved import (
     dump_endpoint_document,
     dump_endpoint_ref,
     write_conflict_keys,
 )
+from src.shared.logging_setup import apply_log_level, resolve_level
 
-# Set up logging
-log_level = settings.log_level()
+# Both run modes share one process entry point, so .env is read here, before
+# the first env lookup below: a variable that reaches the engine must reach the
+# destination server identically.
+load_dotenv()
+
+# LOG_LEVEL governs everything logged before a pipeline document exists; a
+# pipeline declaring runtime.logging.log_level supersedes it once its config
+# is loaded (apply_log_level, in both run modes).
 logging.basicConfig(
-    level=getattr(logging, log_level, logging.INFO),
+    level=resolve_level(settings.log_level()),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
@@ -173,6 +182,8 @@ async def run_destination_mode() -> None:
         resolved_endpoints,
         _connectors,
     ) = config_prep.create_config()
+
+    apply_log_level(pipeline_config.runtime.logging.log_level)
 
     # Get destination connection from pipeline config
     destinations = pipeline_config.connections.destinations

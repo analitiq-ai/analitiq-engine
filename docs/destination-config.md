@@ -96,7 +96,7 @@ building blocks. The engine keeps only the gRPC server that fronts them
 | `PIPELINE_ID` | Yes | Same pipeline ID the engine uses |
 | `DESTINATION_INDEX` | No | Index into `pipeline.connections.destinations` (default: `0`) |
 | `GRPC_PORT` | No | gRPC listen port (default: `50051`) |
-| `LOG_LEVEL` | No | `INFO` (default) |
+| `LOG_LEVEL` | No | `INFO` (default). Superseded by the pipeline's `runtime.logging.log_level` once the config is read |
 | `ENV` | No | `loc` (default) — skips the remote config fetch |
 
 Both engine and destination read the same `PIPELINE_ID` and load identical

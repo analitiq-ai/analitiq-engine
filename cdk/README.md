@@ -47,11 +47,11 @@ surface never pulls `pyarrow`/`aiohttp`.
 |---|---|---|
 | core (always) | `sqlalchemy`, `pydantic` | SQL control-plane: `cdk.sql` discovery + standalone `create_table`, `ConnectionRuntime`/transport seam, type-map (string surface), secrets |
 | `[arrow]` | `pyarrow` | columnar streaming: `schema_contract`, `sql.adbc_reader`, `type_map.parse_arrow_type`, `GenericSQLConnector` read/write |
-| `[api]` | `aiohttp`, `aiohttp-retry`, `orjson`, `python-dateutil` | HTTP transport plus `GenericAPIConnector`: bounded transport retries, a lossless JSON encoder, and the ISO parser a stored replication cursor is read with |
+| `[api]` | `aiohttp`, `aiohttp-retry`, `orjson`, `python-dateutil`, `jsonschema[format-nongpl]` | HTTP transport plus `GenericAPIConnector`: bounded transport retries, a lossless JSON encoder, the ISO parser a stored replication cursor is read with, and the reference implementation that enforces a declared param's value keywords (`format-nongpl`, never `format`: the latter pulls a GPLv3 dependency into an Apache-2.0 package) |
 | `[file]` | `aiofiles` + `pyarrow` | the file / s3 destination family (`cdk.file`), which writes through the local filesystem backend |
 | `[streaming]` | `[arrow]` + `[api]` + `[file]` | full connector surface the engine consumes |
 | `[s3]` | `boto3` | `s3://` secret refs (`SchemeSecretsResolver`) |
-| `[conformance]` | `pytest` + `pyarrow` | the connector conformance suite a connector repo runs in its own CI |
+| `[conformance]` | `pytest` + `pyarrow` + `jsonschema[format-nongpl]` | the connector conformance suite a connector repo runs in its own CI; the api tier builds a request through `cdk.api.request`, so it judges a param's value keywords with the same library the run does |
 
 Plus the per-driver DB package a given connector needs (asyncpg, adbc-driver-*, …).
 

@@ -202,9 +202,13 @@ class TestUrlEncode:
         }
         assert url_encode_function(node, _resolver()) == "a/b"
 
-    def test_none_resolves_to_empty_string(self):
+    def test_an_unresolved_input_answers_nothing_not_an_empty_value(self):
+        # ``None`` is how every other expression says "nothing resolved",
+        # and it is what the per-request omit rule reads to drop the key.
+        # Answering "" made this the one function that turned an absent
+        # value into a present, empty one.
         node = {"function": "url_encode", "input": {"literal": None}}
-        assert url_encode_function(node, _resolver()) == ""
+        assert url_encode_function(node, _resolver()) is None
 
     def test_integer_value_stringified_then_encoded(self):
         node = {"function": "url_encode", "input": {"literal": 5432}}

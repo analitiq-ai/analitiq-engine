@@ -545,7 +545,7 @@ class TestTheRequestTheStreamWillActuallySend:
         block = write_mode_block(doc, "insert")
         assert block is not None
         request = block.request
-        table = ParamTable.for_write(block.params, resolver)
+        table = ParamTable.for_write(block.params, resolver, endpoint="items")
         as_read = RequestBuilder(
             table,
             raw_body=None,

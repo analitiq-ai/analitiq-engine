@@ -422,3 +422,6 @@ github-cloud/
 # Local git worktrees used for parallel branches.
 .worktree/
 .worktrees/
+
+# Issue specs written by the shape skill: worktree-local, never committed.
+specs/

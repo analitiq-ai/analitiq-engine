@@ -18,6 +18,7 @@ from pydantic import TypeAdapter
 
 from cdk.api import GenericAPIConnector
 from cdk.api.page_loop import PaginationStrategy
+from cdk.api.param_rules import ParamRules
 from cdk.api.read_setup import build_read_strategy
 from cdk.api.request import ParamTable
 from cdk.batch_metadata import response_metadata_of
@@ -155,6 +156,19 @@ _PAGINATION_PARAMS = {
         "required": False,
         "controlled_by": "pagination",
     },
+}
+
+
+#: The replication-owned param an integer cursor field binds to. Separate
+#: from a timestamp param because a bound takes its type from the record
+#: field it tracks.
+_SINCE_ID_PARAM = {
+    "since_id": {
+        "in": "query",
+        "type": "integer",
+        "required": False,
+        "controlled_by": "replication",
+    }
 }
 
 
@@ -522,6 +536,108 @@ class TestTheRequestTheContractDescribes:
         assert session.calls == []
 
 
+@pytest.mark.asyncio
+class TestRequiredParamRefusals:
+    """A required param that resolves to nothing is refused before the read starts.
+
+    ``for_read`` deliberately does not answer presence -- the kit's compile
+    drive builds the same table with no connection and no secrets, so
+    absence there tells it nothing. Only the live read holds all three
+    scopes, so it is the one caller that asks.
+    """
+
+    async def test_a_required_param_resolving_to_nothing_fails_before_the_first_request(
+        self,
+    ) -> None:
+        session = FakeSession()
+        with pytest.raises(ReadError, match="'account'") as caught:
+            await _read(
+                session,
+                endpoint_document(
+                    request={
+                        "method": "GET",
+                        "path": "/items",
+                        "query": {"account": {"from_param": "account"}},
+                    },
+                    params={
+                        "account": {
+                            "in": "query",
+                            "type": "string",
+                            "required": True,
+                        }
+                    },
+                ),
+            )
+        assert "'items'" in str(caught.value)
+        assert session.calls == []
+
+
+@pytest.mark.asyncio
+class TestReplicationMethodSupport:
+    """The stream's chosen method has to be one the endpoint declares support for.
+
+    Checked in both directions: a full-refresh stream against an endpoint
+    that only ever declared ``incremental`` support, and the reverse. What
+    the endpoint cannot support it will not start supporting on page two,
+    so both fail before the first request rather than reading the whole
+    collection while reporting success.
+    """
+
+    async def test_a_full_refresh_stream_against_an_incremental_only_endpoint(
+        self,
+    ) -> None:
+        session = FakeSession()
+        document = endpoint_document(
+            request={
+                "method": "GET",
+                "path": "/items",
+                "query": {"since_id": {"from_param": "since_id"}},
+            },
+            params=_SINCE_ID_PARAM,
+            replication={
+                "supported_methods": ["incremental"],
+                "cursor_mappings": [
+                    {"cursor_field": "id", "param": "since_id", "operator": "gte"}
+                ],
+            },
+        )
+        with pytest.raises(ReadError, match="supports replication methods"):
+            await _read(session, document, source=stream_source(method="full_refresh"))
+        assert session.calls == []
+
+    async def test_an_incremental_stream_against_a_full_refresh_only_endpoint(
+        self,
+    ) -> None:
+        session = FakeSession()
+        document = endpoint_document(
+            request={
+                "method": "GET",
+                "path": "/items",
+                "query": {"since_id": {"from_param": "since_id"}},
+            },
+            params=_SINCE_ID_PARAM,
+            # cursor_mappings is required by the contract regardless of
+            # which methods are declared supported; it names one anyway,
+            # which is why this is a support mismatch and not a missing
+            # mapping.
+            replication={
+                "supported_methods": ["full_refresh"],
+                "cursor_mappings": [
+                    {"cursor_field": "id", "param": "since_id", "operator": "gte"}
+                ],
+            },
+        )
+        with pytest.raises(ReadError, match="supports replication methods"):
+            await _read(
+                session,
+                document,
+                source=stream_source(
+                    method="incremental", cursor_field="id", safety_window=0
+                ),
+            )
+        assert session.calls == []
+
+
 #: One authoring defect per request block that the CONTRACT accepts and the
 #: resolver refuses: an unregistered derived function raises
 #: ``TransportSpecError``, one handed the wrong type raises ``TypeError``.
@@ -865,7 +981,10 @@ class TestIncremental:
             request={
                 "method": "GET",
                 "path": "/items",
-                "query": {"since": {"from_param": "since"}},
+                "query": {
+                    "since": {"from_param": "since"},
+                    "since_id": {"from_param": "since_id"},
+                },
             },
             params={
                 "since": {
@@ -873,12 +992,22 @@ class TestIncremental:
                     "type": "string",
                     "required": False,
                     "controlled_by": "replication",
-                }
+                },
+                # A separate param for the integer cursor field, because a
+                # bound takes its type from the record field it tracks: one
+                # param cannot carry both a timestamp and an id and stay
+                # true to a single declared type.
+                "since_id": {
+                    "in": "query",
+                    "type": "integer",
+                    "required": False,
+                    "controlled_by": "replication",
+                },
             },
             replication={
                 "supported_methods": ["full_refresh", "incremental"],
                 "cursor_mappings": [
-                    {"cursor_field": "id", "param": "since", "operator": "gte"},
+                    {"cursor_field": "id", "param": "since_id", "operator": "gte"},
                     {
                         "cursor_field": "updated_at",
                         "param": "since",
@@ -960,7 +1089,7 @@ class TestIncremental:
             ),
             checkpoint=FakeCheckpoint({"cursor": 0}),
         )
-        assert sent_query(session.calls[0])["since"] == 0
+        assert sent_query(session.calls[0])["since_id"] == 0
 
     async def test_a_nullable_cursor_field_reads_by_its_real_type(self) -> None:
         document = self._document()
@@ -1098,6 +1227,68 @@ class TestIncremental:
                 document,
                 source=stream_source(
                     method="incremental", cursor_field="modified", safety_window=60
+                ),
+                checkpoint=FakeCheckpoint({"cursor": "1"}),
+            )
+        assert session.calls == []
+
+    async def test_a_cursor_field_with_no_mapping_is_refused(self) -> None:
+        # Previously a warning, not a refusal: without a mapping there is
+        # no param to carry the bound, so the request would go out
+        # unnarrowed and the run re-reads the whole collection every time
+        # while reporting success.
+        document = endpoint_document(
+            request={
+                "method": "GET",
+                "path": "/items",
+                "query": {"since": {"from_param": "since"}},
+            },
+            params={
+                "since": {
+                    "in": "query",
+                    "type": "string",
+                    "required": False,
+                    "controlled_by": "replication",
+                }
+            },
+            replication={
+                "supported_methods": ["full_refresh", "incremental"],
+                "cursor_mappings": [
+                    {"cursor_field": "updated_at", "param": "since", "operator": "gte"}
+                ],
+            },
+            record_fields=_UPDATED_AT,
+        )
+        session = FakeSession()
+        with pytest.raises(ReadError, match="does not map to any param"):
+            await _read(
+                session,
+                document,
+                source=stream_source(
+                    method="incremental", cursor_field="id", safety_window=60
+                ),
+                checkpoint=FakeCheckpoint({"cursor": "1"}),
+            )
+        assert session.calls == []
+
+    async def test_a_stored_cursor_outside_its_params_declared_bound_is_refused(
+        self,
+    ) -> None:
+        # A replication-owned param is exempt from ``required`` -- its
+        # loop sets it -- but not from the rest of its declaration: a
+        # resume marker outside the range its author declared is how a
+        # corrupted checkpoint becomes a request the provider answers with
+        # a 400 that maps back to nothing, so it is refused before that
+        # request goes out.
+        document = self._document()
+        document["operations"]["read"]["params"]["since_id"]["minimum"] = 100.0
+        session = FakeSession()
+        with pytest.raises(ReadError, match="minimum"):
+            await _read(
+                session,
+                document,
+                source=stream_source(
+                    method="incremental", cursor_field="id", safety_window=0
                 ),
                 checkpoint=FakeCheckpoint({"cursor": "1"}),
             )
@@ -1506,11 +1697,19 @@ class TestBuildingTheAdapterTouchesNothingItWasGiven:
         )
 
     def test_the_page_size_is_on_the_first_request(self) -> None:
-        first = self._strategy(ParamTable(values={"tenant": "acme"})).first()
+        first = self._strategy(
+            ParamTable(
+                rules=ParamRules.compile({}, endpoint="items"),
+                values={"tenant": "acme"},
+            )
+        ).first()
         assert first.params == {"tenant": "acme", "offset": 0, "limit": 25}
 
     def test_the_page_size_is_not_written_into_the_callers_table(self) -> None:
-        table = ParamTable(values={"tenant": "acme"})
+        table = ParamTable(
+            rules=ParamRules.compile({}, endpoint="items"),
+            values={"tenant": "acme"},
+        )
         self._strategy(table)
         assert table.values == {"tenant": "acme"}
 
@@ -1609,8 +1808,24 @@ class TestResponseMetadata:
             session,
             endpoint_document(
                 pagination=_OFFSET,
-                request=_PAGINATION_REQUEST,
-                params=_PAGINATION_PARAMS,
+                request={
+                    **_PAGINATION_REQUEST,
+                    "query": {
+                        **_PAGINATION_REQUEST["query"],
+                        "since_id": {"from_param": "since_id"},
+                    },
+                },
+                params={**_PAGINATION_PARAMS, **_SINCE_ID_PARAM},
+                replication={
+                    "supported_methods": ["incremental"],
+                    "cursor_mappings": [
+                        {
+                            "cursor_field": "id",
+                            "param": "since_id",
+                            "operator": "gte",
+                        }
+                    ],
+                },
                 response_fields=self._TOTAL_FIELD,
                 response_metadata={"total": {"ref": "response.body.total"}},
             ),

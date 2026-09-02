@@ -17,7 +17,7 @@ the CDK / connector design in
 |----------|----------|-------------|
 | `PIPELINE_ID` | Yes | Pipeline ID matching an entry in `pipelines/manifest.json` |
 | `RUN_MODE` | No | `source` (default) or `destination` |
-| `LOG_LEVEL` | No | `INFO` (default) |
+| `LOG_LEVEL` | No | `INFO` (default). Governs everything logged before the pipeline config is read; a pipeline declaring `runtime.logging.log_level` supersedes it for the rest of the run |
 | `ENV` | No | `loc` (default) — `loc` skips the remote config fetch; configs must be on disk |
 | `DESTINATION_GRPC_HOST` | No | Hostname of the destination gRPC server (when running with a remote destination) |
 | `DESTINATION_GRPC_PORT` | No | `50051` (default) |
@@ -100,7 +100,7 @@ pipelines with `status: "active"` are executable.
     "runtime": {
       "buffer_size": 5000,
       "batching": { "batch_size": 200 },
-      "logging": { "log_level": "INFO", "metrics_enabled": true },
+      "logging": { "log_level": "INFO" },
       "error_handling": { "strategy": "dlq", "max_retries": 3, "retry_delay_seconds": 5 }
     }
   },
@@ -390,13 +390,14 @@ it before the document crosses into the connector process.
 |-------|-------------|
 | `operations.read.request.method` / `.path` | HTTP verb, and the path appended to the transport's `base_url` |
 | `operations.read.request.query` / `.headers` / `.body` | Where each declared param lands on the wire. Every declared param must be bound exactly once, and every binding must name a declared param — the contract refuses a document that breaks either rule |
-| `operations.read.params.<name>` | One declared param: `in` (`query` / `header` / `body` / `path`), `type`, `required`, an optional `default` value expression (`literal` / `ref` / `template` / `function`), and `controlled_by` (`pagination` or `replication`) for a param whose value a loop sets rather than the author |
+| `operations.read.params.<name>` | One declared param: `in` (`query` / `header` / `body` / `path`), `type`, `required`, an optional `default` value expression (`literal` / `ref` / `template` / `function`), and `controlled_by` (`pagination` or `replication`) for a param whose value a loop sets rather than the author. The JSON-Schema value keywords — `enum`, `format`, `pattern`, `minimum`, `maximum`, `minLength`, `maxLength`, `minItems`, `maxItems` — are enforced against every value the param carries, at the same version of the same reference implementation the published schema is written for. A `required` param that resolves to nothing fails the read before its first request, because a read that quietly drops the narrowing returns the whole collection and reports success. A param a loop owns is exempt from `required` only: it is legitimately absent until its loop produces a value, and judged like any other once it has. `format` is enforced for the names the engine ships checkers for; any other `format` is an annotation. No refusal renders the offending value — a param carries credentials and continuation tokens |
 | `operations.read.response.schema` | JSON Schema for the response body. Each record field's canonical Arrow type is resolved from the endpoint's read type-map unless the field declares `arrow_type` itself; a JSON type with no rule in that type-map fails the read naming the field |
 | `operations.read.response.records.ref` | `response.body`, or `response.body.<field>[.<field>...]` — where a page's records sit in the decoded body. A ref anchored anywhere else, or one that addresses a value carrying no records, fails the read naming the ref |
 | `operations.read.pagination.type` | One of `offset`, `page`, `cursor`, `keyset`, `link`. The union is closed: an unrecognised value fails loud rather than reading one page |
 | `operations.read.pagination.stop_when` | Required on every strategy. The authoritative end-of-pages condition, evaluated against the page's own body |
 | `operations.read.pagination.limit` | Optional on every strategy: `param` (where the page size lands), `default` (a value expression; `runtime.batch_size` is in scope), and `max`, the provider's cap, which clamps whatever the default produced. Under `link` it binds to the first request only — a followed `next_url` carries the provider's own query |
-| `operations.read.replication.cursor_mappings` | Maps a stream's `cursor_field` to declared params. The single form (`param` plus a `gt`/`gte` `operator`) binds the stored cursor, moved back by the safety window, as the read's lower bound; the window form (`start_param` / `end_param` / `start_operator` / `end_operator`) binds that lower bound and the run's upper bound (now, UTC). Both render their bounds in the mapping's `format` (`date-time`, `date`, `epoch_seconds`, `epoch_milliseconds`; an undeclared format keeps the cursor's own vocabulary: an epoch record field sends epoch ticks in its unit, a string moment sends ISO). Under `date` or an epoch format a `gt` lower bound goes out one unit earlier, so the provider's exclusive comparison cannot skip the unit the cursor sits in. A single mapping whose operator is `lt`/`lte`, or a window whose ends face the wrong way, fails the read rather than binding a range the author did not declare |
+| `operations.read.replication.supported_methods` | The replication methods this endpoint can serve. A stream selecting one outside the list fails before its first request, whichever method it selected |
+| `operations.read.replication.cursor_mappings` | Maps a stream's `cursor_field` to declared params. The single form (`param` plus a `gt`/`gte` `operator`) binds the stored cursor, moved back by the safety window, as the read's lower bound; the window form (`start_param` / `end_param` / `start_operator` / `end_operator`) binds that lower bound and the run's upper bound (now, UTC). Both render their bounds in the mapping's `format` (`date-time`, `date`, `epoch_seconds`, `epoch_milliseconds`; an undeclared format keeps the cursor's own vocabulary: an epoch record field sends epoch ticks in its unit, a string moment sends ISO). Under `date` or an epoch format a `gt` lower bound goes out one unit earlier, so the provider's exclusive comparison cannot skip the unit the cursor sits in. A single mapping whose operator is `lt`/`lte`, or a window whose ends face the wrong way, fails the read rather than binding a range the author did not declare. So does an incremental stream whose `cursor_field` no mapping names: nothing can carry the bound, so the run would re-read the whole collection every time and report success |
 
 All five strategies run on one loop, `cdk.api.PageLoop`, with one adapter per
 scheme. The loop stops on an empty page, on the strategy having nowhere left

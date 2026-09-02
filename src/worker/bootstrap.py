@@ -13,6 +13,7 @@ Shape::
       "kind": "<connector kind: database, api, ... >",
       "connector_id": "postgres",
       "uds_path": "/.../worker.sock",
+      "log_level": "INFO",
       "connection": {<ConnectionRuntime.resolve_spec() payload>},
       "type_maps": {
         "connector":  {"rules": [...], "write_rules": [...] | null} | null,
@@ -47,6 +48,7 @@ class WorkerBootstrap:
     kind: str
     connector_id: str
     uds_path: str
+    log_level: str
     connection_payload: dict[str, Any]
     connector_type_mapper: TypeMapper | None
     connection_type_mapper: TypeMapper | None
@@ -75,7 +77,7 @@ def parse_bootstrap(raw: dict[str, Any]) -> WorkerBootstrap:
     role = raw.get("role")
     if role not in _ROLES:
         raise ValueError(f"bootstrap.role must be one of {_ROLES}, got {role!r}")
-    for key in ("kind", "connector_id", "uds_path", "connection"):
+    for key in ("kind", "connector_id", "uds_path", "log_level", "connection"):
         if not raw.get(key):
             raise ValueError(f"bootstrap.{key} is required")
 
@@ -86,6 +88,7 @@ def parse_bootstrap(raw: dict[str, Any]) -> WorkerBootstrap:
         kind=raw["kind"],
         connector_id=connector_id,
         uds_path=raw["uds_path"],
+        log_level=raw["log_level"],
         connection_payload=dict(raw["connection"]),
         connector_type_mapper=_mapper_from(type_maps.get("connector"), connector_id),
         connection_type_mapper=_mapper_from(
