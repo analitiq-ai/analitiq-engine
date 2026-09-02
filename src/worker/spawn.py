@@ -146,6 +146,14 @@ async def _forward_stderr(handle_label: str, stream: asyncio.StreamReader) -> No
     filters it a second time, and a pipeline declaring WARNING would then
     drop the worker's own errors -- including the startup traceback that is
     the only explanation for ``worker exited before becoming ready``.
+
+    A lower bound, then, and never precise: the worker's own level survives
+    only as characters inside the message, so a worker ERROR and a worker
+    DEBUG both arrive here at the threshold. That loss is the boundary's,
+    not this function's -- records cross it as formatted text, and no level
+    chosen here can recover what the formatting discarded. Parsing the
+    level back out is not the fix either; it breaks on the multi-line
+    record that matters most, which is a traceback.
     """
     level = logger.getEffectiveLevel()
     while True:
