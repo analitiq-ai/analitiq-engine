@@ -425,3 +425,6 @@ github-cloud/
 
 # Issue specs written by the shape skill: worktree-local, never committed.
 specs/
+
+# Personal, machine-local Claude instructions.
+CLAUDE.local.md
