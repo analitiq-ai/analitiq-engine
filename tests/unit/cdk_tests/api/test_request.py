@@ -379,10 +379,9 @@ class TestRequestBuilder:
     def test_for_page_never_reports_a_missing_required_param(self) -> None:
         # Presence is a caller's question, answered once by
         # ``check_required`` after the table is built (the read calls it
-        # right after ``for_read``); ``for_page`` asks only whether what a
-        # page DID send is inside its declared range, which the kit's
-        # compile drive relies on too -- it holds none of the scopes that
-        # could answer presence.
+        # right after ``for_read``). The builder asks nothing at all: what
+        # a loop produced is judged by the loop, before the page that
+        # produced it is yielded.
         table = ParamTable.for_read(
             _params({"account": {"in": "query", "type": "string", "required": True}}),
             _resolver(),
@@ -392,34 +391,6 @@ class TestRequestBuilder:
             table, raw_body=None, resolver=_resolver(), endpoint="/items"
         )
         builder.for_page({})
-
-    def test_for_page_refuses_a_controlled_params_value_outside_its_range(
-        self,
-    ) -> None:
-        # A loop-owned param is exempt from ``required``, not from its
-        # other keywords: once the loop has produced a value, the
-        # author's declaration is the only statement about what it may
-        # carry -- which is what catches a corrupted resume marker.
-        table = ParamTable.for_read(
-            _params(
-                {
-                    "since_id": {
-                        "in": "query",
-                        "type": "integer",
-                        "required": True,
-                        "controlled_by": "replication",
-                        "minimum": 0.0,
-                    }
-                }
-            ),
-            _resolver(),
-            endpoint="items",
-        )
-        builder = RequestBuilder(
-            table, raw_body=None, resolver=_resolver(), endpoint="/items"
-        )
-        with pytest.raises(RequestSpecError, match="minimum"):
-            builder.for_page({"since_id": -1})
 
 
 class TestABindingKeyIsAName:

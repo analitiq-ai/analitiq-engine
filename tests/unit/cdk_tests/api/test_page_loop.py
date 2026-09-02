@@ -13,9 +13,14 @@ from typing import Any
 import pytest
 
 from cdk.api import page_loop as page_loop_module
+from cdk.api.exceptions import RequestSpecError
 from cdk.api.page_loop import Page, PageLoop, PageRequest
 
 pytestmark = pytest.mark.unit
+
+
+def _admits_anything(_params) -> None:
+    """A judge for the tests that are not about judging."""
 
 
 class _ScriptedFetch:
@@ -65,7 +70,12 @@ class TestStopping:
         # declared response metadata, and the caller decides what an empty
         # page is worth.
         fetch = _ScriptedFetch([Page(_rows(2)), Page([])])
-        loop = PageLoop(_Counting(9), fetch=fetch, stop_when=lambda page: False)
+        loop = PageLoop(
+            _Counting(9),
+            fetch=fetch,
+            stop_when=lambda page: False,
+            judge_params=_admits_anything,
+        )
         assert await _drain(loop) == [_rows(2), []]
 
     @pytest.mark.asyncio
@@ -82,7 +92,12 @@ class TestStopping:
             return False
 
         fetch = _ScriptedFetch([Page(_rows(1)), Page([])])
-        loop = PageLoop(_Recording(9), fetch=fetch, stop_when=stop_when)
+        loop = PageLoop(
+            _Recording(9),
+            fetch=fetch,
+            stop_when=stop_when,
+            judge_params=_admits_anything,
+        )
         await _drain(loop)
         assert seen == ["stop_when", "advance"]
         assert len(fetch.requests) == 2
@@ -93,13 +108,23 @@ class TestStopping:
         # Providers return short pages for filtering, rate limiting and
         # per-request caps, so stopping on one silently truncates the read.
         fetch = _ScriptedFetch([Page(_rows(10)), Page(_rows(3)), Page(_rows(7))])
-        loop = PageLoop(_Counting(3), fetch=fetch, stop_when=lambda page: False)
+        loop = PageLoop(
+            _Counting(3),
+            fetch=fetch,
+            stop_when=lambda page: False,
+            judge_params=_admits_anything,
+        )
         assert await _drain(loop) == [_rows(10), _rows(3), _rows(7)]
 
     @pytest.mark.asyncio
     async def test_advance_returning_none_ends_the_traversal(self) -> None:
         fetch = _ScriptedFetch([Page(_rows(2)), Page(_rows(2)), Page(_rows(2))])
-        loop = PageLoop(_Counting(2), fetch=fetch, stop_when=lambda page: False)
+        loop = PageLoop(
+            _Counting(2),
+            fetch=fetch,
+            stop_when=lambda page: False,
+            judge_params=_admits_anything,
+        )
         assert await _drain(loop) == [_rows(2), _rows(2)]
 
     @pytest.mark.asyncio
@@ -115,6 +140,7 @@ class TestStopping:
             _Counting(9),
             fetch=fetch,
             stop_when=lambda page: bool(page.payload and page.payload.get("done")),
+            judge_params=_admits_anything,
         )
         # The page that satisfies the condition is still yielded: it carried
         # records, and the condition says "this was the last one", not
@@ -127,7 +153,12 @@ class TestStopping:
         # the empty page that proves the end. That is the price of the
         # silent-truncation risk going away.
         fetch = _ScriptedFetch([Page(_rows(3)), Page([])])
-        loop = PageLoop(_Counting(9), fetch=fetch, stop_when=lambda page: False)
+        loop = PageLoop(
+            _Counting(9),
+            fetch=fetch,
+            stop_when=lambda page: False,
+            judge_params=_admits_anything,
+        )
         await _drain(loop)
         assert len(fetch.requests) == 2
 
@@ -146,7 +177,12 @@ class TestLoopOrder:
                 return super().advance(page)
 
         fetch = _ScriptedFetch([Page(_rows(1)), Page(_rows(1))])
-        loop = PageLoop(_Recording(2), fetch=fetch, stop_when=lambda page: False)
+        loop = PageLoop(
+            _Recording(2),
+            fetch=fetch,
+            stop_when=lambda page: False,
+            judge_params=_admits_anything,
+        )
         async for _page in loop:
             seen.append("yield")
         assert seen == ["advance", "yield", "advance", "yield"]
@@ -162,7 +198,12 @@ class TestLoopOrder:
                 )
 
         fetch = _ScriptedFetch([Page(_rows(2))])
-        loop = PageLoop(_Stuck(9), fetch=fetch, stop_when=lambda page: False)
+        loop = PageLoop(
+            _Stuck(9),
+            fetch=fetch,
+            stop_when=lambda page: False,
+            judge_params=_admits_anything,
+        )
         yielded: list[Any] = []
         with pytest.raises(ValueError, match="order_by_field"):
             async for page in loop:
@@ -172,14 +213,24 @@ class TestLoopOrder:
     @pytest.mark.asyncio
     async def test_the_first_request_comes_from_the_strategy(self) -> None:
         fetch = _ScriptedFetch([Page(_rows(1))])
-        loop = PageLoop(_Counting(1), fetch=fetch, stop_when=lambda page: False)
+        loop = PageLoop(
+            _Counting(1),
+            fetch=fetch,
+            stop_when=lambda page: False,
+            judge_params=_admits_anything,
+        )
         await _drain(loop)
         assert fetch.requests[0] == PageRequest(url="/things", params={"page": 1})
 
     @pytest.mark.asyncio
     async def test_each_later_request_comes_from_advance(self) -> None:
         fetch = _ScriptedFetch([Page(_rows(1)), Page(_rows(1)), Page(_rows(1))])
-        loop = PageLoop(_Counting(3), fetch=fetch, stop_when=lambda page: False)
+        loop = PageLoop(
+            _Counting(3),
+            fetch=fetch,
+            stop_when=lambda page: False,
+            judge_params=_admits_anything,
+        )
         await _drain(loop)
         assert [r.params["page"] for r in fetch.requests] == [1, 2, 3]
 
@@ -214,6 +265,7 @@ class TestNothingIsDecidedAfterTheCallerHasTheRecords:
             _Counting(pages=3),
             fetch=_ScriptedFetch([Page(_rows(2))]),
             stop_when=_raises,
+            judge_params=_admits_anything,
         )
         seen: list[list[dict[str, Any]]] = []
         with pytest.raises(ValueError, match="stop condition"):
@@ -230,6 +282,7 @@ class TestNothingIsDecidedAfterTheCallerHasTheRecords:
             strategy,
             fetch=_ScriptedFetch([Page(_rows(2))]),
             stop_when=lambda page: True,
+            judge_params=_admits_anything,
         )
         assert await _drain(loop) == [_rows(2)]
 
@@ -239,6 +292,7 @@ class TestNothingIsDecidedAfterTheCallerHasTheRecords:
             strategy,
             fetch=_ScriptedFetch([Page(_rows(1)), Page(_rows(1))]),
             stop_when=lambda page: False,
+            judge_params=_admits_anything,
         )
         await _drain(loop)
         assert strategy.advanced == 2
@@ -246,3 +300,48 @@ class TestNothingIsDecidedAfterTheCallerHasTheRecords:
 
 def _raises(page: Page) -> bool:
     raise ValueError("stop condition could not be evaluated")
+
+
+@pytest.mark.asyncio
+class TestAContinuationIsJudgedBeforeItsPageIsYielded:
+    """A loop-owned value carries its author's declaration like any other.
+
+    Where the refusal lands is the whole point. ``advance`` runs before its
+    page is yielded so a page the loop cannot follow fails while the failure
+    still costs nothing; judging the continuation anywhere later -- when the
+    next request is built, say -- moves the refusal one page on, after the
+    caller has been handed and may already have committed the records that
+    produced the bad continuation.
+    """
+
+    async def test_a_refused_continuation_fails_before_the_yield(self) -> None:
+        def judge(params) -> None:
+            if params.get("page") == 2:
+                raise RequestSpecError("cursor 2 is outside its declared range")
+
+        seen: list[list[dict[str, Any]]] = []
+        loop = PageLoop(
+            _Counting(9),
+            fetch=_ScriptedFetch([Page(records=_rows(2))]),
+            stop_when=lambda page: False,
+            judge_params=judge,
+        )
+        with pytest.raises(RequestSpecError, match="declared range"):
+            async for page in loop:
+                seen.append(page.records)
+        # The page that produced the refused continuation never reached the
+        # caller, so nothing was committed from it.
+        assert seen == []
+
+    async def test_the_first_request_is_judged_too(self) -> None:
+        # It is the one request no ``advance`` produces.
+        judged: list[dict[str, Any]] = []
+        loop = PageLoop(
+            _Counting(1),
+            fetch=_ScriptedFetch([Page(records=_rows(1))]),
+            stop_when=lambda page: True,
+            judge_params=judged.append,
+        )
+        async for _page in loop:
+            pass
+        assert judged[0] == {"page": 1}

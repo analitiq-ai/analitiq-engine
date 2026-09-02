@@ -1033,13 +1033,6 @@ class RequestBuilder:
         # bindings read the table too: a header bound to a declared param
         # must carry the same value on page two as on page one.
         binding_params = {**self._table.values, **page_params}
-        # The page's own values, judged against the same declarations the
-        # table's were. Admissibility only: page one carries no cursor, and
-        # a param a loop owns is legitimately absent until its loop
-        # produces one. What the loop DID produce is another matter -- a
-        # resume marker outside the range its author declared is how a
-        # keyset read walks off the end of the collection it was reading.
-        self._table.rules.check_admissible(page_params)
         query, headers = bind_query_and_headers(
             params=binding_params,
             # A continuation replaces the whole request, query string

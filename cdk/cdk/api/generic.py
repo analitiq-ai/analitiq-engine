@@ -688,6 +688,11 @@ class GenericAPIConnector(BaseDestinationHandler):
                 stop_when=stop_condition(
                     pagination.stop_when if pagination else None, resolver
                 ),
+                # Admissibility only: a param a loop owns is legitimately
+                # absent until its loop produces a value, and what it DID
+                # produce is judged against the same declarations every
+                # other value in this table went through.
+                judge_params=table.rules.check_admissible,
             ),
             schema=schema_contract,
             cursor_field=cursor_field,

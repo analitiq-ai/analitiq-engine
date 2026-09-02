@@ -20,7 +20,7 @@ tests script pages directly.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -91,6 +91,10 @@ class PaginationStrategy(Protocol):
 #: Answers "does the author's stop condition hold for this page?".
 StopCondition = Callable[[Page], bool]
 
+#: Refuses a request whose params their declarations do not admit; answers
+#: nothing when they do.
+JudgeParams = Callable[[Mapping[str, Any]], None]
+
 #: Resolves a declared value expression against the page it was written for.
 Resolve = Callable[[Any, Page | None], Any]
 
@@ -123,6 +127,7 @@ class PageLoop:
         *,
         fetch: Fetch,
         stop_when: StopCondition,
+        judge_params: JudgeParams,
     ) -> None:
         self._strategy = strategy
         self._fetch = fetch
@@ -130,6 +135,12 @@ class PageLoop:
         # stop_when with no default, so a loop built without one would be
         # running against a document that could not have validated.
         self._stop_when = stop_when
+        # Required for the same reason, and asked in the same place: the
+        # values a loop produces carry the author's declarations like any
+        # others, and the only moment refusing one is free is before its
+        # page is yielded. A default would be a judgement that refuses
+        # nothing.
+        self._judge_params = judge_params
 
     def __aiter__(self) -> AsyncIterator[Page]:
         """Return the traversal.
@@ -155,7 +166,11 @@ class PageLoop:
         the caller decides whether an empty page is worth a batch. It is
         neither evaluated for stopping nor advanced from -- it is the end.
         """
-        request: PageRequest | None = self._strategy.first()
+        first = self._strategy.first()
+        # The one request no ``advance`` produces, judged before the widened
+        # binding hides that the protocol always answers one.
+        self._judge_params(first.params)
+        request: PageRequest | None = first
         while request is not None:
             page = await self._fetch(request)
             if not page.records:
@@ -172,5 +187,14 @@ class PageLoop:
             # follow -- and asking for one there would fail a read that had
             # just been told it was complete.
             following = None if self._stop_when(page) else self._strategy.advance(page)
+            if following is not None:
+                # Judged here, with the stop and the advance, and for their
+                # reason: a continuation the author's own declarations do
+                # not admit -- a cursor past a declared bound, a token of
+                # the wrong type -- is a request that will never be
+                # sendable. Left until the request is built, the refusal
+                # lands one page later, after the caller has been handed
+                # and may have committed the records that produced it.
+                self._judge_params(following.params)
             yield page
             request = following

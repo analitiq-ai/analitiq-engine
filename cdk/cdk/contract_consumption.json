@@ -647,7 +647,7 @@
         "cdk.api.generic:512",
         "cdk.api.generic:518",
         "cdk.api.generic:563",
-        "cdk.api.generic:694"
+        "cdk.api.generic:699"
       ]
     },
     "analitiq.contracts.endpoints.RefExpression": {
@@ -668,7 +668,7 @@
     "analitiq.contracts.endpoints.ResponseExtraction": {
       "metadata": [
         "cdk.api.generic:563",
-        "cdk.api.generic:694"
+        "cdk.api.generic:699"
       ],
       "records": [
         "cdk.api.generic:518",
@@ -747,7 +747,7 @@
     },
     "analitiq.contracts.endpoints.WriteOperation": {
       "batching": [
-        "cdk.api.generic:963",
+        "cdk.api.generic:968",
         "cdk.api.write_plan:598"
       ],
       "conflict_keys": [
@@ -1032,7 +1032,7 @@
       "cursor_field": [
         "cdk.api.generic:606",
         "cdk.api.generic:613",
-        "cdk.api.generic:843",
+        "cdk.api.generic:848",
         "cdk.sql.generic:2103",
         "src.engine.pipeline_config_prep:162"
       ],
@@ -1041,7 +1041,7 @@
         "src.engine.pipeline_config_prep:160"
       ],
       "safety_window_seconds": [
-        "cdk.api.generic:871"
+        "cdk.api.generic:876"
       ],
       "tie_breaker_fields": [
         "src.engine.pipeline_config_prep:166"
