@@ -28,6 +28,11 @@ from cdk.api.strategies import UnknownPaginationStrategy, build_strategy
 
 pytestmark = pytest.mark.unit
 
+
+def _admits_anything(_params) -> None:
+    """A judge for the tests that are not about judging."""
+
+
 _PAGINATION: TypeAdapter[Any] = TypeAdapter(Pagination)
 
 #: The per-page step a provider reports back, as the contract spells it.
@@ -353,6 +358,7 @@ class TestThroughTheLoop:
                 _build(block),
                 fetch=_scripted([Page(_rows(2)), Page(_rows(2, start=2)), Page([])]),
                 stop_when=lambda page: False,
+                judge_params=_admits_anything,
             )
             collected = [page.records async for page in loop]
             assert collected == [_rows(2), _rows(2, start=2), []], block["type"]

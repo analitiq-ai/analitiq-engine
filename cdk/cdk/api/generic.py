@@ -536,8 +536,17 @@ class GenericAPIConnector(BaseDestinationHandler):
             table = ParamTable.for_read(
                 read.params,
                 resolver,
+                endpoint=endpoint_id,
                 filters=stream_source.filters or [],
             )
+            # Presence, which ``for_read`` deliberately does not answer:
+            # only a caller holding the connection, the secrets and the
+            # stream's filters can tell a param that resolved to nothing
+            # from one this build was never going to see. A required param
+            # missing here is the narrowing the author asked for silently
+            # not happening -- the read returns the whole collection and
+            # reports success.
+            table.rules.check_required(table.values)
             problem = request_block_problem(
                 request_block,
                 # The names the CONNECTION owns on the transport this read
@@ -562,6 +571,33 @@ class GenericAPIConnector(BaseDestinationHandler):
             # the incremental member alone. Narrowing on the type is what
             # makes the attribute readable at all.
             replication_block = stream_source.replication
+            declared_replication = read.replication
+            # An omitted stream replication block IS full refresh -- the
+            # contract allows the omission "only when the source supports
+            # full_refresh", so reading it as "nothing selected" would let
+            # the one stream shape the endpoint cannot serve be the one
+            # shape that skips the check.
+            selected_method = (
+                replication_block.method
+                if replication_block is not None
+                else "full_refresh"
+            )
+            if (
+                declared_replication is not None
+                and selected_method not in declared_replication.supported_methods
+            ):
+                # Outside the incremental branch below on purpose: a
+                # full-refresh stream against an endpoint declaring
+                # ``["incremental"]`` only is the same defect, and checking
+                # it where the cursor is bound would miss exactly that
+                # pairing. Refused before the first request, because what
+                # the endpoint cannot support it will not start supporting
+                # on page two.
+                raise ReadError(
+                    f"endpoint {endpoint_id!r} supports replication methods "
+                    f"{sorted(declared_replication.supported_methods)}, and "
+                    f"the stream selected {selected_method!r}"
+                )
             incremental = (
                 replication_block
                 if isinstance(replication_block, IncrementalReplication)
@@ -581,6 +617,12 @@ class GenericAPIConnector(BaseDestinationHandler):
                     partition=partition,
                     now=self._clock(),
                 )
+                # The cursor the loop just wrote, judged against the same
+                # declarations every other value in this table went through.
+                # A resume marker outside its param's declared range is how
+                # a corrupted checkpoint becomes a request the provider
+                # answers with a 400 that maps back to nothing.
+                table.rules.check_admissible(table.values)
 
             # Substituted here, after the incremental filter has written the
             # cursor into the table: a path bound to an ordinary param the
@@ -646,12 +688,35 @@ class GenericAPIConnector(BaseDestinationHandler):
                 stop_when=stop_condition(
                     pagination.stop_when if pagination else None, resolver
                 ),
+                # Admissibility only: a param a loop owns is legitimately
+                # absent until its loop produces a value, and what it DID
+                # produce is judged against the same declarations every
+                # other value in this table went through.
+                #
+                # Wrapped in the read boundary because the loop is outside
+                # the request builder's: a refusal raised here would leave
+                # as a bare RequestSpecError, which is not a ValueError and
+                # so passes straight through the traversal's own catch --
+                # the same defect reaching the worker under a different
+                # error_type depending only on which page it happened on.
+                judge_params=partial(
+                    self._judge_loop_values,
+                    judge=table.rules.check_admissible,
+                ),
             ),
             schema=schema_contract,
             cursor_field=cursor_field,
             metadata=read.response.metadata,
             resolver=resolver,
         )
+
+    @staticmethod
+    def _judge_loop_values(
+        params: Mapping[str, Any], *, judge: Callable[[Mapping[str, Any]], None]
+    ) -> None:
+        """Judge one loop-produced request, failing the read if it cannot go."""
+        with read_spec_errors("a pagination value"):
+            judge(params)
 
     async def _read_pages(
         self,
@@ -801,12 +866,20 @@ class GenericAPIConnector(BaseDestinationHandler):
         cursor_field_name = stream_replication.cursor_field
         mapping = cursor_mapping_for(declared_replication, cursor_field_name)
         if mapping is None:
-            logger.warning(
-                "no replication.cursor_mappings entry for cursor field %r; "
-                "running full replication",
-                cursor_field_name,
+            # Refused, not downgraded. Without a mapping there is no param
+            # to carry the bound, so the request goes out unnarrowed: the
+            # run re-reads the whole collection every time and reports
+            # success, which is indistinguishable from an incremental read
+            # that is working. An endpoint declaring ``incremental`` with no
+            # mapping for this stream's cursor field is a broken pairing,
+            # and only its author can fix it.
+            raise ReadError(
+                f"stream {stream_name!r} replicates incrementally on cursor "
+                f"field {cursor_field_name!r}, which "
+                f"replication.cursor_mappings does not map to any param; "
+                f"nothing can send the bound, so the read would return the "
+                f"whole collection on every run"
             )
-            return
         check_mapping_direction(mapping)
         cursor_state = await checkpoint.get_cursor(stream_name, partition)
         cursor_value = (cursor_state or {}).get("cursor")

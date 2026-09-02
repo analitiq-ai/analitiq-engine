@@ -65,6 +65,7 @@ from ..resolver import REQUEST_CONNECTION_SUBTREES, Resolver, scope_paths
 from ..transport_factory import require_wire_safe_header
 from .body import unsupported_media_type
 from .exceptions import RequestSpecError, request_spec_errors
+from .param_rules import ParamRules
 from .query_style import (
     QueryStyle,
     declared_query_styles,
@@ -122,13 +123,22 @@ class PreparedRequest:
 
 @dataclass
 class ParamTable:
-    """The declared params' resolved values.
+    """The declared params' resolved values, and what they may carry.
 
     ``values`` is the single table a request materialises from: every
     ``{from_param}`` binding in the three request maps reads it, and that
     is the only way a param reaches the wire.
+
+    ``rules`` rides along required and with no default, because this table
+    is what every request is built from: a build cannot reach the wire
+    without the declarations that judge its values, and a default would be
+    a rule set that refuses nothing. Presence is a separate question the
+    caller asks (:meth:`ParamRules.check_required`) -- only a caller
+    holding the connection, the secrets and the stream's filters can answer
+    it, and the conformance kit holds none of the three.
     """
 
+    rules: ParamRules
     values: dict[str, Any] = field(default_factory=dict)
     #: Every param a loop owns, mapped to the loop that owns it
     #: (``controlled_by``). Read by exactly one caller:
@@ -143,6 +153,7 @@ class ParamTable:
         declared: Mapping[str, Param],
         resolver: Resolver,
         *,
+        endpoint: str,
         filters: Iterable[Filter] = (),
     ) -> ParamTable:
         """Build the read role's table: defaults, then the stream's filters.
@@ -173,7 +184,11 @@ class ParamTable:
         # as whichever builtin the resolver happened to raise.
         with request_spec_errors("a read param's declared default"):
             values = resolve_param_defaults(uncontrolled, resolver)
-        table = cls(values=values, controlled_by=_controlled_by(declared))
+        table = cls(
+            rules=ParamRules.compile(declared, endpoint=endpoint),
+            values=values,
+            controlled_by=_controlled_by(declared),
+        )
         for declared_filter in filters:
             target = declared_filter.field
             if target not in declared:
@@ -187,10 +202,19 @@ class ParamTable:
             value = declared_filter.value
             if value is not None:
                 table.values[target] = value
+        # Admissibility only, and here rather than at each caller: this is
+        # the one construction both the live read and the conformance kit
+        # go through, so a value no declaration admits cannot reach a
+        # request from either. Whether a required param is THERE is the
+        # caller's question -- the kit compiles from an empty connection
+        # and no secrets, so absence tells it nothing.
+        table.rules.check_admissible(table.values)
         return table
 
     @classmethod
-    def for_write(cls, declared: Mapping[str, Param], resolver: Resolver) -> ParamTable:
+    def for_write(
+        cls, declared: Mapping[str, Param], resolver: Resolver, *, endpoint: str
+    ) -> ParamTable:
         """Build the write role's table.
 
         Write params are request-construction inputs feeding the body's
@@ -199,7 +223,17 @@ class ParamTable:
         """
         with request_spec_errors("a write param's declared default"):
             values = resolve_param_defaults(declared, resolver, context="write param")
-        return cls(values=values, controlled_by=_controlled_by(declared))
+        rules = ParamRules.compile(declared, endpoint=endpoint)
+        # Admissibility, the same question the read's table answers: what a
+        # param may carry is the author's declaration either way. Presence
+        # is asked by the write PLAN, once the never-fillable-scope walk in
+        # :func:`request_block_problem` has had its say -- that walk names
+        # the scope a default reads and why nothing will ever fill it,
+        # which is the sharper answer wherever it applies. It only sees a
+        # declared expression, though, so a required param with no default
+        # at all reaches it invisible; that one is caught by presence.
+        rules.check_admissible(values)
+        return cls(rules=rules, values=values, controlled_by=_controlled_by(declared))
 
 
 def _controlled_by(declared: Mapping[str, Param]) -> dict[str, str]:
@@ -368,8 +402,8 @@ def substitute_path(path: str, values: Mapping[str, Any], *, endpoint: str) -> s
     An empty segment is refused alongside a missing one. ``/Contact/{id}``
     with an empty ``id`` addresses the whole collection: a read then fetches
     every record instead of one, and a PUT or PATCH targets the collection.
-    ``url_encode`` returns ``""`` for an unbound input, so the empty case is
-    reachable without anyone declaring it.
+    A binding resolving to an empty string reaches here as one, so the two
+    cases are refused together rather than only the one anybody declares.
 
     A dot segment is refused for the same reason one step further on.
     Percent-encoding does not contain ``.`` -- it is unreserved, so ``quote``

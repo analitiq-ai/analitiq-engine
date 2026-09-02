@@ -534,7 +534,7 @@ def build_write_plan(
         if problem is not None:
             return f"response block on endpoint {endpoint_id!r}: {problem}"
     try:
-        table = ParamTable.for_write(mode_block.params, resolver)
+        table = ParamTable.for_write(mode_block.params, resolver, endpoint=endpoint_id)
         problem = request_block_problem(
             request,
             reserved_headers=reserved,
@@ -545,6 +545,12 @@ def build_write_plan(
         )
         if problem is not None:
             return problem
+        # A write param has no loop to fill it: every value comes from the
+        # defaults resolved above, so one declared required and resolving
+        # to nothing is missing for good. Left unasked, the binding drops
+        # the field and every record goes out without it while the batch
+        # reports success -- the same silence the read path refuses.
+        table.rules.check_required(table.values)
 
         plan = StreamWritePlan(
             method=request.method,

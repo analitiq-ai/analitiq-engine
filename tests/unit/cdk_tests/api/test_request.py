@@ -11,6 +11,7 @@ from analitiq.contracts.stream import Filter
 from pydantic import TypeAdapter
 
 from cdk.api.exceptions import RequestSpecError
+from cdk.api.param_rules import ParamRules
 from cdk.api.request import (
     ParamTable,
     RequestBuilder,
@@ -101,6 +102,7 @@ class TestReadParamTable:
                 }
             ),
             _resolver(),
+            endpoint="items",
         )
         assert table.values == {"profile": 42}
 
@@ -128,6 +130,7 @@ class TestReadParamTable:
                 ResolutionContext(connection={"parameters": {"token": "tok-123"}}),
                 functions=DEFAULT_FUNCTIONS,
             ),
+            endpoint="items",
         )
         assert table.values == {"auth": base64.b64encode(b"tok-123").decode("ascii")}
 
@@ -152,6 +155,7 @@ class TestReadParamTable:
                 }
             ),
             Resolver(ResolutionContext(connection={"parameters": {"org": "acme"}})),
+            endpoint="items",
         )
         assert table.values == {"scope": "acme/"}
 
@@ -171,6 +175,7 @@ class TestReadParamTable:
                 }
             ),
             _resolver(),
+            endpoint="items",
         )
         assert table.values == {}
 
@@ -188,6 +193,7 @@ class TestReadParamTable:
             ),
             _resolver(),
             filters=_filters({"field": "status", "operator": "eq", "value": "open"}),
+            endpoint="items",
         )
         assert table.values == {"status": "open"}
 
@@ -203,6 +209,7 @@ class TestReadParamTable:
                 filters=_filters(
                     {"field": "customer_number", "operator": "eq", "value": "C-1"}
                 ),
+                endpoint="items",
             )
 
     def test_an_unresolved_default_omits_its_param(self, caplog) -> None:
@@ -219,6 +226,7 @@ class TestReadParamTable:
                     }
                 ),
                 _resolver(),
+                endpoint="items",
             )
         assert table.values == {}
         assert "parameter omitted" in caplog.text
@@ -248,6 +256,7 @@ class TestRequestBuilder:
                 }
             ),
             _resolver(),
+            endpoint="items",
         )
         builder = RequestBuilder(
             table,
@@ -268,6 +277,7 @@ class TestRequestBuilder:
         table = ParamTable.for_read(
             _params({"limit": {"in": "query", "type": "integer", "required": False}}),
             _resolver(),
+            endpoint="items",
         )
         builder = RequestBuilder(
             table,
@@ -282,6 +292,7 @@ class TestRequestBuilder:
         table = ParamTable.for_read(
             _params({"tenant": {"in": "query", "type": "string", "required": False}}),
             _resolver(),
+            endpoint="items",
         )
         builder = RequestBuilder(
             table,
@@ -301,6 +312,7 @@ class TestRequestBuilder:
             _params({"tenant": {"in": "query", "type": "string", "required": False}}),
             _resolver(),
             filters=_filters({"field": "tenant", "operator": "eq", "value": "acme"}),
+            endpoint="items",
         )
         builder = RequestBuilder(
             table,
@@ -322,6 +334,7 @@ class TestRequestBuilder:
         table = ParamTable.for_read(
             _params({"limit": {"in": "query", "type": "integer", "required": False}}),
             _resolver(),
+            endpoint="items",
         )
         builder = RequestBuilder(
             table,
@@ -339,6 +352,7 @@ class TestRequestBuilder:
         table = ParamTable.for_read(
             _params({"offset": {"in": "body", "type": "integer", "required": False}}),
             _resolver(),
+            endpoint="items",
         )
         builder = RequestBuilder(
             table,
@@ -354,13 +368,29 @@ class TestRequestBuilder:
         # Reading with a null body sends a request the endpoint did not
         # describe; the read path never checked this before.
         builder = RequestBuilder(
-            ParamTable(),
+            ParamTable(rules=ParamRules.compile({}, endpoint="items")),
             raw_body={"ref": "connection.parameters.absent"},
             resolver=_resolver(),
             endpoint="/items",
         )
         with pytest.raises(RequestSpecError, match="resolved to nothing"):
             builder.for_page({})
+
+    def test_for_page_never_reports_a_missing_required_param(self) -> None:
+        # Presence is a caller's question, answered once by
+        # ``check_required`` after the table is built (the read calls it
+        # right after ``for_read``). The builder asks nothing at all: what
+        # a loop produced is judged by the loop, before the page that
+        # produced it is yielded.
+        table = ParamTable.for_read(
+            _params({"account": {"in": "query", "type": "string", "required": True}}),
+            _resolver(),
+            endpoint="items",
+        )
+        builder = RequestBuilder(
+            table, raw_body=None, resolver=_resolver(), endpoint="/items"
+        )
+        builder.for_page({})
 
 
 class TestABindingKeyIsAName:
@@ -569,6 +599,27 @@ class TestSendableValues:
                 block="query",
                 endpoint="/items",
             )
+
+    def test_url_encode_of_an_unresolved_input_omits_its_key(self) -> None:
+        # url_encode_function answers None for an unresolved input, not
+        # "" -- None is how every other expression says "nothing
+        # resolved", and it is what the per-request omit rule reads to
+        # drop the key rather than send it empty.
+        assert (
+            bind_request_values(
+                {
+                    "sig": {
+                        "function": "url_encode",
+                        "input": {"ref": "connection.parameters.absent"},
+                    }
+                },
+                params={},
+                resolver=_resolver(),
+                block="query",
+                endpoint="/items",
+            )
+            == {}
+        )
 
 
 class TestNeverFillableScopeRefusals:
@@ -967,8 +1018,8 @@ class TestPathSubstitution:
     def test_a_placeholder_resolving_to_an_empty_string_is_refused(self) -> None:
         # "/Contact/" addresses the whole collection: a read fetches every
         # record instead of one, and a PUT or PATCH targets all of them.
-        # url_encode answers "" for an unbound input, so this is reachable
-        # without anyone declaring an empty value.
+        # A binding resolving to an empty string reaches here as one, so
+        # the empty case is refused alongside the missing one.
         with pytest.raises(RequestSpecError, match=r"\{id\}"):
             substitute_path("/Contact/{id}", {"id": ""}, endpoint="items")
 

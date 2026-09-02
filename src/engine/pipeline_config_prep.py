@@ -90,6 +90,7 @@ from src.engine.mapping import MappingDocument
 from src.models.resolved import (
     BatchingConfig,
     ErrorHandlingConfig,
+    LoggingConfig,
     PipelineConnections,
     ReplicationConfig,
     ResolvedDestination,
@@ -120,6 +121,10 @@ def _parse_runtime_config(contract: ContractRuntime) -> RuntimeConfig:
     """
     batching = contract.batching
     error_handling = contract.error_handling
+    # ``metrics_enabled`` is deliberately not read: the engine emits its run
+    # metrics unconditionally, so honouring the flag would mean dropping the
+    # record of a run that failed.
+    logging_block = contract.logging
     return RuntimeConfig(
         batching=BatchingConfig(**author_set(batching, batch_size=batching.batch_size)),
         error_handling=ErrorHandlingConfig(
@@ -129,6 +134,9 @@ def _parse_runtime_config(contract: ContractRuntime) -> RuntimeConfig:
                 max_retries=error_handling.max_retries,
                 retry_delay_seconds=error_handling.retry_delay_seconds,
             )
+        ),
+        logging=LoggingConfig(
+            **author_set(logging_block, log_level=logging_block.log_level)
         ),
         **author_set(contract, buffer_size=contract.buffer_size),
     )

@@ -79,6 +79,13 @@ in a customer pipeline (spec
   fetched and no HTTP client is needed, which is why the `conformance`
   extra pulls no transport.
 
+  A declared param's value keywords travel with the table every request is
+  built from, so the kit judges them exactly as the run does: a value the
+  author's own `enum`, `pattern`, bound or length rules do not admit is a
+  finding wherever it comes from. Presence is the one thing it does not
+  judge -- a definition-only run has no connection and no secrets, so a
+  `required` param resolving to nothing here says nothing about the run.
+
   What a definition cannot supply is deferred rather than guessed at or
   reported. The engine fills a path placeholder from a param default
   resolved against a real connection, from the stream's filters, or from

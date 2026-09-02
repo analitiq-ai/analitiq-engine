@@ -71,7 +71,7 @@ names are an established deployment contract and are unchanged.
 
 | Setting | Env var | Default | Controls |
 |---|---|---|---|
-| Log level | `LOG_LEVEL` | `INFO` | Logging level for the process. |
+| Log level | `LOG_LEVEL` | `INFO` | Logging level until the pipeline config is read; a declared `runtime.logging.log_level` supersedes it in both run modes and in the connector worker. |
 | Run mode | `RUN_MODE` | `source` | Process role: `source` (engine) or `destination` (gRPC server). |
 | Destination index | `DESTINATION_INDEX` | `0` | Which destination from the pipeline config to serve. |
 | Pipeline id | `PIPELINE_ID` | _(required)_ | Pipeline id from `pipelines/manifest.json` to execute. |

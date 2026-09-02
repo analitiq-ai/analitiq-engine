@@ -75,6 +75,11 @@ repos:
           - aiofiles
           - orjson
           - jsonschema
+          # jsonschema ships no py.typed, and cdk.api.param_rules imports it
+          # directly, so the isolated hook env needs the stubs the poetry dev
+          # group installs -- without them the hook and `poetry run mypy`
+          # disagree on the same file.
+          - types-jsonschema
           - python-dotenv
           - python-dateutil
           - protobuf

@@ -1076,6 +1076,16 @@ def resolve_http_spec(spec: Mapping[str, Any], *, resolver: Resolver) -> dict[st
     for name, value in raw_headers.items():
         resolved = resolver.resolve(value)
         if resolved is None:
+            # Logged for the reason the adbc db_kwargs loop logs its own
+            # drops: a transport header is where a credential or an API
+            # version lives, and a header that is simply absent gives the
+            # provider's 401 nothing to map back to.
+            logger.warning(
+                "http transport header %r resolved to nothing and is not "
+                "sent; check the secret store and the connection parameters "
+                "the declared value reads.",
+                str(name),
+            )
             continue
         headers[str(name)] = require_wire_safe_header(str(name), str(resolved))
 

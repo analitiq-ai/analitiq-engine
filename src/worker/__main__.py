@@ -97,6 +97,10 @@ def main() -> int:
         format="[worker] %(asctime)s %(name)s %(levelname)s %(message)s",
     )
     bootstrap = read_bootstrap_from_stdin()
+    # The worker's environment is stripped of LOG_LEVEL, so the level the run
+    # is executing at reaches it only here -- INFO covers the bootstrap read
+    # above, which is the only thing logged before this point.
+    logging.getLogger().setLevel(bootstrap.log_level)
     if bootstrap.role == "destination":
         return asyncio.run(_run_destination(bootstrap))
     return asyncio.run(_run_source(bootstrap))

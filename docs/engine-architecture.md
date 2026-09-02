@@ -396,6 +396,25 @@ and `deepObject`, in the explode combinations OpenAPI defines. A style
 outside it — or a combination OpenAPI leaves undefined — is refused with
 the rest of the request block, before a page is fetched.
 
+A declared param's value keywords (`cdk/cdk/api/param_rules.py`) are the
+third. `enum`, `format`, `pattern`, the numeric bounds and the length and
+item bounds are published as JSON Schema, so they are enforced with the
+reference implementation rather than with rules of the engine's own —
+anything else would let a document satisfy the published artifact and fail
+here. Two things sit around it. The `format` names the engine enforces are
+listed explicitly rather than taken from the library's ambient registry,
+which holds whichever checkers the surrounding install happens to supply:
+a connector pulling one in for its own reasons would otherwise switch a
+format on inside its worker and nowhere else. And numbers are compared in
+one decimal model entered from the text both sides were written in — a
+declared bound arrives as the binary float nearest the author's decimal,
+while a value read back off the wire is an exact `Decimal`, which is how a
+keyset cursor reaches the next page. The compiled rules travel on the
+param table every request is built from, so no request reaches the wire
+without the declarations that judge its values. A refusal names the param,
+the endpoint, the keyword and what the author declared, and never the
+value: params carry bearer tokens and continuation tokens.
+
 ## Source Connector Layer
 
 The engine ships no source connector. Both families live in the CDK, and

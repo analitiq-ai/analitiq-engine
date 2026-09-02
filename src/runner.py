@@ -14,8 +14,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
-
 from cdk.connection_runtime import ConnectionRuntime
 from src.engine.engine import StreamingEngine
 from src.models.metrics import PipelineMetrics
@@ -27,6 +25,7 @@ from src.models.resolved import (
 )
 
 from .engine.pipeline_config_prep import PipelineConfigPrep
+from .shared.logging_setup import apply_log_level
 from .shared.run_id import get_or_generate_run_id
 from .state.error_classification import (
     ErrorCode,
@@ -159,11 +158,11 @@ class PipelineRunner:
     """Executes Analitiq Stream pipelines with proper error handling and metrics.
 
     Configuration paths are defined in manifest.json. Requires PIPELINE_ID
-    environment variable (may be supplied via a .env file).
+    environment variable (may be supplied via a .env file, which the process
+    entry point loads before any run mode starts).
     """
 
     def __init__(self) -> None:
-        load_dotenv()  # must precede os.getenv so .env-based configs work
         pipeline_id = os.getenv("PIPELINE_ID")
         if not pipeline_id:
             raise ValueError("PIPELINE_ID environment variable is required")
@@ -203,6 +202,11 @@ class PipelineRunner:
                 _resolved_endpoints,
                 _connectors,
             ) = pipeline_config_prep.create_config()
+
+            # The pipeline's declared level supersedes LOG_LEVEL for the rest
+            # of the run; the destination server applies the same one from the
+            # same document (src.main.run_destination_mode).
+            apply_log_level(pipeline_config.runtime.logging.log_level)
 
             # Translate the resolved contract into the engine config dict. This
             # still validates config (e.g. a stream with no destinations), so it
