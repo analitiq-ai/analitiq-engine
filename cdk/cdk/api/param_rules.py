@@ -138,11 +138,16 @@ def normalize_numbers(value: Any) -> Any:
     ``Decimal("0.1")`` rather than the binary float nearest it, so a bound
     and a value that were both written ``0.1`` compare equal.
 
-    An exactly-integral ``Decimal`` becomes an ``int``, because JSON
+    An exactly-integral number then becomes an ``int``, because JSON
     Schema's ``integer`` is an isinstance test and rejects ``Decimal(9901)``
     outright -- a keyset cursor on an integer id would fail its own
-    declaration. Everything else stays a ``Decimal``: narrowing to ``float``
-    first would round the judgement it is about to be used for.
+    declaration. This is why the float branch falls THROUGH rather than
+    returning: JSON Schema calls ``1.0`` an integer, and the library agrees
+    for a ``float`` but not for a ``Decimal``, so a float that stopped at
+    ``Decimal("1.0")`` would be refused by a declaration that admits the
+    same number written any other way. Everything non-integral stays a
+    ``Decimal``: narrowing to ``float`` would round the judgement it is
+    about to be used for.
 
     That narrowing stops at the interpreter's decimal-rendering limit.
     ``Decimal("1E+5000")`` is finite and integral, so it converts to a
@@ -163,7 +168,11 @@ def normalize_numbers(value: Any) -> Any:
     if isinstance(value, bool):
         return value
     if isinstance(value, float):
-        return Decimal(repr(value))
+        # Re-entered, not returned: a float and a Decimal that spell the
+        # same number have to leave here as the same object, or ``1.0``
+        # would be refused by a ``type: integer`` param that admits
+        # ``Decimal("1.0")`` -- and JSON Schema calls both an integer.
+        value = Decimal(repr(value))
     if isinstance(value, Decimal):
         if (
             value.is_finite()

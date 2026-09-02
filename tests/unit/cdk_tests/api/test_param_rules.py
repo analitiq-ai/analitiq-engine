@@ -485,3 +485,45 @@ class TestAnIntervalThatAdmitsNothing:
             }
         )
         rules.check_admissible({"p": 5.0})
+
+
+class TestAnIntegralFloatIsAnInteger:
+    """JSON Schema calls ``1.0`` an integer; every spelling of it must agree.
+
+    ``normalize_numbers`` routes a float through the Decimal branch rather
+    than returning from its own, so a value written ``1.0`` is judged the
+    same whether it arrived as a float from a literal default or as a
+    ``Decimal`` off the wire. Stopping at ``Decimal("1.0")`` refused it: the
+    library's ``integer`` check accepts an integral ``float`` but not an
+    integral ``Decimal``.
+    """
+
+    @pytest.mark.parametrize("value", [1.0, 1, Decimal("1.0"), 9901.0], ids=str)
+    def test_an_integral_value_admits_a_declared_integer(self, value: Any) -> None:
+        rules = _rules({"n": {"in": "query", "type": "integer", "required": False}})
+        rules.check_admissible({"n": value})
+
+    @pytest.mark.parametrize("value", [1.5, Decimal("1.5")], ids=str)
+    def test_a_fractional_value_still_refuses_a_declared_integer(
+        self, value: Any
+    ) -> None:
+        rules = _rules({"n": {"in": "query", "type": "integer", "required": False}})
+        with pytest.raises(RequestSpecError, match="type"):
+            rules.check_admissible({"n": value})
+
+    @pytest.mark.parametrize("value", [0.1, Decimal("0.1")], ids=str)
+    def test_the_fractional_bound_model_is_unchanged(self, value: Any) -> None:
+        # The reason the float branch exists at all: both spellings of 0.1
+        # sit exactly on a bound written 0.1.
+        rules = _rules(
+            {
+                "a": {
+                    "in": "query",
+                    "type": "number",
+                    "required": False,
+                    "minimum": 0.1,
+                    "maximum": 0.1,
+                }
+            }
+        )
+        rules.check_admissible({"a": value})

@@ -156,7 +156,7 @@ class TestLoggingConfig:
         assert LoggingConfig().log_level == "WARNING"
 
     def test_unknown_level_fails_loud(self):
-        with pytest.raises(ValueError, match="Unknown log level"):
+        with pytest.raises(ValueError, match="Unusable log level"):
             LoggingConfig(log_level="DEGUB")
 
 

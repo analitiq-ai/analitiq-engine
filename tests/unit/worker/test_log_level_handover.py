@@ -116,3 +116,20 @@ class TestTheRelayDoesNotFilterTwice:
         with caplog.at_level(logging.WARNING):
             await _forward_stderr("pg-source", stream)
         assert "Traceback" in caplog.text
+
+
+class TestNotsetIsNotAnExecutableLevel:
+    def test_it_is_refused_rather_than_silencing_the_run(self):
+        # NOTSET is a real name, so it used to resolve to 0 -- and
+        # isEnabledFor(0) is false, so the root logger set to it emits
+        # nothing at all. A run that says nothing is indistinguishable from
+        # a run that had nothing to say, including the worker's own stderr.
+        from src.shared.logging_setup import resolve_level
+
+        with pytest.raises(ValueError, match="NOTSET"):
+            resolve_level("NOTSET")
+
+    def test_a_usable_level_still_resolves(self):
+        from src.shared.logging_setup import resolve_level
+
+        assert resolve_level("debug") == logging.DEBUG

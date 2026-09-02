@@ -18,13 +18,21 @@ def resolve_level(name: str) -> int:
 
     An unknown name raises rather than degrading to INFO: a silently ignored
     ``LOG_LEVEL=DEGUB`` is indistinguishable from a level that was honoured.
+
+    ``NOTSET`` raises for the same reason, though it IS a name. On the root
+    logger it is not "log everything" but ``0``, and ``isEnabledFor(0)`` is
+    false -- so it silences the whole run, which is the opposite of what an
+    operator typing it intends and is indistinguishable from a process that
+    had nothing to say.
     """
     level = logging.getLevelNamesMapping().get(name.upper())
-    if level is None:
-        raise ValueError(
-            f"Unknown log level {name!r}; expected one of "
-            f"{sorted(logging.getLevelNamesMapping())}"
+    if level is None or level == logging.NOTSET:
+        usable = sorted(
+            n
+            for n, value in logging.getLevelNamesMapping().items()
+            if value != logging.NOTSET
         )
+        raise ValueError(f"Unusable log level {name!r}; expected one of {usable}")
     return level
 
 
