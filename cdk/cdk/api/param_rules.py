@@ -61,23 +61,40 @@ logger = logging.getLogger(__name__)
 __all__ = ["ParamRules", "normalize_numbers"]
 
 
-#: The ``Param`` attribute that carries each enforced JSON-Schema keyword,
-#: mapped to the keyword's name in the schema this compiles. Read at
-#: exactly one site (:meth:`ParamRules.compile`), which is what lets the
-#: consumption census claim all nine from the table rather than from nine
-#: literal attribute reads -- see ``DYNAMIC_ATTRIBUTE_TABLES`` in
-#: ``tools/contract_consumption.py``.
-_CONSTRAINT_KEYWORDS: Final[Mapping[str, str]] = {
-    "enum": "enum",
-    "format": "format",
-    "pattern": "pattern",
-    "minimum": "minimum",
-    "maximum": "maximum",
-    "min_length": "minLength",
-    "max_length": "maxLength",
-    "min_items": "minItems",
-    "max_items": "maxItems",
-}
+#: The ``Param`` attributes that carry an enforced JSON-Schema keyword.
+#: Read at exactly one site (:meth:`ParamRules.compile`), which is what lets
+#: the consumption census claim all nine from the table rather than from
+#: nine literal attribute reads -- see ``DYNAMIC_ATTRIBUTE_TABLES`` in
+#: ``tools/contract_consumption.py``. That census is why these are spelled
+#: out rather than derived: it reads the names statically, and a table it
+#: has to execute to see claims nothing.
+_CONSTRAINT_KEYWORDS: Final[tuple[str, ...]] = (
+    "enum",
+    "format",
+    "pattern",
+    "minimum",
+    "maximum",
+    "min_length",
+    "max_length",
+    "min_items",
+    "max_items",
+)
+
+
+def _keyword_of(attribute: str) -> str:
+    """Name the JSON-Schema keyword a ``Param`` attribute carries.
+
+    The contract already answers this: ``Param.min_length`` declares
+    ``alias="minLength"``, which IS the wire spelling, and an attribute with
+    no alias is spelled the same both ways. Asked of the model rather than
+    written down again, because a second copy of the mapping enforces the
+    old keyword name for one release after the contract moves -- and the
+    engine would then be checking a keyword the published schema no longer
+    names, which is the exact drift delegating to the reference
+    implementation exists to prevent.
+    """
+    return Param.model_fields[attribute].alias or attribute
+
 
 #: The keywords whose refusal is unactionable without a measurement: "too
 #: long" says nothing when the value itself may not be printed. A count is
@@ -271,7 +288,8 @@ class ParamRules:
         for name, decl in declared.items():
             schema: dict[str, Any] = {"type": decl.type}
             authored: dict[str, Any] = {"type": decl.type}
-            for attribute, keyword in _CONSTRAINT_KEYWORDS.items():
+            for attribute in _CONSTRAINT_KEYWORDS:
+                keyword = _keyword_of(attribute)
                 value = getattr(decl, attribute)
                 if value is None:
                     continue

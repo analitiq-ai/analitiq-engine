@@ -13,7 +13,7 @@ Shape::
       "kind": "<connector kind: database, api, ... >",
       "connector_id": "postgres",
       "uds_path": "/.../worker.sock",
-      "log_level": "INFO",
+      "log_level": 20,
       "connection": {<ConnectionRuntime.resolve_spec() payload>},
       "type_maps": {
         "connector":  {"rules": [...], "write_rules": [...] | null} | null,
@@ -48,7 +48,7 @@ class WorkerBootstrap:
     kind: str
     connector_id: str
     uds_path: str
-    log_level: str
+    log_level: int
     connection_payload: dict[str, Any]
     connector_type_mapper: TypeMapper | None
     connection_type_mapper: TypeMapper | None
@@ -77,9 +77,19 @@ def parse_bootstrap(raw: dict[str, Any]) -> WorkerBootstrap:
     role = raw.get("role")
     if role not in _ROLES:
         raise ValueError(f"bootstrap.role must be one of {_ROLES}, got {role!r}")
-    for key in ("kind", "connector_id", "uds_path", "log_level", "connection"):
+    for key in ("kind", "connector_id", "uds_path", "connection"):
         if not raw.get(key):
             raise ValueError(f"bootstrap.{key} is required")
+    # Checked apart from the others because it is a number: a truthiness
+    # test would read a level of 0 as absent, and 0 is the one level that
+    # silences the worker outright -- exactly what has to be caught, not
+    # what has to be reported as missing.
+    log_level = raw.get("log_level")
+    if not isinstance(log_level, int) or isinstance(log_level, bool) or log_level <= 0:
+        raise ValueError(
+            f"bootstrap.log_level must be a positive logging level, got "
+            f"{log_level!r}"
+        )
 
     type_maps = raw.get("type_maps") or {}
     connector_id = raw["connector_id"]
@@ -88,7 +98,7 @@ def parse_bootstrap(raw: dict[str, Any]) -> WorkerBootstrap:
         kind=raw["kind"],
         connector_id=connector_id,
         uds_path=raw["uds_path"],
-        log_level=raw["log_level"],
+        log_level=log_level,
         connection_payload=dict(raw["connection"]),
         connector_type_mapper=_mapper_from(type_maps.get("connector"), connector_id),
         connection_type_mapper=_mapper_from(

@@ -36,7 +36,7 @@ def _bootstrap_raw(**overrides):
         "kind": "database",
         "connector_id": "postgres",
         "uds_path": "/tmp/w/worker.sock",  # nosec B108
-        "log_level": "DEBUG",
+        "log_level": logging.DEBUG,
         "connection": {"connection_id": "my-pg"},
     }
     raw.update(overrides)
@@ -61,7 +61,7 @@ class TestShellPacksItsLevel:
             connectors_dir=tmp_path / "connectors",
             connections_dir=tmp_path / "connections",
         )
-        assert bootstrap["log_level"] == "DEBUG"
+        assert bootstrap["log_level"] == logging.DEBUG
 
     def test_the_child_environment_still_carries_no_level(self, monkeypatch):
         monkeypatch.setenv("LOG_LEVEL", "DEBUG")
@@ -71,7 +71,7 @@ class TestShellPacksItsLevel:
 class TestWorkerAppliesTheBootstrapLevel:
     def test_main_sets_the_root_logger_from_the_bootstrap(self, root_level_restored):
         root_level_restored.setLevel(logging.INFO)
-        bootstrap = parse_bootstrap(_bootstrap_raw(log_level="DEBUG"))
+        bootstrap = parse_bootstrap(_bootstrap_raw(log_level=logging.DEBUG))
 
         applied: list[int] = []
         with (
@@ -133,3 +133,29 @@ class TestNotsetIsNotAnExecutableLevel:
         from src.shared.logging_setup import resolve_level
 
         assert resolve_level("debug") == logging.DEBUG
+
+
+class TestTheLevelTravelsAsANumber:
+    async def test_a_level_the_stdlib_does_not_name_still_reaches_the_worker(
+        self, tmp_path: Path, root_level_restored
+    ):
+        # The whole reason the payload carries the integer. ``getLevelName``
+        # answers "Level 25" for any level the stdlib does not name, and the
+        # far side could not resolve that back -- a crash across the process
+        # boundary for a value that was correct where it started.
+        root_level_restored.setLevel(25)
+
+        runtime = MagicMock()
+        runtime.connector_type = "database"
+        runtime.connector_id = "postgres"
+        runtime.connection_id = "my-pg"
+        runtime.resolve_spec = AsyncMock(return_value={"connection_id": "my-pg"})
+
+        bootstrap = await build_bootstrap(
+            runtime,
+            role="source",
+            connectors_dir=tmp_path / "connectors",
+            connections_dir=tmp_path / "connections",
+        )
+        assert bootstrap["log_level"] == 25
+        assert parse_bootstrap(_bootstrap_raw(log_level=25)).log_level == 25

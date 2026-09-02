@@ -20,7 +20,7 @@ from pydantic import ValidationError
 from cdk.api.request import endpoint_transport_refs
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.type_map.loader import connector_definition_dir, read_raw_type_maps
-from src.shared.logging_setup import current_log_level_name
+from src.shared.logging_setup import current_log_level
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +153,7 @@ async def build_bootstrap(
         # The shell's own level, already superseded by the pipeline's declared
         # one at config load. It travels in the payload because _clean_env
         # strips LOG_LEVEL, so the worker has no environment to read it from.
-        "log_level": current_log_level_name(),
+        "log_level": current_log_level(),
         "connection": connection_payload,
         "type_maps": read_type_map_payloads(
             connectors_dir,

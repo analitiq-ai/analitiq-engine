@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 
 import pytest
 
@@ -27,7 +28,7 @@ def _minimal_raw(**overrides):
         "kind": "database",
         "connector_id": "postgres",
         "uds_path": "/tmp/w/worker.sock",
-        "log_level": "INFO",
+        "log_level": 20,
         "connection": {
             "connection_id": "my-pg",
             "connector_id": "postgres",
@@ -50,7 +51,7 @@ class TestParseBootstrap:
         assert bootstrap.kind == "database"
         assert bootstrap.connector_id == "postgres"
         assert bootstrap.uds_path == "/tmp/w/worker.sock"
-        assert bootstrap.log_level == "INFO"
+        assert bootstrap.log_level == logging.INFO
         assert bootstrap.connection_payload["connection_id"] == "my-pg"
         # Optional blocks default to empty, not None.
         assert bootstrap.endpoint_refs == {}
@@ -76,13 +77,29 @@ class TestParseBootstrap:
         with pytest.raises(ValueError, match="bootstrap.role"):
             parse_bootstrap(_minimal_raw(role=role))
 
-    @pytest.mark.parametrize(
-        "key", ["kind", "connector_id", "uds_path", "log_level", "connection"]
-    )
+    @pytest.mark.parametrize("key", ["kind", "connector_id", "uds_path", "connection"])
     def test_missing_required_field_rejected(self, key):
         raw = _minimal_raw()
         del raw[key]
         with pytest.raises(ValueError, match=f"bootstrap.{key} is required"):
+            parse_bootstrap(raw)
+
+    @pytest.mark.parametrize(
+        "level",
+        [None, "INFO", 0, -1, True],
+        ids=["absent", "name", "notset", "negative", "bool"],
+    )
+    def test_an_unusable_log_level_is_rejected(self, level):
+        # Checked apart from the other required keys because it is a number.
+        # A truthiness test would read 0 as absent, and 0 is the one level
+        # that silences the worker outright -- the case that most needs
+        # catching, not one to report as missing.
+        raw = _minimal_raw()
+        if level is None:
+            del raw["log_level"]
+        else:
+            raw["log_level"] = level
+        with pytest.raises(ValueError, match="bootstrap.log_level"):
             parse_bootstrap(raw)
 
     def test_type_map_blocks_build_mappers(self):

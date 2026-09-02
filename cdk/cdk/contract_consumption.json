@@ -531,7 +531,7 @@
     },
     "analitiq.contracts.endpoints.Param": {
       "controlled_by": [
-        "cdk.api.param_rules:326",
+        "cdk.api.param_rules:344",
         "cdk.api.request:180",
         "cdk.api.request:242",
         "cdk.api.request:244"
@@ -541,46 +541,46 @@
         "cdk.request_binding:74"
       ],
       "enum": [
-        "cdk.api.param_rules:275"
+        "cdk.api.param_rules:293"
       ],
       "explode": [
         "cdk.api.query_style:121",
         "cdk.api.query_style:124"
       ],
       "format": [
-        "cdk.api.param_rules:275"
+        "cdk.api.param_rules:293"
       ],
       "max_items": [
-        "cdk.api.param_rules:275"
+        "cdk.api.param_rules:293"
       ],
       "max_length": [
-        "cdk.api.param_rules:275"
+        "cdk.api.param_rules:293"
       ],
       "maximum": [
-        "cdk.api.param_rules:275"
+        "cdk.api.param_rules:293"
       ],
       "min_items": [
-        "cdk.api.param_rules:275"
+        "cdk.api.param_rules:293"
       ],
       "min_length": [
-        "cdk.api.param_rules:275"
+        "cdk.api.param_rules:293"
       ],
       "minimum": [
-        "cdk.api.param_rules:275"
+        "cdk.api.param_rules:293"
       ],
       "pattern": [
-        "cdk.api.param_rules:275"
+        "cdk.api.param_rules:293"
       ],
       "required": [
-        "cdk.api.param_rules:325"
+        "cdk.api.param_rules:343"
       ],
       "style": [
         "cdk.api.query_style:121",
         "cdk.api.query_style:124"
       ],
       "type": [
-        "cdk.api.param_rules:272",
-        "cdk.api.param_rules:273",
+        "cdk.api.param_rules:289",
+        "cdk.api.param_rules:290",
         "cdk.api.query_style:124"
       ]
     },

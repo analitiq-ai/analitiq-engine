@@ -41,6 +41,14 @@ def apply_log_level(name: str) -> None:
     logging.getLogger().setLevel(resolve_level(name))
 
 
-def current_log_level_name() -> str:
-    """Name of the level the root logger is currently effective at."""
-    return logging.getLevelName(logging.getLogger().getEffectiveLevel())
+def current_log_level() -> int:
+    """Return the level the root logger is currently effective at.
+
+    The number, not its name. A name is a lossy channel in one direction:
+    ``getLevelName`` answers ``"Level 25"`` for any level the stdlib does
+    not name, and the far side of the worker boundary then cannot resolve
+    it -- a crash for a value that was correct where it started. The
+    integer is what ``setLevel`` takes anyway, and it is JSON-native, so
+    nothing has to be translated to carry it.
+    """
+    return logging.getLogger().getEffectiveLevel()
