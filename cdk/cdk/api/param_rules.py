@@ -19,16 +19,9 @@ worker and nowhere else -- the same document passing in one consumer and
 failing in another. A ``format`` outside the list is an annotation, which
 is what JSON Schema says it is by default.
 
-**Numbers are compared in one model.** A declared bound is a
-``StrictFloat`` in the contract, so the author's ``0.1`` arrives as the
-binary float nearest it; a value read back off the wire arrives as an
-exact ``Decimal`` (:func:`cdk.api.http.loads_preserving_decimals`), which
-is how a keyset cursor reaches the next page's params. Compared as they
-arrive, a cursor sitting exactly on a declared fractional bound is refused
-on page two of a read whose page one already committed rows.
-:func:`normalize_numbers` puts both sides into the decimal model they were
-each written in, and it runs over the declared keywords and the value
-alike -- one function, so the two can never drift apart.
+**Numbers are compared in one model**, stated once in
+:func:`normalize_numbers` and applied to the declaration and the value
+alike, so the two can never drift apart.
 
 Nothing here renders the value it refused. Params carry bearer tokens, API
 keys and opaque continuation tokens, and a refusal becomes a
@@ -52,7 +45,6 @@ from typing import Any, Final
 
 from analitiq.contracts.endpoints import Param
 from jsonschema import Draft202012Validator, FormatChecker
-from jsonschema.exceptions import SchemaError
 
 from .exceptions import RequestSpecError
 
@@ -62,9 +54,9 @@ __all__ = ["ParamRules", "normalize_numbers"]
 
 
 #: The ``Param`` attributes that carry an enforced JSON-Schema keyword.
-#: Read at exactly one site (:meth:`ParamRules.compile`), which is what lets
-#: the consumption census claim all nine from the table rather than from
-#: nine literal attribute reads -- see ``DYNAMIC_ATTRIBUTE_TABLES`` in
+#: Read at exactly one site (:func:`_compile_one`), which is what lets the
+#: consumption census claim all nine from the table rather than from nine
+#: literal attribute reads -- see ``DYNAMIC_ATTRIBUTE_TABLES`` in
 #: ``tools/contract_consumption.py``. That census is why these are spelled
 #: out rather than derived: it reads the names statically, and a table it
 #: has to execute to see claims nothing.
@@ -80,26 +72,19 @@ _CONSTRAINT_KEYWORDS: Final[tuple[str, ...]] = (
     "max_items",
 )
 
-
-def _keyword_of(attribute: str) -> str:
-    """Name the JSON-Schema keyword a ``Param`` attribute carries.
-
-    The contract already answers this: ``Param.min_length`` declares
-    ``alias="minLength"``, which IS the wire spelling, and an attribute with
-    no alias is spelled the same both ways. Asked of the model rather than
-    written down again, because a second copy of the mapping enforces the
-    old keyword name for one release after the contract moves -- and the
-    engine would then be checking a keyword the published schema no longer
-    names, which is the exact drift delegating to the reference
-    implementation exists to prevent.
-    """
-    return Param.model_fields[attribute].alias or attribute
-
-
 #: The keywords whose refusal is unactionable without a measurement: "too
 #: long" says nothing when the value itself may not be printed. A count is
 #: not the content.
 _MEASURED: Final = frozenset({"minLength", "maxLength", "minItems", "maxItems"})
+
+#: The keyword pairs that bound one quantity from both ends, low then high.
+#: The metaschema judges a keyword at a time, so it accepts a pair no value
+#: can satisfy.
+_INTERVALS: Final = (
+    ("minimum", "maximum"),
+    ("minLength", "maxLength"),
+    ("minItems", "maxItems"),
+)
 
 #: Every ``format`` this engine ENFORCES, named rather than discovered.
 #: Exactly the set ``jsonschema[format-nongpl]`` supplies, which is what
@@ -148,55 +133,52 @@ _FORMAT_CHECKER: Final = _named_format_checker()
 
 
 def normalize_numbers(value: Any) -> Any:
-    """Put every number in *value* into the model the others are compared in.
+    """Put every number into the one model this module compares in.
 
-    A ``float`` re-enters through its own decimal spelling, which is the
-    text the author (or the provider) wrote: ``0.1`` becomes
-    ``Decimal("0.1")`` rather than the binary float nearest it, so a bound
-    and a value that were both written ``0.1`` compare equal.
+    A number leaves here as exactly one of two things:
 
-    An exactly-integral number then becomes an ``int``, because JSON
-    Schema's ``integer`` is an isinstance test and rejects ``Decimal(9901)``
-    outright -- a keyset cursor on an integer id would fail its own
-    declaration. This is why the float branch falls THROUGH rather than
-    returning: JSON Schema calls ``1.0`` an integer, and the library agrees
-    for a ``float`` but not for a ``Decimal``, so a float that stopped at
-    ``Decimal("1.0")`` would be refused by a declaration that admits the
-    same number written any other way. Everything non-integral stays a
-    ``Decimal``: narrowing to ``float`` would round the judgement it is
+    * an ``int``, when it is exactly integral AND short enough for the
+      interpreter to render as a decimal string;
+    * a ``Decimal`` carrying the digits it was written with, otherwise.
+
+    How it ARRIVED does not change the answer, and that is the point. A
+    ``float`` enters through its own decimal spelling, so ``1.0``,
+    ``Decimal("1.0")`` and ``1`` all leave as ``1``, while ``0.1`` and
+    ``Decimal("0.1")`` both leave as ``Decimal("0.1")``. A value's spelling
+    must not decide its verdict: a declared bound reaches the engine as the
+    binary float nearest the author's decimal, while the same number read
+    back off the wire is an exact ``Decimal``
+    (:func:`cdk.api.http.loads_preserving_decimals`, which is how a keyset
+    cursor reaches the next page's params).
+
+    Each half of the rule earns its place. ``int``, because JSON Schema's
+    ``integer`` is an isinstance test that rejects ``Decimal(9901)``
+    outright. The length cap, because ``Decimal("1E+5000")`` is integral and
+    would otherwise become a 5001-digit ``int`` that raises a bare
+    ``ValueError`` the moment anything renders it -- a builtin escaping a
+    module whose entire error vocabulary is :class:`RequestSpecError`, on a
+    number a provider can put in a JSON body. ``Decimal`` for everything
+    else, because narrowing to ``float`` would round the judgement it is
     about to be used for.
 
-    That narrowing stops at the interpreter's decimal-rendering limit.
-    ``Decimal("1E+5000")`` is finite and integral, so it converts to a
-    5001-digit ``int`` that raises a bare ``ValueError`` the moment anything
-    renders it -- a builtin escaping a module whose entire error vocabulary
-    is :class:`RequestSpecError`, on a number a provider can put in a JSON
-    body. Left a ``Decimal`` it compares cleanly, and a param declaring
-    ``type: integer`` refuses it in words instead of crashing.
+    ``bool`` is outside the model: it is not a number here, it reaches
+    neither branch, and the library already tells it from ``1``
+    (``{"enum": [1]}`` refuses ``True``).
 
-    ``bool`` is left alone even though it is an ``int`` subclass: the
-    library already tells the two apart (``{"enum": [1]}`` refuses ``True``),
-    so touching it here would only break that.
-
-    Recursive, because a number can arrive at any depth -- an ``enum`` of
-    arrays matches element by element, and normalising only the outermost
-    number looks right in a test and fails on real data.
+    Containers are mapped element-wise, because a number can arrive at any
+    depth -- an ``enum`` of arrays matches element by element, and
+    normalising only the outermost number looks right in a test and fails
+    on real data.
     """
-    if isinstance(value, bool):
-        return value
     if isinstance(value, float):
-        # Re-entered, not returned: a float and a Decimal that spell the
-        # same number have to leave here as the same object, or ``1.0``
-        # would be refused by a ``type: integer`` param that admits
-        # ``Decimal("1.0")`` -- and JSON Schema calls both an integer.
         value = Decimal(repr(value))
     if isinstance(value, Decimal):
-        if (
-            value.is_finite()
-            and value == value.to_integral_value()
-            and _renderable_as_int(value)
-        ):
-            return int(value)
+        if value.is_finite() and value == value.to_integral_value():
+            # ``sys.get_int_max_str_digits`` is read per call because it is
+            # settable at runtime; ``0`` means the interpreter caps nothing.
+            limit = sys.get_int_max_str_digits()
+            if limit == 0 or value.adjusted() < limit:
+                return int(value)
         return value
     if isinstance(value, Mapping):
         return {key: normalize_numbers(item) for key, item in value.items()}
@@ -205,20 +187,8 @@ def normalize_numbers(value: Any) -> Any:
     return value
 
 
-def _renderable_as_int(value: Decimal) -> bool:
-    """Whether *value* has few enough digits for CPython to render as an int.
-
-    ``sys.get_int_max_str_digits`` is read per call because it is settable at
-    runtime; ``0`` means the interpreter imposes no limit.
-    """
-    limit = sys.get_int_max_str_digits()
-    return limit == 0 or value.adjusted() < limit
-
-
 def _non_finite(value: Any) -> bool:
     """Whether *value* holds a number no comparison can order."""
-    if isinstance(value, bool):
-        return False
     if isinstance(value, float):
         return not math.isfinite(value)
     if isinstance(value, Decimal):
@@ -233,6 +203,81 @@ def _non_finite(value: Any) -> bool:
 def _type_name(value: Any) -> str:
     """Name the type of a value without rendering the value."""
     return type(value).__name__
+
+
+def _measurement(keyword: str, value: Any) -> str:
+    """Report a size for the keywords that are unactionable without one."""
+    if keyword in _MEASURED and isinstance(value, (str, list, tuple)):
+        return f" (measured {len(value)})"
+    return ""
+
+
+def _keyword_of(attribute: str) -> str:
+    """Name the JSON-Schema keyword a ``Param`` attribute carries.
+
+    The contract already answers this: ``Param.min_length`` declares
+    ``alias="minLength"``, which IS the wire spelling, and an attribute with
+    no alias is spelled the same both ways. Asked of the model rather than
+    written down again, because a second copy of the mapping enforces the
+    old keyword name for one release after the contract moves -- and the
+    engine would then be checking a keyword the published schema no longer
+    names, which is the exact drift delegating to the reference
+    implementation exists to prevent.
+    """
+    return Param.model_fields[attribute].alias or attribute
+
+
+def _keyword_defect(name: str, endpoint: str, keyword: str, value: Any) -> str | None:
+    """Say how one declared keyword is unusable, or ``None`` if it is fine.
+
+    Everything a single keyword can be wrong about, in one place: a bound no
+    comparison can order, and a ``pattern`` the regex engine cannot compile
+    -- which would otherwise surface as a bare ``re.error``, escaping a
+    module whose whole error vocabulary is :class:`RequestSpecError`.
+    """
+    if _non_finite(value):
+        return (
+            f"param {name!r} for endpoint {endpoint!r} declares {keyword} "
+            f"{value!r}, which no comparison can order; declare a finite "
+            f"bound or remove the keyword"
+        )
+    if keyword == "pattern":
+        try:
+            re.compile(value)
+        except re.error as err:
+            return (
+                f"param {name!r} for endpoint {endpoint!r} declares pattern "
+                f"{value!r}, which is not a valid regular expression: {err}"
+            )
+    return None
+
+
+def _empty_intervals(
+    name: str, endpoint: str, authored: Mapping[str, Any]
+) -> list[str]:
+    """Say which declared intervals admit nothing at all.
+
+    Has to be answered at compile: on a param a loop owns, the first value
+    arrives on page two, after page one has already committed rows.
+    """
+    return [
+        f"param {name!r} for endpoint {endpoint!r} declares {low} "
+        f"{authored[low]!r} above {high} {authored[high]!r}, which no value "
+        f"can satisfy"
+        for low, high in _INTERVALS
+        if low in authored and high in authored and authored[low] > authored[high]
+    ]
+
+
+def _refuse(problems: Sequence[str]) -> None:
+    """Raise every problem as one error, or return if there are none.
+
+    Joined rather than raised as an ``ExceptionGroup``: every member is the
+    same defect class with the same handling, so a group gives a caller
+    nothing to branch on and costs every log reader a traceback tree.
+    """
+    if problems:
+        raise RequestSpecError("; ".join(problems))
 
 
 @dataclass(frozen=True)
@@ -250,6 +295,53 @@ class _Rule:
     #: param out of the defaults and the cursor strategy sends no token on
     #: the first request, so it is CORRECTLY absent before page one.
     controlled: bool
+
+
+def _compile_one(name: str, decl: Param, endpoint: str) -> _Rule:
+    """Turn one declared param into the rule that judges its values."""
+    schema: dict[str, Any] = {"type": decl.type}
+    authored: dict[str, Any] = {"type": decl.type}
+    for attribute in _CONSTRAINT_KEYWORDS:
+        keyword = _keyword_of(attribute)
+        value = getattr(decl, attribute)
+        if value is None:
+            continue
+        if keyword == "format" and value not in _ENFORCED_FORMATS:
+            # An unenforced format is an annotation, which is what JSON
+            # Schema says a format is by default. Left out of the schema
+            # entirely rather than left to the ambient registry to answer --
+            # but said out loud, because ``Param.format`` is an open string
+            # and a typo (``datetime`` for ``date-time``) is otherwise
+            # indistinguishable from a constraint that held.
+            logger.warning(
+                "param %r for endpoint %r declares format %r, which this "
+                "engine does not enforce; it is carried as an annotation and "
+                "nothing is checked against it. Enforced formats: %s",
+                name,
+                endpoint,
+                value,
+                sorted(_ENFORCED_FORMATS),
+            )
+            continue
+        defect = _keyword_defect(name, endpoint, keyword, value)
+        if defect is not None:
+            raise RequestSpecError(defect)
+        schema[keyword] = normalize_numbers(value)
+        authored[keyword] = value
+    _refuse(_empty_intervals(name, endpoint, authored))
+    # No metaschema pass over ``schema``. Every key in it comes from a
+    # contract field the models already constrain -- ``type`` is a Literal,
+    # the size bounds are non-negative ints, ``pattern`` was compiled above
+    # and the numeric bounds were checked finite -- so there is no shape
+    # left for it to catch. One gate per document: a second validator over
+    # what ``analitiq-contract-models`` already refuses is split-brain, not
+    # defence in depth.
+    return _Rule(
+        validator=Draft202012Validator(schema, format_checker=_FORMAT_CHECKER),
+        authored=authored,
+        required=decl.required,
+        controlled=decl.controlled_by is not None,
+    )
 
 
 @dataclass(frozen=True)
@@ -276,74 +368,17 @@ class ParamRules:
     def compile(cls, declared: Mapping[str, Param], *, endpoint: str) -> ParamRules:
         """Compile one operation's declared params into judgeable rules.
 
-        Every defect this raises is a fact about the DOCUMENT, true before
-        any request is built and actionable only by its author, so it is
-        raised once here rather than re-discovered on every page: a bound
-        no comparison can order, and a ``pattern`` the regex engine cannot
-        compile (which would otherwise surface as a bare ``re.error``
-        escaping a module whose whole error vocabulary is
-        :class:`RequestSpecError`).
+        Every defect raised here is a fact about the DOCUMENT -- true before
+        any request is built, actionable only by its author -- so it is
+        raised once, rather than rediscovered on every page.
         """
-        rules: dict[str, _Rule] = {}
-        for name, decl in declared.items():
-            schema: dict[str, Any] = {"type": decl.type}
-            authored: dict[str, Any] = {"type": decl.type}
-            for attribute in _CONSTRAINT_KEYWORDS:
-                keyword = _keyword_of(attribute)
-                value = getattr(decl, attribute)
-                if value is None:
-                    continue
-                if keyword == "format" and value not in _ENFORCED_FORMATS:
-                    # An unenforced format is an annotation, which is what
-                    # JSON Schema says a format is by default. Left out of
-                    # the schema entirely rather than left to the ambient
-                    # registry to answer -- but said out loud, because
-                    # ``Param.format`` is an open string and a typo
-                    # (``datetime`` for ``date-time``) is otherwise
-                    # indistinguishable from a constraint that held.
-                    logger.warning(
-                        "param %r for endpoint %r declares format %r, which "
-                        "this engine does not enforce; it is carried as an "
-                        "annotation and nothing is checked against it. "
-                        "Enforced formats: %s",
-                        name,
-                        endpoint,
-                        value,
-                        sorted(_ENFORCED_FORMATS),
-                    )
-                    continue
-                if _non_finite(value):
-                    raise RequestSpecError(
-                        f"param {name!r} for endpoint {endpoint!r} declares "
-                        f"{keyword} {value!r}, which no comparison can order; "
-                        f"declare a finite bound or remove the keyword"
-                    )
-                if keyword == "pattern":
-                    try:
-                        re.compile(value)
-                    except re.error as err:
-                        raise RequestSpecError(
-                            f"param {name!r} for endpoint {endpoint!r} declares "
-                            f"pattern {value!r}, which is not a valid regular "
-                            f"expression: {err}"
-                        ) from err
-                schema[keyword] = normalize_numbers(value)
-                authored[keyword] = value
-            _refuse(_inverted_intervals(name, endpoint, authored))
-            try:
-                Draft202012Validator.check_schema(schema)
-            except SchemaError as err:
-                raise RequestSpecError(
-                    f"param {name!r} for endpoint {endpoint!r} declares "
-                    f"constraints that are not a usable schema: {err.message}"
-                ) from err
-            rules[name] = _Rule(
-                validator=Draft202012Validator(schema, format_checker=_FORMAT_CHECKER),
-                authored=authored,
-                required=decl.required,
-                controlled=decl.controlled_by is not None,
-            )
-        return cls(endpoint=endpoint, rules=rules)
+        return cls(
+            endpoint=endpoint,
+            rules={
+                name: _compile_one(name, decl, endpoint)
+                for name, decl in declared.items()
+            },
+        )
 
     def check_admissible(self, values: Mapping[str, Any]) -> None:
         """Refuse any PRESENT value its own declaration does not admit.
@@ -359,13 +394,14 @@ class ParamRules:
         an empty one is admissible is exactly what ``minLength`` and
         ``minItems`` are for.
         """
-        problems = [
-            problem
-            for name, value in values.items()
-            if value is not None and name in self.rules
-            for problem in self._problems(name, value)
-        ]
-        _refuse(problems)
+        _refuse(
+            [
+                problem
+                for name, value in values.items()
+                if value is not None and name in self.rules
+                for problem in self._problems(name, value)
+            ]
+        )
 
     def check_required(self, values: Mapping[str, Any]) -> None:
         """Refuse a required param that resolved to nothing.
@@ -400,59 +436,14 @@ class ParamRules:
                 f"param {name!r} for endpoint {self.endpoint!r} received a "
                 f"non-finite number, which no declared bound can order"
             ]
-        normalized = normalize_numbers(value)
         arrived = _type_name(value)
         problems = []
-        for error in rule.validator.iter_errors(normalized):
+        for error in rule.validator.iter_errors(normalize_numbers(value)):
             keyword = str(error.validator)
-            declared = rule.authored[keyword]
-            measured = ""
-            if keyword in _MEASURED and isinstance(value, (str, list, tuple)):
-                measured = f" (measured {len(value)})"
             problems.append(
                 f"param {name!r} for endpoint {self.endpoint!r} declares "
-                f"{keyword} {declared!r}, which the {arrived} value it "
-                f"received does not satisfy{measured}"
+                f"{keyword} {rule.authored[keyword]!r}, which the {arrived} "
+                f"value it received does not satisfy"
+                f"{_measurement(keyword, value)}"
             )
         return problems
-
-
-#: The keyword pairs that bound one quantity from both ends, low then high.
-#: ``check_schema`` judges a keyword at a time, so it accepts a pair no
-#: value can satisfy.
-_INTERVALS: Final = (
-    ("minimum", "maximum"),
-    ("minLength", "maxLength"),
-    ("minItems", "maxItems"),
-)
-
-
-def _inverted_intervals(
-    name: str, endpoint: str, authored: Mapping[str, Any]
-) -> list[str]:
-    """Say which declared intervals admit nothing at all.
-
-    A fact about the document, true before any request is built and
-    actionable only by its author, so it is answered here rather than
-    rediscovered per value -- and it has to be answered, because an empty
-    interval on a loop-owned param first refuses on page two, after page
-    one committed rows.
-    """
-    return [
-        f"param {name!r} for endpoint {endpoint!r} declares {low} "
-        f"{authored[low]!r} above {high} {authored[high]!r}, which no value "
-        f"can satisfy"
-        for low, high in _INTERVALS
-        if low in authored and high in authored and authored[low] > authored[high]
-    ]
-
-
-def _refuse(problems: Sequence[str]) -> None:
-    """Raise every problem as one error, or return if there are none.
-
-    Joined rather than raised as an ``ExceptionGroup``: every member is the
-    same defect class with the same handling, so a group gives a caller
-    nothing to branch on and costs every log reader a traceback tree.
-    """
-    if problems:
-        raise RequestSpecError("; ".join(problems))

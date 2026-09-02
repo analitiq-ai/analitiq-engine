@@ -1870,6 +1870,33 @@ class TestApiReadPathBreaks:
         )
         assert check_read_transport_selection(target) == []
 
+    def test_a_default_its_own_declaration_refuses_is_a_compile_finding(
+        self, tmp_path: Path
+    ) -> None:
+        """Admissibility IS the kit's question, unlike presence.
+
+        A resolved default is a value the document supplies itself, so
+        whether the param's own ``enum``/``pattern``/bounds admit it is
+        decidable from the definition alone -- no connection, no secrets,
+        no stream. The kit is the only place that catches it before a run.
+        """
+
+        def bend(read: dict[str, Any]) -> None:
+            read["params"]["region"] = {
+                "in": "query",
+                "type": "string",
+                "required": False,
+                "enum": ["eu", "us"],
+                "default": {"literal": "moon"},
+            }
+            read["request"]["query"]["region"] = {"from_param": "region"}
+
+        target = self._broken(tmp_path, "widgets", bend)
+        report = _report(check_api_read_compiles(target))
+        assert "region" in report
+        assert "enum" in report
+        assert "moon" not in report
+
     def test_a_required_param_with_no_default_still_compiles_clean(
         self, tmp_path: Path
     ) -> None:
