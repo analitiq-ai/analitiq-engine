@@ -347,3 +347,77 @@ class TestNormalizeNumbers:
     def test_a_non_numeric_value_passes_through_unchanged(self) -> None:
         assert normalize_numbers("abc") == "abc"
         assert normalize_numbers(None) is None
+
+
+class TestNumbersTooLargeToRenderAsAnInt:
+    """A provider can put a number in a body that CPython will not render.
+
+    ``normalize_numbers`` narrows an integral ``Decimal`` to ``int`` so a
+    ``type: integer`` param admits a keyset cursor. Unbounded, that same
+    narrowing turns ``Decimal("1E+1000000")`` into a million-digit ``int``
+    -- which costs minutes to build and then raises a bare ``ValueError``
+    the moment anything renders it, out of the one module whose whole error
+    vocabulary is ``RequestSpecError``.
+    """
+
+    _DECLARED: Mapping[str, Any] = {
+        "cursor": {"in": "query", "type": "number", "required": False, "maximum": 100.0}
+    }
+
+    def test_a_number_past_the_render_limit_stays_a_decimal(self) -> None:
+        assert isinstance(normalize_numbers(Decimal("1E+100000")), Decimal)
+
+    def test_an_ordinary_integral_decimal_still_narrows(self) -> None:
+        # The narrowing the cap protects must survive it: a real id is
+        # nowhere near the limit.
+        assert normalize_numbers(Decimal("9901")) == 9901
+        assert isinstance(normalize_numbers(Decimal("9901")), int)
+
+    def test_it_is_refused_in_words_rather_than_raising_a_builtin(self) -> None:
+        rules = _rules(self._DECLARED)
+        try:
+            rules.check_admissible({"cursor": Decimal("1E+1000000")})
+        except RequestSpecError as err:
+            assert "maximum" in str(err)
+        except ValueError:  # pragma: no cover - the regression this pins
+            pytest.fail("a bare ValueError escaped check_admissible")
+        else:  # pragma: no cover - the value is over the declared maximum
+            pytest.fail("a number over the declared maximum must be refused")
+
+
+class TestAnUnenforcedFormatSaysSo:
+    def test_a_format_outside_the_enforced_set_is_announced(self, caplog) -> None:
+        # ``Param.format`` is an open string, so ``datetime`` for
+        # ``date-time`` is a typo no contract check catches. It stays an
+        # annotation -- JSON Schema's own default -- but silence would make
+        # it indistinguishable from a constraint that held.
+        with caplog.at_level("WARNING"):
+            rules = _rules(
+                {
+                    "when": {
+                        "in": "query",
+                        "type": "string",
+                        "required": False,
+                        "format": "datetime",
+                    }
+                }
+            )
+        assert "datetime" in caplog.text
+        assert "does not enforce" in caplog.text
+        rules.check_admissible({"when": "not a moment at all"})
+
+    def test_an_enforced_format_is_checked_and_announces_nothing(self, caplog) -> None:
+        with caplog.at_level("WARNING"):
+            rules = _rules(
+                {
+                    "when": {
+                        "in": "query",
+                        "type": "string",
+                        "required": False,
+                        "format": "date-time",
+                    }
+                }
+            )
+        assert caplog.text == ""
+        with pytest.raises(RequestSpecError, match="format"):
+            rules.check_admissible({"when": "not a moment at all"})

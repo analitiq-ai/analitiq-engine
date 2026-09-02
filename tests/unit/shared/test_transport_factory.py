@@ -401,6 +401,28 @@ class TestHttpSpecValidation:
                 resolver=_resolver(),
             )
 
+    def test_a_header_resolving_to_nothing_is_dropped_and_said_out_loud(self, caplog):
+        # A transport header is where a credential or an API version lives.
+        # Dropped in silence, the provider's 401 maps back to nothing --
+        # which is why the adbc db_kwargs loop already logs its own drops.
+        ctx = ResolutionContext(connection={"parameters": {"org": None}})
+        with caplog.at_level("WARNING"):
+            spec = resolve_http_spec(
+                {
+                    "base_url": "https://api.example.com",
+                    "headers": {
+                        "X-Org": {
+                            "function": "url_encode",
+                            "input": {"ref": "connection.parameters.org"},
+                        },
+                        "X-Kept": "yes",
+                    },
+                },
+                resolver=_resolver(ctx),
+            )
+        assert spec["headers"] == {"X-Kept": "yes"}
+        assert "X-Org" in caplog.text
+
     def test_non_object_headers_raises_transport_spec_error(self):
         with pytest.raises(TransportSpecError, match=r"`headers` must be an object"):
             resolve_http_spec(

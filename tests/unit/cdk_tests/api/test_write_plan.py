@@ -581,6 +581,53 @@ class TestTheRequestTheStreamWillActuallySend:
         assert isinstance(outcome, str)
         assert "Authorization" in outcome
 
+    def test_a_required_write_param_with_no_default_is_refused(self) -> None:
+        # A write param has no loop to fill it: every value comes from the
+        # resolved defaults, so one declared required with no default at
+        # all is missing for good. The never-fillable-scope walk cannot see
+        # it -- with no default there is no expression to walk -- so the
+        # binding used to drop the field and every record went out without
+        # it while the batch reported success.
+        doc = _document(
+            headers={"X-Tenant": {"from_param": "tenant"}},
+            params={"tenant": {"in": "header", "type": "string", "required": True}},
+        )
+        outcome = build_write_plan(
+            doc,
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
+        )
+        assert isinstance(outcome, str)
+        assert "'tenant'" in outcome
+        assert "required" in outcome
+
+    def test_a_never_fillable_default_keeps_the_sharper_refusal(self) -> None:
+        # Both refusals apply to this one; the scope walk runs first
+        # because it names WHY nothing will ever fill it, which presence
+        # alone cannot say.
+        doc = _document(
+            headers={"X-Api-Key": {"from_param": "key"}},
+            params={
+                "key": {
+                    "in": "header",
+                    "type": "string",
+                    "required": True,
+                    "default": {"ref": "secrets.api_key"},
+                }
+            },
+        )
+        outcome = build_write_plan(
+            doc,
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
+        )
+        assert isinstance(outcome, str)
+        assert "'secrets.api_key'" in outcome
+
     def test_a_write_param_default_reading_a_secret_is_refused(self) -> None:
         # The write call site threads its declared params into the
         # never-fillable-scope walk: a write param default reading

@@ -128,10 +128,10 @@ def cursor_mapping_for(
 ) -> CursorMapping | None:
     """Return the mapping declared for the stream's cursor field, or ``None``.
 
-    ``None`` means the endpoint declares no mapping for this cursor field,
-    which the caller reports as running full replication -- loudly, because
-    an incremental stream silently reading everything is the failure mode
-    this answer exists to make visible.
+    ``None`` means the endpoint declares no mapping for this cursor field.
+    The caller refuses the read on it: with no mapping there is no param to
+    carry the bound, so the request would go out unnarrowed and the run
+    would re-read the whole collection every time while reporting success.
     """
     if replication is None:
         return None

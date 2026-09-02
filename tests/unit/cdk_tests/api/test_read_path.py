@@ -605,6 +605,34 @@ class TestReplicationMethodSupport:
             await _read(session, document, source=stream_source(method="full_refresh"))
         assert session.calls == []
 
+    async def test_a_stream_omitting_replication_is_read_as_full_refresh(
+        self,
+    ) -> None:
+        # The contract allows the omission "only when the source supports
+        # full_refresh", so an absent block IS full refresh -- read as
+        # "nothing selected" it would make the one stream shape this
+        # endpoint cannot serve the one shape that skips the check.
+        session = FakeSession()
+        document = endpoint_document(
+            request={
+                "method": "GET",
+                "path": "/items",
+                "query": {"since_id": {"from_param": "since_id"}},
+            },
+            params=_SINCE_ID_PARAM,
+            replication={
+                "supported_methods": ["incremental"],
+                "cursor_mappings": [
+                    {"cursor_field": "id", "param": "since_id", "operator": "gte"}
+                ],
+            },
+        )
+        source = stream_source(method="full_refresh")
+        del source["replication"]
+        with pytest.raises(ReadError, match="full_refresh"):
+            await _read(session, document, source=source)
+        assert session.calls == []
+
     async def test_an_incremental_stream_against_a_full_refresh_only_endpoint(
         self,
     ) -> None:

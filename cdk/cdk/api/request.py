@@ -226,11 +226,12 @@ class ParamTable:
         rules = ParamRules.compile(declared, endpoint=endpoint)
         # Admissibility, the same question the read's table answers: what a
         # param may carry is the author's declaration either way. Presence
-        # is NOT asked here -- a write param that can never resolve is
-        # already refused by the never-fillable-scope walk in
-        # :func:`request_block_problem`, which names the scope the default
-        # reads and why nothing will ever fill it. A second refusal would
-        # only preempt that one with a vaguer message.
+        # is asked by the write PLAN, once the never-fillable-scope walk in
+        # :func:`request_block_problem` has had its say -- that walk names
+        # the scope a default reads and why nothing will ever fill it,
+        # which is the sharper answer wherever it applies. It only sees a
+        # declared expression, though, so a required param with no default
+        # at all reaches it invisible; that one is caught by presence.
         rules.check_admissible(values)
         return cls(rules=rules, values=values, controlled_by=_controlled_by(declared))
 

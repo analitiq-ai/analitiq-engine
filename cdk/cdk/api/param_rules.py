@@ -41,8 +41,10 @@ instance verbatim in ``ValidationError.message``, so that attribute and
 
 from __future__ import annotations
 
+import logging
 import math
 import re
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -53,6 +55,8 @@ from jsonschema import Draft202012Validator, FormatChecker
 from jsonschema.exceptions import SchemaError
 
 from .exceptions import RequestSpecError
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["ParamRules", "normalize_numbers"]
 
@@ -140,6 +144,14 @@ def normalize_numbers(value: Any) -> Any:
     declaration. Everything else stays a ``Decimal``: narrowing to ``float``
     first would round the judgement it is about to be used for.
 
+    That narrowing stops at the interpreter's decimal-rendering limit.
+    ``Decimal("1E+5000")`` is finite and integral, so it converts to a
+    5001-digit ``int`` that raises a bare ``ValueError`` the moment anything
+    renders it -- a builtin escaping a module whose entire error vocabulary
+    is :class:`RequestSpecError`, on a number a provider can put in a JSON
+    body. Left a ``Decimal`` it compares cleanly, and a param declaring
+    ``type: integer`` refuses it in words instead of crashing.
+
     ``bool`` is left alone even though it is an ``int`` subclass: the
     library already tells the two apart (``{"enum": [1]}`` refuses ``True``),
     so touching it here would only break that.
@@ -153,7 +165,11 @@ def normalize_numbers(value: Any) -> Any:
     if isinstance(value, float):
         return Decimal(repr(value))
     if isinstance(value, Decimal):
-        if value.is_finite() and value == value.to_integral_value():
+        if (
+            value.is_finite()
+            and value == value.to_integral_value()
+            and _renderable_as_int(value)
+        ):
             return int(value)
         return value
     if isinstance(value, Mapping):
@@ -161,6 +177,16 @@ def normalize_numbers(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [normalize_numbers(item) for item in value]
     return value
+
+
+def _renderable_as_int(value: Decimal) -> bool:
+    """Whether *value* has few enough digits for CPython to render as an int.
+
+    ``sys.get_int_max_str_digits`` is read per call because it is settable at
+    runtime; ``0`` means the interpreter imposes no limit.
+    """
+    limit = sys.get_int_max_str_digits()
+    return limit == 0 or value.adjusted() < limit
 
 
 def _non_finite(value: Any) -> bool:
@@ -221,9 +247,7 @@ class ParamRules:
     rules: Mapping[str, _Rule]
 
     @classmethod
-    def compile(
-        cls, declared: Mapping[str, Param], *, endpoint: str
-    ) -> ParamRules:
+    def compile(cls, declared: Mapping[str, Param], *, endpoint: str) -> ParamRules:
         """Compile one operation's declared params into judgeable rules.
 
         Every defect this raises is a fact about the DOCUMENT, true before
@@ -246,7 +270,20 @@ class ParamRules:
                     # An unenforced format is an annotation, which is what
                     # JSON Schema says a format is by default. Left out of
                     # the schema entirely rather than left to the ambient
-                    # registry to answer.
+                    # registry to answer -- but said out loud, because
+                    # ``Param.format`` is an open string and a typo
+                    # (``datetime`` for ``date-time``) is otherwise
+                    # indistinguishable from a constraint that held.
+                    logger.warning(
+                        "param %r for endpoint %r declares format %r, which "
+                        "this engine does not enforce; it is carried as an "
+                        "annotation and nothing is checked against it. "
+                        "Enforced formats: %s",
+                        name,
+                        endpoint,
+                        value,
+                        sorted(_ENFORCED_FORMATS),
+                    )
                     continue
                 if _non_finite(value):
                     raise RequestSpecError(
@@ -273,9 +310,7 @@ class ParamRules:
                     f"constraints that are not a usable schema: {err.message}"
                 ) from err
             rules[name] = _Rule(
-                validator=Draft202012Validator(
-                    schema, format_checker=_FORMAT_CHECKER
-                ),
+                validator=Draft202012Validator(schema, format_checker=_FORMAT_CHECKER),
                 authored=authored,
                 required=decl.required,
                 controlled=decl.controlled_by is not None,
@@ -317,12 +352,10 @@ class ParamRules:
         _refuse(
             [
                 f"param {name!r} for endpoint {self.endpoint!r} is declared "
-                f"required and resolved to nothing; the request would go out "
-                f"without it and read more than the stream asked for"
+                f"required and resolved to nothing; every request built from "
+                f"this table would go out without it"
                 for name, rule in self.rules.items()
-                if rule.required
-                and not rule.controlled
-                and values.get(name) is None
+                if rule.required and not rule.controlled and values.get(name) is None
             ]
         )
 
@@ -344,7 +377,7 @@ class ParamRules:
         problems = []
         for error in rule.validator.iter_errors(normalized):
             keyword = str(error.validator)
-            declared = rule.authored.get(keyword, error.validator_value)
+            declared = rule.authored[keyword]
             measured = ""
             if keyword in _MEASURED and isinstance(value, (str, list, tuple)):
                 measured = f" (measured {len(value)})"

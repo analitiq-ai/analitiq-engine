@@ -572,11 +572,19 @@ class GenericAPIConnector(BaseDestinationHandler):
             # makes the attribute readable at all.
             replication_block = stream_source.replication
             declared_replication = read.replication
+            # An omitted stream replication block IS full refresh -- the
+            # contract allows the omission "only when the source supports
+            # full_refresh", so reading it as "nothing selected" would let
+            # the one stream shape the endpoint cannot serve be the one
+            # shape that skips the check.
+            selected_method = (
+                replication_block.method
+                if replication_block is not None
+                else "full_refresh"
+            )
             if (
                 declared_replication is not None
-                and replication_block is not None
-                and replication_block.method
-                not in declared_replication.supported_methods
+                and selected_method not in declared_replication.supported_methods
             ):
                 # Outside the incremental branch below on purpose: a
                 # full-refresh stream against an endpoint declaring
@@ -588,7 +596,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                 raise ReadError(
                     f"endpoint {endpoint_id!r} supports replication methods "
                     f"{sorted(declared_replication.supported_methods)}, and "
-                    f"the stream selected {replication_block.method!r}"
+                    f"the stream selected {selected_method!r}"
                 )
             incremental = (
                 replication_block
