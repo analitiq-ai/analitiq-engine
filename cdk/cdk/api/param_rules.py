@@ -21,7 +21,8 @@ is what JSON Schema says it is by default.
 
 **Numbers are compared in one model**, stated once in
 :func:`normalize_numbers` and applied to the declaration and the value
-alike, so the two can never drift apart.
+alike, so the two can never drift apart -- and the validator is taught
+the one thing that model needs it to know, in :data:`_VALIDATOR`.
 
 Nothing here renders the value it refused. Params carry bearer tokens, API
 keys and opaque continuation tokens, and a refusal becomes a
@@ -37,14 +38,13 @@ from __future__ import annotations
 import logging
 import math
 import re
-import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Final
 
 from analitiq.contracts.endpoints import Param
-from jsonschema import Draft202012Validator, FormatChecker
+from jsonschema import Draft202012Validator, FormatChecker, validators
 
 from .exceptions import RequestSpecError
 
@@ -132,38 +132,57 @@ def _named_format_checker() -> FormatChecker:
 _FORMAT_CHECKER: Final = _named_format_checker()
 
 
+def _is_integer(_checker: Any, instance: Any) -> bool:
+    """Whether *instance* is what JSON Schema calls an integer.
+
+    ``integer`` is a statement about the VALUE -- "a number with no
+    fractional part" -- which the library implements as an isinstance test
+    against ``int``. Every number this module judges is a ``Decimal`` by
+    then (:func:`normalize_numbers`), so the isinstance test would refuse
+    an integer cursor for being spelled exactly. Widened rather than worked
+    around: converting the ``Decimal`` to an ``int`` to satisfy the test is
+    what made a provider's ``1E+5000`` a 5001-digit integer.
+
+    ``number`` needs no such widening -- the library already accepts a
+    ``Decimal`` there -- and neither check accepts a ``bool``.
+    """
+    if isinstance(instance, Decimal):
+        return instance.is_finite() and instance == instance.to_integral_value()
+    return bool(Draft202012Validator.TYPE_CHECKER.is_type(instance, "integer"))
+
+
+#: The draft this module validates with, knowing what a ``Decimal`` is.
+_VALIDATOR: Final = validators.extend(
+    Draft202012Validator,
+    type_checker=Draft202012Validator.TYPE_CHECKER.redefine("integer", _is_integer),
+)
+
+
 def normalize_numbers(value: Any) -> Any:
     """Put every number into the one model this module compares in.
 
-    A number leaves here as exactly one of two things:
-
-    * an ``int``, when it is exactly integral AND short enough for the
-      interpreter to render as a decimal string;
-    * a ``Decimal`` carrying the digits it was written with, otherwise.
-
-    How it ARRIVED does not change the answer, and that is the point. A
-    ``float`` enters through its own decimal spelling, so ``1.0``,
-    ``Decimal("1.0")`` and ``1`` all leave as ``1``, while ``0.1`` and
-    ``Decimal("0.1")`` both leave as ``Decimal("0.1")``. A value's spelling
-    must not decide its verdict: a declared bound reaches the engine as the
-    binary float nearest the author's decimal, while the same number read
-    back off the wire is an exact ``Decimal``
+    A number leaves here as a ``Decimal`` carrying the digits it was
+    written with -- whatever it arrived as, and that is the point. A
+    ``float`` enters through its own decimal spelling, so ``0.1`` becomes
+    ``Decimal("0.1")`` rather than the binary float nearest it, and a bound
+    and a value that were both written ``0.1`` compare equal. A value's
+    spelling must not decide its verdict: a declared bound reaches the
+    engine as the binary float nearest the author's decimal, while the same
+    number read back off the wire is an exact ``Decimal``
     (:func:`cdk.api.http.loads_preserving_decimals`, which is how a keyset
     cursor reaches the next page's params).
 
-    Each half of the rule earns its place. ``int``, because JSON Schema's
-    ``integer`` is an isinstance test that rejects ``Decimal(9901)``
-    outright. The length cap, because ``Decimal("1E+5000")`` is integral and
-    would otherwise become a 5001-digit ``int`` that raises a bare
-    ``ValueError`` the moment anything renders it -- a builtin escaping a
-    module whose entire error vocabulary is :class:`RequestSpecError`, on a
-    number a provider can put in a JSON body. ``Decimal`` for everything
-    else, because narrowing to ``float`` would round the judgement it is
-    about to be used for.
+    Nothing is narrowed to ``int``, and nothing needs to be: what would
+    have needed it is JSON Schema's ``integer``, and :data:`_VALIDATOR`
+    teaches that check about ``Decimal`` instead. Narrowing was worse in
+    both directions -- to ``float`` it would round the judgement it is
+    about to be used for, and to ``int`` a provider's ``1E+5000`` became a
+    5001-digit integer that raises a bare ``ValueError`` the moment
+    anything renders it.
 
     ``bool`` is outside the model: it is not a number here, it reaches
-    neither branch, and the library already tells it from ``1``
-    (``{"enum": [1]}`` refuses ``True``).
+    neither branch, and the library already refuses it for ``integer``,
+    ``number`` and ``{"enum": [1]}`` alike.
 
     Containers are mapped element-wise, because a number can arrive at any
     depth -- an ``enum`` of arrays matches element by element, and
@@ -171,15 +190,7 @@ def normalize_numbers(value: Any) -> Any:
     on real data.
     """
     if isinstance(value, float):
-        value = Decimal(repr(value))
-    if isinstance(value, Decimal):
-        if value.is_finite() and value == value.to_integral_value():
-            # ``sys.get_int_max_str_digits`` is read per call because it is
-            # settable at runtime; ``0`` means the interpreter caps nothing.
-            limit = sys.get_int_max_str_digits()
-            if limit == 0 or value.adjusted() < limit:
-                return int(value)
-        return value
+        return Decimal(repr(value))
     if isinstance(value, Mapping):
         return {key: normalize_numbers(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
@@ -337,7 +348,7 @@ def _compile_one(name: str, decl: Param, endpoint: str) -> _Rule:
     # what ``analitiq-contract-models`` already refuses is split-brain, not
     # defence in depth.
     return _Rule(
-        validator=Draft202012Validator(schema, format_checker=_FORMAT_CHECKER),
+        validator=_VALIDATOR(schema, format_checker=_FORMAT_CHECKER),
         authored=authored,
         required=decl.required,
         controlled=decl.controlled_by is not None,

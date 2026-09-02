@@ -324,9 +324,12 @@ class TestNormalizeNumbers:
         # binary float nearest it.
         assert normalize_numbers(0.1) == Decimal("0.1")
 
-    def test_an_exactly_integral_decimal_narrows_to_int(self) -> None:
-        assert normalize_numbers(Decimal("9901")) == 9901
-        assert isinstance(normalize_numbers(Decimal("9901")), int)
+    def test_an_integral_decimal_stays_a_decimal(self) -> None:
+        # Nothing narrows to int any more: what needed that is JSON
+        # Schema's ``integer`` check, and the validator was taught about
+        # Decimal instead.
+        assert normalize_numbers(Decimal("9901")) == Decimal("9901")
+        assert isinstance(normalize_numbers(Decimal("9901")), Decimal)
 
     def test_a_fractional_decimal_stays_a_decimal(self) -> None:
         # Narrowing to float first would round the judgement it is about
@@ -341,48 +344,72 @@ class TestNormalizeNumbers:
         assert normalize_numbers(False) is False
 
     def test_it_recurses_into_mappings_and_sequences(self) -> None:
-        normalized = normalize_numbers({"a": [0.1, {"b": Decimal("2")}]})
-        assert normalized == {"a": [Decimal("0.1"), {"b": 2}]}
+        normalized = normalize_numbers({"a": [0.1, {"b": 2.0}]})
+        assert normalized == {"a": [Decimal("0.1"), {"b": Decimal("2.0")}]}
 
     def test_a_non_numeric_value_passes_through_unchanged(self) -> None:
         assert normalize_numbers("abc") == "abc"
         assert normalize_numbers(None) is None
 
 
-class TestNumbersTooLargeToRenderAsAnInt:
-    """A provider can put a number in a body that CPython will not render.
+class TestAnIntegralDecimalIsAnIntegerAtAnySize:
+    """JSON Schema's ``integer`` is about the value, not its Python type.
 
-    ``normalize_numbers`` narrows an integral ``Decimal`` to ``int`` so a
-    ``type: integer`` param admits a keyset cursor. Unbounded, that same
-    narrowing turns ``Decimal("1E+1000000")`` into a million-digit ``int``
-    -- which costs minutes to build and then raises a bare ``ValueError``
-    the moment anything renders it, out of the one module whose whole error
-    vocabulary is ``RequestSpecError``.
+    A keyset cursor arrives from the wire as a ``Decimal`` of whatever size
+    the provider sent. Nothing about its magnitude stops it being an
+    integer, and a query or header carries it as text either way -- so a
+    declaration of ``type: integer`` has to admit it whatever the exponent.
     """
 
-    _DECLARED: Mapping[str, Any] = {
-        "cursor": {"in": "query", "type": "number", "required": False, "maximum": 100.0}
-    }
+    @pytest.mark.parametrize(
+        "value",
+        [Decimal("9901"), Decimal("1E+5000"), Decimal("1E+1000000"), 1.0, 1],
+        ids=["small", "huge", "vast", "integral-float", "int"],
+    )
+    def test_it_admits_a_declared_integer(self, value: Any) -> None:
+        rules = _rules({"n": {"in": "query", "type": "integer", "required": False}})
+        rules.check_admissible({"n": value})
 
-    def test_a_number_past_the_render_limit_stays_a_decimal(self) -> None:
-        assert isinstance(normalize_numbers(Decimal("1E+100000")), Decimal)
+    @pytest.mark.parametrize("value", [1.5, Decimal("1.5")], ids=str)
+    def test_a_fractional_value_still_refuses_a_declared_integer(
+        self, value: Any
+    ) -> None:
+        rules = _rules({"n": {"in": "query", "type": "integer", "required": False}})
+        with pytest.raises(RequestSpecError, match="type"):
+            rules.check_admissible({"n": value})
 
-    def test_an_ordinary_integral_decimal_still_narrows(self) -> None:
-        # The narrowing the cap protects must survive it: a real id is
-        # nowhere near the limit.
-        assert normalize_numbers(Decimal("9901")) == 9901
-        assert isinstance(normalize_numbers(Decimal("9901")), int)
+    @pytest.mark.parametrize("value", [0.1, Decimal("0.1")], ids=str)
+    def test_both_spellings_sit_on_a_fractional_bound(self, value: Any) -> None:
+        # Why every number enters through its decimal spelling: a bound and
+        # a value both written 0.1 have to compare equal.
+        rules = _rules(
+            {
+                "a": {
+                    "in": "query",
+                    "type": "number",
+                    "required": False,
+                    "minimum": 0.1,
+                    "maximum": 0.1,
+                }
+            }
+        )
+        rules.check_admissible({"a": value})
 
-    def test_it_is_refused_in_words_rather_than_raising_a_builtin(self) -> None:
-        rules = _rules(self._DECLARED)
-        try:
-            rules.check_admissible({"cursor": Decimal("1E+1000000")})
-        except RequestSpecError as err:
-            assert "maximum" in str(err)
-        except ValueError:  # pragma: no cover - the regression this pins
-            pytest.fail("a bare ValueError escaped check_admissible")
-        else:  # pragma: no cover - the value is over the declared maximum
-            pytest.fail("a number over the declared maximum must be refused")
+    def test_a_huge_integral_decimal_is_still_bounded(self) -> None:
+        # Admitting it as an integer does not exempt it from the author's
+        # bounds -- which is what refuses it, in words, with no conversion.
+        rules = _rules(
+            {
+                "n": {
+                    "in": "query",
+                    "type": "integer",
+                    "required": False,
+                    "maximum": 100.0,
+                }
+            }
+        )
+        with pytest.raises(RequestSpecError, match="maximum"):
+            rules.check_admissible({"n": Decimal("1E+5000")})
 
 
 class TestAnUnenforcedFormatSaysSo:
@@ -485,45 +512,3 @@ class TestAnIntervalThatAdmitsNothing:
             }
         )
         rules.check_admissible({"p": 5.0})
-
-
-class TestAnIntegralFloatIsAnInteger:
-    """JSON Schema calls ``1.0`` an integer; every spelling of it must agree.
-
-    ``normalize_numbers`` routes a float through the Decimal branch rather
-    than returning from its own, so a value written ``1.0`` is judged the
-    same whether it arrived as a float from a literal default or as a
-    ``Decimal`` off the wire. Stopping at ``Decimal("1.0")`` refused it: the
-    library's ``integer`` check accepts an integral ``float`` but not an
-    integral ``Decimal``.
-    """
-
-    @pytest.mark.parametrize("value", [1.0, 1, Decimal("1.0"), 9901.0], ids=str)
-    def test_an_integral_value_admits_a_declared_integer(self, value: Any) -> None:
-        rules = _rules({"n": {"in": "query", "type": "integer", "required": False}})
-        rules.check_admissible({"n": value})
-
-    @pytest.mark.parametrize("value", [1.5, Decimal("1.5")], ids=str)
-    def test_a_fractional_value_still_refuses_a_declared_integer(
-        self, value: Any
-    ) -> None:
-        rules = _rules({"n": {"in": "query", "type": "integer", "required": False}})
-        with pytest.raises(RequestSpecError, match="type"):
-            rules.check_admissible({"n": value})
-
-    @pytest.mark.parametrize("value", [0.1, Decimal("0.1")], ids=str)
-    def test_the_fractional_bound_model_is_unchanged(self, value: Any) -> None:
-        # The reason the float branch exists at all: both spellings of 0.1
-        # sit exactly on a bound written 0.1.
-        rules = _rules(
-            {
-                "a": {
-                    "in": "query",
-                    "type": "number",
-                    "required": False,
-                    "minimum": 0.1,
-                    "maximum": 0.1,
-                }
-            }
-        )
-        rules.check_admissible({"a": value})

@@ -692,13 +692,31 @@ class GenericAPIConnector(BaseDestinationHandler):
                 # absent until its loop produces a value, and what it DID
                 # produce is judged against the same declarations every
                 # other value in this table went through.
-                judge_params=table.rules.check_admissible,
+                #
+                # Wrapped in the read boundary because the loop is outside
+                # the request builder's: a refusal raised here would leave
+                # as a bare RequestSpecError, which is not a ValueError and
+                # so passes straight through the traversal's own catch --
+                # the same defect reaching the worker under a different
+                # error_type depending only on which page it happened on.
+                judge_params=partial(
+                    self._judge_loop_values,
+                    judge=table.rules.check_admissible,
+                ),
             ),
             schema=schema_contract,
             cursor_field=cursor_field,
             metadata=read.response.metadata,
             resolver=resolver,
         )
+
+    @staticmethod
+    def _judge_loop_values(
+        params: Mapping[str, Any], *, judge: Callable[[Mapping[str, Any]], None]
+    ) -> None:
+        """Judge one loop-produced request, failing the read if it cannot go."""
+        with read_spec_errors("a pagination value"):
+            judge(params)
 
     async def _read_pages(
         self,

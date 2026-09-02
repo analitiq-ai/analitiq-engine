@@ -573,6 +573,38 @@ class TestRequiredParamRefusals:
 
 
 @pytest.mark.asyncio
+class TestALoopValueRefusalReachesTheCallerAsAReadError:
+    """Every deterministic read failure leaves as ``ReadError``, this one too.
+
+    The judge runs inside ``PageLoop``, so its ``RequestSpecError`` does not
+    pass through the request builder's boundary the way it did when the
+    check lived there. ``_read_pages`` converts ``ValueError``, which
+    ``RequestSpecError`` is not -- so without its own boundary the refusal
+    escapes the connector, and the worker reports a different error_type
+    for the same defect.
+    """
+
+    async def test_a_refused_continuation_is_a_read_error(self) -> None:
+        session = FakeSession(
+            [
+                FakeResponse(body=_rows(2)),
+                FakeResponse(body=_rows(2)),
+            ]
+        )
+        document = endpoint_document(
+            pagination=_OFFSET,
+            request=_PAGINATION_REQUEST,
+            # ``skip`` is what the offset loop advances; declaring a maximum
+            # of 0 refuses page two's value and nothing before it.
+            params={
+                **_PAGINATION_PARAMS,
+                "skip": {**_PAGINATION_PARAMS["skip"], "maximum": 0.0},
+            },
+        )
+        with pytest.raises(ReadError, match="maximum"):
+            await _read(session, document)
+
+
 class TestReplicationMethodSupport:
     """The stream's chosen method has to be one the endpoint declares support for.
 
