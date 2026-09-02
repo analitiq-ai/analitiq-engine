@@ -91,3 +91,28 @@ class TestWorkerAppliesTheBootstrapLevel:
             assert worker_main.main() == 0
 
         assert applied == [logging.DEBUG]
+
+
+class TestTheRelayDoesNotFilterTwice:
+    """The worker already logs at the declared level; the relay must not re-filter.
+
+    A pipeline declaring WARNING raises the shell's root logger, and a relay
+    fixed at INFO would then drop every line the worker chose to emit --
+    including the startup traceback that is the only explanation for
+    ``worker exited before becoming ready``.
+    """
+
+    async def test_a_worker_line_survives_an_elevated_declared_level(
+        self, root_level_restored, caplog
+    ):
+        import asyncio
+
+        from src.worker.spawn import _forward_stderr
+
+        root_level_restored.setLevel(logging.WARNING)
+        stream = asyncio.StreamReader()
+        stream.feed_data(b"Traceback (most recent call last):\n")
+        stream.feed_eof()
+        with caplog.at_level(logging.WARNING):
+            await _forward_stderr("pg-source", stream)
+        assert "Traceback" in caplog.text

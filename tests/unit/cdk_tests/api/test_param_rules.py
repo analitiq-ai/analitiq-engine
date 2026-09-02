@@ -421,3 +421,67 @@ class TestAnUnenforcedFormatSaysSo:
         assert caplog.text == ""
         with pytest.raises(RequestSpecError, match="format"):
             rules.check_admissible({"when": "not a moment at all"})
+
+
+class TestTheEnforcedFormatsAreActuallyInstalled:
+    def test_every_named_format_has_a_checker(self) -> None:
+        # The named list and the dependency floor are two halves of one
+        # claim. ``iri``/``iri-reference`` arrive with ``rfc3987-syntax``,
+        # which ``jsonschema[format-nongpl]`` only pulls from 4.25 -- on an
+        # earlier resolve the guard in ``_named_format_checker`` fires at
+        # import and ``analitiq-cdk[api]`` cannot be imported at all. This
+        # is the test that says so in CI rather than at a user's install.
+        from jsonschema import FormatChecker
+
+        from cdk.api.param_rules import _ENFORCED_FORMATS
+
+        assert not _ENFORCED_FORMATS - set(FormatChecker.checkers)
+
+    def test_the_checker_enforces_exactly_the_named_list(self) -> None:
+        from cdk.api.param_rules import _ENFORCED_FORMATS, _FORMAT_CHECKER
+
+        assert set(_FORMAT_CHECKER.checkers) == _ENFORCED_FORMATS
+
+
+class TestAnIntervalThatAdmitsNothing:
+    """``check_schema`` judges one keyword at a time, so a pair slips past.
+
+    Decidable from the document alone, and it has to be answered at compile:
+    on a loop-owned param the first value arrives on page two, after page
+    one has already committed rows.
+    """
+
+    @pytest.mark.parametrize(
+        "declared",
+        [
+            {"in": "query", "type": "number", "minimum": 10.0, "maximum": 1.0},
+            {"in": "query", "type": "string", "minLength": 5, "maxLength": 2},
+            {
+                "in": "query",
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 1,
+                "style": "form",
+                "explode": True,
+            },
+        ],
+        ids=["numeric", "length", "items"],
+    )
+    def test_it_is_refused_at_compile(self, declared: dict[str, Any]) -> None:
+        declared["required"] = False
+        with pytest.raises(RequestSpecError, match="no value can satisfy"):
+            _rules({"p": declared})
+
+    def test_a_well_ordered_interval_compiles(self) -> None:
+        rules = _rules(
+            {
+                "p": {
+                    "in": "query",
+                    "type": "number",
+                    "required": False,
+                    "minimum": 1.0,
+                    "maximum": 10.0,
+                }
+            }
+        )
+        rules.check_admissible({"p": 5.0})

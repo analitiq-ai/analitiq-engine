@@ -302,6 +302,7 @@ class ParamRules:
                         ) from err
                 schema[keyword] = normalize_numbers(value)
                 authored[keyword] = value
+            _refuse(_inverted_intervals(name, endpoint, authored))
             try:
                 Draft202012Validator.check_schema(schema)
             except SchemaError as err:
@@ -387,6 +388,36 @@ class ParamRules:
                 f"received does not satisfy{measured}"
             )
         return problems
+
+
+#: The keyword pairs that bound one quantity from both ends, low then high.
+#: ``check_schema`` judges a keyword at a time, so it accepts a pair no
+#: value can satisfy.
+_INTERVALS: Final = (
+    ("minimum", "maximum"),
+    ("minLength", "maxLength"),
+    ("minItems", "maxItems"),
+)
+
+
+def _inverted_intervals(
+    name: str, endpoint: str, authored: Mapping[str, Any]
+) -> list[str]:
+    """Say which declared intervals admit nothing at all.
+
+    A fact about the document, true before any request is built and
+    actionable only by its author, so it is answered here rather than
+    rediscovered per value -- and it has to be answered, because an empty
+    interval on a loop-owned param first refuses on page two, after page
+    one committed rows.
+    """
+    return [
+        f"param {name!r} for endpoint {endpoint!r} declares {low} "
+        f"{authored[low]!r} above {high} {authored[high]!r}, which no value "
+        f"can satisfy"
+        for low, high in _INTERVALS
+        if low in authored and high in authored and authored[low] > authored[high]
+    ]
 
 
 def _refuse(problems: Sequence[str]) -> None:

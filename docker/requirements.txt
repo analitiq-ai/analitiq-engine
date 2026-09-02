@@ -25,7 +25,9 @@ grpcio-tools>=1.60.0
 # A declared param's JSON-Schema value keywords are enforced with the
 # reference implementation, which is the artifact external authors write
 # against. format-nongpl, never format: the latter pulls rfc3987 (GPLv3).
-jsonschema[format-nongpl]>=4.20
+# 4.25 is the floor: the iri checkers arrive with rfc3987-syntax, which
+# format-nongpl only pulls from that release.
+jsonschema[format-nongpl]>=4.25
 
 # Serialization formats for gRPC payloads
 msgpack>=1.0.0

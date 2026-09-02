@@ -64,7 +64,12 @@ pydantic = "^2.0.0"
 # ``format-nongpl``, never ``format``: the latter pulls rfc3987 (GPLv3).
 # Declared here rather than inherited transitively -- the CDK puts it behind
 # its [api] extra, and the engine always runs that surface.
-jsonschema = {version = "^4.20", extras = ["format-nongpl"]}
+# 4.25 is the floor, not 4.20: ``iri`` and ``iri-reference`` are enforced
+# from `_ENFORCED_FORMATS`, and their checker arrives with
+# `rfc3987-syntax`, which `format-nongpl` only pulls from 4.25.0. On any
+# earlier resolve the named-list guard fires at import and `analitiq-
+# cdk[api]` cannot be imported at all.
+jsonschema = {version = "^4.25", extras = ["format-nongpl"]}
 
 # Published Analitiq contract packages (PyPI). The engine validates on-disk
 # artifacts against these offline, so it never fetches a schema at runtime:
@@ -138,7 +143,7 @@ mypy = "1.17.1"
 # jsonschema ships no inline types; the census refuses to render over a
 # build with errors, so the stubs are a dev requirement rather than a
 # per-import ignore.
-types-jsonschema = "^4.20"
+types-jsonschema = "^4.25"
 isort = "^5.12.0"
 pre-commit = "^3.3.0"
 sphinx = "^7.0.0"

@@ -95,7 +95,12 @@ boto3 = { version = "^1.26.0", optional = true }
 # jsonschema-specifications and rpds-py, the last a compiled extension: a
 # pure-SQL connector never runs this check and must not carry a
 # platform-specific wheel for it.
-jsonschema = { version = "^4.20", extras = ["format-nongpl"], optional = true }
+# 4.25 is the floor, not 4.20: ``iri`` and ``iri-reference`` are enforced
+# from `_ENFORCED_FORMATS`, and their checker arrives with
+# `rfc3987-syntax`, which `format-nongpl` only pulls from 4.25.0. On any
+# earlier resolve the named-list guard fires at import and `analitiq-
+# cdk[api]` cannot be imported at all.
+jsonschema = { version = "^4.25", extras = ["format-nongpl"], optional = true }
 # Optional: the connector conformance suite (cdk.conformance) a connector
 # repo runs in its own CI against the pinned CDK version (issue #391).
 pytest = { version = ">=7.0", optional = true }

@@ -45,7 +45,7 @@ def __getattr__(name: str) -> Any:
                 exc,
                 feature=f"cdk.api.{name}",
                 extra="api",
-                modules=("aiohttp", "aiohttp_retry", "orjson", "pyarrow"),
+                modules=("aiohttp", "aiohttp_retry", "orjson", "pyarrow", "jsonschema"),
             )
         return getattr(generic, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

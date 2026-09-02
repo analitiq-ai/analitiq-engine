@@ -531,7 +531,7 @@
     },
     "analitiq.contracts.endpoints.Param": {
       "controlled_by": [
-        "cdk.api.param_rules:316",
+        "cdk.api.param_rules:317",
         "cdk.api.request:180",
         "cdk.api.request:242",
         "cdk.api.request:244"
@@ -572,7 +572,7 @@
         "cdk.api.param_rules:266"
       ],
       "required": [
-        "cdk.api.param_rules:315"
+        "cdk.api.param_rules:316"
       ],
       "style": [
         "cdk.api.query_style:121",
