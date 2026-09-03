@@ -6,12 +6,14 @@ The runtime now drives transport creation through
 transports rather than the legacy ``${PLACEHOLDER}`` expansion path.
 """
 
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from analitiq.contracts.connector import Connector
 from contract_documents import connection_document, connector_document
 
+from cdk import connection_runtime as runtime_module
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.secrets import SchemeSecretsResolver
 from cdk.secrets.exceptions import SecretNotFoundError
@@ -429,6 +431,115 @@ class TestConnectionRuntimeClose:
             await runtime.materialize()
         await runtime.close()
         await runtime.close()  # second close is a no-op
+
+
+class TestConnectionRuntimeCloseLogsTracebacks:
+    """close() swallows every teardown failure, so the log record is the only
+    evidence the pool leaked (issue #244).
+
+    A record without a traceback names the connection and nothing else, which is
+    what makes a leak here impossible to connect to the pool exhaustion it causes
+    much later. Each test asserts the *cause* is attached, not merely that some
+    traceback is.
+    """
+
+    def _runtime(self, connection_id: str, connector_type: str, connector):
+        return ConnectionRuntime(
+            connection=connection_document(parameters={}),
+            connection_id=connection_id,
+            connector_id="test-connector",
+            connector_type=connector_type,
+            resolver=_resolver(),
+            connector=connector,
+        )
+
+    @staticmethod
+    def _sole_error(caplog, needle: str) -> logging.LogRecord:
+        errors = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.ERROR and needle in r.getMessage()
+        ]
+        assert len(errors) == 1, [r.getMessage() for r in caplog.records]
+        return errors[0]
+
+    @pytest.mark.asyncio
+    async def test_failed_engine_dispose_logs_the_traceback(self, caplog):
+        boom = RuntimeError("pool already returned to a closed loop")
+        engine = AsyncMock()
+        engine.dispose.side_effect = boom
+        transport = SqlAlchemyTransport(
+            engine=engine,
+            driver="postgresql+asyncpg",
+            dialect="postgresql",
+            is_async=True,
+        )
+        runtime = self._runtime("conn-db", "database", _db_connector())
+        with patch(
+            "cdk.connection_runtime.build_transport_from_spec",
+            new=AsyncMock(return_value=transport),
+        ):
+            await runtime.materialize()
+
+        with caplog.at_level(logging.ERROR, logger=runtime_module.logger.name):
+            await runtime.close()
+
+        record = self._sole_error(caplog, "Failed to dispose engine")
+        assert record.exc_info is not None
+        assert record.exc_info[1] is boom
+
+    @pytest.mark.asyncio
+    async def test_failed_sync_engine_dispose_logs_the_traceback(self, caplog):
+        boom = RuntimeError("driver refused to close the pool")
+        engine = MagicMock()
+        engine.dispose.side_effect = boom
+        transport = SqlAlchemyTransport(
+            engine=engine,
+            driver="redshift+redshift_connector",
+            dialect="redshift",
+            is_async=False,
+        )
+        runtime = self._runtime("conn-db", "database", _db_connector())
+        with patch(
+            "cdk.connection_runtime.build_transport_from_spec",
+            new=AsyncMock(return_value=transport),
+        ):
+            await runtime.materialize()
+
+        with caplog.at_level(logging.ERROR, logger=runtime_module.logger.name):
+            await runtime.close()
+
+        record = self._sole_error(caplog, "Failed to dispose sync engine")
+        assert record.exc_info is not None
+        assert record.exc_info[1] is boom
+
+    @pytest.mark.asyncio
+    async def test_failed_session_close_logs_the_traceback(self, caplog):
+        boom = RuntimeError("connector was already detached")
+        session = AsyncMock()
+        session.close.side_effect = boom
+        transport = HttpTransport(
+            session=session,
+            base_url="https://api.example.com",
+            headers={},
+            rate_limiter=None,
+        )
+        runtime = self._runtime("conn-api", "api", _api_connector())
+        with patch(
+            "cdk.connection_runtime.build_transport_from_spec",
+            new=AsyncMock(return_value=transport),
+        ):
+            await runtime.materialize()
+
+        with caplog.at_level(logging.ERROR, logger=runtime_module.logger.name):
+            await runtime.close()
+
+        record = self._sole_error(caplog, "Failed to close session")
+        assert record.exc_info is not None
+        assert record.exc_info[1] is boom
+        # The swallow is deliberate: teardown continues past the failure.
+        assert runtime._http_transports == {}
+        assert not runtime._materialized
 
 
 # ---------------------------------------------------------------------------
