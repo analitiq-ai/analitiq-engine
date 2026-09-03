@@ -94,11 +94,13 @@ _STRINGABLE_KINDS: Final[frozenset[str]] = frozenset(
 # safe-cast rejects a row it cannot convert exactly.
 _NUMERIC_KINDS: Final[frozenset[str]] = frozenset({"int", "float", "decimal"})
 
-# The cross-kind pairs the runtime safe-cast performs on the *stable* pyarrow
-# kernels -- the ones that behave identically on pyarrow 12 and 24. A cross-kind
-# pair absent here is forbidden: either pc.cast cannot perform it at all (Binary
-# -> Int64, Duration -> Date, Time -> Boolean), or it is version-dependent (Utf8
-# -> Date32 is unimplemented on 12), so the published grid must not promise it.
+# The cross-kind pairs the runtime safe-cast performs on kernels that are
+# stable across the declared pyarrow range (>= 21; see pyproject.toml). A
+# cross-kind pair absent here is forbidden because pc.cast cannot perform it at
+# all -- Binary -> Int64, Duration -> Date, Time -> Boolean -- so the published
+# grid must not promise it. Every listed pair is exercised at runtime by
+# tests/unit/cdk_tests/test_conversion_matrix.py, which is what keeps this list
+# a measurement rather than a belief.
 # Every listed pair resolves to auto + runtime_checked -- attempted, and the
 # safe-cast fails loud on a row or width it cannot convert exactly. Same-kind
 # width/unit changes (Int32 -> Int64, Date32 -> Date64) are settled a step
@@ -153,9 +155,12 @@ def classify_conversion(source_family: str, target_family: str) -> Conversion:
     # and this cast already parse "1" -> Int, "1.5" -> Float. That parse is the
     # engine's standing behavior, so string -> int/float/decimal resolves to auto
     # via the cross-kind allowlist below. Parsing a string into a *temporal* is
-    # not offered: Utf8 -> Date32 is unimplemented on pyarrow 12, so the grid
-    # would promise a version-dependent cast; an author renders those with an
-    # explicit function (iso_to_date) instead.
+    # still not offered, though the kernel now exists on the declared floor
+    # (Utf8 -> Date32 casts "2025-08-16" on pyarrow 25). It parses one spelling:
+    # the same cast rejects "2025-08-16T10:30:00Z" and every offset form, which
+    # is what a real API ships, so an auto cast would succeed on some rows of a
+    # column and fail the batch on others. An author renders these with an
+    # explicit function (iso_to_date) that accepts every ISO form.
 
     # Nested structures never convert to or from a scalar, and one nested shape
     # never becomes another (Object <-> List).

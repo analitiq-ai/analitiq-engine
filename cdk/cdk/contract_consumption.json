@@ -1110,25 +1110,25 @@
     },
     "analitiq.contracts.stream.ValidationRule": {
       "field": [
-        "src.engine.mapping:1069"
+        "src.engine.mapping:1072"
       ],
       "message": [
-        "src.engine.mapping:1105"
+        "src.engine.mapping:1108"
       ],
       "type": [
-        "src.engine.mapping:1080",
-        "src.engine.mapping:1090",
-        "src.engine.mapping:1107",
-        "src.engine.mapping:1127",
-        "src.engine.mapping:1149",
-        "src.engine.mapping:1155"
+        "src.engine.mapping:1083",
+        "src.engine.mapping:1093",
+        "src.engine.mapping:1110",
+        "src.engine.mapping:1130",
+        "src.engine.mapping:1152",
+        "src.engine.mapping:1158"
       ],
       "value": [
-        "src.engine.mapping:1132",
         "src.engine.mapping:1135",
         "src.engine.mapping:1138",
-        "src.engine.mapping:1145",
-        "src.engine.mapping:1164"
+        "src.engine.mapping:1141",
+        "src.engine.mapping:1148",
+        "src.engine.mapping:1167"
       ]
     }
   },

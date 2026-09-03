@@ -334,8 +334,9 @@ class TestBoundariesAgree:
             (pa.int64(), [1, 2], "Utf8"),  # explicit -> both reject
             (pa.struct([("a", pa.int64())]), [{"a": 1}], "Int64"),  # forbidden
             # Allowlisted cross-kind casts, exercised at runtime (not just the
-            # policy) so CI on pyarrow 12 proves the kernel the grid promises
-            # actually runs -- the "stable on 12 and 24" claim, enforced.
+            # policy) so CI proves the kernel the grid promises actually runs on
+            # the pyarrow it resolves -- the allowlist's stability claim,
+            # enforced rather than asserted.
             (pa.string(), ["1", "2"], "Decimal128(20, 4)"),  # string parse
             (pa.float64(), [1.5], "Decimal128(20, 4)"),  # numeric interconvert
             (pa.date32(), [0, 1], "Timestamp(MICROSECOND)"),  # date <-> timestamp

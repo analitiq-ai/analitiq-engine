@@ -103,8 +103,23 @@ protobuf = "^4.25.0"
 # Serialization formats for gRPC payloads
 msgpack = "^1.0.0"
 
-# Arrow for columnar type casting (required for destination handlers)
-pyarrow = "^12.0.0"
+# Arrow for columnar type casting (required for destination handlers).
+#
+# The floor is 21 and it is a capability floor, not a hygiene one. Below it
+# pyarrow cannot build a halffloat array from a Python float, so a Float16
+# column declared by a connector fails on its first record; and to_pylist()
+# hands back numpy.float16, which is not a float subclass, so orjson refuses
+# it (cdk/cdk/api/http.py), the dead-letter encoder refuses it, and a DBAPI
+# that binds buffer-like objects stores the raw two bytes instead of the
+# number. 16 through 20 fix the casts but not that, so 21 is the first
+# version on which the published vocabulary is true end to end (#484).
+#
+# This constraint is asserted equal to the CDK's by
+# tests/unit/test_dependency_agreement.py. The two must not drift: the
+# published arrow_type_grammar and conversion_matrix state what Arrow can
+# do, so a connector resolving a different Arrow than the engine tests
+# against reads an artifact that is not about its own runtime.
+pyarrow = ">=21.0.0"
 
 # Optional dependencies
 kafka-python = {version = "^2.0.0", optional = true}

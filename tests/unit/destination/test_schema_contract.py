@@ -7,7 +7,7 @@ fully-qualified canonical ``arrow_type`` — no inference, no type-map
 lookup on the destination side.
 """
 
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 from decimal import Decimal
 
 import pyarrow as pa
@@ -155,11 +155,12 @@ class TestSchemaContractCastArrowBatch:
             contract.cast_arrow_batch(source)
 
     def test_cast_arrow_batch_string_to_timestamp_is_forbidden(self):
-        # A raw string column targeting a temporal is a version-dependent cast
-        # (Utf8 -> Timestamp is unimplemented on pyarrow 12), so the matrix
-        # forbids it rather than publish an "auto" that only runs on some
-        # versions: the source builds temporals with its own parser, and an
-        # author who needs a string parse wires iso_to_timestamp.
+        # A raw string column targeting a temporal parses exactly one spelling
+        # -- the cast that takes "2025-08-16" rejects every Z and offset form --
+        # so the matrix forbids it rather than publish an "auto" that succeeds
+        # on some rows and fails the batch on others: the source builds
+        # temporals with its own parser, and an author who needs a string parse
+        # wires iso_to_timestamp.
         schema = {
             "columns": [
                 {
@@ -535,6 +536,29 @@ class TestSchemaContractFromPylist:
 
         with pytest.raises(ValueError, match=r"column 'val' at row 1.*got dict"):
             contract.from_pylist([{"val": "1.5"}, {"val": {"x": 1}}])
+
+    def test_source_format_column_reports_its_own_error_for_a_decimal(self):
+        """A source_format column accepts no numeric value, so its own message
+        must win over the unit-offset guard's.
+
+        The guard says the value is not an integer offset, which would imply an
+        integer is taken here. It is not -- source_format parses strings only,
+        so an author told to send an integer would be sent to the wrong fix.
+        """
+        schema = {
+            "columns": [
+                {
+                    "name": "created",
+                    "arrow_type": "Timestamp(SECOND)",
+                    "nullable": True,
+                    "source_format": "%Y-%m-%d",
+                },
+            ]
+        }
+        contract = SchemaContract(schema)
+
+        with pytest.raises(TypeError, match=r"source_format only applies to string"):
+            contract.from_pylist([{"created": Decimal("1.5")}])
 
     def test_from_pylist_strptime_via_source_format(self):
         schema = {
@@ -1112,11 +1136,9 @@ class TestFromPylistNullabilityEnforcement:
             c.from_pylist([{"v": {"k": 1}}, {"v": None}])
 
     def test_time_non_nullable_mixed_raises(self):
-        from datetime import time as _time
-
         c = self._contract("Time32(SECOND)", nullable=False)
         with pytest.raises(ValueError, match=r"'v' is non-nullable.*\[1\]"):
-            c.from_pylist([{"v": _time(10, 0, 0)}, {"v": None}])
+            c.from_pylist([{"v": time(10, 0, 0)}, {"v": None}])
 
     def test_uint_non_nullable_mixed_raises(self):
         c = self._contract("UInt32", nullable=False)
@@ -1268,3 +1290,102 @@ class TestToDbRecords:
         records = contract.to_db_records(batch)
         assert isinstance(records[0]["tags"], str)
         assert _json.loads(records[0]["tags"]) == ["a", "b"]
+
+
+class TestFromPylistTemporalRejectsFloatingPoint:
+    """A floating-point value has no correct reading in a temporal column.
+
+    An integer is unambiguous: the epoch offset in the column's declared unit,
+    which is the shape real connectors carry over JSON. A float or Decimal is
+    not — pyarrow truncates it toward that unit with no signal, so
+    ``Decimal('1.5')`` lands a date column on 1970-01-02 and a microsecond
+    duration on 1 microsecond. The whole Python type is refused, integral
+    values included: ``1.0`` is exactly as ambiguous as ``1.5`` once the
+    declared unit is what decides the reading, and accepting only the integral
+    ones would make the rule depend on the value rather than on its type.
+    """
+
+    TEMPORAL_TYPES = [
+        "Timestamp(SECOND)",
+        "Timestamp(MICROSECOND, UTC)",
+        "Date32",
+        "Date64",
+        "Time32(SECOND)",
+        "Time64(MICROSECOND)",
+        "Duration(SECOND)",
+        "Duration(MICROSECOND)",
+    ]
+
+    @staticmethod
+    def _contract(arrow_type: str) -> SchemaContract:
+        return SchemaContract({"columns": [{"name": "t", "arrow_type": arrow_type}]})
+
+    @pytest.mark.parametrize("arrow_type", TEMPORAL_TYPES)
+    @pytest.mark.parametrize("value", [1.5, 1.0, Decimal("1.5"), Decimal("1.0")])
+    def test_float_and_decimal_rejected_naming_column_and_row(self, arrow_type, value):
+        contract = self._contract(arrow_type)
+        with pytest.raises(ValueError, match=r"column 't' at row 1"):
+            contract.from_pylist([{"t": None}, {"t": value}])
+
+    @pytest.mark.parametrize("arrow_type", TEMPORAL_TYPES)
+    def test_integer_offset_still_decodes(self, arrow_type):
+        batch = self._contract(arrow_type).from_pylist([{"t": 1}])
+        assert batch.num_rows == 1
+        assert batch.column(0)[0].is_valid
+
+    def test_unix_seconds_decode_to_the_declared_instant(self):
+        # Naive on purpose: Timestamp(SECOND) declares no timezone.
+        expected = datetime(2024, 1, 2, 3, 4, 5)  # noqa: DTZ001
+        batch = self._contract("Timestamp(SECOND)").from_pylist([{"t": 1704164645}])
+        assert batch.column(0)[0].as_py() == expected
+
+    @pytest.mark.parametrize(
+        ("arrow_type", "text", "expected"),
+        [
+            (
+                "Timestamp(MICROSECOND)",
+                "2024-01-02T03:04:05",
+                datetime(2024, 1, 2, 3, 4, 5),  # noqa: DTZ001 -- naive on purpose
+            ),
+            ("Date32", "2024-01-02", date(2024, 1, 2)),
+            ("Time64(MICROSECOND)", "03:04:05", time(3, 4, 5)),
+        ],
+    )
+    def test_iso_8601_strings_still_decode(self, arrow_type, text, expected):
+        batch = self._contract(arrow_type).from_pylist([{"t": text}])
+        assert batch.column(0)[0].as_py() == expected
+
+    @pytest.mark.parametrize("arrow_type", ["Date32", "Duration(MICROSECOND)"])
+    def test_nested_temporal_leaf_rejects_floating_point(self, arrow_type):
+        # The leaf restores the unit-offset guard, so a Decimal is refused at
+        # depth exactly as it is at the top level: pyarrow builds nested
+        # columns straight from Python values, so the leaf would otherwise
+        # truncate where the column refuses.
+        contract = SchemaContract(
+            {
+                "columns": [
+                    {
+                        "name": "o",
+                        "arrow_type": "Object",
+                        "properties": {"t": {"arrow_type": arrow_type}},
+                    }
+                ]
+            }
+        )
+        with pytest.raises(ValueError, match=r"column 'o.t' at row 0"):
+            contract.from_pylist([{"o": {"t": Decimal("1.5")}}])
+
+    def test_nested_temporal_leaf_accepts_integer_offset(self):
+        contract = SchemaContract(
+            {
+                "columns": [
+                    {
+                        "name": "o",
+                        "arrow_type": "Object",
+                        "properties": {"t": {"arrow_type": "Date32"}},
+                    }
+                ]
+            }
+        )
+        batch = contract.from_pylist([{"o": {"t": 1}}])
+        assert batch.column(0)[0].as_py() == {"t": date(1970, 1, 2)}

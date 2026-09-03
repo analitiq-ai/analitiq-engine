@@ -890,8 +890,10 @@ def _fn_now(column: pa.Array) -> pa.Array:
 
 
 # A trailing 'Z' or numeric offset, used to strip the zone marker before a naive
-# parse. pyarrow 12 has no single string cast that accepts naive, 'Z', and
-# offset forms together, so the zone is dropped and the value stamped UTC.
+# parse. No pyarrow has a single string cast that accepts naive, 'Z', and offset
+# forms together -- verified on 25, where a naive target rejects the offset form
+# and a tz-aware target rejects the naive one -- so the zone is dropped and the
+# value stamped UTC.
 _ISO_ZONE_SUFFIX_RE: Final[str] = r"(Z|[+-]([01]\d|2[0-3]):?[0-5]\d)$"
 
 
@@ -901,8 +903,8 @@ def _fn_iso_to_datetime(column: pa.Array) -> pa.Array:
     Accepts every form the per-record ``datetime.fromisoformat`` did -- a bare
     date, a naive datetime, and a ``Z``/offset timestamp. The zone marker is
     stripped and the remaining value parsed as a naive timestamp stamped UTC
-    (wall-clock, consistent with ``iso_to_date``); on pyarrow 12 no single cast
-    accepts all three forms, and a tz-aware cast rejects naive input outright.
+    (wall-clock, consistent with ``iso_to_date``); no pyarrow has a single cast
+    accepting all three forms, and a tz-aware cast rejects naive input outright.
     """
     try:
         strings = pc.cast(column, pa.string())
@@ -938,8 +940,9 @@ def _fn_iso_to_date(column: pa.Array) -> pa.Array:
     characters (the calendar date, present in every ISO form -- a bare date, a
     naive datetime, or a ``Z``/offset timestamp) are then parsed as a naive
     timestamp (which validates the date and keeps the original wall-clock date)
-    and reformatted. (A direct string -> date32 cast is unavailable on
-    pyarrow 12, so the date is round-tripped through a timestamp.)
+    and reformatted. (A direct string -> date32 cast takes a bare
+    ``YYYY-MM-DD`` and rejects every datetime form, on pyarrow 25 as on 12, so
+    the date is round-tripped through a timestamp.)
     """
     try:
         strings = pc.cast(column, pa.string())

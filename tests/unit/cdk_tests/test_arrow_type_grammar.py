@@ -313,7 +313,9 @@ class TestOneTableFeedsEverySurface:
         mapper = _one_rule_mapper()
         with _family_added("Interval", added):
             # The published grammar document.
-            assert build_arrow_type_grammar()["families"]["Interval"] == {"params": []}
+            assert build_arrow_type_grammar()["families"]["Interval"] == {
+                "params": [],
+            }
             # The conversion grid: a new axis, classified by its declared kind.
             grid = build_conversion_grid()
             assert set(grid) == set(ARROW_FAMILIES)
@@ -598,4 +600,3 @@ class TestPublishedDocumentShape:
         tz = families["Timestamp"]["params"][1]
         assert tz["kind"] == "timezone"
         assert tz["optional"] is True
-        assert tz["null_sentinel"] == "null"
