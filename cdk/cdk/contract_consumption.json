@@ -12,12 +12,12 @@
       ],
       "parameters": [
         "cdk.connection_runtime:449",
-        "cdk.connection_runtime:1128",
-        "cdk.connection_runtime:1170"
+        "cdk.connection_runtime:1135",
+        "cdk.connection_runtime:1177"
       ],
       "secret_refs": [
         "cdk.connection_runtime:449",
-        "cdk.connection_runtime:1079"
+        "cdk.connection_runtime:1086"
       ],
       "selections": [
         "cdk.connection_runtime:449"
@@ -28,7 +28,7 @@
         "cdk.connection_runtime:204"
       ],
       "connection_contract": [
-        "cdk.connection_runtime:1132"
+        "cdk.connection_runtime:1139"
       ],
       "connector_id": [
         "cdk.transport_factory:304",
@@ -57,15 +57,15 @@
     },
     "analitiq.contracts.connector.ConnectionContract": {
       "inputs": [
-        "cdk.connection_runtime:1132"
+        "cdk.connection_runtime:1139"
       ]
     },
     "analitiq.contracts.connector.ConnectionContractInput": {
       "required": [
-        "cdk.connection_runtime:1133"
+        "cdk.connection_runtime:1140"
       ],
       "storage": [
-        "cdk.connection_runtime:1135"
+        "cdk.connection_runtime:1142"
       ]
     },
     "analitiq.contracts.connector.DatabaseConnector": {
@@ -73,7 +73,7 @@
         "cdk.connection_runtime:204"
       ],
       "connection_contract": [
-        "cdk.connection_runtime:1132"
+        "cdk.connection_runtime:1139"
       ],
       "connector_id": [
         "cdk.transport_factory:304",
@@ -108,7 +108,7 @@
         "cdk.connection_runtime:204"
       ],
       "connection_contract": [
-        "cdk.connection_runtime:1132"
+        "cdk.connection_runtime:1139"
       ],
       "connector_id": [
         "cdk.transport_factory:304",
@@ -140,7 +140,7 @@
         "cdk.connection_runtime:204"
       ],
       "connection_contract": [
-        "cdk.connection_runtime:1132"
+        "cdk.connection_runtime:1139"
       ],
       "connector_id": [
         "cdk.transport_factory:304",
@@ -172,7 +172,7 @@
         "cdk.connection_runtime:204"
       ],
       "connection_contract": [
-        "cdk.connection_runtime:1132"
+        "cdk.connection_runtime:1139"
       ],
       "connector_id": [
         "cdk.transport_factory:304",
@@ -204,7 +204,7 @@
         "cdk.connection_runtime:204"
       ],
       "connection_contract": [
-        "cdk.connection_runtime:1132"
+        "cdk.connection_runtime:1139"
       ],
       "connector_id": [
         "cdk.transport_factory:304",
@@ -236,7 +236,7 @@
         "cdk.connection_runtime:204"
       ],
       "connection_contract": [
-        "cdk.connection_runtime:1132"
+        "cdk.connection_runtime:1139"
       ],
       "connector_id": [
         "cdk.transport_factory:304",
@@ -1332,7 +1332,7 @@
     "analitiq.contracts.connector.ApiConnector": {
       "consumer": "cdk.resolver",
       "dumps": [
-        "cdk.connection_runtime:1155"
+        "cdk.connection_runtime:1162"
       ],
       "entries": [
         "cdk.resolver:102",
@@ -1351,7 +1351,7 @@
     "analitiq.contracts.connector.DatabaseConnector": {
       "consumer": "cdk.resolver",
       "dumps": [
-        "cdk.connection_runtime:1155"
+        "cdk.connection_runtime:1162"
       ],
       "entries": [
         "cdk.resolver:102",
@@ -1363,7 +1363,7 @@
     "analitiq.contracts.connector.DocumentConnector": {
       "consumer": "cdk.resolver",
       "dumps": [
-        "cdk.connection_runtime:1155"
+        "cdk.connection_runtime:1162"
       ],
       "entries": [
         "cdk.resolver:102",
@@ -1382,7 +1382,7 @@
     "analitiq.contracts.connector.FileConnector": {
       "consumer": "cdk.resolver",
       "dumps": [
-        "cdk.connection_runtime:1155"
+        "cdk.connection_runtime:1162"
       ],
       "entries": [
         "cdk.resolver:102",
@@ -1414,7 +1414,7 @@
     "analitiq.contracts.connector.NosqlConnector": {
       "consumer": "cdk.resolver",
       "dumps": [
-        "cdk.connection_runtime:1155"
+        "cdk.connection_runtime:1162"
       ],
       "entries": [
         "cdk.resolver:102",
@@ -1426,7 +1426,7 @@
     "analitiq.contracts.connector.S3Connector": {
       "consumer": "cdk.resolver",
       "dumps": [
-        "cdk.connection_runtime:1155"
+        "cdk.connection_runtime:1162"
       ],
       "entries": [
         "cdk.resolver:102",
@@ -1465,7 +1465,7 @@
     "analitiq.contracts.connector.StdoutConnector": {
       "consumer": "cdk.resolver",
       "dumps": [
-        "cdk.connection_runtime:1155"
+        "cdk.connection_runtime:1162"
       ],
       "entries": [
         "cdk.resolver:102",
