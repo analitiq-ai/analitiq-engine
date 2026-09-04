@@ -15,6 +15,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pytest
 
 import src
@@ -1286,6 +1287,17 @@ class TestPerRecordParity:
             pa.array(["2026-05-12T10:30:00Z", "2026-05-12T10:30:00", "2026-05-12"])
         ).to_pylist()
         assert all(ts is not None and ts.tzinfo is not None for ts in out)
+
+    def test_no_single_pyarrow_cast_accepts_naive_and_offset_forms_together(self):
+        # This is why iso_to_datetime strips the zone marker and stamps UTC
+        # manually instead of casting straight to a timestamp: no single
+        # target admits both spellings, so a raw column mixing naive and
+        # zoned strings has no cast that would decode it in one pass.
+        naive, zoned = "2026-05-12T10:30:00", "2026-05-12T10:30:00Z"
+        with pytest.raises(pa.ArrowInvalid):
+            pc.cast(pa.array([zoned]), pa.timestamp("us"))
+        with pytest.raises(pa.ArrowInvalid):
+            pc.cast(pa.array([naive]), pa.timestamp("us", "UTC"))
 
     def test_fn_wrong_arity_raises_transformation_error(self):
         node = {

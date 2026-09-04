@@ -7,9 +7,10 @@ fully-qualified canonical ``arrow_type`` — no inference, no type-map
 lookup on the destination side.
 """
 
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 from decimal import Decimal
 
+import numpy
 import pyarrow as pa
 import pytest
 
@@ -155,11 +156,15 @@ class TestSchemaContractCastArrowBatch:
             contract.cast_arrow_batch(source)
 
     def test_cast_arrow_batch_string_to_timestamp_is_forbidden(self):
-        # A raw string column targeting a temporal is a version-dependent cast
-        # (Utf8 -> Timestamp is unimplemented on pyarrow 12), so the matrix
-        # forbids it rather than publish an "auto" that only runs on some
-        # versions: the source builds temporals with its own parser, and an
-        # author who needs a string parse wires iso_to_timestamp.
+        # A raw string column targeting a temporal parses the spellings its
+        # target admits and no others, and the two timestamp targets admit
+        # opposite halves: a tz-aware target takes "...T10:30:00Z" and an
+        # offset form but rejects a bare "2025-08-16", while a naive target
+        # does the reverse. No declaration covers a source that ships both, so
+        # the matrix forbids the pair rather than publish an "auto" that
+        # succeeds on some rows and fails the batch on others: the source
+        # builds temporals with its own parser, and an author who needs a
+        # string parse wires iso_to_timestamp.
         schema = {
             "columns": [
                 {
@@ -535,6 +540,29 @@ class TestSchemaContractFromPylist:
 
         with pytest.raises(ValueError, match=r"column 'val' at row 1.*got dict"):
             contract.from_pylist([{"val": "1.5"}, {"val": {"x": 1}}])
+
+    def test_source_format_column_reports_its_own_error_for_a_decimal(self):
+        """A source_format column accepts no numeric value, so its own message
+        must win over the unit-offset guard's.
+
+        The guard says the value is not an integer offset, which would imply an
+        integer is taken here. It is not -- source_format parses strings only,
+        so an author told to send an integer would be sent to the wrong fix.
+        """
+        schema = {
+            "columns": [
+                {
+                    "name": "created",
+                    "arrow_type": "Timestamp(SECOND)",
+                    "nullable": True,
+                    "source_format": "%Y-%m-%d",
+                },
+            ]
+        }
+        contract = SchemaContract(schema)
+
+        with pytest.raises(TypeError, match=r"source_format only applies to string"):
+            contract.from_pylist([{"created": Decimal("1.5")}])
 
     def test_from_pylist_strptime_via_source_format(self):
         schema = {
@@ -1112,11 +1140,9 @@ class TestFromPylistNullabilityEnforcement:
             c.from_pylist([{"v": {"k": 1}}, {"v": None}])
 
     def test_time_non_nullable_mixed_raises(self):
-        from datetime import time as _time
-
         c = self._contract("Time32(SECOND)", nullable=False)
         with pytest.raises(ValueError, match=r"'v' is non-nullable.*\[1\]"):
-            c.from_pylist([{"v": _time(10, 0, 0)}, {"v": None}])
+            c.from_pylist([{"v": time(10, 0, 0)}, {"v": None}])
 
     def test_uint_non_nullable_mixed_raises(self):
         c = self._contract("UInt32", nullable=False)
@@ -1268,3 +1294,196 @@ class TestToDbRecords:
         records = contract.to_db_records(batch)
         assert isinstance(records[0]["tags"], str)
         assert _json.loads(records[0]["tags"]) == ["a", "b"]
+
+
+class TestFromPylistTemporalRejectsFloatingPoint:
+    """A floating-point value has no correct reading in a temporal column.
+
+    An integer is unambiguous: the epoch offset in the column's declared unit,
+    which is the shape real connectors carry over JSON. A float or Decimal is
+    not — pyarrow truncates it toward that unit with no signal, so
+    ``Decimal('1.5')`` lands a date column on 1970-01-02 and a microsecond
+    duration on 1 microsecond. The whole Python type is refused, integral
+    values included: ``1.0`` is exactly as ambiguous as ``1.5`` once the
+    declared unit is what decides the reading, and accepting only the integral
+    ones would make the rule depend on the value rather than on its type.
+    """
+
+    TEMPORAL_TYPES = [
+        "Timestamp(SECOND)",
+        "Timestamp(MICROSECOND, UTC)",
+        "Date32",
+        "Date64",
+        "Time32(SECOND)",
+        "Time64(MICROSECOND)",
+        "Duration(SECOND)",
+        "Duration(MICROSECOND)",
+    ]
+
+    @staticmethod
+    def _contract(arrow_type: str) -> SchemaContract:
+        return SchemaContract({"columns": [{"name": "t", "arrow_type": arrow_type}]})
+
+    @pytest.mark.parametrize("arrow_type", TEMPORAL_TYPES)
+    @pytest.mark.parametrize("value", [1.5, 1.0, Decimal("1.5"), Decimal("1.0")])
+    def test_float_and_decimal_rejected_naming_column_and_row(self, arrow_type, value):
+        contract = self._contract(arrow_type)
+        with pytest.raises(ValueError, match=r"column 't' at row 1"):
+            contract.from_pylist([{"t": None}, {"t": value}])
+
+    @pytest.mark.parametrize("arrow_type", TEMPORAL_TYPES)
+    @pytest.mark.parametrize(
+        "value",
+        [numpy.float16(1.5), numpy.float32(1.5), numpy.float64(1.5)],
+        ids=["float16", "float32", "float64"],
+    )
+    def test_numpy_float_rejected_naming_column_and_row(self, arrow_type, value):
+        # float64 is a float subclass on CPython and would already be caught
+        # by isinstance(value, float); float16/32 are not. from_pylist accepts
+        # list[dict[str, Any]] with no type enforcement at the boundary, so a
+        # connector's own driver code can hand any of the three in -- a guard
+        # that only recognised the stdlib float would let float16/32 walk
+        # through silently truncated.
+        contract = self._contract(arrow_type)
+        with pytest.raises(ValueError, match=r"column 't' at row 1"):
+            contract.from_pylist([{"t": None}, {"t": value}])
+
+    # Date32/Date64/Time32/Time64 accept a bare integer offset from either
+    # Python or numpy -- pa.array's own int64 path. Timestamp and Duration
+    # do not: pyarrow wants np.datetime64/np.timedelta64 for those, not
+    # np.int64, and refuses the numpy int with "Expected np.datetime64 but
+    # got: int64" even though a plain Python int works. That dispatch is
+    # pyarrow's own and has nothing to do with the offset guard -- verified
+    # by reproducing it against an unmodified checkout of this function.
+    NUMPY_INT_FRIENDLY_TYPES = [
+        "Date32",
+        "Date64",
+        "Time32(SECOND)",
+        "Time64(MICROSECOND)",
+    ]
+
+    @pytest.mark.parametrize("arrow_type", NUMPY_INT_FRIENDLY_TYPES)
+    @pytest.mark.parametrize(
+        "value", [numpy.int32(1), numpy.int64(1)], ids=["int32", "int64"]
+    )
+    def test_numpy_integer_offset_still_decodes(self, arrow_type, value):
+        batch = self._contract(arrow_type).from_pylist([{"t": value}])
+        assert batch.num_rows == 1
+        assert batch.column(0)[0].is_valid
+
+    @pytest.mark.parametrize("arrow_type", TEMPORAL_TYPES)
+    def test_integer_offset_still_decodes(self, arrow_type):
+        batch = self._contract(arrow_type).from_pylist([{"t": 1}])
+        assert batch.num_rows == 1
+        assert batch.column(0)[0].is_valid
+
+    def test_unix_seconds_decode_to_the_declared_instant(self):
+        # Naive on purpose: Timestamp(SECOND) declares no timezone.
+        expected = datetime(2024, 1, 2, 3, 4, 5)  # noqa: DTZ001
+        batch = self._contract("Timestamp(SECOND)").from_pylist([{"t": 1704164645}])
+        assert batch.column(0)[0].as_py() == expected
+
+    @pytest.mark.parametrize(
+        ("arrow_type", "text", "expected"),
+        [
+            (
+                "Timestamp(MICROSECOND)",
+                "2024-01-02T03:04:05",
+                datetime(2024, 1, 2, 3, 4, 5),  # noqa: DTZ001 -- naive on purpose
+            ),
+            ("Date32", "2024-01-02", date(2024, 1, 2)),
+            ("Time64(MICROSECOND)", "03:04:05", time(3, 4, 5)),
+        ],
+    )
+    def test_iso_8601_strings_still_decode(self, arrow_type, text, expected):
+        batch = self._contract(arrow_type).from_pylist([{"t": text}])
+        assert batch.column(0)[0].as_py() == expected
+
+    @pytest.mark.parametrize("arrow_type", ["Date32", "Duration(MICROSECOND)"])
+    def test_nested_temporal_leaf_rejects_floating_point(self, arrow_type):
+        # The leaf restores the unit-offset guard, so a Decimal is refused at
+        # depth exactly as it is at the top level: pyarrow builds nested
+        # columns straight from Python values, so the leaf would otherwise
+        # truncate where the column refuses.
+        contract = SchemaContract(
+            {
+                "columns": [
+                    {
+                        "name": "o",
+                        "arrow_type": "Object",
+                        "properties": {"t": {"arrow_type": arrow_type}},
+                    }
+                ]
+            }
+        )
+        with pytest.raises(ValueError, match=r"column 'o.t' at row 0"):
+            contract.from_pylist([{"o": {"t": Decimal("1.5")}}])
+
+    def test_nested_temporal_leaf_accepts_integer_offset(self):
+        contract = SchemaContract(
+            {
+                "columns": [
+                    {
+                        "name": "o",
+                        "arrow_type": "Object",
+                        "properties": {"t": {"arrow_type": "Date32"}},
+                    }
+                ]
+            }
+        )
+        batch = contract.from_pylist([{"o": {"t": 1}}])
+        assert batch.column(0)[0].as_py() == {"t": date(1970, 1, 2)}
+
+    @pytest.mark.parametrize("top_level", [True, False])
+    def test_list_leaf_rejects_floating_point_whether_tuple_or_list(self, top_level):
+        # pa.array accepts a tuple as a list value exactly as it accepts a
+        # list, and a DB-API driver may hand an array column back as a tuple
+        # rather than a list. Before _prepare_nested_value's list branch
+        # matched (list, tuple) instead of list alone, a tuple fell straight
+        # to _prepare_scalar_leaf with the LIST type -- which the offset
+        # guard, the int guard, and the bool guard all silently ignore --
+        # so every item inside a tuple-carried list column bypassed every
+        # leaf guard this file tests. Both the top-level column and a leaf
+        # nested inside Object are covered, since the same isinstance check
+        # gates both call sites.
+        list_field = {
+            "name": "dates",
+            "arrow_type": "List",
+            "items": {"arrow_type": "Date32"},
+        }
+        schema = (
+            {"columns": [list_field]}
+            if top_level
+            else {
+                "columns": [
+                    {
+                        "name": "o",
+                        "arrow_type": "Object",
+                        "properties": {"dates": list_field},
+                    }
+                ]
+            }
+        )
+        contract = SchemaContract(schema)
+        record = (
+            {"dates": (Decimal("1.5"),)}
+            if top_level
+            else {"o": {"dates": (Decimal("1.5"),)}}
+        )
+        with pytest.raises(ValueError, match=r"is not an integer offset for date32"):
+            contract.from_pylist([record])
+
+    def test_list_leaf_accepts_integer_offset_as_a_tuple(self):
+        contract = SchemaContract(
+            {
+                "columns": [
+                    {
+                        "name": "dates",
+                        "arrow_type": "List",
+                        "items": {"arrow_type": "Date32"},
+                    }
+                ]
+            }
+        )
+        batch = contract.from_pylist([{"dates": (1,)}])
+        assert batch.column(0)[0].as_py() == [date(1970, 1, 2)]
