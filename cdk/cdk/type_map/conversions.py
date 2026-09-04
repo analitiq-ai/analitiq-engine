@@ -94,11 +94,17 @@ _STRINGABLE_KINDS: Final[frozenset[str]] = frozenset(
 # safe-cast rejects a row it cannot convert exactly.
 _NUMERIC_KINDS: Final[frozenset[str]] = frozenset({"int", "float", "decimal"})
 
-# The cross-kind pairs the runtime safe-cast performs on the *stable* pyarrow
-# kernels -- the ones that behave identically on pyarrow 12 and 24. A cross-kind
-# pair absent here is forbidden: either pc.cast cannot perform it at all (Binary
-# -> Int64, Duration -> Date, Time -> Boolean), or it is version-dependent (Utf8
-# -> Date32 is unimplemented on 12), so the published grid must not promise it.
+# The cross-kind pairs the runtime safe-cast performs on kernels that are
+# stable across the declared pyarrow range (>= 21; see pyproject.toml). A pair
+# absent here is forbidden for one of two reasons, and they are not the same
+# reason: either pc.cast has no kernel for it at all, or a kernel exists but
+# the conversion is not one the grid should offer implicitly (Binary -> Int64
+# casts b"1" to 1, which is a reinterpretation of bytes as a numeral rather
+# than a widening -- kernel present, excluded anyway). Absence means forbidden
+# either way, so the published grid does not promise it; which reason applies
+# to which pair is not repeated here because it is version-dependent and
+# would drift the way this comment once did -- it is graded, alongside every
+# listed pair, by tests/unit/cdk_tests/test_conversion_matrix.py.
 # Every listed pair resolves to auto + runtime_checked -- attempted, and the
 # safe-cast fails loud on a row or width it cannot convert exactly. Same-kind
 # width/unit changes (Int32 -> Int64, Date32 -> Date64) are settled a step
@@ -153,9 +159,12 @@ def classify_conversion(source_family: str, target_family: str) -> Conversion:
     # and this cast already parse "1" -> Int, "1.5" -> Float. That parse is the
     # engine's standing behavior, so string -> int/float/decimal resolves to auto
     # via the cross-kind allowlist below. Parsing a string into a *temporal* is
-    # not offered: Utf8 -> Date32 is unimplemented on pyarrow 12, so the grid
-    # would promise a version-dependent cast; an author renders those with an
-    # explicit function (iso_to_date) instead.
+    # not offered even where a kernel exists: it parses one ISO spelling and
+    # rejects the rest, so an auto cast would succeed on some rows of a real
+    # column and fail the batch on others -- graded, not asserted, by
+    # test_utf8_to_date32_parses_one_spelling_not_every_iso_form in
+    # tests/unit/cdk_tests/test_conversion_matrix.py. An author renders these
+    # with an explicit function (iso_to_date) that accepts every ISO form.
 
     # Nested structures never convert to or from a scalar, and one nested shape
     # never becomes another (Object <-> List).

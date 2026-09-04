@@ -65,7 +65,15 @@ analitiq-contract-models = { version = ">=1.0.0rc23,<2", allow-prereleases = tru
 yarl = "^1.20"
 # Optional: Arrow columnar read/write (read_batches / write_batch, schema
 # casting, the ADBC reader, the DDL type renderers).
-pyarrow = { version = ">=14.0.0", optional = true }
+#
+# The floor is a capability floor: below pyarrow 21 a Float16 column cannot be
+# built from a Python float and to_pylist() returns numpy.float16, which is not
+# a float subclass and which the JSON and DBAPI boundaries mishandle (#484).
+# Held equal to the engine's declaration by
+# tests/unit/analitiq_stream/test_contract_pin_agreement.py -- a connector resolving a different
+# Arrow than the engine tests against would read a published grammar and
+# conversion matrix that are not about its own runtime.
+pyarrow = { version = ">=21.0.0", optional = true }
 # Optional: HTTP transport for API connectors, plus what the generic API
 # connector itself needs on that transport: bounded transport retries and a
 # JSON encoder that renders datetimes and decimals losslessly.

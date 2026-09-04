@@ -3,6 +3,7 @@
 import json
 import logging
 import math
+import numbers
 from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
@@ -42,6 +43,55 @@ def _is_date_or_timestamp(arrow_type: pa.DataType) -> bool:
 
 def _is_temporal(arrow_type: pa.DataType) -> bool:
     return bool(_is_date_or_timestamp(arrow_type) or pa.types.is_time(arrow_type))
+
+
+def _reads_unit_offsets(arrow_type: pa.DataType) -> bool:
+    """Whether a bare number in this column is an offset in its declared unit.
+
+    Duration is not a temporal in pyarrow's vocabulary -- ``_is_temporal``
+    stops at time -- but it reads a bare number exactly the way the other three
+    do, truncating it toward the declared unit, so the four must be guarded
+    together or the guard leaves half the defect in place.
+    """
+    return bool(_is_temporal(arrow_type) or pa.types.is_duration(arrow_type))
+
+
+def _reject_floating_point_offset(
+    where: str, row: int, value: Any, arrow_type: pa.DataType
+) -> None:
+    """Refuse a float/Decimal where the declared type reads numbers as offsets.
+
+    An integer has exactly one reading given the declared unit: the epoch or
+    elapsed offset in it. A floating-point value has none -- pyarrow truncates
+    it toward that unit with no signal, landing ``Decimal('1.5')`` on
+    1970-01-02 in a date column and on one microsecond in a Duration(us) one.
+    The Python type is refused whole, integral values included: ``1.0`` and
+    ``Decimal('1.0')`` are as ambiguous as ``1.5`` once the declared unit is
+    what decides the reading, and accepting only the integral ones would make
+    the rule depend on the value rather than on its type.
+
+    One raiser for both build paths -- a top-level column and a leaf inside a
+    struct or list -- so the same author intent is refused with the same words
+    at every depth.
+    """
+    # A float-family scalar has no unambiguous reading, whichever type
+    # carries it: Decimal is not registered under numbers.Real, so it needs
+    # its own check, and every non-integral Real -- float, and any numpy
+    # scalar (float16/32/64) -- is refused the same way an int-family value
+    # is accepted, by what it IS, not by a denylist of the spellings seen so
+    # far. from_pylist's own contract is list[dict[str, Any]]: this repo does
+    # not control what a connector's own driver code hands it, so the guard
+    # cannot assume every caller passes plain Python types.
+    if not isinstance(value, Decimal) and not (
+        isinstance(value, numbers.Real) and not isinstance(value, numbers.Integral)
+    ):
+        return
+    raise ValueError(
+        f"column {where!r} at row {row}: value {value!r} "
+        f"({type(value).__name__}) is not an integer offset for {arrow_type}; "
+        f"a floating-point value has no unambiguous reading and pyarrow would "
+        f"silently truncate it"
+    )
 
 
 def _is_nested(arrow_type: pa.DataType) -> bool:
@@ -137,15 +187,14 @@ def _encode_json_column(field: pa.Field, values: list[Any]) -> pa.Array:
     return pa.array(serialized, type=field.type)
 
 
-def _prepare_nested_value(
+def _prepare_scalar_leaf(
     value: Any, arrow_type: pa.DataType, path: str, row: int
 ) -> Any:
-    """Fit a nested value to its declared leaf types, failing loud where it can't.
+    """Apply the per-leaf guards for one scalar leaf of a nested column.
 
-    pyarrow builds ``Object``/``List`` columns directly from Python values
-    (``pa.array(values, type=...)``), which bypasses the per-row guards that
-    ``_build_numeric_column`` applies to top-level scalar columns. Walking the
-    declared type alongside the value restores those guards per leaf:
+    ``pa.array`` builds a nested column straight from Python values, bypassing
+    the per-row guards ``_build_numeric_column`` applies to a top-level scalar
+    column. This restores them one leaf at a time:
 
     - a ``Decimal`` bound for a float leaf is narrowed to ``float`` (the
       lossless JSON parse hands every floating-point token in as a ``Decimal``,
@@ -154,25 +203,11 @@ def _prepare_nested_value(
     - a non-integer value bound for an integer leaf is rejected, naming the
       column path and row -- pyarrow would otherwise silently truncate it
       (``5.5 -> 5``), unlike a top-level Int column, which fails loud (#290)
+    - a float or Decimal bound for a leaf whose numbers are unit offsets
+      (timestamp, date, time, duration) is rejected for the same reason
     """
-    if value is None:
-        return None
-    if pa.types.is_struct(arrow_type) and isinstance(value, dict):
-        child = {f.name: f.type for f in arrow_type}
-        return {
-            k: _prepare_nested_value(v, child[k], f"{path}.{k}", row)
-            if k in child
-            else v
-            for k, v in value.items()
-        }
-    if (
-        pa.types.is_list(arrow_type) or pa.types.is_large_list(arrow_type)
-    ) and isinstance(value, list):
-        item_type = arrow_type.value_type
-        return [
-            _prepare_nested_value(v, item_type, f"{path}[{i}]", row)
-            for i, v in enumerate(value)
-        ]
+    if _reads_unit_offsets(arrow_type):
+        _reject_floating_point_offset(path, row, value, arrow_type)
     if pa.types.is_integer(arrow_type):
         # bool is a Python int subclass; isinstance(True, int) is True, so guard
         # it explicitly before the int acceptance check below, matching the
@@ -193,6 +228,58 @@ def _prepare_nested_value(
     if isinstance(value, Decimal) and pa.types.is_floating(arrow_type):
         return float(value)
     return value
+
+
+def _prepare_nested_value(
+    value: Any, arrow_type: pa.DataType, path: str, row: int
+) -> Any:
+    """Fit a nested value to its declared leaf types, failing loud where it can't.
+
+    Walks the declared type alongside the value: a struct recurses per declared
+    field, a list per item, and anything else is a scalar leaf handed to
+    :func:`_prepare_scalar_leaf` for the guards ``pa.array`` would otherwise
+    skip. A key the declared struct does not name passes through untouched --
+    it is not part of the contract, so there is no declared type to check it
+    against.
+
+    These restore some of the guards, and none of the parsers. A leaf is built
+    by ``pa.array`` from the value handed back here, so the string-parsing
+    branches ``_build_column`` dispatches to for a top-level column -- ISO-8601
+    temporal parsing, numeric strings -- have no counterpart at depth.
+
+    A leaf given its own ``arrow_type`` therefore accepts a different set of
+    values from a top-level column of the same declared type. This is not the
+    ``Json`` case: a ``Json`` field is serialised whole and never walked, so
+    nothing here applies to it. The divergence with real teeth is that a
+    Float32/Float64 leaf takes ``True`` as ``1.0`` -- ``_prepare_scalar_leaf``'s
+    bool guard covers only the integer branch, so the #290 class reappears one
+    branch over. See #492.
+    """
+    if value is None:
+        return None
+    if pa.types.is_struct(arrow_type) and isinstance(value, dict):
+        child = {f.name: f.type for f in arrow_type}
+        return {
+            k: _prepare_nested_value(v, child[k], f"{path}.{k}", row)
+            if k in child
+            else v
+            for k, v in value.items()
+        }
+    if (
+        pa.types.is_list(arrow_type) or pa.types.is_large_list(arrow_type)
+    ) and isinstance(value, (list, tuple)):
+        # pa.array accepts a tuple as a list value exactly as it accepts a
+        # list, and a DB-API driver may hand back an array column as a tuple
+        # rather than a list -- excluding it here would not stop the value
+        # from building, only stop it from being walked, so every leaf guard
+        # below (this one and the pre-existing #290 int/bool guards) would
+        # silently miss every tuple-carried row.
+        item_type = arrow_type.value_type
+        return [
+            _prepare_nested_value(v, item_type, f"{path}[{i}]", row)
+            for i, v in enumerate(value)
+        ]
+    return _prepare_scalar_leaf(value, arrow_type, path, row)
 
 
 class SchemaContract:
@@ -432,7 +519,18 @@ class SchemaContract:
             return _encode_json_column(field, values)
         source_format = field_def.get("source_format")
         if source_format and _is_date_or_timestamp(field.type):
+            # Left ahead of the offset guard: this column accepts no numeric
+            # value at all, so _parse_with_source_format's own "source_format
+            # only applies to string inputs" names the author's actual mistake.
+            # The offset guard's message would say the value is not an integer
+            # offset, which implies an integer would be taken here. It would not.
             return _parse_with_source_format(field, values, source_format)
+        if _reads_unit_offsets(field.type):
+            # Ahead of every remaining temporal branch, so the same author
+            # intent is refused identically whether the column carries strings
+            # or takes the bare pa.array path.
+            for row, value in enumerate(values):
+                _reject_floating_point_offset(field.name, row, value, field.type)
         if pa.types.is_decimal(field.type):
             return _build_decimal_column(field, values)
         if _is_temporal(field.type) and _has_strings(values):
