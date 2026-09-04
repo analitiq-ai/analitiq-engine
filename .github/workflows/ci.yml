@@ -113,6 +113,29 @@ jobs:
           PYTHONPATH: cdk
         run: poetry run python tools/contract_consumption.py --check
 
+  docker-requirements:
+    name: docker/requirements.txt is current
+    # docker/requirements.txt is what docker/Dockerfile installs into the
+    # runtime image. It's generated from pyproject.toml via `poetry export`
+    # (tools/generate_docker_requirements.py) rather than hand-typed, so it
+    # can no longer independently drift the way it did before.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Install poetry-plugin-export
+        run: pipx inject poetry poetry-plugin-export
+
+      - name: Check the committed file against a fresh export
+        run: python tools/generate_docker_requirements.py --check
+
   lint:
     name: pre-commit (all files)
     runs-on: ubuntu-latest
