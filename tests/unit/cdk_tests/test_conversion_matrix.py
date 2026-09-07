@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from decimal import Decimal
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pytest
 
 from cdk.schema_contract import SchemaContract
@@ -334,11 +336,21 @@ class TestBoundariesAgree:
             (pa.int64(), [1, 2], "Utf8"),  # explicit -> both reject
             (pa.struct([("a", pa.int64())]), [{"a": 1}], "Int64"),  # forbidden
             # Allowlisted cross-kind casts, exercised at runtime (not just the
-            # policy) so CI on pyarrow 12 proves the kernel the grid promises
-            # actually runs -- the "stable on 12 and 24" claim, enforced.
+            # policy) so CI proves the kernel the grid promises actually runs on
+            # the pyarrow it resolves -- the allowlist's stability claim,
+            # enforced rather than asserted. Every _CROSS_KIND_AUTO pair has an
+            # entry here; a pair missing is a claim this test does not check.
             (pa.string(), ["1", "2"], "Decimal128(20, 4)"),  # string parse
             (pa.float64(), [1.5], "Decimal128(20, 4)"),  # numeric interconvert
-            (pa.date32(), [0, 1], "Timestamp(MICROSECOND)"),  # date <-> timestamp
+            (pa.date32(), [0, 1], "Timestamp(MICROSECOND)"),  # date -> timestamp
+            (pa.timestamp("s"), [0, 86400], "Date32"),  # timestamp -> date
+            (pa.int64(), [1, 2], "Float64"),  # int -> float
+            (pa.int64(), [1, 2], "Decimal128(30, 4)"),  # int -> decimal
+            (pa.decimal128(20, 0), [1, 2], "Int64"),  # decimal -> int
+            (pa.decimal128(20, 4), [Decimal("1.5")], "Float64"),  # decimal -> float
+            (pa.bool_(), [True, False], "Int64"),  # bool -> int
+            (pa.int64(), [1, 0], "Boolean"),  # int -> bool
+            (pa.string(), ["1.5"], "Float64"),  # string -> float
         ],
     )
     def test_transform_and_destination_match(
@@ -393,6 +405,17 @@ class TestCrossKindAllowlist:
         assert conv.mode == "forbidden", (source, target)
         assert conv.fn is None
         assert conv.runtime_checked is False
+
+    def test_utf8_to_date32_parses_one_spelling_not_every_iso_form(self) -> None:
+        # Utf8 -> Date32 is forbidden (above), so cast_arrow_batch never runs
+        # this kernel; the reason it is forbidden -- not merely that it is --
+        # is what this pins. An auto cast would succeed on some rows of a real
+        # column and fail the batch on others, which is why classify_conversion
+        # excludes it even though pc.cast has a kernel here.
+        assert pc.cast(pa.array(["2025-08-16"]), pa.date32())[0].as_py() is not None
+        for form in ("2025-08-16T10:30:00Z", "2025-08-16T10:30:00+02:00"):
+            with pytest.raises(pa.ArrowInvalid):
+                pc.cast(pa.array([form]), pa.date32())
 
     # The four allowlist categories: numeric <-> numeric, bool <-> int,
     # string -> numeric parse, date <-> timestamp. Each stays auto + runtime

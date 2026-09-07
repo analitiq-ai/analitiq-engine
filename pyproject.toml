@@ -90,15 +90,24 @@ python-dateutil = "^2.9.0"
 grpcio = "^1.60.0"
 protobuf = "^4.25.0"
 
-# Arrow for columnar type casting (required for destination handlers)
-pyarrow = "^12.0.0"
-
-# Not imported directly -- pinned because pyarrow 12.x's compiled extension
-# is built against numpy's 1.x ABI and fails to import under numpy 2.x
-# (`pyarrow.lib` raises "numpy.core.multiarray failed to import"). Without
-# this ceiling, `poetry export`/`poetry lock` resolve numpy's own declared
-# `>=1.16.6` to the newest 2.x release and break pyarrow at runtime.
-numpy = "<2"
+# Arrow for columnar type casting (required for destination handlers).
+#
+# The floor is 21 and it is a capability floor, not a hygiene one. Below it
+# pyarrow cannot build a halffloat array from a Python float, so a Float16
+# column declared by a connector fails on its first record; and to_pylist()
+# hands back numpy.float16, which is not a float subclass, so orjson refuses
+# it (cdk/cdk/api/http.py), the dead-letter encoder refuses it, and a DBAPI
+# that binds buffer-like objects stores the raw two bytes instead of the
+# number. 16 through 20 fix the casts but not that, so 21 is the first
+# version on which the published vocabulary is true end to end (#484).
+#
+# No explicit numpy pin: the ceiling this project once carried here
+# (`numpy = "<2"`) existed only because pyarrow 12.x's compiled extension is
+# built against numpy's 1.x ABI (`pyarrow.lib` raises "numpy.core.multiarray
+# failed to import" under 2.x). Verified pyarrow 21.0.0 imports and runs
+# fine against numpy 2.5.3, so that workaround is obsolete at this floor --
+# numpy resolves transitively through pyarrow's own requirement.
+pyarrow = ">=21.0.0"
 
 # The connector packages docker/entrypoint.sh installs at container start use
 # --no-build-isolation (no per-install network fetch of build dependencies),
@@ -137,6 +146,13 @@ flask = "^3.1.2"
 # *_pb2.py files under src/grpc/generated/ are what ships and runs, never
 # the generator itself.
 grpcio-tools = "^1.60.0"
+
+# Test-only: test_schema_contract.py constructs numpy scalars directly
+# (np.float16/32/64) to prove the temporal offset guard rejects them, since
+# they are not float subclasses. Not a runtime dependency -- no shipped code
+# imports numpy or calls to_numpy()/to_pandas() -- so it belongs in dev, not
+# the main table or the generated docker/requirements.txt.
+numpy = "*"
 
 
 [tool.poetry.extras]
