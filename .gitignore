@@ -379,8 +379,12 @@ temp/
 .tmp/
 .temp/
 
-# Lock files
+# Lock files. The root package is an application (its own Dockerized
+# service, never `pip install`-ed by anyone else), so its lock is committed
+# for reproducible installs -- unlike cdk/, a published library, which
+# correctly leaves dependency-version selection to its consumers.
 *.lock
+!/poetry.lock
 
 # Node.js (if using any JS tools)
 node_modules/
