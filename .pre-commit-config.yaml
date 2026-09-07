@@ -69,7 +69,7 @@ repos:
           # attr-defined; pinning an older wheel-less version source-builds and
           # breaks on CI's Python 3.12. The [tool.mypy] pyarrow.* override
           # (ignore_missing_imports) makes it Any instead, matching
-          # `poetry run mypy` (the project's pyarrow 12 ships no py.typed).
+          # `poetry run mypy` (pyarrow ships no py.typed).
           - aiohttp
           - aiohttp-retry
           - aiofiles

@@ -890,8 +890,11 @@ def _fn_now(column: pa.Array) -> pa.Array:
 
 
 # A trailing 'Z' or numeric offset, used to strip the zone marker before a naive
-# parse. pyarrow 12 has no single string cast that accepts naive, 'Z', and
-# offset forms together, so the zone is dropped and the value stamped UTC.
+# parse. No pyarrow cast target admits naive, 'Z', and offset forms together --
+# graded, not asserted, by
+# test_no_single_pyarrow_cast_accepts_naive_and_offset_forms_together in
+# tests/unit/engine/test_mapping.py -- so the zone is dropped and the value
+# stamped UTC.
 _ISO_ZONE_SUFFIX_RE: Final[str] = r"(Z|[+-]([01]\d|2[0-3]):?[0-5]\d)$"
 
 
@@ -901,8 +904,8 @@ def _fn_iso_to_datetime(column: pa.Array) -> pa.Array:
     Accepts every form the per-record ``datetime.fromisoformat`` did -- a bare
     date, a naive datetime, and a ``Z``/offset timestamp. The zone marker is
     stripped and the remaining value parsed as a naive timestamp stamped UTC
-    (wall-clock, consistent with ``iso_to_date``); on pyarrow 12 no single cast
-    accepts all three forms, and a tz-aware cast rejects naive input outright.
+    (wall-clock, consistent with ``iso_to_date``); see :data:`_ISO_ZONE_SUFFIX_RE`
+    for why no single cast covers all three forms.
     """
     try:
         strings = pc.cast(column, pa.string())
@@ -938,8 +941,11 @@ def _fn_iso_to_date(column: pa.Array) -> pa.Array:
     characters (the calendar date, present in every ISO form -- a bare date, a
     naive datetime, or a ``Z``/offset timestamp) are then parsed as a naive
     timestamp (which validates the date and keeps the original wall-clock date)
-    and reformatted. (A direct string -> date32 cast is unavailable on
-    pyarrow 12, so the date is round-tripped through a timestamp.)
+    and reformatted. (A direct string -> date32 cast is unavailable below the
+    declared pyarrow floor, and above it parses only one spelling -- see
+    ``test_utf8_to_date32_parses_one_spelling_not_every_iso_form`` in
+    ``tests/unit/cdk_tests/test_conversion_matrix.py`` -- so the date is
+    round-tripped through a timestamp either way.)
     """
     try:
         strings = pc.cast(column, pa.string())
