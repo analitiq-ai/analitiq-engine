@@ -190,9 +190,8 @@ python_version = "3.11"
 # The CDK is a sibling package (cdk/cdk/), consumed in-tree. Put cdk/ on the
 # type-check path so `import cdk` resolves to cdk/cdk (mirrors pytest's
 # pythonpath and Docker's PYTHONPATH=/app/cdk); without it every cdk import
-# reports import-not-found. tools/ likewise, for the generation scripts'
-# own tests (e.g. test_generate_docker_requirements.py).
-mypy_path = "cdk:tools"
+# reports import-not-found.
+mypy_path = "cdk"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
@@ -252,10 +251,8 @@ addopts = "-ra -v --strict-markers --strict-config"
 testpaths = ["tests"]
 # The CDK is a sibling package (cdk/cdk/), consumed in-tree. Put cdk/ on the
 # path so `import cdk` resolves to cdk/cdk without an editable install. Docker
-# sets PYTHONPATH=/app:/app/cdk for the same reason. tools/ likewise, so a
-# generation script's own tests can import it directly rather than shelling
-# out to it.
-pythonpath = ["cdk", "tools"]
+# sets PYTHONPATH=/app:/app/cdk for the same reason.
+pythonpath = ["cdk"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]

@@ -54,13 +54,17 @@ def render_requirements() -> str:
     ``aiohttp``'s own line), so leaving the export as-is would make every
     commit fail lint until the hook resorted it.
     """
-    result = subprocess.run(  # nosec B603 B607
-        ["poetry", "export", "--without-hashes", "-f", "requirements.txt"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(  # nosec B603 B607
+            ["poetry", "export", "--without-hashes", "-f", "requirements.txt"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("poetry export timed out after 60s") from exc
     if result.returncode != 0:
         raise RuntimeError(
             "poetry export failed (is poetry-plugin-export installed?):\n"

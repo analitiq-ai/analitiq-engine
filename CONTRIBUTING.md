@@ -52,11 +52,10 @@ The `ci` workflow runs on every pull request and on pushes to `main`:
   `docker/Dockerfile` installs into the runtime image) is generated from
   `pyproject.toml` via `poetry export`, not hand-typed. A PR that changes
   `pyproject.toml`'s dependencies regenerates it:
-  `poetry run python tools/generate_docker_requirements.py --write`. This
-  requires the `poetry-plugin-export` plugin
-  (`pipx inject poetry poetry-plugin-export`, or `poetry self add
-  poetry-plugin-export` for a non-pipx install) -- Poetry no longer bundles
-  `export` as a built-in command.
+  `python tools/generate_docker_requirements.py --write`. This requires the
+  `poetry-plugin-export` plugin (`pipx inject poetry poetry-plugin-export`,
+  or `poetry self add poetry-plugin-export` for a non-pipx install) --
+  Poetry no longer bundles `export` as a built-in command.
 
 Run `poetry run pre-commit run --all-files` locally before pushing to catch
 everything the gate checks. mypy is pinned to the project's own version in both

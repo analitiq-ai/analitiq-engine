@@ -118,7 +118,11 @@ jobs:
     # docker/requirements.txt is what docker/Dockerfile installs into the
     # runtime image. It's generated from pyproject.toml via `poetry export`
     # (tools/generate_docker_requirements.py) rather than hand-typed, so it
-    # can no longer independently drift the way it did before.
+    # can no longer independently drift the way it did before. Poetry and
+    # the export plugin are pinned (unlike the other jobs' bare `pipx install
+    # poetry`): this job diffs rendered text byte-for-byte against a
+    # committed file, and export's line/marker format is plugin-version
+    # specific, so an unpinned bump would fail PRs that changed nothing.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -128,10 +132,10 @@ jobs:
           python-version: "3.11"
 
       - name: Install Poetry
-        run: pipx install poetry
+        run: pipx install poetry==2.4.2
 
       - name: Install poetry-plugin-export
-        run: pipx inject poetry poetry-plugin-export
+        run: pipx inject poetry poetry-plugin-export==1.10.0
 
       - name: Check the committed file against a fresh export
         run: python tools/generate_docker_requirements.py --check
