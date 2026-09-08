@@ -566,18 +566,17 @@ installed packages are discovered additively.
    ```
 
 2. **Engine discovers it at startup.** `build_registries(discover=True)`
-   seeds each registry's kind defaults from `KIND_DEFAULTS`, then scans the
-   `analitiq.source_connectors` / `analitiq.destination_connectors`
+   declares each registry's kind defaults from `KIND_DEFAULTS` (lazily —
+   noting which kind each default serves without importing its class), then
+   scans the `analitiq.source_connectors` / `analitiq.destination_connectors`
    entry-point groups, registering each entry under its `connector_id`. A
    plugin whose class fails to import, or whose `connector_id` collides with
    one already registered, is logged and skipped — one broken or
-   double-published connector package must not abort startup. (A collision
-   *inside* `KIND_DEFAULTS` itself — two CDK generic classes both claiming
-   the same kind — is a CDK defect and raises, unconditionally, at seed
-   time.) Resolving a connector tries its own `connector_id` first, falling
-   back to the kind default only when no specific class is registered (the
-   thin path, §2). Which operations a connector supports is read from the
-   class itself (`isinstance` against the Protocols), not from config.
+   double-published connector package must not abort startup. Resolving a
+   connector tries its own `connector_id` first, falling back to the kind
+   default only when no specific class is registered (the thin path, §3).
+   Which operations a connector supports is read from the class itself
+   (`isinstance` against the Protocols), not from config.
 
 3. **User references it by name** in pipeline config (`connector_id:
    "postgresql"`). Definition + type map are read from the connector's package
