@@ -6,7 +6,7 @@ connector repo runs it in its own CI against the pinned CDK version, so
 a CDK change that breaks a connector — or a connector change that
 breaks its contract — turns that connector's CI red before release, not
 in a customer pipeline (spec
-[sql-write-path](sql-write-path.md) §10).
+[sql-write-path](../data-path/sql-write-path.md) §10).
 
 ## What each tier certifies
 
@@ -188,13 +188,17 @@ The suite needs three inputs: the connector checkout
 class, and — for tier 2 — a live connection document
 (`--live-connection`).
 
-The class is resolved the way the engine registry resolves it, from the
-same `cdk.registry.KIND_DEFAULTS` table, so what the suite audits is what
-production loads: an explicit `--connector-class package.module:Class`
-wins (for running the suite before the package is installed), then the
-installed package's entry points, then the CDK's generic default for the
-connector's kind — the thin path, for every kind the CDK ships a default
-for. Both entry-point groups are read and must name the same class; a
+The class is resolved from the same `cdk.registry.KIND_DEFAULTS` table the
+engine registry reads, so what the suite audits is what production loads —
+but the precedence order differs from the engine's, because the two
+consumers have different needs: an explicit `--connector-class
+package.module:Class` wins (for running the suite before the package is
+installed), then the installed package's entry points, then the CDK's
+generic default for the connector's kind — the thin path, for every kind
+the CDK ships a default for. (The engine registry itself has no
+`--connector-class` override; see
+[`connector-module-architecture.md`](../architecture/connector-module-architecture.md)
+for its own seeding order.) Both entry-point groups are read and must name the same class; a
 connector that registers a different class per role is refused at load,
 because a split there is how the two directions drift apart while the
 suite stays green. A kind the CDK ships no default for resolves no class

@@ -1335,10 +1335,10 @@
         "cdk.connection_runtime:1162"
       ],
       "entries": [
-        "cdk.resolver:102",
-        "cdk.resolver:343",
-        "cdk.resolver:392",
-        "cdk.resolver:434"
+        "cdk.resolver:103",
+        "cdk.resolver:344",
+        "cdk.resolver:393",
+        "cdk.resolver:435"
       ]
     },
     "analitiq.contracts.connector.Concurrency": {
@@ -1354,10 +1354,10 @@
         "cdk.connection_runtime:1162"
       ],
       "entries": [
-        "cdk.resolver:102",
-        "cdk.resolver:343",
-        "cdk.resolver:392",
-        "cdk.resolver:434"
+        "cdk.resolver:103",
+        "cdk.resolver:344",
+        "cdk.resolver:393",
+        "cdk.resolver:435"
       ]
     },
     "analitiq.contracts.connector.DocumentConnector": {
@@ -1366,10 +1366,10 @@
         "cdk.connection_runtime:1162"
       ],
       "entries": [
-        "cdk.resolver:102",
-        "cdk.resolver:343",
-        "cdk.resolver:392",
-        "cdk.resolver:434"
+        "cdk.resolver:103",
+        "cdk.resolver:344",
+        "cdk.resolver:393",
+        "cdk.resolver:435"
       ]
     },
     "analitiq.contracts.connector.ErrorMap": {
@@ -1385,10 +1385,10 @@
         "cdk.connection_runtime:1162"
       ],
       "entries": [
-        "cdk.resolver:102",
-        "cdk.resolver:343",
-        "cdk.resolver:392",
-        "cdk.resolver:434"
+        "cdk.resolver:103",
+        "cdk.resolver:344",
+        "cdk.resolver:393",
+        "cdk.resolver:435"
       ]
     },
     "analitiq.contracts.connector.FileTransport": {
@@ -1417,10 +1417,10 @@
         "cdk.connection_runtime:1162"
       ],
       "entries": [
-        "cdk.resolver:102",
-        "cdk.resolver:343",
-        "cdk.resolver:392",
-        "cdk.resolver:434"
+        "cdk.resolver:103",
+        "cdk.resolver:344",
+        "cdk.resolver:393",
+        "cdk.resolver:435"
       ]
     },
     "analitiq.contracts.connector.S3Connector": {
@@ -1429,10 +1429,10 @@
         "cdk.connection_runtime:1162"
       ],
       "entries": [
-        "cdk.resolver:102",
-        "cdk.resolver:343",
-        "cdk.resolver:392",
-        "cdk.resolver:434"
+        "cdk.resolver:103",
+        "cdk.resolver:344",
+        "cdk.resolver:393",
+        "cdk.resolver:435"
       ]
     },
     "analitiq.contracts.connector.S3Transport": {
@@ -1468,10 +1468,10 @@
         "cdk.connection_runtime:1162"
       ],
       "entries": [
-        "cdk.resolver:102",
-        "cdk.resolver:343",
-        "cdk.resolver:392",
-        "cdk.resolver:434"
+        "cdk.resolver:103",
+        "cdk.resolver:344",
+        "cdk.resolver:393",
+        "cdk.resolver:435"
       ]
     },
     "analitiq.contracts.connector.StdoutTransport": {
@@ -1505,20 +1505,20 @@
       "consumer": "cdk.resolver",
       "dumps": [],
       "entries": [
-        "cdk.resolver:102",
-        "cdk.resolver:343",
-        "cdk.resolver:392",
-        "cdk.resolver:434"
+        "cdk.resolver:103",
+        "cdk.resolver:344",
+        "cdk.resolver:393",
+        "cdk.resolver:435"
       ]
     },
     "analitiq.contracts.endpoints.LiteralExpression": {
       "consumer": "cdk.resolver",
       "dumps": [],
       "entries": [
-        "cdk.resolver:102",
-        "cdk.resolver:343",
-        "cdk.resolver:392",
-        "cdk.resolver:434"
+        "cdk.resolver:103",
+        "cdk.resolver:344",
+        "cdk.resolver:393",
+        "cdk.resolver:435"
       ]
     },
     "analitiq.contracts.endpoints.PredicateAnd": {
@@ -1616,20 +1616,20 @@
       "consumer": "cdk.resolver",
       "dumps": [],
       "entries": [
-        "cdk.resolver:102",
-        "cdk.resolver:343",
-        "cdk.resolver:392",
-        "cdk.resolver:434"
+        "cdk.resolver:103",
+        "cdk.resolver:344",
+        "cdk.resolver:393",
+        "cdk.resolver:435"
       ]
     },
     "analitiq.contracts.endpoints.TemplateExpression": {
       "consumer": "cdk.resolver",
       "dumps": [],
       "entries": [
-        "cdk.resolver:102",
-        "cdk.resolver:343",
-        "cdk.resolver:392",
-        "cdk.resolver:434"
+        "cdk.resolver:103",
+        "cdk.resolver:344",
+        "cdk.resolver:393",
+        "cdk.resolver:435"
       ]
     },
     "analitiq.contracts.stream.AssignmentTarget": {

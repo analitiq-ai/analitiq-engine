@@ -7,27 +7,27 @@ thick connectors, the dialect-capability block in `connector.json`, stage-table
 lifecycle, transaction boundaries, and engine-side batch coalescing. The
 conformance kit enforces this document: a connector that diverges from it fails
 CI. Section 8 is the exception — engine-side coalescing and the `write_unit`
-declaration it consumes are specified here but not yet built, so the engine
-does not coalesce and a `write_unit` declaration currently has no consumer.
+declaration it consumes are specified here but not built: the engine does not
+coalesce, and a `write_unit` declaration has no consumer.
 The read path, discovery, the mapping layer, and the gRPC ack protocol are
 unchanged except where this document names them.
 
 Related docs: transport strategy rationale in
-[pyarrow-and-destinations.md](pyarrow-and-destinations.md), wire protocol in
-[grpc-streaming-architecture.md](grpc-streaming-architecture.md), CDK packaging
+[arrow-and-transport-strategy.md](arrow-and-transport-strategy.md), wire protocol in
+[grpc-streaming-architecture.md](../architecture/grpc-streaming-architecture.md), CDK packaging
 and the connector contract in
-[connector-module-architecture.md](connector-module-architecture.md).
+[connector-module-architecture.md](../architecture/connector-module-architecture.md).
+The decisions behind this primitive are recorded in
+[ADR 0005](../adr/0005-stage-then-merge-is-the-single-sql-write-primitive.md)
+and [ADR 0006](../adr/0006-batch-coalescing-is-engine-side.md).
 
 ## 1. What this prevents
 
 The failure mode this design exists to prevent is **the same author intent
-taking a different primitive per transport**. When `upsert` means a direct
-dialect statement on one transport and a stage table plus `MERGE` on another,
-every write-path rule has to be stated twice, the two copies drift, and each
-new system multiplies the divergence rather than adding to it. Per-dialect
-divergence was the fastest-growing defect class in this codebase, and guessed
-base-class defaults — behavior right for one database family and silently
-wrong for the next — were its mechanism.
+taking a different primitive per transport**. See
+[ADR 0005](../adr/0005-stage-then-merge-is-the-single-sql-write-primitive.md)
+for why that failure mode, and no other design, is what stage-then-merge
+closes off.
 
 Three properties follow, and the rest of this document is their consequence:
 
@@ -109,6 +109,12 @@ visible, never silent). `adbc_ingest` is not an ADBC-private code path but
 that backend's declared bulk mechanism, and a system's own protocol —
 `LOAD DATA LOCAL INFILE`, `COPY`, a load-job API — lands here too.
 
+Stage-then-merge costs one extra object and one extra statement per batch
+on systems where direct DML alone would suffice (small Postgres
+pipelines). This is accepted cost: the batch sizes where it matters are
+exactly the ones coalescing (§8) grows, and a temp-scope stage (§6) is one
+in-session table.
+
 ## 3. Facade and backends
 
 `GenericSQLConnector` remains the single **semantic owner**: write modes,
@@ -136,6 +142,7 @@ class StageWritePlan:
     mode_sql: str                  # the one mode statement (section 2)
     drop_stage_sql: str
     columns: tuple[str, ...]       # landing column order, identity included
+    rows_per_statement: int | None # executemany chunk size, from limits.max_bind_params (section 5)
 
 
 class TransportBackend(ABC):
@@ -448,10 +455,13 @@ Properties:
 
 ## 6. Stage lifecycle
 
-**Naming** is a deterministic token, `sha256(run_id|stream_id|batch_seq)[:16]`,
+**Naming** is a deterministic token, `sha256(run_id|stream_id|batch_seq|target)[:16]`,
 in the grammar `_analitiq_stage_b<sha16>_<target>`: the fixed prefix and hash
 come first, and the target-name tail is readability only, truncated to the
-dialect's identifier budget. The order matters — with the tail first, a short
+dialect's identifier budget. `target` is part of the hashed token, not just
+the tail — two destinations of the same stream must never share one stage
+namespace, and their same-numbered batches would collide on a stage name
+once the tail is truncated if `target` were omitted from the hash. The order matters — with the tail first, a short
 identifier budget (Postgres' 63-byte NAMEDATALEN against any target longer
 than 29 characters) truncates the *hash*, distinct stages collapse into one
 name, and a pre-flight drop can destroy another batch's in-flight stage. The
@@ -569,17 +579,13 @@ SQLAlchemy flavor can enforce it in-band.
 ## 8. Batch coalescing
 
 **Not yet implemented.** This section specifies the design; the engine does not
-coalesce today, and a declared `write_unit` has no consumer until it does.
+coalesce, and a declared `write_unit` has no consumer.
 
 **The engine coalesces source batches before sending; the wire protocol does
-not change.** The destination-side alternatives — buffered
-batches with deferred or windowed acks, or a flush hook with held cursors —
-are rejected: both require the sandboxed, untrusted connector worker to hold
-data the engine has already had acked or to participate in cursor durability,
-exactly the trust this architecture withholds from connector code
-(connector execution is isolated precisely because it is untrusted). Engine-
-side coalescing keeps the exactly-once unit "one sent batch = one ack = one
-cursor persist" byte-for-byte intact; the sent batch just gets bigger.
+not change** — the exactly-once unit "one sent batch = one ack = one
+cursor persist" stays byte-for-byte intact; the sent batch just gets
+bigger. See [ADR 0006](../adr/0006-batch-coalescing-is-engine-side.md)
+for why this happens in the engine rather than the destination.
 
 Mechanics:
 
@@ -666,13 +672,14 @@ Mechanics:
   a restart's different payload gets a fresh identity instead of a silent
   no-op.
 - **Size budget.** The hard bound is the gRPC message cap
-  (`GRPC_MAX_MESSAGE_SIZE`), 64 MiB by default. The unit budget counts the
-  Arrow payload **plus**
-  per-row wire overhead — `record_ids` alone add 64 bytes per row — and the
-  coalescer targets the declared `write_unit.bytes` capped at a safety
-  margin below the message cap. Single-message units in the tens of
-  megabytes are deliberately the ceiling: a protobuf message has no
-  streaming inside it, so both containers hold ~3-4x the unit size in
+  (`GRPC_MAX_MESSAGE_SIZE`), 16 MiB, fixed by design and not
+  environment-tunable — client and server must agree, so it is a code
+  constant, not a setting. The unit budget counts the Arrow payload
+  **plus** per-row wire overhead — `record_ids` alone add 64 bytes per
+  row — and the coalescer targets the declared `write_unit.bytes` capped
+  at a safety margin below the message cap. A single-digit-megabyte
+  single-message unit is deliberately the ceiling: a protobuf message has
+  no streaming inside it, so both containers hold ~3-4x the unit size in
   transient memory. Chunked framing (one logical batch as N wire messages
   under one ack) would lift that ceiling and is explicitly out of scope —
   an additive protocol change to revisit only if a workload proves the
@@ -684,11 +691,13 @@ Mechanics:
   table. What unit count does bound are the project-level load-job quota and
   the per-table/dataset operation-rate limits, all of which scale down
   linearly with coalescing — which is exactly what `write_unit` buys.
-- The write-unit fact lives in `connector.json` and nowhere else. The
-  `GetCapabilitiesResponse` sizing fields are not a second declaration
-  channel: they are removed, with their field numbers and names `reserved` in
-  the proto so a future field can never reuse the tags against a
-  mixed-version peer.
+- The write-unit fact belongs in `connector.json` and nowhere else. The
+  proto's `GetCapabilitiesResponse` also carries `max_batch_size`
+  / `max_batch_bytes` sizing fields (`src/destination/server.py`,
+  `cdk/cdk/base_handler.py`); building this section means retiring those as
+  a second declaration channel and reserving their field numbers so a
+  future field can never reuse the tags against a mixed-version peer — not
+  yet done, since the section itself is not yet built.
 
 ## 9. Idempotency and retry verdicts
 
@@ -711,8 +720,8 @@ what the system cannot hold.
 `retry_semantics` carries no per-transport rows: both backends run the same
 mechanism, so a mode's verdict is a property of the mode and the target
 system, never of the transport that reached it. The per-handler matrix in
-[grpc-streaming-architecture.md](grpc-streaming-architecture.md) states the
-same verdicts.
+[destination-config.md](../config/destination-config.md#idempotency) states
+the same verdicts.
 
 ## 10. What the conformance kit asserts about the primitive
 
@@ -755,85 +764,3 @@ The contract tier (no live database) certifies this document's surface:
 The live tier exercises the primitive end-to-end (all modes plus
 restart/replay) on systems that run as Docker service containers. Cloud
 warehouses are contract-tier-only; that is an accepted residual risk.
-
-## 11. Consequences
-
-**Positive**
-
-- One write primitive: "same concept, same semantics" stops being aspiration
-  on the write path — the verdict table has no transport column left.
-- The thick-connector write surface is a contract (§4 hooks + declarations)
-  certified by CI, so a system with a native bulk protocol has a supported
-  route to it instead of overriding private internals.
-- Insert is exactly-once on both transports and set-based everywhere: one
-  anti-join statement per batch, not N round trips.
-- Load-job destinations reach their quotas honestly (§8) with zero wire
-  protocol change and zero new durability edge cases.
-- Dialect divergence gets a declared vocabulary; a new system states its
-  facts in JSON and renders its quirks in one small dialect class.
-
-**Costs / risks**
-
-- Connector definitions must carry the capability block; a connector that
-  does not declare what it needs refuses loudly rather than guessing.
-- Stage-then-merge costs one extra object and one extra statement per batch
-  on systems where direct DML was previously enough (small Postgres
-  pipelines). Accepted: the batch sizes where this matters are exactly the
-  ones coalescing grows, and temp-scope stages make the overhead one
-  in-session table.
-- Declaring `write_unit` widens the dlq/skip unit to the coalesced batch: a
-  fatally rejected unit is rejected wholesale, good rows included. All rows
-  land in the DLQ; the mitigation is unit size, not engine machinery.
-- The 64 MiB single-message ceiling is a real bound on write-unit size;
-  chunked framing is the known, deliberately deferred escape hatch.
-
-## 12. Decisions
-
-1. **Stage-then-merge is the single write primitive on both transports.**
-   Every SQL write lands in a stage, then one mode statement applies it.
-   *Rationale:* it is the only shape all three modes, both transports, and
-   bulk loading share.
-2. **Landing is executemany by default, bulk-load by declaration.**
-   *Rationale:* a pure speed slot with identical semantics is the only bulk
-   hook that cannot fork behavior.
-3. **Facade + cycle + backend split.** `GenericSQLConnector` owns
-   semantics; `StageCycle` owns the step order and its cleanup and
-   poisoning rules; `SqlAlchemyBackend` / `AdbcBackend` own mechanics
-   behind `TransportBackend` (§3). *Rationale:* define-once for every rule
-   that would otherwise exist twice — a step order held per transport is a
-   second copy, and second copies drift.
-4. **Dialect capabilities are declared data in `connector.json`**
-   (vocabulary in §5). *Rationale:* guessed defaults are the mechanism of
-   per-dialect divergence; facts about a system belong in validated data,
-   rendering belongs in code.
-5. **Stage scope is declared per dialect, temp preferred; real scope gets
-   deterministic names, optional dedicated schema, expiration where the
-   system has it.** *Rationale:* session-temp is the industry norm where it
-   exists (auto-cleanup, invisibility); where it does not, deterministic
-   naming plus honest cleanup (§6) is the sound fallback.
-6. **Transaction shape is declared: one transaction spanning the stage cycle
-   where the system supports it, per-step commits with self-healing retries
-   and poisoning where it does not** (§7). *Rationale:* take atomicity where
-   it is free; document idempotent-retry semantics where it is not, rather
-   than pretending one model fits warehouses whose DDL and loads
-   self-commit.
-7. **Batch coalescing is engine-side, single-message, preference declared as
-   `write_unit` in `connector.json`; the ack protocol is untouched** (§8).
-   *Rationale:* the flush-gated and windowed-ack alternatives
-   hand unacked data or cursor durability to untrusted connector workers;
-   engine-side merging solves the quota problem with no new trust and no
-   wire change. The dlq/skip unit remains the sent batch — `write_unit`
-   consciously widens it, and unit size is the operator's granularity
-   control. Chunked framing is deferred until a workload needs it.
-8. **Duplicate keys inside one source batch stay a loud failure; duplicates
-   across coalesced source batches are collapsed by the engine's coalescer,
-   later batch wins; insert stays first-wins** (§2, §8). *Rationale:*
-   sequential per-batch merges are the semantics being preserved, and the
-   coalescer reproduces them exactly at the one point where batch order
-   still exists — instead of reconstructing recency at the destination
-   through new contract surface. Insert is first-wins.
-9. **The conformance contract tier certifies rendering-matches-declaration,
-   refusals, the sanctioned override surface, landing equivalence, and the
-   duplicate rules** (§10).
-10. **There is no compatibility path.** No fallback to a pre-primitive write
-    shape, and no capability boolean mirroring a declaration.

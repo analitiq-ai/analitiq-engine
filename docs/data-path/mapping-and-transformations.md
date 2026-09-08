@@ -1,9 +1,9 @@
 # Field Mapping, Transformations & Validation
 
 **Scope:** this doc owns the assignment syntax, the path grammar, the
-expression AST, the validation rules, and the function catalog. For Arrow
-type-system and schema-contract internals see
-[`pyarrow-and-destinations.md`](pyarrow-and-destinations.md).
+expression AST, the validation rules, the function catalog, and the
+conversion matrix. For Arrow type-system and schema-contract internals see
+[`arrow-and-transport-strategy.md`](arrow-and-transport-strategy.md).
 
 Streams declare their record-shape transformation under `mapping` in
 `pipelines/{id}/streams/{stream_id}.json`. The implementation lives in
@@ -229,7 +229,7 @@ Built-in functions:
 |------|---------|---------|
 | `iso_to_date` | 1 | ISO-8601 timestamp → `YYYY-MM-DD` string |
 | `iso_to_datetime` | 1 | ISO-8601 → datetime (timezone-aware) |
-| `iso_to_timestamp` | 1 | ISO-8601 → epoch timestamp |
+| `iso_to_timestamp` | 1 | ISO-8601 → timezone-aware UTC timestamp (same kernel as `iso_to_datetime`) |
 | `trim`, `lower`, `upper` | 1 | String normalization |
 | `to_int`, `to_float`, `to_string` | 1 | Type coercion |
 | `abs` | 1 | Numeric absolute value |
@@ -281,7 +281,7 @@ pipeline's `runtime.error_handling.strategy`. `fail` stops the stream, `dlq`
 dead-letters the source rows and continues, `skip` drops them and continues.
 When rules under different strategies fail on the same batch, the strictest
 one wins (`fail` over `dlq` over `skip`). The batch never reaches the
-destination (see [`engine-architecture.md`](engine-architecture.md)).
+destination (see [`engine-architecture.md`](../architecture/engine-architecture.md)).
 
 The override's `max_retries` and `retry_delay_seconds` are not read: a rule is
 a pure function of the batch, so a retry would fail the same rows the same way.
@@ -377,8 +377,8 @@ discipline that pays off the moment an upstream payload changes.
 
 ## See Also
 
-- [`source-config.md`](source-config.md) — stream file layout and
+- [`source-config.md`](../config/source-config.md) — stream file layout and
   source section
-- [`destination-config.md`](destination-config.md) — destination side
-- [`engine-architecture.md`](engine-architecture.md) — module map
-- [`pyarrow-and-destinations.md`](pyarrow-and-destinations.md) — Arrow type system, schema contract
+- [`destination-config.md`](../config/destination-config.md) — destination side
+- [`engine-architecture.md`](../architecture/engine-architecture.md) — module map
+- [`arrow-and-transport-strategy.md`](arrow-and-transport-strategy.md) — Arrow type system, schema contract

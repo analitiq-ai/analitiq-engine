@@ -225,47 +225,55 @@ reads a flat, gitignored credentials file — the local-development default:
 
 An unresolvable reference (missing env var, missing file/object, missing sidecar
 entry, unsupported scheme) fails loud — the connection is never established with
-an empty secret. See [docs/source-config.md](docs/source-config.md#secret-reference-schemes)
+an empty secret. See [docs/config/source-config.md](docs/config/source-config.md#secret-references)
 for the full reference.
 
 ### Configuration and defaults
 
-Every engine default lives in one place: [`src/config/settings.py`](src/config/settings.py),
-each overridable by an environment variable. The full catalogue - what each
-setting controls, its default, and how to override it - is in
-[docs/configuration.md](docs/configuration.md). Per-pipeline overrides go in the
-`runtime` block of `pipelines/{pipeline_id}/pipeline.json`; precedence is
-**pipeline config > environment variable > built-in default**.
+Every Python-side engine default and its environment-variable override is
+declared once, in [`src/config/settings.py`](src/config/settings.py).
+Per-pipeline overrides go in the `runtime` block of
+`pipelines/{pipeline_id}/pipeline.json`; precedence and resolution order
+are specified in
+[docs/config/settings-reference.md](docs/config/settings-reference.md).
+
+The table below is a quick-start subset for local development, not the
+complete environment-variable list — it deliberately excludes
+deployment-injected correlation IDs (`RUN_ID`, `AWS_BATCH_JOB_ID`,
+`INVOCATION_ID`, `ORG_ID`) that a cloud run supplies rather than an
+operator setting. The one complete list, kept in one place so it can't go
+stale in two, is
+[docs/config/settings-reference.md](docs/config/settings-reference.md#environment-inputs-outside-settingspy)
+for everything outside `settings.py`, and `src/config/settings.py` itself
+for everything in it.
 
 ### Environment Variables
 
-| Variable | Default | Description |
-|---|---|---|
-| `PIPELINE_ID` | *(required)* | Pipeline ID from `manifest.json` |
-| `RUN_MODE` | `source` | `source` or `destination` |
-| `ENV` | `local` | Environment: `local`, `dev`, `prod` |
-| `LOG_LEVEL` | `INFO` | Logging level until the pipeline config is read; a declared `runtime.logging.log_level` supersedes it |
-| `DESTINATION_GRPC_HOST` | | Destination service host (engine mode) |
-| `DESTINATION_GRPC_PORT` | `50051` | gRPC port (engine mode) |
-| `GRPC_PORT` | `50051` | gRPC listen port (destination mode) |
-| `DESTINATION_INDEX` | `0` | Which destination from the pipeline config |
-| `ANALITIQ_BATCH_SIZE` | `1000` | Records read and shipped per batch |
-| `ANALITIQ_BUFFER_SIZE` | `5000` | Queue depth between pipeline stages |
-| `ANALITIQ_ERROR_STRATEGY` | `fail` | Exhausted-retry policy: `fail`, `dlq`, or `skip` |
-| `ANALITIQ_MAX_RETRIES` | `3` | Retry attempts before the error strategy applies |
-| `ANALITIQ_RETRY_DELAY_SECONDS` | `5` | Base backoff between retries |
-| `AWS_ENDPOINT_URL_S3` | | Endpoint for `s3://` secret refs (S3-compatible stores, e.g. MinIO) |
-| `AWS_REGION` | | Region for `s3://` secret refs |
+| Variable | Description |
+|---|---|
+| `PIPELINE_ID` | Pipeline ID from `manifest.json` (required) |
+| `RUN_MODE` | `source` or `destination` |
+| `LOG_LEVEL` | Logging level until the pipeline config is read; a declared `runtime.logging.log_level` supersedes it |
+| `DESTINATION_GRPC_HOST` / `DESTINATION_GRPC_PORT` | Destination service address (engine mode) |
+| `GRPC_PORT` | gRPC listen port (destination mode) |
+| `DESTINATION_INDEX` | Which destination from the pipeline config to serve |
+| `ANALITIQ_BATCH_SIZE` / `ANALITIQ_BUFFER_SIZE` | Batch size and inter-stage queue depth |
+| `ANALITIQ_ERROR_STRATEGY` / `ANALITIQ_MAX_RETRIES` / `ANALITIQ_RETRY_DELAY_SECONDS` | Exhausted-retry policy and backoff |
+| `AWS_ENDPOINT_URL_S3` (falls back to `AWS_ENDPOINT_URL`) / `AWS_REGION` (falls back to `AWS_DEFAULT_REGION`) | Endpoint and region for `s3://` secret refs (S3-compatible stores, e.g. MinIO) |
+| `CONFIG_BUNDLE` | Read by `docker/entrypoint.sh`, before Python starts: a config archive (local path or URL) to hydrate into the container. Unset for local runs that bind-mount config directly |
+| `CONNECTORS_DIR` | Read by `docker/entrypoint.sh`; default `/app/connectors` |
 
-See [docs/configuration.md](docs/configuration.md) for the complete list,
-including gRPC, worker, and schema settings.
+Defaults and every other `settings.py`-backed env var (gRPC, worker
+supervision, process role) are in
+[`src/config/settings.py`](src/config/settings.py); the handful that
+aren't are the ones named just above.
 
 Durable incremental cursors resume from per-stream
 `state/{pipeline_id}/{stream_id}.json` checkpoint files rather than an
 environment variable: each stream writes its own committed cursor on every
 destination ACK, and the deployment delivers those same files in the config
 bundle on a fresh container. See
-[engine-architecture.md](docs/engine-architecture.md#incremental-state-restore).
+[engine-architecture.md](docs/architecture/engine-architecture.md#incremental-state-restore).
 
 </details>
 

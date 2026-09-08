@@ -9,7 +9,7 @@ license = "Apache-2.0"
 readme = "README.md"
 homepage = "https://github.com/analitiq-ai/analitiq-engine"
 repository = "https://github.com/analitiq-ai/analitiq-engine"
-documentation = "https://github.com/analitiq-ai/analitiq-engine/blob/main/docs/connector-module-architecture.md"
+documentation = "https://github.com/analitiq-ai/analitiq-engine/blob/main/docs/architecture/connector-module-architecture.md"
 keywords = ["connector", "cdk", "etl", "data-integration", "arrow"]
 classifiers = [
     "Development Status :: 4 - Beta",

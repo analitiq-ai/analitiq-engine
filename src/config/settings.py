@@ -7,9 +7,9 @@ default are collected:
   per-pipeline knobs. These are layered: a pipeline's ``runtime`` block wins,
   then the matching environment variable, then the built-in default returned
   here. The overlay happens in
-  :func:`src.engine.pipeline_config_prep._parse_runtime_config`; the typed
-  defaults on :mod:`src.models.resolved` source their values from the
-  ``default_*`` accessors below.
+  :meth:`src.engine.pipeline_config_prep.PipelineConfigPrep.create_config`;
+  the typed defaults on :mod:`src.models.resolved` source their values from
+  the ``default_*`` accessors below.
 * **Process infrastructure** (gRPC endpoints/timeouts, worker supervision,
   schema fetching) -- engine-process knobs with no per-pipeline layer. The
   modules that own these read the matching accessor here instead of restating
@@ -17,8 +17,9 @@ default are collected:
 
 Connector and formatter defaults are deliberately NOT here: a connector owns
 its own configuration (the engine stays connector-agnostic), so those defaults
-live with their connector. See ``docs/configuration.md`` for the human-facing
-catalogue.
+live with their connector. This module is the catalogue; see
+``docs/config/settings-reference.md`` for resolution order and layering
+rules.
 
 Accessors read the environment on every call rather than at import, so a value
 placed in ``.env`` (loaded by the runner before config parsing) is honoured.

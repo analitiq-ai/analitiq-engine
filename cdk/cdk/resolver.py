@@ -1,7 +1,8 @@
 """Generic expression and context resolution for connector templates.
 
 Implements the connector-template resolution model (see
-``docs/connector-module-architecture.md``). The resolver walks JSON
+``docs/architecture/engine-architecture.md``, "ConnectionRuntime and
+Transports"). The resolver walks JSON
 expression objects (``ref`` / ``template`` / ``literal`` / ``function``)
 against a typed :class:`ResolutionContext` that exposes connection
 parameters, secrets, post-auth selections, discovered values, auth state,
