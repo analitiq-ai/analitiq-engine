@@ -107,7 +107,7 @@ async def list_columns(
         name = _col(row, "column_name")
         native = _col(row, "data_type")
         try:
-            canonical = type_mapper.to_arrow_type(native)
+            arrow_type = type_mapper.to_arrow_type(native)
         except UnmappedTypeError as err:
             raise DiscoveryError(
                 f"{schema}.{table}.{name}: native type {native!r} has no "
@@ -117,7 +117,7 @@ async def list_columns(
         columns.append(
             ColumnDef(
                 name=name,
-                arrow_type=canonical,
+                arrow_type=arrow_type,
                 nullable=nullable,
                 primary_key=name in pk_set,
             )

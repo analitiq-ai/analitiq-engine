@@ -30,7 +30,7 @@ from cdk.conformance import (
     load_target,
 )
 from cdk.conformance.fakes import minimal_connector_definition
-from cdk.conformance.roundtrip import probe_canonicals, render_probe
+from cdk.conformance.roundtrip import probe_arrow_types, render_probe
 from cdk.conformance.target import ConformanceTarget
 from cdk.conformance.tier1 import test_definition as kit_definition
 from cdk.type_map.exceptions import UnmappedTypeError
@@ -171,9 +171,9 @@ class TestReferencePassesTier1:
         mapper = reference_target.type_mapper
         assert mapper is not None
         rendered = 0
-        for canonical in probe_canonicals(mapper):
+        for arrow_type in probe_arrow_types(mapper):
             try:
-                render_probe(mapper, canonical, reference_target.dialect)
+                render_probe(mapper, arrow_type, reference_target.dialect)
             except UnmappedTypeError:
                 continue
             rendered += 1

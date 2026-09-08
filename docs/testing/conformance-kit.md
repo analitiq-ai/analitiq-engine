@@ -48,10 +48,12 @@ in a customer pipeline (spec
   source types through, whatever the connector's kind: a database maps the
   `native_type`s discovery returns, an API the JSON `type`/`format` its
   endpoint fields declare.
-- **Arrow types are in the published grammar.** Every literal `arrow_type`
-  a rule names must belong to an `arrow_family` the engine can parse —
-  checked for read rules whether or not the connector ships a write map,
-  since a source-only connector still emits `arrow_type`s from discovery.
+
+  Every literal `arrow_type` a rule names must belong to an `arrow_family`
+  the engine can parse. The kit no longer checks this separately: the rule
+  loader refuses a foreign `arrow_type` against the pinned contract before
+  a type map is ever assembled, so a document that would fail the check
+  cannot reach it.
 - **Type maps are round-trip stable.** Every `native_type` the write map
   renders must be readable by the read map (a table the connector
   creates stays discoverable), and one write/read round must reach a
@@ -288,8 +290,7 @@ variable can never silently retire the live tier while CI stays green.
 
 The checks are also plain importable functions
 (`cdk.conformance.check_override_surface`,
-`check_declaration_consistency`, `check_type_map_grammar`,
-`check_type_map_round_trip`) for repos
+`check_declaration_consistency`, `check_type_map_round_trip`) for repos
 that want them inside their own harness.
 
 ## How the kit itself is certified

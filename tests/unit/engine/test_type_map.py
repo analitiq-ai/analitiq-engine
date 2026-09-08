@@ -30,7 +30,11 @@ from cdk.type_map import (
     parse_arrow_type,
 )
 from cdk.type_map.loader import TYPE_MAP_FILENAME, WRITE_TYPE_MAP_FILENAME
-from cdk.type_map.rules import parse_rules, parse_write_rules
+from cdk.type_map.rules import (
+    _FORBIDDEN_CONSTRUCTS,
+    parse_rules,
+    parse_write_rules,
+)
 
 # ---------------------------------------------------------------------------
 # normalize_native_type
@@ -83,6 +87,21 @@ def _parse_write(rule: dict):
     return parse_write_rules([rule], source="<test>")
 
 
+#: One pattern per construct the engine refuses, mirroring
+#: ``_FORBIDDEN_CONSTRUCTS``. Kept in sync by
+#: ``test_every_forbidden_construct_has_a_case``.
+_NON_RE2_PATTERNS = [
+    ("lookahead", r"^FOO(?=BAR)$"),
+    ("negative lookahead", r"^FOO(?!BAR)$"),
+    ("lookbehind", r"^(?<=BAR)FOO$"),
+    ("negative lookbehind", r"^(?<!BAR)FOO$"),
+    ("atomic group", r"^(?>FOO)BAR$"),
+    ("named backreference", r"^(?<x>\d+)-\k<x>$"),
+    ("Python-style named backreference", r"^(?<x>\d+)-(?P=x)$"),
+    ("numeric backreference", r"^(?<x>\d+)-\1$"),
+]
+
+
 class TestReadRuleValidation:
     def test_exact_rule_allows_literal_arrow_type(self):
         (rule,) = _parse_read(
@@ -102,45 +121,25 @@ class TestReadRuleValidation:
                 }
             )
 
-    def test_regex_rule_rejects_lookahead(self):
-        with pytest.raises(InvalidTypeMapError, match="lookahead"):
+    @pytest.mark.parametrize(("construct", "pattern"), _NON_RE2_PATTERNS)
+    def test_regex_rule_rejects_every_construct_outside_the_re2_subset(
+        self, construct, pattern
+    ):
+        # The engine is the only gate on these: Python compiles all of them and
+        # the contract permits any ECMA-262 matcher, so a construct dropped from
+        # _FORBIDDEN_CONSTRUCTS would load clean and silently make the rule
+        # non-portable.
+        with pytest.raises(InvalidTypeMapError):
             _parse_read(
-                {
-                    "match": "regex",
-                    "native_type": r"^FOO(?=BAR)$",
-                    "arrow_type": "Utf8",
-                }
+                {"match": "regex", "native_type": pattern, "arrow_type": "Utf8"}
             )
 
-    def test_regex_rule_rejects_lookbehind(self):
-        with pytest.raises(InvalidTypeMapError, match="lookbehind"):
-            _parse_read(
-                {
-                    "match": "regex",
-                    "native_type": r"^(?<=BAR)FOO$",
-                    "arrow_type": "Utf8",
-                }
-            )
-
-    def test_regex_rule_rejects_numeric_backreference(self):
-        with pytest.raises(InvalidTypeMapError, match="backreference"):
-            _parse_read(
-                {
-                    "match": "regex",
-                    "native_type": r"^(?<x>\d+)-\1$",
-                    "arrow_type": "Utf8",
-                }
-            )
-
-    def test_regex_rule_rejects_named_backreference(self):
-        with pytest.raises(InvalidTypeMapError, match="backreference"):
-            _parse_read(
-                {
-                    "match": "regex",
-                    "native_type": r"^(?<x>\d+)-\k<x>$",
-                    "arrow_type": "Utf8",
-                }
-            )
+    def test_every_forbidden_construct_has_a_case(self):
+        # _NON_RE2_PATTERNS is a hand-written mirror of the guard's own list;
+        # this is what stops the two drifting apart.
+        declared = {label for _token, label in _FORBIDDEN_CONSTRUCTS}
+        covered = {construct for construct, _pattern in _NON_RE2_PATTERNS}
+        assert declared <= covered, f"untested constructs: {sorted(declared - covered)}"
 
     def test_regex_rule_rejects_missing_named_capture(self):
         with pytest.raises(InvalidTypeMapError, match=r"no matching \(\?<p>"):
@@ -163,6 +162,38 @@ class TestReadRuleValidation:
                     "arrow_type": "Utf8(${n})",
                 }
             )
+
+    def test_regex_rule_rejects_a_capture_wider_than_the_parameter(self):
+        # rc24 checks that what a template CAN render is always an Arrow type:
+        # an unbounded \d+ in the precision position can match 0 or 40, which
+        # Decimal128 does not admit. This is why the reference fixture's NUMERIC
+        # captures are bounded alternations rather than \d+ -- the fixture was
+        # narrowed to satisfy this rule, and without this test nothing would
+        # notice if the rule were relaxed and the narrowing became arbitrary.
+        with pytest.raises(InvalidTypeMapError, match="does not admit"):
+            _parse_read(
+                {
+                    "match": "regex",
+                    "native_type": r"^NUMERIC\((?<p>\d+), *(?<s>\d+)\)$",
+                    "arrow_type": "Decimal128(${p}, ${s})",
+                }
+            )
+
+    def test_regex_rule_accepts_a_capture_bounded_to_the_parameter(self):
+        # The narrowed form the fixtures now carry: every value the capture can
+        # match is a legal precision, so the render is an Arrow type whatever
+        # the native matches.
+        (rule,) = _parse_read(
+            {
+                "match": "regex",
+                "native_type": (
+                    r"^NUMERIC\((?<p>[1-9]|[12][0-9]|3[0-8]), *"
+                    r"(?<s>[0-9]|[12][0-9]|3[0-8])\)$"
+                ),
+                "arrow_type": "Decimal128(${p}, ${s})",
+            }
+        )
+        assert rule.match == "regex"
 
     def test_regex_rule_rejects_malformed_pattern(self):
         with pytest.raises(InvalidTypeMapError, match="not a valid regex"):
@@ -652,7 +683,7 @@ class TestLoadConnectionTypeMap:
 # ---------------------------------------------------------------------------
 
 
-class TestNormalizeCanonicalType:
+class TestNormalizeArrowType:
     def test_preserves_case(self):
         assert normalize_arrow_type("Int64") == "Int64"
         assert normalize_arrow_type("Timestamp(MICROSECOND, UTC)") == (
@@ -992,13 +1023,22 @@ class TestParseWriteRules:
         with pytest.raises(InvalidTypeMapError, match="valid dictionary"):
             parse_write_rules(["oops"], source="<test>")
 
-    def test_validator_error_carries_the_rule_index(self):
-        # An execution-safety failure names the offending rule's index.
-        with pytest.raises(InvalidTypeMapError, match=r"rule #1: .*not a valid regex"):
+    def test_execution_safety_error_carries_the_rule_index(self):
+        # The engine's own pass builds its own "rule #N" prefix, separately
+        # from the one _render_validation_error builds for contract failures.
+        # An uncompilable pattern would exercise the contract's path instead,
+        # so this drives a construct only the engine refuses.
+        with pytest.raises(
+            InvalidTypeMapError, match=r"rule #1: .*unsupported construct"
+        ):
             parse_write_rules(
                 [
                     {"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"},
-                    {"match": "regex", "arrow_type": "^[", "native_type": "TEXT"},
+                    {
+                        "match": "regex",
+                        "arrow_type": "^DEC(?=IMAL)$",
+                        "native_type": "TEXT",
+                    },
                 ],
                 source="<test>",
             )
