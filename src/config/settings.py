@@ -17,7 +17,7 @@ default are collected:
 
 Connector and formatter defaults are deliberately NOT here: a connector owns
 its own configuration (the engine stays connector-agnostic), so those defaults
-live with their connector. See ``docs/configuration.md`` for the human-facing
+live with their connector. See ``docs/config/settings-reference.md`` for the human-facing
 catalogue.
 
 Accessors read the environment on every call rather than at import, so a value

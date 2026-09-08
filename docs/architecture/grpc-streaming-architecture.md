@@ -1,6 +1,6 @@
 # gRPC Streaming Architecture
 
-**Scope:** This doc owns the engine<->destination gRPC protocol — wire messages, the Arrow IPC payload, cursor encode/decode, row-level idempotency semantics, and the ack/retry flow. Environment variables, docker-compose, the handler registry, and per-handler config live in [destination-config.md](destination-config.md).
+**Scope:** This doc owns the engine<->destination gRPC protocol — wire messages, the Arrow IPC payload, cursor encode/decode, the protocol-level idempotency design (row identity vs. batch position, how a retry-safety verdict crosses the wire), and the ack/retry flow. Per-handler idempotency mechanics, environment variables, docker-compose, and the handler registry live in [destination-config.md](../config/destination-config.md).
 
 ## Overview
 
@@ -23,7 +23,7 @@ The engine and its destinations run as separate services connected by a gRPC bid
 +-------------------------------------------------------------+
 ```
 
-Both containers run the same Docker image, toggled by `RUN_MODE` (`source` or `destination`), and load identical config from the same `PIPELINE_ID` via `PipelineConfigPrep`. The destination picks its connection with `DESTINATION_INDEX`. See [destination-config.md](destination-config.md) for the env vars and compose file.
+Both containers run the same Docker image, toggled by `RUN_MODE` (`source` or `destination`), and load identical config from the same `PIPELINE_ID` via `PipelineConfigPrep`. The destination picks its connection with `DESTINATION_INDEX`. See [destination-config.md](../config/destination-config.md) for the env vars and compose file.
 
 ## Wire Protocol
 
@@ -54,7 +54,7 @@ On `StreamRecords` the engine sends a `StreamRequest` carrying either a `SchemaM
 
 ### Payload format: Arrow IPC only
 
-`PayloadFormat` has exactly one real value, `PAYLOAD_FORMAT_ARROW_IPC` (`UNSPECIFIED = 0`). The engine encodes one `pa.RecordBatch` per message with `pa.ipc.new_stream` (`src/grpc/client.py::_encode_arrow_ipc`); the destination decodes it with `pa.ipc.open_stream` (`src/destination/server.py::_decode_arrow_ipc`). The IPC stream carries the Arrow schema in the same buffer, so batch and schema decode together with no out-of-band coordination. Typed columnar data is preserved end-to-end — there is no dict/JSON round-trip on either side.
+`PayloadFormat` has exactly one real value, `PAYLOAD_FORMAT_ARROW_IPC` (`UNSPECIFIED = 0`). The engine encodes one `pa.RecordBatch` per message with `pa.ipc.new_stream` (`src/grpc/client.py::DestinationGRPCClient.send_batch`); the destination decodes it with `pa.ipc.open_stream` (`src/destination/server.py::DestinationServicer.StreamRecords`). The IPC stream carries the Arrow schema in the same buffer, so batch and schema decode together with no out-of-band coordination. Typed columnar data is preserved end-to-end — there is no dict/JSON round-trip on either side.
 
 ### SchemaMessage is slim
 
@@ -142,11 +142,11 @@ There is no `PARTIAL_SUCCESS` — batches are all-or-nothing (below).
 
 `failure_summary` answers *what went wrong* (human-readable, free text); `failure_category` answers *who owns the fix* (machine-readable). The engine never parses the summary: nothing in the classification path reads an exception's message or type.
 
-Any sender may declare a category — the config-defect and write-failure excepts in `cdk/sql/generic.py`, every pre-flight guard via `reject_batch`, the destination servicer's own batch-before-schema rejection, and a thick connector that overrides `write_batch`. The declaration is signal, not trust: it is range-checked when read off the wire, and an unrecognised integer degrades to `UNSPECIFIED` rather than propagating or aborting the stream. An in-range value is used as declared.
+Any sender may declare a category — the config-defect and write-failure excepts in `cdk/cdk/sql/generic.py`, every pre-flight guard via `reject_batch`, the destination servicer's own batch-before-schema rejection, and a thick connector that overrides `write_batch`. The declaration is signal, not trust: it is range-checked when read off the wire, and an unrecognised integer degrades to `UNSPECIFIED` rather than propagating or aborting the stream. An in-range value is used as declared.
 
 `UNSPECIFIED` resolves from the pipeline stage that raised, not from the summary. A destination-load failure reads as `DESTINATION_WRITE_FAILED`, because the load stage establishes exactly that much: the write did not happen. `SchemaAck` carries the same field for the same reason — a destination shell that could not reach its connector worker declares `NOT_READY`, which is the only way the engine can tell that refusal apart from one the customer's configuration caused.
 
-`FAILURE_CATEGORY_INTERNAL` exists so an engine or connector bug can say so on the wire. Without it every internal fault has to impersonate a user-owned failure, which is the confusion the split between this vocabulary and the customer-facing `ErrorCode` exists to prevent — see [ADR 0001](adr/0001-two-failure-vocabularies.md).
+`FAILURE_CATEGORY_INTERNAL` exists so an engine or connector bug can say so on the wire. Without it every internal fault has to impersonate a user-owned failure, which is the confusion the split between this vocabulary and the customer-facing `ErrorCode` exists to prevent — see [ADR 0001](../adr/0001-two-failure-vocabularies.md).
 
 ## Key Design Decisions
 
@@ -160,27 +160,37 @@ The destination never parses the cursor; the engine controls its semantics (time
 
 ### Row-level, content-derived idempotency
 
-Idempotency is enforced at the destination on **row identity**, not batch position. `batch_seq` is a monotonic ordering/log sequence per stream within a run — it is never the dedup key, and neither are `run_id`/`stream_id`. The SQL destination writes idempotently by content and returns `SUCCESS`; it keeps no per-batch commit ledger. How identity is enforced depends on the write mode:
+Idempotency is a protocol design choice, enforced at the destination on
+**row identity**, never batch position: `batch_seq` is a monotonic
+ordering/log sequence per stream within a run, never a dedup key, and
+neither are `run_id`/`stream_id`. This survives a network failure that
+drops the ACK after the destination already wrote — the engine retries,
+row identity dedups, and no duplicate data lands. Per-handler mechanics
+(which write mode dedups how, and which report at-least-once) are
+specified in [destination-config.md](../config/destination-config.md#idempotency);
+this section covers only what is a property of the *protocol*, not of any
+one handler.
 
-- **`upsert`** — MERGE / INSERT-or-UPDATE on the stream's `conflict_keys`.
-- **`truncate_insert`** — full refresh: the target is emptied on the read's first batch (`batch_seq` 1) via the dialect's target-emptying statement (ANSI `DELETE FROM`, never `TRUNCATE`), plain append from the stage after that. `batch_seq` is the engine's own statement of a fresh read — it restarts at 1 only when the engine (re)starts the stream read — so the decision survives engine and destination restarting independently: a destination that restarts mid-refresh keeps appending (committed batches survive), and an engine that restarts re-reads from scratch and re-truncates. The engine never resumes a truncate_insert stream from a cursor.
-- **`insert`** — a row lands only if its identity is not already present. The batch lands in a per-batch stage table and one set-based `INSERT ... SELECT ... FROM stage WHERE NOT EXISTS (...)` applies it, identically on both transports (stage-then-merge, [sql-write-path](sql-write-path.md)) — plain ANSI over the dialect's quoting, no dialect-specific SQL. The identity is the contract primary key, or — for a keyless insert stream — a synthetic engine-managed `_record_hash` column (full SHA-256 of the row content) declared as the table's `PRIMARY KEY`, the structural uniqueness backstop. Two byte-identical keyless rows collapse to one.
+**A destination that does not dedup itself is at-least-once on a
+same-`RUN_ID` retry.** The engine keeps no in-run pre-send skip, so a
+restart re-sends already-ACKed batches; a positional pre-send skip cannot
+be made correct without reintroducing the row-drop this design removes
+(an advancing cursor re-batches the same `batch_seq` over different rows).
+Every handler reports its retry-safety verdict per stream in the
+`SchemaAck` (`retry_semantics` + `retry_semantics_reason`, forwarded
+verbatim across the worker-proxy hop), and the engine logs it at stream
+start — the operator learns which streams may duplicate on a restart
+before any data moves.
 
-This survives a network failure that drops the ACK after the destination already wrote: the engine retries, the row identity dedups, and no duplicate data lands. See [destination-config.md](destination-config.md#idempotency).
-
-A destination that does not dedup itself is **at-least-once on a same-`RUN_ID` retry**: the engine keeps no in-run pre-send skip, so a restart re-sends already-ACKed batches, and a positional pre-send skip cannot be made correct without reintroducing the row-drop this design removes (an advancing cursor re-batches the same `batch_seq` over different rows). Per handler:
-
-- **API, `upsert` mode** — exactly-once: the endpoint dedups on its `conflict_keys`; a re-sent record updates in place.
-- **API, `insert` or `upsert` mode with a declared `idempotency` block** — exactly-once within the provider's replay window. The api-endpoint contract's `operations.write.<mode>.idempotency` (`{"in": "header" | "body", "name": "<key>"}`) declares **where** the key lands; the engine owns the **value**, per write mode: `insert` sends the identity-derived `record_id` (primary-key fields when declared, else full content — SQL-insert parity: first occurrence of an identity wins), `upsert` sends a full-content hash (an identical replay dedups; a changed row gets a new key so the provider applies the update). Excluded with a `batching` block (the contract has no batching mode — a present block IS the multi-record case; both the schema and `configure_schema` reject the combination, because a restart re-batches records and a per-request key spanning several records can never dedup); `in: "body"` additionally requires a JSON-object request body, and the key name must not collide with engine/connection-owned headers or already-declared body fields.
-- **API, `insert` mode without the block** — at-least-once: the engine rents the sink and has no key to dedup on.
-- **SQL `insert` on a system that does not enforce uniqueness** — at-least-once. The anti-join dedups every sequential replay on its own, but the enforced `PRIMARY KEY` is the structural backstop against writes that race it; a system that does not enforce the constraint (BigQuery's `NOT ENFORCED` keys) has a filter, not a guarantee, so its insert streams report at-least-once rather than promising what the system cannot hold. Everywhere the constraint is enforced, `insert` is exactly-once on both transports.
-- **file / S3** — batch files are content-addressed (the filename carries a hash of the serialized bytes), so a true replay overwrites the same file with the same bytes — atomically: the local backend writes temp-then-rename, so a crash mid-rewrite cannot truncate committed output. There is no batch-level commit ledger, so nothing can misclassify a restart batch as a replay and drop its rows. A same-run restart re-reads the inclusive cursor boundary and writes those rows into a new file — duplicates possible, drops not. Reported as at-least-once.
-- **SQL `truncate_insert`** — the truncate runs on the read's first batch only and the append phase has no row-identity dedup (deduping a full refresh would collapse legitimate duplicate rows), so a replayed already-committed later batch re-inserts its rows (a replayed *first* batch re-truncates, landing exactly once). Reported as at-least-once. The restart data-loss case is gone: the engine never resumes a truncate_insert stream from a cursor, so a restart is a fresh full refresh, not a resumed slice.
-- **stdout** — at-least-once by construction: it only prints, so a replayed batch prints again.
-
-Every handler reports its verdict per stream in the `SchemaAck` (`retry_semantics` + `retry_semantics_reason`, forwarded verbatim across the worker-proxy hop), and the engine logs it at stream start — the operator learns which streams may duplicate on a restart before any data moves.
-
-The declaration is reported, never consulted: the retry does not read it. Conditioning the retry on it would mean failing a batch on an at-least-once sink to avoid a duplicate — trading a possible duplicate for a certain data loss. The trade this section describes is the one the engine takes everywhere: on an exactly-once stream `ALREADY_COMMITTED` (or row-identity dedup) resolves a committed-before-crash batch on resend; on an at-least-once one the resend duplicates rather than drops. That is Kafka Connect with `enable.idempotence=false`, and Airbyte and Singer at every sink — no comparable tool fails a batch to avoid a duplicate.
+**The declaration is reported, never consulted: the retry does not read
+it.** Conditioning the retry on it would mean failing a batch on an
+at-least-once sink to avoid a duplicate — trading a possible duplicate for
+a certain data loss. The trade is taken everywhere: on an exactly-once
+stream, `ALREADY_COMMITTED` (or row-identity dedup) resolves a
+committed-before-crash batch on resend; on an at-least-once one, the
+resend duplicates rather than drops. That is Kafka Connect with
+`enable.idempotence=false`, and Airbyte and Singer at every sink — no
+comparable tool fails a batch to avoid a duplicate.
 
 ### All-or-nothing batches
 
@@ -222,10 +232,10 @@ The client sends a batch, awaits its ACK, then sends the next (`send_batch` bloc
 | Send a batch | `send_batch(run_id, stream_id, batch_seq, record_batch: pa.RecordBatch, record_ids, cursor) -> BatchResult` | handler `write_batch(..., record_batch: pa.RecordBatch, record_ids, cursor) -> BatchWriteResult` |
 | Configure stream | `start_stream(...)` -> `SchemaMessage` | handler `configure_schema(schema_spec: SchemaSpec) -> bool` |
 | Liveness | `HealthCheck` RPC | handler `health_check() -> bool` |
-| Arrow IPC | `_encode_arrow_ipc` (`pa.ipc.new_stream`) | `_decode_arrow_ipc` (`pa.ipc.open_stream`) |
+| Arrow IPC | `DestinationGRPCClient.send_batch` (`pa.ipc.new_stream`) | `DestinationServicer.StreamRecords` (`pa.ipc.open_stream`) |
 | Cursor | `src/grpc/cursor.py` (`compute_max_cursor`, `encode_cursor`, `cursor_to_state_dict`) | stores/returns the opaque token |
 
-Handlers subclass the CDK base (`from cdk.base_handler import BaseDestinationHandler`; `from cdk.types import Cursor, SchemaSpec, WriteMode`). The SQL destination is `GenericSQLConnector` (`cdk/cdk/sql/generic.py`). The handler registry and how new destinations are wired live in [destination-config.md](destination-config.md#handler-registry).
+Handlers subclass the CDK base (`from cdk.base_handler import BaseDestinationHandler`; `from cdk.types import Cursor, SchemaSpec, WriteMode`). The SQL destination is `GenericSQLConnector` (`cdk/cdk/sql/generic.py`). The handler registry and how new destinations are wired live in [destination-config.md](../config/destination-config.md#handler-registry).
 
 ## Message Flow
 

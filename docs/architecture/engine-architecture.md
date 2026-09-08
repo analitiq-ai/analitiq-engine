@@ -2,19 +2,19 @@
 
 This document describes the engine layout, the pipeline lifecycle, and
 the contracts between components. For source-/destination-side schema
-details see [`source-config.md`](source-config.md) and
-[`destination-config.md`](destination-config.md).
+details see [`source-config.md`](../config/source-config.md) and
+[`destination-config.md`](../config/destination-config.md).
 
 **Scope:** this doc owns the streaming engine — extract / transform /
 load / checkpoint orchestration, the producer/consumer flow, the
 dual-mode (`RUN_MODE`) runner, and how the engine consumes the CDK and
 connections. It defers elsewhere for: destination handler config
-([`destination-config.md`](destination-config.md)); the gRPC protocol /
+([`destination-config.md`](../config/destination-config.md)); the gRPC protocol /
 wire format ([`grpc-streaming-architecture.md`](grpc-streaming-architecture.md));
-the Arrow type system ([`pyarrow-and-destinations.md`](pyarrow-and-destinations.md));
+the Arrow type system ([`arrow-and-transport-strategy.md`](../data-path/arrow-and-transport-strategy.md));
 the CDK boundary / contract
 ([`connector-module-architecture.md`](connector-module-architecture.md));
-and source / stream config ([`source-config.md`](source-config.md)).
+and source / stream config ([`source-config.md`](../config/source-config.md)).
 
 ## Module Layout
 
@@ -55,7 +55,7 @@ src/
 ├── shared/                  # Engine-local helpers
 │   └── run_id.py
 │
-├── destination/             # Destination side (see destination-config.md)
+├── destination/             # Destination side (see ../config/destination-config.md)
 │   └── server.py                # gRPC server
 │
 ├── engine/                  # Core engine
@@ -150,22 +150,21 @@ silently losing rows.
    - builds a `ConnectionRuntime` per connection (with a per-connection
      secrets resolver),
    - resolves every `endpoint_ref` to its endpoint JSON.
-3. `PipelineRunner` (`src/runner.py`) translates the resolved contract
-   objects into a flat config dict via `_build_config_dict` (and its
-   source/destination translation helpers), then constructs a
+3. `PipelineRunner.run` (`src/runner.py`) translates the resolved contract
+   objects into a flat config dict, then constructs a
    `StreamingEngine` with runtime tuning parameters from the pipeline
    config and calls `engine.stream_data(config_dict)`.
 4. `StreamingEngine.stream_data` creates one `StreamProcessor`
    (`src/engine/stream_processor.py`) per stream and runs them
-   concurrently. Each processor owns everything scoped to its stream —
-   counters, the gRPC client, its dead letter queue — and runs four async
-   stages — `_extract_stage -> _transform_stage -> _load_stage ->
-   _checkpoint_stage` — wired together with async queues. The processor
-   compiles the stream's typed mapping document once at construction
+   concurrently via `StreamProcessor.run`. Each processor owns everything
+   scoped to its stream — counters, the gRPC client, its dead letter
+   queue — and runs four async stages, extract -> transform -> load ->
+   checkpoint, wired together with async queues. The processor compiles
+   the stream's typed mapping document once at construction
    (`compile_mapping`), so a mapping the engine cannot run fails before any
    batch is read; the transform stage then applies it to each batch as
    vectorized Arrow compute.
-5. `_load_stage` streams batches over gRPC to the destination service
+5. The load stage streams batches over gRPC to the destination service
    with row-level, content-derived idempotency (protocol in
    [`grpc-streaming-architecture.md`](grpc-streaming-architecture.md)).
    Every send — including the synthetic empty batch that truncates a
@@ -328,7 +327,7 @@ findable instead of absorbed into a plausible code. A verdict is never a
 secret leak (only class names and codes ever reach `error_detail`) and never
 a cross-stage error (the stage is always known from the tag). The two
 vocabularies behind this — what a peer declares versus what the customer is
-told — are separated in [ADR 0001](adr/0001-two-failure-vocabularies.md).
+told — are separated in [ADR 0001](../adr/0001-two-failure-vocabularies.md).
 
 ## ConnectionRuntime and Transports
 
@@ -429,7 +428,7 @@ each is one class serving read and write:
   replication over the engine-supplied safety window, and the five paging
   schemes the endpoint contract declares. Those five run on one loop
   (`cdk/cdk/api/page_loop.py`) with one adapter per scheme — see
-  [ADR 0002](adr/0002-one-stop-rule-for-every-paging-scheme.md).
+  [ADR 0002](../adr/0002-one-stop-rule-for-every-paging-scheme.md).
 
 The one attribute either class exposes for a connector package to override
 is its dialect (`SqlDialect`, `ApiDialect`): pure translation, no I/O. See
@@ -444,25 +443,29 @@ is no `HandlerRegistry`.
 
 The engine binds no connector class. Every kind default is a CDK generic
 class named once in `cdk.registry.KIND_DEFAULTS`, which maps a kind to a
-`module:ClassName` string plus the extra that importing it needs:
+`module:ClassName` string, the roles it serves, and the extra that
+importing it needs:
 
-| kind | kind default | extra |
-|------|--------------|-------|
-| `database` | `cdk.sql.generic:GenericSQLConnector` | `arrow` |
-| `api` | `cdk.api.generic:GenericAPIConnector` | `api` |
-| `file` | `cdk.file.generic:GenericFileConnector` | `file` |
-| `s3` | `cdk.file.generic:GenericFileConnector` | `file` |
-| `stdout` | `cdk.stdout.generic:GenericStdoutConnector` | `arrow` |
+| kind | kind default | roles | extra |
+|------|--------------|-------|-------|
+| `database` | `cdk.sql.generic:GenericSQLConnector` | source, destination | `arrow` |
+| `api` | `cdk.api.generic:GenericAPIConnector` | source, destination | `api` |
+| `file` | `cdk.file.generic:GenericFileConnector` | destination | `file` |
+| `s3` | `cdk.file.generic:GenericFileConnector` | destination | `file` |
+| `stdout` | `cdk.stdout.generic:GenericStdoutConnector` | destination | `arrow` |
 
 The table holds strings, not classes, so reading the kind vocabulary costs
 no transport: only resolving a kind imports one, and a kind whose transport
 is absent fails naming the extra to install. `build_registries()` seeds both
-registries from that one table, and **which roles a kind serves is read off
-the class**, never declared beside it — a class is registered as a source
-default iff it satisfies `Readable` and as a destination default iff it
-satisfies `Writable` (`cdk/cdk/contract.py`). So `file`, `s3` and `stdout`
-have no source default at all, and a `kind: file` source fails loud instead
-of resolving a class with no read path.
+registries from that one table. **The roles column is a declaration, not a
+value read off the class** — reading it off the class would mean importing
+it, which is exactly the cost the table exists to defer. It is verified,
+not trusted blindly: the first time a kind default actually loads, its
+declared roles are checked against the class's own capability Protocols
+(`isinstance` against `Readable` / `Writable`, `cdk/cdk/contract.py`), and a
+mismatch is a registry defect. So `file`, `s3` and `stdout` have no source
+default at all, and a `kind: file` source fails loud instead of resolving a
+class with no read path.
 
 `build_registries()` is called inside the spawned worker subprocess, because
 that is where connector classes execute. The engine process holds only the
@@ -471,8 +474,8 @@ that is where connector classes execute. The engine process holds only the
 Externally installed connector packages add themselves on top through the
 `analitiq.source_connectors` and `analitiq.destination_connectors`
 entry-point groups. A package states its roles by which groups it registers
-under; a kind default states them through the Protocols its class
-implements.
+under; a kind default states them through its declared roles in
+`KIND_DEFAULTS`, checked against the Protocols its class implements.
 
 ## Structured Logging
 
@@ -499,9 +502,9 @@ the docker compose flow described in the project `CLAUDE.md`.
 
 ## See Also
 
-- [`source-config.md`](source-config.md)
-- [`destination-config.md`](destination-config.md)
-- [`mapping-and-transformations.md`](mapping-and-transformations.md)
+- [`source-config.md`](../config/source-config.md)
+- [`destination-config.md`](../config/destination-config.md)
+- [`mapping-and-transformations.md`](../data-path/mapping-and-transformations.md)
 - [`grpc-streaming-architecture.md`](grpc-streaming-architecture.md)
-- [`pyarrow-and-destinations.md`](pyarrow-and-destinations.md)
+- [`arrow-and-transport-strategy.md`](../data-path/arrow-and-transport-strategy.md)
 - [`connector-module-architecture.md`](connector-module-architecture.md)

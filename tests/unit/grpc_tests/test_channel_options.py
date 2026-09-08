@@ -3,7 +3,7 @@
 PR #85 removed client-side keepalives that tripped the destination's HTTP/2
 ping-flood policy and produced "Too many pings" GOAWAY mid-batch. This pins
 the absence at the one production call site so they cannot be quietly
-re-added; the incident is recorded in docs/grpc-streaming-architecture.md.
+re-added; the incident is recorded in docs/architecture/grpc-streaming-architecture.md.
 """
 
 from __future__ import annotations
