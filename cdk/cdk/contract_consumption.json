@@ -1152,7 +1152,7 @@
     },
     "analitiq.contracts.type_map.TypeMapReadRegexRule": {
       "arrow_type": [
-        "cdk.type_map.mapper:144",
+        "cdk.type_map.mapper:154",
         "cdk.type_map.rules:334",
         "cdk.type_map.rules:370",
         "cdk.type_map.rules:372",
@@ -1179,12 +1179,12 @@
       ],
       "match": [
         "cdk.type_map.mapper:73",
-        "cdk.type_map.mapper:180",
+        "cdk.type_map.mapper:190",
         "cdk.type_map.rules:331",
         "cdk.type_map.rules:380"
       ],
       "native_type": [
-        "cdk.type_map.mapper:182",
+        "cdk.type_map.mapper:192",
         "cdk.type_map.rules:334",
         "cdk.type_map.rules:378"
       ]
@@ -1198,12 +1198,12 @@
       ],
       "match": [
         "cdk.type_map.mapper:73",
-        "cdk.type_map.mapper:180",
+        "cdk.type_map.mapper:190",
         "cdk.type_map.rules:331",
         "cdk.type_map.rules:380"
       ],
       "native_type": [
-        "cdk.type_map.mapper:193",
+        "cdk.type_map.mapper:209",
         "cdk.type_map.rules:334",
         "cdk.type_map.rules:378",
         "cdk.type_map.rules:382"
