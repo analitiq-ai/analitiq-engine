@@ -15,6 +15,7 @@ import pyarrow as pa
 import pytest
 
 from cdk.schema_contract import SchemaContract
+from cdk.type_map.exceptions import MissingEncodingError
 
 
 class TestSchemaContractColumnsFormat:
@@ -541,12 +542,12 @@ class TestSchemaContractFromPylist:
         with pytest.raises(ValueError, match=r"column 'val' at row 1.*got dict"):
             contract.from_pylist([{"val": "1.5"}, {"val": {"x": 1}}])
 
-    def test_source_format_column_reports_its_own_error_for_a_decimal(self):
-        """A source_format column accepts no numeric value, so its own message
+    def test_strptime_encoding_column_reports_its_own_error_for_a_decimal(self):
+        """A ``strptime`` column accepts no numeric value, so its own message
         must win over the unit-offset guard's.
 
         The guard says the value is not an integer offset, which would imply an
-        integer is taken here. It is not -- source_format parses strings only,
+        integer is taken here. It is not -- ``strptime`` parses strings only,
         so an author told to send an integer would be sent to the wrong fix.
         """
         schema = {
@@ -555,23 +556,23 @@ class TestSchemaContractFromPylist:
                     "name": "created",
                     "arrow_type": "Timestamp(SECOND)",
                     "nullable": True,
-                    "source_format": "%Y-%m-%d",
+                    "encoding": {"name": "strptime", "pattern": "%Y-%m-%d"},
                 },
             ]
         }
         contract = SchemaContract(schema)
 
-        with pytest.raises(TypeError, match=r"source_format only applies to string"):
+        with pytest.raises(TypeError, match=r"encoding 'strptime' expects a string"):
             contract.from_pylist([{"created": Decimal("1.5")}])
 
-    def test_from_pylist_strptime_via_source_format(self):
+    def test_from_pylist_strptime_via_encoding(self):
         schema = {
             "columns": [
                 {
                     "name": "created",
                     "arrow_type": "Timestamp(MICROSECOND, UTC)",
                     "nullable": True,
-                    "source_format": "%Y-%m-%d %H:%M:%S",
+                    "encoding": {"name": "strptime", "pattern": "%Y-%m-%d %H:%M:%S"},
                 },
             ]
         }
@@ -591,6 +592,7 @@ class TestSchemaContractFromPylist:
                     "name": "created",
                     "arrow_type": "Timestamp(MICROSECOND, UTC)",
                     "nullable": True,
+                    "encoding": {"name": "iso8601"},
                 },
             ]
         }
@@ -602,6 +604,15 @@ class TestSchemaContractFromPylist:
         value = batch.to_pylist()[0]["created"]
         assert value.utcoffset().total_seconds() == 0
         assert (value.year, value.hour, value.second) == (2026, 12, 45)
+
+    def test_missing_encoding_on_a_temporal_column_raises_at_construction(self):
+        schema = {
+            "columns": [
+                {"name": "created", "arrow_type": "Timestamp(MICROSECOND, UTC)"},
+            ]
+        }
+        with pytest.raises(MissingEncodingError, match="encoding"):
+            SchemaContract(schema).check_required_read_encoding()
 
 
 class TestSchemaContractJsonSchema:
@@ -1125,12 +1136,34 @@ class TestFromPylistNullabilityEnforcement:
             c.from_pylist([{"v": 1.5}, {"v": None}])
 
     def test_timestamp_non_nullable_mixed_raises(self):
-        c = self._contract("Timestamp(MICROSECOND, UTC)", nullable=False)
+        c = SchemaContract(
+            {
+                "columns": [
+                    {
+                        "name": "v",
+                        "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                        "nullable": False,
+                        "encoding": {"name": "iso8601"},
+                    }
+                ]
+            }
+        )
         with pytest.raises(ValueError, match=r"'v' is non-nullable.*\[0\]"):
             c.from_pylist([{"v": None}, {"v": "2026-01-01T00:00:00Z"}])
 
     def test_date_non_nullable_mixed_raises(self):
-        c = self._contract("Date32", nullable=False)
+        c = SchemaContract(
+            {
+                "columns": [
+                    {
+                        "name": "v",
+                        "arrow_type": "Date32",
+                        "nullable": False,
+                        "encoding": {"name": "iso8601"},
+                    }
+                ]
+            }
+        )
         with pytest.raises(ValueError, match=r"'v' is non-nullable.*\[1\]"):
             c.from_pylist([{"v": "2026-01-01"}, {"v": None}])
 
@@ -1149,7 +1182,7 @@ class TestFromPylistNullabilityEnforcement:
         with pytest.raises(ValueError, match=r"'v' is non-nullable.*\[1\]"):
             c.from_pylist([{"v": 0}, {"v": None}])
 
-    def test_source_format_non_nullable_mixed_raises(self):
+    def test_strptime_encoding_non_nullable_mixed_raises(self):
         contract = SchemaContract(
             {
                 "columns": [
@@ -1157,7 +1190,10 @@ class TestFromPylistNullabilityEnforcement:
                         "name": "ts",
                         "arrow_type": "Timestamp(MICROSECOND, UTC)",
                         "nullable": False,
-                        "source_format": "%Y-%m-%d %H:%M:%S",
+                        "encoding": {
+                            "name": "strptime",
+                            "pattern": "%Y-%m-%d %H:%M:%S",
+                        },
                     }
                 ]
             }
@@ -1165,7 +1201,7 @@ class TestFromPylistNullabilityEnforcement:
         with pytest.raises(ValueError, match=r"'ts' is non-nullable.*\[1\]"):
             contract.from_pylist([{"ts": "2026-01-01 00:00:00"}, {"ts": None}])
 
-    def test_source_format_date_non_nullable_mixed_raises(self):
+    def test_strptime_encoding_date_non_nullable_mixed_raises(self):
         contract = SchemaContract(
             {
                 "columns": [
@@ -1173,7 +1209,7 @@ class TestFromPylistNullabilityEnforcement:
                         "name": "d",
                         "arrow_type": "Date32",
                         "nullable": False,
-                        "source_format": "%Y/%m/%d",
+                        "encoding": {"name": "strptime", "pattern": "%Y/%m/%d"},
                     }
                 ]
             }
@@ -1321,8 +1357,21 @@ class TestFromPylistTemporalRejectsFloatingPoint:
     ]
 
     @staticmethod
-    def _contract(arrow_type: str) -> SchemaContract:
-        return SchemaContract({"columns": [{"name": "t", "arrow_type": arrow_type}]})
+    def _contract(arrow_type: str, *, encoding: dict | None = None) -> SchemaContract:
+        field_def: dict = {"name": "t", "arrow_type": arrow_type}
+        if encoding is not None:
+            field_def["encoding"] = encoding
+        return SchemaContract({"columns": [field_def]})
+
+    @staticmethod
+    def _epoch_unit_for(arrow_type: str) -> str:
+        """The wire unit that reproduces the retired bare-int fallback's
+        reading for *arrow_type*: the type's own declared unit, or ``DAY``
+        for Date32/Date64, whose physical storage has no unit parameter at
+        all but is itself a day count."""
+        if arrow_type.startswith(("Date32", "Date64")):
+            return "DAY"
+        return arrow_type.split("(", 1)[1].rstrip(")").split(",")[0].strip()
 
     @pytest.mark.parametrize("arrow_type", TEMPORAL_TYPES)
     @pytest.mark.parametrize("value", [1.5, 1.0, Decimal("1.5"), Decimal("1.0")])
@@ -1367,20 +1416,30 @@ class TestFromPylistTemporalRejectsFloatingPoint:
         "value", [numpy.int32(1), numpy.int64(1)], ids=["int32", "int64"]
     )
     def test_numpy_integer_offset_still_decodes(self, arrow_type, value):
-        batch = self._contract(arrow_type).from_pylist([{"t": value}])
+        # Retired implicit path: the bare-int fallback is gone, so the same
+        # reading now needs an explicit 'epoch' declaration in the wire's
+        # own unit -- the type's declared unit, or DAY for Date32/Date64.
+        encoding = {"name": "epoch", "unit": self._epoch_unit_for(arrow_type)}
+        batch = self._contract(arrow_type, encoding=encoding).from_pylist(
+            [{"t": value}]
+        )
         assert batch.num_rows == 1
         assert batch.column(0)[0].is_valid
 
     @pytest.mark.parametrize("arrow_type", TEMPORAL_TYPES)
     def test_integer_offset_still_decodes(self, arrow_type):
-        batch = self._contract(arrow_type).from_pylist([{"t": 1}])
+        encoding = {"name": "epoch", "unit": self._epoch_unit_for(arrow_type)}
+        batch = self._contract(arrow_type, encoding=encoding).from_pylist([{"t": 1}])
         assert batch.num_rows == 1
         assert batch.column(0)[0].is_valid
 
     def test_unix_seconds_decode_to_the_declared_instant(self):
         # Naive on purpose: Timestamp(SECOND) declares no timezone.
         expected = datetime(2024, 1, 2, 3, 4, 5)  # noqa: DTZ001
-        batch = self._contract("Timestamp(SECOND)").from_pylist([{"t": 1704164645}])
+        encoding = {"name": "epoch", "unit": "SECOND"}
+        batch = self._contract("Timestamp(SECOND)", encoding=encoding).from_pylist(
+            [{"t": 1704164645}]
+        )
         assert batch.column(0)[0].as_py() == expected
 
     @pytest.mark.parametrize(
@@ -1396,8 +1455,16 @@ class TestFromPylistTemporalRejectsFloatingPoint:
         ],
     )
     def test_iso_8601_strings_still_decode(self, arrow_type, text, expected):
-        batch = self._contract(arrow_type).from_pylist([{"t": text}])
+        batch = self._contract(arrow_type, encoding={"name": "iso8601"}).from_pylist(
+            [{"t": text}]
+        )
         assert batch.column(0)[0].as_py() == expected
+
+    def test_missing_encoding_on_bare_integer_offset_raises(self):
+        # Without a declared encoding, a bare int no longer decodes -- the
+        # class's own name is what this row of the retirement covers.
+        with pytest.raises(MissingEncodingError, match="encoding"):
+            self._contract("Timestamp(SECOND)").from_pylist([{"t": 1704164645}])
 
     @pytest.mark.parametrize("arrow_type", ["Date32", "Duration(MICROSECOND)"])
     def test_nested_temporal_leaf_rejects_floating_point(self, arrow_type):

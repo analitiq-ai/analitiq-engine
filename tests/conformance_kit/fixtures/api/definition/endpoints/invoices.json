@@ -67,7 +67,11 @@
                   "number": { "type": "string" },
                   "total": { "type": "number" },
                   "paid": { "type": "boolean" },
-                  "issued_on": { "type": "string", "format": "date" }
+                  "issued_on": {
+                    "type": "string",
+                    "format": "date",
+                    "encoding": { "name": "iso8601" }
+                  }
                 }
               }
             }

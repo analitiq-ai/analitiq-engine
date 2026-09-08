@@ -32,7 +32,9 @@ from analitiq.contracts.endpoints import (
 from ..exceptions import TransportSpecError
 from ..record_identity import record_digest
 from ..resolver import Resolver, scope_paths
+from ..schema_contract import SchemaContract
 from ..transport_factory import require_wire_safe_header_name
+from ..type_map.exceptions import MissingEncodingError
 from ..types import RetrySemantics, RetryVerdict, SchemaSpec
 from .body import FORM_CONTENT_TYPE, media_type
 from .exceptions import RequestSpecError
@@ -49,6 +51,7 @@ from .write_response import WRITE_SCOPE_KEYS
 __all__ = [
     "WRITE_MODE_KEYS",
     "StreamWritePlan",
+    "apply_field_encoders",
     "body_with_idempotency_key",
     "build_write_plan",
     "collect_input_field_names",
@@ -56,6 +59,7 @@ __all__ = [
     "content_idempotency_key",
     "idempotency_config_problem",
     "reserved_header_names",
+    "resolve_field_encoders",
     "retry_verdict",
     "write_mode_block",
 ]
@@ -106,6 +110,12 @@ class StreamWritePlan:
     #: serialised -- otherwise the provider receives a quoted string where a
     #: nested object was declared.
     json_fields: set[str] = field(default_factory=set)
+    #: Body field name -> the encode function its declared ``encoding_write``
+    #: resolves to. Applied to every record dict in
+    #: ``GenericAPIConnector.land`` before the body is serialised, so a
+    #: field needing one (``build_write_plan`` refused the schema otherwise)
+    #: never reaches ``encode_body`` un-encoded.
+    field_encoders: dict[str, Callable[[Any], Any]] = field(default_factory=dict)
     #: ``request.body``, or ``None`` when the endpoint declares no template
     #: and the record itself is the body.
     body_spec: Any | None = None
@@ -230,6 +240,35 @@ def collect_input_field_names(mode_block: WriteOperation) -> set[str]:
         if isinstance(col, Mapping) and col.get("name"):
             names.add(col["name"])
     return names
+
+
+def resolve_field_encoders(
+    mode_block: WriteOperation,
+    *,
+    code_encoder: Callable[[str, Any, Any], Any] | None = None,
+) -> dict[str, Callable[[Any], Any]] | str:
+    """Build the field-name -> encode function map, or why the schema refuses.
+
+    Reuses :class:`~cdk.schema_contract.SchemaContract` against the write
+    input schema -- the same JSON-Schema/columns shape it already parses on
+    the read side -- so "does this arrow_type need a declared encoding" is
+    answered by the one policy in
+    :meth:`~cdk.schema_contract.SchemaContract.check_required_write_encoding`,
+    never re-derived here. A string return is the rejection reason the ack
+    carries, matching every other configure-time refusal in this module.
+
+    ``code_encoder`` takes ``(field_name, value, arrow_type)`` where
+    ``arrow_type`` is a ``pyarrow.DataType`` -- typed ``Any`` here, like the
+    rest of this package outside ``generic.py``, which never imports
+    pyarrow itself.
+    """
+    schema = mode_block.input.schema_
+    try:
+        contract = SchemaContract(schema)
+        contract.check_required_write_encoding()
+        return contract.resolve_write_encoders(code_encoder=code_encoder)
+    except (ValueError, MissingEncodingError) as err:
+        return f"write input schema: {err}"
 
 
 def reserved_header_names(transport_header_names: Iterable[str]) -> frozenset[str]:
@@ -386,6 +425,27 @@ def body_with_idempotency_key(
     return {**body, plan.idempotency_name: record_id}
 
 
+def apply_field_encoders(
+    records: list[dict[str, Any]], field_encoders: Mapping[str, Callable[[Any], Any]]
+) -> None:
+    """Encode every declared field in place, before the body is serialised.
+
+    Mirrors ``decode_json_fields``'s role on the same call site
+    (``GenericAPIConnector.land``): one pass over the batch's dicts so
+    ``encode_body`` never sees a value ``orjson`` cannot render natively --
+    a ``datetime``, ``Decimal``, or ``bytes`` a field's ``encoding_write``
+    was declared to bridge. ``None`` values are left alone; an encoder is
+    only ever asked to render a value that is actually present.
+    """
+    if not field_encoders:
+        return
+    for record in records:
+        for name, encode in field_encoders.items():
+            value = record.get(name)
+            if value is not None:
+                record[name] = encode(value)
+
+
 def content_idempotency_key(record: Mapping[str, Any]) -> str:
     """Full-content hash used as the idempotency key in upsert mode.
 
@@ -494,6 +554,7 @@ def build_write_plan(
     header_names_for: Callable[[str | None], Iterable[str]],
     transport_problem: Callable[[str | None], str | None],
     resolver: Resolver,
+    code_encoder: Callable[[str, Any, Any], Any] | None = None,
 ) -> StreamWritePlan | str:
     """Build the plan for a stream, or return why the schema is refused.
 
@@ -552,10 +613,15 @@ def build_write_plan(
         # reports success -- the same silence the read path refuses.
         table.rules.check_required(table.values)
 
+        field_encoders = resolve_field_encoders(mode_block, code_encoder=code_encoder)
+        if isinstance(field_encoders, str):
+            return field_encoders
+
         plan = StreamWritePlan(
             method=request.method,
             transport_ref=request.transport_ref,
             json_fields=collect_json_fields(mode_block),
+            field_encoders=field_encoders,
             body_spec=request.body,
             content_type=request.content_type,
             params=table.values,

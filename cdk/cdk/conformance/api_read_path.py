@@ -93,7 +93,7 @@ from cdk.exceptions import ReadError
 from cdk.json_utils import authored_json
 from cdk.resolver import Resolver, scope_paths
 from cdk.schema_contract import SchemaContract
-from cdk.type_map import TypeMapper
+from cdk.type_map import TypeMapError, TypeMapper
 
 from .api_surface import (
     STAND_IN_ORIGIN,
@@ -135,8 +135,10 @@ _COMPILE_FAILURES = (ReadError, RequestSpecError)
 _ADVANCE_FAILURES = (ReadError, ValueError)
 
 #: What building a record schema raises: ``ReadError`` from the records ref
-#: and the arrow-type resolution, ``ValueError`` from ``SchemaContract``.
-_RECORD_FAILURES = (ReadError, ValueError)
+#: and the arrow-type resolution, ``ValueError`` from ``SchemaContract``,
+#: ``TypeMapError`` (``MissingEncodingError`` included) from a field whose
+#: wire shape needs a declared ``encoding`` and has none.
+_RECORD_FAILURES = (ReadError, ValueError, TypeMapError)
 
 #: The page size the probe reads with. Any positive integer works; a value
 #: unlike the contract's own bounds makes it obvious in a message that the
@@ -1393,7 +1395,11 @@ def check_api_record_schema(target: ConformanceTarget) -> list[Violation]:
     through the connector's read type-map, and the result builds a
     :class:`~cdk.schema_contract.SchemaContract`. A ref naming a field the
     schema does not declare, or a JSON type the type-map has no rule for,
-    fails the read on its first page.
+    fails the read on its first page -- and so does a field whose
+    ``arrow_type`` has no direct wire-native rendering
+    (``check_required_read_encoding``) and declares no ``encoding``: it
+    would validate here and fail only when a real record is read, which is
+    exactly the gap this check exists to close before that happens.
     """
     violations: list[Violation] = unread_endpoints(RECORDS_CHECK, target)
     mapper = target.type_mapper
@@ -1401,7 +1407,7 @@ def check_api_record_schema(target: ConformanceTarget) -> list[Violation]:
         try:
             items = records_items_schema(label, read.response)
             _resolve_arrow_types(items, mapper)
-            SchemaContract(items)
+            SchemaContract(items).check_required_read_encoding()
         except _RECORD_FAILURES as err:
             violations.append(
                 Violation(

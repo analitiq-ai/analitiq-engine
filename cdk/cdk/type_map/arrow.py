@@ -7,15 +7,23 @@ which only :func:`resolve_arrow_type` has access to.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import numbers
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 from re import Pattern
 from typing import Any, Final
 
 import pyarrow as pa
+import pyarrow.compute as pc
 
+from ._param_validation import require_enum_param, require_list_param, require_str_param
 from .conversions import Conversion, classify_conversion
+from .decoders import CODE_ENCODING_NAME, EPOCH_UNITS
 from .exceptions import InvalidTypeMapError
 from .grammar import (
     ARROW_FAMILIES,
@@ -24,6 +32,16 @@ from .grammar import (
     UnitParam,
     bind_parameters,
 )
+
+#: One decoded column: the raw wire values in, a typed ``pa.Array`` out.
+DecodeFn = Callable[[pa.Field, "list[Any]"], pa.Array]
+
+_UNIT_SHORT: Final[dict[str, str]] = {
+    "SECOND": "s",
+    "MILLISECOND": "ms",
+    "MICROSECOND": "us",
+    "NANOSECOND": "ns",
+}
 
 _PARAM_SPLIT: Final[Pattern[str]] = re.compile(r"\s*,\s*")
 
@@ -293,3 +311,372 @@ def first_blocked_nested_leaf(
     if conversion.mode in ("explicit", "forbidden"):
         return BlockedLeaf(path, source, target, conversion)
     return None
+
+
+# ---- decoders: the pyarrow-backed functions the decoders_catalog names ----
+#
+# The vocabulary (names, declared params, which conversion kinds require one)
+# lives in :mod:`cdk.type_map.decoders`, which stays importable without
+# pyarrow. Each function here takes the raw wire values for one column and
+# returns a ``pa.Array`` already cast to ``field.type`` -- the same contract
+# ``cdk.schema_contract._parse_with_source_format``/``_build_temporal_from_strings``
+# held before this catalog replaced them.
+
+
+def _coerce_ticks(field_name: str, values: "list[Any]") -> "list[int | None]":
+    """Read each wire value as an integer tick count, or raise naming the row.
+
+    ``numbers.Integral`` rather than a bare ``isinstance(v, int)``: a
+    connector's own driver code can hand back a numpy integer scalar
+    (``int32``/``int64``), which registers against the ABC but is not a
+    Python ``int`` subclass -- the same accommodation
+    ``_reject_floating_point_offset`` makes for numpy floats.
+    """
+    ticks: list[int | None] = []
+    for row, v in enumerate(values):
+        if v is None:
+            ticks.append(None)
+            continue
+        if isinstance(v, bool):
+            raise ValueError(
+                f"column {field_name!r} at row {row}: got bool {v!r}, expected an "
+                f"integer epoch tick count"
+            )
+        if isinstance(v, numbers.Integral):
+            ticks.append(int(v))
+            continue
+        if isinstance(v, str):
+            try:
+                ticks.append(int(v))
+            except ValueError as exc:
+                raise ValueError(
+                    f"column {field_name!r} at row {row}: {v!r} is not an integer "
+                    f"epoch tick count"
+                ) from exc
+            continue
+        raise ValueError(
+            f"column {field_name!r} at row {row}: {v!r} "
+            f"({type(v).__name__}) is not an integer epoch tick count"
+        )
+    return ticks
+
+
+def _ticks_to_array(
+    field: pa.Field, ticks: "list[int | None]", wire_unit: str
+) -> pa.Array:
+    """Build ``field.type`` from epoch ticks in *wire_unit*.
+
+    Built through the wire unit's own pyarrow type and cast to ``field.type``
+    (``pc.cast(safe=True)``) rather than hand-computed, so a unit mismatch
+    between the wire and the declared type (ms ticks into a Timestamp(us)
+    column, or seconds-since-midnight into a Time64(MICROSECOND) column) is
+    the same safe-cast every other boundary in this package uses, not a
+    second arithmetic implementation that could disagree with it.
+    """
+    if wire_unit == "DAY":
+        if not pa.types.is_date(field.type):
+            raise InvalidTypeMapError(
+                f"column {field.name!r}: epoch unit 'DAY' only applies to a "
+                f"Date32/Date64 arrow_type, got {field.type}"
+            )
+        return pc.cast(pa.array(ticks, type=pa.date32()), field.type, safe=True)
+    short = _UNIT_SHORT[wire_unit]
+    if pa.types.is_timestamp(field.type):
+        naive = pa.array(ticks, type=pa.timestamp(short))
+        if field.type.tz is not None:
+            naive = pc.assume_timezone(naive, field.type.tz)
+        return pc.cast(naive, field.type, safe=True)
+    if pa.types.is_date(field.type):
+        naive = pa.array(ticks, type=pa.timestamp(short))
+        return pc.cast(naive, field.type, safe=True)
+    if pa.types.is_duration(field.type):
+        return pc.cast(pa.array(ticks, type=pa.duration(short)), field.type, safe=True)
+    if pa.types.is_time(field.type):
+        wire_time_type = pa.time32(short) if short in ("s", "ms") else pa.time64(short)
+        return pc.cast(pa.array(ticks, type=wire_time_type), field.type, safe=True)
+    raise InvalidTypeMapError(
+        f"column {field.name!r}: epoch ticks cannot build {field.type}; expected "
+        f"a Timestamp, Date, Time, or Duration arrow_type"
+    )
+
+
+def _decode_iso8601(_config: Mapping[str, Any]) -> DecodeFn:
+    """ISO-8601 text -> Timestamp/Date/Time. The retired implicit default,
+    now only applied when a field names it."""
+
+    def decode(field: pa.Field, values: "list[Any]") -> pa.Array:
+        is_ts = pa.types.is_timestamp(field.type)
+        is_date_type = pa.types.is_date(field.type)
+        is_time_type = pa.types.is_time(field.type)
+        if not (is_ts or is_date_type or is_time_type):
+            raise InvalidTypeMapError(
+                f"column {field.name!r}: encoding 'iso8601' requires a "
+                f"Timestamp, Date, or Time arrow_type, got {field.type}"
+            )
+        tz = field.type.tz if is_ts else None
+        parsed: list[Any] = []
+        for row, v in enumerate(values):
+            if v is None:
+                parsed.append(None)
+                continue
+            if not isinstance(v, str):
+                raise ValueError(
+                    f"column {field.name!r} at row {row}: encoding 'iso8601' "
+                    f"expects a string, got {type(v).__name__}"
+                )
+            try:
+                if is_ts:
+                    dt = datetime.fromisoformat(v)
+                    if tz and dt.tzinfo is None:
+                        raise ValueError(
+                            f"value {v!r} is naive but column declares tz={tz!r}"
+                        )
+                    if not tz and dt.tzinfo is not None:
+                        dt = dt.replace(tzinfo=None)
+                    parsed.append(dt)
+                elif is_date_type:
+                    parsed.append(date.fromisoformat(v[:10]))
+                else:
+                    parsed.append(time.fromisoformat(v))
+            except ValueError as exc:
+                raise ValueError(
+                    f"column {field.name!r} at row {row}: cannot parse {v!r} as "
+                    f"{field.type} via encoding 'iso8601': {exc}"
+                ) from exc
+        return pa.array(parsed, type=field.type)
+
+    return decode
+
+
+def _decode_epoch(config: Mapping[str, Any]) -> DecodeFn:
+    unit = require_enum_param(config, "unit", EPOCH_UNITS, "encoding 'epoch'")
+
+    def decode(field: pa.Field, values: "list[Any]") -> pa.Array:
+        return _ticks_to_array(field, _coerce_ticks(field.name, values), unit)
+
+    return decode
+
+
+def _decode_strptime(config: Mapping[str, Any]) -> DecodeFn:
+    """``pc.strptime`` against a declared pattern -- the retired ``source_format``
+    hatch, now a named, declared catalog entry rather than an unvalidated one."""
+    pattern = require_str_param(config, "pattern", "encoding 'strptime'")
+
+    def decode(field: pa.Field, values: "list[Any]") -> pa.Array:
+        for row, v in enumerate(values):
+            if v is not None and not isinstance(v, str):
+                raise TypeError(
+                    f"column {field.name!r} at row {row}: encoding 'strptime' "
+                    f"expects a string, got {type(v).__name__}"
+                )
+        string_col = pa.array(values, type=pa.string())
+        unit = getattr(field.type, "unit", None) or (
+            "us" if pa.types.is_timestamp(field.type) else "s"
+        )
+        parsed = pc.strptime(string_col, format=pattern, unit=unit)
+        if parsed.type == field.type:
+            return parsed
+        tz = getattr(field.type, "tz", None)
+        if tz and not getattr(parsed.type, "tz", None):
+            parsed = pc.assume_timezone(parsed, tz)
+        return pc.cast(parsed, field.type, safe=False)
+
+    return decode
+
+
+_REGEX_EPOCH_RE_CACHE: Final[dict[str, re.Pattern[str]]] = {}
+
+
+def _decode_regex_epoch(config: Mapping[str, Any]) -> DecodeFn:
+    """Extract epoch ticks from a wrapper string via a capturing regex.
+
+    Xero's ``/Date(1541176290160+0000)/``: ``pattern`` names the single
+    capture group holding the ticks, ``unit`` the tick unit. Anything else in
+    the wrapper -- Xero's decorative offset suffix -- is matched but not
+    captured, so it is read and discarded rather than shifting the instant
+    (ticks are always UTC per the MS/ASP.NET AJAX date convention).
+    """
+    pattern = require_str_param(config, "pattern", "encoding 'regex_epoch'")
+    unit = require_enum_param(config, "unit", EPOCH_UNITS, "encoding 'regex_epoch'")
+    compiled = _REGEX_EPOCH_RE_CACHE.setdefault(pattern, re.compile(pattern))
+    if compiled.groups != 1:
+        raise InvalidTypeMapError(
+            f"encoding 'regex_epoch' pattern {pattern!r} must declare exactly "
+            f"one capture group for the ticks, found {compiled.groups}"
+        )
+
+    def decode(field: pa.Field, values: "list[Any]") -> pa.Array:
+        ticks: list[int | None] = []
+        for row, v in enumerate(values):
+            if v is None:
+                ticks.append(None)
+                continue
+            if not isinstance(v, str):
+                raise ValueError(
+                    f"column {field.name!r} at row {row}: encoding 'regex_epoch' "
+                    f"expects a string, got {type(v).__name__}"
+                )
+            match = compiled.fullmatch(v)
+            if match is None:
+                raise ValueError(
+                    f"column {field.name!r} at row {row}: {v!r} does not match "
+                    f"encoding 'regex_epoch' pattern {pattern!r}"
+                )
+            ticks.append(int(match.group(1)))
+        return _ticks_to_array(field, ticks, unit)
+
+    return decode
+
+
+def _decode_decimal(_config: Mapping[str, Any]) -> DecodeFn:
+    def decode(field: pa.Field, values: "list[Any]") -> pa.Array:
+        if not pa.types.is_decimal(field.type):
+            raise InvalidTypeMapError(
+                f"column {field.name!r}: encoding 'decimal' requires a "
+                f"Decimal128/Decimal256 arrow_type, got {field.type}"
+            )
+        converted = [None if v is None else Decimal(str(v)) for v in values]
+        return pa.array(converted, type=field.type)
+
+    return decode
+
+
+def _decode_bool_map(config: Mapping[str, Any]) -> DecodeFn:
+    true_values = require_list_param(config, "true_values", "encoding 'bool_map'")
+    false_values = require_list_param(config, "false_values", "encoding 'bool_map'")
+    if not true_values or not false_values:
+        raise InvalidTypeMapError(
+            "encoding 'bool_map' requires a non-empty 'true_values' and "
+            "'false_values'"
+        )
+
+    def decode(field: pa.Field, values: "list[Any]") -> pa.Array:
+        mapped: list[bool | None] = []
+        for row, v in enumerate(values):
+            if v is None:
+                mapped.append(None)
+            elif v in true_values:
+                mapped.append(True)
+            elif v in false_values:
+                mapped.append(False)
+            else:
+                raise ValueError(
+                    f"column {field.name!r} at row {row}: {v!r} is not in "
+                    f"encoding 'bool_map''s true_values {true_values} or "
+                    f"false_values {false_values}"
+                )
+        return pa.array(mapped, type=field.type)
+
+    return decode
+
+
+def _decode_base64(_config: Mapping[str, Any]) -> DecodeFn:
+    def decode(field: pa.Field, values: "list[Any]") -> pa.Array:
+        decoded: list[bytes | None] = []
+        for row, v in enumerate(values):
+            if v is None:
+                decoded.append(None)
+                continue
+            if not isinstance(v, str):
+                raise ValueError(
+                    f"column {field.name!r} at row {row}: encoding 'base64' "
+                    f"expects a string, got {type(v).__name__}"
+                )
+            try:
+                decoded.append(base64.b64decode(v, validate=True))
+            except (binascii.Error, ValueError) as exc:
+                raise ValueError(
+                    f"column {field.name!r} at row {row}: {v!r} is not valid "
+                    f"base64: {exc}"
+                ) from exc
+        return pa.array(decoded, type=field.type)
+
+    return decode
+
+
+#: ``PnW`` or ``PnDTnHnMnS`` -- weeks (exclusive per ISO-8601), or days and
+#: clock components. Calendar years/months are deliberately unsupported: a
+#: Duration is a fixed physical length, and a month has none.
+_ISO_DURATION_RE: Final[re.Pattern[str]] = re.compile(
+    r"^P(?:(?P<weeks>\d+)W)$"
+    r"|"
+    r"^P(?:(?P<days>\d+)D)?"
+    r"(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?"
+    r"(?:(?P<seconds>\d+(?:\.\d+)?)S)?)?$"
+)
+
+
+def _decode_iso_duration(_config: Mapping[str, Any]) -> DecodeFn:
+    def decode(field: pa.Field, values: "list[Any]") -> pa.Array:
+        if not pa.types.is_duration(field.type):
+            raise InvalidTypeMapError(
+                f"column {field.name!r}: encoding 'iso_duration' requires a "
+                f"Duration arrow_type, got {field.type}"
+            )
+        parsed: list[Any] = []
+        for row, v in enumerate(values):
+            if v is None:
+                parsed.append(None)
+                continue
+            if not isinstance(v, str):
+                raise ValueError(
+                    f"column {field.name!r} at row {row}: encoding "
+                    f"'iso_duration' expects a string, got {type(v).__name__}"
+                )
+            match = _ISO_DURATION_RE.fullmatch(v)
+            if match is None:
+                raise ValueError(
+                    f"column {field.name!r} at row {row}: {v!r} is not an "
+                    f"ISO-8601 duration this decoder supports (weeks, days, "
+                    f"and clock components only -- no calendar Y/M)"
+                )
+            groups = match.groupdict()
+            parsed.append(
+                timedelta(
+                    weeks=int(groups["weeks"] or 0),
+                    days=int(groups["days"] or 0),
+                    hours=int(groups["hours"] or 0),
+                    minutes=int(groups["minutes"] or 0),
+                    seconds=float(groups["seconds"] or 0),
+                )
+            )
+        return pa.array(parsed, type=field.type)
+
+    return decode
+
+
+_DECODER_FACTORIES: Final[dict[str, Callable[[Mapping[str, Any]], DecodeFn]]] = {
+    "iso8601": _decode_iso8601,
+    "epoch": _decode_epoch,
+    "strptime": _decode_strptime,
+    "regex_epoch": _decode_regex_epoch,
+    "decimal": _decode_decimal,
+    "bool_map": _decode_bool_map,
+    "base64": _decode_base64,
+    "iso_duration": _decode_iso_duration,
+}
+
+
+def resolve_decoder(field_def: Mapping[str, Any], field: pa.Field) -> DecodeFn | None:
+    """Build the decode function a field's declared ``encoding`` names.
+
+    Returns ``None`` for an undeclared field (the caller decides whether
+    that is an error via :func:`cdk.type_map.decoders.requires_read_encoding`)
+    and for :data:`~cdk.type_map.decoders.CODE_ENCODING_NAME`, which the
+    caller must route to ``ApiDialect.decode_field`` before calling this --
+    there is no catalog function backing it.
+    """
+    encoding = field_def.get("encoding")
+    if encoding is None:
+        return None
+    name = encoding.get("name")
+    if name == CODE_ENCODING_NAME:
+        return None
+    factory = _DECODER_FACTORIES.get(name)
+    if factory is None:
+        raise InvalidTypeMapError(
+            f"unknown encoding name {name!r} on field {field.name!r}; expected "
+            f"one of {', '.join([*_DECODER_FACTORIES, CODE_ENCODING_NAME])}"
+        )
+    config = {k: v for k, v in encoding.items() if k != "name"}
+    return factory(config)

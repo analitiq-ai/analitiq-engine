@@ -94,6 +94,7 @@ from .verdicts import declared_retry_statuses, read_verdict, write_verdict
 from .write_plan import (
     WRITE_MODE_KEYS,
     StreamWritePlan,
+    apply_field_encoders,
     body_with_idempotency_key,
     build_write_plan,
     content_idempotency_key,
@@ -511,7 +512,12 @@ class GenericAPIConnector(BaseDestinationHandler):
 
         items_schema = records_items_schema(endpoint_id, read.response)
         apply_read_type_map(items_schema, endpoint_ref, runtime)
-        schema_contract = SchemaContract(items_schema)
+        code_decoder = self.dialect.decode_field if self.dialect is not None else None
+        schema_contract = SchemaContract(items_schema, code_decoder=code_decoder)
+        # Opt-in, and only here: this is the one call site building a
+        # SchemaContract from a JSON-Schema API endpoint. SQL's "columns"
+        # shape never declares 'encoding' and must never be gated by it.
+        schema_contract.check_required_read_encoding()
 
         request_block = read.request
         method = request_block.method
@@ -1049,6 +1055,9 @@ class GenericAPIConnector(BaseDestinationHandler):
             header_names_for=runtime.transport_header_names,
             transport_problem=runtime.transport_problem,
             resolver=self._write_resolver,
+            code_encoder=self.dialect.encode_field
+            if self.dialect is not None
+            else None,
         )
         if isinstance(outcome, str):
             return self._reject_schema(stream_id, outcome)
@@ -1084,13 +1093,19 @@ class GenericAPIConnector(BaseDestinationHandler):
     async def land(self, batch: LandingBatch) -> int:
         """Send the batch's records to the endpoint.
 
-        Records stay row-oriented: Arrow-native Python types survive into
-        the dicts and the body serialiser handles them, so pre-casting in
-        Arrow space would be a second pass for no gain.
+        Records stay row-oriented. Most Arrow-native Python types (``str``,
+        ``int``, ``float``, ``bool``) survive into the dicts and the body
+        serialiser handles them directly; a field whose type has no native
+        JSON rendering (``datetime``, ``Decimal``, ``bytes``, ...) is
+        resolved through its declared ``encoding_write`` here, in place,
+        before serialisation -- ``plan.field_encoders`` is built once at
+        schema configure time (``build_write_plan``), never re-derived per
+        batch.
         """
         plan = self._streams[batch.stream_id]
         records = batch.records
         decode_json_fields(records, plan.json_fields)
+        apply_field_encoders(records, plan.field_encoders)
         if plan.max_records is None:
             written, failed_ids, detail, category = await self._write_one_by_one(
                 plan, records, batch.record_ids

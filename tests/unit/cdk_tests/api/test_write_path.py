@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 import pyarrow as pa
 import pytest
 
 from cdk.api import GenericAPIConnector
+from cdk.api.dialects import ApiDialect
 from cdk.types import AckStatus, Cursor, RetrySemantics, SchemaSpec, WriteMode
 
 from .fakes import BASE_URL, FakeResponse, FakeSession, runtime_with, sent_query
@@ -70,8 +73,27 @@ def _document(
     }
 
 
+def _document_with_field(field_name: str, field_def: dict[str, Any]) -> dict[str, Any]:
+    """A write document like :func:`_document`, plus one extra input field.
+
+    The default body template (``{"item": {"from_input": "record"}}``) sends
+    the whole record, so a field's value reaches ``encode_body`` however
+    ``GenericAPIConnector.land`` prepared it -- exactly the seam
+    ``apply_field_encoders`` runs in, before any body template is applied.
+    """
+    doc = _document()
+    doc["operations"]["write"]["insert"]["input"]["schema"]["properties"][
+        field_name
+    ] = field_def
+    return doc
+
+
 def _batch(rows: int = 2) -> pa.RecordBatch:
     return pa.RecordBatch.from_pylist([{"id": i} for i in range(rows)])
+
+
+def _batch_with(rows: list[dict[str, Any]]) -> pa.RecordBatch:
+    return pa.RecordBatch.from_pylist(rows)
 
 
 async def _connected(
@@ -374,3 +396,161 @@ class TestHealthCheck:
 
     async def test_an_unconnected_connector_is_not(self) -> None:
         assert await GenericAPIConnector().health_check() is False
+
+
+@pytest.mark.asyncio
+class TestDeclarativeWireFormatEncoding:
+    """The write-side half of issue #503, driven end to end through
+    ``GenericAPIConnector.configure_schema``/``write_batch``."""
+
+    async def test_a_decimal_field_with_no_encoding_write_is_refused_at_configure(
+        self,
+    ) -> None:
+        # Acceptance: a field whose arrow_type cannot be cast directly to
+        # its JSON wire value and has no encoding_write declared raises the
+        # mirrored loud error at connector load -- here, a configure-time
+        # schema rejection, matching every other config defect this module
+        # refuses the same way.
+        connector = GenericAPIConnector()
+        document = _document_with_field(
+            "amount",
+            {
+                "type": "string",
+                "native_type": "numeric",
+                "arrow_type": "Decimal128(18, 2)",
+            },
+        )
+        connector.set_stream_endpoints({"items": document})
+        await connector.connect(runtime_with(FakeSession()))
+        accepted = await connector.configure_schema(
+            SchemaSpec(
+                stream_id="items",
+                version=1,
+                write_mode=WriteMode.WRITE_MODE_INSERT,
+                ack_timeout_seconds=30,
+            )
+        )
+        assert accepted is False
+        assert "amount" in connector.last_schema_rejection
+        assert "encoding_write" in connector.last_schema_rejection
+
+    async def test_explicit_decimal_encoding_write_matches_the_old_orjson_default(
+        self,
+    ) -> None:
+        # Acceptance: byte-identical wire output to today's _orjson_default
+        # behavior for the same input value.
+        session = FakeSession([FakeResponse(body={})])
+        document = _document_with_field(
+            "amount",
+            {
+                "type": "string",
+                "native_type": "numeric",
+                "arrow_type": "Decimal128(18, 2)",
+                "encoding_write": {"name": "decimal"},
+            },
+        )
+        connector = await _connected(session, document)
+        value = Decimal("1.50")
+        await _write(connector, _batch_with([{"id": 0, "amount": value}]))
+        assert session.calls[0]["data"] == (
+            b'{"item":{"id":0,"amount":' + f'"{value}"'.encode() + b"}}"
+        )
+
+    async def test_explicit_iso8601_encoding_write_matches_the_old_native_rendering(
+        self,
+    ) -> None:
+        session = FakeSession([FakeResponse(body={})])
+        document = _document_with_field(
+            "shipped_at",
+            {
+                "type": "string",
+                "native_type": "timestamp",
+                "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                "encoding_write": {"name": "iso8601"},
+            },
+        )
+        connector = await _connected(session, document)
+        moment = datetime(2026, 7, 31, 12, 0, 0, tzinfo=timezone.utc)
+        await _write(connector, _batch_with([{"id": 0, "shipped_at": moment}]))
+        expected_iso = moment.isoformat().encode()
+        assert session.calls[0]["data"] == (
+            b'{"item":{"id":0,"shipped_at":"' + expected_iso + b'"}}'
+        )
+
+    async def test_explicit_base64_encoding_write_matches_the_old_orjson_default(
+        self,
+    ) -> None:
+        session = FakeSession([FakeResponse(body={})])
+        document = _document_with_field(
+            "blob",
+            {
+                "type": "string",
+                "native_type": "binary",
+                "arrow_type": "Binary",
+                "encoding_write": {"name": "base64"},
+            },
+        )
+        connector = await _connected(session, document)
+        payload = b"\x00\x01\xff"
+        await _write(connector, _batch_with([{"id": 0, "blob": payload}]))
+        expected = base64.b64encode(payload).decode("ascii").encode()
+        assert session.calls[0]["data"] == (
+            b'{"item":{"id":0,"blob":"' + expected + b'"}}'
+        )
+
+    async def test_code_hatch_routes_through_the_dialect_encode_hook(self) -> None:
+        class ReversingDialect(ApiDialect):
+            def encode_field(self, field_name: str, value: Any, arrow_type: Any) -> Any:
+                return value[::-1]
+
+        class CustomConnector(GenericAPIConnector):
+            dialect_class = ReversingDialect
+
+        document = _document_with_field(
+            "code_name",
+            {
+                "type": "string",
+                "native_type": "text",
+                "arrow_type": "Utf8",
+                "encoding_write": {"name": "code"},
+            },
+        )
+        session = FakeSession([FakeResponse(body={})])
+        connector = CustomConnector()
+        connector.set_stream_endpoints({"items": document})
+        await connector.connect(runtime_with(session))
+        accepted = await connector.configure_schema(
+            SchemaSpec(
+                stream_id="items",
+                version=1,
+                write_mode=WriteMode.WRITE_MODE_INSERT,
+                ack_timeout_seconds=30,
+            )
+        )
+        assert accepted, connector.last_schema_rejection
+        await _write(connector, _batch_with([{"id": 0, "code_name": "abc"}]))
+        assert session.calls[0]["data"] == b'{"item":{"id":0,"code_name":"cba"}}'
+
+    async def test_code_hatch_with_no_dialect_override_fails_loud_at_write(
+        self,
+    ) -> None:
+        # configure_schema accepts (the base ApiDialect.encode_field exists,
+        # just raises); land()'s catch-all turns the NotImplementedError
+        # into a fatal ack naming the exception, the same as any other
+        # unexpected failure during land() -- not a silent pass-through of
+        # the un-encoded value.
+        document = _document_with_field(
+            "code_name",
+            {
+                "type": "string",
+                "native_type": "text",
+                "arrow_type": "Utf8",
+                "encoding_write": {"name": "code"},
+            },
+        )
+        session = FakeSession()
+        connector = await _connected(session, document)
+        result = await _write(connector, _batch_with([{"id": 0, "code_name": "abc"}]))
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert "code_name" in result.failure_summary
+        assert session.calls == []

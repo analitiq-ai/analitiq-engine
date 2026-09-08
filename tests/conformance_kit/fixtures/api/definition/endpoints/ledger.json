@@ -60,7 +60,11 @@
                   "sequence": { "type": "integer" },
                   "account": { "type": "string" },
                   "amount": { "type": "number" },
-                  "posted_at": { "type": "string", "format": "date-time" }
+                  "posted_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "encoding": { "name": "iso8601" }
+                  }
                 }
               }
             }

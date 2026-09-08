@@ -4,7 +4,8 @@ import json
 import logging
 import math
 import numbers
-from datetime import date, datetime, time
+from collections.abc import Callable
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -13,8 +14,19 @@ import pyarrow.compute as pc
 
 from .json_utils import decimals_to_float, decode_json_fields
 from .type_map import resolve_arrow_type
-from .type_map.arrow import classify_arrow_conversion, first_blocked_nested_leaf
-from .type_map.exceptions import InvalidTypeMapError
+from .type_map.arrow import (
+    arrow_family,
+    classify_arrow_conversion,
+    first_blocked_nested_leaf,
+    resolve_decoder,
+)
+from .type_map.decoders import CODE_ENCODING_NAME as READ_CODE_ENCODING_NAME
+from .type_map.decoders import REQUIRES_ENCODING_KINDS as READ_REQUIRES_ENCODING_KINDS
+from .type_map.encoders import CODE_ENCODING_NAME as WRITE_CODE_ENCODING_NAME
+from .type_map.encoders import REQUIRES_ENCODING_KINDS as WRITE_REQUIRES_ENCODING_KINDS
+from .type_map.encoders import resolve_encoder
+from .type_map.exceptions import InvalidTypeMapError, MissingEncodingError
+from .type_map.grammar import ARROW_FAMILIES
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +114,19 @@ def _is_nested(arrow_type: pa.DataType) -> bool:
     )
 
 
-def _has_strings(values: list[Any]) -> bool:
-    return any(isinstance(v, str) for v in values if v is not None)
+def _bind_code_encoder(
+    code_encoder: Callable[[str, Any, pa.DataType], Any],
+    field_name: str,
+    arrow_type: pa.DataType,
+) -> Callable[[Any], Any]:
+    """Close over one field's name/type so ``resolve_write_encoders`` can
+    return a uniform ``Callable[[Any], Any]`` regardless of whether the
+    field resolved to a catalog encoder or the ``code`` hatch."""
+
+    def encode(value: Any) -> Any:
+        return code_encoder(field_name, value, arrow_type)
+
+    return encode
 
 
 def _all_null_column(field: pa.Field, values: list[Any]) -> pa.Array:
@@ -113,30 +136,6 @@ def _all_null_column(field: pa.Field, values: list[Any]) -> pa.Array:
             f"column {field.name!r} is non-nullable but every source value is None"
         )
     return pa.nulls(len(values), type=field.type)
-
-
-def _parse_with_source_format(
-    field: pa.Field, values: list[Any], source_format: str
-) -> pa.Array:
-    """Parse string values by the declared ``source_format`` into a date/timestamp."""
-    for v in values:
-        if v is not None and not isinstance(v, str):
-            raise TypeError(
-                f"column {field.name!r} declares source_format but a "
-                f"non-string value of type {type(v).__name__} was found; "
-                f"source_format only applies to string inputs"
-            )
-    string_col = pa.array(values, type=pa.string())
-    unit = getattr(field.type, "unit", None) or (
-        "us" if pa.types.is_timestamp(field.type) else "s"
-    )
-    parsed = pc.strptime(string_col, format=source_format, unit=unit)
-    if parsed.type == field.type:
-        return parsed
-    tz = getattr(field.type, "tz", None)
-    if tz and not getattr(parsed.type, "tz", None):
-        parsed = pc.assume_timezone(parsed, tz)
-    return pc.cast(parsed, field.type, safe=False)
 
 
 def _build_decimal_column(field: pa.Field, values: list[Any]) -> pa.Array:
@@ -283,9 +282,24 @@ def _prepare_nested_value(
 
 
 class SchemaContract:
-    """Arrow schema mapping for a connector endpoint."""
+    """Arrow schema mapping for a connector endpoint.
 
-    def __init__(self, endpoint_schema: dict[str, Any]) -> None:
+    ``code_decoder``, when given, backs a field declaring
+    ``encoding: {"name": "code"}`` -- routed to a connector's
+    ``ApiDialect.decode_field`` override rather than a catalog entry. It is
+    the caller's business to supply one: this module stays free of any
+    ``cdk.api`` import, so a SQL caller (which has no dialect) simply never
+    passes it, and a field declaring ``"code"`` without one fails loud at
+    the point it is needed rather than being silently skipped.
+    """
+
+    def __init__(
+        self,
+        endpoint_schema: dict[str, Any],
+        *,
+        code_decoder: Callable[[str, list[Any], pa.DataType], pa.Array] | None = None,
+    ) -> None:
+        self._code_decoder = code_decoder
         if "columns" in endpoint_schema:
             field_defs = endpoint_schema.get("columns") or []
             if not field_defs:
@@ -332,6 +346,77 @@ class SchemaContract:
     def json_columns(self) -> set:
         return {n for n, defn in self._field_defs.items() if _is_json_field(defn)}
 
+    def check_required_read_encoding(self) -> None:
+        """Raise for a field whose read wire shape needs a declared ``encoding``.
+
+        Opt-in, and deliberately not run from ``__init__``: only a caller
+        building this contract from a JSON-Schema API endpoint should call
+        it. SQL's ``"columns"`` shape has no ``encoding`` vocabulary at all,
+        so a SQL caller must never call this -- see
+        ``cdk.api.generic._plan_read`` for the one call site that does.
+        """
+        self._check_required_encoding(
+            key="encoding", kinds=READ_REQUIRES_ENCODING_KINDS, direction="read"
+        )
+
+    def check_required_write_encoding(self) -> None:
+        """Raise for a field whose write wire shape needs ``encoding_write``.
+
+        Same opt-in contract as :meth:`check_required_read_encoding`; the one
+        call site is ``cdk.api.write_plan.build_write_plan``.
+        """
+        self._check_required_encoding(
+            key="encoding_write", kinds=WRITE_REQUIRES_ENCODING_KINDS, direction="write"
+        )
+
+    def resolve_write_encoders(
+        self,
+        *,
+        code_encoder: Callable[[str, Any, pa.DataType], Any] | None = None,
+    ) -> dict[str, Callable[[Any], Any]]:
+        """Build the field name -> encode function map for every declared
+        ``encoding_write``.
+
+        Skips a field with none declared -- nothing to apply, and
+        :meth:`check_required_write_encoding` is what refuses that when the
+        field's arrow_type actually needs one. A field naming ``"code"``
+        binds a closure over *code_encoder* and the field's arrow_type; a
+        missing *code_encoder* raises immediately rather than deferring to
+        the first record that reaches it.
+        """
+        encoders: dict[str, Callable[[Any], Any]] = {}
+        for f in self._arrow_schema:
+            field_def = self._field_defs.get(f.name) or {}
+            encoding_write = field_def.get("encoding_write")
+            if encoding_write is None:
+                continue
+            if encoding_write.get("name") == WRITE_CODE_ENCODING_NAME:
+                if code_encoder is None:
+                    raise ValueError(
+                        f"field {f.name!r} declares encoding_write name='code' "
+                        f"but no code_encoder was supplied"
+                    )
+                encoders[f.name] = _bind_code_encoder(code_encoder, f.name, f.type)
+                continue
+            fn = resolve_encoder(encoding_write)
+            if fn is not None:
+                encoders[f.name] = fn
+        return encoders
+
+    def _check_required_encoding(
+        self, *, key: str, kinds: frozenset[str], direction: str
+    ) -> None:
+        for f in self._arrow_schema:
+            kind = ARROW_FAMILIES[arrow_family(f.type)].conversion_kind
+            if kind not in kinds:
+                continue
+            field_def = self._field_defs.get(f.name) or {}
+            if key in field_def:
+                continue
+            raise MissingEncodingError(
+                f.name, str(f.type), direction=direction, key=key
+            )
+
     def to_db_records(self, record_batch: pa.RecordBatch) -> list[dict[str, Any]]:
         """Materialise a batch for a SQL destination.
 
@@ -371,7 +456,9 @@ class SchemaContract:
             values = [r.get(field.name) for r in records]
             field_def = self._field_defs.get(field.name) or {}
             try:
-                array = self._build_column(field, values, field_def)
+                array = self._build_column(
+                    field, values, field_def, code_decoder=self._code_decoder
+                )
             except ValueError:
                 # _build_column already names the offending row; passing
                 # it through preserves that precision instead of wrapping
@@ -523,78 +610,62 @@ class SchemaContract:
         field: pa.Field,
         values: list[Any],
         field_def: dict[str, Any],
+        *,
+        code_decoder: Callable[[str, list[Any], pa.DataType], pa.Array] | None = None,
     ) -> pa.Array:
-        """Dispatch one column's Python values to the builder for its type."""
+        """Dispatch one column's Python values to the builder for its type.
+
+        No decode is implicit. ``iso8601``/``epoch`` (the two shapes this
+        method used to apply automatically) and every other wire shape
+        reach the arrow_type only through a resolved decoder
+        (:func:`~cdk.type_map.arrow.resolve_decoder`) or the ``code`` hatch
+        -- both driven by the field's declared ``encoding``. A temporal or
+        duration value that is neither already a native Python temporal
+        object (the SQL case: the driver handed one over directly) nor
+        resolved through one of those two paths is refused here,
+        unconditionally, regardless of whether the caller ran
+        :meth:`SchemaContract.check_required_read_encoding` first.
+        """
         if all(v is None for v in values):
             return _all_null_column(field, values)
         if _is_json_field(field_def):
             return _encode_json_column(field, values)
-        source_format = field_def.get("source_format")
-        if source_format and _is_date_or_timestamp(field.type):
-            # Left ahead of the offset guard: this column accepts no numeric
-            # value at all, so _parse_with_source_format's own "source_format
-            # only applies to string inputs" names the author's actual mistake.
-            # The offset guard's message would say the value is not an integer
-            # offset, which implies an integer would be taken here. It would not.
-            return _parse_with_source_format(field, values, source_format)
+        encoding = field_def.get("encoding")
+        if encoding is not None and encoding.get("name") == READ_CODE_ENCODING_NAME:
+            if code_decoder is None:
+                raise ValueError(
+                    f"column {field.name!r} declares encoding name='code' but "
+                    f"this SchemaContract was built without a code_decoder"
+                )
+            return code_decoder(field.name, values, field.type)
+        decoder = resolve_decoder(field_def, field)
+        if decoder is not None:
+            return decoder(field, values)
         if _reads_unit_offsets(field.type):
-            # Ahead of every remaining temporal branch, so the same author
-            # intent is refused identically whether the column carries strings
-            # or takes the bare pa.array path.
+            # Ahead of every remaining branch, so the same author intent is
+            # refused identically whether the column carries strings, a bare
+            # epoch int, or (rejected below) a float/Decimal offset.
+            is_duration = pa.types.is_duration(field.type)
             for row, value in enumerate(values):
+                if value is None:
+                    continue
                 _reject_floating_point_offset(field.name, row, value, field.type)
+                native = (
+                    isinstance(value, timedelta)
+                    if is_duration
+                    else isinstance(value, (datetime, date, time))
+                )
+                if not native:
+                    raise MissingEncodingError(
+                        field.name, str(field.type), direction="read", key="encoding"
+                    )
         if pa.types.is_decimal(field.type):
             return _build_decimal_column(field, values)
-        if _is_temporal(field.type) and _has_strings(values):
-            return SchemaContract._build_temporal_from_strings(field, values)
         if pa.types.is_integer(field.type) or pa.types.is_floating(field.type):
             return SchemaContract._build_numeric_column(field, values)
         if _is_nested(field.type):
             return _build_nested_column(field, values)
         return pa.array(values, type=field.type)
-
-    @staticmethod
-    def _build_temporal_from_strings(field: pa.Field, values: list[Any]) -> pa.Array:
-        """Parse ISO-8601 strings into a timestamp / date / time column.
-
-        Triggered for JSON-Schema ``format: date-time | date | time`` fields
-        whose endpoint declares an Arrow temporal ``arrow_type`` but does not
-        pin a ``source_format``. PyArrow refuses to coerce strings into a
-        timestamp/date/time array directly, so we parse with the stdlib
-        first and hand typed Python objects to ``pa.array``.
-        """
-        is_ts = pa.types.is_timestamp(field.type)
-        is_date = pa.types.is_date(field.type)
-        tz = getattr(field.type, "tz", None) if is_ts else None
-
-        parsed: list[Any] = []
-        for row, v in enumerate(values):
-            if v is None:
-                parsed.append(None)
-                continue
-            if not isinstance(v, str):
-                parsed.append(v)
-                continue
-            try:
-                if is_ts:
-                    dt = datetime.fromisoformat(v)
-                    if tz and dt.tzinfo is None:
-                        raise ValueError(
-                            f"value {v!r} is naive but column declares tz={tz!r}"
-                        )
-                    if not tz and dt.tzinfo is not None:
-                        dt = dt.replace(tzinfo=None)
-                    parsed.append(dt)
-                elif is_date:
-                    parsed.append(date.fromisoformat(v[:10]))
-                else:
-                    parsed.append(time.fromisoformat(v))
-            except ValueError as exc:
-                raise ValueError(
-                    f"column {field.name!r} at row {row}: cannot parse "
-                    f"{v!r} as {field.type}: {exc}"
-                ) from exc
-        return pa.array(parsed, type=field.type)
 
     @staticmethod
     def _build_numeric_column(field: pa.Field, values: list[Any]) -> pa.Array:

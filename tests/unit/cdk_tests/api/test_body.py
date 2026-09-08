@@ -91,13 +91,24 @@ class TestJsonIsStillTheDefault:
     def test_no_declared_type_encodes_as_json(self) -> None:
         assert encode_body({"a": 1}) == b'{"a":1}'
 
-    def test_a_decimal_keeps_its_exact_digits(self) -> None:
-        # Precision is the one thing that cannot be recovered downstream.
-        assert encode_body({"n": Decimal("1.10")}) == b'{"n":"1.10"}'
+    def test_an_unencoded_decimal_is_refused(self) -> None:
+        # A Decimal has no native JSON rendering: a field of this kind must
+        # resolve through its declared encoding_write (GenericAPIConnector.land)
+        # before reaching here. No implicit default survives it. orjson wraps
+        # the default-hook's TypeError in its own generic one; the original,
+        # naming 'encoding_write', survives as __cause__.
+        with pytest.raises(TypeError, match="not JSON serializable") as excinfo:
+            encode_body({"n": Decimal("1.10")})
+        assert "encoding_write" in str(excinfo.value.__cause__)
 
-    def test_a_datetime_is_handled_by_the_encoder_itself(self) -> None:
+    def test_an_unencoded_datetime_is_refused(self) -> None:
+        # orjson's own native datetime rendering is deliberately turned off
+        # (OPT_PASSTHROUGH_DATETIME): it was one of the implicit defaults
+        # the encoders catalog replaces.
         moment = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
-        assert b"2026-01-02T03:04:05" in encode_body({"at": moment})
+        with pytest.raises(TypeError, match="not JSON serializable") as excinfo:
+            encode_body({"at": moment})
+        assert "encoding_write" in str(excinfo.value.__cause__)
 
 
 class TestFormEncoding:

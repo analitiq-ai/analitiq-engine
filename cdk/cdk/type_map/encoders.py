@@ -1,0 +1,265 @@
+"""The write-side encoder vocabulary and the functions each name resolves to.
+
+The mirror of :mod:`cdk.type_map.decoders`, but pyarrow-free on both the
+vocabulary *and* the function side: an encoder takes one already-Arrow-typed
+Python scalar (a ``datetime``, a ``Decimal``, ``bytes`` -- whatever
+``pyarrow.RecordBatch.to_pylist()`` produced) and returns a JSON-native
+Python value (``str`` / ``int`` / ``float`` / ``bool`` / ``None``). No
+``pa.DataType`` is needed to run one -- only to decide, at the call site,
+whether a field's ``arrow_type`` *requires* one (:data:`REQUIRES_ENCODING_KINDS`).
+
+These functions replace ``cdk.api.http._orjson_default``'s ``Decimal``/
+``bytes`` special cases and orjson's native ``datetime``/``date`` rendering,
+which are retired as *implicit* behavior: a field of a kind this module
+gates now renders through a declared ``encoding_write`` catalog entry, never
+through an engine default nobody wrote down.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+from collections.abc import Callable, Mapping
+from datetime import date, datetime, time, timezone
+from decimal import Decimal
+from pathlib import Path
+from typing import Any, Final
+
+from ._param_validation import require_enum_param, require_list_param, require_str_param
+from .exceptions import InvalidTypeMapError
+from .grammar import ConversionKind
+
+#: The sentinel name routing to a ``connector.py`` override of
+#: ``ApiDialect.encode_field`` instead of a catalog function. Same role as
+#: :data:`cdk.type_map.decoders.CODE_ENCODING_NAME` on the read side.
+CODE_ENCODING_NAME: Final[str] = "code"
+
+_EPOCH_UNITS: Final[tuple[str, ...]] = (
+    "SECOND",
+    "MILLISECOND",
+    "MICROSECOND",
+    "NANOSECOND",
+)
+
+_UNIT_MICROS: Final[dict[str, int]] = {
+    "SECOND": 1_000_000,
+    "MILLISECOND": 1_000,
+    "MICROSECOND": 1,
+    "NANOSECOND": 1,  # sub-microsecond precision is not carried by datetime
+}
+
+_UNIX_EPOCH: Final[datetime] = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+def _encode_iso8601(_config: Mapping[str, Any]) -> Callable[[Any], Any]:
+    """``datetime``/``date``/``time`` -> the same ISO string orjson renders.
+
+    orjson's native (now-retired) rendering of these three types is
+    ``value.isoformat()`` with no injected timezone -- a naive value stays
+    naive. Matched exactly so a field's wire output is unchanged by
+    switching from the implicit default to this declared entry (issue
+    Acceptance: byte-identical output).
+    """
+
+    def encode(value: Any) -> str:
+        if not isinstance(value, (datetime, date, time)):
+            raise TypeError(
+                f"encoding_write 'iso8601' expects a datetime/date/time value, "
+                f"got {type(value).__name__}"
+            )
+        return value.isoformat()
+
+    return encode
+
+
+def _encode_strftime(config: Mapping[str, Any]) -> Callable[[Any], Any]:
+    pattern = require_str_param(config, "pattern", "encoding_write 'strftime'")
+
+    def encode(value: Any) -> str:
+        if not isinstance(value, (datetime, date, time)):
+            raise TypeError(
+                f"encoding_write 'strftime' expects a datetime/date/time value, "
+                f"got {type(value).__name__}"
+            )
+        return value.strftime(pattern)
+
+    return encode
+
+
+def _encode_epoch(config: Mapping[str, Any]) -> Callable[[Any], Any]:
+    unit = require_enum_param(config, "unit", _EPOCH_UNITS, "encoding_write 'epoch'")
+    micros_per_unit = _UNIT_MICROS[unit]
+
+    def encode(value: Any) -> int:
+        if not isinstance(value, datetime):
+            raise TypeError(
+                f"encoding_write 'epoch' expects a datetime value, "
+                f"got {type(value).__name__}"
+            )
+        delta = _as_utc(value) - _UNIX_EPOCH
+        total_micros = (
+            delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds
+        )
+        return total_micros // micros_per_unit
+
+    return encode
+
+
+def _encode_decimal(_config: Mapping[str, Any]) -> Callable[[Any], Any]:
+    """``Decimal`` -> its exact decimal string, matching ``_orjson_default``."""
+
+    def encode(value: Any) -> str:
+        if not isinstance(value, Decimal):
+            raise TypeError(
+                f"encoding_write 'decimal' expects a Decimal value, "
+                f"got {type(value).__name__}"
+            )
+        return str(value)
+
+    return encode
+
+
+def _encode_bool_map(config: Mapping[str, Any]) -> Callable[[Any], Any]:
+    true_values = require_list_param(config, "true_values", "encoding_write 'bool_map'")
+    false_values = require_list_param(
+        config, "false_values", "encoding_write 'bool_map'"
+    )
+    if not true_values or not false_values:
+        raise InvalidTypeMapError(
+            "encoding_write 'bool_map' requires a non-empty 'true_values' and "
+            "'false_values'; the first of each is the rendered token"
+        )
+
+    def encode(value: Any) -> str:
+        if not isinstance(value, bool):
+            raise TypeError(
+                f"encoding_write 'bool_map' expects a bool value, "
+                f"got {type(value).__name__}"
+            )
+        return true_values[0] if value else false_values[0]
+
+    return encode
+
+
+def _encode_base64(_config: Mapping[str, Any]) -> Callable[[Any], Any]:
+    """``bytes`` -> base64 text, matching ``_orjson_default``."""
+
+    def encode(value: Any) -> str:
+        if not isinstance(value, (bytes, bytearray, memoryview)):
+            raise TypeError(
+                f"encoding_write 'base64' expects a bytes-like value, "
+                f"got {type(value).__name__}"
+            )
+        return base64.b64encode(bytes(value)).decode("ascii")
+
+    return encode
+
+
+#: Every encoder name this engine ships, mapped to the factory that builds
+#: its runtime function from the field's ``encoding_write`` config (minus
+#: ``name``). :data:`CODE_ENCODING_NAME` is deliberately absent -- it has no
+#: factory here; a caller routes it to ``ApiDialect.encode_field`` before
+#: ever reaching this table.
+ENCODER_FACTORIES: Final[
+    dict[str, Callable[[Mapping[str, Any]], Callable[[Any], Any]]]
+] = {
+    "iso8601": _encode_iso8601,
+    "strftime": _encode_strftime,
+    "epoch": _encode_epoch,
+    "decimal": _encode_decimal,
+    "bool_map": _encode_bool_map,
+    "base64": _encode_base64,
+}
+
+
+def resolve_encoder(
+    encoding_write: Mapping[str, Any] | None
+) -> Callable[[Any], Any] | None:
+    """Build the encode function a field's declared ``encoding_write`` names.
+
+    Returns ``None`` for an undeclared field (the caller decides whether
+    that is an error via :func:`requires_write_encoding`) and for
+    :data:`CODE_ENCODING_NAME`, which the caller must special-case before
+    calling this -- there is no catalog function backing it.
+    """
+    if encoding_write is None:
+        return None
+    name = encoding_write.get("name")
+    if name == CODE_ENCODING_NAME:
+        return None
+    factory = ENCODER_FACTORIES.get(name) if isinstance(name, str) else None
+    if factory is None:
+        raise InvalidTypeMapError(
+            f"unknown encoding_write name {name!r}; expected one of "
+            f"{', '.join([*ENCODER_FACTORIES, CODE_ENCODING_NAME])}"
+        )
+    config = {k: v for k, v in encoding_write.items() if k != "name"}
+    return factory(config)
+
+
+#: The conversion-matrix kinds a *write* requires an explicit
+#: ``encoding_write`` for. Wider than the read-side set
+#: (:data:`cdk.type_map.decoders.REQUIRES_ENCODING_KINDS`): JSON has no
+#: native wire shape for any of these six kinds, so orjson either rendered
+#: them through an implicit special case (``datetime``/``date`` natively,
+#: ``Decimal``/bytes via ``_orjson_default``) or never handled them at all
+#: (``time``/``duration``). All six now require a declared entry rather
+#: than an engine default.
+REQUIRES_ENCODING_KINDS: Final[frozenset[ConversionKind]] = frozenset(
+    {"timestamp", "date", "time", "duration", "decimal", "binary"}
+)
+
+
+def requires_write_encoding(kind: ConversionKind) -> bool:
+    """Whether a field of this conversion kind must declare ``encoding_write``."""
+    return kind in REQUIRES_ENCODING_KINDS
+
+
+#: The published catalog's own version.
+ENCODERS_CATALOG_VERSION: Final[str] = "1.0.0"
+
+_PARAM_SHAPES: Final[dict[str, list[dict[str, Any]]]] = {
+    "iso8601": [],
+    "strftime": [{"name": "pattern", "kind": "string", "required": True}],
+    "epoch": [
+        {
+            "name": "unit",
+            "kind": "enum",
+            "required": True,
+            "allowed": list(_EPOCH_UNITS),
+        }
+    ],
+    "decimal": [],
+    "bool_map": [
+        {"name": "true_values", "kind": "list[string]", "required": True},
+        {"name": "false_values", "kind": "list[string]", "required": True},
+    ],
+    "base64": [],
+}
+
+
+def build_encoders_catalog() -> dict[str, Any]:
+    """Materialise the published document: every encoder name and its params."""
+    encoders: dict[str, Any] = {
+        name: {"params": params} for name, params in _PARAM_SHAPES.items()
+    }
+    encoders[CODE_ENCODING_NAME] = {"params": [], "requires_connector_code": True}
+    return {"version": ENCODERS_CATALOG_VERSION, "encoders": encoders}
+
+
+ENCODERS_CATALOG_PATH: Final[Path] = Path(__file__).with_name("encoders_catalog.json")
+
+
+def render_encoders_catalog() -> str:
+    """Canonical serialisation, matching the committed artifact."""
+    return json.dumps(build_encoders_catalog(), indent=2, sort_keys=True) + "\n"
+
+
+def load_published_encoders_catalog() -> dict[str, Any]:
+    """Return the committed, published encoders catalog document."""
+    document: dict[str, Any] = json.loads(ENCODERS_CATALOG_PATH.read_text())
+    return document

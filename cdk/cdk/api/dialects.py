@@ -2,7 +2,7 @@
 
 Mirrors :class:`cdk.sql.dialects.SqlDialect`. :meth:`ApiDialect.for_runtime`
 is the one place a declaration becomes a dialect, and a connector package's
-whole surface is ``dialect_class = XDialect`` plus the three hooks below.
+whole surface is ``dialect_class = XDialect`` plus the hooks below.
 
 There is deliberately no next-page hook. One loop walks every scheme
 (:class:`cdk.api.page_loop.PageLoop`), and a hook that could replace it
@@ -31,7 +31,11 @@ class ApiDialect:
 
     The base is every hook's neutral answer, so a declarative connector
     ships no dialect at all. A connector overrides only the hook its
-    provider actually needs.
+    provider actually needs. ``decode_field``/``encode_field`` are the one
+    exception: they are reached only when a field explicitly opts into the
+    ``"code"`` escape hatch, so their base raises rather than passing
+    through -- an opted-in field with no override is a config defect, not a
+    neutral no-op.
     """
 
     #: Dialect identifier (the connector package sets its own).
@@ -91,6 +95,24 @@ class ApiDialect:
                 f"calls dialect_class(error_map)): {err}. Take 'error_map' and "
                 f"forward it to super().__init__()."
             ) from err
+        # decode_field/encode_field are optional (reached only when a field
+        # opts into 'code'), but an override that IS present must accept the
+        # same four arguments the resolver calls it with -- checked here,
+        # at class-definition time, for the same reason __init__'s shape is:
+        # a bent signature otherwise surfaces as a TypeError deep inside a
+        # running read/write, on whichever record first reaches 'code'.
+        for hook_name in ("decode_field", "encode_field"):
+            hook = inspect.getattr_static(cls, hook_name)
+            if hook is inspect.getattr_static(ApiDialect, hook_name):
+                continue
+            try:
+                inspect.signature(hook).bind(None, None, None, None)
+            except TypeError as err:
+                raise TypeError(
+                    f"{cls.__name__}.{hook_name} does not accept the "
+                    f"(field_name, values_or_value, arrow_type) ApiDialect "
+                    f"calls it with, plus self: {err}"
+                ) from err
 
     @classmethod
     def for_runtime(cls, runtime: Any) -> Self:
@@ -174,6 +196,44 @@ class ApiDialect:
         """
         _ = (status, body)
         return None
+
+    # skipcq: PYL-R0201 - see unwrap_page.
+    def decode_field(
+        self, field_name: str, values: list[Any], arrow_type: Any
+    ) -> Any:  # skipcq: PYL-R0201
+        """Decode one column's raw wire values into ``arrow_type``.
+
+        ``arrow_type`` is a ``pyarrow.DataType`` and the return a
+        ``pyarrow.Array`` -- typed as ``Any`` here so this module, like the
+        rest of the API package outside ``generic.py``, never imports
+        pyarrow itself.
+
+        Called only for a field declaring ``encoding: {"name": "code"}"`` --
+        the catalog's escape hatch for a wire shape no named decoder covers.
+        The base raises: a connector declaring ``"code"`` promises this
+        override exists, and a connector that ships none is a config defect
+        caught here rather than by ``values`` silently passing through
+        un-decoded.
+        """
+        raise NotImplementedError(
+            f"field {field_name!r} declares encoding name='code' but "
+            f"{type(self).__name__} does not override decode_field"
+        )
+
+    # skipcq: PYL-R0201 - see unwrap_page.
+    def encode_field(
+        self, field_name: str, value: Any, arrow_type: Any
+    ) -> Any:  # skipcq: PYL-R0201
+        """Encode one Arrow-typed value into a JSON-native wire value.
+
+        Called only for a field declaring ``encoding_write: {"name": "code"}"`` --
+        the write-side mirror of :meth:`decode_field`. The base raises for
+        the same reason.
+        """
+        raise NotImplementedError(
+            f"field {field_name!r} declares encoding_write name='code' but "
+            f"{type(self).__name__} does not override encode_field"
+        )
 
 
 def dialect_overrides(dialect_cls: type[ApiDialect], hook: str) -> bool:

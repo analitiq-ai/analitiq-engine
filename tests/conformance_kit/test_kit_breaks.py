@@ -1675,6 +1675,23 @@ class TestApiReadPathBreaks:
         assert "'geometry'" in report
         assert "read type-map" in report
 
+    def test_a_temporal_field_with_no_declared_encoding_fails(
+        self, tmp_path: Path
+    ) -> None:
+        """A field whose arrow_type has no direct wire-native rendering must
+        declare ``encoding`` -- removing it must fail here, not on the first
+        real record."""
+        target = self._broken(
+            tmp_path,
+            "invoices",
+            lambda read: read["response"]["schema"]["properties"]["results"]["items"][
+                "properties"
+            ]["issued_on"].pop("encoding"),
+        )
+        report = _report(check_api_record_schema(target))
+        assert "issued_on" in report
+        assert "encoding" in report
+
     def test_a_named_transport_that_cannot_be_opened_names_the_reads(
         self, tmp_path: Path
     ) -> None:
