@@ -488,6 +488,18 @@ class GenericAPIConnector(BaseDestinationHandler):
         finally:
             await self.disconnect()
 
+    def _read_schema_contract(self, items_schema: dict[str, Any]) -> SchemaContract:
+        """Build and gate the read's SchemaContract.
+
+        Opt-in, and only here: this is the one call site building a
+        SchemaContract from a JSON-Schema API endpoint. SQL's "columns"
+        shape never declares 'encoding' and must never be gated by it.
+        """
+        code_decoder = self.dialect.decode_field if self.dialect is not None else None
+        schema_contract = SchemaContract(items_schema, code_decoder=code_decoder)
+        schema_contract.check_required_read_encoding()
+        return schema_contract
+
     async def _plan_read(
         self,
         config: dict[str, Any],
@@ -512,12 +524,7 @@ class GenericAPIConnector(BaseDestinationHandler):
 
         items_schema = records_items_schema(endpoint_id, read.response)
         apply_read_type_map(items_schema, endpoint_ref, runtime)
-        code_decoder = self.dialect.decode_field if self.dialect is not None else None
-        schema_contract = SchemaContract(items_schema, code_decoder=code_decoder)
-        # Opt-in, and only here: this is the one call site building a
-        # SchemaContract from a JSON-Schema API endpoint. SQL's "columns"
-        # shape never declares 'encoding' and must never be gated by it.
-        schema_contract.check_required_read_encoding()
+        schema_contract = self._read_schema_contract(items_schema)
 
         request_block = read.request
         method = request_block.method

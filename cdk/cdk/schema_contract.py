@@ -106,6 +106,34 @@ def _reject_floating_point_offset(
     )
 
 
+def _reject_non_native_temporal_values(field: pa.Field, values: list[Any]) -> None:
+    """Refuse a non-native, non-decoded temporal/duration value.
+
+    Neither a native Python object nor resolved through a decoder -- the
+    removed implicit-epoch path, made an unconditional refusal rather than
+    an opt-in check. Also rejects a float/Decimal offset
+    (``_reject_floating_point_offset``, ahead of the native check so its
+    own, more specific message wins for that case). Called only when no
+    decoder resolved and no ``code`` hatch applies -- an already-native
+    value (the SQL case: the driver handed one over directly) is the sole
+    remaining value shape this ever accepts.
+    """
+    is_duration = pa.types.is_duration(field.type)
+    for row, value in enumerate(values):
+        if value is None:
+            continue
+        _reject_floating_point_offset(field.name, row, value, field.type)
+        native = (
+            isinstance(value, timedelta)
+            if is_duration
+            else isinstance(value, (datetime, date, time))
+        )
+        if not native:
+            raise MissingEncodingError(
+                field.name, str(field.type), direction="read", key="encoding"
+            )
+
+
 def _is_nested(arrow_type: pa.DataType) -> bool:
     return bool(
         pa.types.is_struct(arrow_type)
@@ -634,33 +662,15 @@ class SchemaContract:
             return _encode_json_column(field, values)
         encoding = field_def.get("encoding")
         if encoding is not None and encoding.get("name") == READ_CODE_ENCODING_NAME:
-            if code_decoder is None:
-                raise ValueError(
-                    f"column {field.name!r} declares encoding name='code' but "
-                    f"this SchemaContract was built without a code_decoder"
-                )
-            return code_decoder(field.name, values, field.type)
+            return SchemaContract._decode_via_code_hatch(field, values, code_decoder)
         decoder = resolve_decoder(field_def, field)
         if decoder is not None:
             return decoder(field, values)
         if _reads_unit_offsets(field.type):
             # Ahead of every remaining branch, so the same author intent is
             # refused identically whether the column carries strings, a bare
-            # epoch int, or (rejected below) a float/Decimal offset.
-            is_duration = pa.types.is_duration(field.type)
-            for row, value in enumerate(values):
-                if value is None:
-                    continue
-                _reject_floating_point_offset(field.name, row, value, field.type)
-                native = (
-                    isinstance(value, timedelta)
-                    if is_duration
-                    else isinstance(value, (datetime, date, time))
-                )
-                if not native:
-                    raise MissingEncodingError(
-                        field.name, str(field.type), direction="read", key="encoding"
-                    )
+            # epoch int, or a float/Decimal offset.
+            _reject_non_native_temporal_values(field, values)
         if pa.types.is_decimal(field.type):
             return _build_decimal_column(field, values)
         if pa.types.is_integer(field.type) or pa.types.is_floating(field.type):
@@ -668,6 +678,20 @@ class SchemaContract:
         if _is_nested(field.type):
             return _build_nested_column(field, values)
         return pa.array(values, type=field.type)
+
+    @staticmethod
+    def _decode_via_code_hatch(
+        field: pa.Field,
+        values: list[Any],
+        code_decoder: Callable[[str, list[Any], pa.DataType], pa.Array] | None,
+    ) -> pa.Array:
+        """Run the ``code`` escape hatch, or refuse when none was supplied."""
+        if code_decoder is None:
+            raise ValueError(
+                f"column {field.name!r} declares encoding name='code' but "
+                f"this SchemaContract was built without a code_decoder"
+            )
+        return code_decoder(field.name, values, field.type)
 
     @staticmethod
     def _build_numeric_column(field: pa.Field, values: list[Any]) -> pa.Array:

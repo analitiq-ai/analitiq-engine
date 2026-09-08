@@ -121,17 +121,25 @@ class TestFieldEncodingHooks:
         assert Provider(None).encode_field("f", "a", None) == "A"
 
     def test_a_decode_field_override_with_the_wrong_arity_is_refused(self) -> None:
+        # Every expected name is present, but values/arrow_type are pushed
+        # keyword-only -- __init_subclass__ still refuses it: binding the
+        # four positional arguments ApiDialect calls this with leaves no
+        # slot for either.
         with pytest.raises(TypeError, match="decode_field"):
 
-            class Bad(ApiDialect):
-                def decode_field(self, field_name: str) -> Any:
+            class _(ApiDialect):
+                def decode_field(
+                    self, field_name: str, *, values: Any, arrow_type: Any
+                ) -> Any:
                     return field_name
 
     def test_an_encode_field_override_with_the_wrong_arity_is_refused(self) -> None:
         with pytest.raises(TypeError, match="encode_field"):
 
-            class Bad(ApiDialect):
-                def encode_field(self, field_name: str, value: Any) -> Any:
+            class _(ApiDialect):
+                def encode_field(
+                    self, field_name: str, *, value: Any, arrow_type: Any
+                ) -> Any:
                     return value
 
     def test_an_unrelated_hook_override_is_still_accepted(self) -> None:
