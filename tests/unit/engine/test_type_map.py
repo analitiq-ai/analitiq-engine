@@ -30,11 +30,7 @@ from cdk.type_map import (
     parse_arrow_type,
 )
 from cdk.type_map.loader import TYPE_MAP_FILENAME, WRITE_TYPE_MAP_FILENAME
-from cdk.type_map.rules import (
-    _FORBIDDEN_CONSTRUCTS,
-    parse_rules,
-    parse_write_rules,
-)
+from cdk.type_map.rules import _FORBIDDEN_CONSTRUCTS, parse_rules, parse_write_rules
 
 # ---------------------------------------------------------------------------
 # normalize_native_type
