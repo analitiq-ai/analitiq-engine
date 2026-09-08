@@ -142,7 +142,9 @@ class SqlAlchemyTransport:
 @dataclass(frozen=True)
 class AdbcTransport:
     connect: Callable[[], Any]   # call → a fresh DBAPI 2.0 connection (no pool)
-    driver: str                  # closed enum: "postgresql" | "snowflake" | "bigquery"
+    driver: str                  # e.g. "postgresql", "snowflake", "bigquery" —
+                                 # constrained by the published connector schema's
+                                 # AdbcTransport.driver enum, not by this dataclass
 ```
 
 `await runtime.materialize()` builds the transport and exposes it via
@@ -181,9 +183,10 @@ derived from the class at registration** — reading them off the class
 would mean importing it, which is exactly the cost the table exists to
 defer. The declaration is checked, not trusted blindly: the first time a
 kind default is actually loaded, its declared roles are verified against
-the class's own capability Protocols (`isinstance` against
-`runtime_checkable` Protocols in `cdk/cdk/contract.py`), and a mismatch is
-a registry defect, not a silent divergence. The worker subprocess is the
+the class's own capability Protocols (`issubclass` against
+`runtime_checkable` Protocols in `cdk/cdk/contract.py` — the registry holds
+a class, not an instance, at this point), and a mismatch is a registry
+defect, not a silent divergence. The worker subprocess is the
 one caller of `build_registries`, because that is where connector classes
 execute; the engine process holds only the `WorkerReadable` client and
 imports no connector. A duplicate `kind` raises rather than silently
@@ -245,8 +248,8 @@ it's generic and can live in the CDK. By that test, the CDK holds:
    plugs its **own** driver*),
 3. the **`SecretsResolver`** ABC (credential fetching seam),
 4. the **`TypeMapper` mechanism** (the type-map *engine*, not any mappings) —
-   including the **write-direction** support `create_table` needs (§3, item 4 /
-   the per-DB mappings themselves are the connector's data,
+   including the **write-direction** support `create_table` needs (§3). The
+   per-DB mappings themselves are the connector's data,
 5. **optional reusable building blocks** — e.g. a generic, dialect-agnostic
    SQL-database base a connector can use as-is or subclass (so
    batching/streaming/error handling is battle-tested, not reinvented per
@@ -269,11 +272,12 @@ never by a declared block. Method names mirror the engine's source/destination
 methods (`read_batches`, `configure_schema`, `write_batch`).
 
 ```python
-# cdk/cdk/contract.py  (verbatim shape)
+# cdk/cdk/contract.py  (shape, not verbatim — read the module for the exact signatures)
 
 from __future__ import annotations
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 from .types import BatchWriteResult, CheckpointStore, Cursor, SchemaSpec
 
 
@@ -290,10 +294,10 @@ class ColumnDef:
 # ---- Capability: DISCOVER (control-plane reads) -------------------------
 @runtime_checkable
 class Discoverable(Protocol):
-    async def list_schemas(self, runtime: "ConnectionRuntime", catalog: str = "") -> list[str]: ...
-    async def list_tables(self, runtime: "ConnectionRuntime", schema: str, catalog: str = "") -> list[str]: ...
+    async def list_schemas(self, runtime: "ConnectionRuntime", *, catalog: str = "") -> list[str]: ...
+    async def list_tables(self, runtime: "ConnectionRuntime", schema: str, *, catalog: str = "") -> list[str]: ...
     async def list_columns(
-        self, runtime: "ConnectionRuntime", schema: str, table: str, catalog: str = ""
+        self, runtime: "ConnectionRuntime", schema: str, table: str, *, catalog: str = ""
     ) -> tuple[list[ColumnDef], list[str]]:  # (columns, primary_keys)
         ...
 
@@ -303,14 +307,17 @@ class Discoverable(Protocol):
 class TableCreator(Protocol):
     async def create_table(
         self, runtime: "ConnectionRuntime", schema: str, table: str,
-        columns: list[ColumnDef], primary_keys: list[str], catalog: str = "",
+        columns: list[ColumnDef], primary_keys: list[str], *, catalog: str = "",
     ) -> None: ...
 
 
 # ---- Capability: READ (engine source) -----------------------------------
 @runtime_checkable
 class Readable(Protocol):
-    async def read_batches(
+    # Not `async def`: implementors are async generators, so calling
+    # read_batches returns the AsyncIterator directly. `async def` would
+    # type the call as Coroutine[..., AsyncIterator], breaking `async for`.
+    def read_batches(
         self, runtime: "ConnectionRuntime", config: dict[str, Any], *,
         checkpoint: CheckpointStore, stream_name: str,
         partition: dict[str, Any] | None = None, batch_size: int = 1000,
@@ -331,8 +338,12 @@ class Writable(Protocol):
     async def health_check(self) -> bool: ...
 ```
 
-There is no `finalize`; the write lifecycle is `connect` → `configure_schema`
-→ `write_batch`* → `disconnect`, with `health_check` for liveness.
+The `Writable` protocol itself declares no `finalize`; the connector-visible
+write lifecycle is `connect` → `configure_schema` → `write_batch`* →
+`disconnect`, with `health_check` for liveness. (The destination *base
+class*, `BaseDestinationHandler`, does add a `finalize_run` hook the gRPC
+server calls on shutdown — that is engine-side lifecycle, not part of the
+`Writable` capability contract a connector implements.)
 `GenericSQLConnector` (`cdk/cdk/sql/generic.py`) implements **all four**
 protocols — a single class serves source reads, destination writes, and the
 control-plane discover / create_table operations over both SQLAlchemy and ADBC.
@@ -412,11 +423,12 @@ definitions, not a connector-wide flag.)
 
 ### CDK packaging — core + opt-in extras
 
-The CDK (`analitiq-cdk`) is **dependency-tiered**. The core
-install pulls only `sqlalchemy` + `pydantic`, so a database-only consumer (e.g.
-a control-plane process doing discovery / DDL) stays lightweight. The heavier
-capabilities are opt-in extras, declared once in `cdk/pyproject.toml` — that
-file is authoritative for the exact package list per extra; in outline:
+The CDK (`analitiq-cdk`) is **dependency-tiered**. The core install pulls
+`sqlalchemy`, `pydantic`, `analitiq-contract-models`, and `yarl` — no
+Arrow, no HTTP client — so a database-only consumer (e.g. a control-plane
+process doing discovery / DDL) stays lightweight. The heavier capabilities
+are opt-in extras, declared once in `cdk/pyproject.toml` — that file is
+authoritative for the exact package list per extra; in outline:
 
 | Extra | Enables |
 |---|---|
@@ -495,7 +507,7 @@ Two complementary distribution forms:
 
 - **Connector repo** (one per connector in the connector registry) — holds
   **both** the code (`connector.py` + deps) and the data (`definition/`),
-  versioned together by **git tag** (§9, decision 3). The installable unit:
+  versioned together by **git tag** (§8). The installable unit:
   consumers `pip install git+…@vX.Y.Z`.
 - **Registry snapshot** — the `definition/` (connector.json + type-map) can be
   snapshotted by a registry source for read paths that only need the data; the
@@ -533,37 +545,41 @@ installed packages are discovered additively.
 
    ```bash
    # into the running engine container, or baked into a custom image layer;
-   # git-based from the connector's registry repo at a pinned tag (§9, dec. 3)
+   # git-based from the connector's registry repo at a pinned tag (§8)
    pip install "git+https://…/postgresql@v1.0.0"
    ```
 
-   The package advertises itself via entry points. There is a group per role
-   because the engine keeps a registry per role, but a connector registers the
-   same class in both: one class serves the system in both directions, and the
-   conformance suite refuses a connector that registers two, because a split
-   there is exactly how the two directions drift apart. The CDK's own kind
-   defaults obey the same one-class rule without an entry point to state it:
-   the class named in `KIND_DEFAULTS` is registered as a source default iff it
-   satisfies `Readable` and as a destination default iff it satisfies
-   `Writable`, so the roles are read off the code the CDK owns.
+   The package advertises itself via entry points, named by its
+   **`connector_id`** (`postgresql`, not the `database` kind). There is a
+   group per role because the engine keeps a registry per role, but a
+   connector registers the same class in both: one class serves the system
+   in both directions, and the conformance suite refuses a connector that
+   registers two, because a split there is exactly how the two directions
+   drift apart.
 
    ```toml
    # connectors/postgresql/pyproject.toml
    [project.entry-points."analitiq.source_connectors"]
-   database = "analitiq_connector_postgresql.connector:PostgresConnector"
+   postgresql = "analitiq_connector_postgresql.connector:PostgresConnector"
    [project.entry-points."analitiq.destination_connectors"]
-   database = "analitiq_connector_postgresql.connector:PostgresConnector"
+   postgresql = "analitiq_connector_postgresql.connector:PostgresConnector"
    ```
 
 2. **Engine discovers it at startup.** `build_registries(discover=True)`
-   seeds the CDK's kind defaults from `KIND_DEFAULTS`, then scans the
-   `analitiq.source_connectors` / `analitiq.destination_connectors` entry-point
-   groups, registering each `ConnectorRegistry` by `kind`. A broken plugin is
-   logged and skipped; a duplicate `kind` raises rather than silently shadowing.
-   Which operations a connector supports is read from the class itself
-   (`isinstance` against the Protocols), not from config.
+   seeds each registry's kind defaults from `KIND_DEFAULTS`, then scans the
+   `analitiq.source_connectors` / `analitiq.destination_connectors`
+   entry-point groups, registering each entry under its `connector_id`. A
+   plugin whose class fails to import, or whose `connector_id` collides with
+   one already registered, is logged and skipped — one broken or
+   double-published connector package must not abort startup. (A collision
+   *inside* `KIND_DEFAULTS` itself — two CDK generic classes both claiming
+   the same kind — is a CDK defect and raises, unconditionally, at seed
+   time.) Resolving a connector tries its own `connector_id` first, falling
+   back to the kind default only when no specific class is registered (the
+   thin path, §2). Which operations a connector supports is read from the
+   class itself (`isinstance` against the Protocols), not from config.
 
-3. **User references it by name** in pipeline config (`connector_ref:
+3. **User references it by name** in pipeline config (`connector_id:
    "postgresql"`). Definition + type map are read from the connector's package
    data (or a mounted `connectors/` dir for local dev).
 

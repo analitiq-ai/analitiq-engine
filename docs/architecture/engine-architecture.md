@@ -159,11 +159,13 @@ silently losing rows.
    concurrently via `StreamProcessor.run`. Each processor owns everything
    scoped to its stream — counters, the gRPC client, its dead letter
    queue — and runs four async stages, extract -> transform -> load ->
-   checkpoint, wired together with async queues. The processor compiles
-   the stream's typed mapping document once at construction
-   (`compile_mapping`), so a mapping the engine cannot run fails before any
-   batch is read; the transform stage then applies it to each batch as
-   vectorized Arrow compute.
+   checkpoint, wired together with async queues. Before extraction starts,
+   `StreamProcessor.run` compiles the stream's typed mapping document once
+   (`compile_mapping`), when the stream declares any assignments, so a
+   mapping the engine cannot run fails before any batch is read; the
+   transform stage then applies the compiled mapping to each batch as
+   vectorized Arrow compute. A stream with no assignments skips compilation
+   and forwards each source batch untouched.
 5. The load stage streams batches over gRPC to the destination service
    with row-level, content-derived idempotency (protocol in
    [`grpc-streaming-architecture.md`](grpc-streaming-architecture.md)).
@@ -462,8 +464,9 @@ value read off the class** — reading it off the class would mean importing
 it, which is exactly the cost the table exists to defer. It is verified,
 not trusted blindly: the first time a kind default actually loads, its
 declared roles are checked against the class's own capability Protocols
-(`isinstance` against `Readable` / `Writable`, `cdk/cdk/contract.py`), and a
-mismatch is a registry defect. So `file`, `s3` and `stdout` have no source
+(`issubclass` against `Readable` / `Writable`, `cdk/cdk/contract.py` — the
+registry holds a class, not an instance, at this point), and a mismatch is
+a registry defect. So `file`, `s3` and `stdout` have no source
 default at all, and a `kind: file` source fails loud instead of resolving a
 class with no read path.
 

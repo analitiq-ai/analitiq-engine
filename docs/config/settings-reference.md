@@ -39,6 +39,31 @@ Settings split into two kinds, resolved differently:
 Environment variables are read on use, not at import, so a value placed in a
 `.env` file — which the runner loads before parsing config — is honoured.
 
+### Runtime-tuning key paths
+
+Which `runtime` block key overrides which environment variable is a
+structural fact `settings.py` cannot state on its own — the JSON path and
+the env var name are declared in two different places (`pipeline.json`'s
+schema and `settings.py` respectively) and only their pairing lives here:
+
+| `runtime` key path | Env var |
+|---|---|
+| `batching.batch_size` | `ANALITIQ_BATCH_SIZE` |
+| `buffer_size` | `ANALITIQ_BUFFER_SIZE` |
+| `error_handling.strategy` | `ANALITIQ_ERROR_STRATEGY` |
+| `error_handling.max_retries` | `ANALITIQ_MAX_RETRIES` |
+| `error_handling.retry_delay_seconds` | `ANALITIQ_RETRY_DELAY_SECONDS` |
+
+Defaults for each are in `src/config/settings.py`, not repeated here.
+
+### The one default outside `settings.py`
+
+The runtime-archive download timeout lives in the standalone
+`src/runtime_archive.py` CLI, not in `settings.py`, because that script
+runs without the engine package on its path — it cannot import
+`src/config/settings.py`. It is the one exception to "every default lives
+in one catalogue," and it exists for that reason alone.
+
 ## What is deliberately not centralised
 
 Connector- and formatter-owned defaults (e.g. an API connector's replication

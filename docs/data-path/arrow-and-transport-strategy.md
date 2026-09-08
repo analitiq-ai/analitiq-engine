@@ -69,13 +69,15 @@ Arrow space before writing. `LandingBatch.records`
 (`cdk/cdk/base_handler.py`) materialises the batch once —
 `record_batch.to_pylist()`, no intermediate cast — and the API handler
 serialises those Python dicts directly with `orjson.dumps(default=...)`
-(`cdk/cdk/api/http.py::encode_body`), whose encoder hook handles
-`datetime`, `Decimal`, and `UUID` inline. Arrow-native Python types survive
-into the dicts unchanged, so a pre-cast in Arrow space would be a second
-pass for no gain: the API destination never coerces types the way the SQL
-destination does, because there is no destination-declared column schema
-to cast against — the write input is whatever the endpoint contract
-declares.
+(`cdk/cdk/api/http.py::encode_body`). `orjson` natively handles `datetime`,
+`date`, `time`, `UUID`, dataclasses, and enums; the `default` hook
+(`_orjson_default`) only has to cover what orjson itself refuses —
+`Decimal` and `bytes`/`bytearray`/`memoryview`. Arrow-native Python types
+survive into the dicts unchanged, so a pre-cast in Arrow space would be a
+second pass for no gain: the API destination never coerces types the way
+the SQL destination does, because there is no destination-declared column
+schema to cast against — the write input is whatever the endpoint
+contract declares.
 
 ## Two transports, not five destinations
 
@@ -87,9 +89,13 @@ connector definition picks between them per `transport_type`:
   write mode, modest throughput. Async engine for dialects with an async
   driver (asyncpg, aiomysql); plain sync engine for sync-only drivers
   (Redshift `redshift_connector`), run via `asyncio.to_thread`.
-- **`adbc`** — the depth layer: the warehouses where volume matters
-  (Snowflake, BigQuery), with near-bulk-load throughput via a direct ADBC
-  DBAPI connection.
+- **`adbc`** — the depth layer: the warehouses where volume matters, with
+  near-bulk-load throughput via a direct ADBC DBAPI connection. Per-system
+  ingestion mechanism (an external-ecosystem fact, not derivable from this
+  repo — verify current driver maturity before relying on it): PostgreSQL
+  (libpq `COPY`), Snowflake (native Arrow ingestion), BigQuery (Storage
+  Write API), SQLite and DuckDB (in-process), MySQL (Flight SQL, newer —
+  verify maturity per release).
 
 Both flavours run the identical stage-then-merge plan
 ([`sql-write-path.md`](sql-write-path.md)) — dispatch, never fork, the

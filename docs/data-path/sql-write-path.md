@@ -110,7 +110,7 @@ that backend's declared bulk mechanism, and a system's own protocol —
 `LOAD DATA LOCAL INFILE`, `COPY`, a load-job API — lands here too.
 
 Stage-then-merge costs one extra object and one extra statement per batch
-on systems where direct DML was previously enough (small Postgres
+on systems where direct DML alone would suffice (small Postgres
 pipelines). This is accepted cost: the batch sizes where it matters are
 exactly the ones coalescing (§8) grows, and a temp-scope stage (§6) is one
 in-session table.
@@ -455,10 +455,13 @@ Properties:
 
 ## 6. Stage lifecycle
 
-**Naming** is a deterministic token, `sha256(run_id|stream_id|batch_seq)[:16]`,
+**Naming** is a deterministic token, `sha256(run_id|stream_id|batch_seq|target)[:16]`,
 in the grammar `_analitiq_stage_b<sha16>_<target>`: the fixed prefix and hash
 come first, and the target-name tail is readability only, truncated to the
-dialect's identifier budget. The order matters — with the tail first, a short
+dialect's identifier budget. `target` is part of the hashed token, not just
+the tail — two destinations of the same stream must never share one stage
+namespace, and their same-numbered batches would collide on a stage name
+once the tail is truncated if `target` were omitted from the hash. The order matters — with the tail first, a short
 identifier budget (Postgres' 63-byte NAMEDATALEN against any target longer
 than 29 characters) truncates the *hash*, distinct stages collapse into one
 name, and a pre-flight drop can destroy another batch's in-flight stage. The
@@ -673,13 +676,14 @@ Mechanics:
   a restart's different payload gets a fresh identity instead of a silent
   no-op.
 - **Size budget.** The hard bound is the gRPC message cap
-  (`GRPC_MAX_MESSAGE_SIZE`), 64 MiB by default. The unit budget counts the
-  Arrow payload **plus**
-  per-row wire overhead — `record_ids` alone add 64 bytes per row — and the
-  coalescer targets the declared `write_unit.bytes` capped at a safety
-  margin below the message cap. Single-message units in the tens of
-  megabytes are deliberately the ceiling: a protobuf message has no
-  streaming inside it, so both containers hold ~3-4x the unit size in
+  (`GRPC_MAX_MESSAGE_SIZE`), 16 MiB, fixed by design and not
+  environment-tunable — client and server must agree, so it is a code
+  constant, not a setting. The unit budget counts the Arrow payload
+  **plus** per-row wire overhead — `record_ids` alone add 64 bytes per
+  row — and the coalescer targets the declared `write_unit.bytes` capped
+  at a safety margin below the message cap. A single-digit-megabyte
+  single-message unit is deliberately the ceiling: a protobuf message has
+  no streaming inside it, so both containers hold ~3-4x the unit size in
   transient memory. Chunked framing (one logical batch as N wire messages
   under one ack) would lift that ceiling and is explicitly out of scope —
   an additive protocol change to revisit only if a workload proves the
@@ -691,11 +695,13 @@ Mechanics:
   table. What unit count does bound are the project-level load-job quota and
   the per-table/dataset operation-rate limits, all of which scale down
   linearly with coalescing — which is exactly what `write_unit` buys.
-- The write-unit fact lives in `connector.json` and nowhere else. The
-  `GetCapabilitiesResponse` sizing fields are not a second declaration
-  channel: they are removed, with their field numbers and names `reserved` in
-  the proto so a future field can never reuse the tags against a
-  mixed-version peer.
+- The write-unit fact belongs in `connector.json` and nowhere else. The
+  proto's `GetCapabilitiesResponse` also carries `max_batch_size`
+  / `max_batch_bytes` sizing fields (`src/destination/server.py`,
+  `cdk/cdk/base_handler.py`); building this section means retiring those as
+  a second declaration channel and reserving their field numbers so a
+  future field can never reuse the tags against a mixed-version peer — not
+  yet done, since the section itself is not yet built.
 
 ## 9. Idempotency and retry verdicts
 
@@ -718,8 +724,8 @@ what the system cannot hold.
 `retry_semantics` carries no per-transport rows: both backends run the same
 mechanism, so a mode's verdict is a property of the mode and the target
 system, never of the transport that reached it. The per-handler matrix in
-[grpc-streaming-architecture.md](../architecture/grpc-streaming-architecture.md) states the
-same verdicts.
+[destination-config.md](../config/destination-config.md#idempotency) states
+the same verdicts.
 
 ## 10. What the conformance kit asserts about the primitive
 

@@ -54,10 +54,11 @@ with two scopes, and the scope changes what identifies the endpoint:
   connector. `endpoint_id` names it directly.
 - **`connection`** — a private endpoint (e.g. a database table) that
   belongs to one connection. Its identity is `database_object`
-  (catalog/schema/name); `endpoint_id` is derived server-side from
-  `database_object`, not authored by the client, and the document's
-  `endpoint_id` field must agree with that derivation where both are
-  present.
+  (catalog/schema/name); `endpoint_id` may be omitted by the author, and
+  the contract validator derives it from `database_object` before the
+  document is accepted (`src/config/endpoint_resolver.py`) — a document
+  carrying no `endpoint_id` at this point is a validator defect, not a
+  client error.
 
 `connection_id` is always present regardless of scope. Optional `x-*`
 extension keys are accepted verbatim; any other unrecognised key is
@@ -80,11 +81,10 @@ not derivable from the schema alone:
   (e.g. MSSQL) declare it on full-refresh streams freely; on an incremental
   stream it must equal `cursor_field`, because cursor checkpointing depends
   on cursor-ordered pages — any other value is rejected.
-- **`is_enabled` and `source.connection_ref` are runtime-computed, never
-  authored.** `pipeline_config_prep` derives `is_enabled` from `status ==
-  "active"` and copies `endpoint_ref.connection_id` onto the source block
-  as a convenience key. Neither appears in the document a user or plugin
-  writes.
+- **`source.connection_ref` is runtime-computed, never authored.**
+  `pipeline_config_prep` copies `endpoint_ref.connection_id` onto the
+  source block as a convenience key; it does not appear in the document a
+  user or plugin writes.
 
 ## Connector definitions and transport containment
 

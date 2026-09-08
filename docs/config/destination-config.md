@@ -108,8 +108,8 @@ time.
 
 ## Formatters
 
-Used by File and Stdout handlers. `parquet` requires
-`poetry install -E analytics`.
+Used by File and Stdout handlers. `parquet` requires the CDK's `[arrow]`
+extra (`pip install "analitiq-cdk[arrow]"`).
 
 | Format | Extension | Content-Type | Notes |
 |--------|-----------|--------------|-------|
@@ -208,6 +208,11 @@ connection-owned header or an already-declared body field —
 a `batching` block: a restart re-batches records, and a per-request key
 spanning several records can never dedup. Without the block, API `insert`
 is at-least-once on a same-run restart.
+
+### Stdout
+
+At-least-once by construction: the handler only prints, so a replayed
+batch prints again — there is no sink state for a replay to dedup against.
 
 ## gRPC batch parameters
 

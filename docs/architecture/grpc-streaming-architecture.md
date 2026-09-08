@@ -1,6 +1,6 @@
 # gRPC Streaming Architecture
 
-**Scope:** This doc owns the engine<->destination gRPC protocol — wire messages, the Arrow IPC payload, cursor encode/decode, the protocol-level idempotency design (row identity vs. batch position, how a retry-safety verdict crosses the wire), and the ack/retry flow. Per-handler idempotency mechanics, environment variables, docker-compose, and the handler registry live in [destination-config.md](../config/destination-config.md).
+**Scope:** This doc owns the engine<->destination gRPC protocol — wire messages, the Arrow IPC payload, cursor encode/decode, the protocol-level idempotency design (row identity vs. batch position, how a retry-safety verdict crosses the wire), and the ack/retry flow. Per-handler idempotency mechanics, environment variables, `docker compose`, and the handler registry live in [destination-config.md](../config/destination-config.md).
 
 ## Overview
 
@@ -152,7 +152,7 @@ Any sender may declare a category — the config-defect and write-failure except
 
 ### No client keepalive on the engine<->destination channel
 
-The engine deliberately does **not** set `grpc.keepalive_*` options on the client channel — it configures only `max_send/receive_message_length` (`src/grpc/client.py::connect`). The server runs with default keepalive enforcement, which treats unsolicited client pings as abuse and sends a `GOAWAY` ("too many pings") that would tear the stream down mid-batch. Leaving client keepalive unset avoids that.
+The engine deliberately does **not** set `grpc.keepalive_*` options on the client channel — it configures only `max_send/receive_message_length` (`src/grpc/client.py::connect`). The server (`src/destination/server.py`) sets `grpc.http2.min_ping_interval_without_data_ms` and `grpc.http2.max_ping_strikes` as deliberate hardening against an aggressive client ping schedule — not a gRPC out-of-the-box default — and a client that re-adds keepalive options would trip it: too-frequent pings read as abuse and the server sends a `GOAWAY` ("too many pings") that would tear the stream down mid-batch. Leaving client keepalive unset avoids that.
 
 ### Opaque cursor
 
@@ -297,7 +297,7 @@ Engine                                    Destination
 
 ## Testing
 
-The gRPC units live in `tests/unit/grpc_tests/` (`poetry run pytest tests/unit/grpc_tests/`). The end-to-end contract is the docker-compose run itself — both services resolve identical config from one `PIPELINE_ID`:
+The gRPC units live in `tests/unit/grpc_tests/` (`poetry run pytest tests/unit/grpc_tests/`). The end-to-end contract is the `docker compose` run itself — both services resolve identical config from one `PIPELINE_ID`:
 
 ```bash
 cd docker && PIPELINE_ID=<id> docker compose run --rm source_engine
