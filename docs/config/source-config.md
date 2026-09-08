@@ -43,10 +43,15 @@ project_root/
     └── definition/endpoints/{endpoint_id}.json  # private endpoint documents
 ```
 
-**Identity is directory-based, not a declared field.** The directory name
-under `connections/` *is* the `connection_id`; a stream reaches a connection
-through `endpoint_ref.connection_id`, never through a field authored inside
-`connection.json` diverging from its own directory. `manifest.json` is
+**Identity is directory-based; an authored `connection_id` must agree with
+it, not replace it.** The directory name under `connections/` is the
+identity a stream reaches through `endpoint_ref.connection_id`.
+`connection_id` is an optional field on `connection.json` — a document
+may omit it, and the directory name is used — but if present it is
+validated against the directory name and rejected on mismatch
+(`PipelineConfigPrep._build_connection_index`,
+`src/engine/pipeline_config_prep.py`); it can never diverge from its own
+directory, authored or not. `manifest.json` is
 authoritative for which pipelines run: only an entry with `status: "active"`
 is executable.
 

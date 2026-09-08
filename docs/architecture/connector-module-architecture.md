@@ -557,8 +557,14 @@ installed packages are discovered additively.
    double-published connector package must not abort startup. Resolving a
    connector tries its own `connector_id` first, falling back to the kind
    default only when no specific class is registered (the thin path, §3).
-   Which operations a connector supports is read from the class itself
-   (`isinstance` against the Protocols), not from config.
+   Which role an entry-point connector serves — source, destination, or
+   both — is declared by which entry-point group it registered under, not
+   read off the class: the worker invokes the resolved class directly, no
+   Protocol check at that call, so a class registered under a role it
+   doesn't implement fails at first invocation. `isinstance` against the
+   Protocols is for a caller deciding whether to *offer* an optional
+   capability before trying it (see [ADR 0004](../adr/0004-capability-is-derived-never-declared.md)) —
+   not the invocation gate.
 
 3. **User references it by name** in pipeline config (`connector_id:
    "postgresql"`). Definition + type map are read from the connector's package

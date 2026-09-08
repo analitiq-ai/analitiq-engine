@@ -34,15 +34,32 @@ before either fact is known, would drift from the code on the first
 refactor and would lie about authorization on the first credential
 rotation.
 
-## What follows
+## What follows, and where this claim stops
 
-A runtime selects a capability by checking the connector object against
-the relevant Protocol, never by reading a flag:
+Where a consumer decides whether to *offer* an optional operation (does
+this connector support discovery, so the UI should show a "browse
+schemas" action), it checks the connector object against the relevant
+Protocol, never a flag:
 
 ```python
 if isinstance(connector, Discoverable):
     schemas = await connector.list_schemas(runtime)
 ```
+
+This governs two things, and only two: the CDK's own kind defaults (`is`
+this generic class really `Readable`, checked once via `issubclass` when
+a kind default is loaded — see
+[`engine-architecture.md`](../architecture/engine-architecture.md#connector-registries));
+and any caller deciding whether to *offer* an optional capability before
+trying it. It does **not** govern whether an externally-installed
+connector package's declared role is honoured. That role — source,
+destination, or both — is declared by which entry-point group
+(`analitiq.source_connectors` / `analitiq.destination_connectors`) the
+package registers under; the worker invokes the resolved class directly,
+with no Protocol check at that call. A connector package that registers
+under a group it doesn't actually implement fails at first invocation,
+not at selection — the entry-point group is itself a declaration, just
+not a static flag inside `connector.json`.
 
 This is a different rule from the SQL-shape facts in
 [`sql-write-path.md`](../data-path/sql-write-path.md) §5
