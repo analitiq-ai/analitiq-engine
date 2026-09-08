@@ -59,11 +59,16 @@ Defaults for each are in `src/config/settings.py`, not repeated here.
 
 ### Environment inputs outside `settings.py`
 
-This is the complete list of Python-side environment reads that do not
-go through `settings.py`, kept here — the one place, not README.md or
-any other doc — precisely because every prior attempt to state this list
-in two places let one of them go stale. Update this list, not a copy of
-it, when a new one is added.
+This is the complete list of Python-side environment reads that
+**configure application behavior** and do not go through `settings.py`,
+kept here — the one place, not README.md or any other doc — precisely
+because every prior attempt to state this list in two places let one of
+them go stale. Update this list, not a copy of it, when a new one is
+added. Explicitly out of scope: generic subprocess-environment
+forwarding when the worker is spawned (`PATH`, `HOME`, `LANG` in
+`src/worker/spawn.py::_clean_env`) — inherited shell environment for the
+interpreter to run at all, not application configuration, and not
+enumerable the way a deliberate input is.
 
 **Engine-owned defaults**, each declared outside `settings.py` for its
 own reason:
@@ -98,6 +103,17 @@ identification and log correlation, absent locally by design:
   absent locally (`src/state/log_emitter.py`).
 - `ORG_ID` — tenant routing for emitted logs, same file; absent locally
   defaults to `0`.
+
+**Worker bootstrap inputs** — forwarded into the isolated connector
+worker's environment by `src/worker/spawn.py::_clean_env`, unlike the
+generic forwarding this section excludes, because they determine whether
+an attach-time-installed connector is importable inside the worker at
+all:
+
+- `PYTHONPATH` — forwarded when set, so a connector package installed
+  outside the default interpreter path is still importable in the worker.
+- `PYTHONUSERBASE` — forwarded when set; `pip install --user` connector
+  packages live under it.
 
 Nothing above is a gap to fix; `settings.py` is the catalogue for
 environment-overridable *process defaults*, not for every environment

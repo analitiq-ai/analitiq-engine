@@ -205,7 +205,10 @@ reported as at-least-once.
 ### API (per-record idempotency key)
 
 An API `upsert` is idempotent through the endpoint's own `conflict_keys`.
-For `insert`, the api-endpoint contract's
+For `insert` with a declared `idempotency` block, the guarantee is
+exactly-once **within the provider's replay window** — a retry after the
+provider has expired its idempotency key is not deduped, and may create a
+duplicate. The api-endpoint contract's
 `operations.write.<mode>.idempotency` block (`{"in": "header" | "body",
 "name": "<key>"}`) declares **placement only** — the key value is
 engine-owned, following the write mode's identity semantics: `insert`
