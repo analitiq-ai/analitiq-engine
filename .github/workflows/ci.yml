@@ -113,6 +113,31 @@ jobs:
           PYTHONPATH: cdk
         run: poetry run python tools/contract_consumption.py --check
 
+  contract-version-pin:
+    name: contract pin matches the published release
+    # This repo's four manifests agreeing with each other (the pytest suite's
+    # test_contract_pin_agreement.py) says nothing about whether the agreed
+    # version is current -- all four can be consistently stale. This job
+    # fetches the provenance fact the plugins repo's published schema tree
+    # stamps at render time and fails outright (no retry) on any fetch/parse
+    # failure or on a real mismatch (issue #418).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Install dependencies
+        run: poetry install --no-interaction
+
+      - name: Check this repo's pin against the published release
+        run: poetry run python tools/check_contract_version_pin.py
+
   docker-requirements:
     name: docker/requirements.txt is current
     # docker/requirements.txt is what docker/Dockerfile installs into the

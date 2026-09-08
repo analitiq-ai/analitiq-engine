@@ -56,6 +56,12 @@ The `ci` workflow runs on every pull request and on pushes to `main`:
   `poetry-plugin-export` plugin (`pipx inject poetry poetry-plugin-export`,
   or `poetry self add poetry-plugin-export` for a non-pipx install) --
   Poetry no longer bundles `export` as a built-in command.
+- **contract pin matches the published release** -- `test_contract_pin_agreement.py`
+  only checks that this repo's manifests agree with each other; this job
+  additionally fetches `https://schemas.analitiq.ai/contracts-version.json`
+  (the plugins repo's published provenance fact) and fails outright, no
+  retry, if the agreed pin doesn't match it: `poetry run python
+  tools/check_contract_version_pin.py`.
 
 Run `poetry run pre-commit run --all-files` locally before pushing to catch
 everything the gate checks. mypy is pinned to the project's own version in both
@@ -120,7 +126,8 @@ commit is green:
    posts a verdict comment. Pushing new commits resets the gate until Codex
    reviews the new head.
 2. **CI is green** -- `pytest`, `pre-commit (all files)`,
-   `contract-consumption manifest is current`, and `Scan for secrets`.
+   `contract-consumption manifest is current`,
+   `contract pin matches the published release`, and `Scan for secrets`.
 3. **DeepSource Code Review Summary is all passed** -- the `DeepSource: Docker`,
    `DeepSource: Python`, `DeepSource: Shell`, and `DeepSource: Secrets`
    statuses, which mirror the analyzer table in DeepSource's PR comment.
