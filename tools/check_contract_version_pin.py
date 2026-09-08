@@ -88,6 +88,10 @@ def published_version() -> str:
         raise RuntimeError(
             f"{PUBLISHED_FACT_URL} did not return valid JSON: {exc}"
         ) from exc
+    if not isinstance(fact, dict):
+        raise RuntimeError(
+            f"{PUBLISHED_FACT_URL} did not return a JSON object: {fact!r}"
+        )
 
     try:
         return cast(str, fact[PACKAGE])

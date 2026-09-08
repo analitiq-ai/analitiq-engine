@@ -110,6 +110,16 @@ class TestPublishedVersion:
         with pytest.raises(RuntimeError, match="has no 'analitiq-contract-models' key"):
             ccvp.published_version()
 
+    def test_raises_when_the_fact_is_not_a_json_object(
+        self, ccvp: ModuleType, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fake_urlopen(url, timeout=None):
+            return io.BytesIO(json.dumps(["1.0.0rc24"]).encode())
+
+        monkeypatch.setattr(ccvp.urllib.request, "urlopen", fake_urlopen)
+        with pytest.raises(RuntimeError, match="did not return a JSON object"):
+            ccvp.published_version()
+
 
 class TestMain:
     def test_passes_when_local_pin_matches_published(
