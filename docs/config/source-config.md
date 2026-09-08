@@ -17,8 +17,10 @@ mapping in
 [`mapping-and-transformations.md`](../data-path/mapping-and-transformations.md),
 and the CDK / connector design in
 [`connector-module-architecture.md`](../architecture/connector-module-architecture.md).
-Environment variables and engine settings are specified in
-[`settings-reference.md`](settings-reference.md).
+The environment-variable catalogue is
+[`src/config/settings.py`](../../src/config/settings.py) (see also
+[README.md](../../README.md#environment-variables)); resolution order and
+layering rules are in [`settings-reference.md`](settings-reference.md).
 
 ## File layout
 

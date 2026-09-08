@@ -13,8 +13,11 @@ protocol see
 for the CDK connector contract see
 [`connector-module-architecture.md`](../architecture/connector-module-architecture.md);
 for connection / connector / endpoint schema see
-[`source-config.md`](source-config.md). Environment variables are
-specified in [`settings-reference.md`](settings-reference.md).
+[`source-config.md`](source-config.md). The environment-variable
+catalogue is [`src/config/settings.py`](../../src/config/settings.py) (see
+also [README.md](../../README.md#environment-variables)); their
+resolution order and layering rules are
+[`settings-reference.md`](settings-reference.md).
 
 Destinations are selected at runtime from the pipeline's
 `connections.destinations` list (indexed by the `DESTINATION_INDEX`
@@ -85,11 +88,18 @@ resolving a class with no read path.
 
 Externally installed connector packages add themselves through the
 `analitiq.source_connectors` / `analitiq.destination_connectors`
-entry-point groups, discovered at registry build time. The set of runnable
-kinds is therefore owned entirely by the registry: a kind that is neither a
-kind default nor registry-discovered fails at worker startup with
-`ConnectorNotRegisteredError` — neither the engine nor the CDK pins a
-parallel kind enum to keep in sync.
+entry-point groups, registering under their `connector_id` — an entry
+point never introduces a new *kind*, only a class for a kind the contract
+already declares valid. Which `kind` values are valid at all is owned by
+the published connector contract: `validate_connector`
+(`src/engine/pipeline_config_prep.py::_load_connector`) rejects a
+`connector.json` with an unrecognised `kind` before the document ever
+reaches the registry. Which of those contract-valid kinds actually has a
+class to run is a separate, later question the registry alone answers: a
+kind with neither a kind default nor a registry-discovered class fails at
+worker startup with `ConnectorNotRegisteredError` — the registry's set of
+*runnable* kinds is a subset of the contract's set of *valid* ones, never
+a parallel vocabulary to keep in sync.
 
 ### Handler capabilities
 

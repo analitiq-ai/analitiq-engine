@@ -53,6 +53,7 @@ schema and `settings.py` respectively) and only their pairing lives here:
 | `error_handling.strategy` | `ANALITIQ_ERROR_STRATEGY` |
 | `error_handling.max_retries` | `ANALITIQ_MAX_RETRIES` |
 | `error_handling.retry_delay_seconds` | `ANALITIQ_RETRY_DELAY_SECONDS` |
+| `logging.log_level` | `LOG_LEVEL` |
 
 Defaults for each are in `src/config/settings.py`, not repeated here.
 

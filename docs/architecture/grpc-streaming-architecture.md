@@ -1,6 +1,6 @@
 # gRPC Streaming Architecture
 
-**Scope:** This doc owns the engine<->destination gRPC protocol — wire messages, the Arrow IPC payload, cursor encode/decode, the protocol-level idempotency design (row identity vs. batch position, how a retry-safety verdict crosses the wire), and the ack/retry flow. Per-handler idempotency mechanics, environment variables, `docker compose`, and the handler registry live in [destination-config.md](../config/destination-config.md).
+**Scope:** This doc owns the engine<->destination gRPC protocol — wire messages, the Arrow IPC payload, cursor encode/decode, the protocol-level idempotency design (row identity vs. batch position, how a retry-safety verdict crosses the wire), and the ack/retry flow. Per-handler idempotency mechanics and the handler registry live in [destination-config.md](../config/destination-config.md); the environment-variable catalogue is [`src/config/settings.py`](../../src/config/settings.py) (see also [README.md](../../README.md#environment-variables)); the `docker compose` setup is [`docker/docker-compose.yml`](../../docker/docker-compose.yml).
 
 ## Overview
 
@@ -23,7 +23,7 @@ The engine and its destinations run as separate services connected by a gRPC bid
 +-------------------------------------------------------------+
 ```
 
-Both containers run the same Docker image, toggled by `RUN_MODE` (`source` or `destination`), and load identical config from the same `PIPELINE_ID` via `PipelineConfigPrep`. The destination picks its connection with `DESTINATION_INDEX`. See [destination-config.md](../config/destination-config.md) for the env vars and compose file.
+Both containers run the same Docker image, toggled by `RUN_MODE` (`source` or `destination`), and load identical config from the same `PIPELINE_ID` via `PipelineConfigPrep`. The destination picks its connection with `DESTINATION_INDEX`. See [`docker/docker-compose.yml`](../../docker/docker-compose.yml) for the compose file and [README.md](../../README.md#environment-variables) for the env vars.
 
 ## Wire Protocol
 
