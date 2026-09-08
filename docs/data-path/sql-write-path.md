@@ -17,17 +17,17 @@ Related docs: transport strategy rationale in
 [grpc-streaming-architecture.md](../architecture/grpc-streaming-architecture.md), CDK packaging
 and the connector contract in
 [connector-module-architecture.md](../architecture/connector-module-architecture.md).
+The decisions behind this primitive are recorded in
+[ADR 0005](../adr/0005-stage-then-merge-is-the-single-sql-write-primitive.md)
+and [ADR 0006](../adr/0006-batch-coalescing-is-engine-side.md).
 
 ## 1. What this prevents
 
 The failure mode this design exists to prevent is **the same author intent
-taking a different primitive per transport**. When `upsert` means a direct
-dialect statement on one transport and a stage table plus `MERGE` on another,
-every write-path rule has to be stated twice, the two copies drift, and each
-new system multiplies the divergence rather than adding to it. Per-dialect
-divergence was the fastest-growing defect class in this codebase, and guessed
-base-class defaults — behavior right for one database family and silently
-wrong for the next — were its mechanism.
+taking a different primitive per transport**. See
+[ADR 0005](../adr/0005-stage-then-merge-is-the-single-sql-write-primitive.md)
+for why that failure mode, and no other design, is what stage-then-merge
+closes off.
 
 Three properties follow, and the rest of this document is their consequence:
 
@@ -582,14 +582,10 @@ SQLAlchemy flavor can enforce it in-band.
 coalesce, and a declared `write_unit` has no consumer.
 
 **The engine coalesces source batches before sending; the wire protocol does
-not change.** The destination-side alternatives — buffered
-batches with deferred or windowed acks, or a flush hook with held cursors —
-are rejected: both require the sandboxed, untrusted connector worker to hold
-data the engine has already had acked or to participate in cursor durability,
-exactly the trust this architecture withholds from connector code
-(connector execution is isolated precisely because it is untrusted). Engine-
-side coalescing keeps the exactly-once unit "one sent batch = one ack = one
-cursor persist" byte-for-byte intact; the sent batch just gets bigger.
+not change** — the exactly-once unit "one sent batch = one ack = one
+cursor persist" stays byte-for-byte intact; the sent batch just gets
+bigger. See [ADR 0006](../adr/0006-batch-coalescing-is-engine-side.md)
+for why this happens in the engine rather than the destination.
 
 Mechanics:
 
