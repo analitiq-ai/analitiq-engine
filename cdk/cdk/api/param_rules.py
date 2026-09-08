@@ -162,21 +162,22 @@ _RE2_OPTIONS.log_errors = False
 
 
 def _re2_pattern(
-    validator: Draft202012Validator, patrn: str, instance: Any, schema: Any
+    validator: Draft202012Validator, patrn: str, instance: Any, _schema: Any
 ) -> Iterator[ValidationError]:
-    """The ``pattern`` keyword, matched with ``re2`` instead of ``jsonschema``'s
-    default (stdlib ``re``, ``jsonschema/_keywords.py``'s ``re.search``).
+    """Match the ``pattern`` keyword with ``re2`` instead of stdlib ``re``.
 
-    ``pattern`` is connector-authored, untrusted input (:data:`Param.pattern`
-    is an unconstrained string -- the published contract puts no subset
-    restriction on it, unlike the type-map ``native``/``canonical`` regex
-    rules), and this validator runs it against every admitted request value,
-    on every page, of every run (#504). A pattern relying on Perl/Python
-    syntax RE2 doesn't support -- see ``cdk.type_map.rules``'s module
-    docstring for the differences -- is refused at declaration time
-    (:func:`_keyword_defect`), not silently reinterpreted. Same contract as
-    the keyword it replaces: yield one :class:`ValidationError` when a
-    string instance does not match, yield nothing otherwise.
+    ``jsonschema``'s default (``jsonschema/_keywords.py``'s ``re.search``)
+    is backtracking ``re``. ``pattern`` is connector-authored, untrusted
+    input (:data:`Param.pattern` is an unconstrained string -- the published
+    contract puts no subset restriction on it, unlike the type-map
+    ``native``/``canonical`` regex rules), and this validator runs it
+    against every admitted request value, on every page, of every run
+    (#504). A pattern relying on Perl/Python syntax RE2 doesn't support --
+    see ``cdk.type_map.rules``'s module docstring for the differences -- is
+    refused at declaration time (:func:`_keyword_defect`), not silently
+    reinterpreted. Same contract as the keyword it replaces: yield one
+    :class:`ValidationError` when a string instance does not match, yield
+    nothing otherwise.
     """
     if not validator.is_type(instance, "string"):
         return

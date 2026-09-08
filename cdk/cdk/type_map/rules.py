@@ -114,11 +114,11 @@ __all__ = [
 
 
 class _PatternMatch(Protocol):
-    """What :class:`CompiledPattern` returns from a successful match.
+    r"""What :class:`CompiledPattern` returns from a successful match.
 
     ``groupdict()`` gives ``None`` for a named group that exists in the
     pattern but did not participate in this particular match (an optional
-    group, e.g. ``(?:,(?<s>\\d+))?``, when the input omits it) -- the same
+    group, e.g. ``(?:,(?<s>\d+))?``, when the input omits it) -- the same
     semantics as stdlib ``re.Match.groupdict()``.
     """
 

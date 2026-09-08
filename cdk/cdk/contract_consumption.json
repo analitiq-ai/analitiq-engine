@@ -531,7 +531,7 @@
     },
     "analitiq.contracts.endpoints.Param": {
       "controlled_by": [
-        "cdk.api.param_rules:354",
+        "cdk.api.param_rules:398",
         "cdk.api.request:180",
         "cdk.api.request:242",
         "cdk.api.request:244"
@@ -541,46 +541,46 @@
         "cdk.request_binding:74"
       ],
       "enum": [
-        "cdk.api.param_rules:317"
+        "cdk.api.param_rules:361"
       ],
       "explode": [
         "cdk.api.query_style:121",
         "cdk.api.query_style:124"
       ],
       "format": [
-        "cdk.api.param_rules:317"
+        "cdk.api.param_rules:361"
       ],
       "max_items": [
-        "cdk.api.param_rules:317"
+        "cdk.api.param_rules:361"
       ],
       "max_length": [
-        "cdk.api.param_rules:317"
+        "cdk.api.param_rules:361"
       ],
       "maximum": [
-        "cdk.api.param_rules:317"
+        "cdk.api.param_rules:361"
       ],
       "min_items": [
-        "cdk.api.param_rules:317"
+        "cdk.api.param_rules:361"
       ],
       "min_length": [
-        "cdk.api.param_rules:317"
+        "cdk.api.param_rules:361"
       ],
       "minimum": [
-        "cdk.api.param_rules:317"
+        "cdk.api.param_rules:361"
       ],
       "pattern": [
-        "cdk.api.param_rules:317"
+        "cdk.api.param_rules:361"
       ],
       "required": [
-        "cdk.api.param_rules:353"
+        "cdk.api.param_rules:397"
       ],
       "style": [
         "cdk.api.query_style:121",
         "cdk.api.query_style:124"
       ],
       "type": [
-        "cdk.api.param_rules:313",
-        "cdk.api.param_rules:314",
+        "cdk.api.param_rules:357",
+        "cdk.api.param_rules:358",
         "cdk.api.query_style:124"
       ]
     },
@@ -1134,79 +1134,79 @@
     "analitiq.contracts.type_map.TypeMapReadExactRule": {
       "arrow_type": [
         "cdk.type_map.mapper:130",
-        "cdk.type_map.rules:314",
-        "cdk.type_map.rules:316"
+        "cdk.type_map.rules:370",
+        "cdk.type_map.rules:372"
       ],
       "match": [
         "cdk.type_map.mapper:58",
         "cdk.type_map.mapper:128",
-        "cdk.type_map.rules:261",
-        "cdk.type_map.rules:278",
-        "cdk.type_map.rules:324"
+        "cdk.type_map.rules:310",
+        "cdk.type_map.rules:331",
+        "cdk.type_map.rules:380"
       ],
       "native_type": [
-        "cdk.type_map.rules:263",
-        "cdk.type_map.rules:281",
-        "cdk.type_map.rules:322"
+        "cdk.type_map.rules:312",
+        "cdk.type_map.rules:334",
+        "cdk.type_map.rules:378"
       ]
     },
     "analitiq.contracts.type_map.TypeMapReadRegexRule": {
       "arrow_type": [
-        "cdk.type_map.mapper:136",
-        "cdk.type_map.rules:281",
-        "cdk.type_map.rules:314",
-        "cdk.type_map.rules:316",
-        "cdk.type_map.rules:326"
+        "cdk.type_map.mapper:144",
+        "cdk.type_map.rules:334",
+        "cdk.type_map.rules:370",
+        "cdk.type_map.rules:372",
+        "cdk.type_map.rules:382"
       ],
       "match": [
         "cdk.type_map.mapper:58",
         "cdk.type_map.mapper:128",
-        "cdk.type_map.rules:261",
-        "cdk.type_map.rules:278",
-        "cdk.type_map.rules:324"
+        "cdk.type_map.rules:310",
+        "cdk.type_map.rules:331",
+        "cdk.type_map.rules:380"
       ],
       "native_type": [
-        "cdk.type_map.rules:281",
-        "cdk.type_map.rules:322",
-        "cdk.type_map.rules:326"
+        "cdk.type_map.rules:334",
+        "cdk.type_map.rules:378",
+        "cdk.type_map.rules:382"
       ]
     },
     "analitiq.contracts.type_map.TypeMapWriteExactRule": {
       "arrow_type": [
         "cdk.type_map.mapper:74",
-        "cdk.type_map.rules:314",
-        "cdk.type_map.rules:316"
+        "cdk.type_map.rules:370",
+        "cdk.type_map.rules:372"
       ],
       "match": [
         "cdk.type_map.mapper:73",
-        "cdk.type_map.mapper:172",
-        "cdk.type_map.rules:278",
-        "cdk.type_map.rules:324"
+        "cdk.type_map.mapper:180",
+        "cdk.type_map.rules:331",
+        "cdk.type_map.rules:380"
       ],
       "native_type": [
-        "cdk.type_map.mapper:174",
-        "cdk.type_map.rules:281",
-        "cdk.type_map.rules:322"
+        "cdk.type_map.mapper:182",
+        "cdk.type_map.rules:334",
+        "cdk.type_map.rules:378"
       ]
     },
     "analitiq.contracts.type_map.TypeMapWriteRegexRule": {
       "arrow_type": [
-        "cdk.type_map.rules:281",
-        "cdk.type_map.rules:314",
-        "cdk.type_map.rules:316",
-        "cdk.type_map.rules:326"
+        "cdk.type_map.rules:334",
+        "cdk.type_map.rules:370",
+        "cdk.type_map.rules:372",
+        "cdk.type_map.rules:382"
       ],
       "match": [
         "cdk.type_map.mapper:73",
-        "cdk.type_map.mapper:172",
-        "cdk.type_map.rules:278",
-        "cdk.type_map.rules:324"
+        "cdk.type_map.mapper:180",
+        "cdk.type_map.rules:331",
+        "cdk.type_map.rules:380"
       ],
       "native_type": [
-        "cdk.type_map.mapper:185",
-        "cdk.type_map.rules:281",
-        "cdk.type_map.rules:322",
-        "cdk.type_map.rules:326"
+        "cdk.type_map.mapper:193",
+        "cdk.type_map.rules:334",
+        "cdk.type_map.rules:378",
+        "cdk.type_map.rules:382"
       ]
     }
   },
