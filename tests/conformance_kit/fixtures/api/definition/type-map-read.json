@@ -1,10 +1,10 @@
 [
-  { "match": "exact", "native": "BOOLEAN", "canonical": "Boolean" },
-  { "match": "exact", "native": "INTEGER", "canonical": "Int64" },
-  { "match": "exact", "native": "NUMBER", "canonical": "Float64" },
-  { "match": "exact", "native": "STRING:DATE-TIME", "canonical": "Timestamp(MICROSECOND, UTC)" },
-  { "match": "exact", "native": "STRING:DATE", "canonical": "Date32" },
-  { "match": "regex", "native": "^STRING(:.+)?$", "canonical": "Utf8" },
-  { "match": "exact", "native": "OBJECT", "canonical": "Json" },
-  { "match": "exact", "native": "ARRAY", "canonical": "Json" }
+  { "match": "exact", "native_type": "BOOLEAN", "arrow_type": "Boolean" },
+  { "match": "exact", "native_type": "INTEGER", "arrow_type": "Int64" },
+  { "match": "exact", "native_type": "NUMBER", "arrow_type": "Float64" },
+  { "match": "exact", "native_type": "STRING:DATE-TIME", "arrow_type": "Timestamp(MICROSECOND, UTC)" },
+  { "match": "exact", "native_type": "STRING:DATE", "arrow_type": "Date32" },
+  { "match": "regex", "native_type": "^STRING(:.+)?$", "arrow_type": "Utf8" },
+  { "match": "exact", "native_type": "OBJECT", "arrow_type": "Json" },
+  { "match": "exact", "native_type": "ARRAY", "arrow_type": "Json" }
 ]

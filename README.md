@@ -173,8 +173,8 @@ The pipeline builder plugin generates all of this automatically. This section is
 connectors/{connector_id}/      # One installable connector package per system
   definition/
     connector.json              # Connector metadata, transports, auth config
-    type-map-read.json          # native -> arrow type rules
-    type-map-write.json         # arrow -> native type rules (database connectors)
+    type-map-read.json          # native_type -> arrow_type rules
+    type-map-write.json         # arrow_type -> native_type rules (database connectors)
     manifest.json               # Lists available endpoints
     endpoints/{name}.json       # Endpoint schemas
   connector.py                  # Connector class (only when the system is quirky)

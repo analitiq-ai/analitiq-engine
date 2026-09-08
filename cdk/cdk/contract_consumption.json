@@ -33,7 +33,7 @@
       "connector_id": [
         "cdk.transport_factory:304",
         "cdk.transport_factory:310",
-        "cdk.transport_factory:1313"
+        "cdk.transport_factory:1314"
       ],
       "default_transport": [
         "cdk.connection_runtime:104",
@@ -78,7 +78,7 @@
       "connector_id": [
         "cdk.transport_factory:304",
         "cdk.transport_factory:310",
-        "cdk.transport_factory:1313"
+        "cdk.transport_factory:1314"
       ],
       "default_transport": [
         "cdk.connection_runtime:104",
@@ -113,7 +113,7 @@
       "connector_id": [
         "cdk.transport_factory:304",
         "cdk.transport_factory:310",
-        "cdk.transport_factory:1313"
+        "cdk.transport_factory:1314"
       ],
       "default_transport": [
         "cdk.connection_runtime:104",
@@ -145,7 +145,7 @@
       "connector_id": [
         "cdk.transport_factory:304",
         "cdk.transport_factory:310",
-        "cdk.transport_factory:1313"
+        "cdk.transport_factory:1314"
       ],
       "default_transport": [
         "cdk.connection_runtime:104",
@@ -177,7 +177,7 @@
       "connector_id": [
         "cdk.transport_factory:304",
         "cdk.transport_factory:310",
-        "cdk.transport_factory:1313"
+        "cdk.transport_factory:1314"
       ],
       "default_transport": [
         "cdk.connection_runtime:104",
@@ -209,7 +209,7 @@
       "connector_id": [
         "cdk.transport_factory:304",
         "cdk.transport_factory:310",
-        "cdk.transport_factory:1313"
+        "cdk.transport_factory:1314"
       ],
       "default_transport": [
         "cdk.connection_runtime:104",
@@ -241,7 +241,7 @@
       "connector_id": [
         "cdk.transport_factory:304",
         "cdk.transport_factory:310",
-        "cdk.transport_factory:1313"
+        "cdk.transport_factory:1314"
       ],
       "default_transport": [
         "cdk.connection_runtime:104",
@@ -268,7 +268,7 @@
         "cdk.api.generic:187",
         "cdk.api.write_plan:518",
         "src.engine.pipeline_config_prep:591",
-        "src.engine.pipeline_config_prep:594"
+        "src.engine.pipeline_config_prep:595"
       ],
       "operations": [
         "cdk.api.generic:191",
@@ -335,7 +335,7 @@
       ],
       "endpoint_id": [
         "src.engine.pipeline_config_prep:591",
-        "src.engine.pipeline_config_prep:594"
+        "src.engine.pipeline_config_prep:595"
       ],
       "primary_keys": [
         "cdk.sql.generic:1125"
@@ -687,11 +687,11 @@
         "cdk.api.replication:222",
         "cdk.api.replication:223",
         "cdk.api.replication:306",
-        "cdk.api.replication:308"
+        "cdk.api.replication:309"
       ],
       "operator": [
         "cdk.api.replication:255",
-        "cdk.api.replication:257",
+        "cdk.api.replication:258",
         "cdk.api.replication:317"
       ],
       "param": [
@@ -707,7 +707,7 @@
       ],
       "end_operator": [
         "cdk.api.replication:263",
-        "cdk.api.replication:265"
+        "cdk.api.replication:267"
       ],
       "end_param": [
         "cdk.api.replication:332"
@@ -718,7 +718,7 @@
       ],
       "start_operator": [
         "cdk.api.replication:263",
-        "cdk.api.replication:265",
+        "cdk.api.replication:266",
         "cdk.api.replication:319"
       ],
       "start_param": [
@@ -947,7 +947,7 @@
         "src.config.endpoint_resolver:100",
         "src.config.endpoint_resolver:106",
         "src.engine.pipeline_config_prep:591",
-        "src.engine.pipeline_config_prep:594"
+        "src.engine.pipeline_config_prep:596"
       ],
       "scope": [
         "cdk.api.response_schema:173",
@@ -1118,7 +1118,7 @@
       "type": [
         "src.engine.mapping:1086",
         "src.engine.mapping:1096",
-        "src.engine.mapping:1113",
+        "src.engine.mapping:1114",
         "src.engine.mapping:1133",
         "src.engine.mapping:1155",
         "src.engine.mapping:1161"
@@ -1130,9 +1130,88 @@
         "src.engine.mapping:1151",
         "src.engine.mapping:1170"
       ]
+    },
+    "analitiq.contracts.type_map.TypeMapReadExactRule": {
+      "arrow_type": [
+        "cdk.type_map.mapper:131",
+        "cdk.type_map.rules:277",
+        "cdk.type_map.rules:279"
+      ],
+      "match": [
+        "cdk.type_map.mapper:57",
+        "cdk.type_map.mapper:129",
+        "cdk.type_map.rules:222",
+        "cdk.type_map.rules:239",
+        "cdk.type_map.rules:287"
+      ],
+      "native_type": [
+        "cdk.type_map.mapper:58",
+        "cdk.type_map.rules:224",
+        "cdk.type_map.rules:242",
+        "cdk.type_map.rules:285"
+      ]
+    },
+    "analitiq.contracts.type_map.TypeMapReadRegexRule": {
+      "arrow_type": [
+        "cdk.type_map.mapper:137",
+        "cdk.type_map.rules:244",
+        "cdk.type_map.rules:277",
+        "cdk.type_map.rules:279",
+        "cdk.type_map.rules:289"
+      ],
+      "match": [
+        "cdk.type_map.mapper:57",
+        "cdk.type_map.mapper:129",
+        "cdk.type_map.rules:222",
+        "cdk.type_map.rules:239",
+        "cdk.type_map.rules:287"
+      ],
+      "native_type": [
+        "cdk.type_map.rules:242",
+        "cdk.type_map.rules:285",
+        "cdk.type_map.rules:289"
+      ]
+    },
+    "analitiq.contracts.type_map.TypeMapWriteExactRule": {
+      "arrow_type": [
+        "cdk.type_map.mapper:74",
+        "cdk.type_map.rules:277",
+        "cdk.type_map.rules:279"
+      ],
+      "match": [
+        "cdk.type_map.mapper:72",
+        "cdk.type_map.mapper:173",
+        "cdk.type_map.rules:239",
+        "cdk.type_map.rules:287"
+      ],
+      "native_type": [
+        "cdk.type_map.mapper:175",
+        "cdk.type_map.rules:242",
+        "cdk.type_map.rules:285"
+      ]
+    },
+    "analitiq.contracts.type_map.TypeMapWriteRegexRule": {
+      "arrow_type": [
+        "cdk.type_map.rules:244",
+        "cdk.type_map.rules:277",
+        "cdk.type_map.rules:279",
+        "cdk.type_map.rules:289"
+      ],
+      "match": [
+        "cdk.type_map.mapper:72",
+        "cdk.type_map.mapper:173",
+        "cdk.type_map.rules:239",
+        "cdk.type_map.rules:287"
+      ],
+      "native_type": [
+        "cdk.type_map.mapper:186",
+        "cdk.type_map.rules:242",
+        "cdk.type_map.rules:285",
+        "cdk.type_map.rules:289"
+      ]
     }
   },
-  "contract_models_version": "1.0.0rc23",
+  "contract_models_version": "1.0.0rc24",
   "kit_reads": {
     "analitiq.contracts.endpoints.ApiEndpointDoc": {
       "endpoint_id": [
@@ -1315,6 +1394,42 @@
       ],
       "schema_": [
         "cdk.conformance.api_read_path:719"
+      ]
+    },
+    "analitiq.contracts.type_map.TypeMapReadExactRule": {
+      "arrow_type": [
+        "cdk.conformance.roundtrip:218",
+        "cdk.conformance.roundtrip:219",
+        "cdk.conformance.roundtrip:221"
+      ],
+      "match": [
+        "cdk.conformance.roundtrip:217"
+      ]
+    },
+    "analitiq.contracts.type_map.TypeMapReadRegexRule": {
+      "match": [
+        "cdk.conformance.roundtrip:217"
+      ]
+    },
+    "analitiq.contracts.type_map.TypeMapWriteExactRule": {
+      "arrow_type": [
+        "cdk.conformance.roundtrip:223",
+        "cdk.conformance.roundtrip:224"
+      ],
+      "match": [
+        "cdk.conformance.roundtrip:183",
+        "cdk.conformance.roundtrip:223",
+        "cdk.conformance.roundtrip:261"
+      ]
+    },
+    "analitiq.contracts.type_map.TypeMapWriteRegexRule": {
+      "arrow_type": [
+        "cdk.conformance.roundtrip:280"
+      ],
+      "match": [
+        "cdk.conformance.roundtrip:183",
+        "cdk.conformance.roundtrip:223",
+        "cdk.conformance.roundtrip:261"
       ]
     }
   },
@@ -1659,7 +1774,11 @@
     "analitiq.contracts.endpoints.ApiEndpointDoc",
     "analitiq.contracts.endpoints.DatabaseEndpointDoc",
     "analitiq.contracts.pipelines.config.PipelineInput",
-    "analitiq.contracts.stream.StreamInput"
+    "analitiq.contracts.stream.StreamInput",
+    "analitiq.contracts.type_map.TypeMapReadExactRule",
+    "analitiq.contracts.type_map.TypeMapReadRegexRule",
+    "analitiq.contracts.type_map.TypeMapWriteExactRule",
+    "analitiq.contracts.type_map.TypeMapWriteRegexRule"
   ],
   "scope": {
     "kit": [

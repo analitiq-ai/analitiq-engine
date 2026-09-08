@@ -313,19 +313,19 @@ boundary and rejected on another. Each pair resolves to one mode:
   This gate applies to a scalar leaf *inside* a nested (`Object`/`List`) target
   too: an `Int64 → Utf8` struct leaf fails loud, not a silent per-child cast.
 - `forbidden` — never permitted: nested and `Json` conversions (`Object → Int64`)
-  and every cross-kind pair outside the stable-cast allowlist (`Binary → Int64`,
-  `Duration → Date32`, `Utf8 → Date32`). The published grid lists only casts the
-  runtime performs identically on every supported pyarrow version, so it never
-  promises a conversion that cannot run.
+  and every cross-`conversion_kind` pair outside the stable-cast allowlist
+  (`Binary → Int64`, `Duration → Date32`, `Utf8 → Date32`). The published
+  grid lists only casts the runtime performs identically on every supported
+  pyarrow version, so it never promises a conversion that cannot run.
 
 `runtime_checked` marks a permitted conversion a per-row guard may still reject
 (a narrowing that overflows, a string that will not parse); the build runs with
 `safe=True` so a bad row fails loud rather than truncating.
 
 The same policy is published as a generated artifact
-(`cdk/cdk/type_map/conversion_matrix.json`, built from the canonical table by
-`build_conversion_matrix()`) so the mapping authoring UI offers exactly the
-conversions the engine accepts and auto-wires the function an `explicit`
+(`cdk/cdk/type_map/conversion_matrix.json`, built from the `ARROW_FAMILIES`
+table by `build_conversion_matrix()`) so the mapping authoring UI offers
+exactly the conversions the engine accepts and auto-wires the function an `explicit`
 conversion needs. The artifact states its own version in a top-level `version` field, filled from
 `CONVERSION_MATRIX_VERSION`, so a consumer holding the bytes can name the policy
 it got; the publisher reads that field rather than assigning a version. The frontend consumes it as the `@analitiq-ai/conversion-matrix`

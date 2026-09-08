@@ -188,7 +188,7 @@ class TestThinConnectorPassesVacuously:
             json.dumps(minimal_connector_definition("database", "conformance-thin"))
         )
         (definition_dir / "type-map-read.json").write_text(
-            '[{"match": "exact", "native": "TEXT", "canonical": "Utf8"}]'
+            '[{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}]'
         )
         target = load_target(tmp_path)
         assert target.connector_class is not None, "thin path falls back"
@@ -226,7 +226,7 @@ class TestUnassessableKindIsNotAPass:
             json.dumps(minimal_connector_definition("file", "unassessed"))
         )
         (definition_dir / "type-map-read.json").write_text(
-            '[{"match": "exact", "native": "TEXT", "canonical": "Utf8"}]'
+            '[{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}]'
         )
         completed = run_kit_suite(
             "cdk.conformance.tier1",

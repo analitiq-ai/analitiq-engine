@@ -1,13 +1,13 @@
 [
-  { "match": "exact", "canonical": "Boolean", "native": "BOOLEAN" },
-  { "match": "exact", "canonical": "Int16", "native": "SMALLINT" },
-  { "match": "exact", "canonical": "Int32", "native": "INTEGER" },
-  { "match": "exact", "canonical": "Int64", "native": "BIGINT" },
-  { "match": "exact", "canonical": "Float64", "native": "DOUBLE PRECISION" },
-  { "match": "exact", "canonical": "Utf8", "native": "TEXT" },
-  { "match": "regex", "canonical": "^Decimal128\\((?<p>\\d+), (?<s>\\d+)\\)$", "native": "NUMERIC(${p}, ${s})" },
-  { "match": "exact", "canonical": "Date32", "native": "DATE" },
-  { "match": "exact", "canonical": "Timestamp(MICROSECOND, UTC)", "native": "TIMESTAMPTZ" },
-  { "match": "exact", "canonical": "Timestamp(MICROSECOND)", "native": "TIMESTAMP" },
-  { "match": "exact", "canonical": "Json", "native": "JSONB" }
+  { "match": "exact", "arrow_type": "Boolean", "native_type": "BOOLEAN" },
+  { "match": "exact", "arrow_type": "Int16", "native_type": "SMALLINT" },
+  { "match": "exact", "arrow_type": "Int32", "native_type": "INTEGER" },
+  { "match": "exact", "arrow_type": "Int64", "native_type": "BIGINT" },
+  { "match": "exact", "arrow_type": "Float64", "native_type": "DOUBLE PRECISION" },
+  { "match": "exact", "arrow_type": "Utf8", "native_type": "TEXT" },
+  { "match": "regex", "arrow_type": "^Decimal128\\((?<p>\\d+), (?<s>\\d+)\\)$", "native_type": "NUMERIC(${p}, ${s})" },
+  { "match": "exact", "arrow_type": "Date32", "native_type": "DATE" },
+  { "match": "exact", "arrow_type": "Timestamp(MICROSECOND, UTC)", "native_type": "TIMESTAMPTZ" },
+  { "match": "exact", "arrow_type": "Timestamp(MICROSECOND)", "native_type": "TIMESTAMP" },
+  { "match": "exact", "arrow_type": "Json", "native_type": "JSONB" }
 ]

@@ -526,7 +526,7 @@ class SqlDialect:
         that must be pinned for type-mapping correctness — e.g. MySQL's
         ``SET time_zone = '+00:00'``, without which retrieved TIMESTAMP
         values are converted through whatever ``time_zone`` the server
-        happens to run and the tz-aware canonical types carry the wrong
+        happens to run and the tz-aware Arrow types carry the wrong
         instants.
         """
         return []
@@ -552,12 +552,12 @@ class SqlDialect:
     # ---- column type rendering (one write surface: type-map-write.json) -----
     def render_column_type(
         self,
-        canonical: str,
+        arrow_type: str,
         type_mapper: TypeMapper,
         *,
         params: Mapping[str, Any] | None = None,
     ) -> str:
-        """Render a canonical Arrow type to this system's native DDL type.
+        """Render an Arrow type to this system's native DDL type.
 
         The default is fully declarative: the connector's
         ``type-map-write.json`` (via ``TypeMapper.to_native_type``) is the
@@ -567,7 +567,7 @@ class SqlDialect:
         BigQuery's NUMERIC/BIGNUMERIC precision-range arithmetic); the
         override should handle its special case and delegate the rest here.
         """
-        return type_mapper.to_native_type(canonical, params=params)
+        return type_mapper.to_native_type(arrow_type, params=params)
 
     def current_timestamp_default(self) -> str:
         """Return the SQL DEFAULT expression for server-stamped timestamps.

@@ -52,6 +52,7 @@ from cdk.conformance.tier1 import test_rendering as kit_rendering
 from cdk.sql.capabilities import SqlCapabilities
 from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.generic import GenericSQLConnector
+from cdk.type_map import InvalidTypeMapError
 from cdk.type_map.loader import build_type_mapper
 
 from .kit_runner import API_REFERENCE_DIR, REFERENCE_CLASS, REFERENCE_DIR
@@ -226,9 +227,9 @@ class _RequiredOptionalDialect(ReferencePostgresDialect):
     """Makes render_column_type's optional params keyword required."""
 
     def render_column_type(  # type: ignore[override]
-        self, canonical: str, type_mapper: Any, *, params: Any
+        self, arrow_type: str, type_mapper: Any, *, params: Any
     ) -> str:
-        return super().render_column_type(canonical, type_mapper, params=params)
+        return super().render_column_type(arrow_type, type_mapper, params=params)
 
 
 class _RequiredOptionalConnector(GenericSQLConnector):
@@ -731,7 +732,7 @@ class TestGateInversionBreaks:
         """
         read_only_mapper = build_type_mapper(
             "no-write-map",
-            [{"match": "exact", "native": "TEXT", "canonical": "Utf8"}],
+            [{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}],
         )
         doctored = dataclasses.replace(reference_target, type_mapper=read_only_mapper)
         violations = check_declaration_consistency(doctored)
@@ -741,80 +742,74 @@ class TestGateInversionBreaks:
 
 
 class TestTypeMapBreaks:
-    def test_foreign_canonical_literal_fails_and_never_counts(self) -> None:
-        """A made-up canonical must be a violation, not self-certifying.
+    def test_foreign_arrow_literal_is_refused_before_a_mapper_exists(self) -> None:
+        """A made-up Arrow type must be a violation, not self-certifying.
 
-        An exact rule pair Foo <-> TEXT round-trips with itself and
-        previously counted toward probe coverage, certifying a write map
-        that cannot render any canonical an endpoint document can carry.
+        An exact rule pair Foo <-> TEXT round-trips with itself, so left
+        unchecked it counted toward probe coverage and certified a write map
+        that cannot render any Arrow type an endpoint document can carry. The
+        published contract holds an exact rule's arrow_type to the Arrow
+        vocabulary, so the document is refused at parse time.
         """
-        mapper = build_type_mapper(
-            "foreign-literal",
-            [{"match": "exact", "native": "TEXT", "canonical": "Foo"}],
-            [{"match": "exact", "canonical": "Foo", "native": "TEXT"}],
-        )
-        violations = check_type_map_round_trip(mapper)
-        report = _messages(violations)
-        assert "Foo" in report
-        assert "published grammar" in report
-        assert (
-            "rendered none" in report
-        ), f"the foreign literal must not count toward coverage: {report}"
+        with pytest.raises(InvalidTypeMapError, match=r"exact\.arrow_type"):
+            build_type_mapper(
+                "foreign-literal",
+                [{"match": "exact", "native_type": "TEXT", "arrow_type": "Foo"}],
+                [{"match": "exact", "arrow_type": "Foo", "native_type": "TEXT"}],
+            )
 
-    def test_source_only_connector_still_earns_its_read_canonicals(self) -> None:
+    def test_source_only_connector_is_held_to_the_arrow_vocabulary(self) -> None:
         """No write map is not a reason to certify nothing.
 
-        A source-only connector emits canonicals from discovery alone, so
-        a foreign literal in its read map fails at runtime in
-        parse_arrow_type. Gating the grammar check on a write map let
-        exactly that connector pass with nothing checked.
+        A source-only connector emits Arrow types from discovery alone, so a
+        foreign literal in its read map would fail at runtime in
+        parse_arrow_type. The read direction is validated whether or not a
+        write map is present.
         """
-        mapper = build_type_mapper(
-            "source-only",
-            [{"match": "exact", "native": "TEXT", "canonical": "Bogus"}],
-            None,
-        )
-        assert not mapper.has_write_map
-        report = _messages(check_type_map_grammar(mapper))
-        assert "Bogus" in report
-        assert "published grammar" in report
+        with pytest.raises(InvalidTypeMapError, match=r"exact\.arrow_type"):
+            build_type_mapper(
+                "source-only",
+                [{"match": "exact", "native_type": "TEXT", "arrow_type": "Bogus"}],
+                None,
+            )
 
-    def test_regex_read_rule_with_a_foreign_literal_output_fails(self) -> None:
-        """A regex read rule's canonical is its output, so it is checked.
+    def test_regex_read_rule_with_a_foreign_literal_output_is_refused(self) -> None:
+        """A regex read rule's arrow_type is its output, so it is checked.
 
-        The match kind says nothing about whether the emitted canonical
-        is a literal; this one interpolates no capture, so discovery
-        would emit the foreign family verbatim.
+        The match kind says nothing about whether the emitted Arrow type is a
+        literal; this one interpolates no capture, so discovery would emit the
+        foreign family verbatim.
         """
-        mapper = build_type_mapper(
-            "regex-foreign-output",
-            [
-                {"match": "exact", "native": "TEXT", "canonical": "Utf8"},
-                {
-                    "match": "regex",
-                    "native": "^VARCHAR\\((?<n>\\d+)\\)$",
-                    "canonical": "Bogus",
-                },
-            ],
-            [{"match": "exact", "canonical": "Utf8", "native": "TEXT"}],
-        )
-        report = _messages(check_type_map_grammar(mapper))
-        assert "Bogus" in report
-        assert "published grammar" in report
+        with pytest.raises(InvalidTypeMapError, match="not a valid Arrow type"):
+            build_type_mapper(
+                "regex-foreign-output",
+                [
+                    {"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"},
+                    {
+                        "match": "regex",
+                        "native_type": "^VARCHAR\\((?<n>\\d+)\\)$",
+                        "arrow_type": "Bogus",
+                    },
+                ],
+                [{"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"}],
+            )
 
     def test_regex_read_rule_interpolating_a_capture_is_not_flagged(self) -> None:
         """A templated canonical is not a literal family; it must pass."""
         mapper = build_type_mapper(
             "regex-templated-output",
             [
-                {"match": "exact", "native": "TEXT", "canonical": "Utf8"},
+                {"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"},
                 {
                     "match": "regex",
-                    "native": "^NUMERIC\\((?<p>\\d+), *(?<s>\\d+)\\)$",
-                    "canonical": "Decimal128(${p}, ${s})",
+                    "native_type": (
+                        "^NUMERIC\\((?<p>[1-9]|[12][0-9]|3[0-8]), *"
+                        "(?<s>[0-9]|[12][0-9]|3[0-8])\\)$"
+                    ),
+                    "arrow_type": "Decimal128(${p}, ${s})",
                 },
             ],
-            [{"match": "exact", "canonical": "Utf8", "native": "TEXT"}],
+            [{"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"}],
         )
         assert check_type_map_grammar(mapper) == []
 
@@ -822,12 +817,12 @@ class TestTypeMapBreaks:
         """A write map rendering no probe must not read as fully certified."""
         mapper = build_type_mapper(
             "zero-coverage",
-            [{"match": "exact", "native": "JSONB", "canonical": "Json"}],
+            [{"match": "exact", "native_type": "JSONB", "arrow_type": "Json"}],
             [
                 {
                     "match": "regex",
-                    "canonical": "^(List|LargeList)<.+>$",
-                    "native": "JSONB",
+                    "arrow_type": "^(List|LargeList)<.+>$",
+                    "native_type": "JSONB",
                 }
             ],
         )
@@ -846,20 +841,20 @@ class TestTypeMapBreaks:
         mapper = build_type_mapper(
             "partial-family",
             [
-                {"match": "exact", "native": "TEXT", "canonical": "Utf8"},
+                {"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"},
                 {
                     "match": "regex",
-                    "native": "^NUMERIC\\((?<p>[1-5]), (?<s>\\d)\\)$",
-                    "canonical": "Decimal128(${p}, ${s})",
+                    "native_type": "^NUMERIC\\((?<p>[1-5]), (?<s>\\d)\\)$",
+                    "arrow_type": "Decimal128(${p}, ${s})",
                 },
             ],
             [
-                {"match": "exact", "canonical": "Utf8", "native": "TEXT"},
+                {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"},
                 # Covers only precision 1-5: matches no probe, but valid.
                 {
                     "match": "regex",
-                    "canonical": "^Decimal128\\((?<p>[1-5]), (?<s>\\d)\\)$",
-                    "native": "NUMERIC(${p}, ${s})",
+                    "arrow_type": "^Decimal128\\((?<p>[1-5]), (?<s>\\d)\\)$",
+                    "native_type": "NUMERIC(${p}, ${s})",
                 },
             ],
         )
@@ -873,15 +868,15 @@ class TestTypeMapBreaks:
         """A regex no normalized canonical can match is a dead rule."""
         mapper = build_type_mapper(
             "dead-rule",
-            [{"match": "exact", "native": "TEXT", "canonical": "Utf8"}],
+            [{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}],
             [
-                {"match": "exact", "canonical": "Utf8", "native": "TEXT"},
+                {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"},
                 # No space after the comma: the normalizer always emits
                 # ", ", so this pattern can never match a probe.
                 {
                     "match": "regex",
-                    "canonical": "^Decimal128\\((?<p>\\d+),(?<s>\\d+)\\)$",
-                    "native": "NUMERIC(${p}, ${s})",
+                    "arrow_type": "^Decimal128\\((?<p>\\d+),(?<s>\\d+)\\)$",
+                    "native_type": "NUMERIC(${p}, ${s})",
                 },
             ],
         )
@@ -900,13 +895,13 @@ class TestTypeMapBreaks:
         """
         mapper = build_type_mapper(
             "case-variant-rule",
-            [{"match": "exact", "native": "TEXT", "canonical": "Utf8"}],
+            [{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}],
             [
-                {"match": "exact", "canonical": "Utf8", "native": "TEXT"},
+                {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"},
                 {
                     "match": "regex",
-                    "canonical": "^decimal128\\((?<p>\\d+), (?<s>\\d+)\\)$",
-                    "native": "NUMERIC(${p}, ${s})",
+                    "arrow_type": "^decimal128\\((?<p>\\d+), (?<s>\\d+)\\)$",
+                    "native_type": "NUMERIC(${p}, ${s})",
                 },
             ],
         )
@@ -926,8 +921,14 @@ class TestTypeMapBreaks:
         """
         mapper = build_type_mapper(
             "hint-break",
-            [{"match": "exact", "native": "TEXT", "canonical": "Utf8"}],
-            [{"match": "exact", "canonical": "Utf8", "native": "VARCHAR(${length})"}],
+            [{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}],
+            [
+                {
+                    "match": "exact",
+                    "arrow_type": "Utf8",
+                    "native_type": "VARCHAR(${length})",
+                }
+            ],
         )
         violations = check_type_map_round_trip(mapper)
         report = _messages(violations)
@@ -939,8 +940,8 @@ class TestTypeMapBreaks:
         """A write rule rendering a native the read map cannot map back."""
         mapper = build_type_mapper(
             "closure-break",
-            [{"match": "exact", "native": "TEXT", "canonical": "Utf8"}],
-            [{"match": "exact", "canonical": "Utf8", "native": "INTERVAL"}],
+            [{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}],
+            [{"match": "exact", "arrow_type": "Utf8", "native_type": "INTERVAL"}],
         )
         violations = check_type_map_round_trip(mapper)
         assert violations, "an unreadable rendered native must fail"
@@ -953,12 +954,12 @@ class TestTypeMapBreaks:
         mapper = build_type_mapper(
             "convergence-break",
             [
-                {"match": "exact", "native": "TEXT", "canonical": "LargeUtf8"},
-                {"match": "exact", "native": "CLOB", "canonical": "LargeUtf8"},
+                {"match": "exact", "native_type": "TEXT", "arrow_type": "LargeUtf8"},
+                {"match": "exact", "native_type": "CLOB", "arrow_type": "LargeUtf8"},
             ],
             [
-                {"match": "exact", "canonical": "Utf8", "native": "TEXT"},
-                {"match": "exact", "canonical": "LargeUtf8", "native": "CLOB"},
+                {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"},
+                {"match": "exact", "arrow_type": "LargeUtf8", "native_type": "CLOB"},
             ],
         )
         violations = check_type_map_round_trip(mapper)
@@ -1910,6 +1911,12 @@ class TestApiReadPathBreaks:
         no default compiles clean here and is caught instead by the live
         read (``check_required``, driven end to end in
         ``tests/unit/cdk_tests/api/test_read_path.py``).
+
+        ``operators`` is the source the contract makes a required param
+        declare (RULE-ENDP-066), and it is a source only a stream can draw
+        on -- which is exactly the scope a definition-only run does not
+        hold, so the param arrives here as empty as one with no source
+        could.
         """
 
         def bend(read: dict[str, Any]) -> None:
@@ -1917,6 +1924,7 @@ class TestApiReadPathBreaks:
                 "in": "query",
                 "type": "string",
                 "required": True,
+                "operators": ["eq"],
             }
             read["request"]["query"]["account"] = {"from_param": "account"}
 
@@ -3820,6 +3828,11 @@ class TestApiRequestBlockBreaks:
         defaults, and substitutes the path only after the incremental filter
         has bound. Reporting it here fails a connector the engine reads
         correctly -- so the kit stands a segment in and drives on.
+
+        ``operators`` is what says a stream may filter on it, and it is the
+        source the contract accepts for a required read param with no
+        default (RULE-ENDP-066) -- the same statement the docstring above
+        makes, now made in the document.
         """
 
         def bend(read: dict[str, Any]) -> None:
@@ -3829,6 +3842,7 @@ class TestApiRequestBlockBreaks:
                 "in": "path",
                 "type": "string",
                 "required": True,
+                "operators": ["eq"],
             }
 
         target = self._broken(tmp_path, "widgets", bend)

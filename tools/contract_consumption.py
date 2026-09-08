@@ -76,6 +76,12 @@ from analitiq.contracts.endpoints import (
 )
 from analitiq.contracts.pipelines.config import PipelineInput
 from analitiq.contracts.stream import AssignmentTarget, StreamInput, StreamMapping
+from analitiq.contracts.type_map import (
+    TypeMapReadExactRule,
+    TypeMapReadRegexRule,
+    TypeMapWriteExactRule,
+    TypeMapWriteRegexRule,
+)
 from mypy import build
 from mypy.main import process_options
 from mypy.nodes import CallExpr
@@ -107,8 +113,11 @@ CONTRACT_DISTRIBUTION: Final = "analitiq-contract-models"
 RUNTIME_MODULES: Final = ("cdk", "src")
 KIT_MODULES: Final = ("cdk.conformance",)
 
-#: The contract documents the engine holds: the four authored artifacts it
-#: loads from disk and the two endpoint-document variants they reference.
+#: The contract documents the engine holds: the authored artifacts it
+#: loads from disk, the two endpoint-document variants they reference, and
+#: the type-map rules a connector ships beside them. The type-map documents
+#: themselves are ``RootModel`` aliases defined in pydantic rather than in the
+#: contract package, so the rule variants they wrap are the roots instead.
 #: Every other model the engine reads is reachable from one of these through
 #: the contract's own field annotations; a read on a model unreachable from
 #: these fails the render.
@@ -119,6 +128,10 @@ ROOTS: Final[tuple[Any, ...]] = (
     Connector,
     ApiEndpointDoc,
     DatabaseEndpointDoc,
+    TypeMapReadExactRule,
+    TypeMapReadRegexRule,
+    TypeMapWriteExactRule,
+    TypeMapWriteRegexRule,
 )
 
 #: Models the engine consumes as a JSON grammar (``model_dump`` /

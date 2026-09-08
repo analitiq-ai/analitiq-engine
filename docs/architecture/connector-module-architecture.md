@@ -193,11 +193,11 @@ shadowing.
 `list_schemas` / `list_tables` / `list_columns` are introspection
 operations exposed on `GenericSQLConnector` (`cdk/cdk/sql/discovery.py`),
 running `INFORMATION_SCHEMA` queries over the same transport the data path
-uses and canonicalizing native types via the connection-scoped read
-type-map (`runtime.type_mapper_for(scope=CONNECTION)` — connection rules
-over connector rules, since discovery introspects the connection's own
-database). `list_columns` returns **both** the columns and the primary
-keys (`tuple[list[ColumnDef], list[str]]`).
+uses and mapping each `native_type` to its `arrow_type` via the
+connection-scoped read type-map (`runtime.type_mapper_for(scope=CONNECTION)`
+— connection rules over connector rules, since discovery introspects the
+connection's own database). `list_columns` returns **both** the columns and
+the primary keys (`tuple[list[ColumnDef], list[str]]`).
 
 `create_table` is a standalone module-level function
 (`cdk/cdk/sql/ddl.py::create_table`), decoupled from the gRPC streaming
@@ -207,9 +207,9 @@ flow: the destination base and the contract speak CDK-native DTOs
 constructs `ColumnDef`s directly and calls it with no engine orchestration.
 
 `TypeMapper` (`cdk/cdk/type_map/mapper.py`) exposes `to_native_type()`,
-driven by a separate `type-map-write.json` rule set (Arrow canonical →
-native), the inverse `create_table` DDL needs. The two directions are
-independent rule sets, never one inverted at runtime.
+driven by a separate `type-map-write.json` rule set (`arrow_type` →
+`native_type`), the inverse `create_table` DDL needs. The two directions
+are independent rule sets, never one inverted at runtime.
 
 **There is no capability declaration, by design.** Capability is never a
 static block in `connector.json`, because it conflates two unrelated things
@@ -273,7 +273,7 @@ from .types import BatchWriteResult, CheckpointStore, Cursor, SchemaSpec
 @dataclass(frozen=True)
 class ColumnDef:
     name: str
-    canonical_type: str          # Arrow canonical type string, e.g. "Int64",
+    arrow_type: str              # the canonical Arrow type string, e.g. "Int64",
                                  # "Decimal128(38, 9)" — symmetric with the type-map
     nullable: bool = True
     primary_key: bool = False
@@ -390,9 +390,9 @@ definitions, not a connector-wide flag.)
   requests**, which gives the control plane its isolation.
 - **Type translation lives with the connector.** The CDK's `TypeMapper`
   provides both `to_arrow_type(native)` (read direction) and `to_native_type()`
-  (write direction, canonical → native), the latter what `create_table` DDL
-  needs. Read direction is fed by `type-map-read.json`, write
-  direction by a separate `type-map-write.json` — the *mappings* are the
+  (write direction, `arrow_type` → `native_type`), the latter what
+  `create_table` DDL needs. Read direction is fed by `type-map-read.json`,
+  write direction by a separate `type-map-write.json` — the *mappings* are the
   connector's data, the *mechanism* is the CDK's.
 - **The contract is a versioned package, not an in-document field.** A
   connector declares its `analitiq-cdk` dependency in its own `pyproject.toml`
@@ -461,7 +461,7 @@ just declares "use the CDK's generic SQL base."
 connectors/postgresql/
   definition/
     connector.json        # kind, transports (no capabilities block — see §4)
-    type-map-read.json         # native <-> arrow mappings (this DB's data)
+    type-map-read.json         # native_type -> arrow_type rules (this DB's data)
   connector.py            # ~10 lines: subclass the CDK SQL base, no overrides
   requirements.txt        # this DB's driver only (asyncpg / adbc-driver-postgresql)
   pyproject.toml          # packaged as `analitiq-connector-postgresql`
@@ -475,7 +475,7 @@ DDL, pagination, type quirks). The overrides live **here**, never in the CDK.
 connectors/clickhouse/
   definition/
     connector.json
-    type-map-read.json         # Clickhouse native types -> arrow (plugin-researched)
+    type-map-read.json         # Clickhouse native_type -> arrow_type (plugin-researched)
   connector.py            # subclass CDK base + override create_table DDL, etc.
   requirements.txt        # clickhouse-connect / clickhouse driver
   pyproject.toml
@@ -505,10 +505,10 @@ new database end-to-end without an engineer.
 The plugin is a **small-package author**, not a plain JSON author: it emits
 `connector.json`, the read-direction `type-map-read.json`, and (for API
 connectors) endpoint files, plus the write-direction `type-map-write.json`
-(canonical → native — the inverse `create_table` needs and the read map
-cannot give), `requirements.txt` (this system's driver — drivers are never
-baked into the engine), `pyproject.toml` (the connector is an installable
-package), and `connector.py` (the code seam: thin — subclass the CDK SQL
+(`arrow_type` → `native_type` — the inverse `create_table` needs and the
+read map cannot give), `requirements.txt` (this system's driver — drivers
+are never baked into the engine), `pyproject.toml` (the connector is an
+installable package), and `connector.py` (the code seam: thin — subclass the CDK SQL
 base, no overrides — for a well-behaved system, thick — subclass plus
 override dialect DDL / pagination / type quirks — for a quirky one). The
 plugin still needs no engineer for any of this: for a well-behaved database

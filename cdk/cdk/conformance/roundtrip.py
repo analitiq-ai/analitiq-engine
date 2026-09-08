@@ -46,7 +46,11 @@ from cdk.type_map.grammar import (
     TimezoneParam,
     UnitParam,
 )
-from cdk.type_map.rules import normalize_canonical_type, normalize_native_type
+from cdk.type_map.rules import (
+    compile_pattern,
+    normalize_arrow_type,
+    normalize_native_type,
+)
 
 from .violations import Violation
 
@@ -155,10 +159,18 @@ def _in_published_grammar(spelling: str) -> bool:
 
 
 def _foreign_literal_violations(mapper: TypeMapper) -> list[Violation]:
-    """Flag rule canonicals whose family the grammar does not define.
+    """Flag rule arrow_types whose family the grammar does not define.
 
-    The rule loaders are string-level and accept any spelling, but a
-    canonical outside the published grammar is a defect in either
+    NOTE: as of the move onto the published contract models, the rule
+    loaders no longer accept any spelling -- ``parse_rules`` refuses a
+    foreign ``arrow_type`` in both the exact and regex forms, and the
+    contract blocks the ``model_construct`` bypass -- so no ``TypeMapper``
+    reachable from a parsed document can still carry one. This check is
+    retained as a belt-and-braces certification of the kit's own promise,
+    but it can no longer fire from a validly loaded connector. Removing it
+    is a change to the kit's public surface and is tracked separately.
+
+    An ``arrow_type`` outside the published grammar is a defect in either
     direction: a read rule emitting one hands discovery a family
     ``parse_arrow_type`` rejects, and a write rule matching one is
     unreachable, since no endpoint document can ever carry it. Left
@@ -179,17 +191,17 @@ def _foreign_literal_violations(mapper: TypeMapper) -> list[Violation]:
         ("write", rule) for rule in mapper.write_rules if rule.match == "exact"
     ]
     for direction, rule in directions:
-        if "${" in rule.canonical or _in_published_grammar(rule.canonical):
+        if "${" in rule.arrow_type or _in_published_grammar(rule.arrow_type):
             continue
-        normalized = normalize_canonical_type(rule.canonical)
+        normalized = normalize_arrow_type(rule.arrow_type)
         if normalized in seen:
             continue
         seen.add(normalized)
         violations.append(
             Violation(
                 CHECK_COVERAGE,
-                f"{direction} rule declares canonical {rule.canonical!r}, "
-                f"whose family {_canonical_family(rule.canonical)!r} is not "
+                f"{direction} rule declares canonical {rule.arrow_type!r}, "
+                f"whose family {_canonical_family(rule.arrow_type)!r} is not "
                 f"in the published grammar; no endpoint document can ever "
                 f"produce it, so the rule is unreachable and does not count "
                 f"as coverage.",
@@ -211,13 +223,13 @@ def _rule_exemplars(mapper: TypeMapper) -> list[str]:
     for read_rule in mapper.rules:
         if (
             read_rule.match == "exact"
-            and "${" not in read_rule.canonical
-            and _in_published_grammar(read_rule.canonical)
+            and "${" not in read_rule.arrow_type
+            and _in_published_grammar(read_rule.arrow_type)
         ):
-            exemplars.append(read_rule.canonical)
+            exemplars.append(read_rule.arrow_type)
     for write_rule in mapper.write_rules:
-        if write_rule.match == "exact" and _in_published_grammar(write_rule.canonical):
-            exemplars.append(write_rule.canonical)
+        if write_rule.match == "exact" and _in_published_grammar(write_rule.arrow_type):
+            exemplars.append(write_rule.arrow_type)
     return exemplars
 
 
@@ -226,7 +238,7 @@ def probe_canonicals(mapper: TypeMapper) -> list[str]:
     seen: set[str] = set()
     probes: list[str] = []
     for canonical in _grammar_exemplars() + _rule_exemplars(mapper):
-        normalized = normalize_canonical_type(canonical)
+        normalized = normalize_arrow_type(canonical)
         if normalized in seen:
             continue
         seen.add(normalized)
@@ -251,12 +263,12 @@ def _misnormalized_write_rules(
     arrives.
     """
     universe = [
-        normalize_canonical_type(c) for c in probes + list(_STRUCTURAL_MATCH_EXEMPLARS)
+        normalize_arrow_type(c) for c in probes + list(_STRUCTURAL_MATCH_EXEMPLARS)
     ]
     violations: list[Violation] = []
     regex_rules = [rule for rule in mapper.write_rules if rule.match != "exact"]
     for rule in regex_rules:
-        pattern = rule.compile_pattern()
+        pattern = compile_pattern(rule)
         if any(pattern.fullmatch(candidate) for candidate in universe):
             continue
         witness = next(
@@ -273,7 +285,7 @@ def _misnormalized_write_rules(
         violations.append(
             Violation(
                 CHECK_COVERAGE,
-                f"write rule for canonical {rule.canonical!r} matches "
+                f"write rule for canonical {rule.arrow_type!r} matches "
                 f"{spelling!r} but not the {candidate!r} the matcher "
                 f"actually receives, so the rule is dead: {reason}.",
             )
@@ -332,7 +344,7 @@ def _pre_normalization_variants(candidate: str) -> list[str]:
     return [
         proposal
         for proposal in proposals
-        if proposal != candidate and normalize_canonical_type(proposal) == candidate
+        if proposal != candidate and normalize_arrow_type(proposal) == candidate
     ]
 
 
@@ -357,14 +369,17 @@ def render_probe(
 
 
 def check_type_map_grammar(mapper: TypeMapper) -> list[Violation]:
-    """Certify every literal canonical against the published grammar.
+    """Certify every literal ``arrow_type`` against the published grammar.
 
     Applies to any connector that ships a type map, write map or not:
-    a source-only connector still emits canonicals from discovery, and
-    one outside the grammar fails at runtime in
+    a source-only connector still emits an ``arrow_type`` from discovery,
+    and one outside the grammar fails at runtime in
     :func:`~cdk.type_map.arrow.parse_arrow_type`. Gating this on a write
     map would let exactly that connector — the one with nothing else to
     certify — pass with nothing certified.
+
+    See :func:`_foreign_literal_violations` on why this no longer fires for
+    a connector loaded through ``parse_rules``.
     """
     return _foreign_literal_violations(mapper)
 

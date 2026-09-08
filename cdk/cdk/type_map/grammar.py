@@ -130,7 +130,7 @@ class ArrowFamily:
     shape comes from that sub-schema, never from parentheses.
     """
 
-    kind: ConversionKind
+    conversion_kind: ConversionKind
     params: tuple[GrammarParam, ...] = ()
     builder: str | None = None
     probes: tuple[str, ...] = ()

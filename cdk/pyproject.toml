@@ -54,7 +54,7 @@ pydantic = "^2.12"
 # it (DatabaseEndpointDoc, WriteInput.schema_, SingleCursorMapping,
 # validate_endpoint_ref). A lower floor resolves for pip and then fails at
 # import.
-analitiq-contract-models = { version = ">=1.0.0rc23,<2", allow-prereleases = true }
+analitiq-contract-models = { version = ">=1.0.0rc24,<2", allow-prereleases = true }
 # Core, on purpose, though only the HTTP transport sends a request: yarl is
 # what aiohttp builds every URL with, so it is the authority on what an
 # endpoint's URL means. Keeping it behind the [api] extra is what forced the

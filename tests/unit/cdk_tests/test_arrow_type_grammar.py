@@ -78,11 +78,11 @@ def _one_rule_mapper() -> TypeMapper:
     return TypeMapper(
         "acceptance",
         parse_rules(
-            [{"match": "exact", "native": "TEXT", "canonical": "Utf8"}],
+            [{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}],
             source="test",
         ),
         parse_write_rules(
-            [{"match": "exact", "canonical": "Utf8", "native": "TEXT"}],
+            [{"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"}],
             source="test",
         ),
     )

@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pydantic
 import pytest
 
 from cdk.type_map import (
@@ -24,15 +23,14 @@ from cdk.type_map import (
     TypeMapNotFoundError,
     TypeMapper,
     UnmappedTypeError,
-    WriteTypeMapRule,
     load_connection_type_map,
     load_type_map,
-    normalize_canonical_type,
+    normalize_arrow_type,
     normalize_native_type,
     parse_arrow_type,
 )
 from cdk.type_map.loader import TYPE_MAP_FILENAME, WRITE_TYPE_MAP_FILENAME
-from cdk.type_map.rules import TypeMapRule, parse_rules, parse_write_rules
+from cdk.type_map.rules import parse_rules, parse_write_rules
 
 # ---------------------------------------------------------------------------
 # normalize_native_type
@@ -55,89 +53,148 @@ class TestNormalizeNativeType:
         assert normalize_native_type("Varchar(50)") == "VARCHAR(50)"
 
     def test_rejects_non_string(self):
-        with pytest.raises(TypeError):
+        # normalize_native_type is the published contract's function and does
+        # its own str operations directly, so a non-string fails on attribute
+        # access rather than an explicit type check.
+        with pytest.raises(AttributeError):
             normalize_native_type(None)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
-# TypeMapRule validation
+# Read-rule validation (contract shape, then execution safety)
 # ---------------------------------------------------------------------------
 
 
-class TestTypeMapRuleValidation:
-    def test_exact_rule_allows_literal_canonical(self):
-        rule = TypeMapRule(match="exact", native="BIGINT", canonical="Int64")
+def _parse_read(rule: dict):
+    """Parse one read rule through the real entry point."""
+    return parse_rules([rule], source="<test>")
+
+
+def _parse_write(rule: dict):
+    """Parse one write rule through the real entry point."""
+    return parse_write_rules([rule], source="<test>")
+
+
+class TestReadRuleValidation:
+    def test_exact_rule_allows_literal_arrow_type(self):
+        (rule,) = _parse_read(
+            {"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"}
+        )
         assert rule.match == "exact"
 
     def test_exact_rule_rejects_substitution_tokens(self):
-        with pytest.raises(InvalidTypeMapError, match=r"exact rule"):
-            TypeMapRule(
-                match="exact", native="BIGINT", canonical="Decimal128(${p}, ${s})"
+        # An exact rule renders a literal Arrow type; the Arrow vocabulary
+        # admits no "$", so the contract's field pattern refuses the template.
+        with pytest.raises(InvalidTypeMapError, match=r"exact\.arrow_type"):
+            _parse_read(
+                {
+                    "match": "exact",
+                    "native_type": "BIGINT",
+                    "arrow_type": "Decimal128(${p}, ${s})",
+                }
             )
 
     def test_regex_rule_rejects_lookahead(self):
         with pytest.raises(InvalidTypeMapError, match="lookahead"):
-            TypeMapRule(match="regex", native=r"^FOO(?=BAR)$", canonical="Utf8")
+            _parse_read(
+                {
+                    "match": "regex",
+                    "native_type": r"^FOO(?=BAR)$",
+                    "arrow_type": "Utf8",
+                }
+            )
 
     def test_regex_rule_rejects_lookbehind(self):
         with pytest.raises(InvalidTypeMapError, match="lookbehind"):
-            TypeMapRule(match="regex", native=r"^(?<=BAR)FOO$", canonical="Utf8")
+            _parse_read(
+                {
+                    "match": "regex",
+                    "native_type": r"^(?<=BAR)FOO$",
+                    "arrow_type": "Utf8",
+                }
+            )
 
     def test_regex_rule_rejects_numeric_backreference(self):
         with pytest.raises(InvalidTypeMapError, match="backreference"):
-            TypeMapRule(match="regex", native=r"^(?<x>\d+)-\1$", canonical="Utf8")
+            _parse_read(
+                {
+                    "match": "regex",
+                    "native_type": r"^(?<x>\d+)-\1$",
+                    "arrow_type": "Utf8",
+                }
+            )
 
     def test_regex_rule_rejects_named_backreference(self):
         with pytest.raises(InvalidTypeMapError, match="backreference"):
-            TypeMapRule(
-                match="regex",
-                native=r"^(?<x>\d+)-\k<x>$",
-                canonical="Utf8",
+            _parse_read(
+                {
+                    "match": "regex",
+                    "native_type": r"^(?<x>\d+)-\k<x>$",
+                    "arrow_type": "Utf8",
+                }
             )
 
     def test_regex_rule_rejects_missing_named_capture(self):
-        with pytest.raises(InvalidTypeMapError, match="unknown named"):
-            TypeMapRule(
-                match="regex",
-                native=r"^FOO\d+$",
-                canonical="Utf8(${n})",
+        with pytest.raises(InvalidTypeMapError, match=r"no matching \(\?<p>"):
+            _parse_read(
+                {
+                    "match": "regex",
+                    "native_type": r"^FOO\d+$",
+                    "arrow_type": "Decimal128(${p}, ${s})",
+                }
+            )
+
+    def test_regex_rule_rejects_render_that_is_not_an_arrow_type(self):
+        # A templated render is shape-checked as a whole: Utf8 takes no
+        # parameters, so no substitution can make Utf8(${n}) an Arrow type.
+        with pytest.raises(InvalidTypeMapError, match="not a valid Arrow type"):
+            _parse_read(
+                {
+                    "match": "regex",
+                    "native_type": r"^FOO(?<n>\d+)$",
+                    "arrow_type": "Utf8(${n})",
+                }
             )
 
     def test_regex_rule_rejects_malformed_pattern(self):
-        with pytest.raises(InvalidTypeMapError, match="failed to compile"):
-            TypeMapRule(match="regex", native="^[", canonical="Utf8")
+        with pytest.raises(InvalidTypeMapError, match="not a valid regex"):
+            _parse_read({"match": "regex", "native_type": "^[", "arrow_type": "Utf8"})
 
     def test_unknown_match_kind_rejected(self):
-        with pytest.raises(pydantic.ValidationError):
-            TypeMapRule(
-                match="partial", native="x", canonical="Utf8"  # type: ignore[arg-type]
-            )
+        with pytest.raises(InvalidTypeMapError, match="does not match any of"):
+            _parse_read({"match": "partial", "native_type": "x", "arrow_type": "Utf8"})
 
     @pytest.mark.parametrize(
-        "bad_canonical,match",
+        "bad_arrow_type",
         [
-            ("Time32(us)", "Time32 accepts"),
-            ("Time32(MICROSECOND)", "Time32 accepts"),
-            ("Time64(s)", "Time64 accepts"),
-            ("Time64(MILLISECOND)", "Time64 accepts"),
+            "Time32(us)",
+            "Time32(MICROSECOND)",
+            "Time64(s)",
+            "Time64(MILLISECOND)",
+            "Timestamp(us, UTC)",
         ],
     )
-    def test_exact_rule_rejects_invalid_canonical_cross_type_unit(
-        self, bad_canonical, match
-    ):
-        # normalize_canonical_type must fire at construction, not deferred to
-        # parse_arrow_type downstream.
-        with pytest.raises(InvalidTypeMapError, match=match):
-            TypeMapRule(match="exact", native="TIME", canonical=bad_canonical)
+    def test_exact_rule_rejects_arrow_type_outside_the_vocabulary(self, bad_arrow_type):
+        # An exact rule's arrow_type is held to the published Arrow pattern, so
+        # a cross-type temporal unit and a short unit code are both refused at
+        # the contract, not deferred to parse_arrow_type downstream.
+        with pytest.raises(InvalidTypeMapError, match=r"exact\.arrow_type"):
+            _parse_read(
+                {
+                    "match": "exact",
+                    "native_type": "TIME",
+                    "arrow_type": bad_arrow_type,
+                }
+            )
 
 
 class TestParseRules:
     def test_empty_list_rejected(self):
-        with pytest.raises(InvalidTypeMapError, match="rule list is empty"):
+        with pytest.raises(InvalidTypeMapError, match="at least 1 item"):
             parse_rules([], source="<test>")
 
     def test_non_object_rejected(self):
-        with pytest.raises(InvalidTypeMapError, match="not a JSON object"):
+        with pytest.raises(InvalidTypeMapError, match="valid dictionary"):
             parse_rules(["oops"], source="<test>")
 
 
@@ -152,21 +209,29 @@ def _mapper(rules: list[dict]) -> TypeMapper:
 
 class TestTypeMapperExact:
     def test_exact_hit(self):
-        m = _mapper([{"match": "exact", "native": "JSONB", "canonical": "Utf8"}])
+        m = _mapper([{"match": "exact", "native_type": "JSONB", "arrow_type": "Utf8"}])
         assert m.to_arrow_type("JSONB") == "Utf8"
 
     def test_normalization_lower_to_upper(self):
-        m = _mapper([{"match": "exact", "native": "BIGINT", "canonical": "Int64"}])
+        m = _mapper(
+            [{"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"}]
+        )
         assert m.to_arrow_type("bigint") == "Int64"
 
     def test_normalization_internal_whitespace(self):
         m = _mapper(
-            [{"match": "exact", "native": "DOUBLE PRECISION", "canonical": "Float64"}]
+            [
+                {
+                    "match": "exact",
+                    "native_type": "DOUBLE PRECISION",
+                    "arrow_type": "Float64",
+                }
+            ]
         )
         assert m.to_arrow_type("double   precision") == "Float64"
 
     def test_unmapped_raises(self):
-        m = _mapper([{"match": "exact", "native": "TEXT", "canonical": "Utf8"}])
+        m = _mapper([{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}])
         with pytest.raises(UnmappedTypeError) as exc:
             m.to_arrow_type("MONEY")
         assert exc.value.direction == "forward"
@@ -180,8 +245,11 @@ class TestTypeMapperRegex:
             [
                 {
                     "match": "regex",
-                    "native": r"^NUMERIC\(\s*(?<p>\d+)\s*,\s*(?<s>\d+)\s*\)$",
-                    "canonical": "Decimal128(${p}, ${s})",
+                    "native_type": (
+                        r"^NUMERIC\(\s*(?<p>[1-9]|[12][0-9]|3[0-8])\s*,"
+                        r"\s*(?<s>[0-9]|[12][0-9]|3[0-8])\s*\)$"
+                    ),
+                    "arrow_type": "Decimal128(${p}, ${s})",
                 }
             ]
         )
@@ -193,8 +261,8 @@ class TestTypeMapperRegex:
             [
                 {
                     "match": "regex",
-                    "native": r"^VARCHAR\(\s*\d+\s*\)$",
-                    "canonical": "Utf8",
+                    "native_type": r"^VARCHAR\(\s*\d+\s*\)$",
+                    "arrow_type": "Utf8",
                 }
             ]
         )
@@ -208,11 +276,15 @@ class TestSpecificityOrdering:
     def test_boolean_exact_beats_int8_regex(self):
         m = _mapper(
             [
-                {"match": "exact", "native": "TINYINT(1)", "canonical": "Boolean"},
+                {
+                    "match": "exact",
+                    "native_type": "TINYINT(1)",
+                    "arrow_type": "Boolean",
+                },
                 {
                     "match": "regex",
-                    "native": r"^TINYINT(\(\d+\))?$",
-                    "canonical": "Int8",
+                    "native_type": r"^TINYINT(\(\d+\))?$",
+                    "arrow_type": "Int8",
                 },
             ]
         )
@@ -225,10 +297,14 @@ class TestSpecificityOrdering:
             [
                 {
                     "match": "regex",
-                    "native": r"^TINYINT(\(\d+\))?$",
-                    "canonical": "Int8",
+                    "native_type": r"^TINYINT(\(\d+\))?$",
+                    "arrow_type": "Int8",
                 },
-                {"match": "exact", "native": "TINYINT(1)", "canonical": "Boolean"},
+                {
+                    "match": "exact",
+                    "native_type": "TINYINT(1)",
+                    "arrow_type": "Boolean",
+                },
             ]
         )
         # Broader rule now wins — the exact rule is shadowed.
@@ -496,7 +572,7 @@ class TestLoaders:
         _write_connector(
             tmp_path,
             "demo",
-            type_map=[{"match": "exact", "native": "TEXT", "canonical": "Utf8"}],
+            type_map=[{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}],
         )
         mapper = load_type_map(tmp_path, "demo")
         assert mapper.connector_slug == "demo"
@@ -516,7 +592,11 @@ class TestLoadConnectionTypeMap:
         (definition / TYPE_MAP_FILENAME).write_text(
             json.dumps(
                 [
-                    {"match": "exact", "native": "CUSTOM_ENUM", "canonical": "Utf8"},
+                    {
+                        "match": "exact",
+                        "native_type": "CUSTOM_ENUM",
+                        "arrow_type": "Utf8",
+                    },
                 ]
             )
         )
@@ -541,41 +621,39 @@ class TestLoadConnectionTypeMap:
 
 
 # ---------------------------------------------------------------------------
-# normalize_canonical_type (write direction, case-preserving)
+# normalize_arrow_type (write direction, case-preserving)
 # ---------------------------------------------------------------------------
 
 
 class TestNormalizeCanonicalType:
     def test_preserves_case(self):
-        assert normalize_canonical_type("Int64") == "Int64"
-        assert normalize_canonical_type("Timestamp(MICROSECOND, UTC)") == (
+        assert normalize_arrow_type("Int64") == "Int64"
+        assert normalize_arrow_type("Timestamp(MICROSECOND, UTC)") == (
             "Timestamp(MICROSECOND, UTC)"
         )
 
     def test_strips_outer_and_collapses_internal_whitespace(self):
-        assert normalize_canonical_type("  Decimal128(38,  9) ") == "Decimal128(38, 9)"
+        assert normalize_arrow_type("  Decimal128(38,  9) ") == "Decimal128(38, 9)"
 
     def test_canonicalizes_comma_spacing(self):
         # Spacing-only variants accepted by parse_arrow_type must normalize to
         # the same form so an exact rule matches either spelling.
-        assert normalize_canonical_type("Decimal128(38,9)") == "Decimal128(38, 9)"
-        assert normalize_canonical_type("Timestamp(MICROSECOND,UTC)") == (
+        assert normalize_arrow_type("Decimal128(38,9)") == "Decimal128(38, 9)"
+        assert normalize_arrow_type("Timestamp(MICROSECOND,UTC)") == (
             "Timestamp(MICROSECOND, UTC)"
         )
-        assert normalize_canonical_type("Decimal128(38 , 9)") == "Decimal128(38, 9)"
+        assert normalize_arrow_type("Decimal128(38 , 9)") == "Decimal128(38, 9)"
 
     def test_canonicalizes_paren_adjacent_whitespace(self):
         # parse_arrow_type strips each parsed arg, so these are all valid; they
         # must all normalize to the single canonical spelling.
-        assert normalize_canonical_type("Decimal128( 38, 9 )") == "Decimal128(38, 9)"
-        assert (
-            normalize_canonical_type("Time64( MICROSECOND )") == "Time64(MICROSECOND)"
-        )
-        assert normalize_canonical_type("Decimal128( 38 , 9 )") == "Decimal128(38, 9)"
+        assert normalize_arrow_type("Decimal128( 38, 9 )") == "Decimal128(38, 9)"
+        assert normalize_arrow_type("Time64( MICROSECOND )") == "Time64(MICROSECOND)"
+        assert normalize_arrow_type("Decimal128( 38 , 9 )") == "Decimal128(38, 9)"
 
     def test_rejects_non_string(self):
         with pytest.raises(TypeError):
-            normalize_canonical_type(None)  # type: ignore[arg-type]
+            normalize_arrow_type(None)  # type: ignore[arg-type]
 
     # --- unit alias normalization (issue #125) --------------------------------
 
@@ -597,10 +675,10 @@ class TestNormalizeCanonicalType:
         ],
     )
     def test_short_unit_codes_expand_to_long_form(self, short, long):
-        # parse_arrow_type accepts both spellings; normalize_canonical_type must
+        # parse_arrow_type accepts both spellings; normalize_arrow_type must
         # map the short code to the same long-form canonical so an exact write
         # rule authored with the long name matches a lookup using the short name.
-        assert normalize_canonical_type(short) == long
+        assert normalize_arrow_type(short) == long
 
     @pytest.mark.parametrize(
         "long_form",
@@ -614,12 +692,12 @@ class TestNormalizeCanonicalType:
     )
     def test_long_form_units_are_idempotent(self, long_form):
         # Long-form spellings must survive normalization unchanged.
-        assert normalize_canonical_type(long_form) == long_form
+        assert normalize_arrow_type(long_form) == long_form
 
     def test_short_unit_with_paren_whitespace(self):
         # Whitespace normalization and alias expansion compose correctly.
-        assert normalize_canonical_type("Time64( us )") == "Time64(MICROSECOND)"
-        assert normalize_canonical_type("Timestamp( us , UTC )") == (
+        assert normalize_arrow_type("Time64( us )") == "Time64(MICROSECOND)"
+        assert normalize_arrow_type("Timestamp( us , UTC )") == (
             "Timestamp(MICROSECOND, UTC)"
         )
 
@@ -627,39 +705,29 @@ class TestNormalizeCanonicalType:
 
     def test_timestamp_null_tz_folded_to_no_tz(self):
         # Timestamp(unit, null) is timezone-naïve; parse_arrow_type treats it
-        # the same as Timestamp(unit).  normalize_canonical_type must fold both
+        # the same as Timestamp(unit).  normalize_arrow_type must fold both
         # into the same string so a write rule for Timestamp(MICROSECOND) also
         # matches Timestamp(MICROSECOND, null).
-        assert normalize_canonical_type("Timestamp(MICROSECOND, null)") == (
+        assert normalize_arrow_type("Timestamp(MICROSECOND, null)") == (
             "Timestamp(MICROSECOND)"
         )
-        assert (
-            normalize_canonical_type("Timestamp(us, null)") == "Timestamp(MICROSECOND)"
-        )
-        assert (
-            normalize_canonical_type("Timestamp(ns, null)") == "Timestamp(NANOSECOND)"
-        )
-        assert (
-            normalize_canonical_type("Timestamp(ms, null)") == "Timestamp(MILLISECOND)"
-        )
+        assert normalize_arrow_type("Timestamp(us, null)") == "Timestamp(MICROSECOND)"
+        assert normalize_arrow_type("Timestamp(ns, null)") == "Timestamp(NANOSECOND)"
+        assert normalize_arrow_type("Timestamp(ms, null)") == "Timestamp(MILLISECOND)"
 
     def test_three_way_composition(self):
         # All three normalization steps must compose: whitespace strip (step 1),
         # short-code expansion (step 2), and null-tz fold (step 3).
+        assert normalize_arrow_type("Timestamp( ns , null )") == "Timestamp(NANOSECOND)"
         assert (
-            normalize_canonical_type("Timestamp( ns , null )")
-            == "Timestamp(NANOSECOND)"
-        )
-        assert (
-            normalize_canonical_type("Timestamp( us , null )")
-            == "Timestamp(MICROSECOND)"
+            normalize_arrow_type("Timestamp( us , null )") == "Timestamp(MICROSECOND)"
         )
 
     def test_non_null_tz_is_preserved(self):
-        assert normalize_canonical_type("Timestamp(MICROSECOND, UTC)") == (
+        assert normalize_arrow_type("Timestamp(MICROSECOND, UTC)") == (
             "Timestamp(MICROSECOND, UTC)"
         )
-        assert normalize_canonical_type("Timestamp(MICROSECOND, America/New_York)") == (
+        assert normalize_arrow_type("Timestamp(MICROSECOND, America/New_York)") == (
             "Timestamp(MICROSECOND, America/New_York)"
         )
 
@@ -676,7 +744,7 @@ class TestNormalizeCanonicalType:
     )
     def test_time32_rejects_time64_units(self, bad_type):
         with pytest.raises(InvalidTypeMapError, match="Time32 accepts"):
-            normalize_canonical_type(bad_type)
+            normalize_arrow_type(bad_type)
 
     @pytest.mark.parametrize(
         "bad_type",
@@ -689,7 +757,7 @@ class TestNormalizeCanonicalType:
     )
     def test_time64_rejects_time32_units(self, bad_type):
         with pytest.raises(InvalidTypeMapError, match="Time64 accepts"):
-            normalize_canonical_type(bad_type)
+            normalize_arrow_type(bad_type)
 
     @pytest.mark.parametrize(
         "valid_type",
@@ -706,7 +774,7 @@ class TestNormalizeCanonicalType:
     )
     def test_time32_and_time64_accept_valid_units(self, valid_type):
         # Must not raise — valid combinations pass through.
-        normalize_canonical_type(valid_type)
+        normalize_arrow_type(valid_type)
 
     def test_timestamp_accepts_all_units(self):
         # Timestamp is unconstrained; all four units must normalize without error.
@@ -720,7 +788,7 @@ class TestNormalizeCanonicalType:
             "MICROSECOND",
             "NANOSECOND",
         ):
-            normalize_canonical_type(f"Timestamp({unit})")
+            normalize_arrow_type(f"Timestamp({unit})")
 
     def test_duration_accepts_all_units(self):
         # Duration is unconstrained; all four units must normalize without error.
@@ -734,121 +802,187 @@ class TestNormalizeCanonicalType:
             "MICROSECOND",
             "NANOSECOND",
         ):
-            normalize_canonical_type(f"Duration({unit})")
+            normalize_arrow_type(f"Duration({unit})")
 
 
 # ---------------------------------------------------------------------------
-# WriteTypeMapRule validation
+# Write-rule validation (contract shape, then execution safety)
 # ---------------------------------------------------------------------------
 
 
-class TestWriteTypeMapRuleValidation:
+class TestWriteRuleValidation:
     def test_exact_rule_allows_literal_native(self):
-        rule = WriteTypeMapRule(match="exact", canonical="Int64", native="BIGINT")
+        (rule,) = _parse_write(
+            {"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"}
+        )
         assert rule.match == "exact"
 
     def test_exact_rule_allows_param_token_in_native(self):
         # Unlike read rules, a write rule's render template may carry tokens fed
         # by per-column hints (e.g. length) rather than regex captures.
-        rule = WriteTypeMapRule(
-            match="exact", canonical="Utf8", native="VARCHAR(${length})"
+        (rule,) = _parse_write(
+            {
+                "match": "exact",
+                "arrow_type": "Utf8",
+                "native_type": "VARCHAR(${length})",
+            }
         )
-        assert rule.native == "VARCHAR(${length})"
+        assert rule.native_type == "VARCHAR(${length})"
 
     def test_regex_rule_allows_non_capture_token(self):
         # ${length} is supplied at render time, not captured — must not raise.
-        rule = WriteTypeMapRule(
-            match="regex", canonical="^Utf8$", native="VARCHAR(${length})"
+        (rule,) = _parse_write(
+            {
+                "match": "regex",
+                "arrow_type": "^Utf8$",
+                "native_type": "VARCHAR(${length})",
+            }
         )
         assert rule.match == "regex"
 
-    def test_regex_rule_rejects_lookahead_in_canonical(self):
+    def test_regex_rule_rejects_lookahead_in_arrow_type(self):
         with pytest.raises(InvalidTypeMapError, match="lookahead"):
-            WriteTypeMapRule(match="regex", canonical="^Foo(?=Bar)$", native="TEXT")
+            _parse_write(
+                {
+                    "match": "regex",
+                    "arrow_type": "^Foo(?=Bar)$",
+                    "native_type": "TEXT",
+                }
+            )
 
     def test_regex_rule_rejects_malformed_pattern(self):
-        with pytest.raises(InvalidTypeMapError, match="failed to compile"):
-            WriteTypeMapRule(match="regex", canonical="^[", native="TEXT")
+        with pytest.raises(InvalidTypeMapError, match="not a valid regex"):
+            _parse_write({"match": "regex", "arrow_type": "^[", "native_type": "TEXT"})
 
     def test_exact_rule_rejects_token_on_match_side(self):
-        # A ${...} token in the canonical (match) side would be matched as the
-        # literal text and never fire — reject it at load time.
-        with pytest.raises(InvalidTypeMapError, match="belong only in the rendered"):
-            WriteTypeMapRule(
-                match="exact", canonical="Decimal128(${p})", native="NUMERIC"
+        # An exact rule matches on a literal Arrow type, and the Arrow
+        # vocabulary admits no "$" — the contract's field pattern refuses it.
+        with pytest.raises(InvalidTypeMapError, match=r"exact\.arrow_type"):
+            _parse_write(
+                {
+                    "match": "exact",
+                    "arrow_type": "Decimal128(${p})",
+                    "native_type": "NUMERIC",
+                }
             )
 
     def test_regex_rule_rejects_token_on_match_side(self):
+        # A regex rule's arrow_type is a matcher, so the contract lets it
+        # through; the engine refuses it because the token is compared as
+        # literal text and the rule could never fire.
         with pytest.raises(InvalidTypeMapError, match="belong only in the rendered"):
-            WriteTypeMapRule(match="regex", canonical="^Foo${bar}$", native="TEXT")
+            _parse_write(
+                {
+                    "match": "regex",
+                    "arrow_type": "^Foo${bar}$",
+                    "native_type": "TEXT",
+                }
+            )
 
-    @pytest.mark.parametrize("bad_canonical", ["Decimal128(${p)", "Utf8${", "X${p-q}"])
-    def test_rejects_malformed_opener_on_match_side(self, bad_canonical):
-        # Any ${ on the match side is a dead-rule footgun, well-formed or not.
-        with pytest.raises(InvalidTypeMapError, match="belong only in the rendered"):
-            WriteTypeMapRule(match="exact", canonical=bad_canonical, native="NUMERIC")
+    @pytest.mark.parametrize("bad_arrow_type", ["Decimal128(${p)", "Utf8${", "X${p-q}"])
+    def test_rejects_malformed_opener_on_match_side(self, bad_arrow_type):
+        # Any ${ on an exact rule's match side is a dead-rule footgun, well
+        # formed or not, and none of these spellings is an Arrow type.
+        with pytest.raises(InvalidTypeMapError, match=r"exact\.arrow_type"):
+            _parse_write(
+                {
+                    "match": "exact",
+                    "arrow_type": bad_arrow_type,
+                    "native_type": "NUMERIC",
+                }
+            )
 
     @pytest.mark.parametrize(
         "bad_native",
         [
-            "VARCHAR(${length-p})",  # bad character
-            "VARCHAR(${length })",  # trailing space
             "VARCHAR(${length)",  # unterminated opener
             "VARCHAR(${})",  # empty name
         ],
     )
-    def test_rejects_malformed_placeholder_in_native(self, bad_native):
-        # A typo'd placeholder must fail at load time, not leak literal ${...}
-        # into the rendered DDL.
-        with pytest.raises(InvalidTypeMapError, match="malformed substitution token"):
-            WriteTypeMapRule(match="exact", canonical="Utf8", native=bad_native)
+    def test_contract_rejects_structurally_broken_placeholder(self, bad_native):
+        # An opener with no close, and a token with no name at all, are refused
+        # by the published contract's own render-value check.
+        with pytest.raises(InvalidTypeMapError, match="render value"):
+            _parse_write(
+                {
+                    "match": "exact",
+                    "arrow_type": "Utf8",
+                    "native_type": bad_native,
+                }
+            )
 
     @pytest.mark.parametrize(
-        "bad_canonical,match",
+        "bad_native",
         [
-            ("Time32(us)", "Time32 accepts"),
-            ("Time32(MICROSECOND)", "Time32 accepts"),
-            ("Time64(s)", "Time64 accepts"),
-            ("Time64(MILLISECOND)", "Time64 accepts"),
+            "VARCHAR(${length-p})",  # bad character in the name
+            "VARCHAR(${length })",  # trailing space in the name
         ],
     )
-    def test_exact_rule_rejects_invalid_canonical_cross_type_unit(
-        self, bad_canonical, match
-    ):
-        # normalize_canonical_type must fire at WriteTypeMapRule construction,
-        # not deferred to TypeMapper.__init__ key pre-computation.
-        with pytest.raises(InvalidTypeMapError, match=match):
-            WriteTypeMapRule(match="exact", canonical=bad_canonical, native="TIME")
+    def test_engine_rejects_placeholder_the_renderer_cannot_resolve(self, bad_native):
+        # Well-formed to the contract, but the substitution token does not match
+        # it, so it would survive rendering as literal text and land in the
+        # emitted DDL. This process does the rendering, so this process refuses.
+        with pytest.raises(InvalidTypeMapError, match="malformed substitution token"):
+            _parse_write(
+                {
+                    "match": "exact",
+                    "arrow_type": "Utf8",
+                    "native_type": bad_native,
+                }
+            )
+
+    @pytest.mark.parametrize(
+        "bad_arrow_type",
+        [
+            "Time32(us)",
+            "Time32(MICROSECOND)",
+            "Time64(s)",
+            "Time64(MILLISECOND)",
+            "Timestamp(us, UTC)",
+        ],
+    )
+    def test_exact_rule_rejects_arrow_type_outside_the_vocabulary(self, bad_arrow_type):
+        # An exact write rule matches on a literal Arrow type, so the contract
+        # holds it to the published pattern rather than deferring to
+        # TypeMapper.__init__'s key pre-computation.
+        with pytest.raises(InvalidTypeMapError, match=r"exact\.arrow_type"):
+            _parse_write(
+                {
+                    "match": "exact",
+                    "arrow_type": bad_arrow_type,
+                    "native_type": "TIME",
+                }
+            )
 
 
 class TestParseWriteRules:
     def test_empty_list_rejected(self):
-        with pytest.raises(InvalidTypeMapError, match="rule list is empty"):
+        with pytest.raises(InvalidTypeMapError, match="at least 1 item"):
             parse_write_rules([], source="<test>")
 
     def test_non_object_rejected(self):
-        with pytest.raises(InvalidTypeMapError, match="not a JSON object"):
+        with pytest.raises(InvalidTypeMapError, match="valid dictionary"):
             parse_write_rules(["oops"], source="<test>")
 
-    def test_validator_error_passes_through(self):
-        # An InvalidTypeMapError from the rule validator is re-raised as-is.
-        with pytest.raises(InvalidTypeMapError, match="failed to compile"):
+    def test_validator_error_carries_the_rule_index(self):
+        # An execution-safety failure names the offending rule's index.
+        with pytest.raises(InvalidTypeMapError, match=r"rule #1: .*not a valid regex"):
             parse_write_rules(
                 [
-                    {"match": "exact", "canonical": "Int64", "native": "BIGINT"},
-                    {"match": "regex", "canonical": "^[", "native": "TEXT"},
+                    {"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"},
+                    {"match": "regex", "arrow_type": "^[", "native_type": "TEXT"},
                 ],
                 source="<test>",
             )
 
-    def test_pydantic_error_wrapped_with_index(self):
-        # A non-InvalidTypeMapError (here a bad ``match`` literal) is wrapped
+    def test_contract_error_wrapped_with_index(self):
+        # A contract-level failure (here a bad ``match`` literal) is wrapped
         # with the offending rule's index.
-        with pytest.raises(InvalidTypeMapError, match=r"rule #1 is invalid"):
+        with pytest.raises(InvalidTypeMapError, match=r"rule #1: "):
             parse_write_rules(
                 [
-                    {"match": "exact", "canonical": "Int64", "native": "BIGINT"},
-                    {"match": "partial", "canonical": "Int32", "native": "INT"},
+                    {"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"},
+                    {"match": "partial", "arrow_type": "Int32", "native_type": "INT"},
                 ],
                 source="<test>",
             )
@@ -863,7 +997,8 @@ def _read_mapper(slug: str, native: str, canonical: str) -> TypeMapper:
     return TypeMapper(
         slug,
         parse_rules(
-            [{"match": "exact", "native": native, "canonical": canonical}], source="<r>"
+            [{"match": "exact", "native_type": native, "arrow_type": canonical}],
+            source="<r>",
         ),
     )
 
@@ -872,10 +1007,12 @@ def _full_mapper(slug: str, native: str, canonical: str) -> TypeMapper:
     return TypeMapper(
         slug,
         parse_rules(
-            [{"match": "exact", "native": native, "canonical": canonical}], source="<r>"
+            [{"match": "exact", "native_type": native, "arrow_type": canonical}],
+            source="<r>",
         ),
         parse_write_rules(
-            [{"match": "exact", "canonical": canonical, "native": native}], source="<w>"
+            [{"match": "exact", "arrow_type": canonical, "native_type": native}],
+            source="<w>",
         ),
     )
 
@@ -940,8 +1077,8 @@ class TestTypeMapperCompose:
                 [
                     {
                         "match": "regex",
-                        "native": r"^CUSTOM_(?<n>\d+)$",
-                        "canonical": "Utf8",
+                        "native_type": r"^CUSTOM_(?<n>\d+)$",
+                        "arrow_type": "Utf8",
                     },
                 ],
                 source="<r>",
@@ -953,8 +1090,8 @@ class TestTypeMapperCompose:
                 [
                     {
                         "match": "regex",
-                        "native": r"^VARCHAR\((?<n>\d+)\)$",
-                        "canonical": "Utf8",
+                        "native_type": r"^VARCHAR\((?<n>\d+)\)$",
+                        "arrow_type": "Utf8",
                     },
                 ],
                 source="<r>",
@@ -975,7 +1112,7 @@ def _write_mapper(write_rules: list[dict]) -> TypeMapper:
     return TypeMapper(
         "test",
         parse_rules(
-            [{"match": "exact", "native": "X", "canonical": "Utf8"}], source="<r>"
+            [{"match": "exact", "native_type": "X", "arrow_type": "Utf8"}], source="<r>"
         ),
         parse_write_rules(write_rules, source="<w>"),
     )
@@ -984,21 +1121,21 @@ def _write_mapper(write_rules: list[dict]) -> TypeMapper:
 class TestToNativeTypeExact:
     def test_exact_hit(self):
         m = _write_mapper(
-            [{"match": "exact", "canonical": "Int64", "native": "BIGINT"}]
+            [{"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"}]
         )
         assert m.to_native_type("Int64") == "BIGINT"
 
     def test_match_is_case_sensitive(self):
         # Arrow vocabulary is mixed-case; "int64" must NOT match "Int64".
         m = _write_mapper(
-            [{"match": "exact", "canonical": "Int64", "native": "BIGINT"}]
+            [{"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"}]
         )
         with pytest.raises(UnmappedTypeError):
             m.to_native_type("int64")
 
     def test_whitespace_tolerated(self):
         m = _write_mapper(
-            [{"match": "exact", "canonical": "Int64", "native": "BIGINT"}]
+            [{"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"}]
         )
         assert m.to_native_type("  Int64  ") == "BIGINT"
 
@@ -1009,8 +1146,8 @@ class TestToNativeTypeExact:
             [
                 {
                     "match": "exact",
-                    "canonical": "Decimal128(38, 9)",
-                    "native": "NUMERIC(38, 9)",
+                    "arrow_type": "Decimal128(38, 9)",
+                    "native_type": "NUMERIC(38, 9)",
                 }
             ]
         )
@@ -1020,7 +1157,7 @@ class TestToNativeTypeExact:
 
     def test_unmapped_raises_reverse(self):
         m = _write_mapper(
-            [{"match": "exact", "canonical": "Int64", "native": "BIGINT"}]
+            [{"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"}]
         )
         with pytest.raises(UnmappedTypeError) as exc:
             m.to_native_type("Float64")
@@ -1032,7 +1169,8 @@ class TestToNativeTypeExact:
         m = TypeMapper(
             "test",
             parse_rules(
-                [{"match": "exact", "native": "X", "canonical": "Utf8"}], source="<r>"
+                [{"match": "exact", "native_type": "X", "arrow_type": "Utf8"}],
+                source="<r>",
             ),
         )
         assert m.has_write_map is False
@@ -1045,7 +1183,8 @@ class TestToNativeTypeExact:
         m = TypeMapper(
             "test",
             parse_rules(
-                [{"match": "exact", "native": "X", "canonical": "Utf8"}], source="<r>"
+                [{"match": "exact", "native_type": "X", "arrow_type": "Utf8"}],
+                source="<r>",
             ),
             write_rules=[],
         )
@@ -1064,19 +1203,24 @@ class TestToNativeTypeUnitAliasNormalization:
             [
                 {
                     "match": "exact",
-                    "canonical": "Timestamp(MICROSECOND, UTC)",
-                    "native": "TIMESTAMPTZ",
+                    "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                    "native_type": "TIMESTAMPTZ",
                 },
             ]
         )
         assert m.to_native_type("Timestamp(us, UTC)") == "TIMESTAMPTZ"
         assert m.to_native_type("Timestamp(MICROSECOND, UTC)") == "TIMESTAMPTZ"
 
-    def test_exact_rule_short_code_matches_long_form_lookup(self):
-        # A rule authored with the short code also matches the long-form lookup.
+    def test_time64_rule_matches_both_unit_spellings(self):
+        # The contract admits only the long-form spelling in a rule, so both
+        # lookup spellings must resolve against the long-form rule.
         m = _write_mapper(
             [
-                {"match": "exact", "canonical": "Time64(us)", "native": "TIME"},
+                {
+                    "match": "exact",
+                    "arrow_type": "Time64(MICROSECOND)",
+                    "native_type": "TIME",
+                },
             ]
         )
         assert m.to_native_type("Time64(MICROSECOND)") == "TIME"
@@ -1088,8 +1232,8 @@ class TestToNativeTypeUnitAliasNormalization:
             [
                 {
                     "match": "exact",
-                    "canonical": "Timestamp(MICROSECOND)",
-                    "native": "TIMESTAMP",
+                    "arrow_type": "Timestamp(MICROSECOND)",
+                    "native_type": "TIMESTAMP",
                 },
             ]
         )
@@ -1099,22 +1243,30 @@ class TestToNativeTypeUnitAliasNormalization:
     def test_all_short_codes_normalized(self):
         m = _write_mapper(
             [
-                {"match": "exact", "canonical": "Time32(SECOND)", "native": "T32S"},
                 {
                     "match": "exact",
-                    "canonical": "Time32(MILLISECOND)",
-                    "native": "T32MS",
-                },
-                {"match": "exact", "canonical": "Duration(SECOND)", "native": "DUR_S"},
-                {
-                    "match": "exact",
-                    "canonical": "Duration(MILLISECOND)",
-                    "native": "DUR_MS",
+                    "arrow_type": "Time32(SECOND)",
+                    "native_type": "T32S",
                 },
                 {
                     "match": "exact",
-                    "canonical": "Duration(NANOSECOND)",
-                    "native": "DUR_NS",
+                    "arrow_type": "Time32(MILLISECOND)",
+                    "native_type": "T32MS",
+                },
+                {
+                    "match": "exact",
+                    "arrow_type": "Duration(SECOND)",
+                    "native_type": "DUR_S",
+                },
+                {
+                    "match": "exact",
+                    "arrow_type": "Duration(MILLISECOND)",
+                    "native_type": "DUR_MS",
+                },
+                {
+                    "match": "exact",
+                    "arrow_type": "Duration(NANOSECOND)",
+                    "native_type": "DUR_NS",
                 },
             ]
         )
@@ -1128,7 +1280,7 @@ class TestToNativeTypeUnitAliasNormalization:
         # Bad canonical supplied at lookup time must raise InvalidTypeMapError,
         # not silently fall through to UnmappedTypeError.
         m = _write_mapper(
-            [{"match": "exact", "canonical": "Time32(SECOND)", "native": "T32S"}]
+            [{"match": "exact", "arrow_type": "Time32(SECOND)", "native_type": "T32S"}]
         )
         with pytest.raises(InvalidTypeMapError, match="Time32 accepts"):
             m.to_native_type("Time32(MICROSECOND)")
@@ -1140,8 +1292,8 @@ class TestToNativeTypeRegex:
             [
                 {
                     "match": "regex",
-                    "canonical": r"^Decimal128\((?<p>\d+),\s*(?<s>\d+)\)$",
-                    "native": "NUMERIC(${p}, ${s})",
+                    "arrow_type": r"^Decimal128\((?<p>\d+),\s*(?<s>\d+)\)$",
+                    "native_type": "NUMERIC(${p}, ${s})",
                 }
             ]
         )
@@ -1150,7 +1302,13 @@ class TestToNativeTypeRegex:
 
     def test_param_hint_substitution(self):
         m = _write_mapper(
-            [{"match": "exact", "canonical": "Utf8", "native": "VARCHAR(${length})"}]
+            [
+                {
+                    "match": "exact",
+                    "arrow_type": "Utf8",
+                    "native_type": "VARCHAR(${length})",
+                }
+            ]
         )
         assert m.to_native_type("Utf8", params={"length": "255"}) == "VARCHAR(255)"
 
@@ -1158,7 +1316,13 @@ class TestToNativeTypeRegex:
         # Hints sourced from JSON/schema metadata arrive as ints; they must
         # render, not raise a TypeError in the substitution callback.
         m = _write_mapper(
-            [{"match": "exact", "canonical": "Utf8", "native": "VARCHAR(${length})"}]
+            [
+                {
+                    "match": "exact",
+                    "arrow_type": "Utf8",
+                    "native_type": "VARCHAR(${length})",
+                }
+            ]
         )
         assert m.to_native_type("Utf8", params={"length": 255}) == "VARCHAR(255)"
 
@@ -1166,14 +1330,26 @@ class TestToNativeTypeRegex:
         # A null/None hint (nullable or absent metadata field) is dropped, not
         # rendered as literal "None" — so a token needing it fails explicitly.
         m = _write_mapper(
-            [{"match": "exact", "canonical": "Utf8", "native": "VARCHAR(${length})"}]
+            [
+                {
+                    "match": "exact",
+                    "arrow_type": "Utf8",
+                    "native_type": "VARCHAR(${length})",
+                }
+            ]
         )
         with pytest.raises(InvalidTypeMapError, match="render hint"):
             m.to_native_type("Utf8", params={"length": None})
 
     def test_missing_hint_raises(self):
         m = _write_mapper(
-            [{"match": "exact", "canonical": "Utf8", "native": "VARCHAR(${length})"}]
+            [
+                {
+                    "match": "exact",
+                    "arrow_type": "Utf8",
+                    "native_type": "VARCHAR(${length})",
+                }
+            ]
         )
         with pytest.raises(InvalidTypeMapError, match="render hint"):
             m.to_native_type("Utf8")
@@ -1182,7 +1358,13 @@ class TestToNativeTypeRegex:
         # The looser branch: a regex rule whose native references a token that
         # is neither a capture nor a supplied hint must raise at render time.
         m = _write_mapper(
-            [{"match": "regex", "canonical": r"^Utf8$", "native": "VARCHAR(${length})"}]
+            [
+                {
+                    "match": "regex",
+                    "arrow_type": r"^Utf8$",
+                    "native_type": "VARCHAR(${length})",
+                }
+            ]
         )
         with pytest.raises(InvalidTypeMapError, match="render hint"):
             m.to_native_type("Utf8")
@@ -1195,8 +1377,8 @@ class TestToNativeTypeRegex:
             [
                 {
                     "match": "regex",
-                    "canonical": r"^Utf8(\((?<length>\d+)\))?$",
-                    "native": "VARCHAR(${length})",
+                    "arrow_type": r"^Utf8(\((?<length>\d+)\))?$",
+                    "native_type": "VARCHAR(${length})",
                 }
             ]
         )
@@ -1210,8 +1392,8 @@ class TestToNativeTypeRegex:
             [
                 {
                     "match": "regex",
-                    "canonical": r"^Decimal128\((?<p>\d+),\s*(?<s>\d+)\)$",
-                    "native": "NUMERIC(${p}, ${s})",
+                    "arrow_type": r"^Decimal128\((?<p>\d+),\s*(?<s>\d+)\)$",
+                    "native_type": "NUMERIC(${p}, ${s})",
                 }
             ]
         )
@@ -1223,8 +1405,8 @@ class TestToNativeTypeRegex:
     def test_first_match_wins(self):
         m = _write_mapper(
             [
-                {"match": "exact", "canonical": "Int64", "native": "FIRST"},
-                {"match": "regex", "canonical": r"^Int\d+$", "native": "SECOND"},
+                {"match": "exact", "arrow_type": "Int64", "native_type": "FIRST"},
+                {"match": "regex", "arrow_type": r"^Int\d+$", "native_type": "SECOND"},
             ]
         )
         assert m.to_native_type("Int64") == "FIRST"
@@ -1241,9 +1423,11 @@ class TestWriteMapLoader:
         _write_connector(
             tmp_path,
             "demo",
-            type_map=[{"match": "exact", "native": "BIGINT", "canonical": "Int64"}],
+            type_map=[
+                {"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"}
+            ],
             write_type_map=[
-                {"match": "exact", "canonical": "Int64", "native": "BIGINT"}
+                {"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"}
             ],
         )
         mapper = load_type_map(tmp_path, "demo")
@@ -1254,7 +1438,9 @@ class TestWriteMapLoader:
         _write_connector(
             tmp_path,
             "readonly",
-            type_map=[{"match": "exact", "native": "BIGINT", "canonical": "Int64"}],
+            type_map=[
+                {"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"}
+            ],
         )
         mapper = load_type_map(tmp_path, "readonly")
         assert mapper.has_write_map is False
@@ -1267,7 +1453,9 @@ class TestWriteMapLoader:
         _write_connector(
             tmp_path,
             "busted",
-            type_map=[{"match": "exact", "native": "BIGINT", "canonical": "Int64"}],
+            type_map=[
+                {"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"}
+            ],
         )
         (tmp_path / "busted" / "definition" / WRITE_TYPE_MAP_FILENAME).write_text(
             "nope"
@@ -1280,7 +1468,9 @@ class TestWriteMapLoader:
         _write_connector(
             tmp_path,
             "wrong",
-            type_map=[{"match": "exact", "native": "BIGINT", "canonical": "Int64"}],
+            type_map=[
+                {"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"}
+            ],
         )
         (tmp_path / "wrong" / "definition" / WRITE_TYPE_MAP_FILENAME).write_text("{}")
         with pytest.raises(InvalidTypeMapError, match="must contain a JSON array"):
@@ -1296,10 +1486,14 @@ class TestWriteMapLoader:
         definition = tmp_path / "my-pg" / "definition"
         definition.mkdir(parents=True)
         (definition / TYPE_MAP_FILENAME).write_text(
-            json.dumps([{"match": "exact", "native": "BIGINT", "canonical": "Int64"}])
+            json.dumps(
+                [{"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"}]
+            )
         )
         (definition / WRITE_TYPE_MAP_FILENAME).write_text(
-            json.dumps([{"match": "exact", "canonical": "Int64", "native": "BIGINT"}])
+            json.dumps(
+                [{"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"}]
+            )
         )
         mapper = load_connection_type_map(tmp_path, "my-pg")
         assert mapper is not None

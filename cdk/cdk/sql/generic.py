@@ -1323,7 +1323,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             columns.append(
                 ColumnDef(
                     name=col_name,
-                    canonical_type=col_def.arrow_type,
+                    arrow_type=col_def.arrow_type,
                     # ``is not False``, not ``bool(...)``: the contract types
                     # nullable as ``bool | None``, so only an authored
                     # ``false`` makes the column NOT NULL. An authored
@@ -1347,7 +1347,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             columns.append(
                 ColumnDef(
                     name=self.SYNCED_AT_COLUMN,
-                    canonical_type="Timestamp(MICROSECOND, UTC)",
+                    arrow_type="Timestamp(MICROSECOND, UTC)",
                     nullable=True,
                     default=self.dialect.current_timestamp_default(),
                 )
@@ -1367,7 +1367,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             columns.append(
                 ColumnDef(
                     name=self.RECORD_HASH_COLUMN,
-                    canonical_type="Utf8",
+                    arrow_type="Utf8",
                     nullable=False,
                     primary_key=True,
                 )

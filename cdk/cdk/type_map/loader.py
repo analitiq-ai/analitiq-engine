@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .exceptions import InvalidTypeMapError, TypeMapNotFoundError
 from .mapper import TypeMapper
-from .rules import WriteTypeMapRule, parse_rules, parse_write_rules
+from .rules import TypeMapWriteRule, parse_rules, parse_write_rules
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ def read_raw_type_maps(
 
 def _load_write_rules(
     definition_dir: Path, label: str
-) -> list[WriteTypeMapRule] | None:
+) -> list[TypeMapWriteRule] | None:
     """Load the optional sibling ``type-map-write.json`` from *definition_dir*.
 
     Absent file → ``None`` (source-only / API connectors have no write map). A

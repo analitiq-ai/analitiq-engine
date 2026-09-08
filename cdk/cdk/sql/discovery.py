@@ -117,7 +117,7 @@ async def list_columns(
         columns.append(
             ColumnDef(
                 name=name,
-                canonical_type=canonical,
+                arrow_type=canonical,
                 nullable=nullable,
                 primary_key=name in pk_set,
             )
