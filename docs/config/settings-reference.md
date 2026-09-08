@@ -57,18 +57,31 @@ schema and `settings.py` respectively) and only their pairing lives here:
 
 Defaults for each are in `src/config/settings.py`, not repeated here.
 
-### The one default outside `settings.py`
+### Defaults outside `settings.py`
 
-The runtime-archive download timeout lives in the standalone
-`src/runtime_archive.py` CLI, not in `settings.py`, because that script
-runs without the engine package on its path — it cannot import
-`src/config/settings.py`. It is the one exception to "every default lives
-in one catalogue," and it exists for that reason alone.
+Two engine-owned defaults are declared outside `settings.py`, each for its
+own reason:
+
+- The runtime-archive download timeout lives in the standalone
+  `src/runtime_archive.py` CLI, not in `settings.py`, because that script
+  runs without the engine package on its path — it cannot import
+  `src/config/settings.py`.
+- The incremental replication safety window
+  (`StateReplicationConfig.safety_window_seconds`, default `120`) lives in
+  `src/models/state.py`, alongside the resolved-config model it defaults a
+  field on, rather than in `settings.py`. It is still engine policy, not
+  connector input — see
+  [`source-config.md`](source-config.md#replication-semantics) — just
+  declared beside its own model instead of in the settings catalogue.
+
+Neither is a gap to fix; `settings.py` is the catalogue for
+environment-overridable process defaults, not for every default the
+engine has.
 
 ## What is deliberately not centralised
 
-Connector- and formatter-owned defaults (e.g. an API connector's replication
-safety window, a formatter's delimiter or row-group size) are not engine
+Connector- and formatter-owned defaults (e.g. an API request timeout or
+retry policy, a formatter's delimiter or row-group size) are not engine
 settings: centralising them here would make the engine connector-aware,
 which the engine's design refuses (see
 [`connector-module-architecture.md`](../architecture/connector-module-architecture.md)).

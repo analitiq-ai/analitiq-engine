@@ -45,12 +45,18 @@ for how the CDK package is bounded and wired see
 
 ## Where Arrow is ceremony
 
-The data path is fundamentally row-oriented at both ends: sources produce
-rows (HTTP JSON, ORM rows) and destinations consume rows (SQLAlchemy binds
-dict params, aiohttp wants JSON). Arrow is columnar only in flight and
-during schema cast — no downstream consumer in this engine is columnar —
-so the design deliberately stops adding Arrow-space steps once a batch
-reaches a destination.
+The data path is fundamentally row-oriented at most destinations: sources
+produce rows (HTTP JSON, ORM rows) and the SQLAlchemy and API write paths
+consume rows (SQLAlchemy binds dict params, aiohttp wants JSON). Arrow is
+columnar only in flight and during schema cast on those paths — no
+consumer downstream of the cast is columnar there — so the design
+deliberately stops adding Arrow-space steps once a batch reaches one of
+them. The one exception is a connector that declares the `adbc_ingest`
+bulk mechanism: `AdbcBackend.land_batch` (`cdk/cdk/sql/adbc_backend.py`)
+passes the `pa.RecordBatch` straight to `cursor.adbc_ingest`, no
+`to_pylist()` — the batch stays columnar all the way to the driver, which
+is exactly the point of a native Arrow ingestion API — see "Landing" (§2)
+in [`sql-write-path.md`](sql-write-path.md).
 
 ### DB destination
 

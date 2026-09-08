@@ -4,12 +4,15 @@
 *design* — identity rules, scoping, replication semantics, and secret
 resolution. It is not the schema reference: the authoritative field-level
 shape of every document named below is the published JSON Schema at
-`schemas.analitiq.ai` (generated from the Pydantic contract models in the
-plugins repo — see the schema-contracts ownership map) and the CDK's own
-Pydantic models where a document is engine-internal. This document exists
-because the schema alone doesn't carry *why* a field resolves the way it
-does; where this doc and the schema could both state a fact, the schema
-wins and this doc points at it instead of repeating it.
+`https://schemas.analitiq.ai/<document-type>/latest.json` — the document
+types this doc names are `connector`, `connection`, `api-endpoint`, and
+the database-endpoint schema — generated from the Pydantic contract
+models the Connector Builder / Pipeline Builder plugins author — and the
+CDK's own Pydantic models where a document is engine-internal. This
+document exists because the schema alone doesn't carry *why* a field
+resolves the way it does; where this doc and the schema could both state
+a fact, the schema wins and this doc points at it instead of repeating
+it.
 
 For the rest see the siblings: the engine pipeline in
 [`engine-architecture.md`](../architecture/engine-architecture.md), field
@@ -131,12 +134,16 @@ alone does not state:
   whole collection and report success. A param a pagination or replication
   loop owns is exempt from `required` only until its loop first produces a
   value.
-- The JSON-Schema value keywords on a param (`enum`, `format`, `pattern`,
-  numeric and length bounds) are enforced with the reference JSON Schema
+- The JSON-Schema value keywords on a param (`enum`, `pattern`, numeric
+  and length bounds) are enforced with the reference JSON Schema
   implementation, at the same version the published schema is written
-  for — never a second, hand-rolled validator. No refusal renders the
-  offending value in its message, since a param can carry a credential or
-  continuation token.
+  for — never a second, hand-rolled validator. `format` is enforced only
+  for the names the engine ships a checker for (`_ENFORCED_FORMATS`,
+  `cdk/cdk/api/param_rules.py`); any other declared `format` is accepted
+  as an annotation, not validated — the contract intentionally allows
+  this rather than pulling in every format library transitively. No
+  refusal renders the offending value in its message, since a param can
+  carry a credential or continuation token.
 - `pagination.type` is a closed union (`offset`, `page`, `cursor`,
   `keyset`, `link`); an unrecognised value fails loud rather than reading
   one page. `stop_when` is required on every strategy — there is no
