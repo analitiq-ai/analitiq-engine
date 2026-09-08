@@ -119,9 +119,11 @@ def _bind_code_encoder(
     field_name: str,
     arrow_type: pa.DataType,
 ) -> Callable[[Any], Any]:
-    """Close over one field's name/type so ``resolve_write_encoders`` can
-    return a uniform ``Callable[[Any], Any]`` regardless of whether the
-    field resolved to a catalog encoder or the ``code`` hatch."""
+    """Close over one field's name/type for ``resolve_write_encoders``.
+
+    Lets it return a uniform ``Callable[[Any], Any]`` regardless of
+    whether the field resolved to a catalog encoder or the ``code`` hatch.
+    """
 
     def encode(value: Any) -> Any:
         return code_encoder(field_name, value, arrow_type)
@@ -374,9 +376,9 @@ class SchemaContract:
         *,
         code_encoder: Callable[[str, Any, pa.DataType], Any] | None = None,
     ) -> dict[str, Callable[[Any], Any]]:
-        """Build the field name -> encode function map for every declared
-        ``encoding_write``.
+        """Build the field name -> encode function map for every declared entry.
 
+        Every ``encoding_write`` declared on this schema resolves here.
         Skips a field with none declared -- nothing to apply, and
         :meth:`check_required_write_encoding` is what refuses that when the
         field's arrow_type actually needs one. A field naming ``"code"``

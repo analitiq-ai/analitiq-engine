@@ -8,7 +8,6 @@ which only :func:`resolve_arrow_type` has access to.
 from __future__ import annotations
 
 import base64
-import binascii
 import numbers
 import re
 from collections.abc import Callable, Mapping
@@ -323,7 +322,7 @@ def first_blocked_nested_leaf(
 # held before this catalog replaced them.
 
 
-def _coerce_ticks(field_name: str, values: "list[Any]") -> "list[int | None]":
+def _coerce_ticks(field_name: str, values: list[Any]) -> list[int | None]:
     """Read each wire value as an integer tick count, or raise naming the row.
 
     ``numbers.Integral`` rather than a bare ``isinstance(v, int)``: a
@@ -362,7 +361,7 @@ def _coerce_ticks(field_name: str, values: "list[Any]") -> "list[int | None]":
 
 
 def _ticks_to_array(
-    field: pa.Field, ticks: "list[int | None]", wire_unit: str
+    field: pa.Field, ticks: list[int | None], wire_unit: str
 ) -> pa.Array:
     """Build ``field.type`` from epoch ticks in *wire_unit*.
 
@@ -401,10 +400,12 @@ def _ticks_to_array(
 
 
 def _decode_iso8601(_config: Mapping[str, Any]) -> DecodeFn:
-    """ISO-8601 text -> Timestamp/Date/Time. The retired implicit default,
-    now only applied when a field names it."""
+    """ISO-8601 text -> Timestamp/Date/Time.
 
-    def decode(field: pa.Field, values: "list[Any]") -> pa.Array:
+    The retired implicit default, now only applied when a field names it.
+    """
+
+    def decode(field: pa.Field, values: list[Any]) -> pa.Array:
         is_ts = pa.types.is_timestamp(field.type)
         is_date_type = pa.types.is_date(field.type)
         is_time_type = pa.types.is_time(field.type)
@@ -451,18 +452,21 @@ def _decode_iso8601(_config: Mapping[str, Any]) -> DecodeFn:
 def _decode_epoch(config: Mapping[str, Any]) -> DecodeFn:
     unit = require_enum_param(config, "unit", EPOCH_UNITS, "encoding 'epoch'")
 
-    def decode(field: pa.Field, values: "list[Any]") -> pa.Array:
+    def decode(field: pa.Field, values: list[Any]) -> pa.Array:
         return _ticks_to_array(field, _coerce_ticks(field.name, values), unit)
 
     return decode
 
 
 def _decode_strptime(config: Mapping[str, Any]) -> DecodeFn:
-    """``pc.strptime`` against a declared pattern -- the retired ``source_format``
-    hatch, now a named, declared catalog entry rather than an unvalidated one."""
+    """``pc.strptime`` against a declared pattern.
+
+    The retired ``source_format`` hatch, now a named, declared catalog
+    entry rather than an unvalidated one.
+    """
     pattern = require_str_param(config, "pattern", "encoding 'strptime'")
 
-    def decode(field: pa.Field, values: "list[Any]") -> pa.Array:
+    def decode(field: pa.Field, values: list[Any]) -> pa.Array:
         for row, v in enumerate(values):
             if v is not None and not isinstance(v, str):
                 raise TypeError(
@@ -505,7 +509,7 @@ def _decode_regex_epoch(config: Mapping[str, Any]) -> DecodeFn:
             f"one capture group for the ticks, found {compiled.groups}"
         )
 
-    def decode(field: pa.Field, values: "list[Any]") -> pa.Array:
+    def decode(field: pa.Field, values: list[Any]) -> pa.Array:
         ticks: list[int | None] = []
         for row, v in enumerate(values):
             if v is None:
@@ -529,7 +533,7 @@ def _decode_regex_epoch(config: Mapping[str, Any]) -> DecodeFn:
 
 
 def _decode_decimal(_config: Mapping[str, Any]) -> DecodeFn:
-    def decode(field: pa.Field, values: "list[Any]") -> pa.Array:
+    def decode(field: pa.Field, values: list[Any]) -> pa.Array:
         if not pa.types.is_decimal(field.type):
             raise InvalidTypeMapError(
                 f"column {field.name!r}: encoding 'decimal' requires a "
@@ -550,7 +554,7 @@ def _decode_bool_map(config: Mapping[str, Any]) -> DecodeFn:
             "'false_values'"
         )
 
-    def decode(field: pa.Field, values: "list[Any]") -> pa.Array:
+    def decode(field: pa.Field, values: list[Any]) -> pa.Array:
         mapped: list[bool | None] = []
         for row, v in enumerate(values):
             if v is None:
@@ -571,7 +575,7 @@ def _decode_bool_map(config: Mapping[str, Any]) -> DecodeFn:
 
 
 def _decode_base64(_config: Mapping[str, Any]) -> DecodeFn:
-    def decode(field: pa.Field, values: "list[Any]") -> pa.Array:
+    def decode(field: pa.Field, values: list[Any]) -> pa.Array:
         decoded: list[bytes | None] = []
         for row, v in enumerate(values):
             if v is None:
@@ -584,7 +588,7 @@ def _decode_base64(_config: Mapping[str, Any]) -> DecodeFn:
                 )
             try:
                 decoded.append(base64.b64decode(v, validate=True))
-            except (binascii.Error, ValueError) as exc:
+            except ValueError as exc:
                 raise ValueError(
                     f"column {field.name!r} at row {row}: {v!r} is not valid "
                     f"base64: {exc}"
@@ -616,7 +620,7 @@ _ISO_DURATION_RE: Final[re.Pattern[str]] = re.compile(
 
 
 def _decode_iso_duration(_config: Mapping[str, Any]) -> DecodeFn:
-    def decode(field: pa.Field, values: "list[Any]") -> pa.Array:
+    def decode(field: pa.Field, values: list[Any]) -> pa.Array:
         if not pa.types.is_duration(field.type):
             raise InvalidTypeMapError(
                 f"column {field.name!r}: encoding 'iso_duration' requires a "
