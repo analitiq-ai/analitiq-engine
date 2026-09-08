@@ -581,7 +581,7 @@ class TestTheRequestTheStreamWillActuallySend:
         assert isinstance(outcome, str)
         assert "Authorization" in outcome
 
-    def test_a_required_write_param_with_no_default_is_refused(self) -> None:
+    def test_a_required_write_param_resolving_to_nothing_is_refused(self) -> None:
         # A write param has no loop to fill it: every value comes from the
         # resolved defaults, so one whose default resolves to nothing is
         # missing for good. The never-fillable-scope walk passes this one

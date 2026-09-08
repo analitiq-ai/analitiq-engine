@@ -35,7 +35,7 @@ exactly the vocabulary the contract defines and can never drift from it.
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from cdk.sql.dialects import SqlDialect
 from cdk.type_map.exceptions import InvalidTypeMapError, UnmappedTypeError
@@ -158,58 +158,6 @@ def _in_published_grammar(spelling: str) -> bool:
     return _canonical_family(spelling) in ARROW_FAMILIES
 
 
-def _foreign_literal_violations(mapper: TypeMapper) -> list[Violation]:
-    """Flag rule arrow_types whose family the grammar does not define.
-
-    NOTE: as of the move onto the published contract models, the rule
-    loaders no longer accept any spelling -- ``parse_rules`` refuses a
-    foreign ``arrow_type`` in both the exact and regex forms, and the
-    contract blocks the ``model_construct`` bypass -- so no ``TypeMapper``
-    reachable from a parsed document can still carry one. This check is
-    retained as a belt-and-braces certification of the kit's own promise,
-    but it can no longer fire from a validly loaded connector. Removing it
-    is a change to the kit's public surface and is tracked separately.
-
-    An ``arrow_type`` outside the published grammar is a defect in either
-    direction: a read rule emitting one hands discovery a family
-    ``parse_arrow_type`` rejects, and a write rule matching one is
-    unreachable, since no endpoint document can ever carry it. Left
-    uncaught, such a literal would also count toward probe coverage (it
-    trivially round-trips with itself), letting a write map that cannot
-    render any real canonical read as covered.
-
-    Which rules carry a literal canonical differs by direction, because
-    the field means different things: a read rule's ``canonical`` is its
-    *output*, literal whenever it interpolates no capture, so regex read
-    rules are checked too; a write rule's ``canonical`` is its *match*,
-    a pattern rather than a family name unless the rule is exact.
-    """
-    violations: list[Violation] = []
-    seen: set[str] = set()
-    directions: list[tuple[str, Any]] = [("read", rule) for rule in mapper.rules]
-    directions += [
-        ("write", rule) for rule in mapper.write_rules if rule.match == "exact"
-    ]
-    for direction, rule in directions:
-        if "${" in rule.arrow_type or _in_published_grammar(rule.arrow_type):
-            continue
-        normalized = normalize_arrow_type(rule.arrow_type)
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        violations.append(
-            Violation(
-                CHECK_COVERAGE,
-                f"{direction} rule declares canonical {rule.arrow_type!r}, "
-                f"whose family {_canonical_family(rule.arrow_type)!r} is not "
-                f"in the published grammar; no endpoint document can ever "
-                f"produce it, so the rule is unreachable and does not count "
-                f"as coverage.",
-            )
-        )
-    return violations
-
-
 def _rule_exemplars(mapper: TypeMapper) -> list[str]:
     """Concrete canonicals named by the connector's own rules.
 
@@ -285,7 +233,7 @@ def _misnormalized_write_rules(
         violations.append(
             Violation(
                 CHECK_COVERAGE,
-                f"write rule for canonical {rule.arrow_type!r} matches "
+                f"write rule for arrow_type {rule.arrow_type!r} matches "
                 f"{spelling!r} but not the {candidate!r} the matcher "
                 f"actually receives, so the rule is dead: {reason}.",
             )
@@ -368,36 +316,22 @@ def render_probe(
     return mapper.to_native_type(canonical)
 
 
-def check_type_map_grammar(mapper: TypeMapper) -> list[Violation]:
-    """Certify every literal ``arrow_type`` against the published grammar.
-
-    Applies to any connector that ships a type map, write map or not:
-    a source-only connector still emits an ``arrow_type`` from discovery,
-    and one outside the grammar fails at runtime in
-    :func:`~cdk.type_map.arrow.parse_arrow_type`. Gating this on a write
-    map would let exactly that connector — the one with nothing else to
-    certify — pass with nothing certified.
-
-    See :func:`_foreign_literal_violations` on why this no longer fires for
-    a connector loaded through ``parse_rules``.
-    """
-    return _foreign_literal_violations(mapper)
-
-
 def check_type_map_round_trip(
     mapper: TypeMapper, dialect: SqlDialect | None = None
 ) -> list[Violation]:
     """Certify read closure and convergence for every covered probe.
 
     The write-direction half of the type-map contract; a connector
-    shipping no write map has no round trip to certify. Its read-side
-    literals are certified by :func:`check_type_map_grammar`, which runs
-    either way.
+    shipping no write map has no round trip to certify. A foreign literal
+    cannot reach here at all: ``parse_rules`` refuses an ``arrow_type``
+    outside the published vocabulary in both the exact and the regex form,
+    so the kit no longer re-certifies what the loader already guarantees --
+    one gate per document.
     """
     if not mapper.has_write_map:
         return []
     probes = probe_canonicals(mapper)
-    violations: list[Violation] = _foreign_literal_violations(mapper)
+    violations: list[Violation] = []
     violations += _misnormalized_write_rules(mapper, probes)
     rendered = 0
     for canonical in probes:

@@ -112,6 +112,56 @@ class TestPublishedArtifactDrift:
         assert set(load_published_grammar()) == {"version", "families"}
 
 
+def _contract_vocabulary_heads() -> set[str]:
+    """The type names the published contract's arrow_type pattern admits."""
+    from analitiq.contracts.arrow_grammar import ARROW_TYPE_PATTERN
+
+    body = re.sub(r"^\^\(\?:", "", ARROW_TYPE_PATTERN)
+    body = re.sub(r"\)\\\$$", "", body)
+    branches: list[str] = []
+    depth = 0
+    current = ""
+    for ch in body:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == "|" and depth == 0:
+            branches.append(current)
+            current = ""
+        else:
+            current += ch
+    branches.append(current)
+    heads = set()
+    for branch in branches:
+        m = re.match(r"[A-Za-z0-9]+", branch)
+        if m:
+            heads.add(m.group(0))
+    return heads
+
+
+class TestContractVocabularyAgreement:
+    """The engine's family table and the contract's vocabulary are one list.
+
+    The engine no longer validates type-map documents -- the published models
+    do -- so these two are the same vocabulary reached through two artifacts:
+    the pinned contract package, and this repo's own grammar table that
+    ``parse_arrow_type`` binds against. A contract bump that adds or removes a
+    type name without the matching grammar change would let a document validate
+    and then fail at parse time, or the reverse. Nothing else now checks it.
+    """
+
+    def test_the_contract_admits_exactly_the_families_the_engine_parses(self):
+        heads = _contract_vocabulary_heads()
+        assert heads, "failed to extract any type name from ARROW_TYPE_PATTERN"
+        assert heads == set(ARROW_FAMILIES), (
+            "the pinned contract's arrow_type vocabulary and the engine's "
+            "family table have drifted: "
+            f"contract-only={sorted(heads - set(ARROW_FAMILIES))}, "
+            f"engine-only={sorted(set(ARROW_FAMILIES) - heads)}"
+        )
+
+
 class TestFamilySetConformance:
     """One vocabulary: both published artifacts render the same table."""
 

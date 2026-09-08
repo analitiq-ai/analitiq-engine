@@ -35,7 +35,6 @@ from cdk.conformance import (
     check_endpoint_documents,
     check_override_surface,
     check_read_transport_selection,
-    check_type_map_grammar,
     check_type_map_round_trip,
     load_target,
 )
@@ -794,8 +793,8 @@ class TestTypeMapBreaks:
                 [{"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"}],
             )
 
-    def test_regex_read_rule_interpolating_a_capture_is_not_flagged(self) -> None:
-        """A templated canonical is not a literal family; it must pass."""
+    def test_regex_read_rule_interpolating_a_capture_loads(self) -> None:
+        """A templated arrow_type is not a literal family; it must load."""
         mapper = build_type_mapper(
             "regex-templated-output",
             [
@@ -811,7 +810,7 @@ class TestTypeMapBreaks:
             ],
             [{"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"}],
         )
-        assert check_type_map_grammar(mapper) == []
+        assert check_type_map_round_trip(mapper) == []
 
     def test_zero_probe_coverage_fails(self) -> None:
         """A write map rendering no probe must not read as fully certified."""

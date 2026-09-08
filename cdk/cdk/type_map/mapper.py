@@ -23,11 +23,12 @@ from .rules import (
     compile_pattern,
     normalize_arrow_type,
     normalize_native_type,
+    normalized_native,
 )
 
 
 class TypeMapper:
-    r"""Deterministic native → canonical matcher for a connector's type-map.
+    r"""Deterministic native_type -> arrow_type matcher for a connector's type-map.
 
     Built from a list of :class:`TypeMapReadRule` instances. Rule order is
     authoritative: the author controls specificity by placing narrower
@@ -55,13 +56,13 @@ class TypeMapper:
         self._exact_native: list[str | None] = []
         for rule in self._rules:
             if rule.match == "exact":
-                self._exact_native.append(normalize_native_type(rule.native_type))
+                self._exact_native.append(normalized_native(rule))
                 self._compiled.append(None)
             else:
                 self._exact_native.append(None)
                 self._compiled.append(compile_pattern(rule))
 
-        # Write direction (canonical -> native). Optional: API connectors and
+        # Write direction (arrow_type -> native_type). Optional: API connectors and
         # source-only connectors have no write map. Built symmetrically to the
         # read side: exact rules keep their normalized literal, regex rules a
         # compiled pattern.
@@ -138,7 +139,7 @@ class TypeMapper:
     def to_native_type(
         self, arrow_type: str, *, params: Mapping[str, Any] | None = None
     ) -> str:
-        """Map an Arrow canonical type string to its native DDL type.
+        """Map an ``arrow_type`` to its native DDL type.
 
         The inverse of :meth:`to_arrow_type`, fed by the connector's
         ``type-map-write.json``. ``params`` supplies per-column hints (e.g.

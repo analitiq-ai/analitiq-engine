@@ -35,8 +35,16 @@ Two further checks sit here because this process is the one that *renders*:
   land in the emitted DDL verbatim. The contract rejects the empty ``${}`` and
   unclosed ``${`` forms; the rest is caught here.
 
-Both are arguably document validity and would be better enforced by the
-contract. They are kept until it does, so the checks are not lost.
+Both are document validity rather than execution safety, so both belong in the
+contract, not here: analitiq-ai/claude-code-plugins#241 moves them. They are
+kept until that lands -- without them a malformed token reaches emitted DDL as
+literal text -- and this module drops them when it does.
+
+Because these checks are no longer ``model_validator``s on a model this repo
+owns, they are not invariants of the type -- they run in :func:`parse_rules`
+and :func:`parse_write_rules`. Those two are the only sanctioned way to obtain
+a rule the engine will execute; a rule validated straight off the contract
+model is contract-valid but has not been cleared to run here.
 """
 
 from __future__ import annotations
@@ -53,7 +61,9 @@ from analitiq.contracts.type_map import (
     TypeMapReadRule,
     TypeMapWriteDoc,
     TypeMapWriteRule,
-    normalize_native_type,
+)
+from analitiq.contracts.type_map import (
+    normalize_native_type as _contract_normalize_native_type,
 )
 from pydantic import ValidationError
 
@@ -84,9 +94,10 @@ _NAMED_GROUP_RE2: Final[Pattern[str]] = re.compile(r"\(\?<([A-Za-z_][A-Za-z0-9_]
 # The one substitution token the renderer recognises. Shared with the mapper so
 # what validates and what renders can never drift apart.
 _SUBSTITUTION_TOKEN: Final[Pattern[str]] = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
-# Every ``${`` opener. The contract validates well-formed tokens; this catches the
-# whole class on a write rule's match side, where even a well-formed one is dead.
-_PLACEHOLDER_OPENER: Final[Pattern[str]] = re.compile(r"\$\{")
+# Every substitution-token opener. Deliberately laxer than the token itself --
+# it matches ``$ {`` too, because the renderer does NOT, so a spaced opener
+# would otherwise survive into the emitted DDL exactly like a malformed name.
+_PLACEHOLDER_OPENER: Final[Pattern[str]] = re.compile(r"\$\s*\{")
 
 # RE2 excludes these Perl/Python extensions: each one admits input on which
 # Python's backtracking engine runs in super-linear time.
@@ -106,9 +117,11 @@ _BACKREFERENCE_DIGIT: Final[Pattern[str]] = re.compile(r"\\[1-9]")
 # the published arrow_type_grammar.json renders from -- so the unit checks this
 # surface performs can never contradict the parser's. That is this surface's
 # whole validation scope: integer ranges, timezone, and arity are enforced
-# only by parse_arrow_type. normalize_arrow_type expands short codes in
-# both the stored write-rule key and every lookup input, so either spelling in
-# a write rule's arrow_type field matches either spelling at lookup time.
+# only by parse_arrow_type. normalize_arrow_type expands short codes in every
+# LOOKUP input, so either spelling resolves to the same key at lookup time. It
+# no longer does so for the authored rule: the contract's arrow_type pattern
+# admits long-form units only, so a write rule keyed ``Timestamp(us)`` -- legal
+# before the move onto the published models -- no longer validates.
 _UNIT_LONG_FORMS: Final[frozenset[str]] = frozenset(UNIT_SHORT_TO_LONG.values())
 
 # Allowed long-form units per temporal family, derived from the grammar. The
@@ -132,7 +145,7 @@ _TEMPORAL_UNIT_RE: Final[Pattern[str]] = re.compile(
     + r")\b"
 )
 _NULL_TZ_RE: Final[Pattern[str]] = re.compile(
-    r"Timestamp\(([^,)]+), " + re.escape(NULL_TZ_SENTINEL) + r"\)"
+    r"\bTimestamp\(([^,)]+),\s*" + re.escape(NULL_TZ_SENTINEL) + r"\)"
 )
 
 
@@ -197,6 +210,23 @@ def normalize_arrow_type(value: str) -> str:
     # Step 3: Timestamp(unit, null) -> Timestamp(unit).
     compact = _NULL_TZ_RE.sub(r"Timestamp(\1)", compact)
     return compact
+
+
+def normalize_native_type(value: str) -> str:
+    """Normalize a native type string for matching, rejecting a non-string.
+
+    Delegates to the published contract's normalization -- the matching rule is
+    the contract's to define -- and adds only the type guard, which the
+    contract's function does not carry because its own inputs are already
+    schema-validated strings. The engine's are not: a lookup input is whatever
+    a driver returned for a column's declared type, so an unguarded ``.strip()``
+    would escape :meth:`~cdk.type_map.mapper.TypeMapper.to_arrow_type` as a bare
+    ``AttributeError``, past the ``UnmappedTypeError`` handling that names the
+    schema, table and column. Symmetric with :func:`normalize_arrow_type`.
+    """
+    if not isinstance(value, str):
+        raise TypeError(f"native type must be a string, got {type(value).__name__}")
+    return _contract_normalize_native_type(value)
 
 
 def _assert_re2_subset(pattern: str) -> None:
@@ -285,26 +315,38 @@ def _assert_executable(rule: TypeMapReadRule | TypeMapWriteRule, *, where: str) 
     if rule.match != "regex":
         return
     matcher = rule.native_type if is_read else rule.arrow_type
+    # Compilability is already settled: the contract compiled this same matcher
+    # in _compile_ecma_matcher before we got here, and the RE2 subset admits no
+    # construct that survives that and then fails Python's compiler. Only the
+    # subset itself is still ours to decide.
     try:
         _assert_re2_subset(matcher)
     except InvalidTypeMapError as err:
         raise InvalidTypeMapError(f"{where}: {err}") from err
-    try:
-        re.compile(_to_python_named_groups(matcher))
-    except re.error as err:
-        raise InvalidTypeMapError(
-            f"{where}: regex pattern {matcher!r} failed to compile: {err}"
-        ) from err
 
 
 def _render_validation_error(err: ValidationError, *, source: str) -> str:
-    """Render a document-level pydantic failure as one per-rule message list."""
+    """Render a document-level pydantic failure as one per-rule message list.
+
+    Always names the offending value. The Arrow-type constraint is published as
+    a ``pattern``, so pydantic's own message for the commonest authoring mistake
+    is the 800-character regex and nothing else -- an author told only that
+    would have to read the grammar to find out which token of theirs was wrong.
+    """
     lines = []
     for detail in err.errors():
         loc = detail["loc"]
-        index = loc[0] if loc and isinstance(loc[0], int) else "?"
+        # A whole-document failure (an empty rule list) has no index and no
+        # field; its own message already says everything, and inventing a
+        # "rule #?" would send the reader looking for a rule that isn't there.
+        if not loc:
+            lines.append(detail["msg"])
+            continue
+        index = loc[0] if isinstance(loc[0], int) else "?"
         field = ".".join(str(part) for part in loc[1:]) or "rule"
-        lines.append(f"rule #{index}: {field}: {detail['msg']}")
+        lines.append(
+            f"rule #{index}: {field}: {detail['msg']} (got {detail['input']!r})"
+        )
     return f"{source}: {'; '.join(lines)}"
 
 

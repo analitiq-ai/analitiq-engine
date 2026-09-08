@@ -392,33 +392,39 @@ class SchemaContract:
         return pa.RecordBatch.from_arrays(arrays, schema=self._arrow_schema)
 
     def cast_arrow_batch(self, record_batch: pa.RecordBatch) -> pa.RecordBatch:
-        """Cast an incoming Arrow batch to this endpoint's schema."""
+        """Cast an arrived Arrow batch to this endpoint's schema.
+
+        The batch carries *arrived* types -- whatever the driver produced. They
+        are the one kind of type in this system nobody declares, so they are
+        never assumed to equal the declared ``arrow_type`` of the field they
+        land in; every column goes through the matrix or an equality check.
+        """
         if record_batch.num_rows == 0:
             return pa.RecordBatch.from_pylist([], schema=self._arrow_schema)
 
-        existing = {
+        arrived_columns = {
             name: record_batch.column(i)
             for i, name in enumerate(record_batch.schema.names)
         }
         arrays: list[pa.Array] = []
         for field in self._arrow_schema:
-            col = existing.get(field.name)
-            if col is None:
+            arrived = arrived_columns.get(field.name)
+            if arrived is None:
                 if not field.nullable:
                     raise ValueError(
                         f"column {field.name!r} is required by the destination "
-                        f"schema but absent from the incoming batch"
+                        f"schema but absent from the arrived batch"
                     )
                 logger.warning(
-                    "column %r absent from incoming batch; filling with typed nulls",
+                    "column %r absent from arrived batch; filling with typed nulls",
                     field.name,
                 )
                 arrays.append(pa.nulls(record_batch.num_rows, type=field.type))
                 continue
-            if col.type == field.type:
-                array = col
+            if arrived.type == field.type:
+                array = arrived
             else:
-                array = self._convert_to_field(field, col)
+                array = self._convert_to_field(field, arrived)
             self._assert_non_nullable(field, array)
             arrays.append(array)
         return pa.RecordBatch.from_arrays(arrays, schema=self._arrow_schema)

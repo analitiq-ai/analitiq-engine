@@ -53,11 +53,19 @@ class TestNormalizeNativeType:
         assert normalize_native_type("Varchar(50)") == "VARCHAR(50)"
 
     def test_rejects_non_string(self):
-        # normalize_native_type is the published contract's function and does
-        # its own str operations directly, so a non-string fails on attribute
-        # access rather than an explicit type check.
-        with pytest.raises(AttributeError):
+        # A lookup input is whatever a driver reported as a column's declared
+        # type, so it is not guaranteed to be a string. It must fail as a typed
+        # error at the mapper boundary, naming what arrived -- not as a bare
+        # AttributeError from inside a str operation, which would escape the
+        # UnmappedTypeError handling that names the schema, table and column.
+        with pytest.raises(TypeError, match="native type must be a string"):
             normalize_native_type(None)  # type: ignore[arg-type]
+
+    def test_guards_symmetrically_with_the_arrow_side(self):
+        # The two halves of one concept must not diverge; that divergence is
+        # what this whole change set exists to remove.
+        with pytest.raises(TypeError, match="arrow type must be a string"):
+            normalize_arrow_type(None)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +200,25 @@ class TestParseRules:
     def test_empty_list_rejected(self):
         with pytest.raises(InvalidTypeMapError, match="at least 1 item"):
             parse_rules([], source="<test>")
+
+    def test_whole_document_failure_does_not_invent_a_rule_number(self):
+        # An empty list fails the document, not a rule. Rendering it as
+        # "rule #?" would send the reader looking for a rule that is not there.
+        with pytest.raises(InvalidTypeMapError) as excinfo:
+            parse_rules([], source="<test>")
+        assert "rule #" not in str(excinfo.value)
+
+    def test_rejection_names_the_offending_value(self):
+        # The Arrow vocabulary is published as a `pattern`, so pydantic's own
+        # message is the whole 800-character regex. Without the input echoed
+        # back, an author is told to go read the grammar rather than which
+        # token of theirs was wrong.
+        with pytest.raises(InvalidTypeMapError) as excinfo:
+            parse_rules(
+                [{"match": "exact", "native_type": "TEXT", "arrow_type": "String"}],
+                source="<test>",
+            )
+        assert "'String'" in str(excinfo.value)
 
     def test_non_object_rejected(self):
         with pytest.raises(InvalidTypeMapError, match="valid dictionary"):
@@ -916,6 +943,7 @@ class TestWriteRuleValidation:
         [
             "VARCHAR(${length-p})",  # bad character in the name
             "VARCHAR(${length })",  # trailing space in the name
+            "VARCHAR($ {length})",  # space between the $ and the brace
         ],
     )
     def test_engine_rejects_placeholder_the_renderer_cannot_resolve(self, bad_native):

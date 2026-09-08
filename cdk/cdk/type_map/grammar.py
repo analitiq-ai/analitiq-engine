@@ -119,9 +119,10 @@ class ArrowFamily:
 
     ``params`` declares what may appear inside the parentheses; an empty tuple
     means the family takes no parameters (and a parenthesised argument on it is
-    rejected, not ignored). ``kind`` is the conversion group the family belongs
-    to. ``builder`` and ``probes`` name pyarrow attributes rather than holding
-    the callables, so this module stays importable without pyarrow:
+    rejected, not ignored). ``conversion_kind`` is the conversion group the
+    family belongs to. ``builder`` and ``probes`` name pyarrow attributes
+    rather than holding the callables, so this module stays importable
+    without pyarrow:
     ``builder`` is the ``pyarrow`` factory the bound parameters are passed to
     positionally, and ``probes`` are the ``pyarrow.types`` predicates that
     recognise a live ``DataType`` as this family. ``sub_schema`` names the

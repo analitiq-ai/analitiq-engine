@@ -97,7 +97,12 @@ def _assert_suite_passed(
 #: loose floor lets a whole check module be deleted without a skip line
 #: to notice, which is the same "not assessed reads as passed" failure
 #: one level down.
-API_TIER1_EXPECTED_PASSED = 13
+#:
+#: 13 -> 12: the grammar check on type-map literals was removed. It certified
+#: that every literal arrow_type names a published family, which parse_rules
+#: now refuses outright -- the check could no longer fail, and a tier-1
+#: promise that cannot fail is worse than no promise.
+API_TIER1_EXPECTED_PASSED = 12
 
 #: The check modules a run against an api connector must actually execute.
 API_CHECK_MODULES = ("test_api_read_path.py", "test_api_surface.py")
