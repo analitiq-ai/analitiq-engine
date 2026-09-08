@@ -130,7 +130,17 @@ class TypeMapper:
                     return rule.arrow_type
                 continue
             assert compiled is not None
-            match = compiled.fullmatch(normalized)
+            # `normalized` is runtime input (whatever a driver or API schema
+            # reported), not a pydantic-validated document field like the
+            # rule's own pattern -- a lone surrogate in it makes re2's
+            # internal UTF-8 encoding step raise UnicodeEncodeError instead
+            # of matching or not matching. Treated as a miss on this rule,
+            # the same verdict a value re2 cannot interpret gets everywhere
+            # else it is checked (#504).
+            try:
+                match = compiled.fullmatch(normalized)
+            except UnicodeEncodeError:
+                continue
             if match is None:
                 continue
             # Drop optional groups that did not participate (groupdict gives
@@ -182,7 +192,13 @@ class TypeMapper:
                     return _substitute_tokens(rule.native_type, hints)
                 continue
             assert compiled is not None
-            match = compiled.fullmatch(normalized)
+            # See the read-side comment in to_arrow_type: `normalized` is
+            # runtime input, not a validated document field, so a lone
+            # surrogate can reach re2's fullmatch here too.
+            try:
+                match = compiled.fullmatch(normalized)
+            except UnicodeEncodeError:
+                continue
             if match is None:
                 continue
             # Drop optional groups that did not participate (groupdict gives them

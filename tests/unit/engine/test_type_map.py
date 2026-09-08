@@ -393,6 +393,38 @@ class TestTypeMapperReDoSBound:
         assert m.to_arrow_type("A" * 50 + "B") == "Utf8"
 
 
+class TestTypeMapperLoneSurrogateInLookupInput:
+    """#504: `to_arrow_type`/`to_native_type`'s input is runtime data (whatever
+    a driver or API schema reported), not a pydantic-validated document field
+    like the rule's own pattern -- pydantic rejects a lone surrogate in an
+    authored `native_type`/`arrow_type`, but nothing validates the lookup
+    input the same way. re2 encodes the match subject to UTF-8 internally, so
+    a lone surrogate there raises UnicodeEncodeError instead of matching or
+    not matching; that must surface as the ordinary miss (UnmappedTypeError),
+    not escape as a raw UnicodeEncodeError.
+    """
+
+    def test_lone_surrogate_in_to_arrow_type_input_is_a_miss(self):
+        m = _mapper(
+            [
+                {
+                    "match": "regex",
+                    "native_type": r"^VARCHAR\(\d+\)$",
+                    "arrow_type": "Utf8",
+                }
+            ]
+        )
+        with pytest.raises(UnmappedTypeError):
+            m.to_arrow_type("VARCHAR(\ud800)")
+
+    def test_lone_surrogate_in_to_native_type_input_is_a_miss(self):
+        m = _write_mapper(
+            [{"match": "regex", "arrow_type": r"^Utf8\(\d+\)$", "native_type": "X"}]
+        )
+        with pytest.raises(UnmappedTypeError):
+            m.to_native_type("Utf8(\ud800)")
+
+
 class TestSpecificityOrdering:
     """First-match-wins: narrower exact rules must sit above broader regexes."""
 
