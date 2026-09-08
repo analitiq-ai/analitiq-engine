@@ -17,12 +17,21 @@ will agree to compile and run. A connector document is untrusted, AI-authored
 input, and a rule that is perfectly valid can still be one this engine must
 refuse to execute:
 
-- The contract permits any ECMA-262 matcher. This engine compiles matchers with
-  Python's ``re`` and runs them against every column name a source reports, so it
-  additionally requires the RE2 subset -- no lookahead ``(?=…)`` / ``(?!…)``, no
-  lookbehind ``(?<=…)`` / ``(?<!…)``, no atomic groups ``(?>…)``, no numeric
-  ``\1``..``\9`` or named ``\k<name>`` / ``(?P=name)`` backreferences. Those are
-  the constructs RE2 excludes because they admit catastrophic backtracking.
+- The contract permits any ECMA-262 matcher. This engine additionally requires
+  the RE2 subset -- no lookahead ``(?=…)`` / ``(?!…)``, no lookbehind
+  ``(?<=…)`` / ``(?<!…)``, no atomic groups ``(?>…)``, no numeric ``\1``..``\9``
+  or named ``\k<name>`` / ``(?P=name)`` backreferences.
+
+  What that buys is **portability**, not safety: those are the constructs RE2
+  cannot express, so excluding them keeps a pattern meaning the same thing in
+  every engine that reads these documents. It does NOT bound match time here,
+  because this engine matches with Python's backtracking ``re`` rather than
+  with RE2 -- ``^(A+)+B$`` is inside the subset and still runs exponentially.
+  Bounding match time is #504.
+
+  Portability is a document-validity property every consumer wants, so this
+  check is engine-owned by accident and should move to the contract; #504
+  carries that half too.
 - ``(?<name>…)`` is rewritten to Python's ``(?P<name>…)`` so the compiled pattern
   works with ``re.fullmatch``.
 
