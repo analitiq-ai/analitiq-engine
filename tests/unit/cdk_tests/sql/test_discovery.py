@@ -363,7 +363,7 @@ class TestConnectionScopedTypeMap:
         columns, _ = await list_columns(
             runtime, "public", "posts", dialect=SqlDialect()
         )
-        assert [c.canonical_type for c in columns] == ["LargeUtf8", "Int64"]
+        assert [c.arrow_type for c in columns] == ["LargeUtf8", "Int64"]
 
 
 class TestNormalizingDialectDiscovery:

@@ -30,7 +30,7 @@ from cdk.conformance import (
     load_target,
 )
 from cdk.conformance.fakes import minimal_connector_definition
-from cdk.conformance.roundtrip import probe_canonicals, render_probe
+from cdk.conformance.roundtrip import probe_arrow_types, render_probe
 from cdk.conformance.target import ConformanceTarget
 from cdk.conformance.tier1 import test_definition as kit_definition
 from cdk.type_map.exceptions import UnmappedTypeError
@@ -97,7 +97,12 @@ def _assert_suite_passed(
 #: loose floor lets a whole check module be deleted without a skip line
 #: to notice, which is the same "not assessed reads as passed" failure
 #: one level down.
-API_TIER1_EXPECTED_PASSED = 13
+#:
+#: 13 -> 12: the grammar check on type-map literals was removed. It certified
+#: that every literal arrow_type names a published family, which parse_rules
+#: now refuses outright -- the check could no longer fail, and a tier-1
+#: promise that cannot fail is worse than no promise.
+API_TIER1_EXPECTED_PASSED = 12
 
 #: The check modules a run against an api connector must actually execute.
 API_CHECK_MODULES = ("test_api_read_path.py", "test_api_surface.py")
@@ -166,9 +171,9 @@ class TestReferencePassesTier1:
         mapper = reference_target.type_mapper
         assert mapper is not None
         rendered = 0
-        for canonical in probe_canonicals(mapper):
+        for arrow_type in probe_arrow_types(mapper):
             try:
-                render_probe(mapper, canonical, reference_target.dialect)
+                render_probe(mapper, arrow_type, reference_target.dialect)
             except UnmappedTypeError:
                 continue
             rendered += 1
@@ -188,7 +193,7 @@ class TestThinConnectorPassesVacuously:
             json.dumps(minimal_connector_definition("database", "conformance-thin"))
         )
         (definition_dir / "type-map-read.json").write_text(
-            '[{"match": "exact", "native": "TEXT", "canonical": "Utf8"}]'
+            '[{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}]'
         )
         target = load_target(tmp_path)
         assert target.connector_class is not None, "thin path falls back"
@@ -226,7 +231,7 @@ class TestUnassessableKindIsNotAPass:
             json.dumps(minimal_connector_definition("file", "unassessed"))
         )
         (definition_dir / "type-map-read.json").write_text(
-            '[{"match": "exact", "native": "TEXT", "canonical": "Utf8"}]'
+            '[{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}]'
         )
         completed = run_kit_suite(
             "cdk.conformance.tier1",

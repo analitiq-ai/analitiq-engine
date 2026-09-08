@@ -17,8 +17,8 @@ from cdk.type_map import InvalidTypeMapError
 from cdk.type_map.loader import build_type_mapper
 from src.worker.shell import build_bootstrap, read_type_map_payloads
 
-_RULES = [{"match": "exact", "native": "BIGINT", "canonical": "Int64"}]
-_WRITE_RULES = [{"match": "exact", "canonical": "Int64", "native": "BIGINT"}]
+_RULES = [{"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"}]
+_WRITE_RULES = [{"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"}]
 
 #: One record field, spelled the way the contract requires a schema to spell
 #: one. Shared by both sides so the documents below stay about transports.

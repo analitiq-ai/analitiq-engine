@@ -1299,7 +1299,7 @@ class GenericSQLConnector(BaseDestinationHandler):
     def _build_column_defs(self, state: _StreamState) -> list[ColumnDef]:
         """Contract endpoint columns -> ColumnDefs for the shared DDL builder.
 
-        Each column's canonical Arrow type is the document's stored
+        Each column's ``arrow_type`` is the document's stored
         ``arrow_type`` — the same declaration ``SchemaContract`` casts
         incoming batches with, so DDL and cast share one source of truth
         (issue #349). The builder renders it through the WRITE map for this
@@ -1323,7 +1323,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             columns.append(
                 ColumnDef(
                     name=col_name,
-                    canonical_type=col_def.arrow_type,
+                    arrow_type=col_def.arrow_type,
                     # ``is not False``, not ``bool(...)``: the contract types
                     # nullable as ``bool | None``, so only an authored
                     # ``false`` makes the column NOT NULL. An authored
@@ -1347,7 +1347,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             columns.append(
                 ColumnDef(
                     name=self.SYNCED_AT_COLUMN,
-                    canonical_type="Timestamp(MICROSECOND, UTC)",
+                    arrow_type="Timestamp(MICROSECOND, UTC)",
                     nullable=True,
                     default=self.dialect.current_timestamp_default(),
                 )
@@ -1367,7 +1367,7 @@ class GenericSQLConnector(BaseDestinationHandler):
             columns.append(
                 ColumnDef(
                     name=self.RECORD_HASH_COLUMN,
-                    canonical_type="Utf8",
+                    arrow_type="Utf8",
                     nullable=False,
                     primary_key=True,
                 )

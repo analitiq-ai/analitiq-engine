@@ -1,22 +1,59 @@
-r"""Type-map rule model and normalization primitives.
+r"""Type-map rule parsing: contract validation, then execution safety.
 
 A rule is one entry in ``type-map-read.json``:
 
-    {"match": "exact", "native": "JSONB", "canonical": "Utf8"}
-    {"match": "regex", "native": "^VARCHAR\((?<n>\d+)\)$", "canonical": "Utf8"}
+    {"match": "exact", "native_type": "JSONB", "arrow_type": "Utf8"}
+    {"match": "regex", "native_type": "^VARCHAR\((?<n>\d+)\)$", "arrow_type": "Utf8"}
 
-Regex rules must be written in an RE2-compatible subset so the same pattern
-behaves identically across engine languages. The following Perl/Python
-extensions are rejected at load time:
+The rule models themselves are **not defined here**. They are
+``analitiq.contracts.type_map``, the published contract, and this module imports
+them. Whether a document is valid is that package's question and it is answered
+once, offline, at a pinned version -- a second model of the same shape in this
+repo is how the document acquired two spellings for one concept in the first
+place.
 
-- lookahead ``(?=…)`` / negative lookahead ``(?!…)``
-- lookbehind ``(?<=…)`` / negative lookbehind ``(?<!…)``
-- atomic groups ``(?>…)``
-- numeric backreferences ``\1``..``\9``
-- named backreferences ``\k<name>`` and Python-style ``(?P=name)``
+What is left here is the part the contract cannot answer: what *this process*
+will agree to compile and run. A connector document is untrusted, AI-authored
+input, and a rule that is perfectly valid can still be one this engine must
+refuse to execute:
 
-``(?<name>…)`` is rewritten to Python's ``(?P<name>…)`` so the compiled
-pattern works with ``re.fullmatch``.
+- The contract permits any ECMA-262 matcher. This engine additionally requires
+  the RE2 subset -- no lookahead ``(?=…)`` / ``(?!…)``, no lookbehind
+  ``(?<=…)`` / ``(?<!…)``, no atomic groups ``(?>…)``, no numeric ``\1``..``\9``
+  or named ``\k<name>`` / ``(?P=name)`` backreferences.
+
+  What that buys is **portability**, not safety: those are the constructs RE2
+  cannot express, so excluding them keeps a pattern meaning the same thing in
+  every engine that reads these documents. It does NOT bound match time here,
+  because this engine matches with Python's backtracking ``re`` rather than
+  with RE2 -- ``^(A+)+B$`` is inside the subset and still runs exponentially.
+  Bounding match time is #504.
+
+  Portability is a document-validity property every consumer wants, so this
+  check is engine-owned by accident and should move to the contract; #504
+  carries that half too.
+- ``(?<name>…)`` is rewritten to Python's ``(?P<name>…)`` so the compiled pattern
+  works with ``re.fullmatch``.
+
+Two further checks sit here because this process is the one that *renders*:
+
+- A write rule whose *match* side carries a ``${…}`` sequence can never fire --
+  the token is compared as literal text.
+- A render template containing a malformed token (``${length-p}``, ``${length }``)
+  is not matched by the substitution token, so it would survive rendering and
+  land in the emitted DDL verbatim. The contract rejects the empty ``${}`` and
+  unclosed ``${`` forms; the rest is caught here.
+
+Both are document validity rather than execution safety, so both belong in the
+contract, not here: analitiq-ai/claude-code-plugins#241 moves them. They are
+kept until that lands -- without them a malformed token reaches emitted DDL as
+literal text -- and this module drops them when it does.
+
+Because these checks are no longer ``model_validator``s on a model this repo
+owns, they are not invariants of the type -- they run in :func:`parse_rules`
+and :func:`parse_write_rules`. Those two are the only sanctioned way to obtain
+a rule the engine will execute; a rule validated straight off the contract
+model is contract-valid but has not been cleared to run here.
 """
 
 from __future__ import annotations
@@ -24,22 +61,55 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from re import Pattern
-from typing import Final, Literal, TypeVar
+from typing import Any, Final
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from analitiq.contracts.type_map import (
+    TypeMapReadDoc,
+    TypeMapReadExactRule,
+    TypeMapReadRegexRule,
+    TypeMapReadRule,
+    TypeMapWriteDoc,
+    TypeMapWriteRule,
+)
+from analitiq.contracts.type_map import (
+    normalize_native_type as _contract_normalize_native_type,
+)
+from pydantic import ValidationError
 
 from .exceptions import InvalidTypeMapError
 from .grammar import NULL_TZ_SENTINEL, UNIT_SHORT_TO_LONG, unit_families
 
-_NAMED_GROUP_RE2: Final[Pattern[str]] = re.compile(r"\(\?<([A-Za-z_][A-Za-z0-9_]*)>")
-_SUBSTITUTION_TOKEN: Final[Pattern[str]] = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
-# Every ``${`` opener, used to catch typos (``${length-p}``, ``${length }``,
-# the unterminated ``${length``) that the strict token above skips over and
-# would otherwise leave as literal text in the rendered output.
-_PLACEHOLDER_OPENER: Final[Pattern[str]] = re.compile(r"\$\{")
+# ``TypeMapReadRule``/``TypeMapWriteRule`` are discriminated *unions*, usable as
+# annotations but not with ``isinstance``. Direction is decided against the two
+# concrete read variants, which both directions' rules would otherwise satisfy
+# structurally -- every rule carries both ``native_type`` and ``arrow_type``.
+_READ_RULE_CLASSES: Final[tuple[type, ...]] = (
+    TypeMapReadExactRule,
+    TypeMapReadRegexRule,
+)
 
-# RE2 excludes these Perl/Python extensions. We reject any rule that uses them
-# at load time so the committed rule set stays portable.
+__all__ = [
+    "TypeMapReadRule",
+    "TypeMapWriteRule",
+    "compile_pattern",
+    "normalize_arrow_type",
+    "normalize_native_type",
+    "normalized_native",
+    "parse_rules",
+    "parse_write_rules",
+]
+
+_NAMED_GROUP_RE2: Final[Pattern[str]] = re.compile(r"\(\?<([A-Za-z_][A-Za-z0-9_]*)>")
+# The one substitution token the renderer recognises. Shared with the mapper so
+# what validates and what renders can never drift apart.
+_SUBSTITUTION_TOKEN: Final[Pattern[str]] = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# Every substitution-token opener. Deliberately laxer than the token itself --
+# it matches ``$ {`` too, because the renderer does NOT, so a spaced opener
+# would otherwise survive into the emitted DDL exactly like a malformed name.
+_PLACEHOLDER_OPENER: Final[Pattern[str]] = re.compile(r"\$\s*\{")
+
+# RE2 excludes these Perl/Python extensions: each one admits input on which
+# Python's backtracking engine runs in super-linear time.
 _FORBIDDEN_CONSTRUCTS: Final[tuple[tuple[str, str], ...]] = (
     ("(?=", "lookahead"),
     ("(?!", "negative lookahead"),
@@ -52,13 +122,15 @@ _FORBIDDEN_CONSTRUCTS: Final[tuple[tuple[str, str], ...]] = (
 _BACKREFERENCE_DIGIT: Final[Pattern[str]] = re.compile(r"\\[1-9]")
 
 # The unit vocabulary comes from the shared grammar table
-# (cdk.type_map.grammar) — the same source parse_arrow_type binds against and
-# the published arrow_type_grammar.json renders from — so the unit checks this
+# (cdk.type_map.grammar) -- the same source parse_arrow_type binds against and
+# the published arrow_type_grammar.json renders from -- so the unit checks this
 # surface performs can never contradict the parser's. That is this surface's
 # whole validation scope: integer ranges, timezone, and arity are enforced
-# only by parse_arrow_type. normalize_canonical_type expands short codes in
-# both the stored write-rule key and every lookup input, so either spelling in
-# a write rule's canonical field matches either spelling at lookup time.
+# only by parse_arrow_type. normalize_arrow_type expands short codes in every
+# LOOKUP input, so either spelling resolves to the same key at lookup time. It
+# no longer does so for the authored rule: the contract's arrow_type pattern
+# admits long-form units only, so a write rule keyed ``Timestamp(us)`` -- legal
+# before the move onto the published models -- no longer validates.
 _UNIT_LONG_FORMS: Final[frozenset[str]] = frozenset(UNIT_SHORT_TO_LONG.values())
 
 # Allowed long-form units per temporal family, derived from the grammar. The
@@ -81,22 +153,17 @@ _TEMPORAL_UNIT_RE: Final[Pattern[str]] = re.compile(
     )
     + r")\b"
 )
-
-# Timestamp(unit, null) is semantically identical to Timestamp(unit) — both
-# produce a timezone-naïve type.  Fold the explicit null into the no-tz form.
 _NULL_TZ_RE: Final[Pattern[str]] = re.compile(
-    r"\bTimestamp\(([^,)]+),\s*" + NULL_TZ_SENTINEL + r"\)"
+    r"\bTimestamp\(([^,)]+),\s*" + re.escape(NULL_TZ_SENTINEL) + r"\)"
 )
 
 
 def _expand_temporal_unit(m: re.Match[str]) -> str:
-    """Substitution callback for :data:`_TEMPORAL_UNIT_RE`.
+    """Expand a short temporal unit code to its long form, validating the pairing.
 
-    Expands a short unit code to its long-form canonical spelling.  Long-form
-    names matched by the regex pass through unchanged.  An unrecognized token
-    (neither a known short code nor a known long form) means the regex and the
-    dict have drifted out of sync — raised as ``AssertionError`` immediately
-    rather than silently producing an un-expanded string that would later fail
+    Runs inside :func:`normalize_arrow_type` so that a write rule keyed
+    ``Timestamp(us, UTC)`` and a lookup of ``Timestamp(MICROSECOND, UTC)`` resolve
+    to the same string rather than missing each other and surfacing later
     with a misleading ``UnmappedTypeError``.
 
     After expansion, validates that the unit is legal for the given temporal
@@ -122,23 +189,8 @@ def _expand_temporal_unit(m: re.Match[str]) -> str:
     return f"{type_name}({long_unit}"
 
 
-def normalize_native_type(value: str) -> str:
-    """Normalize a native type string for matching.
-
-    - Trim leading/trailing whitespace.
-    - Collapse internal whitespace runs to a single space.
-    - Uppercase the whole string.
-
-    The same normalization is applied to rule ``native`` values (for exact
-    rules) and to inputs at lookup time.
-    """
-    if not isinstance(value, str):
-        raise TypeError(f"native type must be a string, got {type(value).__name__}")
-    return re.sub(r"\s+", " ", value.strip()).upper()
-
-
-def normalize_canonical_type(value: str) -> str:
-    """Normalize an Arrow canonical type string for write-direction matching.
+def normalize_arrow_type(value: str) -> str:
+    """Normalize an Arrow type string for write-direction matching.
 
     Unlike :func:`normalize_native_type` this is **case-preserving**: the Arrow
     vocabulary is mixed-case (``Int64``, ``Decimal128(38, 9)``,
@@ -146,28 +198,44 @@ def normalize_canonical_type(value: str) -> str:
     collapse distinct types.
 
     Three normalizations are applied so that every spelling accepted by
-    :func:`~cdk.type_map.arrow.parse_arrow_type` maps to one canonical string:
+    :func:`~cdk.type_map.arrow.parse_arrow_type` maps to one string:
 
     1. Whitespace around ``(`` ``)`` ``,`` is removed and commas are re-spaced
        to ``", "``.
     2. Short temporal unit codes (``s``, ``ms``, ``us``, ``ns``) are expanded to
        their long-form equivalents (``SECOND``, ``MILLISECOND``, ``MICROSECOND``,
-       ``NANOSECOND``).  Because both the write-rule's ``canonical`` field and
-       every lookup input pass through this function, either spelling resolves to
-       the same key regardless of which form the rule author used.
-    3. ``Timestamp(unit, null)`` is folded into ``Timestamp(unit)`` — both are
-       timezone-naïve; ``parse_arrow_type`` already treats them identically.
+       ``NANOSECOND``).  Because every lookup input passes through this function,
+       either spelling resolves to the same key.
+    3. ``Timestamp(unit, null)`` is folded into ``Timestamp(unit)`` -- both are
+       timezone-naive; ``parse_arrow_type`` already treats them identically.
     """
     if not isinstance(value, str):
-        raise TypeError(f"canonical type must be a string, got {type(value).__name__}")
+        raise TypeError(f"arrow type must be a string, got {type(value).__name__}")
     # Step 1: whitespace normalization.
     compact = re.sub(r"\s*([(),])\s*", r"\1", value.strip())
     compact = compact.replace(",", ", ")
-    # Step 2: fold short unit codes into long-form canonical vocabulary.
+    # Step 2: fold short unit codes into long-form vocabulary.
     compact = _TEMPORAL_UNIT_RE.sub(_expand_temporal_unit, compact)
-    # Step 3: Timestamp(unit, null) → Timestamp(unit).
+    # Step 3: Timestamp(unit, null) -> Timestamp(unit).
     compact = _NULL_TZ_RE.sub(r"Timestamp(\1)", compact)
     return compact
+
+
+def normalize_native_type(value: str) -> str:
+    """Normalize a native type string for matching, rejecting a non-string.
+
+    Delegates to the published contract's normalization -- the matching rule is
+    the contract's to define -- and adds only the type guard, which the
+    contract's function does not carry because its own inputs are already
+    schema-validated strings. The engine's are not: a lookup input is whatever
+    a driver returned for a column's declared type, so an unguarded ``.strip()``
+    would escape :meth:`~cdk.type_map.mapper.TypeMapper.to_arrow_type` as a bare
+    ``AttributeError``, past the ``UnmappedTypeError`` handling that names the
+    schema, table and column. Symmetric with :func:`normalize_arrow_type`.
+    """
+    if not isinstance(value, str):
+        raise TypeError(f"native type must be a string, got {type(value).__name__}")
+    return _contract_normalize_native_type(value)
 
 
 def _assert_re2_subset(pattern: str) -> None:
@@ -188,198 +256,137 @@ def _to_python_named_groups(pattern: str) -> str:
     return _NAMED_GROUP_RE2.sub(lambda m: f"(?P<{m.group(1)}>", pattern)
 
 
-def _assert_well_formed_placeholders(template: str, *, field: str) -> None:
+def normalized_native(rule: TypeMapReadRule) -> str:
+    """Normalize an exact read rule's ``native_type`` to its matching form."""
+    if rule.match != "exact":
+        raise RuntimeError("normalized_native is only defined for exact rules")
+    return normalize_native_type(rule.native_type)
+
+
+def compile_pattern(rule: TypeMapReadRule | TypeMapWriteRule) -> Pattern[str]:
+    r"""Compile a regex rule's matcher for forward matching.
+
+    The matcher is the ``native_type`` on a read rule and the ``arrow_type`` on a
+    write rule -- each direction matches on what the other renders.
+
+    Read inputs are normalized to uppercase before matching, so literal
+    characters in a read pattern must be authored in uppercase too; the pattern
+    itself is never uppercased, because that would turn character classes like
+    ``\d`` into ``\D``. Write inputs are matched case-sensitively, the Arrow
+    vocabulary being mixed-case.
+    """
+    if rule.match != "regex":
+        raise RuntimeError("compile_pattern is only defined for regex rules")
+    matcher = (
+        rule.native_type if isinstance(rule, _READ_RULE_CLASSES) else rule.arrow_type
+    )
+    return re.compile(_to_python_named_groups(matcher))
+
+
+def _assert_well_formed_placeholders(template: str, *, where: str, field: str) -> None:
     """Reject every ``${`` that is not the start of a valid ``${identifier}``.
 
-    A malformed placeholder — bad characters (``${length-p}``), trailing space
-    (``${length }``), or an unterminated opener (``${length``) — is not matched
-    by the strict substitution token, so without this check it would survive
-    rendering as literal text and corrupt the emitted DDL silently.
+    A malformed placeholder -- bad characters (``${length-p}``), trailing space
+    (``${length }``), or an unterminated opener (``${length``) -- is not matched
+    by the strict substitution token, so without this check it survives
+    rendering as literal text and lands in the emitted DDL. The contract rejects
+    the empty and unclosed forms; the rest is caught here because this is the
+    process that does the rendering.
     """
     for opener in _PLACEHOLDER_OPENER.finditer(template):
         if _SUBSTITUTION_TOKEN.match(template, opener.start()) is None:
             raise InvalidTypeMapError(
-                f"{field} {template!r} contains a malformed substitution token "
-                f"at offset {opener.start()}; expected ${{name}} with an "
-                f"identifier name"
+                f"{where}: {field} {template!r} contains a malformed "
+                f"substitution token at offset {opener.start()}; expected "
+                f"${{name}} with an identifier name"
             )
 
 
-class TypeMapRule(BaseModel):
-    """A single entry in ``type-map-read.json``."""
+def _assert_executable(rule: TypeMapReadRule | TypeMapWriteRule, *, where: str) -> None:
+    """Refuse a contract-valid rule this process must not compile or run.
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    match: Literal["exact", "regex"]
-    native: str = Field(min_length=1)
-    canonical: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def _validate(self) -> TypeMapRule:
-        tokens = set(_SUBSTITUTION_TOKEN.findall(self.canonical))
-
-        if self.match == "exact":
-            if tokens:
-                raise InvalidTypeMapError(
-                    f"exact rule for {self.native!r} has ${{...}} tokens in "
-                    f"canonical {self.canonical!r}; only regex rules may use "
-                    f"named-capture substitution"
-                )
-            _ = normalize_canonical_type(self.canonical)  # validate; raises on bad unit
-            return self
-
-        _assert_re2_subset(self.native)
-
-        translated = _to_python_named_groups(self.native)
-        try:
-            compiled = re.compile(translated)
-        except re.error as err:
-            raise InvalidTypeMapError(
-                f"regex pattern {self.native!r} failed to compile: {err}"
-            ) from err
-
-        groups = set(compiled.groupindex)
-        missing = tokens - groups
-        if missing:
-            raise InvalidTypeMapError(
-                f"canonical {self.canonical!r} references unknown named "
-                f"groups: {sorted(missing)}"
-            )
-
-        return self
-
-    def normalized_native(self) -> str:
-        """Normalize ``native`` to the form used for exact matching."""
-        if self.match != "exact":
-            raise RuntimeError("normalized_native is only defined for exact rules")
-        return normalize_native_type(self.native)
-
-    def compile_pattern(self) -> Pattern[str]:
-        r"""Compile the regex pattern (RE2-subset) for forward matching.
-
-        Inputs are normalized to uppercase before matching, so literal
-        characters in the pattern must be authored in uppercase too — we do
-        NOT uppercase the pattern itself because that would turn character
-        classes like ``\d`` into ``\D``.
-        """
-        if self.match != "regex":
-            raise RuntimeError("compile_pattern is only defined for regex rules")
-        translated = _to_python_named_groups(self.native)
-        return re.compile(translated)
-
-
-_RuleT = TypeVar("_RuleT", bound=BaseModel)
-
-
-def _parse_rule_list(
-    payload: Iterable[object], model: type[_RuleT], *, source: str
-) -> list[_RuleT]:
-    """Validate and parse a JSON array into *model* instances.
-
-    Shared by the read (:class:`TypeMapRule`) and write
-    (:class:`WriteTypeMapRule`) directions so the two never diverge.
-
-    Args:
-        payload: Iterable of rule dicts, typically the top-level JSON array.
-        model: The rule model to instantiate each item as.
-        source: Human-readable origin (e.g. file path) used in error messages.
+    The contract has already decided the rule is well-formed. This decides
+    whether the engine will execute it -- see the module docstring for why the
+    two are different questions.
     """
-    rules: list[_RuleT] = []
-    for index, item in enumerate(payload):
-        if not isinstance(item, dict):
-            raise InvalidTypeMapError(f"{source}: rule #{index} is not a JSON object")
-        try:
-            rules.append(model(**item))
-        except InvalidTypeMapError:
-            raise
-        except Exception as err:
+    is_read = isinstance(rule, _READ_RULE_CLASSES)
+    if not is_read:
+        if _PLACEHOLDER_OPENER.search(rule.arrow_type):
             raise InvalidTypeMapError(
-                f"{source}: rule #{index} is invalid: {err}"
-            ) from err
-    if not rules:
-        raise InvalidTypeMapError(f"{source}: rule list is empty")
+                f"{where}: write rule arrow_type {rule.arrow_type!r} contains a "
+                f"${{...}} sequence; substitution tokens belong only in the "
+                f"rendered native type, so this rule can never match"
+            )
+        # The write rule renders DDL, and this process is what renders it.
+        _assert_well_formed_placeholders(
+            rule.native_type, where=where, field="write rule native_type"
+        )
+    if rule.match != "regex":
+        return
+    matcher = rule.native_type if is_read else rule.arrow_type
+    # Compilability is already settled: the contract compiled this same matcher
+    # in _compile_ecma_matcher before we got here, and the RE2 subset admits no
+    # construct that survives that and then fails Python's compiler. Only the
+    # subset itself is still ours to decide.
+    try:
+        _assert_re2_subset(matcher)
+    except InvalidTypeMapError as err:
+        raise InvalidTypeMapError(f"{where}: {err}") from err
+
+
+def _render_validation_error(err: ValidationError, *, source: str) -> str:
+    """Render a document-level pydantic failure as one per-rule message list.
+
+    Always names the offending value. The Arrow-type constraint is published as
+    a ``pattern``, so pydantic's own message for the commonest authoring mistake
+    is the 800-character regex and nothing else -- an author told only that
+    would have to read the grammar to find out which token of theirs was wrong.
+    """
+    lines = []
+    for detail in err.errors():
+        loc = detail["loc"]
+        # A whole-document failure (an empty rule list) has no index and no
+        # field; its own message already says everything, and inventing a
+        # "rule #?" would send the reader looking for a rule that isn't there.
+        if not loc:
+            lines.append(detail["msg"])
+            continue
+        index = loc[0] if isinstance(loc[0], int) else "?"
+        field = ".".join(str(part) for part in loc[1:]) or "rule"
+        lines.append(
+            f"rule #{index}: {field}: {detail['msg']} (got {detail['input']!r})"
+        )
+    return f"{source}: {'; '.join(lines)}"
+
+
+def _parse(
+    payload: Iterable[object],
+    doc_model: type[TypeMapReadDoc] | type[TypeMapWriteDoc],
+    *,
+    source: str,
+) -> list[Any]:
+    """Validate a rule array against the contract, then against what we will run.
+
+    Returns ``list[Any]`` because the two document models resolve to different
+    rule unions; each public wrapper below re-narrows to its own direction.
+    """
+    try:
+        doc = doc_model.model_validate(list(payload))
+    except ValidationError as err:
+        raise InvalidTypeMapError(_render_validation_error(err, source=source)) from err
+    rules: list[Any] = list(doc.root)
+    for index, rule in enumerate(rules):
+        _assert_executable(rule, where=f"{source}: rule #{index}")
     return rules
 
 
-def parse_rules(payload: Iterable[object], *, source: str) -> list[TypeMapRule]:
-    """Validate and parse a read-direction (native -> canonical) rule array."""
-    return _parse_rule_list(payload, TypeMapRule, source=source)
-
-
-class WriteTypeMapRule(BaseModel):
-    """A single entry in ``type-map-write.json`` (canonical -> native).
-
-    The inverse of :class:`TypeMapRule`: it matches on the **canonical** Arrow
-    type and renders the **native** DDL type. Two grammar differences follow
-    from the inversion:
-
-    - Matching is case-sensitive (the Arrow vocabulary is mixed-case), so the
-      ``canonical`` pattern must be authored in Arrow case.
-    - ``native`` may carry ``${name}`` tokens fed by **either** named captures
-      in the ``canonical`` regex **or** per-column hints passed at render time
-      (e.g. ``length``). Because a hint cannot be known at load time, write
-      rules defer **all** ``native``-token validation to render time, where
-      :func:`~cdk.type_map.mapper._substitute_tokens` raises on any
-      unresolved token. This is the one place the write rule is looser than the
-      read rule, which can cross-check its output tokens against captures at
-      load time.
-
-    The **match** side (``canonical``) is still validated eagerly: it must not
-    contain ``${...}`` tokens (those belong only in the rendered ``native``),
-    and a regex ``canonical`` must compile within the RE2 subset.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    match: Literal["exact", "regex"]
-    canonical: str = Field(min_length=1)
-    native: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def _validate(self) -> WriteTypeMapRule:
-        # Substitution tokens render into ``native``; any ``${`` on the match
-        # side (well-formed or a typo like ``${p)``) would be matched as literal
-        # text and never fire, so reject the whole class rather than just the
-        # well-formed form.
-        if _PLACEHOLDER_OPENER.search(self.canonical):
-            raise InvalidTypeMapError(
-                f"write rule canonical {self.canonical!r} contains a ${{...}} "
-                f"sequence; substitution tokens belong only in the rendered "
-                f"native type"
-            )
-
-        # A typo'd placeholder in the render template would otherwise leak into
-        # the emitted DDL as literal text instead of failing at load time.
-        _assert_well_formed_placeholders(self.native, field="write rule native")
-
-        if self.match == "exact":
-            _ = normalize_canonical_type(self.canonical)  # validate; raises on bad unit
-            return self
-
-        _assert_re2_subset(self.canonical)
-        translated = _to_python_named_groups(self.canonical)
-        try:
-            re.compile(translated)
-        except re.error as err:
-            raise InvalidTypeMapError(
-                f"regex pattern {self.canonical!r} failed to compile: {err}"
-            ) from err
-        return self
-
-    def compile_pattern(self) -> Pattern[str]:
-        """Compile the canonical-matching regex (RE2-subset).
-
-        Canonical inputs are matched case-sensitively, so the pattern is used
-        verbatim (no case folding).
-        """
-        if self.match != "regex":
-            raise RuntimeError("compile_pattern is only defined for regex rules")
-        translated = _to_python_named_groups(self.canonical)
-        return re.compile(translated)
+def parse_rules(payload: Iterable[object], *, source: str) -> list[TypeMapReadRule]:
+    """Validate and parse a read-direction (native_type -> arrow_type) rule array."""
+    return _parse(payload, TypeMapReadDoc, source=source)
 
 
 def parse_write_rules(
     payload: Iterable[object], *, source: str
-) -> list[WriteTypeMapRule]:
-    """Validate and parse a write-direction (canonical -> native) rule array."""
-    return _parse_rule_list(payload, WriteTypeMapRule, source=source)
+) -> list[TypeMapWriteRule]:
+    """Validate and parse a write-direction (arrow_type -> native_type) rule array."""
+    return _parse(payload, TypeMapWriteDoc, source=source)

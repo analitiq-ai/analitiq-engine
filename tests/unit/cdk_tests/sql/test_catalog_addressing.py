@@ -74,12 +74,12 @@ class _CatalogAdbcDialect(SqlDialect):
 
     name = "cataloged"
 
-    def render_column_type(self, canonical, type_mapper, *, params=None):
+    def render_column_type(self, arrow_type, type_mapper, *, params=None):
         return {
             "Int64": "INTEGER",
             "Utf8": "STRING",
             "Timestamp(MICROSECOND, UTC)": "TIMESTAMPTZ",
-        }[canonical]
+        }[arrow_type]
 
     def stage_table_sql(self, stage, target, *, temp):
         return (

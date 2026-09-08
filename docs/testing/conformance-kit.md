@@ -44,15 +44,17 @@ in a customer pipeline (spec
   (one shipping `type-map-write.json`) needs `sql_capabilities` and
   `stage_table_sql`.
 - **Every connector states its type vocabulary.**
-  `definition/type-map-read.json` is what the engine canonicalizes
-  discovered source types through, whatever the connector's kind: a
-  database canonicalizes the native types discovery returns, an API the
-  JSON `type`/`format` its endpoint fields declare.
-- **Canonical types are in the published grammar.** Every literal
-  canonical a rule names must belong to a family the engine can parse —
-  checked for read rules whether or not the connector ships a write map,
-  since a source-only connector still emits canonicals from discovery.
-- **Type maps are round-trip stable.** Every native type the write map
+  `definition/type-map-read.json` is what the engine maps discovered
+  source types through, whatever the connector's kind: a database maps the
+  `native_type`s discovery returns, an API the JSON `type`/`format` its
+  endpoint fields declare.
+
+  Every literal `arrow_type` a rule names must belong to an `arrow_family`
+  the engine can parse. The kit no longer checks this separately: the rule
+  loader refuses a foreign `arrow_type` against the pinned contract before
+  a type map is ever assembled, so a document that would fail the check
+  cannot reach it.
+- **Type maps are round-trip stable.** Every `native_type` the write map
   renders must be readable by the read map (a table the connector
   creates stays discoverable), and one write/read round must reach a
   fixed point — `write(read(write(x))) == write(x)` — so re-creating a
@@ -288,8 +290,7 @@ variable can never silently retire the live tier while CI stays green.
 
 The checks are also plain importable functions
 (`cdk.conformance.check_override_surface`,
-`check_declaration_consistency`, `check_type_map_grammar`,
-`check_type_map_round_trip`) for repos
+`check_declaration_consistency`, `check_type_map_round_trip`) for repos
 that want them inside their own harness.
 
 ## How the kit itself is certified

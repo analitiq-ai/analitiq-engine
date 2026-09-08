@@ -81,7 +81,13 @@ class TestWriteConflictKeysWiring:
             return_value=TypeMapper(
                 "pg",
                 parse_rules(
-                    [{"match": "exact", "native": "BIGINT", "canonical": "Int64"}],
+                    [
+                        {
+                            "match": "exact",
+                            "native_type": "BIGINT",
+                            "arrow_type": "Int64",
+                        }
+                    ],
                     source="<t>",
                 ),
             ),
@@ -147,7 +153,13 @@ class TestWriteConflictKeysWiring:
             return_value=TypeMapper(
                 "pg",
                 parse_rules(
-                    [{"match": "exact", "native": "BIGINT", "canonical": "Int64"}],
+                    [
+                        {
+                            "match": "exact",
+                            "native_type": "BIGINT",
+                            "arrow_type": "Int64",
+                        }
+                    ],
                     source="<t>",
                 ),
             ),

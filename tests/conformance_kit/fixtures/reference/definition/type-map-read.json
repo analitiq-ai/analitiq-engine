@@ -1,14 +1,14 @@
 [
-  { "match": "exact", "native": "BOOLEAN", "canonical": "Boolean" },
-  { "match": "exact", "native": "SMALLINT", "canonical": "Int16" },
-  { "match": "exact", "native": "INTEGER", "canonical": "Int32" },
-  { "match": "exact", "native": "BIGINT", "canonical": "Int64" },
-  { "match": "exact", "native": "DOUBLE PRECISION", "canonical": "Float64" },
-  { "match": "exact", "native": "TEXT", "canonical": "Utf8" },
-  { "match": "regex", "native": "^NUMERIC\\((?<precision>\\d+), (?<scale>\\d+)\\)$", "canonical": "Decimal128(${precision}, ${scale})" },
-  { "match": "exact", "native": "DATE", "canonical": "Date32" },
-  { "match": "exact", "native": "TIMESTAMPTZ", "canonical": "Timestamp(MICROSECOND, UTC)" },
-  { "match": "regex", "native": "^TIMESTAMP(\\([4-6]\\))?( WITHOUT TIME ZONE)?$", "canonical": "Timestamp(MICROSECOND)" },
-  { "match": "regex", "native": "^TIMESTAMP(\\([4-6]\\))? WITH TIME ZONE$", "canonical": "Timestamp(MICROSECOND, UTC)" },
-  { "match": "exact", "native": "JSONB", "canonical": "Json" }
+  { "match": "exact", "native_type": "BOOLEAN", "arrow_type": "Boolean" },
+  { "match": "exact", "native_type": "SMALLINT", "arrow_type": "Int16" },
+  { "match": "exact", "native_type": "INTEGER", "arrow_type": "Int32" },
+  { "match": "exact", "native_type": "BIGINT", "arrow_type": "Int64" },
+  { "match": "exact", "native_type": "DOUBLE PRECISION", "arrow_type": "Float64" },
+  { "match": "exact", "native_type": "TEXT", "arrow_type": "Utf8" },
+  { "match": "regex", "native_type": "^NUMERIC\\((?<precision>[1-9]|[12][0-9]|3[0-8]), (?<scale>[0-9]|[12][0-9]|3[0-8])\\)$", "arrow_type": "Decimal128(${precision}, ${scale})" },
+  { "match": "exact", "native_type": "DATE", "arrow_type": "Date32" },
+  { "match": "exact", "native_type": "TIMESTAMPTZ", "arrow_type": "Timestamp(MICROSECOND, UTC)" },
+  { "match": "regex", "native_type": "^TIMESTAMP(\\([4-6]\\))?( WITHOUT TIME ZONE)?$", "arrow_type": "Timestamp(MICROSECOND)" },
+  { "match": "regex", "native_type": "^TIMESTAMP(\\([4-6]\\))? WITH TIME ZONE$", "arrow_type": "Timestamp(MICROSECOND, UTC)" },
+  { "match": "exact", "native_type": "JSONB", "arrow_type": "Json" }
 ]

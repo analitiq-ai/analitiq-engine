@@ -184,3 +184,49 @@ class TestTheContractBoundsThePageSize:
         read["pagination"]["limit"] = {"param": "limit", "default": default}
         with pytest.raises(ContractValidationError):
             validate("api-endpoint", _document(read))
+
+
+class TestARequiredParamMustDeclareASource:
+    """RULE-ENDP-066: a required param names where its value comes from.
+
+    Four engine tests reason from this rule in prose -- the read path's
+    required-param refusal, the write plan's presence check, and two
+    conformance-kit break cases -- and each was edited to satisfy it rather
+    than to assert it. Contract-shaped prose is a copy; this is the gate that
+    keeps those four honest, so that relaxing the rule upstream fails here
+    rather than silently voiding their reasoning.
+    """
+
+    def test_a_required_param_with_no_source_is_refused(self) -> None:
+        read = _paginated_read()
+        read["params"]["account"] = {
+            "in": "query",
+            "type": "string",
+            "required": True,
+        }
+        read["request"]["query"]["account"] = {"from_param": "account"}
+        with pytest.raises(ContractValidationError):
+            validate("api-endpoint", _document(read))
+
+    @pytest.mark.parametrize(
+        ("source", "declaration"),
+        [
+            ("default", {"default": {"literal": "acme"}}),
+            ("operators", {"operators": ["eq"]}),
+        ],
+    )
+    def test_a_required_param_declaring_a_source_is_accepted(
+        self, source: str, declaration: dict[str, Any]
+    ) -> None:
+        # A declared source is not a resolved value: both of these still
+        # resolve to nothing at run time if the connection or the stream
+        # supplies nothing, which is what the engine-side refusals grade.
+        read = _paginated_read()
+        read["params"]["account"] = {
+            "in": "query",
+            "type": "string",
+            "required": True,
+            **declaration,
+        }
+        read["request"]["query"]["account"] = {"from_param": "account"}
+        validate("api-endpoint", _document(read))

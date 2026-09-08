@@ -31,7 +31,7 @@ cdk/cdk/                     # Connector Development Kit (shared by source + des
 ├── rate_limiter.py
 ├── resolver.py              # Typed expression resolver (`ref`/`template`/`literal`/`function`)
 ├── derived_functions.py     # `lookup`, `basic_auth`, `base64_encode`, `url_encode`
-├── type_map/                # TypeMapper, canonical Arrow types
+├── type_map/                # TypeMapper, the arrow_type vocabulary
 ├── schema_contract.py       # Arrow-based vectorized casting
 ├── base_handler.py          # BaseDestinationHandler ABC
 ├── contract.py              # Readable / Writable / Discoverable / TableCreator Protocols

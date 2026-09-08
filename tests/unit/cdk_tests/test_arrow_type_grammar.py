@@ -35,7 +35,7 @@ from unittest.mock import patch
 import pyarrow as pa
 import pytest
 
-from cdk.conformance.roundtrip import probe_canonicals
+from cdk.conformance.roundtrip import probe_arrow_types
 from cdk.type_map.arrow import arrow_family, parse_arrow_type
 from cdk.type_map.conversions import build_conversion_grid, classify_conversion
 from cdk.type_map.exceptions import InvalidTypeMapError
@@ -78,11 +78,11 @@ def _one_rule_mapper() -> TypeMapper:
     return TypeMapper(
         "acceptance",
         parse_rules(
-            [{"match": "exact", "native": "TEXT", "canonical": "Utf8"}],
+            [{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}],
             source="test",
         ),
         parse_write_rules(
-            [{"match": "exact", "canonical": "Utf8", "native": "TEXT"}],
+            [{"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"}],
             source="test",
         ),
     )
@@ -110,6 +110,55 @@ class TestPublishedArtifactDrift:
 
     def test_document_carries_the_families_and_nothing_else(self) -> None:
         assert set(load_published_grammar()) == {"version", "families"}
+
+
+def _contract_vocabulary_heads() -> set[str]:
+    """The type names the published contract's arrow_type pattern admits."""
+    from analitiq.contracts.arrow_grammar import ARROW_TYPE_PATTERN
+
+    body = re.sub(r"^\^\(\?:", "", ARROW_TYPE_PATTERN)
+    branches: list[str] = []
+    depth = 0
+    current = ""
+    for ch in body:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == "|" and depth == 0:
+            branches.append(current)
+            current = ""
+        else:
+            current += ch
+    branches.append(current)
+    heads = set()
+    for branch in branches:
+        m = re.match(r"[A-Za-z0-9]+", branch)
+        if m:
+            heads.add(m.group(0))
+    return heads
+
+
+class TestContractVocabularyAgreement:
+    """The engine's family table and the contract's vocabulary are one list.
+
+    The engine no longer validates type-map documents -- the published models
+    do -- so these two are the same vocabulary reached through two artifacts:
+    the pinned contract package, and this repo's own grammar table that
+    ``parse_arrow_type`` binds against. A contract bump that adds or removes a
+    type name without the matching grammar change would let a document validate
+    and then fail at parse time, or the reverse. Nothing else now checks it.
+    """
+
+    def test_the_contract_admits_exactly_the_families_the_engine_parses(self):
+        heads = _contract_vocabulary_heads()
+        assert heads, "failed to extract any type name from ARROW_TYPE_PATTERN"
+        assert heads == set(ARROW_FAMILIES), (
+            "the pinned contract's arrow_type vocabulary and the engine's "
+            "family table have drifted: "
+            f"contract-only={sorted(heads - set(ARROW_FAMILIES))}, "
+            f"engine-only={sorted(set(ARROW_FAMILIES) - heads)}"
+        )
 
 
 class TestFamilySetConformance:
@@ -147,7 +196,7 @@ class TestFamilySetConformance:
         assert rules._VALID_UNITS_BY_TYPE == derived
 
 
-# One representative canonical string per scalar family, derived-checked below
+# One representative arrow_type string per scalar family, derived-checked below
 # against the grammar so a new family cannot land without an example here.
 _CANONICAL_EXAMPLE: dict[str, str] = {
     "Null": "Null",
@@ -186,9 +235,9 @@ class TestEveryFamilyParses:
     def test_example_set_is_complete(self) -> None:
         assert set(_CANONICAL_EXAMPLE) == set(_SCALAR_FAMILIES)
 
-    @pytest.mark.parametrize("canonical", sorted(_CANONICAL_EXAMPLE.values()))
-    def test_example_parses(self, canonical: str) -> None:
-        assert isinstance(parse_arrow_type(canonical), pa.DataType)
+    @pytest.mark.parametrize("arrow_type", sorted(_CANONICAL_EXAMPLE.values()))
+    def test_example_parses(self, arrow_type: str) -> None:
+        assert isinstance(parse_arrow_type(arrow_type), pa.DataType)
 
     @pytest.mark.parametrize("family", sorted(_STRUCTURAL_FAMILIES))
     def test_structural_marker_rejected_with_sub_schema_hint(self, family: str) -> None:
@@ -215,17 +264,17 @@ class TestFamilyProbes:
         assert unprobed == _UNPROBED_FAMILIES
 
     @pytest.mark.parametrize(
-        ("family", "canonical"),
+        ("family", "arrow_type"),
         sorted(
-            (family, canonical)
-            for family, canonical in _CANONICAL_EXAMPLE.items()
+            (family, arrow_type)
+            for family, arrow_type in _CANONICAL_EXAMPLE.items()
             if family not in _UNPROBED_FAMILIES
         ),
     )
     def test_family_recognises_the_type_its_own_factory_builds(
-        self, family: str, canonical: str
+        self, family: str, arrow_type: str
     ) -> None:
-        assert arrow_family(parse_arrow_type(canonical)) == family
+        assert arrow_family(parse_arrow_type(arrow_type)) == family
 
     def test_json_classifies_as_large_utf8(self) -> None:
         # Json is carried on the wire as a JSON-encoded large_string, so the
@@ -324,15 +373,15 @@ class TestOneTableFeedsEverySurface:
             built = parse_arrow_type("Interval")
             assert built == pa.month_day_nano_interval()
             assert arrow_family(built) == "Interval"
-            # The conformance kit's canonical probe set.
-            assert "Interval" in probe_canonicals(mapper)
+            # The conformance kit's arrow_type probe set.
+            assert "Interval" in probe_arrow_types(mapper)
         assert "Interval" not in ARROW_FAMILIES
 
 
 class TestConformanceExemplarsAreGated:
     """No family can silently drop out of the conformance probe set.
 
-    Two families of canonical spelling cannot be derived from the table: the
+    Two families of arrow_type spelling cannot be derived from the table: the
     integer-parameterized ones need representative argument tuples, and the
     structural ones need argument-bearing spellings whose heads are native
     shapes the table never names. Both exemplar sets are therefore
@@ -350,14 +399,14 @@ class TestConformanceExemplarsAreGated:
         with _family_added("Decimal64", added), pytest.raises(
             RuntimeError, match="_INT_PARAM_EXEMPLARS"
         ):
-            probe_canonicals(_one_rule_mapper())
+            probe_arrow_types(_one_rule_mapper())
 
     def test_structural_family_without_an_exemplar_fails_loud(self) -> None:
         added = ArrowFamily("nested", probes=("is_map",), sub_schema="entries")
         with _family_added("MapMarker", added), pytest.raises(
             RuntimeError, match="_STRUCTURAL_MATCH_EXEMPLARS"
         ):
-            probe_canonicals(_one_rule_mapper())
+            probe_arrow_types(_one_rule_mapper())
 
 
 class TestTableBindingFailsLoud:
@@ -480,14 +529,14 @@ class TestIntegerRanges:
     """The published ranges are enforced with the engine's typed error."""
 
     @pytest.mark.parametrize(
-        "canonical",
+        "arrow_type",
         ["Decimal128(1, 0)", "Decimal128(38, 38)", "Decimal256(76, 76)"],
     )
-    def test_boundary_values_accepted(self, canonical: str) -> None:
-        assert isinstance(parse_arrow_type(canonical), pa.DataType)
+    def test_boundary_values_accepted(self, arrow_type: str) -> None:
+        assert isinstance(parse_arrow_type(arrow_type), pa.DataType)
 
     @pytest.mark.parametrize(
-        ("canonical", "match"),
+        ("arrow_type", "match"),
         [
             ("Decimal128(0, 0)", "precision must be between 1 and 38"),
             ("Decimal128(39, 0)", "precision must be between 1 and 38"),
@@ -499,12 +548,12 @@ class TestIntegerRanges:
             ("FixedSizeBinary(-3)", "byte_width must be >= 1"),
         ],
     )
-    def test_out_of_range_rejected(self, canonical: str, match: str) -> None:
+    def test_out_of_range_rejected(self, arrow_type: str, match: str) -> None:
         with pytest.raises(InvalidTypeMapError, match=match):
-            parse_arrow_type(canonical)
+            parse_arrow_type(arrow_type)
 
     @pytest.mark.parametrize(
-        "canonical",
+        "arrow_type",
         [
             "Decimal128(+10, 2)",  # sign prefix
             "Decimal128(1_0, 2)",  # underscore separator
@@ -513,12 +562,12 @@ class TestIntegerRanges:
             "FixedSizeBinary(１６)",  # fullwidth digits
         ],
     )
-    def test_non_plain_integer_spelling_rejected(self, canonical: str) -> None:
+    def test_non_plain_integer_spelling_rejected(self, arrow_type: str) -> None:
         # Python's int() accepts all of these; the published grammar says
         # kind "int", and a consumer implementing [0-9]+ would reject them —
         # the exact same-intent divergence this artifact exists to eliminate.
         with pytest.raises(InvalidTypeMapError, match="is not an integer"):
-            parse_arrow_type(canonical)
+            parse_arrow_type(arrow_type)
 
     def test_oversized_digit_string_stays_a_typed_error(self) -> None:
         # Past sys.int_info.default_max_str_digits (4300), int() itself
@@ -540,15 +589,15 @@ class TestArity:
         with pytest.raises(InvalidTypeMapError, match="takes no parameters"):
             parse_arrow_type("Int64(3)")
 
-    @pytest.mark.parametrize("canonical", ["Int64()", "Boolean( )"])
+    @pytest.mark.parametrize("arrow_type", ["Int64()", "Boolean( )"])
     def test_empty_parens_on_parameterless_family_rejected(
-        self, canonical: str
+        self, arrow_type: str
     ) -> None:
         # Every other surface treats "Int64()" as a distinct string from
         # "Int64" (the write-map lookup would miss), so accepting it here
         # would bless a spelling that fails later with a misleading error.
         with pytest.raises(InvalidTypeMapError, match="takes no parameters"):
-            parse_arrow_type(canonical)
+            parse_arrow_type(arrow_type)
 
     def test_empty_parens_on_parameterized_family_keeps_arity_error(self) -> None:
         with pytest.raises(InvalidTypeMapError, match="at least a unit"):

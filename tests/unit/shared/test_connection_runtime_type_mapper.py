@@ -22,13 +22,17 @@ from cdk.type_map import TypeMapper
 from cdk.type_map.rules import parse_rules, parse_write_rules
 from cdk.types import EndpointScope
 
-CONNECTOR_READ_RULES = [{"match": "exact", "native": "BIGINT", "canonical": "Int64"}]
-CONNECTION_READ_RULES = [
-    {"match": "exact", "native": "CUSTOM_TYPE", "canonical": "Utf8"}
+CONNECTOR_READ_RULES = [
+    {"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"}
 ]
-CONNECTOR_WRITE_RULES = [{"match": "exact", "canonical": "Int64", "native": "BIGINT"}]
+CONNECTION_READ_RULES = [
+    {"match": "exact", "native_type": "CUSTOM_TYPE", "arrow_type": "Utf8"}
+]
+CONNECTOR_WRITE_RULES = [
+    {"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"}
+]
 CONNECTION_WRITE_RULES = [
-    {"match": "exact", "canonical": "Utf8", "native": "CUSTOM_NATIVE"}
+    {"match": "exact", "arrow_type": "Utf8", "native_type": "CUSTOM_NATIVE"}
 ]
 
 

@@ -1130,9 +1130,87 @@
         "src.engine.mapping:1151",
         "src.engine.mapping:1170"
       ]
+    },
+    "analitiq.contracts.type_map.TypeMapReadExactRule": {
+      "arrow_type": [
+        "cdk.type_map.mapper:130",
+        "cdk.type_map.rules:314",
+        "cdk.type_map.rules:316"
+      ],
+      "match": [
+        "cdk.type_map.mapper:58",
+        "cdk.type_map.mapper:128",
+        "cdk.type_map.rules:261",
+        "cdk.type_map.rules:278",
+        "cdk.type_map.rules:324"
+      ],
+      "native_type": [
+        "cdk.type_map.rules:263",
+        "cdk.type_map.rules:281",
+        "cdk.type_map.rules:322"
+      ]
+    },
+    "analitiq.contracts.type_map.TypeMapReadRegexRule": {
+      "arrow_type": [
+        "cdk.type_map.mapper:136",
+        "cdk.type_map.rules:281",
+        "cdk.type_map.rules:314",
+        "cdk.type_map.rules:316",
+        "cdk.type_map.rules:326"
+      ],
+      "match": [
+        "cdk.type_map.mapper:58",
+        "cdk.type_map.mapper:128",
+        "cdk.type_map.rules:261",
+        "cdk.type_map.rules:278",
+        "cdk.type_map.rules:324"
+      ],
+      "native_type": [
+        "cdk.type_map.rules:281",
+        "cdk.type_map.rules:322",
+        "cdk.type_map.rules:326"
+      ]
+    },
+    "analitiq.contracts.type_map.TypeMapWriteExactRule": {
+      "arrow_type": [
+        "cdk.type_map.mapper:74",
+        "cdk.type_map.rules:314",
+        "cdk.type_map.rules:316"
+      ],
+      "match": [
+        "cdk.type_map.mapper:73",
+        "cdk.type_map.mapper:172",
+        "cdk.type_map.rules:278",
+        "cdk.type_map.rules:324"
+      ],
+      "native_type": [
+        "cdk.type_map.mapper:174",
+        "cdk.type_map.rules:281",
+        "cdk.type_map.rules:322"
+      ]
+    },
+    "analitiq.contracts.type_map.TypeMapWriteRegexRule": {
+      "arrow_type": [
+        "cdk.type_map.rules:281",
+        "cdk.type_map.rules:314",
+        "cdk.type_map.rules:316",
+        "cdk.type_map.rules:326"
+      ],
+      "match": [
+        "cdk.type_map.mapper:73",
+        "cdk.type_map.mapper:172",
+        "cdk.type_map.rules:278",
+        "cdk.type_map.rules:324"
+      ],
+      "native_type": [
+        "cdk.type_map.mapper:185",
+        "cdk.type_map.rules:281",
+        "cdk.type_map.rules:322",
+        "cdk.type_map.rules:326"
+      ]
     }
   },
-  "contract_models_version": "1.0.0rc23",
+  "contract_models_version": "1.0.0rc24",
   "kit_reads": {
     "analitiq.contracts.endpoints.ApiEndpointDoc": {
       "endpoint_id": [
@@ -1315,6 +1393,40 @@
       ],
       "schema_": [
         "cdk.conformance.api_read_path:719"
+      ]
+    },
+    "analitiq.contracts.type_map.TypeMapReadExactRule": {
+      "arrow_type": [
+        "cdk.conformance.roundtrip:174",
+        "cdk.conformance.roundtrip:175",
+        "cdk.conformance.roundtrip:177"
+      ],
+      "match": [
+        "cdk.conformance.roundtrip:173"
+      ]
+    },
+    "analitiq.contracts.type_map.TypeMapReadRegexRule": {
+      "match": [
+        "cdk.conformance.roundtrip:173"
+      ]
+    },
+    "analitiq.contracts.type_map.TypeMapWriteExactRule": {
+      "arrow_type": [
+        "cdk.conformance.roundtrip:179",
+        "cdk.conformance.roundtrip:180"
+      ],
+      "match": [
+        "cdk.conformance.roundtrip:179",
+        "cdk.conformance.roundtrip:217"
+      ]
+    },
+    "analitiq.contracts.type_map.TypeMapWriteRegexRule": {
+      "arrow_type": [
+        "cdk.conformance.roundtrip:236"
+      ],
+      "match": [
+        "cdk.conformance.roundtrip:179",
+        "cdk.conformance.roundtrip:217"
       ]
     }
   },
@@ -1659,7 +1771,11 @@
     "analitiq.contracts.endpoints.ApiEndpointDoc",
     "analitiq.contracts.endpoints.DatabaseEndpointDoc",
     "analitiq.contracts.pipelines.config.PipelineInput",
-    "analitiq.contracts.stream.StreamInput"
+    "analitiq.contracts.stream.StreamInput",
+    "analitiq.contracts.type_map.TypeMapReadExactRule",
+    "analitiq.contracts.type_map.TypeMapReadRegexRule",
+    "analitiq.contracts.type_map.TypeMapWriteExactRule",
+    "analitiq.contracts.type_map.TypeMapWriteRegexRule"
   ],
   "scope": {
     "kit": [

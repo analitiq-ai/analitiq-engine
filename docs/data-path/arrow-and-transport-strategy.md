@@ -22,7 +22,8 @@ for how the CDK package is bounded and wired see
    be strictly worse on the wire — see
    [`grpc-streaming-architecture.md`](../architecture/grpc-streaming-architecture.md).
 2. **Schema validation cast.** `SchemaContract.cast_arrow_batch`
-   (`cdk/cdk/schema_contract.py`) aligns incoming columns with the
+   (`cdk/cdk/schema_contract.py`) aligns each arrived column — the Arrow
+   type the driver actually produced, which nobody declares — with the
    destination schema, running vectorized `pyarrow.compute.cast(safe=True)`
    instead of a per-row Python coercion loop. Which conversions are
    permitted is the conversion matrix's call, not this boundary's — see
@@ -32,16 +33,17 @@ for how the CDK package is bounded and wired see
 3. **Type vocabulary.** `parse_arrow_type` (`cdk/cdk/type_map/arrow.py`)
    -> `TypeMapper.to_native_type` (`cdk/cdk/type_map/mapper.py`) ->
    `SqlDialect.render_column_type` (`cdk/cdk/sql/dialects.py`) is the
-   single source of truth for types across all connectors: the canonical
-   Arrow string parses to a `pa.DataType` on the read side, and the
-   connector's own `type-map-write.json` renders it back to native DDL on
-   the write side. The families themselves are declared once, in
-   `ARROW_FAMILIES` (`cdk/cdk/type_map/grammar.py`): each entry carries the
-   family's parameter grammar, its conversion kind, the pyarrow factory
-   that builds it, and the `pyarrow.types` predicates that recognise it in
-   a live batch. The parser, the conversion matrix, `arrow_family`, the
-   conformance probe set, and both published artifacts derive from that
-   one table, so a family added there needs no second edit.
+   single source of truth for types across all connectors: `arrow_type`,
+   the canonical Arrow type string, parses to a `pa.DataType` on the read
+   side, and the connector's own `type-map-write.json` renders it back to a
+   `native_type` for DDL on the write side. The `arrow_family` heads are
+   declared once, in `ARROW_FAMILIES` (`cdk/cdk/type_map/grammar.py`): each
+   entry carries its parameter grammar, its `conversion_kind`, the pyarrow
+   factory that builds it, and the `pyarrow.types` predicates that
+   recognise it in a live batch. The parser, the conversion matrix,
+   `arrow_family`, the conformance probe set, and both published artifacts
+   derive from that
+   one table, so an `arrow_family` added there needs no second edit.
 
 ## Where Arrow is ceremony
 

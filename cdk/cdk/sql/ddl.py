@@ -1,7 +1,7 @@
 """Standalone ``create_table`` — the ``TableCreator`` contract (ADR §6).
 
-Builds and runs ``CREATE TABLE`` DDL from a list of ``ColumnDef`` (canonical
-Arrow types) using the connection-scoped **write** type-map
+Builds and runs ``CREATE TABLE`` DDL from a list of ``ColumnDef`` (each
+carrying an ``arrow_type``) using the connection-scoped **write** type-map
 (``to_native_type``; connection rules first, connector rules on a miss —
 issue #368) to render each native column type, and the dialect strategy for
 quoting and the PRIMARY KEY clause. Callable with no gRPC server running: the
@@ -70,7 +70,7 @@ def build_create_table_sql(
 ) -> str:
     """Render ``CREATE TABLE`` DDL for *address* (no execution).
 
-    Each column's canonical Arrow type is rendered to native DDL via
+    Each column's ``arrow_type`` is rendered to native DDL via
     ``type_mapper.to_native_type``. A primary-key column is emitted ``NOT NULL``
     regardless of its declared nullability (matching the streaming handler), and
     the table-level PRIMARY KEY clause is appended when *primary_keys* is
@@ -97,11 +97,11 @@ def build_create_table_sql(
     column_defs: list[str] = []
     for col in columns:
         try:
-            native = dialect.render_column_type(col.canonical_type, type_mapper)
+            native = dialect.render_column_type(col.arrow_type, type_mapper)
         except (UnmappedTypeError, InvalidTypeMapError) as err:
             raise CreateTableError(
-                f"create_table for {table!r}: column {col.name!r} canonical "
-                f"type {col.canonical_type!r} has no type-map-write rule"
+                f"create_table for {table!r}: column {col.name!r} arrow_type "
+                f"{col.arrow_type!r} has no type-map-write rule"
             ) from err
         parts = [dialect.quote_ident(col.name), native]
         # A PK column is NOT NULL even if the source declared it nullable.

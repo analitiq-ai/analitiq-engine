@@ -18,17 +18,19 @@ from typing import Any
 from .exceptions import InvalidTypeMapError, UnmappedTypeError
 from .rules import (
     _SUBSTITUTION_TOKEN,
-    TypeMapRule,
-    WriteTypeMapRule,
-    normalize_canonical_type,
+    TypeMapReadRule,
+    TypeMapWriteRule,
+    compile_pattern,
+    normalize_arrow_type,
     normalize_native_type,
+    normalized_native,
 )
 
 
 class TypeMapper:
-    r"""Deterministic native → canonical matcher for a connector's type-map.
+    r"""Deterministic native_type -> arrow_type matcher for a connector's type-map.
 
-    Built from a list of :class:`TypeMapRule` instances. Rule order is
+    Built from a list of :class:`TypeMapReadRule` instances. Rule order is
     authoritative: the author controls specificity by placing narrower
     rules above broader ones (e.g. ``TINYINT(1) → Boolean`` above
     ``^TINYINT(\(\d+\))?$ → Int8``). Instances are immutable and safe
@@ -38,15 +40,15 @@ class TypeMapper:
     def __init__(
         self,
         connector_slug: str,
-        rules: list[TypeMapRule],
-        write_rules: list[WriteTypeMapRule] | None = None,
+        rules: list[TypeMapReadRule],
+        write_rules: list[TypeMapWriteRule] | None = None,
     ) -> None:
         if not rules:
             raise InvalidTypeMapError(
                 f"connector {connector_slug!r}: type-map must contain at least one rule"
             )
         self._slug = connector_slug
-        self._rules: tuple[TypeMapRule, ...] = tuple(rules)
+        self._rules: tuple[TypeMapReadRule, ...] = tuple(rules)
 
         # Precompute one match artefact per rule: either the normalized
         # literal (exact) or the compiled pattern (regex).
@@ -54,39 +56,37 @@ class TypeMapper:
         self._exact_native: list[str | None] = []
         for rule in self._rules:
             if rule.match == "exact":
-                self._exact_native.append(normalize_native_type(rule.native))
+                self._exact_native.append(normalized_native(rule))
                 self._compiled.append(None)
             else:
                 self._exact_native.append(None)
-                self._compiled.append(rule.compile_pattern())
+                self._compiled.append(compile_pattern(rule))
 
-        # Write direction (canonical -> native). Optional: API connectors and
+        # Write direction (arrow_type -> native_type). Optional: API connectors and
         # source-only connectors have no write map. Built symmetrically to the
         # read side: exact rules keep their normalized literal, regex rules a
         # compiled pattern.
-        self._write_rules: tuple[WriteTypeMapRule, ...] = tuple(write_rules or ())
+        self._write_rules: tuple[TypeMapWriteRule, ...] = tuple(write_rules or ())
         self._write_compiled: list[Pattern[str] | None] = []
-        self._exact_canonical: list[str | None] = []
+        self._exact_arrow: list[str | None] = []
         for write_rule in self._write_rules:
             if write_rule.match == "exact":
-                self._exact_canonical.append(
-                    normalize_canonical_type(write_rule.canonical)
-                )
+                self._exact_arrow.append(normalize_arrow_type(write_rule.arrow_type))
                 self._write_compiled.append(None)
             else:
-                self._exact_canonical.append(None)
-                self._write_compiled.append(write_rule.compile_pattern())
+                self._exact_arrow.append(None)
+                self._write_compiled.append(compile_pattern(write_rule))
 
     @property
     def connector_slug(self) -> str:
         return self._slug
 
     @property
-    def rules(self) -> tuple[TypeMapRule, ...]:
+    def rules(self) -> tuple[TypeMapReadRule, ...]:
         return self._rules
 
     @property
-    def write_rules(self) -> tuple[WriteTypeMapRule, ...]:
+    def write_rules(self) -> tuple[TypeMapWriteRule, ...]:
         return self._write_rules
 
     @property
@@ -127,37 +127,37 @@ class TypeMapper:
         ):
             if rule.match == "exact":
                 if exact == normalized:
-                    return rule.canonical
+                    return rule.arrow_type
                 continue
             assert compiled is not None
             match = compiled.fullmatch(normalized)
             if match is None:
                 continue
-            return _substitute_tokens(rule.canonical, match.groupdict())
+            return _substitute_tokens(rule.arrow_type, match.groupdict())
         raise UnmappedTypeError(self._slug, "forward", native)
 
     def to_native_type(
-        self, canonical: str, *, params: Mapping[str, Any] | None = None
+        self, arrow_type: str, *, params: Mapping[str, Any] | None = None
     ) -> str:
-        """Map an Arrow canonical type string to its native DDL type.
+        """Map an ``arrow_type`` to its native DDL type.
 
         The inverse of :meth:`to_arrow_type`, fed by the connector's
         ``type-map-write.json``. ``params`` supplies per-column hints (e.g.
-        ``length``) that a rule's ``native`` template may reference via
-        ``${name}`` alongside any named captures from the canonical regex;
+        ``length``) that a rule's ``native_type`` template may reference via
+        ``${name}`` alongside any named captures from the arrow_type regex;
         named captures take precedence on a name clash. Hint values are rendered
         via ``str()``, so numeric hints (e.g. ``length=255``) are accepted. Raises
         :class:`InvalidTypeMapError` if this connector has no write-type-map
         loaded, or if the matched template references a token that neither the
         capture groups nor ``params`` provide; raises :class:`UnmappedTypeError`
-        (``direction="reverse"``) when no rule matches *canonical*.
+        (``direction="reverse"``) when no rule matches *arrow_type*.
         """
         if not self._write_rules:
             raise InvalidTypeMapError(
                 f"connector {self._slug!r}: no write-type-map loaded; cannot "
-                f"render a native type for canonical {canonical!r}"
+                f"render a native type for arrow_type {arrow_type!r}"
             )
-        normalized = normalize_canonical_type(canonical)
+        normalized = normalize_arrow_type(arrow_type)
         # Hints may arrive as ints (e.g. a JSON length) — render them to str so
         # the substitution callback never trips. A None hint (a nullable/absent
         # metadata field) is treated as not provided, mirroring how a
@@ -167,11 +167,11 @@ class TypeMapper:
             k: str(v) for k, v in (params or {}).items() if v is not None
         }
         for rule, compiled, exact in zip(
-            self._write_rules, self._write_compiled, self._exact_canonical
+            self._write_rules, self._write_compiled, self._exact_arrow
         ):
             if rule.match == "exact":
                 if exact == normalized:
-                    return _substitute_tokens(rule.native, hints)
+                    return _substitute_tokens(rule.native_type, hints)
                 continue
             assert compiled is not None
             match = compiled.fullmatch(normalized)
@@ -182,8 +182,8 @@ class TypeMapper:
             # feeds None into the substitution callback.
             captures = {k: v for k, v in match.groupdict().items() if v is not None}
             values = {**hints, **captures}
-            return _substitute_tokens(rule.native, values)
-        raise UnmappedTypeError(self._slug, "reverse", canonical)
+            return _substitute_tokens(rule.native_type, values)
+        raise UnmappedTypeError(self._slug, "reverse", arrow_type)
 
 
 def _substitute_tokens(template: str, values: Mapping[str, str]) -> str:

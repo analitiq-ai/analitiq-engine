@@ -52,7 +52,7 @@ from .api_read_path import (
 from .api_surface import check_api_has_reads, check_read_transport_selection
 from .applicability import check_kind_applicability
 from .declaration import check_declaration_consistency
-from .roundtrip import check_type_map_grammar, check_type_map_round_trip
+from .roundtrip import check_type_map_round_trip
 from .surface import check_override_surface, sanctioned_dialect_surface
 from .target import (
     ConformanceSetupError,
@@ -76,7 +76,6 @@ __all__ = [
     "check_kind_applicability",
     "check_override_surface",
     "check_read_transport_selection",
-    "check_type_map_grammar",
     "check_type_map_round_trip",
     "load_target",
     "sanctioned_dialect_surface",

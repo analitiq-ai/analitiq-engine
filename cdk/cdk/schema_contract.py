@@ -392,40 +392,52 @@ class SchemaContract:
         return pa.RecordBatch.from_arrays(arrays, schema=self._arrow_schema)
 
     def cast_arrow_batch(self, record_batch: pa.RecordBatch) -> pa.RecordBatch:
-        """Cast an incoming Arrow batch to this endpoint's schema."""
+        """Cast an arrived Arrow batch to this endpoint's schema.
+
+        The batch carries *arrived* types -- whatever the driver produced. They
+        are the one kind of type in this system nobody declares, so they are
+        never assumed to equal the declared ``arrow_type`` of the field they
+        land in; every column goes through the matrix or an equality check.
+        """
         if record_batch.num_rows == 0:
             return pa.RecordBatch.from_pylist([], schema=self._arrow_schema)
 
-        existing = {
+        arrived_columns = {
             name: record_batch.column(i)
             for i, name in enumerate(record_batch.schema.names)
         }
         arrays: list[pa.Array] = []
         for field in self._arrow_schema:
-            col = existing.get(field.name)
-            if col is None:
+            arrived = arrived_columns.get(field.name)
+            if arrived is None:
                 if not field.nullable:
                     raise ValueError(
                         f"column {field.name!r} is required by the destination "
-                        f"schema but absent from the incoming batch"
+                        f"schema but absent from the arrived batch"
                     )
                 logger.warning(
-                    "column %r absent from incoming batch; filling with typed nulls",
+                    "column %r absent from arrived batch; filling with typed nulls",
                     field.name,
                 )
                 arrays.append(pa.nulls(record_batch.num_rows, type=field.type))
                 continue
-            if col.type == field.type:
-                array = col
+            if arrived.type == field.type:
+                array = arrived
             else:
-                array = self._convert_to_field(field, col)
+                array = self._convert_to_field(field, arrived)
             self._assert_non_nullable(field, array)
             arrays.append(array)
         return pa.RecordBatch.from_arrays(arrays, schema=self._arrow_schema)
 
     @staticmethod
-    def _convert_to_field(field: pa.Field, col: pa.Array) -> pa.Array:
-        """Cast one incoming column to its destination type via the matrix.
+    def _convert_to_field(field: pa.Field, arrived: pa.Array) -> pa.Array:
+        """Cast one arrived column to its destination type via the matrix.
+
+        ``arrived`` is the column as the driver actually produced it -- the
+        *arrived* type, which nobody declares and which is therefore the one
+        type in this system with no authoring site. The destination type is
+        the declared ``arrow_type`` on ``field``; this method is where the two
+        meet.
 
         The conversion matrix (:mod:`cdk.type_map.conversions`) is the single
         policy both this cast and the engine's transform build consult, so a
@@ -439,20 +451,20 @@ class SchemaContract:
         the transform's ``_cast_structural`` rejects -- one policy, both
         boundaries.
         """
-        conversion = classify_arrow_conversion(col.type, field.type)
+        conversion = classify_arrow_conversion(arrived.type, field.type)
         if conversion.mode == "forbidden":
             raise ValueError(
-                f"column {field.name!r}: converting {col.type} → {field.type} "
+                f"column {field.name!r}: converting {arrived.type} → {field.type} "
                 f"is not a permitted conversion"
             )
         if conversion.mode == "explicit":
             raise ValueError(
-                f"column {field.name!r}: converting {col.type} → {field.type} "
+                f"column {field.name!r}: converting {arrived.type} → {field.type} "
                 f"requires an explicit '{conversion.fn}' conversion declared in "
                 f"the mapping; the destination does not perform it implicitly"
             )
         if pa.types.is_nested(field.type):
-            blocked = first_blocked_nested_leaf(col.type, field.type, field.name)
+            blocked = first_blocked_nested_leaf(arrived.type, field.type, field.name)
             if blocked is not None:
                 leaf = blocked.conversion
                 required = (
@@ -471,14 +483,14 @@ class SchemaContract:
             # matching the per-row range checks the from_pylist path enforces —
             # the same author intent cannot saturate on one build path while it
             # is rejected on the other.
-            return pc.cast(col, field.type, safe=True)
+            return pc.cast(arrived, field.type, safe=True)
         except (
             pa.ArrowInvalid,
             pa.ArrowTypeError,
             pa.ArrowNotImplementedError,
         ) as e:
             raise ValueError(
-                f"column {field.name!r}: cannot cast {col.type} → {field.type}: {e}"
+                f"column {field.name!r}: cannot cast {arrived.type} → {field.type}: {e}"
             ) from e
 
     @staticmethod

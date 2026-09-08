@@ -153,7 +153,7 @@ class TestBuildErrors:
         read_only_mapper = TypeMapper(
             "read-only",
             parse_rules(
-                [{"match": "exact", "native": "BIGINT", "canonical": "Int64"}],
+                [{"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"}],
                 source="<test>",
             ),
         )

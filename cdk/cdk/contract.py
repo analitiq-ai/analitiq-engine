@@ -32,14 +32,14 @@ if TYPE_CHECKING:
 class ColumnDef:
     """A single column in a table definition.
 
-    ``canonical_type`` is the Apache Arrow canonical type string (e.g.
+    ``arrow_type`` is the Arrow type string (e.g.
     ``"Int64"``, ``"Decimal128(38, 9)"``, ``"Timestamp(MICROSECOND, UTC)"``) —
     not the raw native string — so it is symmetric with the type-map and is what
     ``create_table`` consumes downstream.
     """
 
     name: str
-    canonical_type: str
+    arrow_type: str
     nullable: bool = True
     primary_key: bool = False
     #: Optional SQL DEFAULT expression, passed through verbatim into DDL

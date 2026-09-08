@@ -142,8 +142,8 @@ def _endpoint_doc(endpoint_id: str) -> dict[str, Any]:
 
 def _type_map_rules() -> list:
     return [
-        {"match": "exact", "native": "VARCHAR", "canonical": "Utf8"},
-        {"match": "exact", "native": "BIGINT", "canonical": "Int64"},
+        {"match": "exact", "native_type": "VARCHAR", "arrow_type": "Utf8"},
+        {"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"},
     ]
 
 
@@ -151,7 +151,7 @@ def _connection_type_map_rules() -> list:
     """Connection-scoped override map: carries a rule the connector's
     map does not, so tests can tell which mapper actually resolved."""
     return [
-        {"match": "exact", "native": "JSONB", "canonical": "Utf8"},
+        {"match": "exact", "native_type": "JSONB", "arrow_type": "Utf8"},
     ]
 
 

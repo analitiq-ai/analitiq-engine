@@ -259,4 +259,4 @@ def _kind_of(family: str, side: str) -> ConversionKind:
             f"unknown {side} arrow_type family {family!r}; expected one of "
             f"{', '.join(ARROW_FAMILIES)}"
         )
-    return spec.kind
+    return spec.conversion_kind

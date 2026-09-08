@@ -93,7 +93,7 @@ class _FixtureAdbcDialect(SqlDialect):
     name = "fixture"
 
     #: canonical Arrow string -> canned native DDL type the dialect renders.
-    _CANONICAL_TO_DDL = {
+    _ARROW_TO_DDL = {
         "Int64": "INTEGER",
         "Int32": "INTEGER",
         "Utf8": "STRING",
@@ -105,8 +105,8 @@ class _FixtureAdbcDialect(SqlDialect):
     def normalize_ident(self, name: str) -> str:
         return name.upper()
 
-    def render_column_type(self, canonical, type_mapper, *, params=None) -> str:
-        return self._CANONICAL_TO_DDL[canonical]
+    def render_column_type(self, arrow_type, type_mapper, *, params=None) -> str:
+        return self._ARROW_TO_DDL[arrow_type]
 
     def stage_table_sql(self, stage, target, *, temp) -> str:
         keyword = "CREATE TEMPORARY TABLE" if temp else "CREATE TABLE"
@@ -220,7 +220,7 @@ class TestUnsupportedHooksAreFatal:
         read_only = TypeMapper(
             "thin",
             parse_rules(
-                [{"match": "exact", "native": "BIGINT", "canonical": "Int64"}],
+                [{"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"}],
                 source="<test>",
             ),
         )

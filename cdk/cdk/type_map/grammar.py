@@ -17,7 +17,7 @@ The engine is the publisher of this vocabulary and the contract mirrors it,
 never the other way round.
 
 This module must stay importable without ``pyarrow``: the string-only
-control-plane surface validates canonical strings through it (see the
+control-plane surface validates arrow_type strings through it (see the
 thin-import tests), so the pyarrow bindings are declared by name and resolved
 in :mod:`cdk.type_map.arrow`, which is the only module that imports pyarrow.
 """
@@ -119,9 +119,10 @@ class ArrowFamily:
 
     ``params`` declares what may appear inside the parentheses; an empty tuple
     means the family takes no parameters (and a parenthesised argument on it is
-    rejected, not ignored). ``kind`` is the conversion group the family belongs
-    to. ``builder`` and ``probes`` name pyarrow attributes rather than holding
-    the callables, so this module stays importable without pyarrow:
+    rejected, not ignored). ``conversion_kind`` is the conversion group the
+    family belongs to. ``builder`` and ``probes`` name pyarrow attributes
+    rather than holding the callables, so this module stays importable
+    without pyarrow:
     ``builder`` is the ``pyarrow`` factory the bound parameters are passed to
     positionally, and ``probes`` are the ``pyarrow.types`` predicates that
     recognise a live ``DataType`` as this family. ``sub_schema`` names the
@@ -130,7 +131,7 @@ class ArrowFamily:
     shape comes from that sub-schema, never from parentheses.
     """
 
-    kind: ConversionKind
+    conversion_kind: ConversionKind
     params: tuple[GrammarParam, ...] = ()
     builder: str | None = None
     probes: tuple[str, ...] = ()

@@ -67,35 +67,35 @@ def caps_block(
 # ``geometry`` (read) or ``LargeList`` (write): the unmapped-type error paths
 # rely on those missing.
 _PG_READ_RULES = [
-    {"match": "exact", "native": "BIGINT", "canonical": "Int64"},
-    {"match": "exact", "native": "INTEGER", "canonical": "Int32"},
-    {"match": "exact", "native": "TEXT", "canonical": "Utf8"},
-    {"match": "exact", "native": "CHARACTER VARYING", "canonical": "Utf8"},
-    {"match": "exact", "native": "NUMERIC", "canonical": "Decimal128(38, 9)"},
+    {"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"},
+    {"match": "exact", "native_type": "INTEGER", "arrow_type": "Int32"},
+    {"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"},
+    {"match": "exact", "native_type": "CHARACTER VARYING", "arrow_type": "Utf8"},
+    {"match": "exact", "native_type": "NUMERIC", "arrow_type": "Decimal128(38, 9)"},
     {
         "match": "exact",
-        "native": "TIMESTAMP WITH TIME ZONE",
-        "canonical": "Timestamp(MICROSECOND, UTC)",
+        "native_type": "TIMESTAMP WITH TIME ZONE",
+        "arrow_type": "Timestamp(MICROSECOND, UTC)",
     },
 ]
 _PG_WRITE_RULES = [
-    {"match": "exact", "canonical": "Int64", "native": "BIGINT"},
-    {"match": "exact", "canonical": "Utf8", "native": "TEXT"},
+    {"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"},
+    {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"},
     {
         "match": "regex",
-        "canonical": r"Decimal128\((?<precision>\d+), (?<scale>\d+)\)",
-        "native": "NUMERIC(${precision}, ${scale})",
+        "arrow_type": r"Decimal128\((?<precision>\d+), (?<scale>\d+)\)",
+        "native_type": "NUMERIC(${precision}, ${scale})",
     },
     {
         "match": "exact",
-        "canonical": "Timestamp(MICROSECOND, UTC)",
-        "native": "TIMESTAMPTZ",
+        "arrow_type": "Timestamp(MICROSECOND, UTC)",
+        "native_type": "TIMESTAMPTZ",
     },
 ]
 
 # Snowflake-shaped read rules: just what the discovery tests look up.
 _SF_READ_RULES = [
-    {"match": "exact", "native": "NUMBER", "canonical": "Decimal128(38, 0)"},
+    {"match": "exact", "native_type": "NUMBER", "arrow_type": "Decimal128(38, 0)"},
 ]
 
 # Connection-scoped rules standing in for a connections/{id}/definition
@@ -103,11 +103,11 @@ _SF_READ_RULES = [
 # an override of a native the connector also maps (TEXT), and a write override
 # for a canonical the connector's write map also renders (Utf8).
 _CONN_READ_RULES = [
-    {"match": "exact", "native": "CITEXT", "canonical": "Utf8"},
-    {"match": "exact", "native": "TEXT", "canonical": "LargeUtf8"},
+    {"match": "exact", "native_type": "CITEXT", "arrow_type": "Utf8"},
+    {"match": "exact", "native_type": "TEXT", "arrow_type": "LargeUtf8"},
 ]
 _CONN_WRITE_RULES = [
-    {"match": "exact", "canonical": "Utf8", "native": "CITEXT"},
+    {"match": "exact", "arrow_type": "Utf8", "native_type": "CITEXT"},
 ]
 
 

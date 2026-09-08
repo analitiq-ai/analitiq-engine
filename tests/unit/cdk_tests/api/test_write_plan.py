@@ -581,16 +581,30 @@ class TestTheRequestTheStreamWillActuallySend:
         assert isinstance(outcome, str)
         assert "Authorization" in outcome
 
-    def test_a_required_write_param_with_no_default_is_refused(self) -> None:
+    def test_a_required_write_param_resolving_to_nothing_is_refused(self) -> None:
         # A write param has no loop to fill it: every value comes from the
-        # resolved defaults, so one declared required with no default at
-        # all is missing for good. The never-fillable-scope walk cannot see
-        # it -- with no default there is no expression to walk -- so the
-        # binding used to drop the field and every record went out without
-        # it while the batch reported success.
+        # resolved defaults, so one whose default resolves to nothing is
+        # missing for good. The never-fillable-scope walk passes this one
+        # -- `connection.parameters.*` is a subtree request-time resolution
+        # does supply, so the expression is fillable in principle and this
+        # connection simply does not carry it -- and the binding used to
+        # drop the field, sending every record without it while the batch
+        # reported success.
+        #
+        # The contract settles the narrower shape: a required param that
+        # declares no source at all is refused at parse (RULE-ENDP-066), so
+        # what reaches the plan builder is always a DECLARED source that a
+        # given run may still leave empty.
         doc = _document(
             headers={"X-Tenant": {"from_param": "tenant"}},
-            params={"tenant": {"in": "header", "type": "string", "required": True}},
+            params={
+                "tenant": {
+                    "in": "header",
+                    "type": "string",
+                    "required": True,
+                    "default": {"ref": "connection.parameters.tenant"},
+                }
+            },
         )
         outcome = build_write_plan(
             doc,

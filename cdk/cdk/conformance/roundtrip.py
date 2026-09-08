@@ -1,6 +1,6 @@
 """Type-map stability under a write/read round trip.
 
-First-run DDL renders a stream's canonical types through the write map;
+First-run DDL renders a stream's arrow_types through the write map;
 discovery reads the created table's native types back through the read
 map. Widening on that round is physically unavoidable — most systems
 have no unsigned or 8-bit integers, so ``Int8 -> SMALLINT`` correctly
@@ -18,7 +18,7 @@ What must hold is:
   re-renders as ``TEXT``), and schema comparisons drift forever.
 
 Uncovered probes are skipped — a connector is not required to render
-the whole canonical vocabulary — but the skipping is guarded two ways,
+the whole arrow_type vocabulary — but the skipping is guarded two ways,
 so it can never absorb a defect: a write map that covers *zero* probes
 is a violation (the check must not go inert), and a regex rule that
 matches a pre-normalization spelling of a probe while matching no
@@ -26,16 +26,16 @@ normalized probe is flagged as dead — a provable authoring defect. A
 regex that simply matches no probe is left alone: a finite probe set
 cannot prove a partial-family rule unreachable.
 
-Exemplars are generated from the published canonical vocabulary
+Exemplars are generated from the published arrow_type vocabulary
 (:data:`~cdk.type_map.grammar.ARROW_FAMILIES`) plus the concrete
-canonicals named by the connector's own rules, so the probe set covers
+arrow_types named by the connector's own rules, so the probe set covers
 exactly the vocabulary the contract defines and can never drift from it.
 """
 
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from cdk.sql.dialects import SqlDialect
 from cdk.type_map.exceptions import InvalidTypeMapError, UnmappedTypeError
@@ -46,7 +46,11 @@ from cdk.type_map.grammar import (
     TimezoneParam,
     UnitParam,
 )
-from cdk.type_map.rules import normalize_canonical_type, normalize_native_type
+from cdk.type_map.rules import (
+    compile_pattern,
+    normalize_arrow_type,
+    normalize_native_type,
+)
 
 from .violations import Violation
 
@@ -69,7 +73,7 @@ _INT_PARAM_EXEMPLARS: dict[str, tuple[tuple[int, ...], ...]] = {
     "FixedSizeBinary": ((16,),),
 }
 
-#: Structural canonical spellings (nested types) used ONLY for the
+#: Structural arrow_type spellings (nested types) used ONLY for the
 #: write-rule reachability check, never as round-trip probes: nested
 #: types legitimately store as a document column (``List<...> -> JSONB``)
 #: whose read-back is ``Json``, so probing them through the convergence
@@ -92,12 +96,12 @@ _STRUCTURAL_MATCH_EXEMPLARS: tuple[str, ...] = (
 def _structural_exemplar_families() -> frozenset[str]:
     """Return the grammar families :data:`_STRUCTURAL_MATCH_EXEMPLARS` covers."""
     return frozenset(
-        _canonical_family(spelling) for spelling in _STRUCTURAL_MATCH_EXEMPLARS
+        _arrow_family_of(spelling) for spelling in _STRUCTURAL_MATCH_EXEMPLARS
     )
 
 
 def _grammar_exemplars() -> list[str]:
-    """Concrete canonical spellings covering every grammar family."""
+    """Concrete arrow_type spellings covering every grammar family."""
     exemplars: list[str] = []
     structural_covered = _structural_exemplar_families()
     for family, spec in ARROW_FAMILIES.items():
@@ -140,8 +144,8 @@ def _grammar_exemplars() -> list[str]:
     return exemplars
 
 
-def _canonical_family(spelling: str) -> str:
-    """Return the family name of a canonical spelling (before arguments)."""
+def _arrow_family_of(spelling: str) -> str:
+    """Return the family name of a arrow_type spelling (before arguments)."""
     for separator in ("(", "<"):
         index = spelling.find(separator)
         if index != -1:
@@ -150,58 +154,14 @@ def _canonical_family(spelling: str) -> str:
 
 
 def _in_published_grammar(spelling: str) -> bool:
-    """Whether a canonical literal's family exists in the published grammar."""
-    return _canonical_family(spelling) in ARROW_FAMILIES
-
-
-def _foreign_literal_violations(mapper: TypeMapper) -> list[Violation]:
-    """Flag rule canonicals whose family the grammar does not define.
-
-    The rule loaders are string-level and accept any spelling, but a
-    canonical outside the published grammar is a defect in either
-    direction: a read rule emitting one hands discovery a family
-    ``parse_arrow_type`` rejects, and a write rule matching one is
-    unreachable, since no endpoint document can ever carry it. Left
-    uncaught, such a literal would also count toward probe coverage (it
-    trivially round-trips with itself), letting a write map that cannot
-    render any real canonical read as covered.
-
-    Which rules carry a literal canonical differs by direction, because
-    the field means different things: a read rule's ``canonical`` is its
-    *output*, literal whenever it interpolates no capture, so regex read
-    rules are checked too; a write rule's ``canonical`` is its *match*,
-    a pattern rather than a family name unless the rule is exact.
-    """
-    violations: list[Violation] = []
-    seen: set[str] = set()
-    directions: list[tuple[str, Any]] = [("read", rule) for rule in mapper.rules]
-    directions += [
-        ("write", rule) for rule in mapper.write_rules if rule.match == "exact"
-    ]
-    for direction, rule in directions:
-        if "${" in rule.canonical or _in_published_grammar(rule.canonical):
-            continue
-        normalized = normalize_canonical_type(rule.canonical)
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        violations.append(
-            Violation(
-                CHECK_COVERAGE,
-                f"{direction} rule declares canonical {rule.canonical!r}, "
-                f"whose family {_canonical_family(rule.canonical)!r} is not "
-                f"in the published grammar; no endpoint document can ever "
-                f"produce it, so the rule is unreachable and does not count "
-                f"as coverage.",
-            )
-        )
-    return violations
+    """Whether a arrow_type literal's family exists in the published grammar."""
+    return _arrow_family_of(spelling) in ARROW_FAMILIES
 
 
 def _rule_exemplars(mapper: TypeMapper) -> list[str]:
-    """Concrete canonicals named by the connector's own rules.
+    """Concrete arrow_types named by the connector's own rules.
 
-    Exact rules carry a literal canonical on both directions; regex
+    Exact rules carry a literal arrow_type on both directions; regex
     rules carry templates and are probed through the grammar exemplars
     instead. Literals outside the published grammar are excluded — they
     are reported as violations, and letting them probe would count
@@ -211,26 +171,26 @@ def _rule_exemplars(mapper: TypeMapper) -> list[str]:
     for read_rule in mapper.rules:
         if (
             read_rule.match == "exact"
-            and "${" not in read_rule.canonical
-            and _in_published_grammar(read_rule.canonical)
+            and "${" not in read_rule.arrow_type
+            and _in_published_grammar(read_rule.arrow_type)
         ):
-            exemplars.append(read_rule.canonical)
+            exemplars.append(read_rule.arrow_type)
     for write_rule in mapper.write_rules:
-        if write_rule.match == "exact" and _in_published_grammar(write_rule.canonical):
-            exemplars.append(write_rule.canonical)
+        if write_rule.match == "exact" and _in_published_grammar(write_rule.arrow_type):
+            exemplars.append(write_rule.arrow_type)
     return exemplars
 
 
-def probe_canonicals(mapper: TypeMapper) -> list[str]:
-    """Build the deduplicated canonical probe set for *mapper*, in order."""
+def probe_arrow_types(mapper: TypeMapper) -> list[str]:
+    """Build the deduplicated arrow_type probe set for *mapper*, in order."""
     seen: set[str] = set()
     probes: list[str] = []
-    for canonical in _grammar_exemplars() + _rule_exemplars(mapper):
-        normalized = normalize_canonical_type(canonical)
+    for arrow_type in _grammar_exemplars() + _rule_exemplars(mapper):
+        normalized = normalize_arrow_type(arrow_type)
         if normalized in seen:
             continue
         seen.add(normalized)
-        probes.append(canonical)
+        probes.append(arrow_type)
     return probes
 
 
@@ -244,19 +204,19 @@ def _misnormalized_write_rules(
     low-precision decimal range, one timezone) matches valid grammar
     while matching none of the probes — so matching nothing is never,
     by itself, a violation. What is provable is a spelling defect: the
-    matcher only ever receives the normalized canonical, so a pattern
+    matcher only ever receives the normalized arrow_type, so a pattern
     that matches some *other* spelling of a probe while matching no
     candidate was authored against a string the matcher can never
     receive. The witness names both the spelling and why it never
     arrives.
     """
     universe = [
-        normalize_canonical_type(c) for c in probes + list(_STRUCTURAL_MATCH_EXEMPLARS)
+        normalize_arrow_type(c) for c in probes + list(_STRUCTURAL_MATCH_EXEMPLARS)
     ]
     violations: list[Violation] = []
     regex_rules = [rule for rule in mapper.write_rules if rule.match != "exact"]
     for rule in regex_rules:
-        pattern = rule.compile_pattern()
+        pattern = compile_pattern(rule)
         if any(pattern.fullmatch(candidate) for candidate in universe):
             continue
         witness = next(
@@ -273,7 +233,7 @@ def _misnormalized_write_rules(
         violations.append(
             Violation(
                 CHECK_COVERAGE,
-                f"write rule for canonical {rule.canonical!r} matches "
+                f"write rule for arrow_type {rule.arrow_type!r} matches "
                 f"{spelling!r} but not the {candidate!r} the matcher "
                 f"actually receives, so the rule is dead: {reason}.",
             )
@@ -288,7 +248,7 @@ def _unreachable_spelling(
 
     Two classes, each with its own true explanation. A pre-normalization
     spelling is rewritten before matching; a case variant is not
-    rewritten at all, because canonical matching preserves case — the
+    rewritten at all, because arrow_type matching preserves case — the
     Arrow vocabulary is mixed-case and folding it would collapse
     distinct types. Reporting the second under the first's explanation
     would send the author to fix the wrong thing.
@@ -307,7 +267,7 @@ def _unreachable_spelling(
         return (
             candidate,
             lowered,
-            "canonical matching preserves case, so the mixed-case Arrow "
+            "arrow_type matching preserves case, so the mixed-case Arrow "
             "spelling is the only one ever offered",
         )
     return None
@@ -332,17 +292,17 @@ def _pre_normalization_variants(candidate: str) -> list[str]:
     return [
         proposal
         for proposal in proposals
-        if proposal != candidate and normalize_canonical_type(proposal) == candidate
+        if proposal != candidate and normalize_arrow_type(proposal) == candidate
     ]
 
 
 def render_probe(
-    mapper: TypeMapper, canonical: str, dialect: SqlDialect | None = None
+    mapper: TypeMapper, arrow_type: str, dialect: SqlDialect | None = None
 ) -> str:
-    """Render one canonical exactly as first-run DDL renders it.
+    """Render one arrow_type exactly as first-run DDL renders it.
 
     The engine's only production render path is
-    ``dialect.render_column_type(canonical, type_mapper)`` with no
+    ``dialect.render_column_type(arrow_type, type_mapper)`` with no
     per-column hints (``cdk.sql.ddl.build_create_table_sql``), so the
     probe renders the same way — through the connector's own dialect
     when one is available (its ``render_column_type`` override
@@ -352,21 +312,8 @@ def render_probe(
     hints the engine never supplies.
     """
     if dialect is not None:
-        return dialect.render_column_type(canonical, mapper)
-    return mapper.to_native_type(canonical)
-
-
-def check_type_map_grammar(mapper: TypeMapper) -> list[Violation]:
-    """Certify every literal canonical against the published grammar.
-
-    Applies to any connector that ships a type map, write map or not:
-    a source-only connector still emits canonicals from discovery, and
-    one outside the grammar fails at runtime in
-    :func:`~cdk.type_map.arrow.parse_arrow_type`. Gating this on a write
-    map would let exactly that connector — the one with nothing else to
-    certify — pass with nothing certified.
-    """
-    return _foreign_literal_violations(mapper)
+        return dialect.render_column_type(arrow_type, mapper)
+    return mapper.to_native_type(arrow_type)
 
 
 def check_type_map_round_trip(
@@ -375,26 +322,28 @@ def check_type_map_round_trip(
     """Certify read closure and convergence for every covered probe.
 
     The write-direction half of the type-map contract; a connector
-    shipping no write map has no round trip to certify. Its read-side
-    literals are certified by :func:`check_type_map_grammar`, which runs
-    either way.
+    shipping no write map has no round trip to certify. A foreign literal
+    cannot reach here at all: ``parse_rules`` refuses an ``arrow_type``
+    outside the published vocabulary in both the exact and the regex form,
+    so the kit no longer re-certifies what the loader already guarantees --
+    one gate per document.
     """
     if not mapper.has_write_map:
         return []
-    probes = probe_canonicals(mapper)
-    violations: list[Violation] = _foreign_literal_violations(mapper)
+    probes = probe_arrow_types(mapper)
+    violations: list[Violation] = []
     violations += _misnormalized_write_rules(mapper, probes)
     rendered = 0
-    for canonical in probes:
+    for arrow_type in probes:
         try:
-            native = render_probe(mapper, canonical, dialect)
+            native = render_probe(mapper, arrow_type, dialect)
         except UnmappedTypeError:
             continue
         except InvalidTypeMapError as err:
             violations.append(
                 Violation(
                     CHECK_CLOSURE,
-                    f"write map fails to render {canonical}: {err}",
+                    f"write map fails to render {arrow_type}: {err}",
                 )
             )
             continue
@@ -405,8 +354,8 @@ def check_type_map_round_trip(
             violations.append(
                 Violation(
                     CHECK_CLOSURE,
-                    f"write map renders {canonical} as {native!r}, but the "
-                    f"read map cannot map {native!r} to any canonical type; "
+                    f"write map renders {arrow_type} as {native!r}, but the "
+                    f"read map cannot map {native!r} to any arrow_type; "
                     f"a table this connector creates could not be read back "
                     f"by the same connector. Add a read rule for "
                     f"{native!r}.",
@@ -419,7 +368,7 @@ def check_type_map_round_trip(
             violations.append(
                 Violation(
                     CHECK_CONVERGENCE,
-                    f"{canonical} renders as {native!r} and reads back as "
+                    f"{arrow_type} renders as {native!r} and reads back as "
                     f"{recovered}, but the write map cannot render "
                     f"{recovered} ({err}); re-creating the same table would "
                     f"fail at DDL time.",
@@ -430,7 +379,7 @@ def check_type_map_round_trip(
             violations.append(
                 Violation(
                     CHECK_CONVERGENCE,
-                    f"{canonical} -> {native!r} -> {recovered} -> "
+                    f"{arrow_type} -> {native!r} -> {recovered} -> "
                     f"{second!r}: one write/read round does not reach a "
                     f"fixed point, so a re-created destination table changes "
                     f"its column types. Align the read rule for {native!r} "
@@ -442,7 +391,7 @@ def check_type_map_round_trip(
         violations.append(
             Violation(
                 CHECK_COVERAGE,
-                "the write map rendered none of the canonical probes; the "
+                "the write map rendered none of the arrow_type probes; the "
                 "round-trip check certified nothing. The map cannot render "
                 "even the basic scalar vocabulary (Int64, Utf8, ...) the "
                 "engine's DDL needs.",
