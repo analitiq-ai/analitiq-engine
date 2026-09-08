@@ -57,10 +57,16 @@ schema and `settings.py` respectively) and only their pairing lives here:
 
 Defaults for each are in `src/config/settings.py`, not repeated here.
 
-### Defaults outside `settings.py`
+### Environment inputs outside `settings.py`
 
-Three engine-owned defaults are declared outside `settings.py`, each for
-its own reason:
+This is the complete list of Python-side environment reads that do not
+go through `settings.py`, kept here — the one place, not README.md or
+any other doc — precisely because every prior attempt to state this list
+in two places let one of them go stale. Update this list, not a copy of
+it, when a new one is added.
+
+**Engine-owned defaults**, each declared outside `settings.py` for its
+own reason:
 
 - The runtime-archive download timeout lives in the standalone
   `src/runtime_archive.py` CLI, not in `settings.py`, because that script
@@ -77,9 +83,25 @@ its own reason:
   `StreamProcessor._emit_batch_metrics` / `_emit_stream_metrics`
   (`src/engine/stream_processor.py`), not through `settings.py`.
 
-None of the three is a gap to fix; `settings.py` is the catalogue for
-environment-overridable process defaults, not for every default the
-engine has.
+**Deployment/platform correlation identifiers** — not settings with a
+built-in default, but inputs the deployment supplies for run
+identification and log correlation, absent locally by design:
+
+- `RUN_ID` — the run's own identifier. `initialize_run_id`
+  (`src/shared/run_id.py`) honours one already set by the deployment;
+  otherwise it falls back to `AWS_BATCH_JOB_ID` if present, else
+  generates one. Once initialized it is read back via `get_run_id`
+  (same module) and `StateManager` (`src/state/state_manager.py`).
+- `AWS_BATCH_JOB_ID` — the AWS Batch-injected job id, the fallback source
+  for `RUN_ID` above when the deployment hasn't set one directly.
+- `INVOCATION_ID` — included in emitted logs only when set (cloud);
+  absent locally (`src/state/log_emitter.py`).
+- `ORG_ID` — tenant routing for emitted logs, same file; absent locally
+  defaults to `0`.
+
+Nothing above is a gap to fix; `settings.py` is the catalogue for
+environment-overridable *process defaults*, not for every environment
+input the engine reads.
 
 ## What is deliberately not centralised
 

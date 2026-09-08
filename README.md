@@ -231,17 +231,21 @@ for the full reference.
 ### Configuration and defaults
 
 Every Python-side engine default and its environment-variable override is
-declared once, in [`src/config/settings.py`](src/config/settings.py) —
-nothing here or in `docs/` repeats it. A handful of defaults live outside
-that file for their own reasons (documented, not a gap):
-[docs/config/settings-reference.md](docs/config/settings-reference.md#defaults-outside-settingspy)
-lists the Python-side exceptions; `CONFIG_BUNDLE` and `CONNECTORS_DIR`
-below are read by the shell entrypoint (`docker/entrypoint.sh`), before
-any Python runs, so they were never candidates for `settings.py` at all.
+declared once, in [`src/config/settings.py`](src/config/settings.py).
 Per-pipeline overrides go in the `runtime` block of
 `pipelines/{pipeline_id}/pipeline.json`; precedence and resolution order
 are specified in
 [docs/config/settings-reference.md](docs/config/settings-reference.md).
+
+The table below is a quick-start subset for local development, not the
+complete environment-variable list — it deliberately excludes
+deployment-injected correlation IDs (`RUN_ID`, `AWS_BATCH_JOB_ID`,
+`INVOCATION_ID`, `ORG_ID`) that a cloud run supplies rather than an
+operator setting. The one complete list, kept in one place so it can't go
+stale in two, is
+[docs/config/settings-reference.md](docs/config/settings-reference.md#environment-inputs-outside-settingspy)
+for everything outside `settings.py`, and `src/config/settings.py` itself
+for everything in it.
 
 ### Environment Variables
 
@@ -259,9 +263,10 @@ are specified in
 | `CONFIG_BUNDLE` | Read by `docker/entrypoint.sh`, before Python starts: a config archive (local path or URL) to hydrate into the container. Unset for local runs that bind-mount config directly |
 | `CONNECTORS_DIR` | Read by `docker/entrypoint.sh`; default `/app/connectors` |
 
-Defaults, the full setting list, and every other Python-side env var
-(gRPC, worker supervision, process role) are in
-[`src/config/settings.py`](src/config/settings.py).
+Defaults and every other `settings.py`-backed env var (gRPC, worker
+supervision, process role) are in
+[`src/config/settings.py`](src/config/settings.py); the handful that
+aren't are the ones named just above.
 
 Durable incremental cursors resume from per-stream
 `state/{pipeline_id}/{stream_id}.json` checkpoint files rather than an
