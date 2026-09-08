@@ -13,7 +13,7 @@ env var name and built-in default are declared once, beside its accessor.
 |---|---|---|
 | Engine + infrastructure defaults | `src/config/settings.py` | Every engine-owned setting, with its environment-variable override, declared once. |
 | Per-pipeline runtime override | `pipelines/{pipeline_id}/pipeline.json` -> `runtime` block | Overrides the *runtime-tuning* subset only (below) for one pipeline. |
-| Connector / formatter defaults | The connector package; the CDK's batch formatters under `cdk/cdk/formatters/` | Connector- and format-specific values (e.g. an API connector's incremental safety window, a formatter's compression). The engine stays connector-agnostic, so these are never centralised in engine settings. |
+| Connector / formatter defaults | The connector package; the CDK's batch formatters under `cdk/cdk/formatters/` | Connector- and format-specific values (e.g. an API connector's request timeout/retry policy, a formatter's compression). The engine stays connector-agnostic, so these are never centralised in engine settings. |
 
 ## Resolution order
 
@@ -59,8 +59,8 @@ Defaults for each are in `src/config/settings.py`, not repeated here.
 
 ### Defaults outside `settings.py`
 
-Two engine-owned defaults are declared outside `settings.py`, each for its
-own reason:
+Three engine-owned defaults are declared outside `settings.py`, each for
+its own reason:
 
 - The runtime-archive download timeout lives in the standalone
   `src/runtime_archive.py` CLI, not in `settings.py`, because that script
@@ -73,8 +73,11 @@ own reason:
   connector input — see
   [`source-config.md`](source-config.md#replication-semantics) — just
   declared beside its own model instead of in the settings catalogue.
+- `METRICS_ENABLED` (default `false`) is read directly by
+  `StreamProcessor._emit_batch_metrics` / `_emit_stream_metrics`
+  (`src/engine/stream_processor.py`), not through `settings.py`.
 
-Neither is a gap to fix; `settings.py` is the catalogue for
+None of the three is a gap to fix; `settings.py` is the catalogue for
 environment-overridable process defaults, not for every default the
 engine has.
 
