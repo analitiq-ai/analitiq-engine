@@ -768,4 +768,3 @@ The contract tier (no live database) certifies this document's surface:
 The live tier exercises the primitive end-to-end (all modes plus
 restart/replay) on systems that run as Docker service containers. Cloud
 warehouses are contract-tier-only; that is an accepted residual risk.
-
