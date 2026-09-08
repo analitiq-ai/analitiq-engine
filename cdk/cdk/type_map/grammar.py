@@ -17,7 +17,7 @@ The engine is the publisher of this vocabulary and the contract mirrors it,
 never the other way round.
 
 This module must stay importable without ``pyarrow``: the string-only
-control-plane surface validates canonical strings through it (see the
+control-plane surface validates arrow_type strings through it (see the
 thin-import tests), so the pyarrow bindings are declared by name and resolved
 in :mod:`cdk.type_map.arrow`, which is the only module that imports pyarrow.
 """

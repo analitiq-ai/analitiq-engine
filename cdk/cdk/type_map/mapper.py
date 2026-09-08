@@ -143,14 +143,14 @@ class TypeMapper:
 
         The inverse of :meth:`to_arrow_type`, fed by the connector's
         ``type-map-write.json``. ``params`` supplies per-column hints (e.g.
-        ``length``) that a rule's ``native`` template may reference via
-        ``${name}`` alongside any named captures from the canonical regex;
+        ``length``) that a rule's ``native_type`` template may reference via
+        ``${name}`` alongside any named captures from the arrow_type regex;
         named captures take precedence on a name clash. Hint values are rendered
         via ``str()``, so numeric hints (e.g. ``length=255``) are accepted. Raises
         :class:`InvalidTypeMapError` if this connector has no write-type-map
         loaded, or if the matched template references a token that neither the
         capture groups nor ``params`` provide; raises :class:`UnmappedTypeError`
-        (``direction="reverse"``) when no rule matches *canonical*.
+        (``direction="reverse"``) when no rule matches *arrow_type*.
         """
         if not self._write_rules:
             raise InvalidTypeMapError(

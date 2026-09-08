@@ -4,10 +4,10 @@ These implement the ``Discoverable`` contract (``cdk.contract``) as plain
 functions over a materialized ``ConnectionRuntime``. They run the dialect's
 ``INFORMATION_SCHEMA`` queries (``cdk.sql.dialects``) through the
 transport-agnostic executor (``cdk.sql.execution``) and map each native column
-type to its canonical Arrow string via the connection-scoped **read** type-map
+type to its ``arrow_type`` via the connection-scoped **read** type-map
 (``runtime.type_mapper_for(scope=CONNECTION)`` — connection rules first, the
 connector map filling the gaps; issue #368) — so a ``ColumnDef`` carries the
-canonical type ``create_table`` consumes downstream (ADR §6, CONFIRM-1), not
+``arrow_type`` ``create_table`` consumes downstream (ADR §6, CONFIRM-1), not
 the raw native string. Discovery introspects the connection's own database, so
 its objects are private endpoints by definition and the connection scope is
 inherent, not a caller choice.
@@ -80,10 +80,10 @@ async def list_tables(
 async def list_columns(
     runtime: Any, schema: str, table: str, *, dialect: SqlDialect, catalog: str = ""
 ) -> tuple[list[ColumnDef], list[str]]:
-    """Describe *table*: its columns (canonical types) and its primary keys.
+    """Describe *table*: its columns (each with an ``arrow_type``) and its primary keys.
 
     Returns ``(columns, primary_keys)``. Each column's native type is mapped
-    to its canonical Arrow string through the connection-scoped read type-map
+    to its ``arrow_type`` through the connection-scoped read type-map
     — the connection's own rules first, the connector map on a miss — so a
     connection-authored rule for a native outside the connector's vocabulary
     (a pgvector ``vector(N)``, a custom domain) resolves here exactly as it

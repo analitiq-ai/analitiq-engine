@@ -1299,7 +1299,7 @@ class GenericSQLConnector(BaseDestinationHandler):
     def _build_column_defs(self, state: _StreamState) -> list[ColumnDef]:
         """Contract endpoint columns -> ColumnDefs for the shared DDL builder.
 
-        Each column's canonical Arrow type is the document's stored
+        Each column's ``arrow_type`` is the document's stored
         ``arrow_type`` — the same declaration ``SchemaContract`` casts
         incoming batches with, so DDL and cast share one source of truth
         (issue #349). The builder renders it through the WRITE map for this

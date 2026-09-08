@@ -1,6 +1,6 @@
 """Type-map stability under a write/read round trip.
 
-First-run DDL renders a stream's arrow_type types through the write map;
+First-run DDL renders a stream's arrow_types through the write map;
 discovery reads the created table's native types back through the read
 map. Widening on that round is physically unavoidable — most systems
 have no unsigned or 8-bit integers, so ``Int8 -> SMALLINT`` correctly
