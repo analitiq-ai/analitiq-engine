@@ -163,11 +163,15 @@ The destination never parses the cursor; the engine controls its semantics (time
 Idempotency is a protocol design choice, enforced at the destination on
 **row identity**, never batch position: `batch_seq` is a monotonic
 ordering/log sequence per stream within a run, never a dedup key, and
-neither are `run_id`/`stream_id`. This survives a network failure that
-drops the ACK after the destination already wrote — the engine retries,
-row identity dedups, and no duplicate data lands. Per-handler mechanics
-(which write mode dedups how, and which report at-least-once) are
-specified in [destination-config.md](../config/destination-config.md#idempotency);
+neither are `run_id`/`stream_id`. For a handler and mode that enforces
+row identity, this survives a network failure that drops the ACK after
+the destination already wrote — the engine retries, row identity dedups,
+and no duplicate data lands. Not every handler enforces it: API `insert`
+without a declared idempotency block and the append phase of SQL
+`truncate_insert` have no identity to dedup on and report at-least-once,
+so an ACK lost there means the retry's rows land again. Per-handler
+mechanics (which write mode dedups how, and which report at-least-once)
+are specified in [destination-config.md](../config/destination-config.md#idempotency);
 this section covers only what is a property of the *protocol*, not of any
 one handler.
 

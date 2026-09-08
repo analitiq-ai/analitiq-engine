@@ -59,16 +59,29 @@ Defaults for each are in `src/config/settings.py`, not repeated here.
 
 ### Environment inputs outside `settings.py`
 
-This is the complete list of Python-side environment reads that
-**configure application behavior** and do not go through `settings.py`,
-kept here — the one place, not README.md or any other doc — precisely
-because every prior attempt to state this list in two places let one of
-them go stale. Update this list, not a copy of it, when a new one is
-added. Explicitly out of scope: generic subprocess-environment
-forwarding when the worker is spawned (`PATH`, `HOME`, `LANG` in
-`src/worker/spawn.py::_clean_env`) — inherited shell environment for the
-interpreter to run at all, not application configuration, and not
-enumerable the way a deliberate input is.
+This document's scope is **settings** — inputs with a built-in default
+`settings.py` can be asked for. That boundary, not "every environment
+variable the codebase reads," is what makes the list below actually
+closed; a broader claim has failed to stay accurate across several
+revisions of this section, because "every environment read anywhere"
+grows every time the codebase does. Two kinds of input are real
+environment reads but are not settings, and are excluded on purpose
+rather than missing by omission:
+
+- **Required inputs with no default** — `PIPELINE_ID` above all: there is
+  no fallback value to ask `settings.py` for, so it was never a candidate
+  for this list. It's in [README.md](../../README.md#environment-variables)'s
+  quick-start table instead.
+- **Generic subprocess-environment forwarding** — `PATH`, `HOME`, `LANG`
+  in `src/worker/spawn.py::_clean_env`: inherited shell environment for
+  the interpreter to run at all, not application configuration.
+
+What follows is the complete list of settings-shaped inputs declared
+outside `settings.py` — engine-owned defaults, platform-supplied
+correlation identifiers, and the two worker-bootstrap inputs that
+determine whether an attach-time connector is importable — kept here and
+only here so it can't go stale in two places. This document does not
+attempt a broader inventory than that.
 
 **Engine-owned defaults**, each declared outside `settings.py` for its
 own reason:

@@ -5,14 +5,14 @@
 resolution. It is not the schema reference: the authoritative field-level
 shape of every document named below is the published JSON Schema at
 `https://schemas.analitiq.ai/<document-type>/latest.json` — the document
-types this doc names are `connector`, `connection`, `api-endpoint`, and
-the database-endpoint schema — generated from the Pydantic contract
-models the Connector Builder / Pipeline Builder plugins author — and the
-CDK's own Pydantic models where a document is engine-internal. This
-document exists because the schema alone doesn't carry *why* a field
-resolves the way it does; where this doc and the schema could both state
-a fact, the schema wins and this doc points at it instead of repeating
-it.
+types this doc names are `pipeline`, `stream`, `connector`, `connection`,
+`api-endpoint`, and `database-endpoint` — generated from the Pydantic
+contract models the Connector Builder / Pipeline Builder plugins author —
+and the CDK's own Pydantic models where a document is engine-internal.
+This document exists because the schema alone doesn't carry *why* a
+field resolves the way it does; where this doc and the schema could both
+state a fact, the schema wins and this doc points at it instead of
+repeating it.
 
 For the rest see the siblings: the engine pipeline in
 [`engine-architecture.md`](../architecture/engine-architecture.md), field
