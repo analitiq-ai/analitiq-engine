@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from ._param_validation import require_enum_param, require_list_param, require_str_param
+from .decoders import EPOCH_UNITS as _READ_EPOCH_UNITS
 from .exceptions import InvalidTypeMapError
 from .grammar import ConversionKind
 
@@ -34,18 +35,21 @@ from .grammar import ConversionKind
 #: :data:`cdk.type_map.decoders.CODE_ENCODING_NAME` on the read side.
 CODE_ENCODING_NAME: Final[str] = "code"
 
-_EPOCH_UNITS: Final[tuple[str, ...]] = (
-    "SECOND",
-    "MILLISECOND",
-    "MICROSECOND",
-    "NANOSECOND",
-)
+#: The write-side unit vocabulary: the same base units
+#: :data:`cdk.type_map.decoders.EPOCH_UNITS` declares, minus ``"DAY"`` --
+#: ``_encode_epoch`` only ever receives a ``datetime`` (never a bare
+#: ``date``), so a day-count unit has no value to render here. Derived from
+#: the read side's list rather than re-declared, so the two vocabularies
+#: cannot drift on the four units they do share.
+_EPOCH_UNITS: Final[tuple[str, ...]] = tuple(u for u in _READ_EPOCH_UNITS if u != "DAY")
 
-_UNIT_MICROS: Final[dict[str, int]] = {
-    "SECOND": 1_000_000,
-    "MILLISECOND": 1_000,
-    "MICROSECOND": 1,
-    "NANOSECOND": 1,  # sub-microsecond precision is not carried by datetime
+#: Nanoseconds per unit, the common resolution every unit divides evenly --
+#: including ``NANOSECOND`` itself, so no unit needs a special-cased branch.
+_UNIT_NANOS: Final[dict[str, int]] = {
+    "SECOND": 1_000_000_000,
+    "MILLISECOND": 1_000_000,
+    "MICROSECOND": 1_000,
+    "NANOSECOND": 1,
 }
 
 _UNIX_EPOCH: Final[datetime] = datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -92,7 +96,7 @@ def _encode_strftime(config: Mapping[str, Any]) -> Callable[[Any], Any]:
 
 def _encode_epoch(config: Mapping[str, Any]) -> Callable[[Any], Any]:
     unit = require_enum_param(config, "unit", _EPOCH_UNITS, "encoding_write 'epoch'")
-    micros_per_unit = _UNIT_MICROS[unit]
+    nanos_per_unit = _UNIT_NANOS[unit]
 
     def encode(value: Any) -> int:
         if not isinstance(value, datetime):
@@ -101,10 +105,14 @@ def _encode_epoch(config: Mapping[str, Any]) -> Callable[[Any], Any]:
                 f"got {type(value).__name__}"
             )
         delta = _as_utc(value) - _UNIX_EPOCH
-        total_micros = (
+        # datetime carries microsecond precision; scaled to nanoseconds
+        # before dividing so NANOSECOND (nanos_per_unit == 1) returns the
+        # true tick count rather than the microsecond count relabeled --
+        # every coarser unit divides this same nanosecond total evenly.
+        total_nanos = (
             delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds
-        )
-        return total_micros // micros_per_unit
+        ) * 1000
+        return total_nanos // nanos_per_unit
 
     return encode
 

@@ -175,13 +175,9 @@ test("a path absent at the base ref is reported as added, not compared", () => {
     git(dir, ["add", "-A"]);
     git(dir, ["commit", "-qm", "no artifacts yet"]);
     const base = git(dir, ["rev-parse", "HEAD"]).trim();
+    writeAllArtifacts(dir, "1.0.0");
     writeFileSync(join(dir, "cdk", "cdk", "type_map", "conversion_matrix.json"), artifact("2.0.0", {}));
     writeFileSync(join(dir, "cdk", "cdk", "type_map", "arrow_type_grammar.json"), artifact("1.1.0", {}));
-    for (const file of MAIN_CHANNEL_FILES) {
-      if (file !== "conversion_matrix.json" && file !== "arrow_type_grammar.json") {
-        writeFileSync(join(dir, "cdk", "cdk", "type_map", file), artifact("1.0.0", {}));
-      }
-    }
     const out = runCli(cli, base);
     assert.match(out, /conversion-matrix absent in .* added here at v2\.0\.0 \(not compared\)/);
     assert.match(out, /arrow-type-grammar absent in .* added here at v1\.1\.0 \(not compared\)/);

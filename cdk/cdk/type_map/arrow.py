@@ -484,9 +484,6 @@ def _decode_strptime(config: Mapping[str, Any]) -> DecodeFn:
     return decode
 
 
-_REGEX_EPOCH_RE_CACHE: Final[dict[str, re.Pattern[str]]] = {}
-
-
 def _decode_regex_epoch(config: Mapping[str, Any]) -> DecodeFn:
     """Extract epoch ticks from a wrapper string via a capturing regex.
 
@@ -498,7 +495,10 @@ def _decode_regex_epoch(config: Mapping[str, Any]) -> DecodeFn:
     """
     pattern = require_str_param(config, "pattern", "encoding 'regex_epoch'")
     unit = require_enum_param(config, "unit", EPOCH_UNITS, "encoding 'regex_epoch'")
-    compiled = _REGEX_EPOCH_RE_CACHE.setdefault(pattern, re.compile(pattern))
+    # re.compile has its own bounded, process-wide cache for repeated
+    # patterns; a second one here would only add unbounded growth with no
+    # eviction, for a factory called once per column build, not per row.
+    compiled = re.compile(pattern)
     if compiled.groups != 1:
         raise InvalidTypeMapError(
             f"encoding 'regex_epoch' pattern {pattern!r} must declare exactly "
@@ -597,6 +597,15 @@ def _decode_base64(_config: Mapping[str, Any]) -> DecodeFn:
 #: ``PnW`` or ``PnDTnHnMnS`` -- weeks (exclusive per ISO-8601), or days and
 #: clock components. Calendar years/months are deliberately unsupported: a
 #: Duration is a fixed physical length, and a month has none.
+#:
+#: Hand-rolled rather than the ``isoduration`` package (present in this
+#: environment only as a transitive extra of ``jsonschema[format-nongpl]``,
+#: not a declared CDK dependency): its parser accepts the full grammar,
+#: calendar Y/M included, and returns its own ``Duration`` dataclass rather
+#: than a ``datetime.timedelta`` -- a caller would still have to reject Y/M
+#: and convert the result by hand, which is most of what this regex does
+#: directly, without adding a dependency for one decoder in an eight-entry
+#: catalog.
 _ISO_DURATION_RE: Final[re.Pattern[str]] = re.compile(
     r"^P(?:(?P<weeks>\d+)W)$"
     r"|"
