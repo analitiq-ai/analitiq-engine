@@ -39,7 +39,7 @@ def ccvp() -> ModuleType:
 def _fake_pin_test_module(pins: dict[str, str]) -> ModuleType:
     """A stand-in for the loaded ``test_contract_pin_agreement`` module."""
     module = ModuleType("fake_pin_test_module")
-    module._application_pins = lambda package: {  # type: ignore[attr-defined]
+    module.application_pins = lambda package: {  # type: ignore[attr-defined]
         Path(name): version for name, version in pins.items()
     }
     return module

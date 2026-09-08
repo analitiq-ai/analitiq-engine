@@ -94,7 +94,7 @@ def _pins(package: str) -> dict[Path, str]:
     return pins
 
 
-def _application_pins(package: str) -> dict[Path, str]:
+def application_pins(package: str) -> dict[Path, str]:
     """What each manifest that is not the library declares for *package*."""
     return {
         path: requirement
@@ -107,7 +107,7 @@ def _application_pins(package: str) -> dict[Path, str]:
 def test_every_application_manifest_pins_the_same_contract_version(
     package: str,
 ) -> None:
-    pins = _application_pins(package)
+    pins = application_pins(package)
     assert pins, (
         f"no application manifest pins {package}; the engine validates "
         f"artifacts against it, so some manifest must name a version"
@@ -135,7 +135,7 @@ def test_every_application_manifest_pins_the_same_contract_version(
 def test_contract_packages_are_pinned_together() -> None:
     """The validator pins the models exactly, so they move as a pair."""
     versions = {
-        package: set(_application_pins(package).values())
+        package: set(application_pins(package).values())
         for package in CONTRACT_PACKAGES
     }
     assert len(set().union(*versions.values())) == 1, (
@@ -158,7 +158,7 @@ def test_the_library_range_admits_the_application_pin() -> None:
         f"{LIBRARY_MANIFEST} declares no {package}; the CDK reads endpoint "
         f"documents as contract models, so it must depend on them"
     )
-    (pinned,) = set(_application_pins(package).values())
+    (pinned,) = set(application_pins(package).values())
     try:
         admitted = SpecifierSet(declared)
     except InvalidSpecifier:

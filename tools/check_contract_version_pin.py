@@ -44,7 +44,8 @@ def _load_pin_test_module() -> ModuleType:
     spec = importlib.util.spec_from_file_location(
         "contract_pin_agreement_under_test", PIN_TEST_MODULE_PATH
     )
-    assert spec is not None and spec.loader is not None
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load a module spec for {PIN_TEST_MODULE_PATH}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -57,7 +58,7 @@ def local_pin(pin_test_module: ModuleType) -> str:
     read "this repo's pin" the same way and cannot silently diverge on what
     that means.
     """
-    pins = pin_test_module._application_pins(PACKAGE)
+    pins = pin_test_module.application_pins(PACKAGE)
     versions = set(pins.values())
     if len(versions) != 1:
         raise RuntimeError(
