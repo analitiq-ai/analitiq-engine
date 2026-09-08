@@ -63,6 +63,15 @@ analitiq-contract-models = { version = ">=1.0.0rc24,<2", allow-prereleases = tru
 # identical reason on the SQL side: the kit compiles a read without a
 # database, and it must compile it the way the engine does.
 yarl = "^1.20"
+# Core: cdk.type_map matches connector-authored regex patterns (untrusted,
+# AI-authored input) against native-type strings, and type_map is core
+# surface -- reachable with no extras installed at all. re2 is automaton-
+# based and cannot backtrack, so match time is bounded linearly in input
+# length for any pattern it accepts; stdlib `re` backtracks and can go
+# exponential on an adversarial nested-quantifier pattern regardless of
+# which constructs are excluded from it. Ships a prebuilt manylinux/glibc
+# wheel for this package's floor Python -- no source build.
+google-re2 = "^1.1"
 # Optional: Arrow columnar read/write (read_batches / write_batch, schema
 # casting, the ADBC reader, the DDL type renderers).
 #

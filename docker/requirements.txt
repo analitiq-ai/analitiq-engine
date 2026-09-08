@@ -13,6 +13,7 @@ arrow==1.4.0 ; python_version >= "3.11" and python_version < "4.0"
 attrs==26.1.0 ; python_version >= "3.11" and python_version < "4.0"
 fqdn==1.5.1 ; python_version >= "3.11" and python_version < "4.0"
 frozenlist==1.8.0 ; python_version >= "3.11" and python_version < "4.0"
+google-re2==1.1.20251105 ; python_version >= "3.11" and python_version < "4.0"
 greenlet==3.5.5 ; python_version >= "3.11" and python_version < "4.0" and (platform_machine == "aarch64" or platform_machine == "ppc64le" or platform_machine == "x86_64" or platform_machine == "amd64" or platform_machine == "AMD64" or platform_machine == "win32" or platform_machine == "WIN32")
 grpcio==1.83.1 ; python_version >= "3.11" and python_version < "4.0"
 idna==3.19 ; python_version >= "3.11" and python_version < "4.0"

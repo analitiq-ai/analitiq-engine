@@ -20,20 +20,31 @@ refuse to execute:
 - The contract permits any ECMA-262 matcher. This engine additionally requires
   the RE2 subset -- no lookahead ``(?=…)`` / ``(?!…)``, no lookbehind
   ``(?<=…)`` / ``(?<!…)``, no atomic groups ``(?>…)``, no numeric ``\1``..``\9``
-  or named ``\k<name>`` / ``(?P=name)`` backreferences.
+  or named ``\k<name>`` / ``(?P=name)`` backreferences. RE2 refuses to compile
+  every one of these constructs itself, so this list is redundant with RE2's
+  own parser -- kept only so an author sees "unsupported construct
+  (lookahead)" instead of RE2's raw parse error.
+- A ``native_type``/``arrow_type`` regex is compiled and matched with
+  ``google-re2``, not Python's backtracking ``re`` (:func:`compile_pattern`,
+  used both here to verify the pattern actually compiles under RE2 and by
+  :class:`~cdk.type_map.mapper.TypeMapper` for the runtime match). RE2 is
+  automaton-based and cannot backtrack, so match time is bounded linearly in
+  input length for any pattern it accepts, regardless of quantifier nesting --
+  a structural guarantee, not a filtered syntax list: ``^(A+)+B$`` has none of
+  the forbidden constructs above and still ran in time exponential in input
+  length under Python's ``re`` (#504).
+- ``(?<name>…)`` is rewritten to Python's ``(?P<name>…)`` so the compiled
+  pattern works with ``re2``'s ``fullmatch`` (RE2 uses the same named-group
+  syntax as Python's ``re``).
 
-  What that buys is **portability**, not safety: those are the constructs RE2
-  cannot express, so excluding them keeps a pattern meaning the same thing in
-  every engine that reads these documents. It does NOT bound match time here,
-  because this engine matches with Python's backtracking ``re`` rather than
-  with RE2 -- ``^(A+)+B$`` is inside the subset and still runs exponentially.
-  Bounding match time is #504.
-
-  Portability is a document-validity property every consumer wants, so this
-  check is engine-owned by accident and should move to the contract; #504
-  carries that half too.
-- ``(?<name>…)`` is rewritten to Python's ``(?P<name>…)`` so the compiled pattern
-  works with ``re.fullmatch``.
+RE2 patterns also differ from Python's in ways with no dedicated check here,
+because they only narrow what an already-contract-valid pattern matches
+rather than introducing a new hazard (verified against the installed
+``google-re2``): ``\d``/``\w`` match ASCII digits/word characters only, never
+a Unicode category (Python's do); ``$`` requires true end of string, where
+Python's also accepts a position just before one trailing newline; and
+``\Z`` is not accepted at all (RE2 spells the equivalent ``\z``). A pattern
+relying on any of these fails loud, at compile or at match time.
 
 Two further checks sit here because this process is the one that *renders*:
 
@@ -61,8 +72,9 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from re import Pattern
-from typing import Any, Final
+from typing import Any, Final, Protocol, cast
 
+import re2
 from analitiq.contracts.type_map import (
     TypeMapReadDoc,
     TypeMapReadExactRule,
@@ -89,6 +101,7 @@ _READ_RULE_CLASSES: Final[tuple[type, ...]] = (
 )
 
 __all__ = [
+    "CompiledPattern",
     "TypeMapReadRule",
     "TypeMapWriteRule",
     "compile_pattern",
@@ -99,6 +112,41 @@ __all__ = [
     "parse_write_rules",
 ]
 
+
+class _PatternMatch(Protocol):
+    """What :class:`CompiledPattern` returns from a successful match.
+
+    ``groupdict()`` gives ``None`` for a named group that exists in the
+    pattern but did not participate in this particular match (an optional
+    group, e.g. ``(?:,(?<s>\\d+))?``, when the input omits it) -- the same
+    semantics as stdlib ``re.Match.groupdict()``.
+    """
+
+    def groupdict(self) -> dict[str, str | None]:
+        ...
+
+
+class CompiledPattern(Protocol):
+    """Structural type for a compiled connector-authored regex.
+
+    ``re2`` ships no public type for its compiled-pattern object (its
+    docstring calls itself "a drop-in replacement for the re module" and
+    exposes no stub), so this names the one member :class:`TypeMapper`
+    (``mapper.py``) actually uses rather than typing it as ``Any``.
+    """
+
+    def fullmatch(self, string: str) -> _PatternMatch | None:
+        ...
+
+
+# RE2 logs every compile failure to raw process stderr by default (its
+# `log_errors` option), bypassing this engine's own logging entirely -- a
+# connector document with a bad pattern would otherwise dump an uncontrolled
+# C++ log line to the container's stderr before the clean InvalidTypeMapError
+# below is raised. Verified: this suppresses that output completely.
+_RE2_OPTIONS: Final = re2.Options()
+_RE2_OPTIONS.log_errors = False
+
 _NAMED_GROUP_RE2: Final[Pattern[str]] = re.compile(r"\(\?<([A-Za-z_][A-Za-z0-9_]*)>")
 # The one substitution token the renderer recognises. Shared with the mapper so
 # what validates and what renders can never drift apart.
@@ -108,8 +156,9 @@ _SUBSTITUTION_TOKEN: Final[Pattern[str]] = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9
 # would otherwise survive into the emitted DDL exactly like a malformed name.
 _PLACEHOLDER_OPENER: Final[Pattern[str]] = re.compile(r"\$\s*\{")
 
-# RE2 excludes these Perl/Python extensions: each one admits input on which
-# Python's backtracking engine runs in super-linear time.
+# RE2 refuses to compile every one of these constructs itself; kept here too
+# only so an author sees "unsupported construct (lookahead)" instead of RE2's
+# raw parse error.
 _FORBIDDEN_CONSTRUCTS: Final[tuple[tuple[str, str], ...]] = (
     ("(?=", "lookahead"),
     ("(?!", "negative lookahead"),
@@ -263,11 +312,15 @@ def normalized_native(rule: TypeMapReadRule) -> str:
     return normalize_native_type(rule.native_type)
 
 
-def compile_pattern(rule: TypeMapReadRule | TypeMapWriteRule) -> Pattern[str]:
+def compile_pattern(rule: TypeMapReadRule | TypeMapWriteRule) -> CompiledPattern:
     r"""Compile a regex rule's matcher for forward matching.
 
     The matcher is the ``native_type`` on a read rule and the ``arrow_type`` on a
     write rule -- each direction matches on what the other renders.
+
+    Compiled with ``re2``, not stdlib ``re``: this pattern is connector-
+    authored, untrusted input, and RE2's linear-time guarantee is what bounds
+    match time against an adversarial native-type/arrow-type string (#504).
 
     Read inputs are normalized to uppercase before matching, so literal
     characters in a read pattern must be authored in uppercase too; the pattern
@@ -280,7 +333,10 @@ def compile_pattern(rule: TypeMapReadRule | TypeMapWriteRule) -> Pattern[str]:
     matcher = (
         rule.native_type if isinstance(rule, _READ_RULE_CLASSES) else rule.arrow_type
     )
-    return re.compile(_to_python_named_groups(matcher))
+    return cast(
+        CompiledPattern,
+        re2.compile(_to_python_named_groups(matcher), options=_RE2_OPTIONS),
+    )
 
 
 def _assert_well_formed_placeholders(template: str, *, where: str, field: str) -> None:
@@ -324,14 +380,24 @@ def _assert_executable(rule: TypeMapReadRule | TypeMapWriteRule, *, where: str) 
     if rule.match != "regex":
         return
     matcher = rule.native_type if is_read else rule.arrow_type
-    # Compilability is already settled: the contract compiled this same matcher
-    # in _compile_ecma_matcher before we got here, and the RE2 subset admits no
-    # construct that survives that and then fails Python's compiler. Only the
-    # subset itself is still ours to decide.
+    # Compilability under Python's stdlib `re` is already settled: the
+    # contract compiled this same matcher in _compile_ecma_matcher before we
+    # got here, and the RE2 subset admits no construct that survives that and
+    # then fails Python's compiler. RE2 is a stricter engine, not a superset
+    # (#504) -- compilability under RE2 is settled by neither check, so it is
+    # verified here too: a pattern this process cannot compile with the
+    # engine that will actually match it must fail loud now, not with a raw
+    # error the first time a connector using it is loaded into a mapper.
     try:
         _assert_re2_subset(matcher)
     except InvalidTypeMapError as err:
         raise InvalidTypeMapError(f"{where}: {err}") from err
+    try:
+        compile_pattern(rule)
+    except re2.error as err:
+        raise InvalidTypeMapError(
+            f"{where}: regex pattern {matcher!r} failed to compile: {err}"
+        ) from err
 
 
 def _render_validation_error(err: ValidationError, *, source: str) -> str:

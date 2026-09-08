@@ -71,6 +71,16 @@ pydantic = "^2.0.0"
 # cdk[api]` cannot be imported at all.
 jsonschema = {version = "^4.25", extras = ["format-nongpl"]}
 
+# Matches every connector-authored regex pattern this engine executes
+# (type-map native_type/arrow_type rules, API param.pattern): both are
+# untrusted, AI-authored input, and RE2 is automaton-based, so match time is
+# bounded linearly in input length for any pattern it accepts -- unlike
+# stdlib `re`, which backtracks and can go exponential on an adversarial
+# nested-quantifier pattern regardless of which constructs are excluded from
+# it (#504). Ships a prebuilt manylinux/glibc wheel for the floor Python this
+# project supports, matching the Docker base image -- no source build.
+google-re2 = "^1.1"
+
 # Published Analitiq contract packages (PyPI). The engine validates on-disk
 # artifacts against these offline, so it never fetches a schema at runtime:
 #   - contract-models: the single source of artifact shape
@@ -245,6 +255,7 @@ module = [
     "google.protobuf.*",
     "pyarrow.*",
     "dateutil.*",
+    "re2.*",
 ]
 ignore_missing_imports = true
 

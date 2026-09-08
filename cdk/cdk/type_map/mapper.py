@@ -12,12 +12,12 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from re import Pattern
 from typing import Any
 
 from .exceptions import InvalidTypeMapError, UnmappedTypeError
 from .rules import (
     _SUBSTITUTION_TOKEN,
+    CompiledPattern,
     TypeMapReadRule,
     TypeMapWriteRule,
     compile_pattern,
@@ -52,7 +52,7 @@ class TypeMapper:
 
         # Precompute one match artefact per rule: either the normalized
         # literal (exact) or the compiled pattern (regex).
-        self._compiled: list[Pattern[str] | None] = []
+        self._compiled: list[CompiledPattern | None] = []
         self._exact_native: list[str | None] = []
         for rule in self._rules:
             if rule.match == "exact":
@@ -67,7 +67,7 @@ class TypeMapper:
         # read side: exact rules keep their normalized literal, regex rules a
         # compiled pattern.
         self._write_rules: tuple[TypeMapWriteRule, ...] = tuple(write_rules or ())
-        self._write_compiled: list[Pattern[str] | None] = []
+        self._write_compiled: list[CompiledPattern | None] = []
         self._exact_arrow: list[str | None] = []
         for write_rule in self._write_rules:
             if write_rule.match == "exact":
@@ -133,7 +133,15 @@ class TypeMapper:
             match = compiled.fullmatch(normalized)
             if match is None:
                 continue
-            return _substitute_tokens(rule.arrow_type, match.groupdict())
+            # Drop optional groups that did not participate (groupdict gives
+            # them None), symmetrically with the write side below. Without
+            # this, a non-participating capture used as a token reached
+            # re.sub() as None: re.sub() silently treats a None return as an
+            # empty string, so the token vanished from the rendered type
+            # instead of raising -- filtering it here makes the lookup below
+            # miss and raise the same InvalidTypeMapError as everywhere else.
+            captures = {k: v for k, v in match.groupdict().items() if v is not None}
+            return _substitute_tokens(rule.arrow_type, captures)
         raise UnmappedTypeError(self._slug, "forward", native)
 
     def to_native_type(

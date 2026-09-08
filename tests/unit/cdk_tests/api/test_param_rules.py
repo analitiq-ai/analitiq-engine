@@ -12,6 +12,7 @@ a declaration, judging a value against it, and the number model that lets a
 from __future__ import annotations
 
 import decimal
+import time
 from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any
@@ -512,3 +513,109 @@ class TestAnIntervalThatAdmitsNothing:
             }
         )
         rules.check_admissible({"p": 5.0})
+
+
+class TestPatternMatchesWithRE2:
+    """#504: ``pattern`` is connector-authored, untrusted input, matched with
+    ``re2`` instead of ``jsonschema``'s default (backtracking ``re``) -- both
+    at compile (:func:`cdk.api.param_rules._keyword_defect`) and at every
+    admitted request value (the ``_re2_pattern`` override on ``_VALIDATOR``).
+    """
+
+    def test_an_ordinary_pattern_admits_a_matching_value(self) -> None:
+        rules = _rules(
+            {
+                "id": {
+                    "in": "query",
+                    "type": "string",
+                    "required": False,
+                    "pattern": r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                }
+            }
+        )
+        rules.check_admissible({"id": "2024-01-31"})
+
+    def test_an_ordinary_pattern_refuses_a_non_matching_value(self) -> None:
+        rules = _rules(
+            {
+                "id": {
+                    "in": "query",
+                    "type": "string",
+                    "required": False,
+                    "pattern": r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                }
+            }
+        )
+        with pytest.raises(RequestSpecError):
+            rules.check_admissible({"id": "not-a-date"})
+
+    def test_a_lookahead_pattern_is_refused_by_re2_at_compile(self) -> None:
+        # `^[` is refused equally by stdlib `re` and `re2` and proves nothing
+        # about which engine is actually wired here. A lookahead compiles
+        # fine under stdlib `re` and is refused by `re2` -- so this fails
+        # only if `re2.compile` is the engine actually running at this site.
+        with pytest.raises(RequestSpecError, match="not a valid regular expression"):
+            _rules(
+                {
+                    "id": {
+                        "in": "query",
+                        "type": "string",
+                        "required": False,
+                        "pattern": r"^NUM(?=BER)",
+                    }
+                }
+            )
+
+    def test_an_unparsable_pattern_is_refused_at_compile(self) -> None:
+        with pytest.raises(RequestSpecError, match="not a valid regular expression"):
+            _rules(
+                {
+                    "id": {
+                        "in": "query",
+                        "type": "string",
+                        "required": False,
+                        "pattern": "^[",
+                    }
+                }
+            )
+
+    def test_nested_quantifier_pattern_bounded_at_runtime_match(self) -> None:
+        # No lookahead, lookbehind, or backreference, so nothing here refuses
+        # it at compile -- the runtime match is what must bound it (#504).
+        rules = _rules(
+            {
+                "id": {
+                    "in": "query",
+                    "type": "string",
+                    "required": False,
+                    "pattern": r"^(A+)+B$",
+                }
+            }
+        )
+        # Measured directly against stdlib `re.fullmatch` on this exact
+        # pattern: 30 chars takes ~33s -- long enough to fail this assertion
+        # unmistakably on a regression, short enough that a regression still
+        # fails the test run rather than hanging the CI job for hours.
+        adversarial = "A" * 30
+        start = time.perf_counter()
+        with pytest.raises(RequestSpecError):
+            rules.check_admissible({"id": adversarial})
+        elapsed = time.perf_counter() - start
+        assert elapsed < 1.0, (
+            f"nested-quantifier match took {elapsed:.3f}s for 30 chars; "
+            f"expected linear-time (RE2), not exponential (backtracking re)"
+        )
+
+    def test_nested_quantifier_pattern_still_admits_a_matching_value(self) -> None:
+        # The bound above must not come from refusing to match at all.
+        rules = _rules(
+            {
+                "id": {
+                    "in": "query",
+                    "type": "string",
+                    "required": False,
+                    "pattern": r"^(A+)+B$",
+                }
+            }
+        )
+        rules.check_admissible({"id": "A" * 20 + "B"})
