@@ -14,6 +14,7 @@ Covers every acceptance bullet from GH #28:
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -136,6 +137,16 @@ class TestReadRuleValidation:
         declared = {label for _token, label in _FORBIDDEN_CONSTRUCTS}
         covered = {construct for construct, _pattern in _NON_RE2_PATTERNS}
         assert declared <= covered, f"untested constructs: {sorted(declared - covered)}"
+
+    def test_a_re2_incompatible_pattern_outside_the_blocklist_is_refused(self):
+        # #504: \Z is not in _FORBIDDEN_CONSTRUCTS (Python compiles it fine)
+        # but RE2 refuses to compile it (RE2 spells the equivalent \z) --
+        # so this fails only if _assert_executable actually compiles the
+        # pattern with re2, not just checks it against the blocklist.
+        with pytest.raises(InvalidTypeMapError, match="failed to compile"):
+            _parse_read(
+                {"match": "regex", "native_type": r"^FOO\Z", "arrow_type": "Utf8"}
+            )
 
     def test_regex_rule_rejects_missing_named_capture(self):
         with pytest.raises(InvalidTypeMapError, match=r"no matching \(\?<p>"):
@@ -322,6 +333,96 @@ class TestTypeMapperRegex:
         )
         assert m.to_arrow_type("VARCHAR(50)") == "Utf8"
         assert m.to_arrow_type("varchar(1024)") == "Utf8"
+
+    def test_absent_optional_capture_raises_instead_of_rendering_none(self):
+        # The read side has no per-column hint to fall back on (unlike the
+        # write side's params=), so a non-participating optional capture
+        # referenced by a token must raise, not silently render "None" or
+        # crash inside re.sub().
+        m = _mapper(
+            [
+                {
+                    "match": "regex",
+                    "native_type": r"^NUM(?:\((?<p>[1-9]|[12][0-9]|3[0-8])\))?$",
+                    "arrow_type": "Decimal128(${p}, 0)",
+                }
+            ]
+        )
+        # Group present -> capture wins.
+        assert m.to_arrow_type("NUM(10)") == "Decimal128(10, 0)"
+        # Group absent -> raise, not "Decimal128(, 0)" or a crash.
+        with pytest.raises(InvalidTypeMapError, match="render hint"):
+            m.to_arrow_type("NUM")
+
+
+class TestTypeMapperReDoSBound:
+    """#504: a nested-quantifier native_type pattern must not go super-linear.
+
+    ``^(A+)+B$`` has no lookahead, lookbehind, atomic group, or
+    backreference, so it passes the RE2-subset blocklist -- and under
+    Python's backtracking ``re`` it still runs in time exponential in input
+    length on an input with no trailing ``B`` (nothing to anchor the
+    backtrack search). The runtime lookup (:meth:`TypeMapper.to_arrow_type`)
+    must bound this, not just the load-time compile.
+    """
+
+    def test_nested_quantifier_bounded_at_runtime_lookup(self):
+        m = _mapper(
+            [{"match": "regex", "native_type": r"^(A+)+B$", "arrow_type": "Utf8"}]
+        )
+        # Measured directly against stdlib `re.fullmatch` on this exact
+        # pattern: 30 chars takes ~33s (roughly doubling per character in
+        # this range) -- long enough to fail this assertion unmistakably on
+        # a regression, short enough that a regression still fails the test
+        # run rather than hanging the CI job for hours.
+        adversarial = "A" * 30
+        start = time.perf_counter()
+        with pytest.raises(UnmappedTypeError):
+            m.to_arrow_type(adversarial)
+        elapsed = time.perf_counter() - start
+        assert elapsed < 1.0, (
+            f"nested-quantifier match took {elapsed:.3f}s for 30 chars; "
+            f"expected linear-time (RE2), not exponential (backtracking re)"
+        )
+
+    def test_nested_quantifier_still_matches_admissible_input(self):
+        # The bound above must not come from refusing to match at all.
+        m = _mapper(
+            [{"match": "regex", "native_type": r"^(A+)+B$", "arrow_type": "Utf8"}]
+        )
+        assert m.to_arrow_type("A" * 50 + "B") == "Utf8"
+
+
+class TestTypeMapperLoneSurrogateInLookupInput:
+    """#504: `to_arrow_type`/`to_native_type`'s input is runtime data (whatever
+    a driver or API schema reported), not a pydantic-validated document field
+    like the rule's own pattern -- pydantic rejects a lone surrogate in an
+    authored `native_type`/`arrow_type`, but nothing validates the lookup
+    input the same way. re2 encodes the match subject to UTF-8 internally, so
+    a lone surrogate there raises UnicodeEncodeError instead of matching or
+    not matching; that must surface as the ordinary miss (UnmappedTypeError),
+    not escape as a raw UnicodeEncodeError.
+    """
+
+    def test_lone_surrogate_in_to_arrow_type_input_is_a_miss(self):
+        m = _mapper(
+            [
+                {
+                    "match": "regex",
+                    "native_type": r"^VARCHAR\(\d+\)$",
+                    "arrow_type": "Utf8",
+                }
+            ]
+        )
+        with pytest.raises(UnmappedTypeError):
+            m.to_arrow_type("VARCHAR(\ud800)")
+
+    def test_lone_surrogate_in_to_native_type_input_is_a_miss(self):
+        m = _write_mapper(
+            [{"match": "regex", "arrow_type": r"^Utf8\(\d+\)$", "native_type": "X"}]
+        )
+        with pytest.raises(UnmappedTypeError):
+            m.to_native_type("Utf8(\ud800)")
 
 
 class TestSpecificityOrdering:
@@ -1475,6 +1576,24 @@ class TestToNativeTypeRegex:
         )
         assert m.to_native_type("Int64") == "FIRST"
         assert m.to_native_type("Int32") == "SECOND"
+
+    def test_nested_quantifier_bounded_at_runtime_lookup(self):
+        # #504, write direction: compile_pattern() compiles the arrow_type
+        # matcher for write rules through the same re2-backed function as
+        # the read side. Same input size as the read-side test -- see its
+        # comment for the measurement.
+        m = _write_mapper(
+            [{"match": "regex", "arrow_type": r"^(A+)+B$", "native_type": "X"}]
+        )
+        adversarial = "A" * 30
+        start = time.perf_counter()
+        with pytest.raises(UnmappedTypeError):
+            m.to_native_type(adversarial)
+        elapsed = time.perf_counter() - start
+        assert elapsed < 1.0, (
+            f"nested-quantifier match took {elapsed:.3f}s for 30 chars; "
+            f"expected linear-time (RE2), not exponential (backtracking re)"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -37,14 +37,14 @@ from __future__ import annotations
 
 import logging
 import math
-import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Final
 
+import re2
 from analitiq.contracts.endpoints import Param
-from jsonschema import Draft202012Validator, FormatChecker, validators
+from jsonschema import Draft202012Validator, FormatChecker, ValidationError, validators
 
 from .exceptions import RequestSpecError
 
@@ -151,10 +151,50 @@ def _is_integer(_checker: Any, instance: Any) -> bool:
     return bool(Draft202012Validator.TYPE_CHECKER.is_type(instance, "integer"))
 
 
-#: The draft this module validates with, knowing what a ``Decimal`` is.
+# RE2 encodes the subject string to UTF-8 before matching it -- stdlib `re`
+# never needs to, since it operates on Python `str` directly. A value with a
+# lone surrogate (legal in a Python `str`, reachable from `json.loads` on a
+# document with an unpaired `\uD8xx` escape) makes that encode step raise
+# UnicodeEncodeError; caught below and treated as "does not match", the same
+# verdict as any other value RE2 cannot interpret.
+_RE2_OPTIONS: Final = re2.Options()
+_RE2_OPTIONS.log_errors = False
+
+
+def _re2_pattern(
+    validator: Draft202012Validator, patrn: str, instance: Any, _schema: Any
+) -> Iterator[ValidationError]:
+    """Match the ``pattern`` keyword with ``re2`` instead of stdlib ``re``.
+
+    ``jsonschema``'s default (``jsonschema/_keywords.py``'s ``re.search``)
+    is backtracking ``re``. ``pattern`` is connector-authored, untrusted
+    input (:data:`Param.pattern` is an unconstrained string -- the published
+    contract puts no subset restriction on it, unlike the type-map
+    ``native``/``canonical`` regex rules), and this validator runs it
+    against every admitted request value, on every page, of every run
+    (#504). A pattern relying on Perl/Python syntax RE2 doesn't support --
+    see ``cdk.type_map.rules``'s module docstring for the differences -- is
+    refused at declaration time (:func:`_keyword_defect`), not silently
+    reinterpreted. Same contract as the keyword it replaces: yield one
+    :class:`ValidationError` when a string instance does not match, yield
+    nothing otherwise.
+    """
+    if not validator.is_type(instance, "string"):
+        return
+    try:
+        matched = re2.search(patrn, instance, options=_RE2_OPTIONS) is not None
+    except UnicodeEncodeError:
+        matched = False
+    if not matched:
+        yield ValidationError(f"{instance!r} does not match {patrn!r}")
+
+
+#: The draft this module validates with, knowing what a ``Decimal`` is and
+#: matching ``pattern`` with ``re2`` rather than backtracking ``re`` (#504).
 _VALIDATOR: Final = validators.extend(
     Draft202012Validator,
     type_checker=Draft202012Validator.TYPE_CHECKER.redefine("integer", _is_integer),
+    validators={"pattern": _re2_pattern},
 )
 
 
@@ -253,9 +293,13 @@ def _keyword_defect(name: str, endpoint: str, keyword: str, value: Any) -> str |
             f"bound or remove the keyword"
         )
     if keyword == "pattern":
+        # Compiled with `re2`, not stdlib `re`: `pattern` is connector-authored,
+        # untrusted input, matched by `_VALIDATOR` against every admitted
+        # request value on every page of every run, so it must be compilable
+        # by the same linear-time engine that will run it (#504).
         try:
-            re.compile(value)
-        except re.error as err:
+            re2.compile(value, options=_RE2_OPTIONS)
+        except (re2.error, UnicodeEncodeError) as err:
             return (
                 f"param {name!r} for endpoint {endpoint!r} declares pattern "
                 f"{value!r}, which is not a valid regular expression: {err}"

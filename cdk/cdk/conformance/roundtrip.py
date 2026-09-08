@@ -34,7 +34,6 @@ exactly the vocabulary the contract defines and can never drift from it.
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING
 
 from cdk.sql.dialects import SqlDialect
@@ -47,6 +46,7 @@ from cdk.type_map.grammar import (
     UnitParam,
 )
 from cdk.type_map.rules import (
+    CompiledPattern,
     compile_pattern,
     normalize_arrow_type,
     normalize_native_type,
@@ -242,7 +242,7 @@ def _misnormalized_write_rules(
 
 
 def _unreachable_spelling(
-    pattern: re.Pattern[str], candidate: str
+    pattern: CompiledPattern, candidate: str
 ) -> tuple[str, str, str] | None:
     """Find a spelling of *candidate* that *pattern* matches but never sees.
 
