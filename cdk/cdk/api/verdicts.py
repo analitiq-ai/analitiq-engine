@@ -27,7 +27,7 @@ from ..declarations import (
     DECLARED_READ_DETERMINISTIC,
     DECLARED_WRITE_VERDICTS,
     ErrorMap,
-    require_declared_category,
+    call_declared_hook,
 )
 from ..exceptions import ReadError, TransientReadError
 from ..types import AckStatus, FailureCategory
@@ -116,11 +116,13 @@ def classify_status(
     retries.
     """
     if dialect is not None:
-        category = dialect.classify(status, body)
+        category = call_declared_hook(
+            dialect.classify,
+            status,
+            body,
+            source=f"{type(dialect).__name__}.classify",
+        )
         if category is not None:
-            category = require_declared_category(
-                category, source=f"{type(dialect).__name__}.classify"
-            )
             logger.info("dialect classified HTTP %d -> %s", status, category)
             return category
     if error_map is not None:
@@ -138,6 +140,7 @@ def classify_exception(
     *,
     error_map: ErrorMap | None,
     classify_error: Callable[[BaseException], str | None] | None = None,
+    source: str = "classify_error",
 ) -> str | None:
     """Name the declared category a status-less transport error carries.
 
@@ -147,7 +150,9 @@ def classify_exception(
     issue #513) is what classifies it first, then the connector's
     ``classify_error`` code hook for a signal the map can't express. Kept a
     separate branch from :func:`classify_status` so neither this nor the
-    HTTP-status path can claim the other's failures.
+    HTTP-status path can claim the other's failures. *source* names the
+    connector class the hook belongs to, for the log line and any
+    off-vocabulary-category error a caller with that context should pass.
     """
     if error_map is not None:
         match = error_map.match_exception(exc)
@@ -161,10 +166,9 @@ def classify_exception(
             return match.category
     if classify_error is None:
         return None
-    category = classify_error(exc)
+    category = call_declared_hook(classify_error, exc, source=source)
     if category is None:
         return None
-    category = require_declared_category(category, source="classify_error")
     logger.info("classify_error classified the transport error: %s", category)
     return category
 

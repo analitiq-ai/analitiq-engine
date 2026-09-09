@@ -826,7 +826,10 @@ class GenericAPIConnector(BaseDestinationHandler):
                 received = await dispatch.sender.send(signed, unwrap_page=True)
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
                 status, category = failure_facts(
-                    err, error_map=self._error_map, classify_error=self.classify_error
+                    err,
+                    error_map=self._error_map,
+                    classify_error=self.classify_error,
+                    classify_error_source=f"{type(self).__name__}.classify_error",
                 )
                 raise read_verdict(
                     f"API request failed: {method} {request.url} -> {err}",
@@ -1398,7 +1401,10 @@ class GenericAPIConnector(BaseDestinationHandler):
     ) -> tuple[AckStatus, FailureCategory]:
         """Classify one transport failure: declared map, then classify_error."""
         status, category = failure_facts(
-            err, error_map=self._error_map, classify_error=self.classify_error
+            err,
+            error_map=self._error_map,
+            classify_error=self.classify_error,
+            classify_error_source=f"{type(self).__name__}.classify_error",
         )
         return write_verdict(status=status, category=category)
 

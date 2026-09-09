@@ -9,6 +9,8 @@ JSON edit (the #245 class) when it fits the declarative shape, or a
 
 from __future__ import annotations
 
+import pytest
+
 from cdk.declarations import CLASS_NAME_SIGNAL, parse_declared_error_map
 from src.worker.source_service import classify_read_error
 
@@ -91,6 +93,20 @@ class TestClassifyErrorFallback:
         assert deterministic is True
         assert declared == "config"
 
+    def test_off_vocabulary_classify_error_return_fails_loud(self):
+        from cdk.declarations import ConnectorDeclarationError
+
+        with pytest.raises(ConnectorDeclarationError, match="not in the engine"):
+            classify_read_error(ValueError("boom"), None, lambda exc: "retry_me")
+
+    def test_a_crashing_classify_error_falls_back_to_the_ladder(self):
+        def _broken(exc):
+            raise RuntimeError("connector bug")
+
+        deterministic, declared = classify_read_error(TypeError("boom"), None, _broken)
+        assert deterministic is True
+        assert declared is None
+
 
 class TestBirthSiteCategory:
     def test_typed_error_carries_its_birth_site_category(self):
@@ -112,6 +128,19 @@ class TestBirthSiteCategory:
         deterministic, declared = classify_read_error(exc, error_map)
         assert deterministic is True
         assert declared == "auth"
+
+    def test_off_vocabulary_birth_site_category_fails_loud(self):
+        # ReadError/TransientReadError accept any string for
+        # declared_category with no vocabulary check at construction; this
+        # is the first point that value is actually interpreted, so an
+        # authoring bug upstream (a typo'd category) must surface here
+        # rather than being silently treated as "no declared category".
+        from cdk.declarations import ConnectorDeclarationError
+        from cdk.exceptions import ReadError
+
+        exc = ReadError("status 503", declared_category="retry_me")
+        with pytest.raises(ConnectorDeclarationError, match="not in the engine"):
+            classify_read_error(exc, None)
 
 
 class TestLadderFallback:

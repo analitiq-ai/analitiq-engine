@@ -91,6 +91,27 @@ class TestFailureFacts:
             exc, error_map=None, classify_error=lambda e: "transient"
         ) == (None, "transient")
 
+    def test_map_present_but_silent_then_classify_error_claims(self) -> None:
+        error_map = parse_declared_error_map(
+            {"key_attrs": [CLASS_NAME_SIGNAL], "codes": {"SomethingElse": "auth"}}
+        )
+        exc = aiohttp.ClientPayloadError("truncated")
+        assert failure_facts(
+            exc, error_map=error_map, classify_error=lambda e: "transient"
+        ) == (None, "transient")
+
+    def test_a_crashing_classify_error_does_not_displace_the_original_failure(
+        self,
+    ) -> None:
+        def _broken(e):
+            raise RuntimeError("connector bug")
+
+        exc = aiohttp.ClientPayloadError("truncated")
+        assert failure_facts(exc, error_map=None, classify_error=_broken) == (
+            None,
+            None,
+        )
+
 
 @pytest.mark.asyncio
 class TestSend:

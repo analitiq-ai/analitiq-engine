@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
@@ -192,14 +192,17 @@ class DeclaredMatch:
 
 
 def require_declared_category(category: str, *, source: str) -> str:
-    """Validate a category from any connector-classification path.
+    """Validate a category returned by a connector-authored code hook.
 
-    Shared by the declared ``error_map`` lookup and the
-    :meth:`~cdk.base_handler.BaseDestinationHandler.classify_error` /
-    dialect ``classify()`` code hooks, so an off-vocabulary string from
-    either path fails loud at the classification site instead of a
-    ``KeyError`` inside :data:`DECLARED_WRITE_VERDICTS` or
-    :data:`DECLARED_READ_DETERMINISTIC`.
+    Used at the two code-hook return paths —
+    :meth:`~cdk.base_handler.BaseDestinationHandler.classify_error` and a
+    dialect's ``classify()`` — so an off-vocabulary string from either
+    fails loud at the classification site instead of a ``KeyError`` inside
+    :data:`DECLARED_WRITE_VERDICTS` or :data:`DECLARED_READ_DETERMINISTIC`.
+    The declarative ``error_map`` lookup is validated separately, at parse
+    time (:func:`_require_category`) and again on
+    :class:`DeclaredMatch` construction — a hook's return is checked here
+    instead because it is computed at classification time, not parse time.
     """
     if category not in ERROR_CATEGORY_VALUES:
         raise ConnectorDeclarationError(
@@ -207,6 +210,39 @@ def require_declared_category(category: str, *, source: str) -> str:
             f"in the engine vocabulary {list(ERROR_CATEGORY_VALUES)}"
         )
     return category
+
+
+def call_declared_hook(
+    hook: Callable[..., str | None], *args: Any, source: str
+) -> str | None:
+    """Call a connector-authored classification hook, never letting it raise.
+
+    Covers both shapes this mechanism has: ``classify_error(exc)`` and a
+    dialect's ``classify(status, body)``. Both are untrusted,
+    potentially-AI-authored connector code, called from inside the
+    ``except`` block that is in the middle of reporting the *original*
+    failure — a crash here must not displace it, mirroring the same
+    guarantee :meth:`ErrorMap.match_exception` already makes for the
+    declarative read (see its docstring). An off-vocabulary *return* is a
+    different failure mode — the hook did run and answered, just wrongly —
+    and still raises loud via :func:`require_declared_category`, since that
+    is the hook's own declared output, not an implementation crash.
+    """
+    try:
+        category = hook(*args)
+    except Exception:
+        # *args may carry an untrusted response body -- never interpolated
+        # here, only the source label (a class/method name this process
+        # chose, not connector-controlled content).
+        logger.warning(
+            "%s raised; treating this classification attempt as unclaimed",
+            source,
+            exc_info=True,
+        )
+        return None
+    if category is None:
+        return None
+    return require_declared_category(category, source=source)
 
 
 def _require_category(value: Any, path: str, *, source: str) -> str:
@@ -385,8 +421,14 @@ class ErrorMap:
         raises: the members are untrusted connector/driver objects whose
         attributes may be misbehaving properties, and a classifier crash
         here would displace the original failure at the exact moment it is
-        being reported — an unreadable member logs a WARNING and matches
-        nothing for that entry.
+        being reported — a member whose attribute read raises anything
+        other than ``AttributeError`` logs a WARNING and matches nothing
+        for that entry. A ``key_attrs`` name backed by a property whose own
+        body raises ``AttributeError`` is indistinguishable from a plain
+        absent attribute (``getattr``'s three-argument form, and Python's
+        attribute protocol generally, make no distinction here) and matches
+        nothing silently, with no WARNING — an inherent limit of attribute
+        access, not something this method can detect.
         """
         if not self.key_attrs:
             return None

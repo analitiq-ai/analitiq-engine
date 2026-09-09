@@ -948,15 +948,19 @@ class TestDeclaredConnectorFacts:
             prep.create_config()
 
     def test_malformed_error_map_identifier_rejected(self, pipeline_tree: Path) -> None:
-        # The published contract enforces the same key grammar the CDK
-        # parser does, so a malformed identifier fails at the first gate.
+        # http is unchanged by issue #513 -- the published contract still
+        # enforces the same status-code key grammar the CDK parser does,
+        # so a malformed status fails at the first gate. (sqlstate/exception
+        # as top-level error_map fields are covered separately, above:
+        # they're now retired, so a block using them fails at the CDK's own
+        # parse -- see test_legacy_error_map_shape_rejected_at_config_load.)
         connector_doc = _connector_doc()
-        connector_doc["error_map"] = {"sqlstate": {"XYZ!": "auth"}}
+        connector_doc["error_map"] = {"http": {"XYZ!": "auth"}}
         self._write_connector(pipeline_tree, connector_doc)
         prep = PipelineConfigPrep()
         with pytest.raises((ContractValidationError, ConnectorDeclarationError)) as err:
             prep.create_config()
-        assert "sqlstate" in str(err.value)
+        assert "http" in str(err.value)
 
     def test_non_positive_concurrency_ceiling_rejected(
         self, pipeline_tree: Path

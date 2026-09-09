@@ -28,6 +28,7 @@ from cdk.declarations import (
     ERROR_CATEGORY_VALUES,
     ConnectorDeclarationError,
     ErrorMap,
+    call_declared_hook,
     parse_declared_concurrency,
     parse_declared_error_map,
     require_declared_category,
@@ -270,6 +271,71 @@ class TestRequireDeclaredCategory:
     def test_off_vocabulary_category_fails_loud(self):
         with pytest.raises(ConnectorDeclarationError, match="not in the engine"):
             require_declared_category("retry_me", source="test")
+
+
+class TestCallDeclaredHook:
+    """The guard around a connector-authored classification hook.
+
+    Both ``classify_error(exc)`` and a dialect's ``classify(status, body)``
+    are untrusted, potentially-AI-authored connector code; a crash inside
+    one must not displace the original failure the caller is in the middle
+    of reporting -- the same guarantee ``ErrorMap.match_exception`` already
+    makes for the declarative read.
+    """
+
+    def test_normal_return_passes_through(self):
+        assert (
+            call_declared_hook(lambda exc: "transient", ValueError("x"), source="t")
+            == "transient"
+        )
+
+    def test_none_return_passes_through(self):
+        assert call_declared_hook(lambda exc: None, ValueError("x"), source="t") is None
+
+    def test_off_vocabulary_return_still_raises_loud(self):
+        # The hook ran and answered -- wrongly. That's a declared-content
+        # defect, not a crash, so it still fails loud.
+        with pytest.raises(ConnectorDeclarationError, match="not in the engine"):
+            call_declared_hook(lambda exc: "retry_me", ValueError("x"), source="t")
+
+    def test_a_crashing_hook_is_caught_and_treated_as_unclaimed(self):
+        def _broken(exc):
+            raise RuntimeError("connector bug")
+
+        # No RuntimeError escapes -- it must not displace the exception
+        # being classified.
+        assert call_declared_hook(_broken, ValueError("x"), source="t") is None
+
+    def test_a_crashing_hook_logs_a_warning_naming_the_source(self, caplog):
+        import logging
+
+        def _broken(exc):
+            raise RuntimeError("connector bug")
+
+        with caplog.at_level(logging.WARNING, logger="cdk.declarations"):
+            call_declared_hook(
+                _broken, ValueError("x"), source="MyConnector.classify_error"
+            )
+        assert any("MyConnector.classify_error" in r.message for r in caplog.records)
+
+    def test_supports_the_multi_argument_dialect_classify_shape(self):
+        # dialect.classify(status, body) takes two positional args, not one
+        # exception -- the guard must not assume a single-argument hook.
+        assert (
+            call_declared_hook(
+                lambda status, body: "config" if status == 400 else None,
+                400,
+                {"error": "bad request"},
+                source="t",
+            )
+            == "config"
+        )
+
+    def test_a_crashing_two_argument_hook_is_also_caught(self):
+        def _broken(status, body):
+            raise KeyError("body")
+
+        assert call_declared_hook(_broken, 400, {"error": "bad"}, source="t") is None
 
 
 class TestConcurrencyParse:

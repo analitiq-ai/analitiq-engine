@@ -98,6 +98,48 @@ class TestAckLadderDeclaredFirst:
             handler._classify_unexpected_write_error(ProgrammingError("boom"))
         assert any("class-name heuristic" in r.message for r in caplog.records)
 
+    def test_classify_error_claims_what_the_map_does_not(self):
+        # Issue #513: this is the spec's named root-cause module --
+        # _declared_write_verdict tries the declarative map first, then
+        # falls back to the connector's classify_error code hook.
+        handler = self._handler(None)
+        handler.classify_error = lambda exc: "transient"
+        result = handler._classify_unexpected_write_error(ProgrammingError("boom"))
+        assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        assert (
+            result.failure_category == FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED
+        )
+        assert "classify_error" in result.failure_summary
+
+    def test_declared_map_outranks_classify_error(self):
+        handler = self._handler(_error_map(_by_class(ProgrammingError="config")))
+        handler.classify_error = lambda exc: "transient"
+        result = handler._classify_unexpected_write_error(ProgrammingError("boom"))
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
+
+    def test_classify_error_off_vocabulary_return_raises_loud(self):
+        from cdk.declarations import ConnectorDeclarationError
+
+        handler = self._handler(None)
+        handler.classify_error = lambda exc: "retry_me"
+        with pytest.raises(ConnectorDeclarationError, match="not in the engine"):
+            handler._classify_unexpected_write_error(ProgrammingError("boom"))
+
+    def test_a_crashing_classify_error_does_not_displace_the_original_failure(self):
+        # A connector's classify_error is untrusted, potentially AI-authored
+        # code; a bug in it must not crash the write-ack ladder or hide the
+        # original exception -- it just falls through to the heuristic.
+        handler = self._handler(None)
+
+        def _broken(exc):
+            raise RuntimeError("connector bug")
+
+        handler.classify_error = _broken
+        result = handler._classify_unexpected_write_error(ProgrammingError("boom"))
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert "ProgrammingError" in result.failure_summary
+
 
 class TestDriverTimeoutVerdict:
     """A driver/socket timeout is the driver's error — declarations apply.
@@ -173,6 +215,28 @@ class TestConnectWiring:
         result = handler._classify_unexpected_write_error(ProgrammingError("boom"))
         assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
 
+    @pytest.mark.asyncio
+    async def test_classify_error_reaches_the_adbc_backend_through_connect(self):
+        # AdbcBackend can't reach a connector reference on its own (issue
+        # #513) -- connect() must inject the bound classify_error method
+        # (and a source label naming the connector class) into it.
+        handler = GenericSQLConnector()
+        runtime = MagicMock()
+        runtime.connector_id = "demo"
+        runtime.declared_sql_capabilities = caps_block()
+        runtime.declared_error_map = None
+        runtime.is_adbc = True
+        runtime.is_sync_sqlalchemy = False
+        runtime.driver = "postgresql"
+        runtime.open_adbc_connection = MagicMock()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()):
+            await handler.connect(runtime)
+        assert handler._backend._classify_error == handler.classify_error
+        assert (
+            handler._backend._classify_error_source
+            == f"{type(handler).__name__}.classify_error"
+        )
+
 
 class TestAdbcBoundary:
     def _backend(self, error_map=None, *, classify_error=None) -> AdbcBackend:
@@ -198,6 +262,25 @@ class TestAdbcBoundary:
 
     def test_unclaimed_fatal_name_still_reclassifies(self):
         backend = self._backend(_error_map(_by_class(SomeOther="auth")))
+        with pytest.raises(AdbcConfigurationError):
+            backend._reraise_driver_error(ProgrammingError("boom"), write_cycle=True)
+
+    def test_map_present_but_silent_then_hook_claims(self):
+        # The map is declared but doesn't cover this exception -- the hook
+        # still gets its chance, exactly as _declared_write_verdict does.
+        backend = self._backend(
+            _error_map(_by_class(SomeOther="auth")),
+            classify_error=lambda exc: "transient",
+        )
+        exc = ProgrammingError("boom")
+        with pytest.raises(ProgrammingError):
+            backend._reraise_driver_error(exc, write_cycle=True)
+
+    def test_a_crashing_hook_does_not_displace_the_original_failure(self):
+        def _broken(exc):
+            raise RuntimeError("connector bug")
+
+        backend = self._backend(classify_error=_broken)
         with pytest.raises(AdbcConfigurationError):
             backend._reraise_driver_error(ProgrammingError("boom"), write_cycle=True)
 

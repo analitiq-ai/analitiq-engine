@@ -22,6 +22,7 @@ from cdk.connection_runtime import ConnectionRuntime
 from cdk.declarations import (
     DECLARED_READ_DETERMINISTIC,
     ErrorMap,
+    call_declared_hook,
     error_map_for,
     require_declared_category,
 )
@@ -67,6 +68,8 @@ def classify_read_error(
     exc: BaseException,
     error_map: ErrorMap | None,
     classify_error: Callable[[BaseException], str | None] | None = None,
+    *,
+    classify_error_source: str = "classify_error",
 ) -> tuple[bool, str | None]:
     """Classify a read failure: declared verdicts first, isinstance ladder after.
 
@@ -83,15 +86,18 @@ def classify_read_error(
     (``_DETERMINISTIC_READ_ERRORS`` — the hook), never text.
     """
     birth_site = getattr(exc, "declared_category", None)
-    if isinstance(birth_site, str) and birth_site in DECLARED_READ_DETERMINISTIC:
+    if isinstance(birth_site, str):
+        birth_site = require_declared_category(
+            birth_site, source=f"{type(exc).__name__}.declared_category"
+        )
         return DECLARED_READ_DETERMINISTIC[birth_site], birth_site
     match = error_map.match_exception(exc) if error_map is not None else None
     if match is not None:
         return DECLARED_READ_DETERMINISTIC[match.category], match.category
-    category = classify_error(exc) if classify_error is not None else None
-    if category is not None:
-        category = require_declared_category(category, source="classify_error")
-        return DECLARED_READ_DETERMINISTIC[category], category
+    if classify_error is not None:
+        category = call_declared_hook(classify_error, exc, source=classify_error_source)
+        if category is not None:
+            return DECLARED_READ_DETERMINISTIC[category], category
     return isinstance(exc, _DETERMINISTIC_READ_ERRORS), None
 
 
@@ -205,7 +211,12 @@ class SourceWorkerServicer(SourceServiceServicer):
             Exception
         ) as exc:  # noqa: BLE001 — every failure crosses as a typed event
             deterministic, declared = classify_read_error(
-                exc, self._error_map, self._readable.classify_error
+                exc,
+                self._error_map,
+                self._readable.classify_error,
+                classify_error_source=(
+                    f"{type(self._readable).__name__}.classify_error"
+                ),
             )
             logger.error(
                 "source worker read failed (%s, deterministic=%s, "

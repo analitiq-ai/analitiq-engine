@@ -212,6 +212,7 @@ def failure_facts(
     *,
     error_map: ErrorMap | None,
     classify_error: Callable[[BaseException], str | None] | None = None,
+    classify_error_source: str = "classify_error",
 ) -> tuple[int | None, str | None]:
     """Read the status and declared category off a caught transport failure.
 
@@ -221,7 +222,8 @@ def failure_facts(
     status; a status-less one by the declared ``error_map`` then the
     connector's ``classify_error`` hook (issue #513). Keeping the branches
     separate is what stops a broad declared match from claiming deterministic
-    4xx rejections.
+    4xx rejections. *classify_error_source* names the connector class for
+    the hook's log line and any off-vocabulary-category error.
     """
     declared = getattr(exc, "declared_category", None)
     if isinstance(exc, aiohttp.ClientResponseError):
@@ -232,7 +234,10 @@ def failure_facts(
         return status, declared
     if declared is None:
         declared = classify_exception(
-            exc, error_map=error_map, classify_error=classify_error
+            exc,
+            error_map=error_map,
+            classify_error=classify_error,
+            source=classify_error_source,
         )
     return None, declared
 

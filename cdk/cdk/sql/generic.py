@@ -63,8 +63,8 @@ from cdk.database_utils import acquire_connection
 from cdk.declarations import (
     DECLARED_WRITE_VERDICTS,
     ErrorMap,
+    call_declared_hook,
     error_map_for,
-    require_declared_category,
 )
 from cdk.exceptions import ReadError
 from cdk.query_builder import Filter, ParamsLike, QueryBuilder, QueryConfig
@@ -895,7 +895,11 @@ class GenericSQLConnector(BaseDestinationHandler):
         if runtime.is_adbc:
             self._adbc_only = True
             transport_name = "ADBC"
-            backend = AdbcBackend(self.dialect, classify_error=self.classify_error)
+            backend = AdbcBackend(
+                self.dialect,
+                classify_error=self.classify_error,
+                classify_error_source=f"{type(self).__name__}.classify_error",
+            )
         elif runtime.is_sync_sqlalchemy:
             self._sync_engine = runtime.sync_engine
             transport_name = "sync SQLAlchemy"
@@ -1830,10 +1834,9 @@ class GenericSQLConnector(BaseDestinationHandler):
                     ),
                     failure_category=failure_category,
                 )
-        category = self.classify_error(e)
+        category = call_declared_hook(self.classify_error, e, source=source)
         if category is None:
             return None
-        category = require_declared_category(category, source=source)
         status, failure_category = DECLARED_WRITE_VERDICTS[category]
         logger.info(
             "classify_error classified the write failure: %s (%s)",

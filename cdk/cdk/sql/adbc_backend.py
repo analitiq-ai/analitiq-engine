@@ -38,7 +38,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from cdk.adbc_registry import AdbcConfigurationError
-from cdk.declarations import ErrorMap, error_map_for
+from cdk.declarations import ErrorMap, call_declared_hook, error_map_for
 
 from ._adbc_utils import (
     _close_cursor_quietly,
@@ -87,6 +87,7 @@ class AdbcBackend(TransportBackend):
         dialect: SqlDialect,
         *,
         classify_error: Callable[[BaseException], str | None],
+        classify_error_source: str = "classify_error",
     ) -> None:
         self._dialect = dialect
         self._cycle = StageCycle(dialect)
@@ -94,7 +95,11 @@ class AdbcBackend(TransportBackend):
         # than reached through a connector reference this transport-only
         # object doesn't otherwise hold — the same declared-map-first,
         # code-hook-fallback order the facade's write-ack ladder uses.
+        # classify_error_source names the connector class in the log/error
+        # a bad hook produces (call_declared_hook's guard, and a raised
+        # ConnectorDeclarationError on an off-vocabulary return).
         self._classify_error = classify_error
+        self._classify_error_source = classify_error_source
         self._runtime: ConnectionRuntime | None = None
         # Cached ADBC DBAPI connection, opened eagerly in connect() so a
         # bad credential fails there, not on the first batch. Nulled on
@@ -163,7 +168,10 @@ class AdbcBackend(TransportBackend):
         """
         if write_cycle and (
             (self._error_map is not None and self._error_map.match_exception(exc))
-            or self._classify_error(exc) is not None
+            or call_declared_hook(
+                self._classify_error, exc, source=self._classify_error_source
+            )
+            is not None
         ):
             raise exc
         if _is_fatal_adbc_error(exc):

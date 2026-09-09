@@ -31,12 +31,19 @@ class _FakeReadable:
     """A Readable that yields canned batches and drives the checkpoint."""
 
     def __init__(
-        self, batches, *, cursor_values=None, error=None, trailing_cursor=None
+        self,
+        batches,
+        *,
+        cursor_values=None,
+        error=None,
+        trailing_cursor=None,
+        classify_error=None,
     ):
         self._batches = batches
         self._cursor_values = cursor_values or []
         self._error = error
         self._trailing_cursor = trailing_cursor
+        self._classify_error = classify_error
 
     async def read_batches(
         self,
@@ -62,8 +69,10 @@ class _FakeReadable:
             )
 
     def classify_error(self, exc):
-        """The connector-owned code escape hatch (issue #513); unused by default."""
-        return None
+        """The connector-owned code escape hatch (issue #513); None by default."""
+        if self._classify_error is None:
+            return None
+        return self._classify_error(exc)
 
 
 def _batch(rows):
@@ -234,6 +243,41 @@ class TestReadStream:
         terminal = responses[-1]
         assert terminal.WhichOneof("message") == "error"
         assert terminal.error.deterministic is True
+
+    async def test_classify_error_reaches_the_classification_through_readstream(self):
+        # Wiring for the classify_error hook (issue #513): no declared map
+        # at all, so only the connector instance's classify_error can be
+        # the source of a deterministic=True verdict here.
+        runtime = _runtime()
+        readable = _FakeReadable(
+            [],
+            error=OperationalError("bad search_path"),
+            classify_error=lambda exc: "config",
+        )
+        servicer = SourceWorkerServicer(readable, runtime, {})
+        responses = await _collect(servicer)
+        terminal = responses[-1]
+        assert terminal.WhichOneof("message") == "error"
+        assert terminal.error.deterministic is True
+        assert terminal.error.declared_category == "config"
+
+    async def test_a_crashing_classify_error_does_not_crash_the_stream(self):
+        # A connector's classify_error is untrusted, potentially AI-authored
+        # code; a bug in it must not replace the original read failure with
+        # an unhandled exception out of ReadStream.
+        runtime = _runtime()
+
+        def _broken(exc):
+            raise RuntimeError("connector bug")
+
+        readable = _FakeReadable(
+            [], error=OperationalError("bad search_path"), classify_error=_broken
+        )
+        servicer = SourceWorkerServicer(readable, runtime, {})
+        responses = await _collect(servicer)
+        terminal = responses[-1]
+        assert terminal.WhichOneof("message") == "error"
+        assert "OperationalError" in terminal.error.error_type
 
     async def test_error_ends_stream_without_complete(self):
         readable = _FakeReadable([_batch([{"id": 1}])], error=ValueError("x"))
