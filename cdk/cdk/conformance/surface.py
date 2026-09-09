@@ -1,10 +1,12 @@
 """The sanctioned-override-surface check (spec sql-write-path section 10).
 
 A connector's per-system code is its dialect: the connector class
-carries ``dialect_class`` and nothing else, and the dialect's public
-namespace is exactly the public :class:`~cdk.sql.dialects.SqlDialect`
-surface — the stage-then-merge hooks, the session/TLS hooks, and the
-existing DDL/discovery/identifier hooks. Overriding a private CDK
+carries ``dialect_class`` and, for a native error signal that needs more
+than the declared ``error_map`` lookup, ``classify_error`` — nothing
+else. The dialect's public namespace is exactly the public
+:class:`~cdk.sql.dialects.SqlDialect` surface — the stage-then-merge
+hooks, the session/TLS hooks, and the existing DDL/discovery/identifier
+hooks. Overriding a private CDK
 internal is contract-less coupling that breaks silently on any CDK
 refactor (the defect class that parked mysql#29); a *public addition*
 of the dialect's own is either a stale hook from an older write path
@@ -51,13 +53,14 @@ FRAMEWORK_OWNED_DIALECT_ATTRS = frozenset(
     {"capabilities", "for_runtime", "table_address"}
 )
 
-#: The attributes a connector class may define: ``dialect_class`` (ADR
-#: section 4: "the connector class is ``dialect_class = XDialect`` and
-#: nothing else") and ``classify_error``, the code escape hatch for
-#: connector-owned error classification (issue #513; spec sql-write-path
-#: section 5) — resolved by the write path on the connector instance
-#: itself (``sql/generic.py``'s ``_declared_write_verdict``), never on the
-#: dialect, so it is not part of the dialect's sanctioned surface either.
+#: The attributes a connector class may define: ``dialect_class`` (spec
+#: sql-write-path section 4: "the connector class is ``dialect_class =
+#: XDialect`` and nothing else") and ``classify_error``, the code escape
+#: hatch for connector-owned error classification (issue #513; spec
+#: sql-write-path section 5) — resolved by the write path on the
+#: connector instance itself (``sql/generic.py``'s
+#: ``_declared_write_verdict``), never on the dialect, so it is not part
+#: of the dialect's sanctioned surface either.
 CONNECTOR_CLASS_ALLOWED_ATTRS = frozenset({"dialect_class", "classify_error"})
 
 
@@ -301,7 +304,8 @@ def _audit_connector_class(connector_cls: type) -> list[Violation]:
                         f"are defined once in the CDK, and the per-system "
                         f"surface is the dialect (spec sql-write-path "
                         f"section 4). The connector class may only define "
-                        f"{sorted(CONNECTOR_CLASS_ALLOWED_ATTRS)} — move any "
+                        f"{' and '.join(sorted(CONNECTOR_CLASS_ALLOWED_ATTRS))} "
+                        f"(section 5 sanctions classify_error) — move any "
                         f"other quirk onto the dialect's sanctioned hooks.",
                     )
                 )
@@ -311,9 +315,11 @@ def _audit_connector_class(connector_cls: type) -> list[Violation]:
                         CHECK,
                         f"{klass.__name__}.{name} adds a member to the "
                         f"connector class; the connector class may only "
-                        f"define {sorted(CONNECTOR_CLASS_ALLOWED_ATTRS)} "
-                        f"(spec sql-write-path section 4). Helpers belong "
-                        f"on the connector's own dialect class.",
+                        f"define "
+                        f"{' and '.join(sorted(CONNECTOR_CLASS_ALLOWED_ATTRS))} "
+                        f"(spec sql-write-path section 4; section 5 sanctions "
+                        f"classify_error). Helpers belong on the connector's "
+                        f"own dialect class.",
                     )
                 )
     return violations
