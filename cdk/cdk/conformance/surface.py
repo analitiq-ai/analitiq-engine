@@ -275,6 +275,20 @@ def _candidate_raws(raw: Any) -> list[Any]:
     the caught exception's type -- not only the default implementation
     reached when nothing more specific matches -- so every one of them
     is a shape a real call could hit and must be checked.
+
+    Deliberately not covered: a registration that is itself something
+    other than a plain function or method (a ``functools.partial``, a
+    callable object -- ``singledispatchmethod`` binds each registration
+    through its own descriptor machinery, which this does not replicate
+    for anything other than the ordinary case), and the dispatcher
+    wrapper's own constraint that its dispatch argument be positional
+    (``_base_call_shapes``' all-keyword shape is a fact about the base
+    contract in general, not a promise every real call site exercises --
+    ``classify_via_hook`` always calls positionally today). Both are
+    ``singledispatchmethod``-specific binding mechanics several layers
+    past the shape this check exists to validate; a connector author
+    relying on either is on their own the same way they would be for any
+    other CDK internal this check does not model.
     """
     if isinstance(raw, functools.singledispatchmethod):
         return list(raw.dispatcher.registry.values())
@@ -370,7 +384,7 @@ def _hook_shape_problem(
                 f"{hook_label} with a non-callable "
                 f"{type(raw_candidate).__name__}; the CDK calls it."
             )
-        probe = _async_probe(resolved)
+        probe = inspect.unwrap(_async_probe(resolved))
         if inspect.iscoroutinefunction(probe) or inspect.isasyncgenfunction(probe):
             return (
                 f"{klass.__name__}.{name} is declared async; the CDK calls "

@@ -452,6 +452,16 @@ class _BrokenWrappedClassifyErrorConnector(ReferenceConnector):
         return "transient"
 
 
+class _AsyncWrappedClassifyErrorConnector(ReferenceConnector):
+    """A synchronous forwarding decorator hides an async implementation."""
+
+    # skipcq: PYL-W0236 - the async-ness IS the deliberate defect this
+    # fixture models; the kit must reject it, and the test below pins that.
+    @_classify_error_forwarding_decorator
+    async def classify_error(self, exc: BaseException) -> str | None:
+        return "transient"
+
+
 def _classify_error_partial_target(exc: BaseException, context: str) -> str | None:
     return "transient"
 
@@ -902,6 +912,17 @@ class TestOverrideSurfaceBreaks:
         report = _messages(violations)
         assert "classify_error" in report
         assert "signature" in report
+
+    def test_async_forwarded_by_sync_wrapper_classify_error_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """iscoroutinefunction must follow __wrapped__, like signature already does."""
+        violations = check_override_surface(
+            _with_connector(reference_target, _AsyncWrappedClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "async" in report
 
     def test_partial_classify_error_is_allowed(
         self, reference_target: ConformanceTarget
