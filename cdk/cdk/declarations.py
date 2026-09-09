@@ -268,6 +268,46 @@ def call_declared_hook(
     return category
 
 
+def birth_site_category(exc: BaseException) -> str | None:
+    """Read a typed error's birth-site ``declared_category``. Never raises.
+
+    ``ReadError``/``TransientReadError``/``ApiResponseError`` all accept
+    ``declared_category`` as a public constructor kwarg with no
+    construction-time check, and untrusted connector code can raise any
+    of them directly -- so the value here is exactly as untrusted as a
+    ``classify_error`` return, and gets the same treatment as
+    :func:`call_declared_hook`: reading the attribute is guarded (a
+    property that raises is not different from a hook that raises), and
+    anything other than a genuine vocabulary member -- wrong type, wrong
+    string, absent entirely being the one exception -- maps to
+    ``"config"`` rather than being passed through to a verdict-table
+    lookup or silently ignored in favor of guessing from a further
+    fallback source.
+    """
+    try:
+        declared = getattr(exc, "declared_category", None)
+    except Exception:
+        logger.warning(
+            "reading %s.declared_category raised; treating the connector's "
+            "classification as broken (config)",
+            type(exc).__name__,
+            exc_info=True,
+        )
+        return "config"
+    if declared is None:
+        return None
+    if not isinstance(declared, str) or declared not in ERROR_CATEGORY_VALUES:
+        logger.warning(
+            "%s.declared_category %r is not a valid category in %s; "
+            "treating the connector's classification as broken (config)",
+            type(exc).__name__,
+            declared,
+            list(ERROR_CATEGORY_VALUES),
+        )
+        return "config"
+    return declared
+
+
 def _require_category(value: Any, path: str, *, source: str) -> str:
     if value not in ERROR_CATEGORY_VALUES:
         raise ConnectorDeclarationError(

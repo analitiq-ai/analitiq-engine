@@ -95,9 +95,10 @@ class AdbcBackend(TransportBackend):
         # than reached through a connector reference this transport-only
         # object doesn't otherwise hold — the same declared-map-first,
         # code-hook-fallback order the facade's write-ack ladder uses.
-        # classify_error_source names the connector class in the log/error
-        # a bad hook produces (call_declared_hook's guard, and a raised
-        # ConnectorDeclarationError on an off-vocabulary return).
+        # classify_error_source names the connector class in the WARNING
+        # log line call_declared_hook produces when the hook crashes or
+        # returns an off-vocabulary category (both map to "config" there,
+        # never raise).
         self._classify_error = classify_error
         self._classify_error_source = classify_error_source
         self._runtime: ConnectionRuntime | None = None

@@ -28,6 +28,7 @@ from cdk.declarations import (
     ERROR_CATEGORY_VALUES,
     ConnectorDeclarationError,
     ErrorMap,
+    birth_site_category,
     call_declared_hook,
     parse_declared_concurrency,
     parse_declared_error_map,
@@ -357,6 +358,58 @@ class TestCallDeclaredHook:
         assert (
             call_declared_hook(_broken, 400, {"error": "bad"}, source="t") == "config"
         )
+
+
+class TestBirthSiteCategory:
+    """The guard around a typed error's birth-site ``declared_category``.
+
+    ``ReadError``/``TransientReadError``/``ApiResponseError`` accept any
+    value for ``declared_category`` with no construction-time check, so
+    it's exactly as untrusted as a ``classify_error`` return and gets the
+    same treatment: broken (wrong type, off-vocabulary, unreadable) maps
+    to ``"config"``, never raises, never silently falls through to a
+    further guess.
+    """
+
+    def test_absent_declared_category_is_none(self):
+        assert birth_site_category(ValueError("x")) is None
+
+    def test_valid_category_passes_through(self):
+        exc = ValueError("x")
+        exc.declared_category = "auth"
+        assert birth_site_category(exc) == "auth"
+
+    def test_off_vocabulary_string_maps_to_config(self):
+        exc = ValueError("x")
+        exc.declared_category = "retry_me"
+        assert birth_site_category(exc) == "config"
+
+    def test_non_string_value_maps_to_config(self):
+        # An AI-authored connector writing declared_category=SomeEnum.AUTH
+        # is exactly as plausible as a typo'd string.
+        exc = ValueError("x")
+        exc.declared_category = 42
+        assert birth_site_category(exc) == "config"
+
+    def test_a_raising_declared_category_property_maps_to_config(self):
+        class _Bad(ValueError):
+            @property
+            def declared_category(self):
+                raise RuntimeError("connector bug")
+
+        assert birth_site_category(_Bad("x")) == "config"
+
+    def test_a_raising_property_logs_a_warning(self, caplog):
+        import logging
+
+        class _Bad(ValueError):
+            @property
+            def declared_category(self):
+                raise RuntimeError("connector bug")
+
+        with caplog.at_level(logging.WARNING, logger="cdk.declarations"):
+            birth_site_category(_Bad("x"))
+        assert any("declared_category" in r.message for r in caplog.records)
 
 
 class TestConcurrencyParse:

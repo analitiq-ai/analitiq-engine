@@ -21,8 +21,8 @@ import grpc
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.declarations import (
     DECLARED_READ_DETERMINISTIC,
-    ERROR_CATEGORY_VALUES,
     ErrorMap,
+    birth_site_category,
     call_declared_hook,
     error_map_for,
 )
@@ -85,7 +85,7 @@ def classify_read_error(
     hook, then the connector's sanctioned typed errors
     (``_DETERMINISTIC_READ_ERRORS`` — the hook), never text.
 
-    An off-vocabulary birth-site ``declared_category`` (``ReadError`` /
+    A broken birth-site ``declared_category`` (``ReadError`` /
     ``TransientReadError`` accept any string, with no construction-time
     check) is not a "try the next source" signal — the engine does not
     guess at what a broken connector declaration might have meant. It
@@ -94,18 +94,8 @@ def classify_read_error(
     ``classify_error`` hook below, so both broken-classification paths in
     this function agree.
     """
-    birth_site = getattr(exc, "declared_category", None)
-    if isinstance(birth_site, str):
-        if birth_site not in ERROR_CATEGORY_VALUES:
-            logger.warning(
-                "%s.declared_category %r is not in the engine vocabulary "
-                "%s; treating the connector's classification as broken "
-                "(config)",
-                type(exc).__name__,
-                birth_site,
-                list(ERROR_CATEGORY_VALUES),
-            )
-            birth_site = "config"
+    birth_site = birth_site_category(exc)
+    if birth_site is not None:
         return DECLARED_READ_DETERMINISTIC[birth_site], birth_site
     match = error_map.match_exception(exc) if error_map is not None else None
     if match is not None:

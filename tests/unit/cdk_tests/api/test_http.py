@@ -82,6 +82,23 @@ class TestFailureFacts:
         exc = ApiResponseError(None, (), status=200, declared_category="retry_me")
         assert failure_facts(exc, error_map=None) == (200, "config")
 
+    def test_a_non_string_declared_category_maps_to_config(self) -> None:
+        # declared_category takes any *type* too -- an AI-authored
+        # connector writing declared_category=SomeEnum.AUTH is exactly as
+        # plausible as a typo'd string, and must not reach a verdict-table
+        # KeyError either (status-less path).
+        exc = aiohttp.ClientPayloadError("truncated")
+        exc.declared_category = 42  # type: ignore[attr-defined]
+        assert failure_facts(exc, error_map=None) == (None, "config")
+
+    def test_a_raising_declared_category_property_maps_to_config(self) -> None:
+        class _Bad(aiohttp.ClientPayloadError):
+            @property
+            def declared_category(self):
+                raise RuntimeError("connector bug")
+
+        assert failure_facts(_Bad("truncated"), error_map=None) == (None, "config")
+
     def test_a_status_less_error_resolves_by_the_declared_map(self) -> None:
         error_map = parse_declared_error_map(
             {

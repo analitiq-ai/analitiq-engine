@@ -147,6 +147,34 @@ class TestBirthSiteCategory:
         assert deterministic is True
         assert declared == "config"
 
+    def test_a_non_string_birth_site_category_maps_to_config(self):
+        # declared_category takes any *type* too -- an AI-authored
+        # connector writing declared_category=SomeEnum.AUTH is exactly as
+        # plausible as a typo'd string.
+        from cdk.exceptions import ReadError
+
+        exc = ReadError("status 503")
+        exc.declared_category = 42  # type: ignore[assignment]
+        deterministic, declared = classify_read_error(exc, None)
+        assert deterministic is True
+        assert declared == "config"
+
+    def test_a_raising_declared_category_property_maps_to_config(self):
+        from cdk.exceptions import ReadError
+
+        class _Bad(ReadError):
+            @property
+            def declared_category(self):
+                raise RuntimeError("connector bug")
+
+            @declared_category.setter
+            def declared_category(self, value):
+                pass
+
+        deterministic, declared = classify_read_error(_Bad("status 503"), None)
+        assert deterministic is True
+        assert declared == "config"
+
     def test_off_vocabulary_birth_site_category_logs_a_warning(self, caplog):
         import logging
 
