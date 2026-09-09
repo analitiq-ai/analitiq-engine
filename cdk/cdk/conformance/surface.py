@@ -29,6 +29,7 @@ without touching this module.
 
 from __future__ import annotations
 
+import functools
 import inspect
 from typing import TYPE_CHECKING, Any
 
@@ -289,6 +290,13 @@ def _resolve_via_instance(klass: type, raw: Any) -> Any:
     a non-callable attribute) is identical whether read from the class
     or an instance, so it is returned unchanged.
     """
+    if isinstance(raw, functools.singledispatchmethod):
+        # The bound dispatcher's own signature is a generic (*args,
+        # **kwargs) passthrough that accepts every call shape regardless
+        # of the wrapped implementation -- validate the default
+        # implementation instead, the one a call reaches when no
+        # registered type matches.
+        raw = raw.func
     descriptor_get = getattr(type(raw), "__get__", None)
     if descriptor_get is None:
         return raw
@@ -333,7 +341,20 @@ def _hook_shape_problem(
         # any value is the connector's to set.
         return None
     raw_override = inspect.getattr_static(klass, name)
-    resolved = _resolve_via_instance(klass, raw_override)
+    try:
+        resolved = _resolve_via_instance(klass, raw_override)
+    except Exception as exc:
+        # classify_via_hook (declarations.py) treats a descriptor that
+        # raises on resolution as a broken hook and maps it to "config"
+        # at runtime, never crashing the caller reporting the original
+        # failure -- tier 1 must catch the same defect at authoring
+        # time, not propagate it out of the conformance run.
+        return (
+            f"{klass.__name__}.{name} raised {type(exc).__name__} "
+            f"resolving the sanctioned {hook_label} ({exc}); a hook must "
+            f"resolve without relying on state {klass.__name__} only sets "
+            f"up in __init__."
+        )
     effective = _effective_callable(resolved)
     if effective is None:
         return (

@@ -391,6 +391,27 @@ class _AsyncCallableObjectClassifyErrorConnector(ReferenceConnector):
     classify_error = _AsyncCallableObjectClassifyError()
 
 
+class _SingledispatchBrokenDefaultConnector(ReferenceConnector):
+    """singledispatchmethod's default implementation drops exc entirely."""
+
+    @functools.singledispatchmethod
+    def classify_error(self) -> str | None:  # type: ignore[override]
+        return "transient"
+
+
+class _RaisingClassifyErrorDescriptor:
+    """A descriptor whose __get__ needs state object.__new__ never sets up."""
+
+    def __get__(self, obj: Any, objtype: type | None = None) -> Any:
+        return obj.state_from_init.classify
+
+
+class _RaisingClassifyErrorConnector(ReferenceConnector):
+    """classify_error resolution itself raises -- must fail loud, not crash."""
+
+    classify_error = _RaisingClassifyErrorDescriptor()
+
+
 class _MergeFormDialect(ReferencePostgresDialect):
     """Renders the MERGE form, for the merge_form: 'merge' rendering arm."""
 
@@ -725,6 +746,28 @@ class TestOverrideSurfaceBreaks:
         report = _messages(violations)
         assert "classify_error" in report
         assert "async" in report
+
+    def test_singledispatch_broken_default_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """The dispatcher's own signature can't mask a broken default impl."""
+        violations = check_override_surface(
+            _with_connector(reference_target, _SingledispatchBrokenDefaultConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "signature" in report
+
+    def test_raising_classify_error_descriptor_fails_loud(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A descriptor that raises on resolution reports a violation, not a crash."""
+        violations = check_override_surface(
+            _with_connector(reference_target, _RaisingClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "AttributeError" in report
 
     def test_staticmethod_hook_is_allowed(
         self, reference_target: ConformanceTarget
