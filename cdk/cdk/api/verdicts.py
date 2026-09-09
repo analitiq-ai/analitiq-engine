@@ -28,6 +28,7 @@ from ..declarations import (
     DECLARED_WRITE_VERDICTS,
     ErrorMap,
     call_declared_hook,
+    resolve_declared_hook,
 )
 from ..exceptions import ReadError, TransientReadError
 from ..types import AckStatus, FailureCategory
@@ -116,11 +117,12 @@ def classify_status(
     4xx rejections and turn config defects into infinite retries.
     """
     if dialect is not None:
+        source = f"{type(dialect).__name__}.classify"
         category = call_declared_hook(
-            dialect.classify,
+            resolve_declared_hook(dialect, "classify", source=source),
             status,
             body,
-            source=f"{type(dialect).__name__}.classify",
+            source=source,
         )
         if category is not None:
             logger.info("dialect classified HTTP %d -> %s", status, category)

@@ -260,6 +260,30 @@ class TestConnectWiring:
             == f"{type(handler).__name__}.classify_error"
         )
 
+    @pytest.mark.asyncio
+    async def test_a_classify_error_descriptor_bug_does_not_crash_connect(self):
+        # Resolving classify_error (not calling it) is itself an
+        # attribute read on untrusted connector code -- connect() must
+        # not crash and leak the just-materialized runtime over a
+        # connector's descriptor bug.
+        class _BrokenDescriptorConnector(GenericSQLConnector):
+            @property
+            def classify_error(self):
+                raise RuntimeError("connector descriptor bug")
+
+        handler = _BrokenDescriptorConnector()
+        runtime = MagicMock()
+        runtime.connector_id = "demo"
+        runtime.declared_sql_capabilities = caps_block()
+        runtime.declared_error_map = None
+        runtime.is_adbc = True
+        runtime.is_sync_sqlalchemy = False
+        runtime.driver = "postgresql"
+        runtime.open_adbc_connection = MagicMock()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()):
+            await handler.connect(runtime)
+        assert handler._backend._classify_error(ProgrammingError("boom")) == "config"
+
 
 class TestAdbcBoundary:
     def _backend(self, error_map=None, *, classify_error=None) -> AdbcBackend:

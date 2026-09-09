@@ -186,6 +186,21 @@ class TestClassification:
             classify_status(400, {}, dialect=BadDialect(), error_map=None) == "config"
         )
 
+    def test_a_dialect_classify_that_raises_resolving_it_maps_to_config(self) -> None:
+        # Resolving dialect.classify (not calling it) is itself an
+        # attribute read on untrusted, potentially AI-authored connector
+        # code -- a connector overriding it as a raising descriptor must
+        # not crash the HTTP response classification either.
+        class BrokenDescriptorDialect:
+            @property
+            def classify(self):
+                raise RuntimeError("connector descriptor bug")
+
+        assert (
+            classify_status(400, {}, dialect=BrokenDescriptorDialect(), error_map=None)
+            == "config"
+        )
+
 
 class TestDeclaredCategorySurvives:
     def test_a_deterministic_category_rides_the_read_error(self) -> None:

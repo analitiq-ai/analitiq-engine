@@ -896,10 +896,13 @@ class GenericSQLConnector(BaseDestinationHandler):
         if runtime.is_adbc:
             self._adbc_only = True
             transport_name = "ADBC"
+            classify_error_source = f"{type(self).__name__}.classify_error"
             backend = AdbcBackend(
                 self.dialect,
-                classify_error=self.classify_error,
-                classify_error_source=f"{type(self).__name__}.classify_error",
+                classify_error=resolve_declared_hook(
+                    self, "classify_error", source=classify_error_source
+                ),
+                classify_error_source=classify_error_source,
             )
         elif runtime.is_sync_sqlalchemy:
             self._sync_engine = runtime.sync_engine

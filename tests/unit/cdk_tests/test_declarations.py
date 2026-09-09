@@ -306,6 +306,15 @@ class TestCallDeclaredHook:
             == "config"
         )
 
+    def test_a_non_string_return_maps_to_config(self):
+        # A hook can return any *type* too -- membership testing a
+        # non-string against ERROR_CATEGORY_VALUES alone isn't enough to
+        # rule out a value that reaches a verdict-table lookup by luck
+        # (e.g. an object with a broken __eq__/__hash__).
+        assert (
+            call_declared_hook(lambda exc: 42, ValueError("x"), source="t") == "config"
+        )
+
     def test_a_crashing_hook_maps_to_config(self):
         def _broken(exc):
             raise RuntimeError("connector bug")

@@ -255,7 +255,7 @@ def call_declared_hook(
         return "config"
     if category is None:
         return None
-    if category not in ERROR_CATEGORY_VALUES:
+    if not isinstance(category, str) or category not in ERROR_CATEGORY_VALUES:
         logger.warning(
             "%s classified an error as %r, which is not in the engine "
             "vocabulary %s; treating the connector's classification as "
