@@ -105,23 +105,22 @@ def _encode_epoch(config: Mapping[str, Any]) -> Callable[[Any], Any]:
                 f"got {type(value).__name__}"
             )
         delta = _as_utc(value) - _UNIX_EPOCH
-        # A plain datetime carries microsecond precision, no more; scaled to
-        # nanoseconds before dividing so NANOSECOND (nanos_per_unit == 1)
-        # returns the true tick count rather than the microsecond count
-        # relabeled -- every coarser unit divides this same nanosecond
-        # total evenly. `value` can carry finer precision than that,
-        # though: a pyarrow batch's own to_pylist() refuses to materialize
-        # a genuinely sub-microsecond Timestamp(NANOSECOND) as a bare
-        # datetime at all UNLESS pandas is installed, in which case it
-        # returns a pandas.Timestamp -- a datetime subclass exposing the
-        # sub-microsecond remainder as `.nanosecond` (0-999), which plain
-        # subtraction against another datetime would otherwise silently
-        # discard. Read via getattr, not a pandas import (not a CDK
-        # dependency): 0 for every plain datetime, the real remainder for
-        # a pandas.Timestamp.
+        # A plain datetime carries microsecond precision, no more -- which
+        # is all this encoder can ever be handed: LandingBatch.records
+        # (cdk.base_handler) materialises the whole batch via
+        # RecordBatch.to_pylist() before land() ever calls an encoder, and
+        # to_pylist() itself refuses a genuinely sub-microsecond
+        # Timestamp(NANOSECOND)/Time64(NANOSECOND) value outright unless
+        # pandas is installed (not a CDK runtime dependency) -- a
+        # pre-existing limit of that shared, connector-agnostic
+        # materialisation step, not one this catalog's encoders can widen.
+        # Scaled to nanoseconds before dividing so NANOSECOND
+        # (nanos_per_unit == 1) returns the true tick count rather than the
+        # microsecond count relabeled -- every coarser unit divides this
+        # same nanosecond total evenly.
         total_nanos = (
             delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds
-        ) * 1000 + getattr(value, "nanosecond", 0)
+        ) * 1000
         return total_nanos // nanos_per_unit
 
     return encode
@@ -215,14 +214,22 @@ def resolve_encoder(
     name = encoding_write.get("name")
     if name == CODE_ENCODING_NAME:
         return None
-    factory = ENCODER_FACTORIES.get(name) if isinstance(name, str) else None
-    if factory is None:
+    if not isinstance(name, str) or name not in ENCODER_FACTORIES:
         raise InvalidTypeMapError(
             f"unknown encoding_write name {name!r}; expected one of "
             f"{', '.join([*ENCODER_FACTORIES, CODE_ENCODING_NAME])}"
         )
     config = {k: v for k, v in encoding_write.items() if k != "name"}
-    return factory(config)
+    allowed = {p["name"] for p in _PARAM_SHAPES[name]}
+    unknown = set(config) - allowed
+    if unknown:
+        raise InvalidTypeMapError(
+            f"encoding_write {name!r}: unknown parameter(s) {sorted(unknown)!r}; "
+            f"a factory silently ignores a key it does not read, so a "
+            f"misspelled or unpublished parameter would otherwise render a "
+            f"different wire format than the one declared"
+        )
+    return ENCODER_FACTORIES[name](config)
 
 
 #: The conversion-matrix kinds a *write* requires an explicit

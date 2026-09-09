@@ -23,7 +23,7 @@ import re2
 
 from ._param_validation import require_enum_param, require_list_param, require_str_param
 from .conversions import Conversion, classify_conversion
-from .decoders import CODE_ENCODING_NAME, EPOCH_UNITS
+from .decoders import CODE_ENCODING_NAME, DECODER_PARAMS, EPOCH_UNITS
 from .exceptions import InvalidTypeMapError
 from .grammar import (
     ARROW_FAMILIES,
@@ -402,9 +402,10 @@ def _ticks_to_array(
 #: at microseconds), so :func:`_decode_iso8601` reads it straight off the
 #: string and adds it back after the fact, only for a Timestamp/Time64
 #: column actually declared at nanosecond resolution. Zero for a value with
-#: six or fewer fractional digits, or none at all.
+#: six or fewer fractional digits, or none at all. ``[.,]``: ISO-8601 permits
+#: either as the fractional separator, and ``fromisoformat`` accepts both.
 def _iso8601_ns_remainder(value: str) -> int:
-    match = re.search(r"\.(\d+)", value)
+    match = re.search(r"[.,](\d+)", value)
     if match is None:
         return 0
     digits = match.group(1)
@@ -689,7 +690,10 @@ _ISO_DURATION_RE: Final[re.Pattern[str]] = re.compile(
     r"^P(?:(?P<weeks>\d+)W)$"
     r"|"
     r"^P(?:(?P<days>\d+)D)?"
-    r"(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?"
+    # (?=\d) after T: every component below starts with a digit, so this
+    # rejects a dangling "T" with nothing following it ("P1DT", bare "PT")
+    # rather than fullmatching it with every T-section group None.
+    r"(?:T(?=\d)(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?"
     r"(?:(?P<seconds>\d+(?:\.\d+)?)S)?)?$"
 )
 
@@ -790,4 +794,13 @@ def resolve_decoder(field_def: Mapping[str, Any], field: pa.Field) -> DecodeFn |
             f"one of {', '.join([*_DECODER_FACTORIES, CODE_ENCODING_NAME])}"
         )
     config = {k: v for k, v in encoding.items() if k != "name"}
+    allowed = {p.name for p in DECODER_PARAMS[name]}
+    unknown = set(config) - allowed
+    if unknown:
+        raise InvalidTypeMapError(
+            f"encoding {name!r} on field {field.name!r}: unknown parameter(s) "
+            f"{sorted(unknown)!r}; a factory silently ignores a key it does "
+            f"not read, so a misspelled or unpublished parameter would "
+            f"otherwise apply a different wire format than the one declared"
+        )
     return factory(config)

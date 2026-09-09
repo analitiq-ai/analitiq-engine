@@ -22,7 +22,7 @@ from .type_map.arrow import (
 )
 from .type_map.decoders import CODE_ENCODING_NAME as READ_CODE_ENCODING_NAME
 from .type_map.decoders import REQUIRES_ENCODING_KINDS as READ_REQUIRES_ENCODING_KINDS
-from .type_map.decoders import decoder_matches_kind
+from .type_map.decoders import decoder_matches_json_type, decoder_matches_kind
 from .type_map.encoders import CODE_ENCODING_NAME as WRITE_CODE_ENCODING_NAME
 from .type_map.encoders import REQUIRES_ENCODING_KINDS as WRITE_REQUIRES_ENCODING_KINDS
 from .type_map.encoders import encoding_write_matches_kind, resolve_encoder
@@ -225,6 +225,27 @@ def _epoch_day_unit_mismatch(name: Any, encoding: Mapping[str, Any], kind: str) 
         and encoding.get("unit") == "DAY"
         and kind != "date"
     )
+
+
+def _declared_json_type(field_def: Mapping[str, Any]) -> str | None:
+    """Read the one non-null JSON type *field_def* declares, or ``None``.
+
+    Mirrors ``cdk.api.response_schema.declared_json_types``'s reading of
+    JSON Schema's ``type`` (a plain string is one type; a list such as
+    ``["string", "null"]`` names one real type plus nullability) --
+    duplicated rather than imported: this module stays free of any
+    ``cdk.api`` import (see the class docstring). Returns ``None`` for zero
+    or several non-null types, same as an absent declaration: a field with
+    no unambiguous JSON type has nothing here to check the encoding against.
+    """
+    declared = field_def.get("type")
+    if isinstance(declared, str):
+        types = [declared]
+    elif isinstance(declared, list):
+        types = [t for t in declared if isinstance(t, str) and t != "null"]
+    else:
+        types = []
+    return types[0] if len(types) == 1 else None
 
 
 def _check_nested_leaf_encoding(
@@ -552,11 +573,14 @@ class SchemaContract:
         never checked.
 
         A resolved decoder naming a real catalog entry is additionally
-        checked for kind compatibility, via
-        :func:`~cdk.type_map.decoders.decoder_matches_kind` -- a Timestamp
-        field naming ``decimal`` would otherwise resolve fine (the name is
-        real) and only fail inside the decoder's own closure on the first
-        non-null response.
+        checked for kind compatibility against the target ``arrow_type``,
+        via :func:`~cdk.type_map.decoders.decoder_matches_kind`, and for
+        wire-type compatibility against the field's own declared JSON
+        ``type``, via :func:`~cdk.type_map.decoders.decoder_matches_json_type`
+        -- a Timestamp field naming ``decimal``, or an ``integer``-typed
+        field naming ``iso8601`` (which reads only a string), would
+        otherwise resolve fine (the name is real) and only fail inside the
+        decoder's own closure on the first non-null response.
 
         A nested (``Object``/``List``) field with no top-level ``encoding``
         of its own is walked recursively (:func:`_check_nested_leaf_encoding`),
@@ -645,6 +669,17 @@ class SchemaContract:
             raise InvalidTypeMapError(
                 f"field {f.name!r}: encoding {name!r} does not decode a "
                 f"{kind!r} value; arrow_type is {f.type!s}"
+            )
+        json_type = _declared_json_type(field_def)
+        if (
+            json_type is not None
+            and isinstance(name, str)
+            and not decoder_matches_json_type(name, json_type)
+        ):
+            raise InvalidTypeMapError(
+                f"field {f.name!r}: encoding {name!r} does not read a "
+                f"{json_type!r}-typed wire value; field declares type "
+                f"{json_type!r}"
             )
         if _epoch_day_unit_mismatch(name, encoding, kind):
             raise InvalidTypeMapError(

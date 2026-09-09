@@ -137,6 +137,38 @@ def decoder_matches_kind(name: str, kind: ConversionKind) -> bool:
     return kind in DECODER_KIND_COMPATIBILITY.get(name, frozenset())
 
 
+#: The declared JSON Schema ``type`` each catalog decoder actually reads off
+#: the wire, per its own closure in :mod:`cdk.type_map.arrow` -- read there,
+#: not guessed: ``iso8601``/``strptime``/``regex_epoch``/``base64``/
+#: ``iso_duration`` all reject a non-``str`` wire value outright;
+#: ``bool_map`` compares the wire value against ``true_values``/
+#: ``false_values``, both declared as lists of strings
+#: (:func:`cdk.type_map._param_validation.require_list_param`), so only a
+#: JSON string can ever match; ``epoch`` accepts ``numbers.Integral`` or a
+#: numeric string but not a JSON ``number`` (float); ``decimal`` accepts
+#: anything ``Decimal(str(v))`` parses, which covers a JSON boolean as
+#: readily as a string. Checked eagerly by
+#: :meth:`~cdk.schema_contract.SchemaContract.check_required_read_encoding`
+#: against the field's declared ``type``, the same "fails at plan time, not
+#: on the first non-null response" contract :data:`DECODER_KIND_COMPATIBILITY`
+#: already applies to the target ``arrow_type``.
+DECODER_JSON_TYPE_COMPATIBILITY: Final[dict[str, frozenset[str]]] = {
+    "iso8601": frozenset({"string"}),
+    "epoch": frozenset({"integer", "string"}),
+    "strptime": frozenset({"string"}),
+    "regex_epoch": frozenset({"string"}),
+    "decimal": frozenset({"string", "number", "integer"}),
+    "iso_duration": frozenset({"string"}),
+    "bool_map": frozenset({"string"}),
+    "base64": frozenset({"string"}),
+}
+
+
+def decoder_matches_json_type(name: str, json_type: str) -> bool:
+    """Whether decoder *name* can read a wire value of declared JSON *json_type*."""
+    return json_type in DECODER_JSON_TYPE_COMPATIBILITY.get(name, frozenset())
+
+
 #: The published catalog's own version. Bump alongside any change to the
 #: name/parameter vocabulary, same discipline as
 #: :data:`cdk.type_map.grammar.GRAMMAR_VERSION`.

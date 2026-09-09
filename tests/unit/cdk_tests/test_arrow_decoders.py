@@ -50,15 +50,26 @@ class TestIsoDurationPreservesSubMicrosecondPrecision:
 
 
 class TestIsoDurationRejectsComponentFreeStrings:
-    @pytest.mark.parametrize("value", ["P", "PT"])
-    def test_a_designator_with_no_component_is_refused(self, value: str) -> None:
+    def test_a_designator_with_no_component_is_refused(self) -> None:
         # Every component group is individually optional (so "P3D" and
-        # "PT30S" each parse fine alone), which also makes bare "P"/"PT"
-        # fullmatch with every group absent -- neither names an actual
-        # duration component, and ISO-8601 requires at least one.
+        # "PT30S" each parse fine alone), which also makes bare "P"
+        # fullmatch with every group absent -- it names no actual duration
+        # component, and ISO-8601 requires at least one.
         field = pa.field("d", pa.duration("s"), nullable=True)
         fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
         with pytest.raises(ValueError, match="no duration component"):
+            fn(field, ["P"])
+
+    @pytest.mark.parametrize("value", ["PT", "P1DT"])
+    def test_a_dangling_time_designator_is_refused(self, value: str) -> None:
+        # "T" introduces an optional hour/minute/second section, so a "T"
+        # with nothing after it ("PT" alone, or "P1DT") would otherwise
+        # fullmatch with every T-section group None -- silently decoding
+        # "P1DT" as exactly one day rather than rejecting the malformed
+        # dangling designator.
+        field = pa.field("d", pa.duration("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
+        with pytest.raises(ValueError, match="not an ISO-8601 duration"):
             fn(field, [value])
 
 
@@ -87,6 +98,14 @@ class TestIso8601PreservesNanosecondPrecision:
         fn = resolve_decoder({"encoding": {"name": "iso8601"}}, field)
         result = fn(field, ["2024-01-01T00:00:00.123456+00:00"])
         assert result.to_pylist()[0].microsecond == 123456
+
+    def test_a_comma_fractional_separator_is_not_dropped(self) -> None:
+        # ISO-8601 permits "," as well as "." for the fractional separator,
+        # and datetime.fromisoformat accepts both.
+        field = pa.field("t", pa.timestamp("ns", tz="UTC"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso8601"}}, field)
+        result = fn(field, ["1970-01-01T00:00:00,123456789+00:00"])
+        assert result[0].value == 123_456_789
 
 
 class TestEpochDecoderPreservesTheInstantAcrossTargetZones:
@@ -188,3 +207,20 @@ class TestRegexEpochUsesRE2NotBacktrackingRe:
         result = fn(field, ["/Date(1541176290160+0000)/", None])
         assert result.to_pylist()[0].isoformat() == "2018-11-02T16:31:30.160000+00:00"
         assert result.to_pylist()[1] is None
+
+
+class TestResolveDecoderRejectsUnknownParams:
+    def test_a_param_no_factory_reads_is_refused(self) -> None:
+        # iso8601 takes no params; a factory only reads the keys it
+        # declares, so an unpublished one would otherwise be silently
+        # ignored rather than applying the (wrong) format it names.
+        field = pa.field("t", pa.timestamp("us", tz="UTC"), nullable=True)
+        with pytest.raises(InvalidTypeMapError, match="unknown parameter"):
+            resolve_decoder(
+                {"encoding": {"name": "iso8601", "pattern": "%Y%m%d"}}, field
+            )
+
+    def test_a_misspelled_required_param_is_refused_by_name(self) -> None:
+        field = pa.field("t", pa.timestamp("us", tz="UTC"), nullable=True)
+        with pytest.raises(InvalidTypeMapError, match="unknown parameter"):
+            resolve_decoder({"encoding": {"name": "epoch", "units": "SECOND"}}, field)

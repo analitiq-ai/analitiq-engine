@@ -630,6 +630,35 @@ class TestSchemaContractFromPylist:
         with pytest.raises(InvalidTypeMapError, match="decimal"):
             SchemaContract(schema).check_required_read_encoding()
 
+    def test_a_decoder_incompatible_with_the_declared_json_type_is_refused(self):
+        # 'iso8601' reads only a string; an 'integer'-declared field naming
+        # it resolves fine (the name is real, and the arrow kind -- 'time' --
+        # matches too) and would otherwise only fail inside the decoder's
+        # own closure on the first non-null response.
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": "integer",
+                    "arrow_type": "Timestamp(SECOND, UTC)",
+                    "encoding": {"name": "iso8601"},
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="iso8601"):
+            SchemaContract(schema).check_required_read_encoding()
+
+    def test_a_decoder_compatible_with_the_declared_json_type_passes(self):
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": "string",
+                    "arrow_type": "Timestamp(SECOND, UTC)",
+                    "encoding": {"name": "iso8601"},
+                },
+            }
+        }
+        SchemaContract(schema).check_required_read_encoding()
+
     def test_a_nested_gated_leaf_with_no_encoding_is_refused(self):
         # resolve_decoder is never consulted for a nested leaf --
         # _build_nested_column hands its raw wire value straight to
