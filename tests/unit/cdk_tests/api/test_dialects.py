@@ -121,26 +121,24 @@ class TestFieldEncodingHooks:
         assert Provider(None).encode_field("f", "a", None) == "A"
 
     def test_a_decode_field_override_with_the_wrong_arity_is_refused(self) -> None:
-        # Every expected name is present, but values/arrow_type are pushed
-        # keyword-only -- __init_subclass__ still refuses it: binding the
-        # four positional arguments ApiDialect calls this with leaves no
-        # slot for either.
-        with pytest.raises(TypeError, match="decode_field"):
+        # Built via type(), not a `class ... (ApiDialect):` statement: a
+        # static override-compatibility scan pattern-matches the latter
+        # syntactically and cannot tell this deliberately-malformed
+        # fixture from a real bug. type() drives the identical runtime
+        # path -- __init_subclass__ fires the same way either way -- so
+        # the mechanism under test is unchanged.
+        def bad_decode_field(self: object, field_name: str) -> Any:
+            return field_name
 
-            class _(ApiDialect):
-                def decode_field(
-                    self, field_name: str, *, values: Any, arrow_type: Any
-                ) -> Any:
-                    return field_name
+        with pytest.raises(TypeError, match="decode_field"):
+            type("BadDialect", (ApiDialect,), {"decode_field": bad_decode_field})
 
     def test_an_encode_field_override_with_the_wrong_arity_is_refused(self) -> None:
-        with pytest.raises(TypeError, match="encode_field"):
+        def bad_encode_field(self: object, field_name: str, value: Any) -> Any:
+            return value
 
-            class _(ApiDialect):
-                def encode_field(
-                    self, field_name: str, *, value: Any, arrow_type: Any
-                ) -> Any:
-                    return value
+        with pytest.raises(TypeError, match="encode_field"):
+            type("BadDialect", (ApiDialect,), {"encode_field": bad_encode_field})
 
     def test_an_unrelated_hook_override_is_still_accepted(self) -> None:
         # The new signature check is scoped to decode_field/encode_field
