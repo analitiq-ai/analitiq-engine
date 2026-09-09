@@ -227,6 +227,67 @@ def _epoch_day_unit_mismatch(name: Any, encoding: Mapping[str, Any], kind: str) 
     )
 
 
+def _check_nested_leaf_encoding(
+    *,
+    key: str,
+    override_method: str,
+    requires_encoding_kinds: frozenset[str],
+    direction: str,
+    field_def: dict[str, Any],
+    arrow_type: pa.DataType,
+    path: str,
+) -> None:
+    """Recurse into a struct/list leaf, refusing a gated-kind leaf unconditionally.
+
+    One walk for both directions: read and write refuse a nested leaf that
+    needs decoding/encoding by the identical mechanism -- neither
+    ``_build_nested_column`` (read) nor ``resolve_write_encoders`` (write)
+    ever resolves or applies a leaf's own declaration, only a top-level
+    ``{"name": "code"}`` on the whole nested field (checked by the caller
+    before ever recursing here), so a leaf that needs one is refused by its
+    full nested path whether or not it declares its own *key*, naming the
+    ``ApiDialect`` override method that would have to cover it instead.
+    """
+    if pa.types.is_struct(arrow_type):
+        sub_defs = field_def.get("properties") or {}
+        for child in arrow_type:
+            child_def = sub_defs.get(child.name) or {}
+            _check_nested_leaf_encoding(
+                key=key,
+                override_method=override_method,
+                requires_encoding_kinds=requires_encoding_kinds,
+                direction=direction,
+                field_def=child_def,
+                arrow_type=child.type,
+                path=f"{path}.{child.name}",
+            )
+        return
+    if pa.types.is_list(arrow_type) or pa.types.is_large_list(arrow_type):
+        item_def = field_def.get("items") or {}
+        _check_nested_leaf_encoding(
+            key=key,
+            override_method=override_method,
+            requires_encoding_kinds=requires_encoding_kinds,
+            direction=direction,
+            field_def=item_def,
+            arrow_type=arrow_type.value_type,
+            path=f"{path}[]",
+        )
+        return
+    kind = ARROW_FAMILIES[arrow_family(arrow_type)].conversion_kind
+    if kind not in requires_encoding_kinds:
+        return
+    if key in field_def:
+        raise InvalidTypeMapError(
+            f"field {path!r} declares {key!r}, but a nested leaf's own "
+            f"{key} is never resolved or applied -- declare {key}: "
+            f"{{'name': 'code'}} on the top-level nested field instead, "
+            f"which covers the whole value via a connector.py "
+            f"ApiDialect.{override_method} override"
+        )
+    raise MissingEncodingError(path, str(arrow_type), direction=direction, key=key)
+
+
 def _bind_code_encoder(
     code_encoder: Callable[[str, Any, pa.DataType], Any],
     field_name: str,
@@ -498,7 +559,7 @@ class SchemaContract:
         non-null response.
 
         A nested (``Object``/``List``) field with no top-level ``encoding``
-        of its own is walked recursively (:meth:`_check_nested_read_encoding`),
+        of its own is walked recursively (:func:`_check_nested_leaf_encoding`),
         refusing any gated-kind leaf regardless of whether the leaf itself
         declares an ``encoding``: ``_build_nested_column`` hands a nested
         value's raw wire shape straight to pyarrow with no decode step, so
@@ -519,14 +580,22 @@ class SchemaContract:
     ) -> None:
         """Validate a nested (``Object``/``List``) field's own top-level ``encoding``.
 
-        ``None`` recurses into leaves (:meth:`_check_nested_read_encoding`);
+        ``None`` recurses into leaves (:func:`_check_nested_leaf_encoding`);
         anything else must be exactly ``{"name": "code"}`` -- no catalog
         decoder targets a struct/list arrow_type, so a real name would
         resolve fine here and then crash applying a scalar decoder to the
         whole value in ``_build_column``.
         """
         if encoding is None:
-            self._check_nested_read_encoding(field_def, f.type, f.name)
+            _check_nested_leaf_encoding(
+                key="encoding",
+                override_method="decode_field",
+                requires_encoding_kinds=READ_REQUIRES_ENCODING_KINDS,
+                direction="read",
+                field_def=field_def,
+                arrow_type=f.type,
+                path=f.name,
+            )
             return
         if not isinstance(encoding, Mapping):
             raise InvalidTypeMapError(
@@ -583,47 +652,6 @@ class SchemaContract:
                 f"builds a Date32/Date64 arrow_type, got {f.type!s}"
             )
 
-    @staticmethod
-    def _check_nested_read_encoding(
-        field_def: dict[str, Any], arrow_type: pa.DataType, path: str
-    ) -> None:
-        """Recurse into a struct/list leaf for the read side.
-
-        Mirrors :meth:`_check_nested_write_encoding`: refuses a gated-kind
-        leaf unconditionally, named by its full nested path, whether or not
-        the leaf itself declares ``encoding`` -- ``_build_nested_column``
-        never resolves or applies one, so a leaf's own declaration would
-        pass this check and then never actually decode the value.
-        """
-        if pa.types.is_struct(arrow_type):
-            sub_defs = field_def.get("properties") or {}
-            for child in arrow_type:
-                child_def = sub_defs.get(child.name) or {}
-                SchemaContract._check_nested_read_encoding(
-                    child_def, child.type, f"{path}.{child.name}"
-                )
-            return
-        if pa.types.is_list(arrow_type) or pa.types.is_large_list(arrow_type):
-            item_def = field_def.get("items") or {}
-            SchemaContract._check_nested_read_encoding(
-                item_def, arrow_type.value_type, f"{path}[]"
-            )
-            return
-        kind = ARROW_FAMILIES[arrow_family(arrow_type)].conversion_kind
-        if kind not in READ_REQUIRES_ENCODING_KINDS:
-            return
-        if "encoding" in field_def:
-            raise InvalidTypeMapError(
-                f"field {path!r} declares 'encoding', but a nested leaf's "
-                f"own encoding is never resolved or applied -- declare "
-                f"encoding: {{'name': 'code'}} on the top-level nested field "
-                f"instead, which covers the whole value via a connector.py "
-                f"ApiDialect.decode_field override"
-            )
-        raise MissingEncodingError(
-            path, str(arrow_type), direction="read", key="encoding"
-        )
-
     def check_required_write_encoding(self) -> None:
         """Raise for a field whose write wire shape needs ``encoding_write``.
 
@@ -669,95 +697,74 @@ class SchemaContract:
         for f in self._arrow_schema:
             field_def = self._field_defs.get(f.name) or {}
             if _is_nested(f.type):
-                encoding_write = field_def.get("encoding_write")
-                if encoding_write is not None:
-                    if not isinstance(encoding_write, Mapping):
-                        raise InvalidTypeMapError(
-                            f"field {f.name!r}: 'encoding_write' must be an "
-                            f"object, got {type(encoding_write).__name__}"
-                        )
-                    if encoding_write.get("name") != WRITE_CODE_ENCODING_NAME:
-                        raise InvalidTypeMapError(
-                            f"field {f.name!r}: a nested (Object/List) "
-                            f"field's own top-level encoding_write must be "
-                            f"{{'name': 'code'}} -- resolve_write_encoders "
-                            f"can resolve any catalog name, but land() would "
-                            f"then apply it to the whole dict/list value and "
-                            f"crash; declared {encoding_write.get('name')!r}"
-                        )
-                    continue
-                self._check_nested_write_encoding(field_def, f.type, f.name)
-                continue
-            kind = ARROW_FAMILIES[arrow_family(f.type)].conversion_kind
-            encoding_write = field_def.get("encoding_write")
-            if encoding_write is None:
-                if kind in WRITE_REQUIRES_ENCODING_KINDS:
-                    raise MissingEncodingError(
-                        f.name, str(f.type), direction="write", key="encoding_write"
-                    )
-                continue
-            if not isinstance(encoding_write, Mapping):
-                # Malformed shape (e.g. a bare string) -- resolve_write_encoders,
-                # called right after this in the one call site, raises the
-                # precise error for this; not duplicated here.
-                continue
-            name = encoding_write.get("name")
-            if name == WRITE_CODE_ENCODING_NAME or not isinstance(name, str):
-                # The code hatch covers any kind by design; an unknown name
-                # is resolve_write_encoders's error to raise, not this one's.
-                continue
-            if not encoding_write_matches_kind(name, kind):
-                raise InvalidTypeMapError(
-                    f"field {f.name!r}: encoding_write {name!r} does not "
-                    f"render a {kind!r} value; arrow_type is {f.type!s}"
-                )
+                self._check_nested_field_write_encoding(f, field_def)
+            else:
+                self._check_scalar_write_encoding(f, field_def)
 
-    @staticmethod
-    def _check_nested_write_encoding(
-        field_def: dict[str, Any], arrow_type: pa.DataType, path: str
+    def _check_nested_field_write_encoding(
+        self, f: pa.Field, field_def: dict[str, Any]
     ) -> None:
-        """Recurse into a struct/list leaf.
+        """Validate a nested field's own top-level ``encoding_write``.
 
-        Refuses a gated-kind leaf unconditionally, named by its full nested
-        path -- whether or not the leaf itself declares ``encoding_write``.
-        Only a top-level ``encoding_write`` on the whole nested field
-        (checked by the caller before ever recursing here) is resolved and
-        applied: :meth:`resolve_write_encoders` only ever rewrites a
-        top-level record key, so a leaf's own declaration would pass this
-        check and then silently never run, reaching ``encode_body``
-        un-encoded on the first non-null value. Refusing it here regardless
-        of presence turns that into a clear, config-time error naming the
-        one path that does work (the top-level ``code`` hatch) instead of a
-        declaration that looks honored and is not.
+        Mirrors :meth:`_check_nested_field_encoding` on the read side, minus
+        the code-hook presence check: :meth:`resolve_write_encoders`, called
+        unconditionally right after this in the one call site, already
+        raises for a missing ``code_encoder`` -- see this method's caller's
+        docstring for why the write side does not duplicate that check here.
         """
-        if pa.types.is_struct(arrow_type):
-            sub_defs = field_def.get("properties") or {}
-            for child in arrow_type:
-                child_def = sub_defs.get(child.name) or {}
-                SchemaContract._check_nested_write_encoding(
-                    child_def, child.type, f"{path}.{child.name}"
+        encoding_write = field_def.get("encoding_write")
+        if encoding_write is None:
+            _check_nested_leaf_encoding(
+                key="encoding_write",
+                override_method="encode_field",
+                requires_encoding_kinds=WRITE_REQUIRES_ENCODING_KINDS,
+                direction="write",
+                field_def=field_def,
+                arrow_type=f.type,
+                path=f.name,
+            )
+            return
+        if not isinstance(encoding_write, Mapping):
+            raise InvalidTypeMapError(
+                f"field {f.name!r}: 'encoding_write' must be an object, got "
+                f"{type(encoding_write).__name__}"
+            )
+        if encoding_write.get("name") != WRITE_CODE_ENCODING_NAME:
+            raise InvalidTypeMapError(
+                f"field {f.name!r}: a nested (Object/List) field's own "
+                f"top-level encoding_write must be {{'name': 'code'}} -- "
+                f"resolve_write_encoders can resolve any catalog name, but "
+                f"land() would then apply it to the whole dict/list value "
+                f"and crash; declared {encoding_write.get('name')!r}"
+            )
+
+    def _check_scalar_write_encoding(
+        self, f: pa.Field, field_def: dict[str, Any]
+    ) -> None:
+        """Validate a scalar field's declared or required ``encoding_write``."""
+        kind = ARROW_FAMILIES[arrow_family(f.type)].conversion_kind
+        encoding_write = field_def.get("encoding_write")
+        if encoding_write is None:
+            if kind in WRITE_REQUIRES_ENCODING_KINDS:
+                raise MissingEncodingError(
+                    f.name, str(f.type), direction="write", key="encoding_write"
                 )
             return
-        if pa.types.is_list(arrow_type) or pa.types.is_large_list(arrow_type):
-            item_def = field_def.get("items") or {}
-            SchemaContract._check_nested_write_encoding(
-                item_def, arrow_type.value_type, f"{path}[]"
-            )
+        if not isinstance(encoding_write, Mapping):
+            # Malformed shape (e.g. a bare string) -- resolve_write_encoders,
+            # called right after this in the one call site, raises the
+            # precise error for this; not duplicated here.
             return
-        kind = ARROW_FAMILIES[arrow_family(arrow_type)].conversion_kind
-        if kind not in WRITE_REQUIRES_ENCODING_KINDS:
+        name = encoding_write.get("name")
+        if name == WRITE_CODE_ENCODING_NAME or not isinstance(name, str):
+            # The code hatch covers any kind by design; an unknown name
+            # is resolve_write_encoders's error to raise, not this one's.
             return
-        if "encoding_write" in field_def:
+        if not encoding_write_matches_kind(name, kind):
             raise InvalidTypeMapError(
-                f"field {path!r} declares 'encoding_write', but a nested "
-                f"leaf's own encoding_write is never resolved or applied -- "
-                f"declare encoding_write: {{'name': 'code'}} on the "
-                f"top-level nested field instead, which covers the whole "
-                f"value via a connector.py ApiDialect.encode_field override"
+                f"field {f.name!r}: encoding_write {name!r} does not "
+                f"render a {kind!r} value; arrow_type is {f.type!s}"
             )
-        raise MissingEncodingError(
-            path, str(arrow_type), direction="write", key="encoding_write"
-        )
 
     def resolve_write_encoders(
         self,
