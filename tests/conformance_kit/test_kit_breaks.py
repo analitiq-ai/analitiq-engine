@@ -318,6 +318,34 @@ class _NonCallableClassifyErrorConnector(ReferenceConnector):
     classify_error = "transient"
 
 
+class _ClassifyErrorCallableObject:
+    """A callable object, not a plain method -- accessed via the class it
+    is not descriptor-bound, so it needs no implicit-self placeholder."""
+
+    def __call__(self, exc: BaseException) -> str | None:
+        return "transient"
+
+
+class _CallableObjectClassifyErrorConnector(ReferenceConnector):
+    """classify_error as a valid callable object, not a plain method."""
+
+    classify_error = _ClassifyErrorCallableObject()
+
+
+class _ShadowedClassifyErrorMixin:
+    """Defines classify_error, but trails GenericSQLConnector in the MRO."""
+
+    def classify_error(self, exc: BaseException) -> str | None:
+        return "transient"
+
+
+class _ShadowedClassifyErrorConnector(
+    ReferenceConnector, _ShadowedClassifyErrorMixin
+):
+    """BaseDestinationHandler's neutral classify_error wins this MRO, so
+    the mixin's override is never called -- tier 1 must catch that."""
+
+
 class _MergeFormDialect(ReferencePostgresDialect):
     """Renders the MERGE form, for the merge_form: 'merge' rendering arm."""
 
@@ -582,6 +610,30 @@ class TestOverrideSurfaceBreaks:
         report = _messages(violations)
         assert "classify_error" in report
         assert "non-callable" in report
+
+    def test_callable_object_classify_error_is_allowed(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A callable object isn't descriptor-bound; it needs no self shift."""
+        assert (
+            check_override_surface(
+                _with_connector(
+                    reference_target, _CallableObjectClassifyErrorConnector
+                )
+            )
+            == []
+        )
+
+    def test_shadowed_classify_error_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A mixin's classify_error must actually win connector_cls's MRO."""
+        violations = check_override_surface(
+            _with_connector(reference_target, _ShadowedClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "shadowed" in report
 
     def test_staticmethod_hook_is_allowed(
         self, reference_target: ConformanceTarget

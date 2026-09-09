@@ -157,11 +157,14 @@ def _signature_mismatch(
     :func:`_base_call_shapes`) against the override's signature — so an
     override may add defaulted parameters of its own, but a dropped,
     renamed, de-keyworded, or made-required parameter fails with the
-    binder's own explanation. ``takes_self`` is False only for
-    static/class-method overrides (whose resolved signature carries no
-    instance parameter); a plain method that *forgot* ``self`` must not
-    slip through the self-less bind, so the choice comes from the
-    descriptor type, never from which bind happens to succeed.
+    binder's own explanation. ``takes_self`` is False for a
+    static/classmethod override and for a callable *object* (its resolved
+    signature already carries no instance parameter in both cases — the
+    latter because ``inspect.signature`` reads a callable object's own
+    ``__call__`` with its self already stripped); a plain method that
+    *forgot* ``self`` must not slip through the self-less bind, so the
+    choice comes from the descriptor/object type, never from which bind
+    happens to succeed.
     """
     try:
         override_sig = inspect.signature(override_fn)
@@ -272,7 +275,16 @@ def _hook_shape_problem(
     mismatch = _signature_mismatch(
         base_fn,
         override_fn,
-        takes_self=not isinstance(override_attr, (staticmethod, classmethod)),
+        # Only a plain function/method needs an implicit-self placeholder:
+        # accessed via the class it resolves unbound, so its signature
+        # still carries self. staticmethod/classmethod are already
+        # self-less; a callable *object* (``classify_error = Classifier()``
+        # with ``Classifier.__call__(self, exc)``) is neither -- accessing
+        # it via the class returns the instance itself, and
+        # inspect.signature() on a callable object already reads
+        # __call__'s signature with its own self stripped, so adding a
+        # placeholder here double-counts it and rejects a valid hook.
+        takes_self=inspect.isfunction(override_attr),
     )
     if mismatch is None:
         return None
@@ -305,6 +317,24 @@ def _audit_connector_class(connector_cls: type) -> list[Violation]:
     for klass in _mro_span(connector_cls, GenericSQLConnector):
         for name, value in vars(klass).items():
             if name == "classify_error":
+                live = inspect.getattr_static(connector_cls, name, None)
+                if live is not value:
+                    # A framework class earlier in connector_cls's MRO than
+                    # klass also defines classify_error (BaseDestinationHandler
+                    # always does, with its neutral no-op), so the runtime
+                    # attribute lookup on connector_cls never reaches this
+                    # definition -- it is dead code, not a working override.
+                    violations.append(
+                        Violation(
+                            CHECK,
+                            f"{klass.__name__}.classify_error is shadowed by "
+                            f"an earlier class in {connector_cls.__name__}'s "
+                            f"MRO and is never called; declare it on "
+                            f"{connector_cls.__name__} itself or list "
+                            f"{klass.__name__} before the shadowing base.",
+                        )
+                    )
+                    continue
                 mismatch = _hook_shape_problem(
                     klass,
                     name,
