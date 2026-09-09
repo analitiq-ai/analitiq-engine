@@ -144,6 +144,25 @@ class TestAckLadderDeclaredFirst:
         assert result.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
         assert "ProgrammingError" in result.failure_summary
 
+    def test_a_classify_error_that_raises_resolving_it_does_not_displace_the_failure(
+        self,
+    ):
+        # Resolving classify_error (not calling it) is itself an
+        # attribute read on untrusted, potentially AI-authored connector
+        # code -- a connector overriding it as a raising descriptor must
+        # not crash the write-ack ladder either.
+        class _BrokenDescriptorConnector(GenericSQLConnector):
+            @property
+            def classify_error(self):
+                raise RuntimeError("connector descriptor bug")
+
+        handler = _BrokenDescriptorConnector()
+        handler._error_map = None
+        result = handler._classify_unexpected_write_error(ProgrammingError("boom"))
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
+        assert "ProgrammingError" in result.failure_summary
+
 
 class TestDriverTimeoutVerdict:
     """A driver/socket timeout is the driver's error — declarations apply.

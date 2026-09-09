@@ -104,6 +104,23 @@ class _BareReadable:
         yield  # pragma: no cover -- makes this an async generator
 
 
+class _RaisingClassifyErrorReadable:
+    """A Readable whose classify_error attribute itself raises resolving it
+    (a descriptor/property bug) -- not a crash from calling the hook, a
+    crash from reaching it at all."""
+
+    def __init__(self, error):
+        self._error = error
+
+    async def read_batches(self, runtime, config, *, checkpoint, stream_name, **kw):
+        raise self._error
+        yield  # pragma: no cover -- makes this an async generator
+
+    @property
+    def classify_error(self):
+        raise RuntimeError("connector descriptor bug")
+
+
 async def _collect(servicer, request=None):
     request = request or ReadRequest(stream_name="s1", batch_size=10)
     return [r async for r in servicer.ReadStream(request, MagicMock())]
@@ -300,6 +317,21 @@ class TestReadStream:
         # hook from displacing the failure being reported.
         runtime = _runtime()
         readable = _BareReadable(OperationalError("bad search_path"))
+        servicer = SourceWorkerServicer(readable, runtime, {})
+        responses = await _collect(servicer)
+        terminal = responses[-1]
+        assert terminal.WhichOneof("message") == "error"
+        assert "OperationalError" in terminal.error.error_type
+
+    async def test_a_readable_whose_classify_error_raises_resolving_it_does_not_crash(
+        self,
+    ):
+        # Resolving classify_error (not calling it) is itself an
+        # attribute read on untrusted connector code -- a descriptor bug
+        # here must not crash the stream any more than a bug inside the
+        # hook's own body would.
+        runtime = _runtime()
+        readable = _RaisingClassifyErrorReadable(OperationalError("bad search_path"))
         servicer = SourceWorkerServicer(readable, runtime, {})
         responses = await _collect(servicer)
         terminal = responses[-1]

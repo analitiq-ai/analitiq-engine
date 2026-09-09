@@ -33,6 +33,7 @@ from cdk.declarations import (
     parse_declared_concurrency,
     parse_declared_error_map,
     require_declared_category,
+    resolve_declared_hook,
 )
 from cdk.types import AckStatus, FailureCategory
 
@@ -410,6 +411,52 @@ class TestBirthSiteCategory:
         with caplog.at_level(logging.WARNING, logger="cdk.declarations"):
             birth_site_category(_Bad("x"))
         assert any("declared_category" in r.message for r in caplog.records)
+
+
+class TestResolveDeclaredHook:
+    """The guard around *resolving* a connector-authored hook attribute.
+
+    Reading ``owner.attr`` is itself untrusted, potentially-AI-authored
+    connector code (a descriptor, a custom ``__getattr__``) -- the same
+    class of risk ``call_declared_hook`` already guards for *calling* the
+    resolved hook.
+    """
+
+    def test_a_real_method_resolves_and_is_callable(self):
+        class Connector:
+            def classify_error(self, exc):
+                return "transient"
+
+        hook = resolve_declared_hook(Connector(), "classify_error", source="t")
+        assert hook(ValueError("x")) == "transient"
+
+    def test_a_genuinely_absent_attribute_resolves_to_a_none_answering_callable(self):
+        class Bare:
+            pass
+
+        hook = resolve_declared_hook(Bare(), "classify_error", source="t")
+        assert hook(ValueError("x")) is None
+
+    def test_a_raising_descriptor_resolves_to_a_config_answering_callable(self):
+        class Broken:
+            @property
+            def classify_error(self):
+                raise RuntimeError("connector bug")
+
+        hook = resolve_declared_hook(Broken(), "classify_error", source="t")
+        assert hook(ValueError("x")) == "config"
+
+    def test_a_raising_descriptor_logs_a_warning_naming_the_source(self, caplog):
+        import logging
+
+        class Broken:
+            @property
+            def classify_error(self):
+                raise RuntimeError("connector bug")
+
+        with caplog.at_level(logging.WARNING, logger="cdk.declarations"):
+            resolve_declared_hook(Broken(), "classify_error", source="MyConnector")
+        assert any("MyConnector" in r.message for r in caplog.records)
 
 
 class TestConcurrencyParse:

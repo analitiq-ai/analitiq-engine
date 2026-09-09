@@ -223,7 +223,8 @@ def failure_facts(
     connector's ``classify_error`` hook (issue #513). Keeping the branches
     separate is what stops a broad declared match from claiming deterministic
     4xx rejections. *classify_error_source* names the connector class for
-    the hook's log line and any off-vocabulary-category error.
+    the hook's WARNING log line (a crash or an off-vocabulary return never
+    raises -- both map to ``"config"``).
 
     ``exc.declared_category`` (the birth-site value) is untrusted -- a
     connector can raise any ``ClientResponseError`` subclass with any

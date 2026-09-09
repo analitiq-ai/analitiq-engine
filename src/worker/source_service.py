@@ -25,6 +25,7 @@ from cdk.declarations import (
     birth_site_category,
     call_declared_hook,
     error_map_for,
+    resolve_declared_hook,
 )
 from cdk.exceptions import ReadError, TransportSpecError
 from cdk.sql.exceptions import TlsVerificationError, UnsupportedDialectOperationError
@@ -216,19 +217,21 @@ class SourceWorkerServicer(SourceServiceServicer):
         except (
             Exception
         ) as exc:  # noqa: BLE001 — every failure crosses as a typed event
+            classify_error_source = f"{type(self._readable).__name__}.classify_error"
             deterministic, declared = classify_read_error(
                 exc,
                 self._error_map,
                 # The Readable protocol declares only read_batches -- a
                 # source connector isn't required to inherit
-                # BaseDestinationHandler, so classify_error may not exist.
-                # Reading it must not itself raise here, one expression
-                # before the guard that exists precisely to stop a hook
-                # from displacing the failure being reported.
-                getattr(self._readable, "classify_error", None),
-                classify_error_source=(
-                    f"{type(self._readable).__name__}.classify_error"
+                # BaseDestinationHandler, so classify_error may not exist,
+                # and resolving it (a descriptor, a custom __getattr__) is
+                # itself untrusted, potentially-AI-authored connector code
+                # -- resolve_declared_hook guards that read the same way
+                # call_declared_hook guards calling the hook itself.
+                resolve_declared_hook(
+                    self._readable, "classify_error", source=classify_error_source
                 ),
+                classify_error_source=classify_error_source,
             )
             logger.error(
                 "source worker read failed (%s, deterministic=%s, "

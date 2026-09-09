@@ -54,7 +54,7 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 
 from .types import AckStatus, FailureCategory
 
@@ -266,6 +266,44 @@ def call_declared_hook(
         )
         return "config"
     return category
+
+
+def resolve_declared_hook(
+    owner: Any, attr: str, *, source: str
+) -> Callable[..., str | None]:
+    """Look up ``owner.attr`` as a classification hook. Never raises.
+
+    The same guarantee :func:`call_declared_hook` makes for *calling* the
+    hook, one step earlier: resolving it is itself an attribute read on
+    untrusted, potentially-AI-authored connector code (``owner`` is a
+    connector or connector-held instance, ``attr`` typically
+    ``"classify_error"``) -- a descriptor or a custom ``__getattr__`` can
+    raise there exactly as a hook body can. A genuinely absent attribute
+    (no override, no ``BaseDestinationHandler`` in the MRO) is not
+    "broken" -- it returns a callable that always answers ``None``, the
+    same neutral answer the engine's own thin default gives. Anything
+    else going wrong while resolving the attribute is a broken connector,
+    and returns a callable that always answers ``"config"``, matching
+    what :func:`call_declared_hook` gives a hook that crashes or answers
+    wrongly.
+    """
+    try:
+        hook = getattr(owner, attr)
+    except AttributeError:
+        return lambda *args, **kwargs: None
+    except Exception:
+        logger.warning(
+            "resolving %s raised; treating the connector's classification "
+            "as broken (config)",
+            source,
+            exc_info=True,
+        )
+        return lambda *args, **kwargs: "config"
+    # owner is Any, so getattr's result is unannotated -- resolved to a
+    # plain attribute lookup, not a further guess: the caller finds out
+    # whether it is actually callable with the right shape when
+    # call_declared_hook invokes it (and that call is guarded too).
+    return cast("Callable[..., str | None]", hook)
 
 
 def birth_site_category(exc: BaseException) -> str | None:

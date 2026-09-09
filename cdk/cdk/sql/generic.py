@@ -65,6 +65,7 @@ from cdk.declarations import (
     ErrorMap,
     call_declared_hook,
     error_map_for,
+    resolve_declared_hook,
 )
 from cdk.exceptions import ReadError
 from cdk.query_builder import Filter, ParamsLike, QueryBuilder, QueryConfig
@@ -1834,7 +1835,8 @@ class GenericSQLConnector(BaseDestinationHandler):
                     ),
                     failure_category=failure_category,
                 )
-        category = call_declared_hook(self.classify_error, e, source=source)
+        hook = resolve_declared_hook(self, "classify_error", source=source)
+        category = call_declared_hook(hook, e, source=source)
         if category is None:
             return None
         status, failure_category = DECLARED_WRITE_VERDICTS[category]

@@ -151,8 +151,9 @@ def classify_exception(
     ``classify_error`` code hook for a signal the map can't express. Kept a
     separate branch from :func:`classify_status` so neither this nor the
     HTTP-status path can claim the other's failures. *source* names the
-    connector class the hook belongs to, for the log line and any
-    off-vocabulary-category error a caller with that context should pass.
+    connector class the hook belongs to, for the hook's WARNING log line
+    (a crash or an off-vocabulary return never raises -- both map to
+    ``"config"``).
     """
     if error_map is not None:
         match = error_map.match_exception(exc)
