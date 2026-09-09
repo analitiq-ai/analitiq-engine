@@ -213,7 +213,13 @@ class SourceWorkerServicer(SourceServiceServicer):
             deterministic, declared = classify_read_error(
                 exc,
                 self._error_map,
-                self._readable.classify_error,
+                # The Readable protocol declares only read_batches -- a
+                # source connector isn't required to inherit
+                # BaseDestinationHandler, so classify_error may not exist.
+                # Reading it must not itself raise here, one expression
+                # before the guard that exists precisely to stop a hook
+                # from displacing the failure being reported.
+                getattr(self._readable, "classify_error", None),
                 classify_error_source=(
                     f"{type(self._readable).__name__}.classify_error"
                 ),

@@ -91,6 +91,19 @@ class OperationalError(Exception):
     """Bears a driver exception name for the declared-error-map tests."""
 
 
+class _BareReadable:
+    """A Readable satisfying only the protocol's read_batches -- no
+    classify_error at all, since BaseDestinationHandler isn't a required
+    base for a source-only connector (issue #513)."""
+
+    def __init__(self, error):
+        self._error = error
+
+    async def read_batches(self, runtime, config, *, checkpoint, stream_name, **kw):
+        raise self._error
+        yield  # pragma: no cover -- makes this an async generator
+
+
 async def _collect(servicer, request=None):
     request = request or ReadRequest(stream_name="s1", batch_size=10)
     return [r async for r in servicer.ReadStream(request, MagicMock())]
@@ -273,6 +286,20 @@ class TestReadStream:
         readable = _FakeReadable(
             [], error=OperationalError("bad search_path"), classify_error=_broken
         )
+        servicer = SourceWorkerServicer(readable, runtime, {})
+        responses = await _collect(servicer)
+        terminal = responses[-1]
+        assert terminal.WhichOneof("message") == "error"
+        assert "OperationalError" in terminal.error.error_type
+
+    async def test_a_readable_with_no_classify_error_at_all_does_not_crash(self):
+        # The Readable protocol declares only read_batches -- classify_error
+        # comes from BaseDestinationHandler, which a source-only connector
+        # need not inherit. Reading the attribute must not itself raise,
+        # one expression before the guard that exists precisely to stop a
+        # hook from displacing the failure being reported.
+        runtime = _runtime()
+        readable = _BareReadable(OperationalError("bad search_path"))
         servicer = SourceWorkerServicer(readable, runtime, {})
         responses = await _collect(servicer)
         terminal = responses[-1]

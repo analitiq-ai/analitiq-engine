@@ -109,11 +109,11 @@ def classify_status(
     The declared ``error_map`` decides next, by status alone. ``None``
     means neither claimed the response and the built-in rule applies.
 
-    A response error resolves by status only. The declared ``exception``
-    family is never consulted here -- a broad ``exception.ClientError``
-    meant for status-less transport blips would otherwise claim
-    deterministic 4xx rejections and turn config defects into infinite
-    retries.
+    A response error resolves by status only. The declared
+    ``key_attrs``/``codes`` lookup and the ``classify_error`` hook are
+    never consulted here -- a broad ``__exception_class__`` match meant
+    for status-less transport blips would otherwise claim deterministic
+    4xx rejections and turn config defects into infinite retries.
     """
     if dialect is not None:
         category = call_declared_hook(
