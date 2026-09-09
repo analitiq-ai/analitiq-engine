@@ -126,6 +126,14 @@ class _ExtraMemberConnector(ReferenceConnector):
         return None
 
 
+class _ConfigureSchemaOverrideConnector(ReferenceConnector):
+    """A public GenericSQLConnector/BaseDestinationHandler member, not the
+    sanctioned classify_error hook -- the allowlist must not widen past it."""
+
+    async def configure_schema(self, schema_spec: Any) -> bool:
+        return True
+
+
 class _NoMergeDialect(SqlDialect):
     name = "conformance_no_merge"
 
@@ -380,6 +388,16 @@ class TestOverrideSurfaceBreaks:
         )
         assert violations
         assert "load_helper" in _messages(violations)
+
+    def test_public_facade_override_still_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """classify_error widened the allowlist by exactly one name, not by kind."""
+        violations = check_override_surface(
+            _with_connector(reference_target, _ConfigureSchemaOverrideConnector)
+        )
+        assert violations
+        assert "configure_schema" in _messages(violations)
 
     def test_renamed_keyword_only_parameter_fails(
         self, reference_target: ConformanceTarget
