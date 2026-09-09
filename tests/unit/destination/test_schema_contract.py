@@ -647,6 +647,21 @@ class TestSchemaContractFromPylist:
         with pytest.raises(InvalidTypeMapError, match="iso8601"):
             SchemaContract(schema).check_required_read_encoding()
 
+    def test_epoch_is_accepted_on_a_number_typed_field(self):
+        # JSON Schema defines every integer as a valid number, and most
+        # epoch fields on real APIs declare "number" for schema generality
+        # even though they only ever carry whole values.
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": "number",
+                    "arrow_type": "Timestamp(SECOND, UTC)",
+                    "encoding": {"name": "epoch", "unit": "SECOND"},
+                },
+            }
+        }
+        SchemaContract(schema).check_required_read_encoding()
+
     def test_a_decoder_compatible_with_the_declared_json_type_passes(self):
         schema = {
             "properties": {
@@ -654,6 +669,35 @@ class TestSchemaContractFromPylist:
                     "type": "string",
                     "arrow_type": "Timestamp(SECOND, UTC)",
                     "encoding": {"name": "iso8601"},
+                },
+            }
+        }
+        SchemaContract(schema).check_required_read_encoding()
+
+    def test_a_decoder_incompatible_with_one_json_union_member_is_refused(self):
+        # The response is schema-valid for whichever declared alternative
+        # it actually carries, so the decoder must handle every one of
+        # them -- iso8601 reads only a string, and an 'integer' response
+        # would otherwise pass planning and fail decoding.
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": ["string", "integer", "null"],
+                    "arrow_type": "Timestamp(SECOND, UTC)",
+                    "encoding": {"name": "iso8601"},
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="iso8601"):
+            SchemaContract(schema).check_required_read_encoding()
+
+    def test_a_decoder_compatible_with_every_json_union_member_passes(self):
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": ["integer", "string", "null"],
+                    "arrow_type": "Timestamp(SECOND, UTC)",
+                    "encoding": {"name": "epoch", "unit": "SECOND"},
                 },
             }
         }
@@ -750,6 +794,43 @@ class TestSchemaContractFromPylist:
         }
         with pytest.raises(ValueError, match="code_decoder"):
             SchemaContract(schema).check_required_read_encoding()
+
+    def test_a_code_encoding_with_an_extra_param_is_refused(self):
+        # The published catalog declares no parameters for 'code' -- it has
+        # no factory to read them, and decode_field is called with no
+        # config at all, so a stray param left behind while switching a
+        # field to 'code' would otherwise be silently ignored.
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": "string",
+                    "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                    "encoding": {"name": "code", "pattern": "%Y%m%d"},
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="takes no parameters"):
+            SchemaContract(
+                schema, code_decoder=lambda name, values, arrow_type: None
+            ).check_required_read_encoding()
+
+    def test_a_nested_code_encoding_with_an_extra_param_is_refused(self):
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding": {"name": "code", "pattern": "%Y%m%d"},
+                    "properties": {
+                        "posted_at": {"type": "string", "arrow_type": "Utf8"}
+                    },
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="takes no parameters"):
+            SchemaContract(
+                schema, code_decoder=lambda name, values, arrow_type: None
+            ).check_required_read_encoding()
 
     def test_a_nested_field_with_a_non_code_top_level_encoding_is_refused(self):
         # A scalar decoder like iso8601 resolves fine (the name is real)
@@ -860,6 +941,47 @@ class TestSchemaContractFromPylist:
         with pytest.raises(InvalidTypeMapError, match="'code'"):
             SchemaContract(schema).check_required_write_encoding()
 
+    def test_a_write_code_encoding_with_an_extra_param_is_refused(self):
+        schema = {
+            "properties": {
+                "code_name": {
+                    "type": "string",
+                    "arrow_type": "Utf8",
+                    "encoding_write": {"name": "code", "pattern": "%Y%m%d"},
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="takes no parameters"):
+            SchemaContract(schema).check_required_write_encoding()
+
+    def test_a_nested_write_code_encoding_with_an_extra_param_is_refused(self):
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding_write": {"name": "code", "pattern": "%Y%m%d"},
+                    "properties": {
+                        "posted_at": {"type": "string", "arrow_type": "Utf8"}
+                    },
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="takes no parameters"):
+            SchemaContract(schema).check_required_write_encoding()
+
+    def test_epoch_write_output_is_accepted_on_a_number_typed_field(self):
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": "number",
+                    "arrow_type": "Timestamp(SECOND, UTC)",
+                    "encoding_write": {"name": "epoch", "unit": "SECOND"},
+                },
+            }
+        }
+        SchemaContract(schema).check_required_write_encoding()
+
     def test_a_write_encoder_incompatible_with_the_declared_json_type_is_refused(self):
         # bool_map renders a string token; a 'boolean'-typed field naming
         # it resolves fine (the name is real, and the arrow kind matches
@@ -886,6 +1008,42 @@ class TestSchemaContractFromPylist:
             "properties": {
                 "active": {
                     "type": "string",
+                    "arrow_type": "Boolean",
+                    "encoding_write": {
+                        "name": "bool_map",
+                        "true_values": ["Y"],
+                        "false_values": ["N"],
+                    },
+                },
+            }
+        }
+        SchemaContract(schema).check_required_write_encoding()
+
+    def test_a_write_encoder_output_absent_from_the_json_union_is_refused(self):
+        # bool_map renders a string; a union that never includes 'string'
+        # would otherwise pass configuration and violate the endpoint's
+        # own declared input schema once sent.
+        schema = {
+            "properties": {
+                "active": {
+                    "type": ["boolean", "integer"],
+                    "arrow_type": "Boolean",
+                    "encoding_write": {
+                        "name": "bool_map",
+                        "true_values": ["Y"],
+                        "false_values": ["N"],
+                    },
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="bool_map"):
+            SchemaContract(schema).check_required_write_encoding()
+
+    def test_a_write_encoder_output_present_in_the_json_union_passes(self):
+        schema = {
+            "properties": {
+                "active": {
+                    "type": ["string", "boolean"],
                     "arrow_type": "Boolean",
                     "encoding_write": {
                         "name": "bool_map",

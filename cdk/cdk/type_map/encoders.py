@@ -294,8 +294,17 @@ ENCODER_JSON_TYPE: Final[dict[str, str]] = {
 
 
 def encoding_write_matches_json_type(name: str, json_type: str) -> bool:
-    """Whether encoder *name* renders a value of declared JSON *json_type*."""
-    return ENCODER_JSON_TYPE.get(name) == json_type
+    """Whether encoder *name* renders a value of declared JSON *json_type*.
+
+    ``"integer"`` output also satisfies a declared ``"number"``: JSON
+    Schema defines every integer as a valid number, so ``epoch`` (the only
+    encoder rendering a bare ``int``) must not be refused on a
+    ``"number"``-typed field merely because the two spellings differ.
+    """
+    output_type = ENCODER_JSON_TYPE.get(name)
+    if output_type == json_type:
+        return True
+    return output_type == "integer" and json_type == "number"
 
 
 #: The published catalog's own version.

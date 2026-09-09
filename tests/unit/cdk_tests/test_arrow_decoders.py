@@ -54,8 +54,33 @@ class TestIsoDurationPreservesSubMicrosecondPrecision:
         # _iso8601_ns_remainder refuses on the Timestamp side.
         field = pa.field("d", pa.duration("ns"), nullable=True)
         fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
-        with pytest.raises(ValueError, match="sub-nanosecond precision"):
+        with pytest.raises(ValueError, match="precision finer than"):
             fn(field, ["PT0.0000000009S"])
+
+    def test_a_comma_fractional_separator_is_accepted(self) -> None:
+        # ISO-8601 permits "," as well as "." for the fractional separator,
+        # the same as the sibling iso8601 decoder.
+        field = pa.field("d", pa.duration("ms"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
+        result = fn(field, ["PT0,5S"])
+        assert result[0].value == 500
+
+
+class TestIsoDurationScalesToTheDestinationUnit:
+    def test_a_large_day_count_fits_a_coarse_destination_unit(self) -> None:
+        # Accumulating through an intermediate nanosecond total before
+        # casting down would overflow int64 here even though the value
+        # fits comfortably in Duration(SECOND)'s own much wider range.
+        field = pa.field("d", pa.duration("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
+        result = fn(field, ["P200000D"])
+        assert result[0].value == 200_000 * 86400
+
+    def test_precision_finer_than_the_destination_unit_is_refused(self) -> None:
+        field = pa.field("d", pa.duration("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
+        with pytest.raises(ValueError, match="precision finer than"):
+            fn(field, ["PT0.5S"])
 
 
 class TestIsoDurationAcceptsASign:
@@ -256,3 +281,15 @@ class TestResolveDecoderRejectsUnknownParams:
         field = pa.field("t", pa.timestamp("us", tz="UTC"), nullable=True)
         with pytest.raises(InvalidTypeMapError, match="unknown parameter"):
             resolve_decoder({"encoding": {"name": "epoch", "units": "SECOND"}}, field)
+
+
+class TestDecimalDecoderRaisesValueErrorNotInvalidOperation:
+    def test_a_non_decimal_token_raises_value_error(self) -> None:
+        # decimal.InvalidOperation is neither a ValueError nor a
+        # TypeMapError -- left uncaught, the worker's deterministic-error
+        # classifier would never recognize it, misclassifying a repeatable
+        # bad-data failure as retryable.
+        field = pa.field("amount", pa.decimal128(10, 2), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "decimal"}}, field)
+        with pytest.raises(ValueError, match="not a valid decimal"):
+            fn(field, ["unknown"])

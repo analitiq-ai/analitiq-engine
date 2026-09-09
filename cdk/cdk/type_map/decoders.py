@@ -145,16 +145,20 @@ def decoder_matches_kind(name: str, kind: ConversionKind) -> bool:
 #: ``false_values``, both declared as lists of strings
 #: (:func:`cdk.type_map._param_validation.require_list_param`), so only a
 #: JSON string can ever match; ``epoch`` accepts ``numbers.Integral`` or a
-#: numeric string but not a JSON ``number`` (float); ``decimal`` accepts
-#: anything ``Decimal(str(v))`` parses, which covers a JSON boolean as
-#: readily as a string. Checked eagerly by
+#: numeric string -- covering a ``"number"``-declared field too, since JSON
+#: Schema defines every integer as a valid number and most epoch fields on
+#: real APIs carry whole values; a genuinely fractional wire value still
+#: fails inside the decoder's own closure at data time, this table being
+#: only the declared-type gate, not a value-level check. ``decimal``
+#: accepts anything ``Decimal(str(v))`` parses, which covers a JSON
+#: boolean as readily as a string. Checked eagerly by
 #: :meth:`~cdk.schema_contract.SchemaContract.check_required_read_encoding`
 #: against the field's declared ``type``, the same "fails at plan time, not
 #: on the first non-null response" contract :data:`DECODER_KIND_COMPATIBILITY`
 #: already applies to the target ``arrow_type``.
 DECODER_JSON_TYPE_COMPATIBILITY: Final[dict[str, frozenset[str]]] = {
     "iso8601": frozenset({"string"}),
-    "epoch": frozenset({"integer", "string"}),
+    "epoch": frozenset({"integer", "number", "string"}),
     "strptime": frozenset({"string"}),
     "regex_epoch": frozenset({"string"}),
     "decimal": frozenset({"string", "number", "integer"}),

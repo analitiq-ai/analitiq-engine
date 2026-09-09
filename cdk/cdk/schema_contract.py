@@ -232,25 +232,48 @@ def _epoch_day_unit_mismatch(name: Any, encoding: Mapping[str, Any], kind: str) 
     )
 
 
-def _declared_json_type(field_def: Mapping[str, Any]) -> str | None:
-    """Read the one non-null JSON type *field_def* declares, or ``None``.
+def _reject_code_params(encoding: Mapping[str, Any], key: str, path: str) -> None:
+    """Refuse any key besides ``name`` on a ``{"name": "code"}`` declaration.
 
-    Mirrors ``cdk.api.response_schema.declared_json_types``'s reading of
-    JSON Schema's ``type`` (a plain string is one type; a list such as
-    ``["string", "null"]`` names one real type plus nullability) --
+    The published catalog declares no parameters for ``code`` (it has no
+    factory to read them -- ``resolve_decoder``/``resolve_encoder`` never
+    even see this branch, since the caller special-cases it before
+    reaching either), and ``decode_field``/``encode_field`` are called with
+    no config at all. An extra key here is never applied and never
+    resolves to an error on its own, unlike a misspelled key on every
+    other catalog entry (rejected by the unknown-parameter check in
+    ``resolve_decoder``/``resolve_encoder``) -- refused here instead, by
+    name, so an author who leaves a stray param behind while switching a
+    field to ``code`` is told rather than silently ignored.
+    """
+    extra = set(encoding) - {"name"}
+    if extra:
+        raise InvalidTypeMapError(
+            f"field {path!r}: {key} 'code' takes no parameters; found "
+            f"{sorted(extra)!r}"
+        )
+
+
+def _declared_json_types(field_def: Mapping[str, Any]) -> list[str]:
+    """Read the non-null JSON type(s) *field_def* declares, in declared order.
+
+    Mirrors ``cdk.api.response_schema.declared_json_types`` exactly (a
+    plain string is one type; a list such as ``["string", "integer",
+    "null"]`` names every real type the union permits plus nullability) --
     duplicated rather than imported: this module stays free of any
-    ``cdk.api`` import (see the class docstring). Returns ``None`` for zero
-    or several non-null types, same as an absent declaration: a field with
-    no unambiguous JSON type has nothing here to check the encoding against.
+    ``cdk.api`` import (see the class docstring). A multi-type union is
+    schema-valid for whichever alternative a given response/record actually
+    carries, so a caller checking read compatibility must hold for every
+    declared type (the decoder must handle whichever one shows up), while
+    a caller checking write compatibility only needs the encoder's single
+    output type to be one of them.
     """
     declared = field_def.get("type")
     if isinstance(declared, str):
-        types = [declared]
-    elif isinstance(declared, list):
-        types = [t for t in declared if isinstance(t, str) and t != "null"]
-    else:
-        types = []
-    return types[0] if len(types) == 1 else None
+        return [declared]
+    if isinstance(declared, list):
+        return [t for t in declared if isinstance(t, str) and t != "null"]
+    return []
 
 
 def _check_nested_leaf_encoding(
@@ -646,6 +669,7 @@ class SchemaContract:
                 f"_build_column would then apply it to the whole dict/list "
                 f"value and crash; declared {encoding.get('name')!r}"
             )
+        _reject_code_params(encoding, "encoding", f.name)
         if self._code_decoder is None:
             raise ValueError(
                 f"field {f.name!r} declares encoding name='code' but this "
@@ -670,6 +694,7 @@ class SchemaContract:
             )
         name = encoding.get("name")
         if name == READ_CODE_ENCODING_NAME:
+            _reject_code_params(encoding, "encoding", f.name)
             if self._code_decoder is None:
                 raise ValueError(
                     f"field {f.name!r} declares encoding name='code' but "
@@ -682,17 +707,20 @@ class SchemaContract:
                 f"field {f.name!r}: encoding {name!r} does not decode a "
                 f"{kind!r} value; arrow_type is {f.type!s}"
             )
-        json_type = _declared_json_type(field_def)
-        if (
-            json_type is not None
-            and isinstance(name, str)
-            and not decoder_matches_json_type(name, json_type)
-        ):
-            raise InvalidTypeMapError(
-                f"field {f.name!r}: encoding {name!r} does not read a "
-                f"{json_type!r}-typed wire value; field declares type "
-                f"{json_type!r}"
-            )
+        json_types = _declared_json_types(field_def)
+        if isinstance(name, str):
+            # Every declared alternative must be one the decoder can read:
+            # the response is schema-valid for whichever type it actually
+            # carries, and the decoder must handle whichever one shows up.
+            incompatible = [
+                t for t in json_types if not decoder_matches_json_type(name, t)
+            ]
+            if incompatible:
+                raise InvalidTypeMapError(
+                    f"field {f.name!r}: encoding {name!r} does not read a "
+                    f"{incompatible[0]!r}-typed wire value; field declares "
+                    f"type {json_types!r}"
+                )
         if _epoch_day_unit_mismatch(name, encoding, kind):
             raise InvalidTypeMapError(
                 f"field {f.name!r}: encoding {name!r} with unit 'DAY' only "
@@ -790,6 +818,7 @@ class SchemaContract:
                 f"land() would then apply it to the whole dict/list value "
                 f"and crash; declared {encoding_write.get('name')!r}"
             )
+        _reject_code_params(encoding_write, "encoding_write", f.name)
 
     @staticmethod
     def _check_scalar_write_encoding(f: pa.Field, field_def: dict[str, Any]) -> None:
@@ -808,23 +837,29 @@ class SchemaContract:
             # precise error for this; not duplicated here.
             return
         name = encoding_write.get("name")
-        if name == WRITE_CODE_ENCODING_NAME or not isinstance(name, str):
-            # The code hatch covers any kind by design; an unknown name
-            # is resolve_write_encoders's error to raise, not this one's.
+        if name == WRITE_CODE_ENCODING_NAME:
+            _reject_code_params(encoding_write, "encoding_write", f.name)
+            return
+        if not isinstance(name, str):
+            # An unknown/non-string name is resolve_write_encoders's error
+            # to raise, not this one's.
             return
         if not encoding_write_matches_kind(name, kind):
             raise InvalidTypeMapError(
                 f"field {f.name!r}: encoding_write {name!r} does not "
                 f"render a {kind!r} value; arrow_type is {f.type!s}"
             )
-        json_type = _declared_json_type(field_def)
-        if json_type is not None and not encoding_write_matches_json_type(
-            name, json_type
+        json_types = _declared_json_types(field_def)
+        # The encoder renders one type; the schema is satisfied as long as
+        # that type is among the declared alternatives (unlike the read
+        # side, which must cover every alternative the wire might send).
+        if json_types and not any(
+            encoding_write_matches_json_type(name, t) for t in json_types
         ):
             raise InvalidTypeMapError(
                 f"field {f.name!r}: encoding_write {name!r} renders a "
                 f"{ENCODER_JSON_TYPE.get(name)!r}-typed wire value, but "
-                f"field declares type {json_type!r}"
+                f"field declares type {json_types!r}"
             )
 
     def resolve_write_encoders(

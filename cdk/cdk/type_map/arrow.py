@@ -622,7 +622,24 @@ def _decode_decimal(_config: Mapping[str, Any]) -> DecodeFn:
                 f"column {field.name!r}: encoding 'decimal' requires a "
                 f"Decimal128/Decimal256 arrow_type, got {field.type}"
             )
-        converted = [None if v is None else Decimal(str(v)) for v in values]
+        converted: list[Decimal | None] = []
+        for row, v in enumerate(values):
+            if v is None:
+                converted.append(None)
+                continue
+            try:
+                converted.append(Decimal(str(v)))
+            except InvalidOperation as exc:
+                # decimal.InvalidOperation is neither a ValueError nor a
+                # TypeMapError -- left uncaught, this is an authoring/wire
+                # defect the worker's deterministic-error classifier
+                # (src.worker.source_service) would never recognize,
+                # misclassifying a repeatable bad-data failure as
+                # retryable and re-reading the same record forever.
+                raise ValueError(
+                    f"column {field.name!r} at row {row}: {v!r} is not a "
+                    f"valid decimal"
+                ) from exc
         return pa.array(converted, type=field.type)
 
     return decode
@@ -708,12 +725,26 @@ _ISO_DURATION_RE: Final[re.Pattern[str]] = re.compile(
     # rejects a dangling "T" with nothing following it ("P1DT", bare "PT")
     # rather than fullmatching it with every T-section group None.
     r"(?:T(?=\d)(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?"
-    r"(?:(?P<seconds>\d+(?:\.\d+)?)S)?)?$"
+    r"(?:(?P<seconds>\d+(?:[.,]\d+)?)S)?)?$"
 )
+
+#: Nanoseconds per Duration tick, keyed by pyarrow's own unit spelling
+#: (``field.type.unit``) -- the resolution :func:`_iso_duration_ticks`
+#: scales straight to, rather than always accumulating nanosecond ticks
+#: and safe-casting down: a coarser unit's own int64 range is far wider
+#: than nanoseconds', so a value like 200000 days fits Duration(SECOND)'s
+#: range but overflows an intermediate nanosecond total that never needed
+#: to exist.
+_DURATION_UNIT_NANOS: Final[dict[str, int]] = {
+    "s": 1_000_000_000,
+    "ms": 1_000_000,
+    "us": 1_000,
+    "ns": 1,
+}
 
 
 def _iso_duration_ticks(field: pa.Field, row: int, v: str) -> int:
-    """Parse one ISO-8601 duration string into signed nanosecond ticks.
+    """Parse one ISO-8601 duration string into signed ticks in ``field.type``'s unit.
 
     Accumulated via ``Decimal``, not a Python ``timedelta`` (microsecond
     resolution only), which would silently truncate a Duration(NANOSECOND)
@@ -750,7 +781,10 @@ def _iso_duration_ticks(field: pa.Field, row: int, v: str) -> int:
             f"least one"
         )
     try:
-        seconds = Decimal(groups["seconds"] or "0")
+        # ISO-8601 permits "," as well as "." for the fractional separator
+        # (the sibling iso8601 decoder accepts both); Decimal only ever
+        # accepts ".".
+        seconds = Decimal((groups["seconds"] or "0").replace(",", "."))
     except InvalidOperation as exc:
         raise ValueError(
             f"column {field.name!r} at row {row}: {v!r} has a "
@@ -765,18 +799,18 @@ def _iso_duration_ticks(field: pa.Field, row: int, v: str) -> int:
     )
     if negative:
         total_seconds = -total_seconds
-    nanos = total_seconds * 1_000_000_000
-    if nanos != nanos.to_integral_value():
-        # int() below would otherwise truncate silently: a fractional-
-        # second component finer than a nanosecond has no Arrow tick
-        # count to land on, the same class of loss _iso8601_ns_remainder
-        # refuses on the Timestamp side.
+    unit = field.type.unit
+    ticks = total_seconds * 1_000_000_000 / _DURATION_UNIT_NANOS[unit]
+    if ticks != ticks.to_integral_value():
+        # int() below would otherwise truncate silently: a fractional
+        # component finer than one tick of the column's own unit has no
+        # Arrow tick count to land on.
         raise ValueError(
-            f"column {field.name!r} at row {row}: {v!r} has "
-            f"sub-nanosecond precision, which no Arrow tick count can "
-            f"represent"
+            f"column {field.name!r} at row {row}: {v!r} has precision "
+            f"finer than {field.type}'s own tick resolution, which no "
+            f"Arrow tick count can represent"
         )
-    return int(nanos)
+    return int(ticks)
 
 
 def _decode_iso_duration(_config: Mapping[str, Any]) -> DecodeFn:
@@ -790,7 +824,10 @@ def _decode_iso_duration(_config: Mapping[str, Any]) -> DecodeFn:
             None if v is None else _iso_duration_ticks(field, row, v)
             for row, v in enumerate(values)
         ]
-        return pc.cast(pa.array(ticks, type=pa.duration("ns")), field.type, safe=True)
+        # Ticks are already scaled to field.type's own unit -- no
+        # intermediate nanosecond array (see _DURATION_UNIT_NANOS) and no
+        # cast needed.
+        return pa.array(ticks, type=field.type)
 
     return decode
 
