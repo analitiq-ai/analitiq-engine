@@ -156,9 +156,10 @@ class TestAckLadderDeclaredFirst:
         # code -- a connector overriding it as a raising descriptor must
         # not crash the write-ack ladder either.
         class _BrokenDescriptorConnector(GenericSQLConnector):
-            @property
-            def classify_error(self):  # type: ignore[override]
-                raise RuntimeError("connector descriptor bug")
+            def __getattribute__(self, name):
+                if name == "classify_error":
+                    raise RuntimeError("connector descriptor bug")
+                return super().__getattribute__(name)
 
         handler = _BrokenDescriptorConnector()
         handler._error_map = None
@@ -274,9 +275,10 @@ class TestConnectWiring:
         # (only when a driver failure is actually classified), so connect()
         # itself never touches the broken descriptor at all.
         class _BrokenDescriptorConnector(GenericSQLConnector):
-            @property
-            def classify_error(self):  # type: ignore[override]
-                raise RuntimeError("connector descriptor bug")
+            def __getattribute__(self, name):
+                if name == "classify_error":
+                    raise RuntimeError("connector descriptor bug")
+                return super().__getattribute__(name)
 
         handler = _BrokenDescriptorConnector()
         runtime = MagicMock()
