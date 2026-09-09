@@ -294,12 +294,19 @@ class _ClassifyErrorOverrideConnector(ReferenceConnector):
 class _AsyncClassifyErrorConnector(ReferenceConnector):
     """classify_error declared async -- the CDK calls it synchronously."""
 
+    # skipcq: PYL-W0236 - the async-ness IS the deliberate defect this
+    # fixture models; the kit must reject it, and the test below pins that.
     async def classify_error(self, exc: BaseException) -> str | None:
         return "transient"
 
 
 class _BrokenSignatureClassifyErrorConnector(ReferenceConnector):
-    """classify_error missing the exc parameter the base signature admits."""
+    """classify_error missing the exc parameter the base signature admits.
+
+    The dropped parameter IS the deliberate defect this fixture models;
+    the kit must reject it, and the test below pins that -- not a bug to
+    fix by adding the parameter back.
+    """
 
     def classify_error(self) -> str | None:  # type: ignore[override]
         return "transient"
