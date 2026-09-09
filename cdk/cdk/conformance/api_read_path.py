@@ -70,6 +70,7 @@ from analitiq.contracts.endpoints import (
 from yarl import URL
 
 from cdk.api.body import FORM_CONTENT_TYPE, encode_form, media_type
+from cdk.api.dialects import ApiDialect, dialect_overrides
 from cdk.api.exceptions import RequestSpecError
 from cdk.api.page_loop import Page, PageRequest, PaginationStrategy
 from cdk.api.query_style import declared_query_styles
@@ -1387,6 +1388,23 @@ def _operands_are_declared(probe: _ReadProbe, declared: Predicate) -> bool:
     )
 
 
+def _api_code_decoder(target: ConformanceTarget) -> Any | None:
+    """Build the ``code_decoder`` :meth:`SchemaContract` read-encoding checks need.
+
+    Answers the same question ``cdk.api.generic._read_schema_contract``'s
+    ``dialect_overrides()`` call answers at runtime -- "is 'code' backed by
+    a real override" -- from the class alone, never instantiated: this
+    check never invokes the decoder, only whether one is declared, so
+    handing it the unbound method is enough.
+    """
+    dialect_class = getattr(target.connector_class, "dialect_class", None)
+    if not (isinstance(dialect_class, type) and issubclass(dialect_class, ApiDialect)):
+        return None
+    if not dialect_overrides(dialect_class, "decode_field"):
+        return None
+    return dialect_class.decode_field
+
+
 def check_api_record_schema(target: ConformanceTarget) -> list[Violation]:
     """Certify that each read's declared records become an Arrow schema.
 
@@ -1407,7 +1425,9 @@ def check_api_record_schema(target: ConformanceTarget) -> list[Violation]:
         try:
             items = records_items_schema(label, read.response)
             _resolve_arrow_types(items, mapper)
-            SchemaContract(items).check_required_read_encoding()
+            SchemaContract(
+                items, code_decoder=_api_code_decoder(target)
+            ).check_required_read_encoding()
         except _RECORD_FAILURES as err:
             violations.append(
                 Violation(

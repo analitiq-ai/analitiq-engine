@@ -59,7 +59,7 @@ from ..types import (
     SchemaSpec,
 )
 from ..write_keys import require_conflict_key_values
-from .dialects import ApiDialect
+from .dialects import ApiDialect, dialect_overrides
 from .exceptions import ConnectorConnectionError, RequestSpecError, read_spec_errors
 from .http import (
     DEFAULT_MAX_RETRIES,
@@ -495,7 +495,12 @@ class GenericAPIConnector(BaseDestinationHandler):
         SchemaContract from a JSON-Schema API endpoint. SQL's "columns"
         shape never declares 'encoding' and must never be gated by it.
         """
-        code_decoder = self.dialect.decode_field if self.dialect is not None else None
+        code_decoder = (
+            self.dialect.decode_field
+            if self.dialect is not None
+            and dialect_overrides(type(self.dialect), "decode_field")
+            else None
+        )
         schema_contract = SchemaContract(items_schema, code_decoder=code_decoder)
         schema_contract.check_required_read_encoding()
         return schema_contract
@@ -1064,6 +1069,7 @@ class GenericAPIConnector(BaseDestinationHandler):
             resolver=self._write_resolver,
             code_encoder=self.dialect.encode_field
             if self.dialect is not None
+            and dialect_overrides(type(self.dialect), "encode_field")
             else None,
         )
         if isinstance(outcome, str):

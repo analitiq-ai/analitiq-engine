@@ -676,6 +676,19 @@ def _decode_iso_duration(_config: Mapping[str, Any]) -> DecodeFn:
                     f"and clock components only -- no calendar Y/M)"
                 )
             groups = match.groupdict()
+            if not any(
+                groups[g] for g in ("weeks", "days", "hours", "minutes", "seconds")
+            ):
+                # Every component group is optional in the grammar (so
+                # "P3D" and "PT30S" each parse without the others), which
+                # also makes bare "P" or "PT" fullmatch with every group
+                # None -- neither is a valid ISO-8601 duration; at least
+                # one designator is required.
+                raise ValueError(
+                    f"column {field.name!r} at row {row}: {v!r} names no "
+                    f"duration component; an ISO-8601 duration requires at "
+                    f"least one"
+                )
             try:
                 seconds = Decimal(groups["seconds"] or "0")
             except InvalidOperation as exc:

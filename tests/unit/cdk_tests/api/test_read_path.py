@@ -1679,10 +1679,12 @@ class TestDeclarativeWireFormatDecoding:
         assert batches[0].column("shipped_at").to_pylist() == ["HI"]
 
     async def test_code_hatch_with_no_dialect_override_fails_loud(self) -> None:
-        # The base ApiDialect.decode_field raises NotImplementedError; a
-        # connector declaring "code" with no override must fail the same
-        # way, naming the field, rather than the value silently passing
-        # through un-decoded.
+        # A connector declaring "code" with no dialect override must fail
+        # at plan time, before the first request goes out -- the base
+        # ApiDialect.decode_field is never handed to SchemaContract as a
+        # code_decoder in the first place (dialect_overrides() says it
+        # isn't a real override), so check_required_read_encoding refuses
+        # it the same way an undeclared field would, naming it.
         record_fields = {
             "shipped_at": {
                 "type": "string",
@@ -1699,8 +1701,9 @@ class TestDeclarativeWireFormatDecoding:
                 )
             ]
         )
-        with pytest.raises(NotImplementedError, match="shipped_at"):
+        with pytest.raises(ValueError, match="shipped_at"):
             await _read(session, document)
+        assert session.calls == []
 
 
 @pytest.mark.asyncio

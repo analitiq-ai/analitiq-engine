@@ -108,6 +108,29 @@ def requires_read_encoding(kind: ConversionKind) -> bool:
     return kind in REQUIRES_ENCODING_KINDS
 
 
+#: Which conversion kinds each catalog decoder is meant to build.
+#: ``bool_map``/``base64`` are deliberately absent -- neither is a mandatory
+#: declaration (see :data:`REQUIRES_ENCODING_KINDS`) and both accept
+#: whatever ``arrow_type`` the field declares. Checked eagerly by
+#: :meth:`~cdk.schema_contract.SchemaContract.check_required_read_encoding`
+#: against the field's actual arrow_type, so a mismatched declaration (a
+#: Timestamp field naming ``decimal``) is refused at plan time rather than
+#: on the first non-null response the decoder closure happens to reach.
+DECODER_KIND_COMPATIBILITY: Final[dict[str, frozenset[ConversionKind]]] = {
+    "iso8601": frozenset({"timestamp", "date", "time"}),
+    "epoch": frozenset({"timestamp", "date", "time", "duration"}),
+    "strptime": frozenset({"timestamp", "date", "time"}),
+    "regex_epoch": frozenset({"timestamp", "date", "time", "duration"}),
+    "decimal": frozenset({"decimal"}),
+    "iso_duration": frozenset({"duration"}),
+}
+
+
+def decoder_matches_kind(name: str, kind: ConversionKind) -> bool:
+    """Whether decoder *name* is meant to build a field of *kind*."""
+    return kind in DECODER_KIND_COMPATIBILITY.get(name, frozenset())
+
+
 #: The published catalog's own version. Bump alongside any change to the
 #: name/parameter vocabulary, same discipline as
 #: :data:`cdk.type_map.grammar.GRAMMAR_VERSION`.

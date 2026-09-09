@@ -74,3 +74,19 @@ class TestResolveEncoderValidation:
 
     def test_code_sentinel_returns_none_for_the_caller_to_route(self) -> None:
         assert resolve_encoder({"name": "code"}) is None
+
+
+class TestBoolMapRejectsIdenticalTokens:
+    def test_identical_rendered_tokens_are_refused_at_declaration_time(self) -> None:
+        # encode() only ever renders true_values[0]/false_values[0]; if
+        # those match, True and False would render the identical wire
+        # token, which is not a case-of-overlap in the full lists but is
+        # exactly as ambiguous.
+        with pytest.raises(InvalidTypeMapError, match="both"):
+            resolve_encoder(
+                {
+                    "name": "bool_map",
+                    "true_values": ["Y", "yes"],
+                    "false_values": ["Y", "no"],
+                }
+            )

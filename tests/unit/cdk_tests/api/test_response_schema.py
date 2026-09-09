@@ -233,6 +233,42 @@ class TestCursorFieldType:
         with pytest.raises(ReadError, match="'missing' is not declared"):
             record_field_declaration("items", self._schema("string"), "missing")
 
+    @pytest.mark.parametrize("name", ["iso8601", "epoch"])
+    def test_a_cursor_field_declaring_a_safe_encoding_is_accepted(
+        self, name: str
+    ) -> None:
+        # iso8601/epoch don't change the raw wire value's shape from what
+        # was always implicit before issue #503 -- an ISO string stays an
+        # ISO string, a bare epoch int stays a bare epoch int -- so the
+        # checkpoint mechanism's own ISO/epoch-int parse still reads it
+        # back correctly.
+        schema = {
+            "properties": {"updated_at": {"type": "string", "encoding": {"name": name}}}
+        }
+        assert record_field_declaration(
+            "items", schema, "updated_at"
+        ) == FieldDeclaration("string", None)
+
+    def test_a_cursor_field_declaring_an_unsafe_encoding_is_refused(self) -> None:
+        # The checkpoint stores this field's raw wire value and the next
+        # run's cursor_bounds parses it back strictly as ISO-8601/epoch --
+        # a regex_epoch wrapper string is neither, so it would checkpoint
+        # fine once and then break the stream on its second run.
+        schema = {
+            "properties": {
+                "updated_at": {
+                    "type": "string",
+                    "encoding": {
+                        "name": "regex_epoch",
+                        "pattern": r"/Date\((\d+)\)/",
+                        "unit": "MILLISECOND",
+                    },
+                }
+            }
+        }
+        with pytest.raises(ReadError, match="regex_epoch"):
+            record_field_declaration("items", schema, "updated_at")
+
 
 class TestMapperIsScoped:
     def test_the_endpoint_scope_chooses_the_mapper(self) -> None:

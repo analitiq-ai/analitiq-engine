@@ -653,11 +653,12 @@ class TestDeclarativeWireFormatEncoding:
     async def test_code_hatch_with_no_dialect_override_fails_loud_at_write(
         self,
     ) -> None:
-        # configure_schema accepts (the base ApiDialect.encode_field exists,
-        # just raises); land()'s catch-all turns the NotImplementedError
-        # into a fatal ack naming the exception, the same as any other
-        # unexpected failure during land() -- not a silent pass-through of
-        # the un-encoded value.
+        # A connector declaring "code" with no dialect override must be
+        # refused at configure_schema, before the first write goes out --
+        # the base ApiDialect.encode_field is never handed to
+        # resolve_write_encoders as a code_encoder (dialect_overrides()
+        # says it isn't a real override), so it raises the same "no
+        # code_encoder was supplied" error an undeclared override would.
         document = _document_with_field(
             "code_name",
             {
@@ -667,9 +668,16 @@ class TestDeclarativeWireFormatEncoding:
                 "encoding_write": {"name": "code"},
             },
         )
-        session = FakeSession()
-        connector = await _connected(session, document)
-        result = await _write(connector, _batch_with([{"id": 0, "code_name": "abc"}]))
-        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
-        assert "code_name" in result.failure_summary
-        assert session.calls == []
+        connector = GenericAPIConnector()
+        connector.set_stream_endpoints({"items": document})
+        await connector.connect(runtime_with(FakeSession()))
+        accepted = await connector.configure_schema(
+            SchemaSpec(
+                stream_id="items",
+                version=1,
+                write_mode=WriteMode.WRITE_MODE_INSERT,
+                ack_timeout_seconds=30,
+            )
+        )
+        assert accepted is False
+        assert "code_name" in connector.last_schema_rejection

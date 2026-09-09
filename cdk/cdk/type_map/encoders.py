@@ -141,6 +141,12 @@ def _encode_bool_map(config: Mapping[str, Any]) -> Callable[[Any], Any]:
             "encoding_write 'bool_map' requires a non-empty 'true_values' and "
             "'false_values'; the first of each is the rendered token"
         )
+    if true_values[0] == false_values[0]:
+        raise InvalidTypeMapError(
+            f"encoding_write 'bool_map': true_values[0] and false_values[0] "
+            f"are both {true_values[0]!r} -- True and False would render "
+            f"the identical wire token"
+        )
 
     def encode(value: Any) -> str:
         if not isinstance(value, bool):

@@ -49,6 +49,19 @@ class TestIsoDurationPreservesSubMicrosecondPrecision:
         assert result[0].value == 1_123_456_789
 
 
+class TestIsoDurationRejectsComponentFreeStrings:
+    @pytest.mark.parametrize("value", ["P", "PT"])
+    def test_a_designator_with_no_component_is_refused(self, value: str) -> None:
+        # Every component group is individually optional (so "P3D" and
+        # "PT30S" each parse fine alone), which also makes bare "P"/"PT"
+        # fullmatch with every group absent -- neither names an actual
+        # duration component, and ISO-8601 requires at least one.
+        field = pa.field("d", pa.duration("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
+        with pytest.raises(ValueError, match="no duration component"):
+            fn(field, [value])
+
+
 class TestEpochDecoderPreservesTheInstantAcrossTargetZones:
     """Epoch ticks are an absolute UTC instant. Decoding into a Timestamp
     column with a non-UTC tz must shift the wall-clock time to that zone,

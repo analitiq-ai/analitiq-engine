@@ -13,7 +13,7 @@ annotated schema, and ``SchemaContract`` turns it into Arrow.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
@@ -124,6 +124,18 @@ def record_field_declaration(
     about how a stored value reads. A cursor field the schema does not
     declare, or declares with no or several real types, is an authoring
     defect named here rather than a value guessed at later.
+
+    The checkpoint stores the last record's *raw wire* value for this
+    field (``GenericAPIConnector._read_pages``), and this declaration's
+    ``format`` is what the next run's
+    :func:`~cdk.api.replication.cursor_bounds` parses it back as -- a bare
+    ISO-8601 string or a bare epoch integer, the same two shapes that were
+    ever implicit before issue #503. A field whose declared ``encoding``
+    renders the wire in any other shape (``regex_epoch``'s wrapper string,
+    a ``strptime`` pattern, ...) would checkpoint a value the next run's
+    parse cannot read back, breaking the stream on its second run with no
+    signal until then -- refused here instead, at config time, naming the
+    field.
     """
     field = (items_schema.get("properties") or {}).get(cursor_field)
     if not isinstance(field, dict):
@@ -137,6 +149,20 @@ def record_field_declaration(
             f"endpoint {endpoint_id!r}: cursor field {cursor_field!r} declares "
             f"type {field.get('type')!r}; a cursor field needs one plain JSON "
             f"type, nullable or not"
+        )
+    encoding = field.get("encoding")
+    if isinstance(encoding, Mapping) and encoding.get("name") not in (
+        None,
+        "iso8601",
+        "epoch",
+    ):
+        raise ReadError(
+            f"endpoint {endpoint_id!r}: cursor field {cursor_field!r} declares "
+            f"encoding {encoding.get('name')!r}; incremental replication "
+            f"checkpoints this field's raw wire value and can only read it "
+            f"back as a bare ISO-8601 string or bare epoch integer (encoding "
+            f"'iso8601'/'epoch', or none declared) -- no other encoding's wire "
+            f"shape is understood by the replication cursor"
         )
     fmt = field.get("format")
     return FieldDeclaration(types[0], fmt if isinstance(fmt, str) and fmt else None)

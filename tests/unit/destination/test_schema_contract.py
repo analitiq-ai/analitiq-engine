@@ -15,7 +15,7 @@ import pyarrow as pa
 import pytest
 
 from cdk.schema_contract import SchemaContract
-from cdk.type_map.exceptions import MissingEncodingError
+from cdk.type_map.exceptions import InvalidTypeMapError, MissingEncodingError
 
 
 class TestSchemaContractColumnsFormat:
@@ -612,6 +612,86 @@ class TestSchemaContractFromPylist:
             ]
         }
         with pytest.raises(MissingEncodingError, match="encoding"):
+            SchemaContract(schema).check_required_read_encoding()
+
+    def test_a_decoder_incompatible_with_the_arrow_type_is_refused(self):
+        # A Timestamp field naming 'decimal' resolves fine (the name is a
+        # real catalog entry) and would otherwise only fail inside the
+        # decoder's own closure on the first non-null response.
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": "string",
+                    "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                    "encoding": {"name": "decimal"},
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="decimal"):
+            SchemaContract(schema).check_required_read_encoding()
+
+    def test_a_nested_gated_leaf_with_no_encoding_is_refused(self):
+        # resolve_decoder is never consulted for a nested leaf --
+        # _build_nested_column hands its raw wire value straight to
+        # pyarrow -- so a gated-kind leaf inside an Object field must be
+        # refused here, by name and nested path, the same as a top-level
+        # field would be.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "properties": {
+                        "posted_at": {
+                            "type": "string",
+                            "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                        }
+                    },
+                },
+            }
+        }
+        with pytest.raises(MissingEncodingError, match="meta.posted_at"):
+            SchemaContract(schema).check_required_read_encoding()
+
+    def test_a_nested_leaf_declaring_its_own_encoding_is_still_refused(self):
+        # The leaf's own encoding is never resolved or applied (only a
+        # top-level encoding: {"name": "code"} on the whole nested field
+        # is), so declaring one here must not be accepted as sufficient.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "properties": {
+                        "posted_at": {
+                            "type": "string",
+                            "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                            "encoding": {"name": "iso8601"},
+                        }
+                    },
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="meta.posted_at"):
+            SchemaContract(schema).check_required_read_encoding()
+
+    def test_a_nested_field_with_top_level_code_encoding_skips_leaf_checks(self):
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding": {"name": "code"},
+                    "properties": {
+                        "posted_at": {
+                            "type": "string",
+                            "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                        }
+                    },
+                },
+            }
+        }
+        with pytest.raises(ValueError, match="code_decoder"):
             SchemaContract(schema).check_required_read_encoding()
 
 
