@@ -340,9 +340,7 @@ class _ShadowedClassifyErrorMixin:
         return "transient"
 
 
-class _ShadowedClassifyErrorConnector(
-    ReferenceConnector, _ShadowedClassifyErrorMixin
-):
+class _ShadowedClassifyErrorConnector(ReferenceConnector, _ShadowedClassifyErrorMixin):
     """BaseDestinationHandler's neutral classify_error wins this MRO, so
     the mixin's override is never called -- tier 1 must catch that."""
 
@@ -365,7 +363,7 @@ class _ClassifyErrorCooperativeSubclassConnector(_ClassifyErrorSubclassBaseConne
 class _LruCachedClassifyErrorConnector(ReferenceConnector):
     """classify_error wrapped in a descriptor other than a plain function."""
 
-    @functools.lru_cache(maxsize=8)
+    @functools.lru_cache  # noqa: B019 - the caching descriptor IS the fixture
     def classify_error(self, exc: BaseException) -> str | None:
         return "transient"
 
@@ -641,9 +639,7 @@ class TestOverrideSurfaceBreaks:
         """A callable object isn't descriptor-bound; it needs no self shift."""
         assert (
             check_override_surface(
-                _with_connector(
-                    reference_target, _CallableObjectClassifyErrorConnector
-                )
+                _with_connector(reference_target, _CallableObjectClassifyErrorConnector)
             )
             == []
         )
