@@ -276,6 +276,13 @@ class _StaticHookConnector(GenericSQLConnector):
     dialect_class = _StaticHookDialect
 
 
+class _ClassifyErrorOverrideConnector(ReferenceConnector):
+    """Overrides the connector-owned error-classification hook (issue #513)."""
+
+    def classify_error(self, exc: BaseException) -> str | None:
+        return "transient"
+
+
 class _MergeFormDialect(ReferencePostgresDialect):
     """Renders the MERGE form, for the merge_form: 'merge' rendering arm."""
 
@@ -485,6 +492,17 @@ class TestOverrideSurfaceBreaks:
         assert (
             check_override_surface(
                 _with_connector(reference_target, _ExtraDefaultParamConnector)
+            )
+            == []
+        )
+
+    def test_classify_error_override_is_allowed(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """The connector-owned error-classification hook (issue #513) is sanctioned."""
+        assert (
+            check_override_surface(
+                _with_connector(reference_target, _ClassifyErrorOverrideConnector)
             )
             == []
         )

@@ -51,9 +51,14 @@ FRAMEWORK_OWNED_DIALECT_ATTRS = frozenset(
     {"capabilities", "for_runtime", "table_address"}
 )
 
-#: The one attribute a connector class may define (ADR section 4: "the
-#: connector class is ``dialect_class = XDialect`` and nothing else").
-CONNECTOR_CLASS_ALLOWED_ATTRS = frozenset({"dialect_class"})
+#: The attributes a connector class may define: ``dialect_class`` (ADR
+#: section 4: "the connector class is ``dialect_class = XDialect`` and
+#: nothing else") and ``classify_error``, the code escape hatch for
+#: connector-owned error classification (issue #513; spec sql-write-path
+#: section 5) — resolved by the write path on the connector instance
+#: itself (``sql/generic.py``'s ``_declared_write_verdict``), never on the
+#: dialect, so it is not part of the dialect's sanctioned surface either.
+CONNECTOR_CLASS_ALLOWED_ATTRS = frozenset({"dialect_class", "classify_error"})
 
 
 def sanctioned_dialect_surface() -> frozenset[str]:
@@ -273,7 +278,7 @@ def _is_authored_callable(value: Any) -> bool:
 
 
 def _audit_connector_class(connector_cls: type) -> list[Violation]:
-    """Audit the connector class: ``dialect_class`` and nothing else.
+    """Audit the connector class: only ``CONNECTOR_CLASS_ALLOWED_ATTRS``.
 
     Dunders are audited too when they are authored callables — a
     connector defining ``__init__`` (or any lifecycle hook) carries
@@ -295,9 +300,9 @@ def _audit_connector_class(connector_cls: type) -> list[Violation]:
                         f"GenericSQLConnector member; the facade's semantics "
                         f"are defined once in the CDK, and the per-system "
                         f"surface is the dialect (spec sql-write-path "
-                        f"section 4: the connector class carries "
-                        f"dialect_class only). Move the quirk onto the "
-                        f"dialect's sanctioned hooks.",
+                        f"section 4). The connector class may only define "
+                        f"{sorted(CONNECTOR_CLASS_ALLOWED_ATTRS)} — move any "
+                        f"other quirk onto the dialect's sanctioned hooks.",
                     )
                 )
             else:
@@ -305,10 +310,10 @@ def _audit_connector_class(connector_cls: type) -> list[Violation]:
                     Violation(
                         CHECK,
                         f"{klass.__name__}.{name} adds a member to the "
-                        f"connector class; the connector class carries "
-                        f"dialect_class only (spec sql-write-path section "
-                        f"4). Helpers belong on the connector's own dialect "
-                        f"class.",
+                        f"connector class; the connector class may only "
+                        f"define {sorted(CONNECTOR_CLASS_ALLOWED_ATTRS)} "
+                        f"(spec sql-write-path section 4). Helpers belong "
+                        f"on the connector's own dialect class.",
                     )
                 )
     return violations
