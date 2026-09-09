@@ -47,7 +47,6 @@ from ..base_handler import (
 )
 from ..batch_metadata import with_response_metadata
 from ..connection_runtime import ConnectionRuntime
-from ..declarations import resolve_declared_hook
 from ..exceptions import ReadError, TransportSpecError
 from ..json_utils import decode_json_fields
 from ..resolver import Resolver
@@ -826,14 +825,11 @@ class GenericAPIConnector(BaseDestinationHandler):
             try:
                 received = await dispatch.sender.send(signed, unwrap_page=True)
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                classify_error_source = f"{type(self).__name__}.classify_error"
                 status, category = failure_facts(
                     err,
                     error_map=self._error_map,
-                    classify_error=resolve_declared_hook(
-                        self, "classify_error", source=classify_error_source
-                    ),
-                    classify_error_source=classify_error_source,
+                    classify_error_owner=self,
+                    classify_error_source=f"{type(self).__name__}.classify_error",
                 )
                 raise read_verdict(
                     f"API request failed: {method} {request.url} -> {err}",
@@ -1404,14 +1400,11 @@ class GenericAPIConnector(BaseDestinationHandler):
         self, err: aiohttp.ClientError | asyncio.TimeoutError
     ) -> tuple[AckStatus, FailureCategory]:
         """Classify one transport failure: declared map, then classify_error."""
-        classify_error_source = f"{type(self).__name__}.classify_error"
         status, category = failure_facts(
             err,
             error_map=self._error_map,
-            classify_error=resolve_declared_hook(
-                self, "classify_error", source=classify_error_source
-            ),
-            classify_error_source=classify_error_source,
+            classify_error_owner=self,
+            classify_error_source=f"{type(self).__name__}.classify_error",
         )
         return write_verdict(status=status, category=category)
 

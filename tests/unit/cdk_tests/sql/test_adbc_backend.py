@@ -236,7 +236,7 @@ def _batch():
 
 
 def _backend(dialect, conn, *, bulk_load="adbc_ingest", runtime=None):
-    backend = AdbcBackend(dialect, classify_error=lambda exc: None)
+    backend = AdbcBackend(dialect, classify_error_owner=object())
     backend._conn = conn
     backend._bulk_load = bulk_load
     backend._runtime = runtime
@@ -807,7 +807,7 @@ class TestConnectionLifecycle:
         dialect = _StageDialect(_caps(bulk_load={"adbc": "adbc_ingest"}))
         conn = _FakeConn()
         runtime = _FakeRuntime([conn])
-        backend = AdbcBackend(dialect, classify_error=lambda exc: None)
+        backend = AdbcBackend(dialect, classify_error_owner=object())
         await backend.connect(runtime)
         assert runtime.opened == 1
         assert backend._conn is conn
@@ -845,7 +845,7 @@ class TestConnectionLifecycle:
         assert second.ingests[0]["table"] == plan.stage.table
 
     def test_no_connection_and_no_runtime_fails_loud(self):
-        backend = AdbcBackend(_StageDialect(), classify_error=lambda exc: None)
+        backend = AdbcBackend(_StageDialect(), classify_error_owner=object())
         with pytest.raises(AdbcConfigurationError, match="Runtime not available"):
             backend._require_conn_sync()
 

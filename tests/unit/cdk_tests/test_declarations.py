@@ -29,11 +29,10 @@ from cdk.declarations import (
     ConnectorDeclarationError,
     ErrorMap,
     birth_site_category,
-    call_declared_hook,
+    classify_via_hook,
     parse_declared_concurrency,
     parse_declared_error_map,
     require_declared_category,
-    resolve_declared_hook,
 )
 from cdk.types import AckStatus, FailureCategory
 
@@ -275,34 +274,67 @@ class TestRequireDeclaredCategory:
             require_declared_category("retry_me", source="test")
 
 
-class TestCallDeclaredHook:
-    """The guard around a connector-authored classification hook.
+class TestClassifyViaHook:
+    """The guard around resolving *and* calling a connector-authored hook.
 
-    Both ``classify_error(exc)`` and a dialect's ``classify(status, body)``
-    are untrusted, potentially-AI-authored connector code, called from
-    inside the boundary that is reporting the *original* failure. A crash
-    and an off-vocabulary return are the same fact stated two ways: the
-    connector's classification mechanism is broken. Neither may displace
-    the original failure, and the engine does not guess at what a broken
-    mechanism might have meant -- both map to ``"config"``, fatal and
+    Both ``owner.classify_error(exc)`` and a dialect's
+    ``owner.classify(status, body)`` are untrusted, potentially-AI-authored
+    connector code, invoked from inside the boundary that is reporting the
+    *original* failure. Resolving the attribute and calling it are one
+    atomic step -- there is no shorter path that resolves a hook without
+    the guard applying. A crash (resolving or calling) and an
+    off-vocabulary return are the same fact stated different ways: the
+    connector's classification mechanism is broken. None of them may
+    displace the original failure, and the engine does not guess at what a
+    broken mechanism might have meant -- all map to ``"config"``, fatal and
     non-retryable in both verdict tables, never a fallback guess.
     """
 
-    def test_normal_return_passes_through(self):
+    def test_a_real_method_resolves_and_is_called(self):
+        class Connector:
+            def classify_error(self, exc):
+                return "transient"
+
         assert (
-            call_declared_hook(lambda exc: "transient", ValueError("x"), source="t")
+            classify_via_hook(
+                Connector(), "classify_error", ValueError("x"), source="t"
+            )
             == "transient"
         )
 
+    def test_a_genuinely_absent_attribute_returns_none(self):
+        class Bare:
+            pass
+
+        assert (
+            classify_via_hook(Bare(), "classify_error", ValueError("x"), source="t")
+            is None
+        )
+
     def test_none_return_passes_through(self):
-        assert call_declared_hook(lambda exc: None, ValueError("x"), source="t") is None
+        class Connector:
+            def classify_error(self, exc):
+                return None
+
+        assert (
+            classify_via_hook(
+                Connector(), "classify_error", ValueError("x"), source="t"
+            )
+            is None
+        )
 
     def test_off_vocabulary_return_maps_to_config(self):
         # The hook ran and answered -- wrongly. The engine cannot guess
         # what it meant, so this is treated the same as a crash: a broken
         # classification mechanism, fatal and non-retryable.
+        class Connector:
+            def classify_error(self, exc):
+                return "retry_me"
+
         assert (
-            call_declared_hook(lambda exc: "retry_me", ValueError("x"), source="t")
+            classify_via_hook(
+                Connector(), "classify_error", ValueError("x"), source="t"
+            )
             == "config"
         )
 
@@ -311,38 +343,60 @@ class TestCallDeclaredHook:
         # non-string against ERROR_CATEGORY_VALUES alone isn't enough to
         # rule out a value that reaches a verdict-table lookup by luck
         # (e.g. an object with a broken __eq__/__hash__).
+        class Connector:
+            def classify_error(self, exc):
+                return 42
+
         assert (
-            call_declared_hook(lambda exc: 42, ValueError("x"), source="t") == "config"
+            classify_via_hook(
+                Connector(), "classify_error", ValueError("x"), source="t"
+            )
+            == "config"
         )
 
     def test_a_crashing_hook_maps_to_config(self):
-        def _broken(exc):
-            raise RuntimeError("connector bug")
+        class Connector:
+            def classify_error(self, exc):
+                raise RuntimeError("connector bug")
 
         # No RuntimeError escapes -- it must not displace the exception
         # being classified -- and the connector's classification mechanism
         # having crashed is itself treated as a config defect, not silently
         # dropped.
-        assert call_declared_hook(_broken, ValueError("x"), source="t") == "config"
+        assert (
+            classify_via_hook(
+                Connector(), "classify_error", ValueError("x"), source="t"
+            )
+            == "config"
+        )
 
     def test_a_crashing_hook_logs_a_warning_naming_the_source(self, caplog):
         import logging
 
-        def _broken(exc):
-            raise RuntimeError("connector bug")
+        class Connector:
+            def classify_error(self, exc):
+                raise RuntimeError("connector bug")
 
         with caplog.at_level(logging.WARNING, logger="cdk.declarations"):
-            call_declared_hook(
-                _broken, ValueError("x"), source="MyConnector.classify_error"
+            classify_via_hook(
+                Connector(),
+                "classify_error",
+                ValueError("x"),
+                source="MyConnector.classify_error",
             )
         assert any("MyConnector.classify_error" in r.message for r in caplog.records)
 
     def test_an_off_vocabulary_return_logs_a_warning_naming_the_source(self, caplog):
         import logging
 
+        class Connector:
+            def classify_error(self, exc):
+                return "retry_me"
+
         with caplog.at_level(logging.WARNING, logger="cdk.declarations"):
-            call_declared_hook(
-                lambda exc: "retry_me",
+            classify_via_hook(
+                Connector(),
+                "classify_error",
                 ValueError("x"),
                 source="MyConnector.classify_error",
             )
@@ -351,23 +405,54 @@ class TestCallDeclaredHook:
     def test_supports_the_multi_argument_dialect_classify_shape(self):
         # dialect.classify(status, body) takes two positional args, not one
         # exception -- the guard must not assume a single-argument hook.
+        class Dialect:
+            def classify(self, status, body):
+                return "config" if status == 400 else None
+
         assert (
-            call_declared_hook(
-                lambda status, body: "config" if status == 400 else None,
-                400,
-                {"error": "bad request"},
-                source="t",
+            classify_via_hook(
+                Dialect(), "classify", 400, {"error": "bad request"}, source="t"
             )
             == "config"
         )
 
     def test_a_crashing_two_argument_hook_also_maps_to_config(self):
-        def _broken(status, body):
-            raise KeyError("body")
+        class Dialect:
+            def classify(self, status, body):
+                raise KeyError("body")
 
         assert (
-            call_declared_hook(_broken, 400, {"error": "bad"}, source="t") == "config"
+            classify_via_hook(Dialect(), "classify", 400, {"error": "bad"}, source="t")
+            == "config"
         )
+
+    def test_a_raising_descriptor_maps_to_config(self):
+        # Resolving the attribute (not calling it) is itself untrusted,
+        # potentially-AI-authored connector code -- a descriptor or a
+        # custom __getattr__ can raise there exactly as a hook body can.
+        class Broken:
+            @property
+            def classify_error(self):
+                raise RuntimeError("connector bug")
+
+        assert (
+            classify_via_hook(Broken(), "classify_error", ValueError("x"), source="t")
+            == "config"
+        )
+
+    def test_a_raising_descriptor_logs_a_warning_naming_the_source(self, caplog):
+        import logging
+
+        class Broken:
+            @property
+            def classify_error(self):
+                raise RuntimeError("connector bug")
+
+        with caplog.at_level(logging.WARNING, logger="cdk.declarations"):
+            classify_via_hook(
+                Broken(), "classify_error", ValueError("x"), source="MyConnector"
+            )
+        assert any("MyConnector" in r.message for r in caplog.records)
 
 
 class TestBirthSiteCategory:
@@ -420,52 +505,6 @@ class TestBirthSiteCategory:
         with caplog.at_level(logging.WARNING, logger="cdk.declarations"):
             birth_site_category(_Bad("x"))
         assert any("declared_category" in r.message for r in caplog.records)
-
-
-class TestResolveDeclaredHook:
-    """The guard around *resolving* a connector-authored hook attribute.
-
-    Reading ``owner.attr`` is itself untrusted, potentially-AI-authored
-    connector code (a descriptor, a custom ``__getattr__``) -- the same
-    class of risk ``call_declared_hook`` already guards for *calling* the
-    resolved hook.
-    """
-
-    def test_a_real_method_resolves_and_is_callable(self):
-        class Connector:
-            def classify_error(self, exc):
-                return "transient"
-
-        hook = resolve_declared_hook(Connector(), "classify_error", source="t")
-        assert hook(ValueError("x")) == "transient"
-
-    def test_a_genuinely_absent_attribute_resolves_to_a_none_answering_callable(self):
-        class Bare:
-            pass
-
-        hook = resolve_declared_hook(Bare(), "classify_error", source="t")
-        assert hook(ValueError("x")) is None
-
-    def test_a_raising_descriptor_resolves_to_a_config_answering_callable(self):
-        class Broken:
-            @property
-            def classify_error(self):
-                raise RuntimeError("connector bug")
-
-        hook = resolve_declared_hook(Broken(), "classify_error", source="t")
-        assert hook(ValueError("x")) == "config"
-
-    def test_a_raising_descriptor_logs_a_warning_naming_the_source(self, caplog):
-        import logging
-
-        class Broken:
-            @property
-            def classify_error(self):
-                raise RuntimeError("connector bug")
-
-        with caplog.at_level(logging.WARNING, logger="cdk.declarations"):
-            resolve_declared_hook(Broken(), "classify_error", source="MyConnector")
-        assert any("MyConnector" in r.message for r in caplog.records)
 
 
 class TestConcurrencyParse:

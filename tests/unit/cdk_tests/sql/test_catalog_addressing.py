@@ -436,7 +436,7 @@ class TestAdbcWriteSinks:
             stream_id="s1",
             batch_seq=1,
         )
-        backend = AdbcBackend(dialect, classify_error=lambda exc: None)
+        backend = AdbcBackend(dialect, classify_error_owner=object())
         conn = _CapturingConn()
         backend._conn = conn
         backend._bulk_load = caps.bulk_mechanism("adbc") or "none"

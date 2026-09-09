@@ -16,7 +16,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -211,7 +211,7 @@ def failure_facts(
     exc: BaseException,
     *,
     error_map: ErrorMap | None,
-    classify_error: Callable[[BaseException], str | None] | None = None,
+    classify_error_owner: Any = None,
     classify_error_source: str = "classify_error",
 ) -> tuple[int | None, str | None]:
     """Read the status and declared category off a caught transport failure.
@@ -222,9 +222,11 @@ def failure_facts(
     status; a status-less one by the declared ``error_map`` then the
     connector's ``classify_error`` hook (issue #513). Keeping the branches
     separate is what stops a broad declared match from claiming deterministic
-    4xx rejections. *classify_error_source* names the connector class for
-    the hook's WARNING log line (a crash or an off-vocabulary return never
-    raises -- both map to ``"config"``).
+    4xx rejections. *classify_error_owner* is the connector instance the
+    hook is resolved from (never a pre-resolved callable);
+    *classify_error_source* names its class for the hook's WARNING log
+    line (a crash or an off-vocabulary return never raises -- both map to
+    ``"config"``).
 
     ``exc.declared_category`` (the birth-site value) is untrusted -- a
     connector can raise any ``ClientResponseError`` subclass with any
@@ -245,7 +247,7 @@ def failure_facts(
         declared = classify_exception(
             exc,
             error_map=error_map,
-            classify_error=classify_error,
+            classify_error_owner=classify_error_owner,
             source=classify_error_source,
         )
     return None, declared

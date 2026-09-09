@@ -27,6 +27,17 @@ def _by_class(**codes):
     return {"key_attrs": [CLASS_NAME_SIGNAL], "codes": codes}
 
 
+def _owner(classify_error_fn):
+    """A minimal object exposing classify_error, for classify_via_hook's
+    (owner, attr) shape -- tests inject a plain function, not a bound
+    method, so this wraps one as the attribute."""
+
+    class _Owner:
+        classify_error = staticmethod(classify_error_fn)
+
+    return _Owner()
+
+
 class TestDeclaredFirst:
     def test_declared_transient_makes_a_ladder_deterministic_type_retryable(self):
         # ValueError sits in _DETERMINISTIC_READ_ERRORS; the declared map
@@ -71,14 +82,14 @@ class TestClassifyErrorFallback:
     def test_classify_error_runs_when_the_map_claims_nothing(self):
         error_map = _map(_by_class(SomethingElse="transient"))
         deterministic, declared = classify_read_error(
-            ValueError("boom"), error_map, lambda exc: "config"
+            ValueError("boom"), error_map, _owner(lambda exc: "config")
         )
         assert deterministic is True
         assert declared == "config"
 
     def test_classify_error_runs_with_no_map_at_all(self):
         deterministic, declared = classify_read_error(
-            ValueError("boom"), None, lambda exc: "rate_limited"
+            ValueError("boom"), None, _owner(lambda exc: "rate_limited")
         )
         assert deterministic is False
         assert declared == "rate_limited"
@@ -86,7 +97,7 @@ class TestClassifyErrorFallback:
     def test_map_outranks_classify_error(self):
         error_map = _map(_by_class(ValueError="config"))
         deterministic, declared = classify_read_error(
-            ValueError("boom"), error_map, lambda exc: "rate_limited"
+            ValueError("boom"), error_map, _owner(lambda exc: "rate_limited")
         )
         assert deterministic is True
         assert declared == "config"
@@ -96,7 +107,7 @@ class TestClassifyErrorFallback:
         # what it meant, so it's treated as a broken classification
         # mechanism: deterministic (non-retryable), same as a crash.
         deterministic, declared = classify_read_error(
-            ValueError("boom"), None, lambda exc: "retry_me"
+            ValueError("boom"), None, _owner(lambda exc: "retry_me")
         )
         assert deterministic is True
         assert declared == "config"
@@ -105,7 +116,9 @@ class TestClassifyErrorFallback:
         def _broken(exc):
             raise RuntimeError("connector bug")
 
-        deterministic, declared = classify_read_error(TypeError("boom"), None, _broken)
+        deterministic, declared = classify_read_error(
+            TypeError("boom"), None, _owner(_broken)
+        )
         assert deterministic is True
         assert declared == "config"
 

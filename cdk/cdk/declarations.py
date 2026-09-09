@@ -51,10 +51,10 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, cast
+from typing import Any
 
 from .types import AckStatus, FailureCategory
 
@@ -208,7 +208,7 @@ def require_declared_category(category: str, *, source: str) -> str:
     ``declared_category`` stamped on a typed error) is never validated
     with this function -- raising there would displace the original
     failure being reported. Those call sites map an off-vocabulary value
-    to ``"config"`` instead; see :func:`call_declared_hook`.
+    to ``"config"`` instead; see :func:`classify_via_hook`.
     """
     if category not in ERROR_CATEGORY_VALUES:
         raise ConnectorDeclarationError(
@@ -218,29 +218,56 @@ def require_declared_category(category: str, *, source: str) -> str:
     return category
 
 
-def call_declared_hook(
-    hook: Callable[..., str | None], *args: Any, source: str
-) -> str | None:
-    """Call a connector-authored classification hook. Never raises.
+def classify_via_hook(owner: Any, attr: str, *args: Any, source: str) -> str | None:
+    """Resolve ``owner.attr`` and call it as a classification hook. Never raises.
 
-    Covers both shapes this mechanism has: ``classify_error(exc)`` and a
-    dialect's ``classify(status, body)``. Both are untrusted,
-    potentially-AI-authored connector code, called from inside the
-    ``except`` block that is in the middle of reporting the *original*
-    failure — nothing from here may displace it, mirroring the guarantee
-    :meth:`ErrorMap.match_exception` already makes for the declarative
-    read (see its docstring).
+    The single entry point for both connector-authored hook shapes this
+    mechanism has: ``owner.classify_error(exc)`` and a dialect's
+    ``owner.classify(status, body)``. There is deliberately no way to
+    resolve the attribute and call it as two separate steps -- an earlier
+    version of this PR had ``resolve_declared_hook`` (guard the read) and
+    ``call_declared_hook`` (guard the call) as two functions a caller had
+    to remember to compose, and every call site that instead passed a
+    bare, already-resolved attribute expression (``self.classify_error``,
+    ``dialect.classify``) skipped the read-side guard -- four separate
+    review rounds each found one more such site. Collapsing both steps
+    into one function makes that mistake unrepresentable: there is no
+    shorter path that bypasses the guard.
 
-    A crash and an off-vocabulary return are the same fact stated two
-    ways: the connector's classification mechanism is broken. The engine
-    does not guess its way around a broken mechanism (that would mean
-    trusting an exception's Python *type* to stand in for a taxonomy the
-    connector itself failed to supply) — it maps straight to
-    ``"config"``, the engine's own category for "this needs a fix in the
-    connector," fatal and non-retryable in both the write and read
-    verdict tables. ``None`` (the hook ran and declined to classify) is
-    the only case that falls through to the caller's next fallback.
+    Both the read and the call are untrusted, potentially-AI-authored
+    connector code, invoked from inside the ``except`` block that is in
+    the middle of reporting the *original* failure -- nothing from here
+    may displace it, mirroring the guarantee :meth:`ErrorMap.match_exception`
+    already makes for the declarative read (see its docstring). Three
+    failure modes collapse to the same answer:
+
+    - the attribute is genuinely absent (no override) -- neutral, returns
+      ``None``, the same answer the engine's own thin default gives;
+    - resolving it raises anything else (a descriptor, a custom
+      ``__getattr__``), or calling it raises -- a broken classification
+      *mechanism*;
+    - it returns something other than a genuine vocabulary string -- the
+      mechanism ran and answered, just wrongly.
+
+    The last two are the same fact stated two ways: the engine does not
+    guess its way around a broken mechanism (that would mean trusting an
+    exception's Python *type* to stand in for a taxonomy the connector
+    itself failed to supply) -- both map straight to ``"config"``, the
+    engine's own category for "this needs a fix in the connector," fatal
+    and non-retryable in both the write and read verdict tables.
     """
+    try:
+        hook = getattr(owner, attr)
+    except AttributeError:
+        return None
+    except Exception:
+        logger.warning(
+            "resolving %s raised; treating the connector's classification "
+            "as broken (config)",
+            source,
+            exc_info=True,
+        )
+        return "config"
     try:
         category = hook(*args)
     except Exception:
@@ -268,44 +295,6 @@ def call_declared_hook(
     return category
 
 
-def resolve_declared_hook(
-    owner: Any, attr: str, *, source: str
-) -> Callable[..., str | None]:
-    """Look up ``owner.attr`` as a classification hook. Never raises.
-
-    The same guarantee :func:`call_declared_hook` makes for *calling* the
-    hook, one step earlier: resolving it is itself an attribute read on
-    untrusted, potentially-AI-authored connector code (``owner`` is a
-    connector or connector-held instance, ``attr`` typically
-    ``"classify_error"``) -- a descriptor or a custom ``__getattr__`` can
-    raise there exactly as a hook body can. A genuinely absent attribute
-    (no override, no ``BaseDestinationHandler`` in the MRO) is not
-    "broken" -- it returns a callable that always answers ``None``, the
-    same neutral answer the engine's own thin default gives. Anything
-    else going wrong while resolving the attribute is a broken connector,
-    and returns a callable that always answers ``"config"``, matching
-    what :func:`call_declared_hook` gives a hook that crashes or answers
-    wrongly.
-    """
-    try:
-        hook = getattr(owner, attr)
-    except AttributeError:
-        return lambda *args, **kwargs: None
-    except Exception:
-        logger.warning(
-            "resolving %s raised; treating the connector's classification "
-            "as broken (config)",
-            source,
-            exc_info=True,
-        )
-        return lambda *args, **kwargs: "config"
-    # owner is Any, so getattr's result is unannotated -- resolved to a
-    # plain attribute lookup, not a further guess: the caller finds out
-    # whether it is actually callable with the right shape when
-    # call_declared_hook invokes it (and that call is guarded too).
-    return cast("Callable[..., str | None]", hook)
-
-
 def birth_site_category(exc: BaseException) -> str | None:
     """Read a typed error's birth-site ``declared_category``. Never raises.
 
@@ -314,7 +303,7 @@ def birth_site_category(exc: BaseException) -> str | None:
     construction-time check, and untrusted connector code can raise any
     of them directly -- so the value here is exactly as untrusted as a
     ``classify_error`` return, and gets the same treatment as
-    :func:`call_declared_hook`: reading the attribute is guarded (a
+    :func:`classify_via_hook`: reading the attribute is guarded (a
     property that raises is not different from a hook that raises), and
     anything other than a genuine vocabulary member -- wrong type, wrong
     string, absent entirely being the one exception -- maps to

@@ -14,7 +14,11 @@ import pyarrow as pa
 import pytest
 
 from cdk.adbc_registry import AdbcConfigurationError
-from cdk.declarations import CLASS_NAME_SIGNAL, parse_declared_error_map
+from cdk.declarations import (
+    CLASS_NAME_SIGNAL,
+    classify_via_hook,
+    parse_declared_error_map,
+)
 from cdk.sql.adbc_backend import AdbcBackend, _AdbcStageConnection
 from cdk.sql.backend import StageWritePlan
 from cdk.sql.dialects import SqlDialect, TableAddress
@@ -241,8 +245,9 @@ class TestConnectWiring:
     @pytest.mark.asyncio
     async def test_classify_error_reaches_the_adbc_backend_through_connect(self):
         # AdbcBackend can't reach a connector reference on its own (issue
-        # #513) -- connect() must inject the bound classify_error method
-        # (and a source label naming the connector class) into it.
+        # #513) -- connect() must inject itself (never a pre-resolved
+        # callable -- see classify_via_hook) and a source label naming the
+        # connector class.
         handler = GenericSQLConnector()
         runtime = MagicMock()
         runtime.connector_id = "demo"
@@ -254,7 +259,7 @@ class TestConnectWiring:
         runtime.open_adbc_connection = MagicMock()
         with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()):
             await handler.connect(runtime)
-        assert handler._backend._classify_error == handler.classify_error
+        assert handler._backend._classify_error_owner is handler
         assert (
             handler._backend._classify_error_source
             == f"{type(handler).__name__}.classify_error"
@@ -265,7 +270,9 @@ class TestConnectWiring:
         # Resolving classify_error (not calling it) is itself an
         # attribute read on untrusted connector code -- connect() must
         # not crash and leak the just-materialized runtime over a
-        # connector's descriptor bug.
+        # connector's descriptor bug. classify_via_hook resolves lazily
+        # (only when a driver failure is actually classified), so connect()
+        # itself never touches the broken descriptor at all.
         class _BrokenDescriptorConnector(GenericSQLConnector):
             @property
             def classify_error(self):
@@ -282,13 +289,33 @@ class TestConnectWiring:
         runtime.open_adbc_connection = MagicMock()
         with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()):
             await handler.connect(runtime)
-        assert handler._backend._classify_error(ProgrammingError("boom")) == "config"
+        assert (
+            classify_via_hook(
+                handler._backend._classify_error_owner,
+                "classify_error",
+                ProgrammingError("boom"),
+                source=handler._backend._classify_error_source,
+            )
+            == "config"
+        )
+
+
+def _owner(classify_error_fn):
+    """A minimal object exposing classify_error, for classify_via_hook's
+    (owner, attr) shape -- tests inject a plain function, not a bound
+    method, so this wraps one as the attribute."""
+
+    class _Owner:
+        classify_error = staticmethod(classify_error_fn)
+
+    return _Owner()
 
 
 class TestAdbcBoundary:
     def _backend(self, error_map=None, *, classify_error=None) -> AdbcBackend:
         backend = AdbcBackend(
-            SqlDialect(), classify_error=classify_error or (lambda exc: None)
+            SqlDialect(),
+            classify_error_owner=_owner(classify_error or (lambda exc: None)),
         )
         backend._error_map = error_map
         return backend

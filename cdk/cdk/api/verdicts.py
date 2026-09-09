@@ -20,15 +20,13 @@ never about a client library's exception tree.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
 from typing import Any, Protocol
 
 from ..declarations import (
     DECLARED_READ_DETERMINISTIC,
     DECLARED_WRITE_VERDICTS,
     ErrorMap,
-    call_declared_hook,
-    resolve_declared_hook,
+    classify_via_hook,
 )
 from ..exceptions import ReadError, TransientReadError
 from ..types import AckStatus, FailureCategory
@@ -118,12 +116,7 @@ def classify_status(
     """
     if dialect is not None:
         source = f"{type(dialect).__name__}.classify"
-        category = call_declared_hook(
-            resolve_declared_hook(dialect, "classify", source=source),
-            status,
-            body,
-            source=source,
-        )
+        category = classify_via_hook(dialect, "classify", status, body, source=source)
         if category is not None:
             logger.info("dialect classified HTTP %d -> %s", status, category)
             return category
@@ -141,7 +134,7 @@ def classify_exception(
     exc: BaseException,
     *,
     error_map: ErrorMap | None,
-    classify_error: Callable[[BaseException], str | None] | None = None,
+    classify_error_owner: Any = None,
     source: str = "classify_error",
 ) -> str | None:
     """Name the declared category a status-less transport error carries.
@@ -152,10 +145,13 @@ def classify_exception(
     issue #513) is what classifies it first, then the connector's
     ``classify_error`` code hook for a signal the map can't express. Kept a
     separate branch from :func:`classify_status` so neither this nor the
-    HTTP-status path can claim the other's failures. *source* names the
-    connector class the hook belongs to, for the hook's WARNING log line
-    (a crash or an off-vocabulary return never raises -- both map to
-    ``"config"``).
+    HTTP-status path can claim the other's failures. *classify_error_owner*
+    is the connector instance the hook is resolved from (never a
+    pre-resolved callable -- resolving ``classify_error`` is itself
+    untrusted connector code, guarded by :func:`classify_via_hook` the
+    same as calling it); *source* names its class for the hook's WARNING
+    log line (a crash or an off-vocabulary return never raises -- both
+    map to ``"config"``).
     """
     if error_map is not None:
         match = error_map.match_exception(exc)
@@ -167,9 +163,11 @@ def classify_exception(
                 match.category,
             )
             return match.category
-    if classify_error is None:
+    if classify_error_owner is None:
         return None
-    category = call_declared_hook(classify_error, exc, source=source)
+    category = classify_via_hook(
+        classify_error_owner, "classify_error", exc, source=source
+    )
     if category is None:
         return None
     logger.info("classify_error classified the transport error: %s", category)

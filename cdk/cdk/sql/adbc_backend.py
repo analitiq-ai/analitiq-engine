@@ -38,7 +38,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from cdk.adbc_registry import AdbcConfigurationError
-from cdk.declarations import ErrorMap, call_declared_hook, error_map_for
+from cdk.declarations import ErrorMap, classify_via_hook, error_map_for
 
 from ._adbc_utils import (
     _close_cursor_quietly,
@@ -86,20 +86,20 @@ class AdbcBackend(TransportBackend):
         self,
         dialect: SqlDialect,
         *,
-        classify_error: Callable[[BaseException], str | None],
+        classify_error_owner: Any,
         classify_error_source: str = "classify_error",
     ) -> None:
         self._dialect = dialect
         self._cycle = StageCycle(dialect)
-        # The connector's classify_error hook (issue #513), injected rather
-        # than reached through a connector reference this transport-only
-        # object doesn't otherwise hold — the same declared-map-first,
-        # code-hook-fallback order the facade's write-ack ladder uses.
-        # classify_error_source names the connector class in the WARNING
-        # log line call_declared_hook produces when the hook crashes or
-        # returns an off-vocabulary category (both map to "config" there,
-        # never raise).
-        self._classify_error = classify_error
+        # The connector's classify_error hook (issue #513): resolved and
+        # called together, lazily, only when a driver failure is actually
+        # being classified -- classify_via_hook takes the owner, not a
+        # pre-resolved callable, so nothing here reads a connector
+        # attribute (or leaks the runtime on a broken descriptor) before
+        # it's needed. classify_error_source names the connector class in
+        # the WARNING log line a crash or an off-vocabulary category
+        # produces (both map to "config", never raise).
+        self._classify_error_owner = classify_error_owner
         self._classify_error_source = classify_error_source
         self._runtime: ConnectionRuntime | None = None
         # Cached ADBC DBAPI connection, opened eagerly in connect() so a
@@ -169,8 +169,11 @@ class AdbcBackend(TransportBackend):
         """
         if write_cycle and (
             (self._error_map is not None and self._error_map.match_exception(exc))
-            or call_declared_hook(
-                self._classify_error, exc, source=self._classify_error_source
+            or classify_via_hook(
+                self._classify_error_owner,
+                "classify_error",
+                exc,
+                source=self._classify_error_source,
             )
             is not None
         ):

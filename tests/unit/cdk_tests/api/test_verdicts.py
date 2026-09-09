@@ -26,6 +26,18 @@ from cdk.types import AckStatus, FailureCategory
 
 pytestmark = pytest.mark.unit
 
+
+def _owner(classify_error_fn):
+    """A minimal object exposing classify_error, for classify_via_hook's
+    (owner, attr) shape -- tests inject a plain function, not a bound
+    method, so this wraps one as the attribute."""
+
+    class _Owner:
+        classify_error = staticmethod(classify_error_fn)
+
+    return _Owner()
+
+
 # status -> (read is deterministic, write ack, the transport re-attempts it)
 _TABLE = {
     400: (True, AckStatus.ACK_STATUS_FATAL_FAILURE, False),
@@ -119,7 +131,7 @@ class TestClassification:
             classify_exception(
                 ValueError("x"),
                 error_map=None,
-                classify_error=lambda exc: "transient",
+                classify_error_owner=_owner(lambda exc: "transient"),
             )
             == "transient"
         )
@@ -137,7 +149,7 @@ class TestClassification:
             classify_exception(
                 ValueError("x"),
                 error_map=error_map,
-                classify_error=lambda exc: "transient",
+                classify_error_owner=_owner(lambda exc: "transient"),
             )
             == "transient"
         )
@@ -148,7 +160,9 @@ class TestClassification:
         # mechanism: fatal, non-retryable, the same as a crash.
         assert (
             classify_exception(
-                ValueError("x"), error_map=None, classify_error=lambda exc: "retry_me"
+                ValueError("x"),
+                error_map=None,
+                classify_error_owner=_owner(lambda exc: "retry_me"),
             )
             == "config"
         )
@@ -161,7 +175,9 @@ class TestClassification:
             raise RuntimeError("connector bug")
 
         assert (
-            classify_exception(ValueError("x"), error_map=None, classify_error=_broken)
+            classify_exception(
+                ValueError("x"), error_map=None, classify_error_owner=_owner(_broken)
+            )
             == "config"
         )
 

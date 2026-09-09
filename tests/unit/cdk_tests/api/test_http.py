@@ -25,6 +25,17 @@ from .fakes import BASE_URL, FakeResponse, FakeSession, sent_query
 pytestmark = pytest.mark.unit
 
 
+def _owner(classify_error_fn):
+    """A minimal object exposing classify_error, for classify_via_hook's
+    (owner, attr) shape -- tests inject a plain function, not a bound
+    method, so this wraps one as the attribute."""
+
+    class _Owner:
+        classify_error = staticmethod(classify_error_fn)
+
+    return _Owner()
+
+
 def _sender(
     session: FakeSession,
     *,
@@ -112,7 +123,7 @@ class TestFailureFacts:
     def test_a_status_less_error_falls_back_to_classify_error(self) -> None:
         exc = aiohttp.ClientPayloadError("truncated")
         assert failure_facts(
-            exc, error_map=None, classify_error=lambda e: "transient"
+            exc, error_map=None, classify_error_owner=_owner(lambda e: "transient")
         ) == (None, "transient")
 
     def test_map_present_but_silent_then_classify_error_claims(self) -> None:
@@ -121,7 +132,9 @@ class TestFailureFacts:
         )
         exc = aiohttp.ClientPayloadError("truncated")
         assert failure_facts(
-            exc, error_map=error_map, classify_error=lambda e: "transient"
+            exc,
+            error_map=error_map,
+            classify_error_owner=_owner(lambda e: "transient"),
         ) == (None, "transient")
 
     def test_a_crashing_classify_error_does_not_displace_the_original_failure(
@@ -133,7 +146,9 @@ class TestFailureFacts:
             raise RuntimeError("connector bug")
 
         exc = aiohttp.ClientPayloadError("truncated")
-        assert failure_facts(exc, error_map=None, classify_error=_broken) == (
+        assert failure_facts(
+            exc, error_map=None, classify_error_owner=_owner(_broken)
+        ) == (
             None,
             "config",
         )
