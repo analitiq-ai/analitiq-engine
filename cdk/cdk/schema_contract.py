@@ -701,8 +701,9 @@ class SchemaContract:
             else:
                 self._check_scalar_write_encoding(f, field_def)
 
+    @staticmethod
     def _check_nested_field_write_encoding(
-        self, f: pa.Field, field_def: dict[str, Any]
+        f: pa.Field, field_def: dict[str, Any]
     ) -> None:
         """Validate a nested field's own top-level ``encoding_write``.
 
@@ -738,9 +739,8 @@ class SchemaContract:
                 f"and crash; declared {encoding_write.get('name')!r}"
             )
 
-    def _check_scalar_write_encoding(
-        self, f: pa.Field, field_def: dict[str, Any]
-    ) -> None:
+    @staticmethod
+    def _check_scalar_write_encoding(f: pa.Field, field_def: dict[str, Any]) -> None:
         """Validate a scalar field's declared or required ``encoding_write``."""
         kind = ARROW_FAMILIES[arrow_family(f.type)].conversion_kind
         encoding_write = field_def.get("encoding_write")
