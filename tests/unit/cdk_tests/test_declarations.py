@@ -1,9 +1,20 @@
-"""Grammar + lookup tests for the connector-level declared facts (issue #401).
+"""Grammar + lookup tests for the connector-level declared facts (issue #401, #513).
 
 ``cdk.declarations`` is the typed, fail-loud view of the ``error_map`` and
 ``concurrency`` blocks: declared content is validated strictly (vocabulary,
-per-family key grammar, unknown fields), absence is additive, and the
-engine-owned verdict tables cover the whole category vocabulary.
+key grammar, unknown fields), absence is additive, and the engine-owned
+verdict tables cover the whole category vocabulary.
+
+Issue #513 replaced the four closed families (``sqlstate``/``exception``/
+``vendor_code``, plus the unchanged ``http``) with a single generic
+``key_attrs`` + ``codes`` mechanism: a connector names, in its own
+precedence order, which attributes its exception carries a native code on
+(or the reserved ``CLASS_NAME_SIGNAL`` to match the exception's class name),
+and a flat map from that native code to an engine category. The engine no
+longer reads multiple attribute spellings per family (``sqlstate``/
+``pgcode``, ``errno``/``vendor_code``/``args[0]``) or carves out ``OSError``
+specially -- a connector whose driver needs that now either declares an
+unambiguous attribute name or overrides ``classify_error``.
 """
 
 from __future__ import annotations
@@ -11,6 +22,7 @@ from __future__ import annotations
 import pytest
 
 from cdk.declarations import (
+    CLASS_NAME_SIGNAL,
     DECLARED_READ_DETERMINISTIC,
     DECLARED_WRITE_VERDICTS,
     ERROR_CATEGORY_VALUES,
@@ -18,13 +30,17 @@ from cdk.declarations import (
     ErrorMap,
     parse_declared_concurrency,
     parse_declared_error_map,
+    require_declared_category,
 )
 from cdk.types import AckStatus, FailureCategory
 
 FULL_BLOCK = {
-    "sqlstate": {"08": "unreachable", "28000": "auth", "23": "write_rejected"},
-    "exception": {"OperationalError": "transient"},
-    "vendor_code": {"1045": "auth"},
+    "key_attrs": ["sqlstate", CLASS_NAME_SIGNAL],
+    "codes": {
+        "28000": "auth",
+        "23505": "write_rejected",
+        "OperationalError": "transient",
+    },
     "http": {"429": "rate_limited", "401": "auth"},
 }
 
@@ -33,7 +49,8 @@ class TestErrorMapParse:
     def test_full_block_parses(self):
         error_map = parse_declared_error_map(FULL_BLOCK)
         assert error_map is not None
-        assert error_map.sqlstate["28000"] == "auth"
+        assert error_map.key_attrs == ("sqlstate", CLASS_NAME_SIGNAL)
+        assert error_map.codes["28000"] == "auth"
         assert error_map.http[429] == "rate_limited"
 
     def test_absent_block_stays_undeclared(self):
@@ -43,47 +60,72 @@ class TestErrorMapParse:
         error_map = parse_declared_error_map({})
         assert error_map is not None
         assert error_map.match_http(429) is None
+        assert error_map.match_exception(ValueError("x")) is None
 
-    def test_unknown_family_fails(self):
-        with pytest.raises(ConnectorDeclarationError, match="unknown families"):
-            parse_declared_error_map({"sql_state": {"08": "unreachable"}})
+    def test_unknown_field_fails(self):
+        with pytest.raises(ConnectorDeclarationError, match="unknown fields"):
+            parse_declared_error_map({"sqlstate": {"08": "unreachable"}})
 
     def test_off_vocabulary_category_fails(self):
         with pytest.raises(ConnectorDeclarationError, match="expected one of"):
-            parse_declared_error_map({"sqlstate": {"08": "retry_me"}})
+            parse_declared_error_map(
+                {"key_attrs": ["sqlstate"], "codes": {"08": "retry_me"}}
+            )
 
     def test_non_object_block_fails(self):
         with pytest.raises(ConnectorDeclarationError, match="must be an object"):
             parse_declared_error_map("auth")
 
-    def test_non_object_family_fails(self):
+    def test_non_object_codes_fails(self):
+        with pytest.raises(ConnectorDeclarationError, match="must be an object"):
+            parse_declared_error_map({"key_attrs": ["sqlstate"], "codes": ["429"]})
+
+    def test_non_object_http_fails(self):
         with pytest.raises(ConnectorDeclarationError, match="must be an object"):
             parse_declared_error_map({"http": ["429"]})
 
-    @pytest.mark.parametrize("key", ["8", "080", "28000X", "08-1", "sqlstate", "28abc"])
-    def test_malformed_sqlstate_key_fails(self, key):
-        with pytest.raises(ConnectorDeclarationError, match="key grammar"):
-            parse_declared_error_map({"sqlstate": {key: "auth"}})
+    def test_key_attrs_without_codes_fails(self):
+        with pytest.raises(ConnectorDeclarationError, match="key_attrs without codes"):
+            parse_declared_error_map({"key_attrs": ["sqlstate"]})
 
-    @pytest.mark.parametrize("key", ["1Operational", "Op-Error", ""])
-    def test_malformed_exception_key_fails(self, key):
-        with pytest.raises(ConnectorDeclarationError, match="key grammar"):
-            parse_declared_error_map({"exception": {key: "transient"}})
+    def test_codes_without_key_attrs_fails(self):
+        with pytest.raises(ConnectorDeclarationError, match="key_attrs without codes"):
+            parse_declared_error_map({"codes": {"28000": "auth"}})
 
-    @pytest.mark.parametrize("key", ["1045x", "0x1045", ""])
-    def test_malformed_vendor_code_key_fails(self, key):
-        with pytest.raises(ConnectorDeclarationError, match="key grammar"):
-            parse_declared_error_map({"vendor_code": {key: "auth"}})
+    def test_empty_key_attrs_list_fails(self):
+        with pytest.raises(ConnectorDeclarationError, match="non-empty list"):
+            parse_declared_error_map({"key_attrs": [], "codes": {"28000": "auth"}})
+
+    @pytest.mark.parametrize("entry", ["1bad", "bad-name", "", "bad.name", 5])
+    def test_malformed_key_attrs_entry_fails(self, entry):
+        with pytest.raises(ConnectorDeclarationError, match="malformed entry"):
+            parse_declared_error_map({"key_attrs": [entry], "codes": {"28000": "auth"}})
+
+    def test_class_name_signal_is_a_legal_key_attrs_entry(self):
+        error_map = parse_declared_error_map(
+            {"key_attrs": [CLASS_NAME_SIGNAL], "codes": {"ValueError": "config"}}
+        )
+        assert error_map is not None
+        assert error_map.key_attrs == (CLASS_NAME_SIGNAL,)
+
+    def test_arbitrary_native_code_shapes_are_legal(self):
+        # No engine-enforced grammar on codes keys any more: a SQLSTATE, a
+        # numeric vendor code, and an S3-style string code are all just map
+        # keys now (issue #513's motivating NoSQL/API examples).
+        error_map = parse_declared_error_map(
+            {
+                "key_attrs": ["code"],
+                "codes": {"-4002": "unreachable", "NoSuchBucket": "config"},
+            }
+        )
+        assert error_map is not None
+        assert error_map.codes["-4002"] == "unreachable"
+        assert error_map.codes["NoSuchBucket"] == "config"
 
     @pytest.mark.parametrize("key", ["42", "999", "4290", "abc"])
     def test_malformed_http_key_fails(self, key):
         with pytest.raises(ConnectorDeclarationError, match="key grammar"):
             parse_declared_error_map({"http": {key: "auth"}})
-
-    def test_negative_vendor_code_is_legal(self):
-        error_map = parse_declared_error_map({"vendor_code": {"-4002": "unreachable"}})
-        assert error_map is not None
-        assert error_map.vendor_code["-4002"] == "unreachable"
 
 
 class TestErrorMapLookup:
@@ -93,57 +135,65 @@ class TestErrorMapLookup:
         assert parsed is not None
         return parsed
 
-    def test_full_sqlstate_wins_over_class(self, error_map):
+    def test_declared_attribute_matches(self, error_map):
         exc = Exception("boom")
         exc.sqlstate = "28000"
         match = error_map.match_exception(exc)
         assert match is not None
-        assert (match.family, match.identifier, match.category) == (
+        assert (match.signal, match.value, match.category) == (
             "sqlstate",
             "28000",
             "auth",
         )
 
-    def test_sqlstate_class_prefix_matches(self, error_map):
+    def test_only_exact_codes_match_no_prefix_fallback(self, error_map):
+        # Issue #513: the engine no longer special-cases SQLSTATE-class
+        # prefix matching. A connector that wants both a class and a full
+        # state declares both entries explicitly.
         exc = Exception("boom")
-        exc.sqlstate = "08006"
-        match = error_map.match_exception(exc)
-        assert match is not None
-        assert (match.identifier, match.category) == ("08", "unreachable")
+        exc.sqlstate = "28999"  # not declared; "28000" is, but as a full code
+        assert error_map.match_exception(exc) is None
 
-    def test_pgcode_spelling_matches(self, error_map):
+    def test_undeclared_attribute_spelling_does_not_match(self, error_map):
+        # Only "sqlstate" is declared in FULL_BLOCK's key_attrs -- "pgcode"
+        # is no longer read automatically (issue #513 drops the
+        # multi-spelling knowledge _read_sqlstate used to carry).
         exc = Exception("boom")
-        exc.pgcode = "23505"
+        exc.pgcode = "28000"
+        assert error_map.match_exception(exc) is None
+
+    def test_pgcode_matches_when_declared_as_its_own_key_attr(self):
+        error_map = parse_declared_error_map(
+            {"key_attrs": ["pgcode"], "codes": {"28000": "auth"}}
+        )
+        assert error_map is not None
+        exc = Exception("boom")
+        exc.pgcode = "28000"
         match = error_map.match_exception(exc)
         assert match is not None
-        assert match.category == "write_rejected"
+        assert match.category == "auth"
 
-    def test_vendor_code_from_errno(self, error_map):
-        exc = Exception("access denied")
-        exc.errno = 1045
+    def test_first_declared_key_attr_wins_when_both_present(self):
+        error_map = parse_declared_error_map(
+            {
+                "key_attrs": ["sqlstate", "pgcode"],
+                "codes": {"28000": "auth", "99999": "config"},
+            }
+        )
+        assert error_map is not None
+        exc = Exception("boom")
+        exc.sqlstate = "28000"
+        exc.pgcode = "99999"
         match = error_map.match_exception(exc)
         assert match is not None
-        assert (match.family, match.category) == ("vendor_code", "auth")
+        assert (match.signal, match.value) == ("sqlstate", "28000")
 
-    def test_vendor_code_from_args_first_element(self, error_map):
-        # pymysql/MySQLdb expose the code only as args[0], never .errno.
-        exc = Exception(1045, "Access denied for user")
-        match = error_map.match_exception(exc)
-        assert match is not None
-        assert (match.family, match.identifier) == ("vendor_code", "1045")
-
-    def test_oserror_args_never_contribute_a_vendor_code(self, error_map):
-        vendor_111 = parse_declared_error_map({"vendor_code": {"111": "auth"}})
-        assert vendor_111 is not None
-        assert vendor_111.match_exception(OSError(111, "refused")) is None
-
-    def test_oserror_errno_is_never_a_vendor_code(self, error_map):
-        # ECONNREFUSED is 111 on Linux; a declared vendor code "111" must
-        # not claim an operating-system errno.
-        vendor_111 = parse_declared_error_map({"vendor_code": {"111": "auth"}})
-        assert vendor_111 is not None
-        exc = ConnectionRefusedError(111, "Connection refused")
-        assert vendor_111.match_exception(exc) is None
+    def test_boolean_attribute_value_never_matches(self, error_map):
+        # getattr on a bool-valued attribute must not stringify to "True"
+        # and accidentally collide with a declared code.
+        exc = Exception("boom")
+        exc.sqlstate = True
+        assert error_map.match_exception(exc) is None
 
     def test_exception_name_matches_through_mro(self, error_map):
         class OperationalError(Exception):
@@ -154,7 +204,8 @@ class TestErrorMapLookup:
 
         match = error_map.match_exception(SubOperationalError("gone away"))
         assert match is not None
-        assert (match.identifier, match.category) == (
+        assert (match.signal, match.value, match.category) == (
+            CLASS_NAME_SIGNAL,
             "OperationalError",
             "transient",
         )
@@ -170,7 +221,7 @@ class TestErrorMapLookup:
 
     def test_sqlalchemy_orig_link_is_walked(self, error_map):
         # SQLAlchemy's DBAPIError exposes the raw driver exception as
-        # .orig — the member carrying sqlstate/vendor facts.
+        # .orig — the member carrying the driver's native facts.
         driver_exc = Exception("auth denied")
         driver_exc.sqlstate = "28000"
         wrapper = RuntimeError("(psycopg2.OperationalError) wrapped")
@@ -179,11 +230,11 @@ class TestErrorMapLookup:
         assert match is not None
         assert match.category == "auth"
 
-    def test_inner_fact_outranks_a_declared_wrapper_class(self, error_map):
-        # FULL_BLOCK declares OperationalError -> transient. A wrapper of
-        # that class carrying a driver exception with a declared SQLSTATE
-        # must classify by the inner fact, not the generic wrapper name —
-        # otherwise an auth failure retries as transient.
+    def test_declared_precedence_order_is_the_connectors_own(self, error_map):
+        # FULL_BLOCK declares key_attrs=["sqlstate", CLASS_NAME_SIGNAL], so
+        # every member is checked for "sqlstate" before any member is
+        # checked for the class name — a wrapper's declared class name must
+        # not shadow a more specific fact on the driver exception it links.
         class OperationalError(Exception):
             pass
 
@@ -193,7 +244,7 @@ class TestErrorMapLookup:
         wrapper.orig = driver_exc
         match = error_map.match_exception(wrapper)
         assert match is not None
-        assert (match.family, match.category) == ("sqlstate", "auth")
+        assert (match.signal, match.category) == ("sqlstate", "auth")
 
     def test_http_lookup(self, error_map):
         match = error_map.match_http(429)
@@ -201,14 +252,24 @@ class TestErrorMapLookup:
         assert match.category == "rate_limited"
         assert error_map.match_http(500) is None
 
-    def test_names_lookup_for_boundary_collapsed_chains(self, error_map):
-        match = error_map.match_names(["ReadError", "OperationalError"])
-        assert match is not None
-        assert match.category == "transient"
-        assert error_map.match_names(["ValueError"]) is None
+    def test_no_key_attrs_declared_matches_nothing(self):
+        error_map = parse_declared_error_map({"http": {"429": "rate_limited"}})
+        assert error_map is not None
+        exc = Exception("boom")
+        exc.sqlstate = "28000"
+        assert error_map.match_exception(exc) is None
 
     def test_unclaimed_exception_matches_nothing(self, error_map):
         assert error_map.match_exception(ValueError("nope")) is None
+
+
+class TestRequireDeclaredCategory:
+    def test_valid_category_passes_through(self):
+        assert require_declared_category("auth", source="test") == "auth"
+
+    def test_off_vocabulary_category_fails_loud(self):
+        with pytest.raises(ConnectorDeclarationError, match="not in the engine"):
+            require_declared_category("retry_me", source="test")
 
 
 class TestConcurrencyParse:

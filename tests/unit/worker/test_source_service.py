@@ -61,6 +61,10 @@ class _FakeReadable:
                 stream_name, partition, {"cursor": self._trailing_cursor}
             )
 
+    def classify_error(self, exc):
+        """The connector-owned code escape hatch (issue #513); unused by default."""
+        return None
+
 
 def _batch(rows):
     return pa.RecordBatch.from_pylist(rows)
@@ -204,7 +208,10 @@ class TestReadStream:
         # Wiring, not helper logic: the map parsed in __init__ must reach
         # ReadStream's classification without private-attr injection.
         runtime = _runtime()
-        runtime.declared_error_map = {"exception": {"OperationalError": "transient"}}
+        runtime.declared_error_map = {
+            "key_attrs": ["__exception_class__"],
+            "codes": {"OperationalError": "transient"},
+        }
         readable = _FakeReadable([], error=OperationalError("server went away"))
         servicer = SourceWorkerServicer(readable, runtime, {})
         responses = await _collect(servicer)
@@ -217,7 +224,10 @@ class TestReadStream:
         # deterministic type ladder, so deterministic=True can only come
         # from the declaration having reached the classification.
         runtime = _runtime()
-        runtime.declared_error_map = {"exception": {"OperationalError": "config"}}
+        runtime.declared_error_map = {
+            "key_attrs": ["__exception_class__"],
+            "codes": {"OperationalError": "config"},
+        }
         readable = _FakeReadable([], error=OperationalError("bad search_path"))
         servicer = SourceWorkerServicer(readable, runtime, {})
         responses = await _collect(servicer)

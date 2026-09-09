@@ -98,15 +98,31 @@ class TestClassification:
         assert classify_status(400, {}, dialect=None, error_map=None) is None
 
     def test_a_declared_exception_never_claims_a_response_error(self) -> None:
-        # The two families stay disjoint: a broad exception class meant for
-        # status-less blips must not turn a deterministic 4xx into an
-        # infinite retry.
-        error_map = parse_declared_error_map({"exception": {"ValueError": "transient"}})
+        # The declared exception match and the http match stay disjoint: a
+        # broad exception class meant for status-less blips must not turn a
+        # deterministic 4xx into an infinite retry.
+        error_map = parse_declared_error_map(
+            {"key_attrs": ["__exception_class__"], "codes": {"ValueError": "transient"}}
+        )
         assert classify_status(400, {}, dialect=None, error_map=error_map) is None
 
-    def test_a_status_less_error_resolves_by_the_exception_family(self) -> None:
-        error_map = parse_declared_error_map({"exception": {"ValueError": "transient"}})
+    def test_a_status_less_error_resolves_by_the_declared_map(self) -> None:
+        error_map = parse_declared_error_map(
+            {"key_attrs": ["__exception_class__"], "codes": {"ValueError": "transient"}}
+        )
         assert classify_exception(ValueError("x"), error_map=error_map) == "transient"
+
+    def test_a_status_less_error_falls_back_to_classify_error(self) -> None:
+        # Issue #513: the code escape hatch runs when the declared map (or
+        # its absence) claims nothing.
+        assert (
+            classify_exception(
+                ValueError("x"),
+                error_map=None,
+                classify_error=lambda exc: "transient",
+            )
+            == "transient"
+        )
 
     def test_an_undeclared_connector_claims_nothing(self) -> None:
         assert classify_exception(ValueError("x"), error_map=None) is None

@@ -82,9 +82,19 @@ class AdbcBackend(TransportBackend):
     verdict instead.
     """
 
-    def __init__(self, dialect: SqlDialect) -> None:
+    def __init__(
+        self,
+        dialect: SqlDialect,
+        *,
+        classify_error: Callable[[BaseException], str | None],
+    ) -> None:
         self._dialect = dialect
         self._cycle = StageCycle(dialect)
+        # The connector's classify_error hook (issue #513), injected rather
+        # than reached through a connector reference this transport-only
+        # object doesn't otherwise hold — the same declared-map-first,
+        # code-hook-fallback order the facade's write-ack ladder uses.
+        self._classify_error = classify_error
         self._runtime: ConnectionRuntime | None = None
         # Cached ADBC DBAPI connection, opened eagerly in connect() so a
         # bad credential fails there, not on the first batch. Nulled on
@@ -140,21 +150,20 @@ class AdbcBackend(TransportBackend):
     def _reraise_driver_error(self, exc: Exception, *, write_cycle: bool) -> NoReturn:
         """Reraise a driver failure, promoting to fatal only when unclaimed.
 
-        Resolution order per issue #401, on the write cycle only: a declared
-        ``error_map`` fact claims the failure first — the raw exception then
-        propagates so the facade's ack ladder derives the verdict from the
-        declared category. On the DDL / readiness-probe path
-        (``write_cycle=False``) nothing downstream consumes a declared
+        Resolution order per issue #401 (declared map) then #513
+        (``classify_error``), on the write cycle only: a claim from either
+        one propagates the raw exception so the facade's ack ladder derives
+        the verdict from the declared category. On the DDL / readiness-probe
+        path (``write_cycle=False``) nothing downstream consumes a declared
         category — the schema handshake rejects on
         :class:`AdbcConfigurationError` — so the fatal promotion always
         applies there; skipping it would turn a clean schema rejection into
-        a raw RPC failure. An exception the PEP-249 class-name heuristic
-        does not claim reraises raw either way.
+        a raw RPC failure. An exception neither claims (nor the PEP-249
+        class-name heuristic reclassifies) reraises raw either way.
         """
-        if (
-            write_cycle
-            and self._error_map is not None
-            and self._error_map.match_exception(exc)
+        if write_cycle and (
+            (self._error_map is not None and self._error_map.match_exception(exc))
+            or self._classify_error(exc) is not None
         ):
             raise exc
         if _is_fatal_adbc_error(exc):

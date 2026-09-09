@@ -20,12 +20,14 @@ never about a client library's exception tree.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from ..declarations import (
     DECLARED_READ_DETERMINISTIC,
     DECLARED_WRITE_VERDICTS,
     ErrorMap,
+    require_declared_category,
 )
 from ..exceptions import ReadError, TransientReadError
 from ..types import AckStatus, FailureCategory
@@ -116,6 +118,9 @@ def classify_status(
     if dialect is not None:
         category = dialect.classify(status, body)
         if category is not None:
+            category = require_declared_category(
+                category, source=f"{type(dialect).__name__}.classify"
+            )
             logger.info("dialect classified HTTP %d -> %s", status, category)
             return category
     if error_map is not None:
@@ -128,27 +133,40 @@ def classify_status(
     return None
 
 
-def classify_exception(exc: BaseException, *, error_map: ErrorMap | None) -> str | None:
+def classify_exception(
+    exc: BaseException,
+    *,
+    error_map: ErrorMap | None,
+    classify_error: Callable[[BaseException], str | None] | None = None,
+) -> str | None:
     """Name the declared category a status-less transport error carries.
 
     The other half of the disjoint pair: an error that never got a
     response (TLS failure, payload error, timeout) has no status to
-    resolve by, so the declared ``exception`` family is what classifies
-    it. Kept a separate branch from :func:`classify_status` so neither
-    family can claim the other's failures.
+    resolve by, so the declared ``error_map`` (``key_attrs``/``codes``,
+    issue #513) is what classifies it first, then the connector's
+    ``classify_error`` code hook for a signal the map can't express. Kept a
+    separate branch from :func:`classify_status` so neither this nor the
+    HTTP-status path can claim the other's failures.
     """
-    if error_map is None:
+    if error_map is not None:
+        match = error_map.match_exception(exc)
+        if match is not None:
+            logger.info(
+                "declared error_map classified the transport error: %s %s -> %s",
+                match.signal,
+                match.value,
+                match.category,
+            )
+            return match.category
+    if classify_error is None:
         return None
-    match = error_map.match_exception(exc)
-    if match is None:
+    category = classify_error(exc)
+    if category is None:
         return None
-    logger.info(
-        "declared error_map classified the transport error: %s %s -> %s",
-        match.family,
-        match.identifier,
-        match.category,
-    )
-    return match.category
+    category = require_declared_category(category, source="classify_error")
+    logger.info("classify_error classified the transport error: %s", category)
+    return category
 
 
 def read_verdict(

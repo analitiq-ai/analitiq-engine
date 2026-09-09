@@ -67,12 +67,7 @@ def test_declared_categories_are_in_the_engine_vocabulary(
     # so an absent block is an empty declared set, not a skipped check.
     declared: set[str] = set()
     if error_map is not None:
-        declared = (
-            set(error_map.sqlstate.values())
-            | set(error_map.exception.values())
-            | set(error_map.vendor_code.values())
-            | set(error_map.http.values())
-        )
+        declared = set(error_map.codes.values()) | set(error_map.http.values())
     unknown = sorted(declared - set(ERROR_CATEGORY_VALUES))
     assert not unknown, (
         f"connector {conformance_target.connector_id!r} declares categories "

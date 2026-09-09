@@ -14,8 +14,16 @@ import pytest
 from contract_documents import connection_document, connector_document
 
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.declarations import parse_declared_concurrency, parse_declared_error_map
+from cdk.declarations import parse_declared_concurrency
 
+# The vendored ``analitiq.contracts`` package (claude-code-plugins#91's job to
+# update, per issue #513's Decisions) still validates ``error_map`` against
+# the pre-#513 fixed-family shape -- ``connector_document`` below goes
+# through that Pydantic contract, so this file's fixture stays in that shape.
+# This test proves the wire only (the block rides resolve_spec / rebuild
+# verbatim, whatever it contains); the new key_attrs/codes shape and its
+# parsing are exhaustively covered, unconstrained by the vendored contract,
+# in test_declarations.py.
 ERROR_MAP = {
     "sqlstate": {"08": "unreachable"},
     "exception": {"OperationalError": "transient"},
@@ -47,9 +55,6 @@ async def test_declared_blocks_ride_resolve_spec_and_rebuild():
     worker_runtime = ConnectionRuntime.from_resolved_payload(payload)
     assert worker_runtime.declared_error_map == ERROR_MAP
     assert worker_runtime.declared_concurrency == CONCURRENCY
-    # Parsed worker-side exactly as the trusted side would parse it.
-    error_map = parse_declared_error_map(worker_runtime.declared_error_map)
-    assert error_map is not None and error_map.sqlstate["08"] == "unreachable"
     assert parse_declared_concurrency(worker_runtime.declared_concurrency) == 4
 
 

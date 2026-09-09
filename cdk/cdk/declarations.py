@@ -1,15 +1,31 @@
-"""Connector-level declared facts (issue #401): error taxonomy + concurrency.
+"""Connector-level declared facts (issue #401, generalized by #513): error taxonomy
++ concurrency.
 
 Two families of per-system knowledge move from engine guessing (text
 heuristics, class-name matching) and per-connector code into declared,
 testable facts in the connector definition:
 
-- ``error_map`` — how the system's driver identifies failures. Connectors
-  declare facts about their driver's taxonomy (SQLSTATE classes, exception
-  class names, vendor codes, HTTP statuses); the engine alone derives the
-  verdicts (``AckStatus``, ``FailureCategory``, ``ErrorCode`` — and with
-  them whether the engine's bounded retry applies). Connectors never
-  self-declare verdicts.
+- ``error_map`` — how the system's driver identifies failures. A connector
+  declares which of its own exception's attributes carries its native error
+  signal (``key_attrs``, e.g. ``"sqlstate"``, ``"vendor_code"``, or the
+  reserved ``"__exception_class__"`` sentinel for matching the exception's
+  class name), and a flat map from that native code to one of the engine's
+  six categories (``codes``). A provider whose failures ride an HTTP status
+  declares that separately (``http``), since a status is read from the
+  response, never the exception. The engine reads the declared attribute
+  generically — it no longer hardcodes which attribute a family reads or in
+  what order (issue #513 retired the four fixed, closed families —
+  ``sqlstate``/``exception``/``vendor_code``/``http`` as parallel
+  engine-typed blocks — because a closed family list cannot express every
+  source/destination's native error shape). A connector whose signal needs
+  more than one flat attribute read (nested body inspection, a computed
+  match) overrides :meth:`~cdk.base_handler.BaseDestinationHandler.classify_error`
+  instead — the code escape hatch, consulted only when the declarative map
+  finds nothing, mirroring :class:`~cdk.sql.dialects.SqlDialect`'s
+  thin-declarative-default / thick-code-override pattern. The engine alone
+  derives the verdicts (``AckStatus``, ``FailureCategory``, ``ErrorCode`` —
+  and with them whether the engine's bounded retry applies) from the
+  category either path returns. Connectors never self-declare verdicts.
 - ``concurrency`` — the system's connection ceiling (``max_connections``),
   consumed by the engine's stream fan-out pacing. Connector-level (not a
   SQL fact): API systems have connection ceilings too.
@@ -19,9 +35,12 @@ Absence is additive, unlike the shape capabilities in
 missing limit or error mapping cannot block anything — absence means "no
 declared cap / no declared mapping" and current behavior applies. A runtime
 failure caused by an undeclared cap or mapping is a connector defect, fixed
-by declaring it — never worked around in the engine. Declared content is
-still validated fail-loud: an off-vocabulary category, a malformed
-identifier, or an unknown field is a configuration error.
+by declaring it (or implementing ``classify_error``) — never worked around
+in the engine. Declared content is still validated fail-loud: an
+off-vocabulary category or a malformed block is a configuration error. A
+connector definition still carrying the retired fixed-family shape (a
+top-level ``sqlstate``/``exception``/``vendor_code`` key) fails the same
+way: unknown fields, not a silently reinterpreted block.
 
 Both blocks reach the worker via the resolved payload channel
 (``ConnectionRuntime.resolve_spec`` / ``from_resolved_payload``), the same
@@ -32,7 +51,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
@@ -119,14 +138,21 @@ for _table_name, _table in (
 DECLARED_WRITE_VERDICTS = MappingProxyType(dict(DECLARED_WRITE_VERDICTS))
 DECLARED_READ_DETERMINISTIC = MappingProxyType(dict(DECLARED_READ_DETERMINISTIC))
 
-# Identifier grammar per family. Keys are driver-taxonomy facts:
-# - sqlstate: a 2-char SQLSTATE class ("08") or a full 5-char state ("28000")
-# - exception: a Python exception class name, matched anywhere in the MRO
-# - vendor_code: the driver's numeric vendor code, as a string ("1045")
-# - http: an HTTP status code ("429")
-_SQLSTATE_KEY = re.compile(r"^[0-9A-Z]{2}([0-9A-Z]{3})?$")
-_EXCEPTION_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_VENDOR_CODE_KEY = re.compile(r"^-?[0-9]+$")
+# Reserved ``key_attrs`` entry: match the exception's class name (walked up
+# the MRO, subclass before base) instead of reading a plain attribute. The
+# one piece of matching logic that isn't a bare ``getattr`` — every driver
+# exception has a class name, so this needs no connector code, unlike a
+# computed or nested signal (which is what ``classify_error`` is for).
+CLASS_NAME_SIGNAL = "__exception_class__"
+
+# A ``key_attrs`` entry is either the sentinel above or a plain attribute
+# name (whatever the connector's own driver exposes -- "sqlstate",
+# "pgcode", "vendor_code", "errno", anything). No engine-enforced grammar
+# beyond "a non-empty identifier-shaped string": the attribute's existence
+# and meaning are the connector's own driver's business, not the engine's.
+_KEY_ATTR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# HTTP status keys are a genuinely universal, fixed-width scalar (unlike a
+# driver attribute name), so this one grammar stays enforced.
 _HTTP_KEY = re.compile(r"^[1-5][0-9]{2}$")
 
 
@@ -142,18 +168,19 @@ class ConnectorDeclarationError(ValueError):
 
 @dataclass(frozen=True)
 class DeclaredMatch:
-    """One declared classification: which fact matched and what it declares.
+    """One declared classification: which signal matched and what it declares.
 
-    ``family``/``identifier`` name the connector's declared fact (a class
-    name, an SQLSTATE, a code) — developer-chosen identifiers, safe for
-    logs and failure summaries. ``category`` is the engine-vocabulary value
-    the consumer derives its verdict from; membership is re-checked here so
-    a match constructed outside :class:`ErrorMap` can never smuggle an
-    off-vocabulary category into a verdict-table lookup.
+    ``signal``/``value`` name the connector's declared fact (a ``key_attrs``
+    entry and the native code read off it, or ``"http"`` and a status) —
+    developer-chosen identifiers, safe for logs and failure summaries.
+    ``category`` is the engine-vocabulary value the consumer derives its
+    verdict from; membership is re-checked here so a match constructed
+    outside :class:`ErrorMap` can never smuggle an off-vocabulary category
+    into a verdict-table lookup.
     """
 
-    family: str
-    identifier: str
+    signal: str
+    value: str
     category: str
 
     def __post_init__(self) -> None:
@@ -162,6 +189,24 @@ class DeclaredMatch:
                 f"DeclaredMatch category {self.category!r} is not in the "
                 f"engine vocabulary {list(ERROR_CATEGORY_VALUES)}"
             )
+
+
+def require_declared_category(category: str, *, source: str) -> str:
+    """Validate a category from any connector-classification path.
+
+    Shared by the declared ``error_map`` lookup and the
+    :meth:`~cdk.base_handler.BaseDestinationHandler.classify_error` /
+    dialect ``classify()`` code hooks, so an off-vocabulary string from
+    either path fails loud at the classification site instead of a
+    ``KeyError`` inside :data:`DECLARED_WRITE_VERDICTS` or
+    :data:`DECLARED_READ_DETERMINISTIC`.
+    """
+    if category not in ERROR_CATEGORY_VALUES:
+        raise ConnectorDeclarationError(
+            f"{source} classified an error as {category!r}, which is not "
+            f"in the engine vocabulary {list(ERROR_CATEGORY_VALUES)}"
+        )
+    return category
 
 
 def _require_category(value: Any, path: str, *, source: str) -> str:
@@ -173,30 +218,67 @@ def _require_category(value: Any, path: str, *, source: str) -> str:
     return str(value)
 
 
-def _parse_family(
-    block: Mapping[str, Any],
-    family: str,
-    key_grammar: re.Pattern[str],
-    *,
-    source: str,
-) -> dict[str, str]:
-    raw = block.get(family)
+def _parse_key_attrs(block: Mapping[str, Any], *, source: str) -> tuple[str, ...]:
+    raw = block.get("key_attrs")
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not raw:
+        raise ConnectorDeclarationError(
+            f"error_map.key_attrs in {source} must be a non-empty list of "
+            f"attribute names, got {type(raw).__name__}"
+        )
+    parsed: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str) or not (
+            entry == CLASS_NAME_SIGNAL or _KEY_ATTR.match(entry)
+        ):
+            raise ConnectorDeclarationError(
+                f"error_map.key_attrs in {source} declares malformed entry "
+                f"{entry!r}; expected an identifier-shaped attribute name "
+                f"or {CLASS_NAME_SIGNAL!r}"
+            )
+        parsed.append(entry)
+    return tuple(parsed)
+
+
+def _parse_codes(block: Mapping[str, Any], *, source: str) -> dict[str, str]:
+    raw = block.get("codes")
     if raw is None:
         return {}
     if not isinstance(raw, Mapping):
         raise ConnectorDeclarationError(
-            f"error_map.{family} in {source} must be an object mapping "
-            f"identifiers to categories, got {type(raw).__name__}"
+            f"error_map.codes in {source} must be an object mapping native "
+            f"codes to categories, got {type(raw).__name__}"
         )
     parsed: dict[str, str] = {}
     for key, value in raw.items():
-        if not isinstance(key, str) or not key_grammar.match(key):
+        if not isinstance(key, str) or not key:
             raise ConnectorDeclarationError(
-                f"error_map.{family} in {source} declares malformed "
-                f"identifier {key!r}; expected the {family} key grammar "
-                f"({key_grammar.pattern})"
+                f"error_map.codes in {source} declares a malformed key "
+                f"{key!r}; expected a non-empty string -- the connector's "
+                f"own native code, in whatever shape its driver uses"
             )
-        parsed[key] = _require_category(value, f"{family}.{key}", source=source)
+        parsed[key] = _require_category(value, f"codes.{key}", source=source)
+    return parsed
+
+
+def _parse_http(block: Mapping[str, Any], *, source: str) -> dict[int, str]:
+    raw = block.get("http")
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        raise ConnectorDeclarationError(
+            f"error_map.http in {source} must be an object mapping status "
+            f"codes to categories, got {type(raw).__name__}"
+        )
+    parsed: dict[int, str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not _HTTP_KEY.match(key):
+            raise ConnectorDeclarationError(
+                f"error_map.http in {source} declares malformed status "
+                f"{key!r}; expected the http key grammar ({_HTTP_KEY.pattern})"
+            )
+        parsed[int(key)] = _require_category(value, f"http.{key}", source=source)
     return parsed
 
 
@@ -204,27 +286,33 @@ def _parse_family(
 class ErrorMap:
     """Typed view of a connector's declared ``error_map`` block.
 
-    Lookup precedence is most-specific-first across the birth-site pair
-    (the caught exception and its single explicit driver link): both
-    members' structured driver facts (full SQLSTATE, then SQLSTATE class,
-    then vendor code) are consulted before any exception class name (MRO
-    order, subclass before base) — a declared generic wrapper class never
-    shadows the fact on the driver exception it links. HTTP statuses are
-    not read off exceptions — HTTP call sites pass the status explicitly
-    to :meth:`match_http`.
+    ``key_attrs`` names, in the connector's own declared precedence order,
+    which attributes of its exception carry a native error signal (or the
+    reserved :data:`CLASS_NAME_SIGNAL` to match the exception's class name).
+    ``codes`` maps whatever native value each attribute reads to an
+    engine-vocabulary category, with no engine-enforced shape on the native
+    code itself -- SQLSTATEs, vendor codes, anything a driver emits are all
+    just strings to this lookup. ``http`` is unrelated to the exception
+    attributes: a status is read at the HTTP call site, never off a raised
+    exception.
+
+    Lookup precedence is the connector's own ``key_attrs`` order times the
+    birth-site pair (the caught exception and its single explicit driver
+    link) -- both members are consulted for the first ``key_attrs`` entry
+    before either is consulted for the second, so a connector that lists
+    its most specific signal first gets that precedence honored exactly.
     """
 
-    sqlstate: Mapping[str, str]
-    exception: Mapping[str, str]
-    vendor_code: Mapping[str, str]
+    key_attrs: tuple[str, ...]
+    codes: Mapping[str, str]
     http: Mapping[int, str]
 
     def __post_init__(self) -> None:
         # Make the frozenness real: these maps live on long-lived handlers
         # and decide ack verdicts, so the field values must not be
         # rewritable through the plain dicts from_declaration builds.
-        for name in ("sqlstate", "exception", "vendor_code", "http"):
-            object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name))))
+        object.__setattr__(self, "codes", MappingProxyType(dict(self.codes)))
+        object.__setattr__(self, "http", MappingProxyType(dict(self.http)))
 
     @classmethod
     def from_declaration(
@@ -232,30 +320,39 @@ class ErrorMap:
     ) -> ErrorMap:
         """Parse a declared block, failing loud on any grammar mismatch.
 
-        Every family is optional (absence declares nothing); a declared
-        family's identifiers and categories are validated strictly, and an
-        unknown family fails.
+        Every field is optional (absence declares nothing); a declared
+        field's identifiers and categories are validated strictly, and an
+        unknown top-level field fails -- including the retired fixed-family
+        keys (``sqlstate``/``exception``/``vendor_code``), which is what
+        makes a leftover pre-#513 declaration fail loud here rather than
+        being silently reinterpreted.
         """
         if not isinstance(block, Mapping):
             raise ConnectorDeclarationError(
                 f"error_map in {source} must be an object, "
                 f"got {type(block).__name__}"
             )
-        known = {"sqlstate", "exception", "vendor_code", "http"}
+        known = {"key_attrs", "codes", "http"}
         unknown = set(block) - known
         if unknown:
             raise ConnectorDeclarationError(
-                f"error_map in {source} carries unknown families "
-                f"{sorted(unknown)}; expected a subset of {sorted(known)}"
+                f"error_map in {source} carries unknown fields "
+                f"{sorted(unknown)}; expected a subset of {sorted(known)} "
+                f"(the fixed sqlstate/exception/vendor_code families are "
+                f"retired -- issue #513 -- declare key_attrs + codes instead)"
             )
-        http_raw = _parse_family(block, "http", _HTTP_KEY, source=source)
+        key_attrs = _parse_key_attrs(block, source=source)
+        codes = _parse_codes(block, source=source)
+        if bool(key_attrs) != bool(codes):
+            raise ConnectorDeclarationError(
+                f"error_map in {source} declares key_attrs without codes "
+                f"(or codes without key_attrs); both are required together "
+                f"or neither"
+            )
         return cls(
-            sqlstate=_parse_family(block, "sqlstate", _SQLSTATE_KEY, source=source),
-            exception=_parse_family(block, "exception", _EXCEPTION_KEY, source=source),
-            vendor_code=_parse_family(
-                block, "vendor_code", _VENDOR_CODE_KEY, source=source
-            ),
-            http={int(key): category for key, category in http_raw.items()},
+            key_attrs=key_attrs,
+            codes=codes,
+            http=_parse_http(block, source=source),
         )
 
     # ------------------------------------------------------------------
@@ -267,30 +364,7 @@ class ErrorMap:
         category = self.http.get(status)
         if category is None:
             return None
-        return DeclaredMatch(family="http", identifier=str(status), category=category)
-
-    def match_names(self, names: Iterable[str]) -> DeclaredMatch | None:
-        """Match declared exception class names against a name collection.
-
-        For sites where only class names survive (the engine side of a
-        process boundary, where the live type is a wrapper and the original
-        class name was promoted from the worker's ``error_type:`` prefix).
-        Iteration order of *names* is the caller's specificity order; the
-        first declared name wins. A bare string is refused: iterating it
-        would compare single characters and silently never match.
-        """
-        if isinstance(names, str):
-            raise TypeError(
-                "match_names takes an iterable of class names, not a bare "
-                "string; wrap the single name in a list"
-            )
-        for name in names:
-            category = self.exception.get(name)
-            if category is not None:
-                return DeclaredMatch(
-                    family="exception", identifier=name, category=category
-                )
-        return None
+        return DeclaredMatch(signal="http", value=str(status), category=category)
 
     def match_exception(self, exc: BaseException) -> DeclaredMatch | None:
         """Return the declared classification for a live exception, if any.
@@ -304,108 +378,72 @@ class ErrorMap:
         born and crosses process boundaries as structured verdicts, never
         by re-deriving from whatever exotic chain a wrapper accumulated.
 
-        Structured driver facts (full SQLSTATE, then SQLSTATE class, then
-        vendor code) are consulted on both members before any exception
-        class name (MRO order) — a generic declared wrapper class must
-        never shadow the more specific fact on the driver exception it
-        links. Never raises: the members are untrusted connector/driver
-        objects whose attributes may be misbehaving properties, and a
-        classifier crash here would displace the original failure at the
-        exact moment it is being reported — an unreadable member logs a
-        WARNING and matches nothing.
+        For each ``key_attrs`` entry in the connector's own declared order,
+        both members are checked before moving to the next entry — the
+        connector's declared order IS the specificity order, unlike the
+        old fixed-family precedence the engine used to impose. Never
+        raises: the members are untrusted connector/driver objects whose
+        attributes may be misbehaving properties, and a classifier crash
+        here would displace the original failure at the exact moment it is
+        being reported — an unreadable member logs a WARNING and matches
+        nothing for that entry.
         """
+        if not self.key_attrs:
+            return None
         members = _birth_site_members(exc)
-        for member in members:
-            try:
-                match = self._match_member_facts(member)
-            except Exception:
-                logger.warning(
-                    "declared error_map lookup failed reading %s; treating "
-                    "the member as unmatched",
-                    type(member).__name__,
-                    exc_info=True,
-                )
-                continue
-            if match is not None:
-                return match
-        for member in members:
-            match = self.match_names(cls.__name__ for cls in type(member).__mro__)
-            if match is not None:
-                return match
+        for key_attr in self.key_attrs:
+            for member in members:
+                try:
+                    match = self._match_signal(member, key_attr)
+                except Exception:
+                    logger.warning(
+                        "declared error_map lookup failed reading %s off "
+                        "%s; treating the member as unmatched for this "
+                        "signal",
+                        key_attr,
+                        type(member).__name__,
+                        exc_info=True,
+                    )
+                    continue
+                if match is not None:
+                    return match
         return None
 
-    def _match_member_facts(self, member: BaseException) -> DeclaredMatch | None:
-        """Match one member's structured driver facts (never class names)."""
-        sqlstate = _read_sqlstate(member)
-        if sqlstate is not None:
-            for candidate in (sqlstate, sqlstate[:2]):
-                category = self.sqlstate.get(candidate)
+    def _match_signal(
+        self, member: BaseException, key_attr: str
+    ) -> DeclaredMatch | None:
+        """Match one signal (a class name walk or a plain attribute) on *member*."""
+        if key_attr == CLASS_NAME_SIGNAL:
+            for cls in type(member).__mro__:
+                category = self.codes.get(cls.__name__)
                 if category is not None:
                     return DeclaredMatch(
-                        family="sqlstate", identifier=candidate, category=category
+                        signal=key_attr, value=cls.__name__, category=category
                     )
-        vendor = _read_vendor_code(member)
-        if vendor is not None:
-            category = self.vendor_code.get(vendor)
-            if category is not None:
-                return DeclaredMatch(
-                    family="vendor_code", identifier=vendor, category=category
-                )
-        return None
-
-
-def _read_sqlstate(member: BaseException) -> str | None:
-    """Read a driver's SQLSTATE off the common attribute spellings.
-
-    ``sqlstate`` is the DBAPI/ADBC spelling; ``pgcode`` is psycopg's. Only a
-    well-formed 5-char state is used — a driver that stuffs something else
-    into the attribute declares nothing.
-    """
-    for attr in ("sqlstate", "pgcode"):
-        value = getattr(member, attr, None)
-        if isinstance(value, str):
-            candidate = value.upper()
-            if len(candidate) == 5 and _SQLSTATE_KEY.match(candidate):
-                return candidate
-    return None
-
-
-def _read_vendor_code(member: BaseException) -> str | None:
-    """Read a driver's numeric vendor code off the common spellings.
-
-    ``errno`` is one MySQL-family spelling (mysql-connector), and several
-    DB-API drivers (pymysql, MySQLdb) expose the code only as
-    ``exc.args[0]`` — both are read. On an ``OSError`` those slots carry
-    the operating-system errno (ECONNREFUSED is 111, not a driver fact),
-    so OSError subclasses only ever contribute an explicit ``vendor_code``
-    attribute.
-    """
-    value = getattr(member, "vendor_code", None)
-    if value is None and not isinstance(member, OSError):
-        value = getattr(member, "errno", None)
-        if value is None and member.args:
-            first = member.args[0]
-            if isinstance(first, int) and not isinstance(first, bool):
-                value = first
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, str) and _VENDOR_CODE_KEY.match(value):
-        return value
-    return None
+            return None
+        value = getattr(member, key_attr, None)
+        if value is None or isinstance(value, bool):
+            return None
+        native = str(value)
+        category = self.codes.get(native)
+        if category is None:
+            return None
+        return DeclaredMatch(signal=key_attr, value=native, category=category)
 
 
 def _birth_site_members(exc: BaseException) -> list[BaseException]:
     """Collect the exception and its single explicit driver link, one hop only.
 
     ``orig`` is SQLAlchemy's raw-DBAPI-exception slot (the member carrying
-    sqlstate/vendor facts); ``__cause__`` covers ``raise ... from`` at a
+    driver-native facts); ``__cause__`` covers ``raise ... from`` at a
     driver boundary. No recursion and no ``__context__``: the caller is
     the birth site of the failure, so anything deeper is not the failure
     being classified. The reads are guarded — the members are untrusted
     objects, and a misbehaving link property must not crash the caller in
-    the middle of reporting the original failure.
+    the middle of reporting the original failure. Generic, not
+    family-specific: every driver's wrapping convention is the same two
+    attribute names, so this stays engine-owned even though the family
+    regexes it used to feed (issue #401) are gone (issue #513).
     """
     members = [exc]
     for attr in ("orig", "__cause__"):
@@ -438,11 +476,10 @@ def error_map_for(runtime: Any) -> ErrorMap | None:
     """Parse a runtime's declared ``error_map`` with the canonical source label.
 
     The one call shape every consumer site uses — the SQL facade, the ADBC
-    backend, the API connectors, the source worker, and the engine's extract
-    boundary — so a new consumer cannot forget the parse or label the error
-    source inconsistently. Reads ``runtime.declared_error_map`` strictly: a
-    runtime object without the attribute is a wiring defect, not an
-    undeclared connector.
+    backend, the API connectors, the source worker — so a new consumer
+    cannot forget the parse or label the error source inconsistently. Reads
+    ``runtime.declared_error_map`` strictly: a runtime object without the
+    attribute is a wiring defect, not an undeclared connector.
     """
     return parse_declared_error_map(
         runtime.declared_error_map,

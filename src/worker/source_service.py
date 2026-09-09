@@ -12,14 +12,19 @@ from __future__ import annotations
 import io
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import pyarrow as pa
 
 import grpc
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.declarations import DECLARED_READ_DETERMINISTIC, ErrorMap, error_map_for
+from cdk.declarations import (
+    DECLARED_READ_DETERMINISTIC,
+    ErrorMap,
+    error_map_for,
+    require_declared_category,
+)
 from cdk.exceptions import ReadError, TransportSpecError
 from cdk.sql.exceptions import TlsVerificationError, UnsupportedDialectOperationError
 from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
@@ -59,7 +64,9 @@ _DETERMINISTIC_READ_ERRORS = (
 
 
 def classify_read_error(
-    exc: BaseException, error_map: ErrorMap | None
+    exc: BaseException,
+    error_map: ErrorMap | None,
+    classify_error: Callable[[BaseException], str | None] | None = None,
 ) -> tuple[bool, str | None]:
     """Classify a read failure: declared verdicts first, isinstance ladder after.
 
@@ -70,8 +77,9 @@ def classify_read_error(
     against the raw driver exception — and ``None`` when the verdict came
     from the type ladder. The category crosses the process boundary on the
     ``ReadError`` wire message so the engine reports the declared code
-    instead of re-deriving from text. Resolution order per issue #401:
-    declared verdicts, then the connector's sanctioned typed errors
+    instead of re-deriving from text. Resolution order per issue #401, then
+    #513: declared verdicts, then the connector's ``classify_error`` code
+    hook, then the connector's sanctioned typed errors
     (``_DETERMINISTIC_READ_ERRORS`` — the hook), never text.
     """
     birth_site = getattr(exc, "declared_category", None)
@@ -80,6 +88,10 @@ def classify_read_error(
     match = error_map.match_exception(exc) if error_map is not None else None
     if match is not None:
         return DECLARED_READ_DETERMINISTIC[match.category], match.category
+    category = classify_error(exc) if classify_error is not None else None
+    if category is not None:
+        category = require_declared_category(category, source="classify_error")
+        return DECLARED_READ_DETERMINISTIC[category], category
     return isinstance(exc, _DETERMINISTIC_READ_ERRORS), None
 
 
@@ -192,7 +204,9 @@ class SourceWorkerServicer(SourceServiceServicer):
         except (
             Exception
         ) as exc:  # noqa: BLE001 — every failure crosses as a typed event
-            deterministic, declared = classify_read_error(exc, self._error_map)
+            deterministic, declared = classify_read_error(
+                exc, self._error_map, self._readable.classify_error
+            )
             logger.error(
                 "source worker read failed (%s, deterministic=%s, "
                 "classified by %s): %s",

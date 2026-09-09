@@ -270,6 +270,25 @@ class BaseDestinationHandler(ABC):
         FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
     )
 
+    def classify_error(self, exc: BaseException) -> str | None:
+        """Name the engine-vocabulary category this connector's native error is.
+
+        The code escape hatch (issue #513): consulted only after a bound
+        declared ``error_map``'s ``key_attrs``/``codes`` lookup
+        (:meth:`cdk.declarations.ErrorMap.match_exception`) finds nothing —
+        for a native error signal that isn't a flat attribute read (nested
+        body inspection, a computed match, a method call like gRPC's
+        ``exc.code()``). Called once with *exc* as caught; a connector whose
+        driver wraps errors (SQLAlchemy's ``.orig``, ``raise ... from``)
+        unwraps it itself, the same way a dialect's SQL-rendering hooks are
+        each responsible for their own system's quirks. Returns ``None`` by
+        default (undeclared, current heuristic fallback applies) — override
+        only when the driver signal genuinely needs code, not the
+        declarative map.
+        """
+        _ = exc  # no-op default
+        return None
+
     def set_endpoint_refs(self, endpoint_refs: Mapping[str, Any]) -> None:
         """Register the ``stream_id → endpoint_ref`` index for this handler.
 

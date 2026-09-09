@@ -18,7 +18,7 @@ from cdk.api.http import (
     loads_preserving_decimals,
     query_pairs,
 )
-from cdk.declarations import parse_declared_error_map
+from cdk.declarations import CLASS_NAME_SIGNAL, parse_declared_error_map
 
 from .fakes import BASE_URL, FakeResponse, FakeSession, sent_query
 
@@ -75,12 +75,21 @@ class TestFailureFacts:
         exc = ApiResponseError(None, (), status=200, declared_category="config")
         assert failure_facts(exc, error_map=None) == (200, "config")
 
-    def test_a_status_less_error_resolves_by_the_exception_family(self) -> None:
+    def test_a_status_less_error_resolves_by_the_declared_map(self) -> None:
         error_map = parse_declared_error_map(
-            {"exception": {"ClientPayloadError": "transient"}}
+            {
+                "key_attrs": [CLASS_NAME_SIGNAL],
+                "codes": {"ClientPayloadError": "transient"},
+            }
         )
         exc = aiohttp.ClientPayloadError("truncated")
         assert failure_facts(exc, error_map=error_map) == (None, "transient")
+
+    def test_a_status_less_error_falls_back_to_classify_error(self) -> None:
+        exc = aiohttp.ClientPayloadError("truncated")
+        assert failure_facts(
+            exc, error_map=None, classify_error=lambda e: "transient"
+        ) == (None, "transient")
 
 
 @pytest.mark.asyncio

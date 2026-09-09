@@ -358,12 +358,23 @@ and the connector-level (not SQL-specific) declarations:
 "write_unit": { "rows": 200000, "bytes": 33554432 },
 "concurrency": { "max_connections": 8 },
 "error_map": {
-  "sqlstate":    { "08": "unreachable", "28000": "auth", "23": "write_rejected" },
-  "exception":   { "OperationalError": "transient" },
-  "vendor_code": { "1045": "auth" },
-  "http":        { "429": "rate_limited", "401": "auth" }
+  "key_attrs": ["sqlstate", "__exception_class__"],
+  "codes": {
+    "08000": "unreachable", "28000": "auth", "23505": "write_rejected",
+    "OperationalError": "transient"
+  },
+  "http": { "429": "rate_limited", "401": "auth" }
 }
 ```
+
+`key_attrs` names, in the connector's own precedence order, which attributes
+of its caught exception carry a native error code (or the reserved
+`"__exception_class__"` to match the exception's class name); `codes` maps
+whatever native value each attribute reads to an engine category, with no
+engine-enforced shape on the native code itself. A connector whose signal
+needs more than a flat attribute read (nested body inspection, a computed
+match) overrides `BaseDestinationHandler.classify_error()` instead —
+consulted only when the declarative lookup above finds nothing.
 
 Properties:
 
@@ -437,13 +448,14 @@ Properties:
   `declared_category` wire field, the ack's failure category) — never
   re-derived downstream from chains or text. The heuristics are demoted
   to last resort, per context: the read path resolves declared verdicts
-  (the birth-site category on the typed error, then the map) → sanctioned
-  typed errors; the write ack ladder resolves its typed engine errors
-  (type-map, dialect, TLS — engine contracts a driver map must not
-  re-route) → declared map → class-name heuristic; the ADBC boundary and
-  both HTTP sites resolve declared map → built-in heuristic. These are
-  CDK-side, at the boundary that caught the driver error; the engine's own
-  classification reads no exception type or text at all.
+  (the birth-site category on the typed error, then the map, then
+  `classify_error`) → sanctioned typed errors; the write ack ladder
+  resolves its typed engine errors (type-map, dialect, TLS — engine
+  contracts a driver map must not re-route) → declared map →
+  `classify_error` → class-name heuristic; the ADBC boundary and both HTTP
+  sites resolve declared map → `classify_error` → built-in heuristic.
+  These are CDK-side, at the boundary that caught the driver error; the
+  engine's own classification reads no exception type or text at all.
 - **`limits` consumption.** The executemany stage landing chunks rows by
   `floor(max_bind_params / column_count)` (`StageWritePlan.rows_per_statement`,
   applied identically by both transport backends); stage-name rendering and

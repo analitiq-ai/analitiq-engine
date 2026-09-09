@@ -522,7 +522,7 @@ class TestDisconnectClosesBackend:
 
         handler = GenericSQLConnector()
         handler._connected = True
-        backend = AdbcBackend(SqlDialect())
+        backend = AdbcBackend(SqlDialect(), classify_error=lambda exc: None)
         adbc_conn = MagicMock()
         backend._conn = adbc_conn
         handler._backend = backend
@@ -548,7 +548,7 @@ class TestDisconnectClosesBackend:
 
         handler = GenericSQLConnector()
         handler._connected = True
-        backend = AdbcBackend(SqlDialect())
+        backend = AdbcBackend(SqlDialect(), classify_error=lambda exc: None)
         adbc_conn = MagicMock()
         adbc_conn.close.side_effect = RuntimeError("already closed")
         backend._conn = adbc_conn
