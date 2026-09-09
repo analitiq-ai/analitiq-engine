@@ -712,6 +712,73 @@ _ISO_DURATION_RE: Final[re.Pattern[str]] = re.compile(
 )
 
 
+def _iso_duration_ticks(field: pa.Field, row: int, v: str) -> int:
+    """Parse one ISO-8601 duration string into signed nanosecond ticks.
+
+    Accumulated via ``Decimal``, not a Python ``timedelta`` (microsecond
+    resolution only), which would silently truncate a Duration(NANOSECOND)
+    column's sub-microsecond digits before they ever reached pyarrow.
+    """
+    if not isinstance(v, str):
+        raise ValueError(
+            f"column {field.name!r} at row {row}: encoding "
+            f"'iso_duration' expects a string, got {type(v).__name__}"
+        )
+    # The sign is stripped before matching, not folded into the regex's
+    # alternation: Python's re refuses two branches naming the same group
+    # ("redefinition of group name"), and a signed ISO-8601 duration's "-"
+    # always precedes "P" whichever alternative follows, so one strip
+    # covers both.
+    negative = v.startswith("-")
+    unsigned = v[1:] if negative else v
+    match = _ISO_DURATION_RE.fullmatch(unsigned)
+    if match is None:
+        raise ValueError(
+            f"column {field.name!r} at row {row}: {v!r} is not an "
+            f"ISO-8601 duration this decoder supports (weeks, days, "
+            f"and clock components only -- no calendar Y/M)"
+        )
+    groups = match.groupdict()
+    if not any(groups[g] for g in ("weeks", "days", "hours", "minutes", "seconds")):
+        # Every component group is optional in the grammar (so "P3D" and
+        # "PT30S" each parse without the others), which also makes bare
+        # "P" fullmatch with every group None -- it names no actual
+        # duration component; at least one designator is required.
+        raise ValueError(
+            f"column {field.name!r} at row {row}: {v!r} names no "
+            f"duration component; an ISO-8601 duration requires at "
+            f"least one"
+        )
+    try:
+        seconds = Decimal(groups["seconds"] or "0")
+    except InvalidOperation as exc:
+        raise ValueError(
+            f"column {field.name!r} at row {row}: {v!r} has a "
+            f"seconds component that is not a valid decimal"
+        ) from exc
+    total_seconds = (
+        Decimal(int(groups["weeks"] or 0)) * 604800
+        + Decimal(int(groups["days"] or 0)) * 86400
+        + Decimal(int(groups["hours"] or 0)) * 3600
+        + Decimal(int(groups["minutes"] or 0)) * 60
+        + seconds
+    )
+    if negative:
+        total_seconds = -total_seconds
+    nanos = total_seconds * 1_000_000_000
+    if nanos != nanos.to_integral_value():
+        # int() below would otherwise truncate silently: a fractional-
+        # second component finer than a nanosecond has no Arrow tick
+        # count to land on, the same class of loss _iso8601_ns_remainder
+        # refuses on the Timestamp side.
+        raise ValueError(
+            f"column {field.name!r} at row {row}: {v!r} has "
+            f"sub-nanosecond precision, which no Arrow tick count can "
+            f"represent"
+        )
+    return int(nanos)
+
+
 def _decode_iso_duration(_config: Mapping[str, Any]) -> DecodeFn:
     def decode(field: pa.Field, values: list[Any]) -> pa.Array:
         if not pa.types.is_duration(field.type):
@@ -719,76 +786,10 @@ def _decode_iso_duration(_config: Mapping[str, Any]) -> DecodeFn:
                 f"column {field.name!r}: encoding 'iso_duration' requires a "
                 f"Duration arrow_type, got {field.type}"
             )
-        # Accumulated as nanosecond ticks via Decimal, then safe-cast to
-        # field.type -- not a Python `timedelta` (microsecond resolution
-        # only), which would silently truncate a Duration(NANOSECOND)
-        # column's sub-microsecond digits before they ever reached pyarrow.
-        ticks: list[int | None] = []
-        for row, v in enumerate(values):
-            if v is None:
-                ticks.append(None)
-                continue
-            if not isinstance(v, str):
-                raise ValueError(
-                    f"column {field.name!r} at row {row}: encoding "
-                    f"'iso_duration' expects a string, got {type(v).__name__}"
-                )
-            # The sign is stripped before matching, not folded into the
-            # regex's alternation: Python's re refuses two branches naming
-            # the same group ("redefinition of group name"), and a signed
-            # ISO-8601 duration's "-" always precedes "P" whichever
-            # alternative follows, so one strip covers both.
-            negative = v.startswith("-")
-            unsigned = v[1:] if negative else v
-            match = _ISO_DURATION_RE.fullmatch(unsigned)
-            if match is None:
-                raise ValueError(
-                    f"column {field.name!r} at row {row}: {v!r} is not an "
-                    f"ISO-8601 duration this decoder supports (weeks, days, "
-                    f"and clock components only -- no calendar Y/M)"
-                )
-            groups = match.groupdict()
-            if not any(
-                groups[g] for g in ("weeks", "days", "hours", "minutes", "seconds")
-            ):
-                # Every component group is optional in the grammar (so
-                # "P3D" and "PT30S" each parse without the others), which
-                # also makes bare "P" or "PT" fullmatch with every group
-                # None -- neither is a valid ISO-8601 duration; at least
-                # one designator is required.
-                raise ValueError(
-                    f"column {field.name!r} at row {row}: {v!r} names no "
-                    f"duration component; an ISO-8601 duration requires at "
-                    f"least one"
-                )
-            try:
-                seconds = Decimal(groups["seconds"] or "0")
-            except InvalidOperation as exc:
-                raise ValueError(
-                    f"column {field.name!r} at row {row}: {v!r} has a "
-                    f"seconds component that is not a valid decimal"
-                ) from exc
-            total_seconds = (
-                Decimal(int(groups["weeks"] or 0)) * 604800
-                + Decimal(int(groups["days"] or 0)) * 86400
-                + Decimal(int(groups["hours"] or 0)) * 3600
-                + Decimal(int(groups["minutes"] or 0)) * 60
-                + seconds
-            )
-            if negative:
-                total_seconds = -total_seconds
-            nanos = total_seconds * 1_000_000_000
-            if nanos != nanos.to_integral_value():
-                # int() below would otherwise truncate silently: a
-                # fractional-second component finer than a nanosecond has
-                # no Arrow tick count to land on, the same class of loss
-                # _iso8601_ns_remainder refuses on the Timestamp side.
-                raise ValueError(
-                    f"column {field.name!r} at row {row}: {v!r} has "
-                    f"sub-nanosecond precision, which no Arrow tick count "
-                    f"can represent"
-                )
-            ticks.append(int(nanos))
+        ticks = [
+            None if v is None else _iso_duration_ticks(field, row, v)
+            for row, v in enumerate(values)
+        ]
         return pc.cast(pa.array(ticks, type=pa.duration("ns")), field.type, safe=True)
 
     return decode
