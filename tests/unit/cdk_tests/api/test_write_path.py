@@ -434,6 +434,38 @@ class TestDeclarativeWireFormatEncoding:
         assert "amount" in connector.last_schema_rejection
         assert "encoding_write" in connector.last_schema_rejection
 
+    async def test_an_encoding_write_incompatible_with_arrow_type_is_refused(
+        self,
+    ) -> None:
+        # A Timestamp field naming 'decimal' resolves fine (the name is a
+        # real catalog entry) and would otherwise crash with a bare
+        # TypeError at land() on the first non-null value -- refused here
+        # instead, at the same configure-time boundary every other
+        # authoring defect in this class uses.
+        connector = GenericAPIConnector()
+        document = _document_with_field(
+            "shipped_at",
+            {
+                "type": "string",
+                "native_type": "timestamptz",
+                "arrow_type": "Timestamp(MICROSECOND)",
+                "encoding_write": {"name": "decimal"},
+            },
+        )
+        connector.set_stream_endpoints({"items": document})
+        await connector.connect(runtime_with(FakeSession()))
+        accepted = await connector.configure_schema(
+            SchemaSpec(
+                stream_id="items",
+                version=1,
+                write_mode=WriteMode.WRITE_MODE_INSERT,
+                ack_timeout_seconds=30,
+            )
+        )
+        assert accepted is False
+        assert "shipped_at" in connector.last_schema_rejection
+        assert "decimal" in connector.last_schema_rejection
+
     async def test_a_nested_gated_leaf_with_no_encoding_write_is_refused_at_configure(
         self,
     ) -> None:
@@ -568,6 +600,55 @@ class TestDeclarativeWireFormatEncoding:
         assert accepted, connector.last_schema_rejection
         await _write(connector, _batch_with([{"id": 0, "code_name": "abc"}]))
         assert session.calls[0]["data"] == b'{"item":{"id":0,"code_name":"cba"}}'
+
+    async def test_code_hatch_on_a_nested_field_receives_the_whole_value(self) -> None:
+        # A top-level encoding_write:{"name":"code"} on an Object field
+        # covers the whole nested value -- check_required_write_encoding
+        # must not also demand a per-leaf encoding_write inside it, and
+        # resolve_write_encoders/apply_field_encoders must hand the code
+        # hatch the entire nested dict, not just a leaf.
+        class StampingDialect(ApiDialect):
+            def encode_field(self, field_name: str, value: Any, arrow_type: Any) -> Any:
+                return {**value, "posted_at": f"stamped:{value['posted_at']}"}
+
+        class CustomConnector(GenericAPIConnector):
+            dialect_class = StampingDialect
+
+        document = _document_with_field(
+            "meta",
+            {
+                "type": "object",
+                "native_type": "object",
+                "arrow_type": "Object",
+                "encoding_write": {"name": "code"},
+                "properties": {
+                    "posted_at": {
+                        "type": "string",
+                        "native_type": "string",
+                        "arrow_type": "Utf8",
+                    }
+                },
+            },
+        )
+        session = FakeSession([FakeResponse(body={})])
+        connector = CustomConnector()
+        connector.set_stream_endpoints({"items": document})
+        await connector.connect(runtime_with(session))
+        accepted = await connector.configure_schema(
+            SchemaSpec(
+                stream_id="items",
+                version=1,
+                write_mode=WriteMode.WRITE_MODE_INSERT,
+                ack_timeout_seconds=30,
+            )
+        )
+        assert accepted, connector.last_schema_rejection
+        await _write(
+            connector, _batch_with([{"id": 0, "meta": {"posted_at": "2024-01-01"}}])
+        )
+        assert session.calls[0]["data"] == (
+            b'{"item":{"id":0,"meta":{"posted_at":"stamped:2024-01-01"}}}'
+        )
 
     async def test_code_hatch_with_no_dialect_override_fails_loud_at_write(
         self,

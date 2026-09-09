@@ -19,6 +19,54 @@ from cdk.type_map.exceptions import InvalidTypeMapError
 pytestmark = pytest.mark.unit
 
 
+class TestBoolMapRejectsOverlappingTokens:
+    def test_a_token_present_in_both_value_sets_is_refused_at_declaration_time(
+        self,
+    ) -> None:
+        field = pa.field("t", pa.bool_(), nullable=True)
+        with pytest.raises(InvalidTypeMapError, match="appear in both"):
+            resolve_decoder(
+                {
+                    "encoding": {
+                        "name": "bool_map",
+                        "true_values": ["Y", "yes"],
+                        "false_values": ["N", "yes"],
+                    }
+                },
+                field,
+            )
+
+
+class TestIsoDurationPreservesSubMicrosecondPrecision:
+    def test_a_nanosecond_fraction_is_not_truncated(self) -> None:
+        field = pa.field("d", pa.duration("ns"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
+        result = fn(field, ["PT1.123456789S"])
+        # `.value` (raw ticks), not `.to_pylist()` -- pyarrow refuses to
+        # materialize a nanosecond Duration as a Python `timedelta` at all
+        # (it caps at microseconds), which is exactly the precision this
+        # decoder must not lose before the array even reaches that boundary.
+        assert result[0].value == 1_123_456_789
+
+
+class TestEpochDecoderPreservesTheInstantAcrossTargetZones:
+    """Epoch ticks are an absolute UTC instant. Decoding into a Timestamp
+    column with a non-UTC tz must shift the wall-clock time to that zone,
+    never reinterpret the tick count as already being local time there --
+    that would silently move the represented instant by the zone's offset.
+    """
+
+    def test_epoch_zero_into_a_non_utc_column_is_the_correct_local_instant(
+        self,
+    ) -> None:
+        field = pa.field("t", pa.timestamp("s", tz="America/New_York"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "epoch", "unit": "SECOND"}}, field)
+        result = fn(field, [0])
+        # 1970-01-01T00:00:00Z is 1969-12-31T19:00:00 in America/New_York
+        # (UTC-5, no DST in effect at that date).
+        assert result.to_pylist()[0].isoformat() == "1969-12-31T19:00:00-05:00"
+
+
 class TestRegexEpochUsesRE2NotBacktrackingRe:
     """``pattern`` is endpoint-authored, untrusted input matched against
     every row of every batch -- it must be compiled and matched with

@@ -227,6 +227,29 @@ def requires_write_encoding(kind: ConversionKind) -> bool:
     return kind in REQUIRES_ENCODING_KINDS
 
 
+#: Which conversion kinds each catalog encoder is meant to render. A
+#: ``duration`` field has no catalog entry at all -- only ``code`` covers
+#: it -- so it is absent from every set here. Checked eagerly by
+#: :meth:`~cdk.schema_contract.SchemaContract.check_required_write_encoding`
+#: against the field's actual arrow_type, so a mismatched declaration (a
+#: Timestamp field naming ``decimal``) is refused at configure time rather
+#: than on the first non-null value the encoder closure happens to reach at
+#: ``land()``.
+ENCODER_KIND_COMPATIBILITY: Final[dict[str, frozenset[ConversionKind]]] = {
+    "iso8601": frozenset({"timestamp", "date", "time"}),
+    "strftime": frozenset({"timestamp", "date", "time"}),
+    "epoch": frozenset({"timestamp"}),
+    "decimal": frozenset({"decimal"}),
+    "bool_map": frozenset({"bool"}),
+    "base64": frozenset({"binary"}),
+}
+
+
+def encoding_write_matches_kind(name: str, kind: ConversionKind) -> bool:
+    """Whether encoder *name* is meant to render a field of *kind*."""
+    return kind in ENCODER_KIND_COMPATIBILITY.get(name, frozenset())
+
+
 #: The published catalog's own version.
 ENCODERS_CATALOG_VERSION: Final[str] = "1.0.0"
 

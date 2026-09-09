@@ -12,8 +12,8 @@ import numbers
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
-from decimal import Decimal
+from datetime import date, datetime, time
+from decimal import Decimal, InvalidOperation
 from re import Pattern
 from typing import Any, Final
 
@@ -377,7 +377,11 @@ def _ticks_to_array(
     if pa.types.is_timestamp(field.type):
         naive = pa.array(ticks, type=pa.timestamp(short))
         if field.type.tz is not None:
-            naive = pc.assume_timezone(naive, field.type.tz)
+            # Epoch ticks are an absolute UTC instant, not local wall-clock
+            # time in the target zone -- assume_timezone(naive, tz) would
+            # instead reinterpret the tick count as already being local time
+            # in `tz`, shifting the instant by the zone's offset.
+            naive = pc.assume_timezone(naive, "UTC")
         return pc.cast(naive, field.type, safe=True)
     if pa.types.is_date(field.type):
         naive = pa.array(ticks, type=pa.timestamp(short))
@@ -571,6 +575,12 @@ def _decode_bool_map(config: Mapping[str, Any]) -> DecodeFn:
             "encoding 'bool_map' requires a non-empty 'true_values' and "
             "'false_values'"
         )
+    overlap = set(true_values) & set(false_values)
+    if overlap:
+        raise InvalidTypeMapError(
+            f"encoding 'bool_map': {list(overlap)!r} appear in both "
+            f"'true_values' and 'false_values' -- a token cannot map to both"
+        )
 
     def decode(field: pa.Field, values: list[Any]) -> pa.Array:
         mapped: list[bool | None] = []
@@ -644,10 +654,14 @@ def _decode_iso_duration(_config: Mapping[str, Any]) -> DecodeFn:
                 f"column {field.name!r}: encoding 'iso_duration' requires a "
                 f"Duration arrow_type, got {field.type}"
             )
-        parsed: list[Any] = []
+        # Accumulated as nanosecond ticks via Decimal, then safe-cast to
+        # field.type -- not a Python `timedelta` (microsecond resolution
+        # only), which would silently truncate a Duration(NANOSECOND)
+        # column's sub-microsecond digits before they ever reached pyarrow.
+        ticks: list[int | None] = []
         for row, v in enumerate(values):
             if v is None:
-                parsed.append(None)
+                ticks.append(None)
                 continue
             if not isinstance(v, str):
                 raise ValueError(
@@ -662,16 +676,22 @@ def _decode_iso_duration(_config: Mapping[str, Any]) -> DecodeFn:
                     f"and clock components only -- no calendar Y/M)"
                 )
             groups = match.groupdict()
-            parsed.append(
-                timedelta(
-                    weeks=int(groups["weeks"] or 0),
-                    days=int(groups["days"] or 0),
-                    hours=int(groups["hours"] or 0),
-                    minutes=int(groups["minutes"] or 0),
-                    seconds=float(groups["seconds"] or 0),
-                )
+            try:
+                seconds = Decimal(groups["seconds"] or "0")
+            except InvalidOperation as exc:
+                raise ValueError(
+                    f"column {field.name!r} at row {row}: {v!r} has a "
+                    f"seconds component that is not a valid decimal"
+                ) from exc
+            total_seconds = (
+                Decimal(int(groups["weeks"] or 0)) * 604800
+                + Decimal(int(groups["days"] or 0)) * 86400
+                + Decimal(int(groups["hours"] or 0)) * 3600
+                + Decimal(int(groups["minutes"] or 0)) * 60
+                + seconds
             )
-        return pa.array(parsed, type=field.type)
+            ticks.append(int(total_seconds * 1_000_000_000))
+        return pc.cast(pa.array(ticks, type=pa.duration("ns")), field.type, safe=True)
 
     return decode
 

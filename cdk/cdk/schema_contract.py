@@ -24,7 +24,7 @@ from .type_map.decoders import CODE_ENCODING_NAME as READ_CODE_ENCODING_NAME
 from .type_map.decoders import REQUIRES_ENCODING_KINDS as READ_REQUIRES_ENCODING_KINDS
 from .type_map.encoders import CODE_ENCODING_NAME as WRITE_CODE_ENCODING_NAME
 from .type_map.encoders import REQUIRES_ENCODING_KINDS as WRITE_REQUIRES_ENCODING_KINDS
-from .type_map.encoders import resolve_encoder
+from .type_map.encoders import encoding_write_matches_kind, resolve_encoder
 from .type_map.exceptions import InvalidTypeMapError, MissingEncodingError
 from .type_map.grammar import ARROW_FAMILIES
 
@@ -509,30 +509,65 @@ class SchemaContract:
         based on whether its kind requires one), so a second eager pass here
         would only repeat that work.
 
-        A nested (``Object``/``List``) field IS walked recursively here,
-        because nothing else does: :meth:`resolve_write_encoders` only ever
-        rewrites a top-level record key, so a gated-kind leaf several levels
-        down that this method let through would reach ``encode_body``
-        un-encoded and fail there, unconditionally, on the first non-null
-        value -- ``orjson``'s native rendering for exactly these kinds was
-        retired PR-wide, nested included. Refusing it here, by name and
-        path, converts that into the same clean, config-time refusal every
-        other case in this module gets, instead of a crash with no
-        indication which field caused it.
+        A declared top-level ``encoding_write`` naming a catalog entry (not
+        ``code``) IS additionally checked here for kind compatibility, via
+        :func:`~cdk.type_map.encoders.encoding_write_matches_kind` -- a
+        Timestamp field naming ``decimal`` would otherwise pass this method
+        (an entry is present) and ``resolve_write_encoders`` (the name
+        resolves), then crash with a bare ``TypeError`` at ``land()`` on the
+        first non-null value, since no catalog encoder validates the
+        field's arrow_type against its own expected Python type.
+
+        A nested (``Object``/``List``) field with no top-level
+        ``encoding_write`` of its own IS walked recursively here, because
+        nothing else does: :meth:`resolve_write_encoders` only ever rewrites
+        a top-level record key, so a gated-kind leaf several levels down
+        that this method let through would reach ``encode_body`` un-encoded
+        and fail there, unconditionally, on the first non-null value --
+        ``orjson``'s native rendering for exactly these kinds was retired
+        PR-wide, nested included. Refusing it here, by name and path,
+        converts that into the same clean, config-time refusal every other
+        case in this module gets, instead of a crash with no indication
+        which field caused it.
+
+        A nested field that DOES declare its own top-level
+        ``encoding_write`` (necessarily ``{"name": "code"}`` -- no catalog
+        entry targets a struct/list arrow_type) is exempt from that
+        recursion: :meth:`resolve_write_encoders` binds that declaration to
+        the whole nested value via ``code_encoder(field_name, value,
+        arrow_type)``, so a leaf's own encoding is neither required nor
+        applied separately -- recursing here anyway would refuse a
+        correctly-declared field over an encoding it does not need.
         """
         for f in self._arrow_schema:
             field_def = self._field_defs.get(f.name) or {}
             if _is_nested(f.type):
-                self._check_nested_write_encoding(field_def, f.type, f.name)
+                if "encoding_write" not in field_def:
+                    self._check_nested_write_encoding(field_def, f.type, f.name)
                 continue
             kind = ARROW_FAMILIES[arrow_family(f.type)].conversion_kind
-            if kind not in WRITE_REQUIRES_ENCODING_KINDS:
+            encoding_write = field_def.get("encoding_write")
+            if encoding_write is None:
+                if kind in WRITE_REQUIRES_ENCODING_KINDS:
+                    raise MissingEncodingError(
+                        f.name, str(f.type), direction="write", key="encoding_write"
+                    )
                 continue
-            if "encoding_write" in field_def:
+            if not isinstance(encoding_write, Mapping):
+                # Malformed shape (e.g. a bare string) -- resolve_write_encoders,
+                # called right after this in the one call site, raises the
+                # precise error for this; not duplicated here.
                 continue
-            raise MissingEncodingError(
-                f.name, str(f.type), direction="write", key="encoding_write"
-            )
+            name = encoding_write.get("name")
+            if name == WRITE_CODE_ENCODING_NAME or not isinstance(name, str):
+                # The code hatch covers any kind by design; an unknown name
+                # is resolve_write_encoders's error to raise, not this one's.
+                continue
+            if not encoding_write_matches_kind(name, kind):
+                raise InvalidTypeMapError(
+                    f"field {f.name!r}: encoding_write {name!r} does not "
+                    f"render a {kind!r} value; arrow_type is {f.type!s}"
+                )
 
     @staticmethod
     def _check_nested_write_encoding(

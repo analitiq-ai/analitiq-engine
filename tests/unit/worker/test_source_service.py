@@ -16,7 +16,7 @@ import pyarrow as pa
 import pytest
 
 from cdk.exceptions import ReadError, TransientReadError, TransportSpecError
-from cdk.type_map import UnmappedTypeError
+from cdk.type_map import MissingEncodingError, UnmappedTypeError
 from src.grpc.generated.analitiq.v1.source_service_pb2 import ReadRequest
 from src.state.store import decode_cursor_state
 from src.worker.readable import _decode_arrow_ipc
@@ -207,6 +207,12 @@ class TestReadStream:
         [
             ReadError("bad endpoint document"),
             UnmappedTypeError("demo", "forward", "FANCYTYPE"),
+            # A missing/malformed 'encoding' declaration is the same class
+            # of type-map authoring defect as UnmappedTypeError -- both are
+            # TypeMapError subclasses and neither heals by retrying.
+            MissingEncodingError(
+                "posted_at", "Timestamp(MICROSECOND)", direction="read", key="encoding"
+            ),
             # A transport-spec/value-expression authoring defect that
             # escapes a connector unwrapped is deterministic by its own
             # contract — retrying cannot heal a config error.
