@@ -328,13 +328,19 @@ def _async_probe(resolved: Any) -> Any:
     """Return what the async-ness checks must inspect to see the truth.
 
     :func:`inspect.iscoroutinefunction` and ``isasyncgenfunction`` already
-    unwrap a function, bound method, or ``functools.partial`` correctly on
-    their own. Neither looks inside a callable *object*'s own ``__call__``,
-    so an async (or async-generator) ``__call__`` hiding behind one still
-    reads as plain synchronous unless ``__call__`` itself is offered up
-    instead.
+    unwrap a function or bound method correctly on their own, and follow a
+    ``functools.partial`` wrapping either of those too -- but not a
+    ``functools.partial`` wrapping a callable *object*, since a partial's
+    own async-ness detection stops at its immediate ``.func``. Recursing
+    on ``.func`` handles that composition (and a partial wrapping a
+    partial) the same way. Neither built-in check looks inside a callable
+    object's own ``__call__`` at all, so an async (or async-generator)
+    ``__call__`` hiding behind one still reads as plain synchronous
+    unless ``__call__`` itself is offered up instead.
     """
-    if inspect.isroutine(resolved) or isinstance(resolved, functools.partial):
+    if isinstance(resolved, functools.partial):
+        return _async_probe(resolved.func)
+    if inspect.isroutine(resolved):
         return resolved
     return resolved.__call__ if callable(resolved) else resolved
 
@@ -390,6 +396,12 @@ def _hook_shape_problem(
                 f"{klass.__name__}.{name} is declared async; the CDK calls "
                 f"every {hook_label} synchronously and would receive an "
                 f"unawaited coroutine instead of the hook's result."
+            )
+        if inspect.isgeneratorfunction(probe):
+            return (
+                f"{klass.__name__}.{name} contains a yield; the CDK calls "
+                f"every {hook_label} for its return value, and would "
+                f"receive a generator instead of the hook's result."
             )
         mismatch = _signature_mismatch(base_fn, resolved)
         if mismatch is not None:

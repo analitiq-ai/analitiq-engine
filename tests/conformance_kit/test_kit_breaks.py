@@ -498,6 +498,29 @@ class _AsyncGeneratorClassifyErrorConnector(ReferenceConnector):
     classify_error = _classify_error_async_generator
 
 
+def _classify_error_sync_generator(self: Any, exc: BaseException) -> Any:
+    yield "transient"
+
+
+class _SyncGeneratorClassifyErrorConnector(ReferenceConnector):
+    """classify_error written as a plain generator, not a coroutine at all."""
+
+    classify_error = _classify_error_sync_generator
+
+
+class _AsyncCallableObjectClassifyErrorForPartial:
+    """A callable object whose __call__ is async, for wrapping in a partial."""
+
+    async def __call__(self, exc: BaseException) -> str | None:
+        return "transient"
+
+
+class _PartialWrappingAsyncCallableObjectConnector(ReferenceConnector):
+    """functools.partial wrapping a callable object, not a plain function."""
+
+    classify_error = functools.partial(_AsyncCallableObjectClassifyErrorForPartial())
+
+
 class _OwnerSensitiveClassifyErrorDescriptor:
     """Resolves differently depending on which concrete class binds it --
     correct only against the real leaf connector, broken against the
@@ -960,6 +983,29 @@ class TestOverrideSurfaceBreaks:
     ) -> None:
         violations = check_override_surface(
             _with_connector(reference_target, _AsyncGeneratorClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "async" in report
+
+    def test_sync_generator_classify_error_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        violations = check_override_surface(
+            _with_connector(reference_target, _SyncGeneratorClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "yield" in report
+
+    def test_partial_wrapping_async_callable_object_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A partial's async check doesn't look inside a wrapped object's __call__."""
+        violations = check_override_surface(
+            _with_connector(
+                reference_target, _PartialWrappingAsyncCallableObjectConnector
+            )
         )
         report = _messages(violations)
         assert "classify_error" in report
