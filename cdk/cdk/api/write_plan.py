@@ -34,7 +34,7 @@ from ..record_identity import record_digest
 from ..resolver import Resolver, scope_paths
 from ..schema_contract import SchemaContract
 from ..transport_factory import require_wire_safe_header_name
-from ..type_map.exceptions import MissingEncodingError
+from ..type_map.exceptions import TypeMapError
 from ..types import RetrySemantics, RetryVerdict, SchemaSpec
 from .body import FORM_CONTENT_TYPE, media_type
 from .exceptions import RequestSpecError
@@ -267,7 +267,13 @@ def resolve_field_encoders(
         contract = SchemaContract(schema)
         contract.check_required_write_encoding()
         return contract.resolve_write_encoders(code_encoder=code_encoder)
-    except (ValueError, MissingEncodingError) as err:
+    # TypeMapError (InvalidTypeMapError/MissingEncodingError included) covers
+    # an unknown encoding_write name or a malformed param (wrong 'unit',
+    # missing 'pattern', ...); AttributeError covers a declared
+    # encoding_write that isn't an object at all (e.g. a bare string) --
+    # every one of these is the same class of authoring defect the other
+    # branches here already return as a string rather than raise.
+    except (ValueError, TypeMapError, AttributeError) as err:
         return f"write input schema: {err}"
 
 
