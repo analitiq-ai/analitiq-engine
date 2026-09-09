@@ -34,6 +34,7 @@ from ..record_identity import record_digest
 from ..resolver import Resolver, scope_paths
 from ..schema_contract import SchemaContract
 from ..transport_factory import require_wire_safe_header_name
+from ..type_map.encoders import CODE_ENCODING_NAME
 from ..type_map.exceptions import TypeMapError
 from ..types import RetrySemantics, RetryVerdict, SchemaSpec
 from .body import FORM_CONTENT_TYPE, media_type
@@ -210,20 +211,48 @@ def write_mode_block(doc: ApiEndpointDoc, mode_key: WriteMode) -> WriteOperation
     return (doc.operations.write or {}).get(mode_key)
 
 
+def _is_code_encoded(field_def: Mapping[str, Any]) -> bool:
+    encoding_write = field_def.get("encoding_write")
+    return (
+        isinstance(encoding_write, Mapping)
+        and encoding_write.get("name") == CODE_ENCODING_NAME
+    )
+
+
 def collect_json_fields(mode_block: WriteOperation) -> set[str]:
     """Body field names declared with ``arrow_type: "Json"``.
 
     The write input schema is free-form JSON Schema in the contract, so
     both shapes it permits are walked: JSON-Schema ``properties`` and the
     flat ``columns`` array.
+
+    A field also declaring ``encoding_write: {"name": "code"}`` is
+    excluded: it has opted out of every implicit rendering, Json's own
+    native passthrough included, the same as the read side's Json builder
+    defers to a declared ``code`` decoder (``SchemaContract._build_column``).
+    ``land`` runs :func:`apply_field_encoders` after this pass decodes
+    ``json_fields`` in place, so a Json field left in both sets would hand
+    its code encoder an already-``json.loads``-ed dict/list instead of the
+    Arrow-typed JSON string ``ApiDialect.encode_field`` promises -- and
+    ``json.loads`` would then also be the wrong parser to run at all if the
+    encoder renders some other wire text, code being an escape hatch for
+    exactly a wire shape no built-in rendering covers.
     """
     schema = mode_block.input.schema_
     names: set[str] = set()
     for name, prop in (schema.get("properties") or {}).items():
-        if isinstance(prop, Mapping) and prop.get("arrow_type") == "Json":
+        if (
+            isinstance(prop, Mapping)
+            and prop.get("arrow_type") == "Json"
+            and not _is_code_encoded(prop)
+        ):
             names.add(name)
     for col in schema.get("columns") or []:
-        if isinstance(col, Mapping) and col.get("arrow_type") == "Json":
+        if (
+            isinstance(col, Mapping)
+            and col.get("arrow_type") == "Json"
+            and not _is_code_encoded(col)
+        ):
             col_name = col.get("name")
             if col_name:
                 names.add(col_name)

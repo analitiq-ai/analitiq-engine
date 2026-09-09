@@ -48,6 +48,29 @@ class TestIsoDurationPreservesSubMicrosecondPrecision:
         # decoder must not lose before the array even reaches that boundary.
         assert result[0].value == 1_123_456_789
 
+    def test_a_sub_nanosecond_fraction_is_refused_not_truncated(self) -> None:
+        # int() on the scaled Decimal would otherwise truncate any
+        # fractional tick silently, the same class of loss
+        # _iso8601_ns_remainder refuses on the Timestamp side.
+        field = pa.field("d", pa.duration("ns"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
+        with pytest.raises(ValueError, match="sub-nanosecond precision"):
+            fn(field, ["PT0.0000000009S"])
+
+
+class TestIsoDurationAcceptsASign:
+    def test_a_leading_minus_negates_the_duration(self) -> None:
+        field = pa.field("d", pa.duration("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
+        result = fn(field, ["-PT1S", "PT1S"])
+        assert [v.value for v in result] == [-1, 1]
+
+    def test_a_leading_minus_on_a_weeks_duration_is_negated(self) -> None:
+        field = pa.field("d", pa.duration("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
+        result = fn(field, ["-P1W"])
+        assert result[0].value == -604800
+
 
 class TestIsoDurationRejectsComponentFreeStrings:
     def test_a_designator_with_no_component_is_refused(self) -> None:
@@ -106,6 +129,15 @@ class TestIso8601PreservesNanosecondPrecision:
         fn = resolve_decoder({"encoding": {"name": "iso8601"}}, field)
         result = fn(field, ["1970-01-01T00:00:00,123456789+00:00"])
         assert result[0].value == 123_456_789
+
+    def test_precision_finer_than_nanoseconds_is_refused_not_dropped(self) -> None:
+        # fromisoformat drops everything past microseconds silently, and
+        # digits 7-9 are added back explicitly -- a 10th+ digit has nowhere
+        # to go and must be refused rather than dropped the same way.
+        field = pa.field("t", pa.timestamp("ns", tz="UTC"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso8601"}}, field)
+        with pytest.raises(ValueError, match="finer than nanoseconds"):
+            fn(field, ["1970-01-01T00:00:00.0000000009+00:00"])
 
 
 class TestEpochDecoderPreservesTheInstantAcrossTargetZones:

@@ -681,3 +681,50 @@ class TestDeclarativeWireFormatEncoding:
         )
         assert accepted is False
         assert "code_name" in connector.last_schema_rejection
+
+    async def test_json_field_with_code_encoding_write_bypasses_json_decoding(
+        self,
+    ) -> None:
+        # decode_json_fields (json_fields) and apply_field_encoders
+        # (field_encoders) both run in land(); a Json field opting into
+        # 'code' must be excluded from the former, or the code hook
+        # receives an already-json.loads()-ed dict instead of the
+        # Arrow-typed JSON string ApiDialect.encode_field promises, and a
+        # non-JSON encoder output would then also fail decode_json_fields's
+        # own json.loads() the other way round.
+        class WrappingDialect(ApiDialect):
+            def encode_field(self, field_name: str, value: Any, arrow_type: Any) -> Any:
+                assert isinstance(
+                    value, str
+                ), f"code hook expected the raw Json string, got {type(value)}"
+                return f"code:{value}"
+
+        class CustomConnector(GenericAPIConnector):
+            dialect_class = WrappingDialect
+
+        document = _document_with_field(
+            "payload",
+            {
+                "type": "object",
+                "native_type": "object",
+                "arrow_type": "Json",
+                "encoding_write": {"name": "code"},
+            },
+        )
+        session = FakeSession([FakeResponse(body={})])
+        connector = CustomConnector()
+        connector.set_stream_endpoints({"items": document})
+        await connector.connect(runtime_with(session))
+        accepted = await connector.configure_schema(
+            SchemaSpec(
+                stream_id="items",
+                version=1,
+                write_mode=WriteMode.WRITE_MODE_INSERT,
+                ack_timeout_seconds=30,
+            )
+        )
+        assert accepted, connector.last_schema_rejection
+        await _write(connector, _batch_with([{"id": 0, "payload": '{"a": 1}'}]))
+        assert session.calls[0]["data"] == (
+            b'{"item":{"id":0,"payload":"code:{\\"a\\": 1}"}}'
+        )

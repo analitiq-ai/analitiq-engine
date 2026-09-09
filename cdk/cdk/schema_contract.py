@@ -24,8 +24,13 @@ from .type_map.decoders import CODE_ENCODING_NAME as READ_CODE_ENCODING_NAME
 from .type_map.decoders import REQUIRES_ENCODING_KINDS as READ_REQUIRES_ENCODING_KINDS
 from .type_map.decoders import decoder_matches_json_type, decoder_matches_kind
 from .type_map.encoders import CODE_ENCODING_NAME as WRITE_CODE_ENCODING_NAME
+from .type_map.encoders import ENCODER_JSON_TYPE
 from .type_map.encoders import REQUIRES_ENCODING_KINDS as WRITE_REQUIRES_ENCODING_KINDS
-from .type_map.encoders import encoding_write_matches_kind, resolve_encoder
+from .type_map.encoders import (
+    encoding_write_matches_json_type,
+    encoding_write_matches_kind,
+    resolve_encoder,
+)
 from .type_map.exceptions import InvalidTypeMapError, MissingEncodingError
 from .type_map.grammar import ARROW_FAMILIES
 
@@ -295,10 +300,14 @@ def _check_nested_leaf_encoding(
             path=f"{path}[]",
         )
         return
-    kind = ARROW_FAMILIES[arrow_family(arrow_type)].conversion_kind
-    if kind not in requires_encoding_kinds:
-        return
     if key in field_def:
+        # Checked before the requires-kind gate below: a leaf's own
+        # encoding is refused whether or not its kind is one that
+        # mandates a declaration -- an optional-encoding kind (bool's
+        # bool_map, binary's base64) is just as unresolved at nested depth
+        # as a mandatory one, so gating on requires_encoding_kinds first
+        # would let a declared-but-never-applied bool_map/base64 leaf
+        # through unchecked.
         raise InvalidTypeMapError(
             f"field {path!r} declares {key!r}, but a nested leaf's own "
             f"{key} is never resolved or applied -- declare {key}: "
@@ -306,6 +315,9 @@ def _check_nested_leaf_encoding(
             f"which covers the whole value via a connector.py "
             f"ApiDialect.{override_method} override"
         )
+    kind = ARROW_FAMILIES[arrow_family(arrow_type)].conversion_kind
+    if kind not in requires_encoding_kinds:
+        return
     raise MissingEncodingError(path, str(arrow_type), direction=direction, key=key)
 
 
@@ -700,13 +712,18 @@ class SchemaContract:
         would only repeat that work.
 
         A declared top-level ``encoding_write`` naming a catalog entry (not
-        ``code``) IS additionally checked here for kind compatibility, via
-        :func:`~cdk.type_map.encoders.encoding_write_matches_kind` -- a
-        Timestamp field naming ``decimal`` would otherwise pass this method
-        (an entry is present) and ``resolve_write_encoders`` (the name
-        resolves), then crash with a bare ``TypeError`` at ``land()`` on the
-        first non-null value, since no catalog encoder validates the
-        field's arrow_type against its own expected Python type.
+        ``code``) IS additionally checked here for kind compatibility
+        against the field's own ``arrow_type``, via
+        :func:`~cdk.type_map.encoders.encoding_write_matches_kind`, and for
+        output-type compatibility against the field's declared JSON
+        ``type``, via
+        :func:`~cdk.type_map.encoders.encoding_write_matches_json_type` -- a
+        Timestamp field naming ``decimal``, or a ``"boolean"``-typed field
+        naming ``bool_map`` (which renders a string token), would otherwise
+        pass this method (an entry is present) and ``resolve_write_encoders``
+        (the name resolves), then either crash with a bare ``TypeError`` at
+        ``land()`` on the first non-null value or violate the endpoint's own
+        declared input schema once the request is sent.
 
         A nested (``Object``/``List``) field with no top-level
         ``encoding_write`` of its own IS walked recursively here, because
@@ -799,6 +816,15 @@ class SchemaContract:
             raise InvalidTypeMapError(
                 f"field {f.name!r}: encoding_write {name!r} does not "
                 f"render a {kind!r} value; arrow_type is {f.type!s}"
+            )
+        json_type = _declared_json_type(field_def)
+        if json_type is not None and not encoding_write_matches_json_type(
+            name, json_type
+        ):
+            raise InvalidTypeMapError(
+                f"field {f.name!r}: encoding_write {name!r} renders a "
+                f"{ENCODER_JSON_TYPE.get(name)!r}-typed wire value, but "
+                f"field declares type {json_type!r}"
             )
 
     def resolve_write_encoders(

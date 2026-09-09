@@ -273,6 +273,31 @@ def encoding_write_matches_kind(name: str, kind: ConversionKind) -> bool:
     return kind in ENCODER_KIND_COMPATIBILITY.get(name, frozenset())
 
 
+#: The JSON Schema ``type`` each catalog encoder actually renders, per its
+#: own closure above: ``epoch`` returns a bare ``int``; every other encoder
+#: returns ``str`` (``.isoformat()``, ``.strftime()``, ``str(Decimal)``, a
+#: declared ``bool_map`` token, base64 text). Checked eagerly by
+#: :meth:`~cdk.schema_contract.SchemaContract.check_required_write_encoding`
+#: against the field's own declared ``type`` -- a ``"boolean"``-typed field
+#: naming ``bool_map`` (which renders a string token) or a ``"string"``-typed
+#: field naming ``epoch`` (which renders an int) would otherwise resolve
+#: fine and only violate the endpoint's declared input schema once the
+#: request is actually sent.
+ENCODER_JSON_TYPE: Final[dict[str, str]] = {
+    "iso8601": "string",
+    "strftime": "string",
+    "epoch": "integer",
+    "decimal": "string",
+    "bool_map": "string",
+    "base64": "string",
+}
+
+
+def encoding_write_matches_json_type(name: str, json_type: str) -> bool:
+    """Whether encoder *name* renders a value of declared JSON *json_type*."""
+    return ENCODER_JSON_TYPE.get(name) == json_type
+
+
 #: The published catalog's own version.
 ENCODERS_CATALOG_VERSION: Final[str] = "1.0.0"
 

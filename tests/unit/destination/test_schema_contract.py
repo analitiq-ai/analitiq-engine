@@ -704,6 +704,34 @@ class TestSchemaContractFromPylist:
         with pytest.raises(InvalidTypeMapError, match="meta.posted_at"):
             SchemaContract(schema).check_required_read_encoding()
 
+    def test_a_nested_optional_kind_leaf_declaring_its_own_encoding_is_refused(self):
+        # bool's kind is not in READ_REQUIRES_ENCODING_KINDS (bool_map is
+        # opt-in, never mandatory), so gating the leaf-declaration check on
+        # "does this kind require one" first would let a declared-but-
+        # never-applied bool_map leaf through unchecked -- the same class
+        # of gap the mandatory-kind case above is already refused for.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "properties": {
+                        "active": {
+                            "type": "string",
+                            "arrow_type": "Boolean",
+                            "encoding": {
+                                "name": "bool_map",
+                                "true_values": ["Y"],
+                                "false_values": ["N"],
+                            },
+                        }
+                    },
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="meta.active"):
+            SchemaContract(schema).check_required_read_encoding()
+
     def test_a_nested_field_with_top_level_code_encoding_skips_leaf_checks(self):
         schema = {
             "properties": {
@@ -784,6 +812,34 @@ class TestSchemaContractFromPylist:
         }
         SchemaContract(schema).check_required_read_encoding()
 
+    def test_a_nested_optional_kind_write_leaf_declaring_its_own_encoding_is_refused(
+        self,
+    ):
+        # bool is not in WRITE_REQUIRES_ENCODING_KINDS (bool_map is opt-in
+        # there too), so the leaf-declaration check must not skip it just
+        # because the kind itself is optional.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "properties": {
+                        "active": {
+                            "type": "string",
+                            "arrow_type": "Boolean",
+                            "encoding_write": {
+                                "name": "bool_map",
+                                "true_values": ["Y"],
+                                "false_values": ["N"],
+                            },
+                        }
+                    },
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="meta.active"):
+            SchemaContract(schema).check_required_write_encoding()
+
     def test_a_nested_write_field_with_a_non_code_top_level_encoding_is_refused(self):
         # A scalar encoder like iso8601 resolves fine against a nested
         # field's own declaration, but land() would then apply it to the
@@ -803,6 +859,43 @@ class TestSchemaContractFromPylist:
         }
         with pytest.raises(InvalidTypeMapError, match="'code'"):
             SchemaContract(schema).check_required_write_encoding()
+
+    def test_a_write_encoder_incompatible_with_the_declared_json_type_is_refused(self):
+        # bool_map renders a string token; a 'boolean'-typed field naming
+        # it resolves fine (the name is real, and the arrow kind matches
+        # too) and would otherwise only violate the endpoint's own
+        # declared input schema once the request is actually sent.
+        schema = {
+            "properties": {
+                "active": {
+                    "type": "boolean",
+                    "arrow_type": "Boolean",
+                    "encoding_write": {
+                        "name": "bool_map",
+                        "true_values": ["Y"],
+                        "false_values": ["N"],
+                    },
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="bool_map"):
+            SchemaContract(schema).check_required_write_encoding()
+
+    def test_a_write_encoder_compatible_with_the_declared_json_type_passes(self):
+        schema = {
+            "properties": {
+                "active": {
+                    "type": "string",
+                    "arrow_type": "Boolean",
+                    "encoding_write": {
+                        "name": "bool_map",
+                        "true_values": ["Y"],
+                        "false_values": ["N"],
+                    },
+                },
+            }
+        }
+        SchemaContract(schema).check_required_write_encoding()
 
     def test_json_field_with_code_encoding_routes_through_the_code_hatch(self):
         # The Json-specific builder must not run ahead of a declared 'code'

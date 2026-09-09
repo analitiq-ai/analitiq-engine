@@ -404,6 +404,9 @@ def _ticks_to_array(
 #: column actually declared at nanosecond resolution. Zero for a value with
 #: six or fewer fractional digits, or none at all. ``[.,]``: ISO-8601 permits
 #: either as the fractional separator, and ``fromisoformat`` accepts both.
+#: Raises for a nonzero digit past the ninth: finer than nanoseconds, which
+#: no Arrow tick count can represent, so it is refused rather than dropped
+#: the same silent way ``fromisoformat`` itself drops digits past the sixth.
 def _iso8601_ns_remainder(value: str) -> int:
     match = re.search(r"[.,](\d+)", value)
     if match is None:
@@ -411,6 +414,11 @@ def _iso8601_ns_remainder(value: str) -> int:
     digits = match.group(1)
     if len(digits) <= 6:
         return 0
+    if any(d != "0" for d in digits[9:]):
+        raise ValueError(
+            f"{value!r} has fractional-second precision finer than "
+            f"nanoseconds, which no Arrow tick count can represent"
+        )
     return int((digits[6:9] + "000")[:3])
 
 
@@ -486,7 +494,12 @@ def _decode_iso8601(_config: Mapping[str, Any]) -> DecodeFn:
                 )
             )
             if track_ns:
-                ns_remainders.append(_iso8601_ns_remainder(v))
+                try:
+                    ns_remainders.append(_iso8601_ns_remainder(v))
+                except ValueError as exc:
+                    raise ValueError(
+                        f"column {field.name!r} at row {row}: {exc}"
+                    ) from exc
         array = pa.array(parsed, type=field.type)
         if track_ns:
             array = _apply_ns_remainder(array, ns_remainders)
@@ -674,8 +687,9 @@ def _decode_base64(_config: Mapping[str, Any]) -> DecodeFn:
     return decode
 
 
-#: ``PnW`` or ``PnDTnHnMnS`` -- weeks (exclusive per ISO-8601), or days and
-#: clock components. Calendar years/months are deliberately unsupported: a
+#: ``PnW`` or ``PnDTnHnMnS``, an optional leading ``-`` stripped and applied
+#: by the caller -- weeks (exclusive per ISO-8601), or days and clock
+#: components. Calendar years/months are deliberately unsupported: a
 #: Duration is a fixed physical length, and a month has none.
 #:
 #: Hand-rolled rather than the ``isoduration`` package (present in this
@@ -719,7 +733,14 @@ def _decode_iso_duration(_config: Mapping[str, Any]) -> DecodeFn:
                     f"column {field.name!r} at row {row}: encoding "
                     f"'iso_duration' expects a string, got {type(v).__name__}"
                 )
-            match = _ISO_DURATION_RE.fullmatch(v)
+            # The sign is stripped before matching, not folded into the
+            # regex's alternation: Python's re refuses two branches naming
+            # the same group ("redefinition of group name"), and a signed
+            # ISO-8601 duration's "-" always precedes "P" whichever
+            # alternative follows, so one strip covers both.
+            negative = v.startswith("-")
+            unsigned = v[1:] if negative else v
+            match = _ISO_DURATION_RE.fullmatch(unsigned)
             if match is None:
                 raise ValueError(
                     f"column {field.name!r} at row {row}: {v!r} is not an "
@@ -754,7 +775,20 @@ def _decode_iso_duration(_config: Mapping[str, Any]) -> DecodeFn:
                 + Decimal(int(groups["minutes"] or 0)) * 60
                 + seconds
             )
-            ticks.append(int(total_seconds * 1_000_000_000))
+            if negative:
+                total_seconds = -total_seconds
+            nanos = total_seconds * 1_000_000_000
+            if nanos != nanos.to_integral_value():
+                # int() below would otherwise truncate silently: a
+                # fractional-second component finer than a nanosecond has
+                # no Arrow tick count to land on, the same class of loss
+                # _iso8601_ns_remainder refuses on the Timestamp side.
+                raise ValueError(
+                    f"column {field.name!r} at row {row}: {v!r} has "
+                    f"sub-nanosecond precision, which no Arrow tick count "
+                    f"can represent"
+                )
+            ticks.append(int(nanos))
         return pc.cast(pa.array(ticks, type=pa.duration("ns")), field.type, safe=True)
 
     return decode
