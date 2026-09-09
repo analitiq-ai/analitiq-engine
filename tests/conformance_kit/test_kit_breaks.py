@@ -455,9 +455,9 @@ class _BrokenWrappedClassifyErrorConnector(ReferenceConnector):
 class _AsyncWrappedClassifyErrorConnector(ReferenceConnector):
     """A synchronous forwarding decorator hides an async implementation."""
 
+    @_classify_error_forwarding_decorator
     # skipcq: PYL-W0236 - the async-ness IS the deliberate defect this
     # fixture models; the kit must reject it, and the test below pins that.
-    @_classify_error_forwarding_decorator
     async def classify_error(self, exc: BaseException) -> str | None:
         return "transient"
 
