@@ -306,6 +306,21 @@ class TestReadStream:
         assert terminal.WhichOneof("message") == "error"
         assert "OperationalError" in terminal.error.error_type
 
+    async def test_an_off_vocabulary_declared_category_still_reaches_the_stream(self):
+        # ReadError accepts any declared_category with no vocabulary check;
+        # a connector raising one with a typo'd value must still produce
+        # the typed ReadResponse(error=...) event, not an unhandled
+        # exception out of ReadStream itself.
+        runtime = _runtime()
+        readable = _FakeReadable(
+            [], error=ReadError("quota exceeded", declared_category="quota_exceeded")
+        )
+        servicer = SourceWorkerServicer(readable, runtime, {})
+        responses = await _collect(servicer)
+        terminal = responses[-1]
+        assert terminal.WhichOneof("message") == "error"
+        assert "quota exceeded" in terminal.error.message
+
     async def test_error_ends_stream_without_complete(self):
         readable = _FakeReadable([_batch([{"id": 1}])], error=ValueError("x"))
         servicer = SourceWorkerServicer(readable, _runtime(), {})

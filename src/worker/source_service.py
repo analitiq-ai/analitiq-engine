@@ -21,6 +21,7 @@ import grpc
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.declarations import (
     DECLARED_READ_DETERMINISTIC,
+    ConnectorDeclarationError,
     ErrorMap,
     call_declared_hook,
     error_map_for,
@@ -87,10 +88,28 @@ def classify_read_error(
     """
     birth_site = getattr(exc, "declared_category", None)
     if isinstance(birth_site, str):
-        birth_site = require_declared_category(
-            birth_site, source=f"{type(exc).__name__}.declared_category"
-        )
-        return DECLARED_READ_DETERMINISTIC[birth_site], birth_site
+        try:
+            birth_site = require_declared_category(
+                birth_site, source=f"{type(exc).__name__}.declared_category"
+            )
+        except ConnectorDeclarationError:
+            # ReadError/TransientReadError accept any string for
+            # declared_category with no construction-time check, and are
+            # public CDK classes untrusted connector code can raise
+            # directly -- an off-vocabulary value reaching here must not
+            # raise out of the except block that is reporting exc itself
+            # (the same "never displace the original failure" guarantee
+            # call_declared_hook makes for the two paths below). Log it
+            # and fall through to them instead of trusting this birth site.
+            logger.warning(
+                "%s.declared_category %r failed vocabulary validation; "
+                "falling through to the declared map / classify_error",
+                type(exc).__name__,
+                birth_site,
+                exc_info=True,
+            )
+        else:
+            return DECLARED_READ_DETERMINISTIC[birth_site], birth_site
     match = error_map.match_exception(exc) if error_map is not None else None
     if match is not None:
         return DECLARED_READ_DETERMINISTIC[match.category], match.category

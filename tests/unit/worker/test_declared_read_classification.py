@@ -129,18 +129,31 @@ class TestBirthSiteCategory:
         assert deterministic is True
         assert declared == "auth"
 
-    def test_off_vocabulary_birth_site_category_fails_loud(self):
+    def test_off_vocabulary_birth_site_category_does_not_displace_the_failure(self):
         # ReadError/TransientReadError accept any string for
-        # declared_category with no vocabulary check at construction; this
-        # is the first point that value is actually interpreted, so an
-        # authoring bug upstream (a typo'd category) must surface here
-        # rather than being silently treated as "no declared category".
-        from cdk.declarations import ConnectorDeclarationError
+        # declared_category with no vocabulary check at construction, and
+        # are public CDK classes untrusted connector code can raise
+        # directly. classify_read_error runs inside the except block that
+        # is reporting exc itself, so an off-vocabulary value here must not
+        # raise and displace it -- it falls through to the declared map /
+        # classify_error / type ladder instead, the same guarantee
+        # call_declared_hook makes for those paths.
         from cdk.exceptions import ReadError
 
         exc = ReadError("status 503", declared_category="retry_me")
-        with pytest.raises(ConnectorDeclarationError, match="not in the engine"):
+        deterministic, declared = classify_read_error(exc, None)
+        assert deterministic is True  # ReadError is in the deterministic ladder
+        assert declared is None
+
+    def test_off_vocabulary_birth_site_category_logs_a_warning(self, caplog):
+        import logging
+
+        from cdk.exceptions import ReadError
+
+        exc = ReadError("status 503", declared_category="retry_me")
+        with caplog.at_level(logging.WARNING, logger="src.worker.source_service"):
             classify_read_error(exc, None)
+        assert any("declared_category" in r.message for r in caplog.records)
 
 
 class TestLadderFallback:
