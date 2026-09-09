@@ -399,6 +399,18 @@ class _SingledispatchBrokenDefaultConnector(ReferenceConnector):
         return "transient"
 
 
+class _SingledispatchBrokenRegisteredConnector(ReferenceConnector):
+    """A registered implementation, not the default, drops exc."""
+
+    @functools.singledispatchmethod
+    def classify_error(self, exc: BaseException) -> str | None:
+        return "transient"
+
+    # A bare expression statement, not a name binding: only classify_error
+    # itself may be defined on the connector class.
+    classify_error.register(ValueError)(lambda self: "config")  # type: ignore[misc]
+
+
 class _RaisingClassifyErrorDescriptor:
     """A descriptor whose __get__ needs state object.__new__ never sets up."""
 
@@ -410,6 +422,107 @@ class _RaisingClassifyErrorConnector(ReferenceConnector):
     """classify_error resolution itself raises -- must fail loud, not crash."""
 
     classify_error = _RaisingClassifyErrorDescriptor()
+
+
+def _classify_error_forwarding_decorator(
+    fn: Any,
+) -> Any:
+    """An ordinary functools.wraps decorator forwarding every call through."""
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
+class _WrappedClassifyErrorConnector(ReferenceConnector):
+    """classify_error behind a plain functools.wraps forwarding wrapper."""
+
+    @_classify_error_forwarding_decorator
+    def classify_error(self, exc: BaseException) -> str | None:
+        return "transient"
+
+
+class _BrokenWrappedClassifyErrorConnector(ReferenceConnector):
+    """The forwarded implementation itself drops exc."""
+
+    @_classify_error_forwarding_decorator
+    def classify_error(self) -> str | None:  # type: ignore[override]
+        return "transient"
+
+
+def _classify_error_partial_target(exc: BaseException, context: str) -> str | None:
+    return "transient"
+
+
+class _PartialClassifyErrorConnector(ReferenceConnector):
+    """classify_error as a functools.partial with one argument pre-bound."""
+
+    classify_error = functools.partial(_classify_error_partial_target, context="ctx")
+
+
+class _BrokenPartialClassifyErrorConnector(ReferenceConnector):
+    """The partial leaves a required argument unbound beyond exc."""
+
+    classify_error = functools.partial(_classify_error_partial_target)
+
+
+async def _async_partial_target(exc: BaseException) -> str | None:
+    return "transient"
+
+
+class _AsyncPartialClassifyErrorConnector(ReferenceConnector):
+    """A functools.partial wrapping an async function -- still broken."""
+
+    classify_error = functools.partial(_async_partial_target)
+
+
+async def _classify_error_async_generator(self: Any, exc: BaseException) -> Any:
+    yield "transient"
+
+
+class _AsyncGeneratorClassifyErrorConnector(ReferenceConnector):
+    """classify_error written as an async generator, not a coroutine."""
+
+    classify_error = _classify_error_async_generator
+
+
+class _OwnerSensitiveClassifyErrorDescriptor:
+    """Resolves differently depending on which concrete class binds it --
+    correct only against the real leaf connector, broken against the
+    mixin itself. Checking the mixin (the class the attribute is
+    defined on) instead of the real target would wrongly reject this
+    valid hook."""
+
+    def __get__(self, obj: Any, objtype: type | None = None) -> Any:
+        if (
+            objtype is not None
+            and objtype.__name__ == "_OwnerSensitiveClassifyErrorConnector"
+        ):
+
+            def fine(exc: BaseException) -> str | None:
+                return "transient"
+
+            return fine
+
+        def broken() -> str | None:  # missing exc
+            return "transient"
+
+        return broken
+
+
+class _OwnerSensitiveClassifyErrorMixin:
+    """Listed first so it wins the MRO -- isolates owner-threading from
+    the separate shadow-detection check."""
+
+    classify_error = _OwnerSensitiveClassifyErrorDescriptor()
+
+
+class _OwnerSensitiveClassifyErrorConnector(
+    _OwnerSensitiveClassifyErrorMixin, ReferenceConnector
+):
+    """The descriptor must be resolved against this class, not the mixin."""
 
 
 class _MergeFormDialect(ReferencePostgresDialect):
@@ -768,6 +881,90 @@ class TestOverrideSurfaceBreaks:
         report = _messages(violations)
         assert "classify_error" in report
         assert "AttributeError" in report
+
+    def test_forwarding_wrapper_classify_error_is_allowed(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A plain functools.wraps forwarder resolves to what it forwards to."""
+        assert (
+            check_override_surface(
+                _with_connector(reference_target, _WrappedClassifyErrorConnector)
+            )
+            == []
+        )
+
+    def test_broken_forwarding_wrapper_classify_error_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        violations = check_override_surface(
+            _with_connector(reference_target, _BrokenWrappedClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "signature" in report
+
+    def test_partial_classify_error_is_allowed(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A functools.partial's own adjusted signature is what's checked."""
+        assert (
+            check_override_surface(
+                _with_connector(reference_target, _PartialClassifyErrorConnector)
+            )
+            == []
+        )
+
+    def test_broken_partial_classify_error_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        violations = check_override_surface(
+            _with_connector(reference_target, _BrokenPartialClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "signature" in report
+
+    def test_async_partial_classify_error_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        violations = check_override_surface(
+            _with_connector(reference_target, _AsyncPartialClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "async" in report
+
+    def test_async_generator_classify_error_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        violations = check_override_surface(
+            _with_connector(reference_target, _AsyncGeneratorClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "async" in report
+
+    def test_singledispatch_broken_registered_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A registered implementation, not just the default, must be checked."""
+        violations = check_override_surface(
+            _with_connector(reference_target, _SingledispatchBrokenRegisteredConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "signature" in report
+
+    def test_owner_sensitive_descriptor_resolves_against_the_leaf(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """An owner-sensitive descriptor is checked against the real target."""
+        assert (
+            check_override_surface(
+                _with_connector(reference_target, _OwnerSensitiveClassifyErrorConnector)
+            )
+            == []
+        )
 
     def test_staticmethod_hook_is_allowed(
         self, reference_target: ConformanceTarget

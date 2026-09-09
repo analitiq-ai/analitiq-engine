@@ -167,32 +167,27 @@ def _base_call_shapes(base_fn: Any) -> list[tuple[str, list[Any], dict[str, Any]
     ]
 
 
-def _signature_mismatch(base_fn: Any, override_fn: Any) -> str | None:
-    """Explain why *override_fn* cannot take the base hook's calls, if so.
+def _signature_mismatch(base_fn: Any, resolved: Any) -> str | None:
+    """Explain why *resolved* cannot take the base hook's calls, if so.
 
     Checked by binding every call shape the base signature admits (see
-    :func:`_base_call_shapes`) against the override's signature — so an
+    :func:`_base_call_shapes`) against *resolved*'s signature — so an
     override may add defaulted parameters of its own, but a dropped,
     renamed, de-keyworded, or made-required parameter fails with the
-    binder's own explanation. *override_fn* is always the already-bound,
-    self-less effective callable (see :func:`_effective_callable`), so no
-    implicit-self placeholder is needed here for any override shape.
-
-    ``follow_wrapped=False`` is tried first: a dispatching wrapper
-    (``functools.singledispatchmethod``) copies its original, still-self-ful
-    signature onto itself via ``__wrapped__``, and following that chain
-    would reintroduce exactly the placeholder problem this function no
-    longer needs. A wrapper with no signature of its own (a bound
-    ``functools.lru_cache``) raises instead, so the wrapped signature is
-    the fallback, not the default.
+    binder's own explanation. *resolved* is always the already-bound,
+    self-less form (see :func:`_resolve_via_instance`), so no
+    implicit-self placeholder is needed here for any override shape, and
+    plain :func:`inspect.signature` -- following ``__wrapped__`` by
+    default -- is exactly right: it already reads a callable object's
+    own ``__call__`` and a ``functools.partial``'s adjusted arguments
+    correctly on its own, and it is what lets an ordinary
+    ``functools.wraps`` forwarding decorator resolve to what it actually
+    forwards to instead of its generic ``(*args, **kwargs)`` shape.
     """
     try:
-        override_sig = inspect.signature(override_fn, follow_wrapped=False)
+        override_sig = inspect.signature(resolved)
     except (TypeError, ValueError):
-        try:
-            override_sig = inspect.signature(override_fn)
-        except (TypeError, ValueError):
-            return "its signature cannot be introspected"
+        return "its signature cannot be introspected"
     for shape_name, args, kwargs in _base_call_shapes(base_fn):
         try:
             override_sig.bind(*args, **kwargs)
@@ -243,7 +238,7 @@ def _audit_dialect_class(dialect_cls: type) -> list[Violation]:
                     )
                     continue
                 mismatch = _hook_shape_problem(
-                    klass, name, SqlDialect, hook_label="dialect hook"
+                    klass, name, SqlDialect, dialect_cls, hook_label="dialect hook"
                 )
                 if mismatch is not None:
                     violations.append(Violation(CHECK, mismatch))
@@ -272,65 +267,76 @@ def _audit_dialect_class(dialect_cls: type) -> list[Violation]:
     return violations
 
 
-def _resolve_via_instance(klass: type, raw: Any) -> Any:
-    """Resolve *raw* as an instance of *klass* would, without instantiating it.
+def _candidate_raws(raw: Any) -> list[Any]:
+    """Every class-dict entry *raw* could resolve to at runtime.
 
-    *raw* is one of *klass*'s own ``vars(klass)`` entries. A hand-written
-    classification of "does this kind of attribute carry an implicit
-    self" cannot keep up with every descriptor Python allows
-    (a plain method, ``staticmethod``, ``classmethod``, a callable
-    object, an ``lru_cache``- or ``singledispatchmethod``-wrapped
-    method, ...); each new kind Codex found was one more guess this
-    module hadn't made yet. Every one of those resolves purely from
-    identity and the owning class, never from instance state, when run
-    through the real descriptor protocol -- so a bare, uninitialized
-    stand-in is safe to bind against, and there is nothing left to
-    guess: whatever comes back is already bound exactly as a real call
-    would see it. A plain value with no ``__get__`` (a callable object,
-    a non-callable attribute) is identical whether read from the class
-    or an instance, so it is returned unchanged.
+    Normally just ``[raw]``. A ``functools.singledispatchmethod``
+    dispatches to whichever of its registered implementations matches
+    the caught exception's type -- not only the default implementation
+    reached when nothing more specific matches -- so every one of them
+    is a shape a real call could hit and must be checked.
     """
     if isinstance(raw, functools.singledispatchmethod):
-        # The bound dispatcher's own signature is a generic (*args,
-        # **kwargs) passthrough that accepts every call shape regardless
-        # of the wrapped implementation -- validate the default
-        # implementation instead, the one a call reaches when no
-        # registered type matches.
-        raw = raw.func
+        return list(raw.dispatcher.registry.values())
+    return [raw]
+
+
+def _resolve_via_instance(owning_cls: type, raw: Any) -> Any:
+    """Resolve *raw* as an instance of *owning_cls* would, without instantiating it.
+
+    *owning_cls* is the concrete connector or dialect class a real call
+    resolves against -- not necessarily the class *raw* is defined on
+    when that is a connector-owned mixin, since an owner-sensitive
+    descriptor's ``__get__`` can behave differently depending on which
+    class it is asked to bind to; the resolution here must match what a
+    real call would see, not what the mixin alone would produce.
+
+    A hand-written classification of "does this kind of attribute carry
+    an implicit self" cannot keep up with every descriptor Python allows
+    (a plain method, ``staticmethod``, ``classmethod``, a callable
+    object, an ``lru_cache``-wrapped method, ...); each new kind Codex
+    found was one more guess this module hadn't made yet. Every one of
+    those resolves purely from identity and the owning class, never from
+    instance state, when run through the real descriptor protocol -- so
+    a bare, uninitialized stand-in is safe to bind against, and there is
+    nothing left to guess: whatever comes back is already bound exactly
+    as a real call would see it. A plain value with no ``__get__`` (a
+    callable object, a non-callable attribute) is identical whether read
+    from the class or an instance, so it is returned unchanged.
+    """
     descriptor_get = getattr(type(raw), "__get__", None)
     if descriptor_get is None:
         return raw
-    return descriptor_get(raw, object.__new__(klass), klass)
+    return descriptor_get(raw, object.__new__(owning_cls), owning_cls)
 
 
-def _effective_callable(resolved: Any) -> Any | None:
-    """Return the routine that runs when *resolved* is called, or ``None``.
+def _async_probe(resolved: Any) -> Any:
+    """Return what the async-ness checks must inspect to see the truth.
 
-    A function or bound method (a plain override, a ``staticmethod``, a
-    ``classmethod``, an ``lru_cache``/``singledispatchmethod`` wrapper
-    once bound) is itself that routine. A callable *object* runs through
-    its own ``__call__`` -- resolving that, rather than the object,
-    is what lets :func:`inspect.iscoroutinefunction` and
-    :func:`inspect.signature` see the truth (an async ``__call__``, the
-    real parameter list) instead of reporting on the wrapping object,
-    which is neither.
+    :func:`inspect.iscoroutinefunction` and ``isasyncgenfunction`` already
+    unwrap a function, bound method, or ``functools.partial`` correctly on
+    their own. Neither looks inside a callable *object*'s own ``__call__``,
+    so an async (or async-generator) ``__call__`` hiding behind one still
+    reads as plain synchronous unless ``__call__`` itself is offered up
+    instead.
     """
-    if inspect.isroutine(resolved):
+    if inspect.isroutine(resolved) or isinstance(resolved, functools.partial):
         return resolved
-    if not callable(resolved):
-        return None
-    return resolved.__call__
+    return resolved.__call__ if callable(resolved) else resolved
 
 
 def _hook_shape_problem(
-    klass: type, name: str, base_cls: type, *, hook_label: str
+    klass: type, name: str, base_cls: type, owning_cls: type, *, hook_label: str
 ) -> str | None:
     """Check one sanctioned override's shape against *base_cls*'s definition.
 
     *base_cls* is the class that declares the hook's contract (``SqlDialect``
     for a dialect hook, ``BaseDestinationHandler`` for the connector-class
-    ``classify_error`` escape hatch) and *hook_label* names it in the
-    violation text.
+    ``classify_error`` escape hatch); *owning_cls* is the concrete
+    connector/dialect class a real call resolves against, which may differ
+    from *klass* (the class *name* is actually defined on, when that is a
+    connector-owned mixin); *hook_label* names the hook in the violation
+    text.
     """
     base_attr = inspect.getattr_static(base_cls, name)
     base_callable = callable(base_attr) or isinstance(
@@ -340,42 +346,44 @@ def _hook_shape_problem(
         # A data attribute (name, quote_char, max_identifier_length, ...):
         # any value is the connector's to set.
         return None
-    raw_override = inspect.getattr_static(klass, name)
-    try:
-        resolved = _resolve_via_instance(klass, raw_override)
-    except Exception as exc:
-        # classify_via_hook (declarations.py) treats a descriptor that
-        # raises on resolution as a broken hook and maps it to "config"
-        # at runtime, never crashing the caller reporting the original
-        # failure -- tier 1 must catch the same defect at authoring
-        # time, not propagate it out of the conformance run.
-        return (
-            f"{klass.__name__}.{name} raised {type(exc).__name__} "
-            f"resolving the sanctioned {hook_label} ({exc}); a hook must "
-            f"resolve without relying on state {klass.__name__} only sets "
-            f"up in __init__."
-        )
-    effective = _effective_callable(resolved)
-    if effective is None:
-        return (
-            f"{klass.__name__}.{name} replaces the sanctioned {hook_label} "
-            f"with a non-callable {type(raw_override).__name__}; the CDK "
-            f"calls it."
-        )
-    if inspect.iscoroutinefunction(effective):
-        return (
-            f"{klass.__name__}.{name} is declared async; the CDK calls "
-            f"every {hook_label} synchronously and would receive an "
-            f"unawaited coroutine instead of the hook's result."
-        )
     base_fn = inspect.unwrap(getattr(base_cls, name))
-    mismatch = _signature_mismatch(base_fn, effective)
-    if mismatch is None:
-        return None
-    return (
-        f"{klass.__name__}.{name} breaks the sanctioned {hook_label} "
-        f"signature: {mismatch}"
-    )
+    raw_override = inspect.getattr_static(klass, name)
+    for raw_candidate in _candidate_raws(raw_override):
+        try:
+            resolved = _resolve_via_instance(owning_cls, raw_candidate)
+        except Exception as exc:
+            # classify_via_hook (declarations.py) treats a descriptor that
+            # raises on resolution as a broken hook and maps it to
+            # "config" at runtime, never crashing the caller reporting
+            # the original failure -- tier 1 must catch the same defect
+            # at authoring time, not propagate it out of the conformance
+            # run.
+            return (
+                f"{klass.__name__}.{name} raised {type(exc).__name__} "
+                f"resolving the sanctioned {hook_label} ({exc}); a hook "
+                f"must resolve without relying on state "
+                f"{owning_cls.__name__} only sets up in __init__."
+            )
+        if not callable(resolved):
+            return (
+                f"{klass.__name__}.{name} replaces the sanctioned "
+                f"{hook_label} with a non-callable "
+                f"{type(raw_candidate).__name__}; the CDK calls it."
+            )
+        probe = _async_probe(resolved)
+        if inspect.iscoroutinefunction(probe) or inspect.isasyncgenfunction(probe):
+            return (
+                f"{klass.__name__}.{name} is declared async; the CDK calls "
+                f"every {hook_label} synchronously and would receive an "
+                f"unawaited coroutine instead of the hook's result."
+            )
+        mismatch = _signature_mismatch(base_fn, resolved)
+        if mismatch is not None:
+            return (
+                f"{klass.__name__}.{name} breaks the sanctioned "
+                f"{hook_label} signature: {mismatch}"
+            )
+    return None
 
 
 def _is_authored_callable(value: Any) -> bool:
@@ -424,6 +432,7 @@ def _audit_connector_class(connector_cls: type) -> list[Violation]:
                     klass,
                     name,
                     BaseDestinationHandler,
+                    connector_cls,
                     hook_label="classify_error hook",
                 )
                 if mismatch is not None:
