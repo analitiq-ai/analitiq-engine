@@ -75,6 +75,13 @@ class TestFailureFacts:
         exc = ApiResponseError(None, (), status=200, declared_category="config")
         assert failure_facts(exc, error_map=None) == (200, "config")
 
+    def test_an_off_vocabulary_declared_category_maps_to_config(self) -> None:
+        # declared_category takes any string with no construction-time
+        # check, and a connector can raise ApiResponseError directly -- an
+        # off-vocabulary value must not reach a verdict-table KeyError.
+        exc = ApiResponseError(None, (), status=200, declared_category="retry_me")
+        assert failure_facts(exc, error_map=None) == (200, "config")
+
     def test_a_status_less_error_resolves_by_the_declared_map(self) -> None:
         error_map = parse_declared_error_map(
             {
@@ -103,13 +110,15 @@ class TestFailureFacts:
     def test_a_crashing_classify_error_does_not_displace_the_original_failure(
         self,
     ) -> None:
+        # No RuntimeError escapes; the broken classification maps to
+        # "config" (fatal, non-retryable) rather than being guessed at.
         def _broken(e):
             raise RuntimeError("connector bug")
 
         exc = aiohttp.ClientPayloadError("truncated")
         assert failure_facts(exc, error_map=None, classify_error=_broken) == (
             None,
-            None,
+            "config",
         )
 
 

@@ -9,8 +9,6 @@ JSON edit (the #245 class) when it fits the declarative shape, or a
 
 from __future__ import annotations
 
-import pytest
-
 from cdk.declarations import CLASS_NAME_SIGNAL, parse_declared_error_map
 from src.worker.source_service import classify_read_error
 
@@ -93,19 +91,23 @@ class TestClassifyErrorFallback:
         assert deterministic is True
         assert declared == "config"
 
-    def test_off_vocabulary_classify_error_return_fails_loud(self):
-        from cdk.declarations import ConnectorDeclarationError
+    def test_off_vocabulary_classify_error_return_maps_to_config(self):
+        # The hook ran and answered -- wrongly. The engine cannot guess
+        # what it meant, so it's treated as a broken classification
+        # mechanism: deterministic (non-retryable), same as a crash.
+        deterministic, declared = classify_read_error(
+            ValueError("boom"), None, lambda exc: "retry_me"
+        )
+        assert deterministic is True
+        assert declared == "config"
 
-        with pytest.raises(ConnectorDeclarationError, match="not in the engine"):
-            classify_read_error(ValueError("boom"), None, lambda exc: "retry_me")
-
-    def test_a_crashing_classify_error_falls_back_to_the_ladder(self):
+    def test_a_crashing_classify_error_maps_to_config(self):
         def _broken(exc):
             raise RuntimeError("connector bug")
 
         deterministic, declared = classify_read_error(TypeError("boom"), None, _broken)
         assert deterministic is True
-        assert declared is None
+        assert declared == "config"
 
 
 class TestBirthSiteCategory:
@@ -129,21 +131,21 @@ class TestBirthSiteCategory:
         assert deterministic is True
         assert declared == "auth"
 
-    def test_off_vocabulary_birth_site_category_does_not_displace_the_failure(self):
+    def test_off_vocabulary_birth_site_category_maps_to_config(self):
         # ReadError/TransientReadError accept any string for
         # declared_category with no vocabulary check at construction, and
         # are public CDK classes untrusted connector code can raise
         # directly. classify_read_error runs inside the except block that
         # is reporting exc itself, so an off-vocabulary value here must not
-        # raise and displace it -- it falls through to the declared map /
-        # classify_error / type ladder instead, the same guarantee
-        # call_declared_hook makes for those paths.
+        # raise and displace it -- and the engine does not guess at what it
+        # might have meant, so it maps to "config" (deterministic), the
+        # same answer call_declared_hook gives a broken classify_error.
         from cdk.exceptions import ReadError
 
         exc = ReadError("status 503", declared_category="retry_me")
         deterministic, declared = classify_read_error(exc, None)
-        assert deterministic is True  # ReadError is in the deterministic ladder
-        assert declared is None
+        assert deterministic is True
+        assert declared == "config"
 
     def test_off_vocabulary_birth_site_category_logs_a_warning(self, caplog):
         import logging

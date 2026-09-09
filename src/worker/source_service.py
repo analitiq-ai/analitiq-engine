@@ -21,11 +21,10 @@ import grpc
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.declarations import (
     DECLARED_READ_DETERMINISTIC,
-    ConnectorDeclarationError,
+    ERROR_CATEGORY_VALUES,
     ErrorMap,
     call_declared_hook,
     error_map_for,
-    require_declared_category,
 )
 from cdk.exceptions import ReadError, TransportSpecError
 from cdk.sql.exceptions import TlsVerificationError, UnsupportedDialectOperationError
@@ -85,31 +84,29 @@ def classify_read_error(
     #513: declared verdicts, then the connector's ``classify_error`` code
     hook, then the connector's sanctioned typed errors
     (``_DETERMINISTIC_READ_ERRORS`` — the hook), never text.
+
+    An off-vocabulary birth-site ``declared_category`` (``ReadError`` /
+    ``TransientReadError`` accept any string, with no construction-time
+    check) is not a "try the next source" signal — the engine does not
+    guess at what a broken connector declaration might have meant. It
+    maps straight to ``"config"``, the same fatal/non-retryable answer
+    :func:`~cdk.declarations.call_declared_hook` gives a broken
+    ``classify_error`` hook below, so both broken-classification paths in
+    this function agree.
     """
     birth_site = getattr(exc, "declared_category", None)
     if isinstance(birth_site, str):
-        try:
-            birth_site = require_declared_category(
-                birth_site, source=f"{type(exc).__name__}.declared_category"
-            )
-        except ConnectorDeclarationError:
-            # ReadError/TransientReadError accept any string for
-            # declared_category with no construction-time check, and are
-            # public CDK classes untrusted connector code can raise
-            # directly -- an off-vocabulary value reaching here must not
-            # raise out of the except block that is reporting exc itself
-            # (the same "never displace the original failure" guarantee
-            # call_declared_hook makes for the two paths below). Log it
-            # and fall through to them instead of trusting this birth site.
+        if birth_site not in ERROR_CATEGORY_VALUES:
             logger.warning(
-                "%s.declared_category %r failed vocabulary validation; "
-                "falling through to the declared map / classify_error",
+                "%s.declared_category %r is not in the engine vocabulary "
+                "%s; treating the connector's classification as broken "
+                "(config)",
                 type(exc).__name__,
                 birth_site,
-                exc_info=True,
+                list(ERROR_CATEGORY_VALUES),
             )
-        else:
-            return DECLARED_READ_DETERMINISTIC[birth_site], birth_site
+            birth_site = "config"
+        return DECLARED_READ_DETERMINISTIC[birth_site], birth_site
     match = error_map.match_exception(exc) if error_map is not None else None
     if match is not None:
         return DECLARED_READ_DETERMINISTIC[match.category], match.category

@@ -25,7 +25,7 @@ import aiohttp
 import orjson
 from aiohttp_retry import ExponentialRetry, RetryClient
 
-from ..declarations import ErrorMap
+from ..declarations import ERROR_CATEGORY_VALUES, ErrorMap
 from ..rate_limiter import RateLimiter
 from .body import (
     FORM_CONTENT_TYPE,
@@ -224,8 +224,25 @@ def failure_facts(
     separate is what stops a broad declared match from claiming deterministic
     4xx rejections. *classify_error_source* names the connector class for
     the hook's log line and any off-vocabulary-category error.
+
+    ``exc.declared_category`` (the birth-site value) is untrusted -- a
+    connector can raise any ``ClientResponseError`` subclass with any
+    string there, with no construction-time check. An off-vocabulary
+    value maps to ``"config"``, the same fatal/non-retryable answer
+    :func:`~cdk.declarations.call_declared_hook` gives a broken
+    ``classify_error`` hook, rather than reaching a verdict-table
+    ``KeyError`` in the caller.
     """
     declared = getattr(exc, "declared_category", None)
+    if isinstance(declared, str) and declared not in ERROR_CATEGORY_VALUES:
+        logger.warning(
+            "%s.declared_category %r is not in the engine vocabulary %s; "
+            "treating the connector's classification as broken (config)",
+            type(exc).__name__,
+            declared,
+            list(ERROR_CATEGORY_VALUES),
+        )
+        declared = "config"
     if isinstance(exc, aiohttp.ClientResponseError):
         status = exc.status
         if declared is None and error_map is not None:

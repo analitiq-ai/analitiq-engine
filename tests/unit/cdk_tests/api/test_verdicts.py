@@ -20,11 +20,7 @@ from cdk.api.verdicts import (
     read_verdict,
     write_verdict,
 )
-from cdk.declarations import (
-    ConnectorDeclarationError,
-    ErrorMap,
-    parse_declared_error_map,
-)
+from cdk.declarations import ErrorMap, parse_declared_error_map
 from cdk.exceptions import ReadError, TransientReadError
 from cdk.types import AckStatus, FailureCategory
 
@@ -146,21 +142,27 @@ class TestClassification:
             == "transient"
         )
 
-    def test_off_vocabulary_classify_error_return_fails_loud(self) -> None:
-        with pytest.raises(ConnectorDeclarationError, match="not in the engine"):
+    def test_off_vocabulary_classify_error_return_maps_to_config(self) -> None:
+        # The hook ran and answered -- wrongly. The engine cannot guess
+        # what it meant, so it's treated as a broken classification
+        # mechanism: fatal, non-retryable, the same as a crash.
+        assert (
             classify_exception(
                 ValueError("x"), error_map=None, classify_error=lambda exc: "retry_me"
             )
+            == "config"
+        )
 
     def test_a_crashing_classify_error_does_not_displace_the_original_failure(
         self,
     ) -> None:
+        # No RuntimeError escapes; the broken hook maps to "config".
         def _broken(exc):
             raise RuntimeError("connector bug")
 
         assert (
             classify_exception(ValueError("x"), error_map=None, classify_error=_broken)
-            is None
+            == "config"
         )
 
     def test_a_crashing_dialect_classify_does_not_displace_the_original_failure(
@@ -170,15 +172,19 @@ class TestClassification:
             def classify(self, status: int, body: object) -> str | None:
                 raise RuntimeError("connector bug")
 
-        assert classify_status(400, {}, dialect=BrokenDialect(), error_map=None) is None
+        assert (
+            classify_status(400, {}, dialect=BrokenDialect(), error_map=None)
+            == "config"
+        )
 
-    def test_off_vocabulary_dialect_classify_return_fails_loud(self) -> None:
+    def test_off_vocabulary_dialect_classify_return_maps_to_config(self) -> None:
         class BadDialect:
             def classify(self, status: int, body: object) -> str | None:
                 return "retry_me"
 
-        with pytest.raises(ConnectorDeclarationError, match="not in the engine"):
-            classify_status(400, {}, dialect=BadDialect(), error_map=None)
+        assert (
+            classify_status(400, {}, dialect=BadDialect(), error_map=None) == "config"
+        )
 
 
 class TestDeclaredCategorySurvives:

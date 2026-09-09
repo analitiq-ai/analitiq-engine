@@ -118,18 +118,21 @@ class TestAckLadderDeclaredFirst:
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert result.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
 
-    def test_classify_error_off_vocabulary_return_raises_loud(self):
-        from cdk.declarations import ConnectorDeclarationError
-
+    def test_classify_error_off_vocabulary_return_maps_to_config(self):
+        # The hook ran and answered -- wrongly. The engine cannot guess
+        # what it meant, so it's treated as a broken classification
+        # mechanism: fatal, non-retryable, the same as a crash.
         handler = self._handler(None)
         handler.classify_error = lambda exc: "retry_me"
-        with pytest.raises(ConnectorDeclarationError, match="not in the engine"):
-            handler._classify_unexpected_write_error(ProgrammingError("boom"))
+        result = handler._classify_unexpected_write_error(ProgrammingError("boom"))
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
 
     def test_a_crashing_classify_error_does_not_displace_the_original_failure(self):
         # A connector's classify_error is untrusted, potentially AI-authored
         # code; a bug in it must not crash the write-ack ladder or hide the
-        # original exception -- it just falls through to the heuristic.
+        # original exception -- the crash itself maps to "config" (fatal,
+        # non-retryable), the same as an off-vocabulary return.
         handler = self._handler(None)
 
         def _broken(exc):
@@ -138,6 +141,7 @@ class TestAckLadderDeclaredFirst:
         handler.classify_error = _broken
         result = handler._classify_unexpected_write_error(ProgrammingError("boom"))
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
         assert "ProgrammingError" in result.failure_summary
 
 
@@ -277,11 +281,15 @@ class TestAdbcBoundary:
             backend._reraise_driver_error(exc, write_cycle=True)
 
     def test_a_crashing_hook_does_not_displace_the_original_failure(self):
+        # The crash maps to "config" (a claim), so the raw exception
+        # propagates for the facade's ack ladder to derive the fatal
+        # config-defect verdict from -- not the unclaimed-fatal-name
+        # reclassification a crash used to fall through to.
         def _broken(exc):
             raise RuntimeError("connector bug")
 
         backend = self._backend(classify_error=_broken)
-        with pytest.raises(AdbcConfigurationError):
+        with pytest.raises(ProgrammingError):
             backend._reraise_driver_error(ProgrammingError("boom"), write_cycle=True)
 
     def test_non_fatal_unclaimed_exception_reraises_raw(self):

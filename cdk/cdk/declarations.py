@@ -194,18 +194,21 @@ class DeclaredMatch:
 
 
 def require_declared_category(category: str, *, source: str) -> str:
-    """Validate a category against the engine vocabulary.
+    """Validate a category against the engine vocabulary. Raises loud.
 
-    The one shared check: a connector-authored code hook's return
-    (:meth:`~cdk.base_handler.BaseDestinationHandler.classify_error`, a
-    dialect's ``classify()``) and :class:`DeclaredMatch` construction both
-    call this, so an off-vocabulary string fails loud here instead of a
-    ``KeyError`` inside :data:`DECLARED_WRITE_VERDICTS` or
-    :data:`DECLARED_READ_DETERMINISTIC`. The declarative ``error_map``
-    lookup is also checked earlier, at parse time (:func:`_require_category`)
-    -- a different call shape (a JSON-pointer ``path``, not a hook's
-    ``source``) for a different context, not a second implementation of
-    this rule.
+    Reserved for contexts where an off-vocabulary value can only mean an
+    *engine* bug, never a connector one -- :class:`DeclaredMatch`
+    construction is the one caller: every real construction site already
+    validated its category at parse time (:func:`_require_category`), so
+    a failure here means declarations.py itself built a ``DeclaredMatch``
+    wrong, which should stop the process rather than be routed around.
+
+    A category discovered at *runtime* from connector-authored code (a
+    ``classify_error``/``classify()`` hook's return, a birth-site
+    ``declared_category`` stamped on a typed error) is never validated
+    with this function -- raising there would displace the original
+    failure being reported. Those call sites map an off-vocabulary value
+    to ``"config"`` instead; see :func:`call_declared_hook`.
     """
     if category not in ERROR_CATEGORY_VALUES:
         raise ConnectorDeclarationError(
@@ -218,18 +221,25 @@ def require_declared_category(category: str, *, source: str) -> str:
 def call_declared_hook(
     hook: Callable[..., str | None], *args: Any, source: str
 ) -> str | None:
-    """Call a connector-authored classification hook, never letting it raise.
+    """Call a connector-authored classification hook. Never raises.
 
     Covers both shapes this mechanism has: ``classify_error(exc)`` and a
     dialect's ``classify(status, body)``. Both are untrusted,
     potentially-AI-authored connector code, called from inside the
     ``except`` block that is in the middle of reporting the *original*
-    failure — a crash here must not displace it, mirroring the same
-    guarantee :meth:`ErrorMap.match_exception` already makes for the
-    declarative read (see its docstring). An off-vocabulary *return* is a
-    different failure mode — the hook did run and answered, just wrongly —
-    and still raises loud via :func:`require_declared_category`, since that
-    is the hook's own declared output, not an implementation crash.
+    failure — nothing from here may displace it, mirroring the guarantee
+    :meth:`ErrorMap.match_exception` already makes for the declarative
+    read (see its docstring).
+
+    A crash and an off-vocabulary return are the same fact stated two
+    ways: the connector's classification mechanism is broken. The engine
+    does not guess its way around a broken mechanism (that would mean
+    trusting an exception's Python *type* to stand in for a taxonomy the
+    connector itself failed to supply) — it maps straight to
+    ``"config"``, the engine's own category for "this needs a fix in the
+    connector," fatal and non-retryable in both the write and read
+    verdict tables. ``None`` (the hook ran and declined to classify) is
+    the only case that falls through to the caller's next fallback.
     """
     try:
         category = hook(*args)
@@ -238,14 +248,24 @@ def call_declared_hook(
         # here, only the source label (a class/method name this process
         # chose, not connector-controlled content).
         logger.warning(
-            "%s raised; treating this classification attempt as unclaimed",
+            "%s raised; treating the connector's classification as broken " "(config)",
             source,
             exc_info=True,
         )
-        return None
+        return "config"
     if category is None:
         return None
-    return require_declared_category(category, source=source)
+    if category not in ERROR_CATEGORY_VALUES:
+        logger.warning(
+            "%s classified an error as %r, which is not in the engine "
+            "vocabulary %s; treating the connector's classification as "
+            "broken (config)",
+            source,
+            category,
+            list(ERROR_CATEGORY_VALUES),
+        )
+        return "config"
+    return category
 
 
 def _require_category(value: Any, path: str, *, source: str) -> str:

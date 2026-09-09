@@ -277,10 +277,13 @@ class TestCallDeclaredHook:
     """The guard around a connector-authored classification hook.
 
     Both ``classify_error(exc)`` and a dialect's ``classify(status, body)``
-    are untrusted, potentially-AI-authored connector code; a crash inside
-    one must not displace the original failure the caller is in the middle
-    of reporting -- the same guarantee ``ErrorMap.match_exception`` already
-    makes for the declarative read.
+    are untrusted, potentially-AI-authored connector code, called from
+    inside the boundary that is reporting the *original* failure. A crash
+    and an off-vocabulary return are the same fact stated two ways: the
+    connector's classification mechanism is broken. Neither may displace
+    the original failure, and the engine does not guess at what a broken
+    mechanism might have meant -- both map to ``"config"``, fatal and
+    non-retryable in both verdict tables, never a fallback guess.
     """
 
     def test_normal_return_passes_through(self):
@@ -292,19 +295,24 @@ class TestCallDeclaredHook:
     def test_none_return_passes_through(self):
         assert call_declared_hook(lambda exc: None, ValueError("x"), source="t") is None
 
-    def test_off_vocabulary_return_still_raises_loud(self):
-        # The hook ran and answered -- wrongly. That's a declared-content
-        # defect, not a crash, so it still fails loud.
-        with pytest.raises(ConnectorDeclarationError, match="not in the engine"):
+    def test_off_vocabulary_return_maps_to_config(self):
+        # The hook ran and answered -- wrongly. The engine cannot guess
+        # what it meant, so this is treated the same as a crash: a broken
+        # classification mechanism, fatal and non-retryable.
+        assert (
             call_declared_hook(lambda exc: "retry_me", ValueError("x"), source="t")
+            == "config"
+        )
 
-    def test_a_crashing_hook_is_caught_and_treated_as_unclaimed(self):
+    def test_a_crashing_hook_maps_to_config(self):
         def _broken(exc):
             raise RuntimeError("connector bug")
 
         # No RuntimeError escapes -- it must not displace the exception
-        # being classified.
-        assert call_declared_hook(_broken, ValueError("x"), source="t") is None
+        # being classified -- and the connector's classification mechanism
+        # having crashed is itself treated as a config defect, not silently
+        # dropped.
+        assert call_declared_hook(_broken, ValueError("x"), source="t") == "config"
 
     def test_a_crashing_hook_logs_a_warning_naming_the_source(self, caplog):
         import logging
@@ -315,6 +323,17 @@ class TestCallDeclaredHook:
         with caplog.at_level(logging.WARNING, logger="cdk.declarations"):
             call_declared_hook(
                 _broken, ValueError("x"), source="MyConnector.classify_error"
+            )
+        assert any("MyConnector.classify_error" in r.message for r in caplog.records)
+
+    def test_an_off_vocabulary_return_logs_a_warning_naming_the_source(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="cdk.declarations"):
+            call_declared_hook(
+                lambda exc: "retry_me",
+                ValueError("x"),
+                source="MyConnector.classify_error",
             )
         assert any("MyConnector.classify_error" in r.message for r in caplog.records)
 
@@ -331,11 +350,13 @@ class TestCallDeclaredHook:
             == "config"
         )
 
-    def test_a_crashing_two_argument_hook_is_also_caught(self):
+    def test_a_crashing_two_argument_hook_also_maps_to_config(self):
         def _broken(status, body):
             raise KeyError("body")
 
-        assert call_declared_hook(_broken, 400, {"error": "bad"}, source="t") is None
+        assert (
+            call_declared_hook(_broken, 400, {"error": "bad"}, source="t") == "config"
+        )
 
 
 class TestConcurrencyParse:
