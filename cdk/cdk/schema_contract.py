@@ -211,6 +211,22 @@ def _is_nested(arrow_type: pa.DataType) -> bool:
     )
 
 
+def _epoch_day_unit_mismatch(name: Any, encoding: Mapping[str, Any], kind: str) -> bool:
+    """Whether *encoding* is an epoch decoder with unit ``DAY`` for a non-``date`` kind.
+
+    ``_ticks_to_array``'s own ``DAY`` branch builds only a Date32/Date64;
+    the broad name-vs-kind compatibility table accepts ``epoch``/
+    ``regex_epoch`` for Timestamp/Time/Duration too, since every other unit
+    legitimately reaches those, so ``DAY`` needs this narrower check rather
+    than only the one inside the decoder closure at data time.
+    """
+    return (
+        name in ("epoch", "regex_epoch")
+        and encoding.get("unit") == "DAY"
+        and kind != "date"
+    )
+
+
 def _bind_code_encoder(
     code_encoder: Callable[[str, Any, pa.DataType], Any],
     field_name: str,
@@ -494,72 +510,78 @@ class SchemaContract:
             field_def = self._field_defs.get(f.name) or {}
             encoding = field_def.get("encoding")
             if _is_nested(f.type):
-                if encoding is not None:
-                    if not isinstance(encoding, Mapping):
-                        raise InvalidTypeMapError(
-                            f"field {f.name!r}: 'encoding' must be an "
-                            f"object, got {type(encoding).__name__}"
-                        )
-                    if encoding.get("name") != READ_CODE_ENCODING_NAME:
-                        raise InvalidTypeMapError(
-                            f"field {f.name!r}: a nested (Object/List) "
-                            f"field's own top-level encoding must be "
-                            f"{{'name': 'code'}} -- resolve_decoder can "
-                            f"resolve any catalog name, but _build_column "
-                            f"would then apply it to the whole dict/list "
-                            f"value and crash; declared "
-                            f"{encoding.get('name')!r}"
-                        )
-                    if self._code_decoder is None:
-                        raise ValueError(
-                            f"field {f.name!r} declares encoding name='code' "
-                            f"but this SchemaContract was built without a "
-                            f"code_decoder"
-                        )
-                    continue
-                self._check_nested_read_encoding(field_def, f.type, f.name)
-                continue
-            kind = ARROW_FAMILIES[arrow_family(f.type)].conversion_kind
-            if encoding is None:
-                if kind in READ_REQUIRES_ENCODING_KINDS:
-                    raise MissingEncodingError(
-                        f.name, str(f.type), direction="read", key="encoding"
-                    )
-                continue
-            if not isinstance(encoding, Mapping):
-                raise InvalidTypeMapError(
-                    f"field {f.name!r}: 'encoding' must be an object, got "
-                    f"{type(encoding).__name__}"
+                self._check_nested_field_encoding(f, field_def, encoding)
+            else:
+                self._check_scalar_read_encoding(f, field_def, encoding)
+
+    def _check_nested_field_encoding(
+        self, f: pa.Field, field_def: dict[str, Any], encoding: Any
+    ) -> None:
+        """Validate a nested (``Object``/``List``) field's own top-level ``encoding``.
+
+        ``None`` recurses into leaves (:meth:`_check_nested_read_encoding`);
+        anything else must be exactly ``{"name": "code"}`` -- no catalog
+        decoder targets a struct/list arrow_type, so a real name would
+        resolve fine here and then crash applying a scalar decoder to the
+        whole value in ``_build_column``.
+        """
+        if encoding is None:
+            self._check_nested_read_encoding(field_def, f.type, f.name)
+            return
+        if not isinstance(encoding, Mapping):
+            raise InvalidTypeMapError(
+                f"field {f.name!r}: 'encoding' must be an object, got "
+                f"{type(encoding).__name__}"
+            )
+        if encoding.get("name") != READ_CODE_ENCODING_NAME:
+            raise InvalidTypeMapError(
+                f"field {f.name!r}: a nested (Object/List) field's own "
+                f"top-level encoding must be {{'name': 'code'}} -- "
+                f"resolve_decoder can resolve any catalog name, but "
+                f"_build_column would then apply it to the whole dict/list "
+                f"value and crash; declared {encoding.get('name')!r}"
+            )
+        if self._code_decoder is None:
+            raise ValueError(
+                f"field {f.name!r} declares encoding name='code' but this "
+                f"SchemaContract was built without a code_decoder"
+            )
+
+    def _check_scalar_read_encoding(
+        self, f: pa.Field, field_def: dict[str, Any], encoding: Any
+    ) -> None:
+        """Validate a scalar field's declared (or required-but-absent) ``encoding``."""
+        kind = ARROW_FAMILIES[arrow_family(f.type)].conversion_kind
+        if encoding is None:
+            if kind in READ_REQUIRES_ENCODING_KINDS:
+                raise MissingEncodingError(
+                    f.name, str(f.type), direction="read", key="encoding"
                 )
-            name = encoding.get("name")
-            if name == READ_CODE_ENCODING_NAME:
-                if self._code_decoder is None:
-                    raise ValueError(
-                        f"field {f.name!r} declares encoding name='code' but "
-                        f"this SchemaContract was built without a code_decoder"
-                    )
-                continue
-            resolve_decoder(field_def, f)
-            if isinstance(name, str) and not decoder_matches_kind(name, kind):
-                raise InvalidTypeMapError(
-                    f"field {f.name!r}: encoding {name!r} does not decode a "
-                    f"{kind!r} value; arrow_type is {f.type!s}"
+            return
+        if not isinstance(encoding, Mapping):
+            raise InvalidTypeMapError(
+                f"field {f.name!r}: 'encoding' must be an object, got "
+                f"{type(encoding).__name__}"
+            )
+        name = encoding.get("name")
+        if name == READ_CODE_ENCODING_NAME:
+            if self._code_decoder is None:
+                raise ValueError(
+                    f"field {f.name!r} declares encoding name='code' but "
+                    f"this SchemaContract was built without a code_decoder"
                 )
-            if (
-                name in ("epoch", "regex_epoch")
-                and encoding.get("unit") == "DAY"
-                and kind != "date"
-            ):
-                # DAY ticks build only a Date32/Date64 (_ticks_to_array's
-                # own DAY branch requires it); the broad name-vs-kind check
-                # above accepts epoch/regex_epoch for Timestamp/Time/Duration
-                # too, since every other unit reaches those, so DAY is the
-                # one unit that needs its own narrower check here rather
-                # than only inside the decoder closure at data time.
-                raise InvalidTypeMapError(
-                    f"field {f.name!r}: encoding {name!r} with unit 'DAY' "
-                    f"only builds a Date32/Date64 arrow_type, got {f.type!s}"
-                )
+            return
+        resolve_decoder(field_def, f)
+        if isinstance(name, str) and not decoder_matches_kind(name, kind):
+            raise InvalidTypeMapError(
+                f"field {f.name!r}: encoding {name!r} does not decode a "
+                f"{kind!r} value; arrow_type is {f.type!s}"
+            )
+        if _epoch_day_unit_mismatch(name, encoding, kind):
+            raise InvalidTypeMapError(
+                f"field {f.name!r}: encoding {name!r} with unit 'DAY' only "
+                f"builds a Date32/Date64 arrow_type, got {f.type!s}"
+            )
 
     @staticmethod
     def _check_nested_read_encoding(

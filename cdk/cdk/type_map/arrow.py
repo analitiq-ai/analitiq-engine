@@ -413,6 +413,37 @@ def _iso8601_ns_remainder(value: str) -> int:
     return int((digits[6:9] + "000")[:3])
 
 
+def _parse_iso8601_scalar(
+    field: pa.Field, row: int, v: str, *, is_ts: bool, is_date_type: bool, tz: Any
+) -> Any:
+    """Parse one wire value into the datetime/date/time ``pa.array`` expects."""
+    try:
+        if is_ts:
+            dt = datetime.fromisoformat(v)
+            if tz and dt.tzinfo is None:
+                raise ValueError(f"value {v!r} is naive but column declares tz={tz!r}")
+            if not tz and dt.tzinfo is not None:
+                dt = dt.replace(tzinfo=None)
+            return dt
+        if is_date_type:
+            return date.fromisoformat(v[:10])
+        return time.fromisoformat(v)
+    except ValueError as exc:
+        raise ValueError(
+            f"column {field.name!r} at row {row}: cannot parse {v!r} as "
+            f"{field.type} via encoding 'iso8601': {exc}"
+        ) from exc
+
+
+def _apply_ns_remainder(array: pa.Array, ns_remainders: list[int]) -> pa.Array:
+    """Add each row's sub-microsecond remainder back onto its raw ticks."""
+    if not any(ns_remainders):
+        return array
+    ticks = array.cast(pa.int64())
+    adjusted = pc.add(ticks, pa.array(ns_remainders, type=pa.int64()))
+    return adjusted.cast(array.type)
+
+
 def _decode_iso8601(_config: Mapping[str, Any]) -> DecodeFn:
     """ISO-8601 text -> Timestamp/Date/Time.
 
@@ -448,32 +479,16 @@ def _decode_iso8601(_config: Mapping[str, Any]) -> DecodeFn:
                     f"column {field.name!r} at row {row}: encoding 'iso8601' "
                     f"expects a string, got {type(v).__name__}"
                 )
-            try:
-                if is_ts:
-                    dt = datetime.fromisoformat(v)
-                    if tz and dt.tzinfo is None:
-                        raise ValueError(
-                            f"value {v!r} is naive but column declares tz={tz!r}"
-                        )
-                    if not tz and dt.tzinfo is not None:
-                        dt = dt.replace(tzinfo=None)
-                    parsed.append(dt)
-                elif is_date_type:
-                    parsed.append(date.fromisoformat(v[:10]))
-                else:
-                    parsed.append(time.fromisoformat(v))
-            except ValueError as exc:
-                raise ValueError(
-                    f"column {field.name!r} at row {row}: cannot parse {v!r} as "
-                    f"{field.type} via encoding 'iso8601': {exc}"
-                ) from exc
+            parsed.append(
+                _parse_iso8601_scalar(
+                    field, row, v, is_ts=is_ts, is_date_type=is_date_type, tz=tz
+                )
+            )
             if track_ns:
                 ns_remainders.append(_iso8601_ns_remainder(v))
         array = pa.array(parsed, type=field.type)
-        if track_ns and any(ns_remainders):
-            ticks = array.cast(pa.int64())
-            adjusted = pc.add(ticks, pa.array(ns_remainders, type=pa.int64()))
-            array = adjusted.cast(field.type)
+        if track_ns:
+            array = _apply_ns_remainder(array, ns_remainders)
         return array
 
     return decode
