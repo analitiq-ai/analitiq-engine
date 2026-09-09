@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 from analitiq.contracts.endpoints import ResponseExtraction
 from analitiq.contracts.stream import EndpointRef
@@ -97,6 +97,18 @@ def declared_json_types(field: dict[str, Any]) -> list[str]:
     return []
 
 
+#: The two ``cursor_bounds`` epoch formats (``cdk.api.replication._EPOCH_UNIT``),
+#: keyed by the matching ``encoding: {"name": "epoch", "unit": ...}`` unit.
+#: Duplicated rather than imported -- ``replication`` imports
+#: :class:`FieldDeclaration` from this module, so the reverse import would
+#: cycle. MICROSECOND/NANOSECOND/DAY have no entry: ``cursor_bounds`` only
+#: ever reads an epoch cursor back in seconds or milliseconds.
+_CURSOR_EPOCH_FORMAT: Final[dict[str, str]] = {
+    "SECOND": "epoch_seconds",
+    "MILLISECOND": "epoch_milliseconds",
+}
+
+
 @dataclass(frozen=True)
 class FieldDeclaration:
     """What the record schema says a field holds: its JSON type and format.
@@ -150,21 +162,48 @@ def record_field_declaration(
             f"type {field.get('type')!r}; a cursor field needs one plain JSON "
             f"type, nullable or not"
         )
-    encoding = field.get("encoding")
-    if isinstance(encoding, Mapping) and encoding.get("name") not in (
-        None,
-        "iso8601",
-        "epoch",
-    ):
-        raise ReadError(
-            f"endpoint {endpoint_id!r}: cursor field {cursor_field!r} declares "
-            f"encoding {encoding.get('name')!r}; incremental replication "
-            f"checkpoints this field's raw wire value and can only read it "
-            f"back as a bare ISO-8601 string or bare epoch integer (encoding "
-            f"'iso8601'/'epoch', or none declared) -- no other encoding's wire "
-            f"shape is understood by the replication cursor"
-        )
     fmt = field.get("format")
+    encoding = field.get("encoding")
+    if isinstance(encoding, Mapping):
+        name = encoding.get("name")
+        if name not in (None, "iso8601", "epoch"):
+            raise ReadError(
+                f"endpoint {endpoint_id!r}: cursor field {cursor_field!r} "
+                f"declares encoding {name!r}; incremental replication "
+                f"checkpoints this field's raw wire value and can only read "
+                f"it back as a bare ISO-8601 string or bare epoch integer "
+                f"(encoding 'iso8601'/'epoch', or none declared) -- no other "
+                f"encoding's wire shape is understood by the replication "
+                f"cursor"
+            )
+        if name == "epoch":
+            if types[0] != "integer":
+                raise ReadError(
+                    f"endpoint {endpoint_id!r}: cursor field {cursor_field!r} "
+                    f"declares encoding 'epoch' but JSON type {types[0]!r}, "
+                    f"not 'integer'; cursor_bounds reads an epoch cursor back "
+                    f"only from an integer-typed field"
+                )
+            unit = encoding.get("unit")
+            expected_format = (
+                _CURSOR_EPOCH_FORMAT.get(unit) if isinstance(unit, str) else None
+            )
+            if expected_format is None:
+                raise ReadError(
+                    f"endpoint {endpoint_id!r}: cursor field {cursor_field!r} "
+                    f"declares encoding 'epoch' with unit {unit!r}; "
+                    f"incremental replication only reads an epoch cursor "
+                    f"back in {sorted(_CURSOR_EPOCH_FORMAT)!r} units"
+                )
+            if fmt != expected_format:
+                raise ReadError(
+                    f"endpoint {endpoint_id!r}: cursor field {cursor_field!r} "
+                    f"declares encoding 'epoch' with unit {unit!r}, but "
+                    f"format {fmt!r} -- "
+                    f"cursor_bounds reads this field back in whatever unit "
+                    f"format {expected_format!r} names; a mismatch resumes "
+                    f"from the wrong instant"
+                )
     return FieldDeclaration(types[0], fmt if isinstance(fmt, str) and fmt else None)
 
 

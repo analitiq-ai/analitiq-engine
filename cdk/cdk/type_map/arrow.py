@@ -397,6 +397,22 @@ def _ticks_to_array(
     )
 
 
+#: Digits 7-9 of an ISO-8601 fractional-seconds component, as an integer
+#: 0-999 -- the precision ``datetime``/``time`` cannot hold at all (both cap
+#: at microseconds), so :func:`_decode_iso8601` reads it straight off the
+#: string and adds it back after the fact, only for a Timestamp/Time64
+#: column actually declared at nanosecond resolution. Zero for a value with
+#: six or fewer fractional digits, or none at all.
+def _iso8601_ns_remainder(value: str) -> int:
+    match = re.search(r"\.(\d+)", value)
+    if match is None:
+        return 0
+    digits = match.group(1)
+    if len(digits) <= 6:
+        return 0
+    return int((digits[6:9] + "000")[:3])
+
+
 def _decode_iso8601(_config: Mapping[str, Any]) -> DecodeFn:
     """ISO-8601 text -> Timestamp/Date/Time.
 
@@ -413,10 +429,19 @@ def _decode_iso8601(_config: Mapping[str, Any]) -> DecodeFn:
                 f"Timestamp, Date, or Time arrow_type, got {field.type}"
             )
         tz = field.type.tz if is_ts else None
+        # datetime.fromisoformat/time.fromisoformat silently drop any
+        # fractional digit past the sixth (they cap at microseconds) --
+        # "...000000001" parses to microsecond=0, not 1ns, with no error.
+        # Tracked only when the target actually resolves ticks that fine;
+        # every coarser unit already loses nothing by going through them.
+        track_ns = getattr(field.type, "unit", None) == "ns" and (is_ts or is_time_type)
         parsed: list[Any] = []
+        ns_remainders: list[int] = []
         for row, v in enumerate(values):
             if v is None:
                 parsed.append(None)
+                if track_ns:
+                    ns_remainders.append(0)
                 continue
             if not isinstance(v, str):
                 raise ValueError(
@@ -442,7 +467,14 @@ def _decode_iso8601(_config: Mapping[str, Any]) -> DecodeFn:
                     f"column {field.name!r} at row {row}: cannot parse {v!r} as "
                     f"{field.type} via encoding 'iso8601': {exc}"
                 ) from exc
-        return pa.array(parsed, type=field.type)
+            if track_ns:
+                ns_remainders.append(_iso8601_ns_remainder(v))
+        array = pa.array(parsed, type=field.type)
+        if track_ns and any(ns_remainders):
+            ticks = array.cast(pa.int64())
+            adjusted = pc.add(ticks, pa.array(ns_remainders, type=pa.int64()))
+            array = adjusted.cast(field.type)
+        return array
 
     return decode
 

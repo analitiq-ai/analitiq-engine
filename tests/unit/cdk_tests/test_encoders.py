@@ -56,6 +56,21 @@ class TestEpochEncoderUnitArithmetic:
         with pytest.raises(TypeError, match="expects a datetime"):
             fn("not-a-datetime")
 
+    def test_a_sub_microsecond_nanosecond_remainder_is_preserved(self) -> None:
+        # A pyarrow batch's own to_pylist() returns a pandas.Timestamp (a
+        # datetime subclass exposing the sub-microsecond remainder as
+        # `.nanosecond`) for a genuinely sub-microsecond Timestamp(NANOSECOND)
+        # value, when pandas happens to be installed -- plain datetime
+        # subtraction would otherwise silently discard that remainder.
+        # pandas isn't a CDK dependency, so this fakes the one attribute
+        # _encode_epoch actually reads rather than requiring the package.
+        class _FakeNanosecondTimestamp(datetime):
+            nanosecond = 789
+
+        fn = resolve_encoder({"name": "epoch", "unit": "NANOSECOND"})
+        value = _FakeNanosecondTimestamp(1970, 1, 1, 0, 0, 1, tzinfo=timezone.utc)
+        assert fn(value) == 1_000_000_789
+
 
 class TestResolveEncoderValidation:
     def test_an_unknown_name_is_refused(self) -> None:

@@ -108,14 +108,18 @@ def requires_read_encoding(kind: ConversionKind) -> bool:
     return kind in REQUIRES_ENCODING_KINDS
 
 
-#: Which conversion kinds each catalog decoder is meant to build.
-#: ``bool_map``/``base64`` are deliberately absent -- neither is a mandatory
-#: declaration (see :data:`REQUIRES_ENCODING_KINDS`) and both accept
-#: whatever ``arrow_type`` the field declares. Checked eagerly by
+#: Which conversion kinds each catalog decoder is meant to build. Every
+#: entry here is checked eagerly by
 #: :meth:`~cdk.schema_contract.SchemaContract.check_required_read_encoding`
 #: against the field's actual arrow_type, so a mismatched declaration (a
 #: Timestamp field naming ``decimal``) is refused at plan time rather than
 #: on the first non-null response the decoder closure happens to reach.
+#: ``bool_map``/``base64`` are neither a mandatory declaration (see
+#: :data:`REQUIRES_ENCODING_KINDS`) nor, despite that, unconstrained in
+#: which kind they may target -- mirrors
+#: :data:`cdk.type_map.encoders.ENCODER_KIND_COMPATIBILITY`'s write-side
+#: pair exactly, since a decoder and its mirror encoder always agree on
+#: the kind they bridge.
 DECODER_KIND_COMPATIBILITY: Final[dict[str, frozenset[ConversionKind]]] = {
     "iso8601": frozenset({"timestamp", "date", "time"}),
     "epoch": frozenset({"timestamp", "date", "time", "duration"}),
@@ -123,6 +127,8 @@ DECODER_KIND_COMPATIBILITY: Final[dict[str, frozenset[ConversionKind]]] = {
     "regex_epoch": frozenset({"timestamp", "date", "time", "duration"}),
     "decimal": frozenset({"decimal"}),
     "iso_duration": frozenset({"duration"}),
+    "bool_map": frozenset({"bool"}),
+    "base64": frozenset({"binary"}),
 }
 
 

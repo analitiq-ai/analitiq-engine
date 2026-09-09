@@ -233,21 +233,91 @@ class TestCursorFieldType:
         with pytest.raises(ReadError, match="'missing' is not declared"):
             record_field_declaration("items", self._schema("string"), "missing")
 
-    @pytest.mark.parametrize("name", ["iso8601", "epoch"])
-    def test_a_cursor_field_declaring_a_safe_encoding_is_accepted(
-        self, name: str
-    ) -> None:
-        # iso8601/epoch don't change the raw wire value's shape from what
-        # was always implicit before issue #503 -- an ISO string stays an
-        # ISO string, a bare epoch int stays a bare epoch int -- so the
-        # checkpoint mechanism's own ISO/epoch-int parse still reads it
-        # back correctly.
+    def test_a_cursor_field_declaring_iso8601_is_accepted(self) -> None:
+        # iso8601 doesn't change the raw wire value's shape from what was
+        # always implicit before issue #503 -- an ISO string stays an ISO
+        # string -- so the checkpoint mechanism's own ISO parse still reads
+        # it back correctly.
         schema = {
-            "properties": {"updated_at": {"type": "string", "encoding": {"name": name}}}
+            "properties": {
+                "updated_at": {"type": "string", "encoding": {"name": "iso8601"}}
+            }
         }
         assert record_field_declaration(
             "items", schema, "updated_at"
         ) == FieldDeclaration("string", None)
+
+    @pytest.mark.parametrize(
+        ("unit", "fmt"),
+        [("SECOND", "epoch_seconds"), ("MILLISECOND", "epoch_milliseconds")],
+    )
+    def test_a_cursor_field_declaring_epoch_with_a_matching_format_is_accepted(
+        self, unit: str, fmt: str
+    ) -> None:
+        schema = {
+            "properties": {
+                "updated_at": {
+                    "type": "integer",
+                    "format": fmt,
+                    "encoding": {"name": "epoch", "unit": unit},
+                }
+            }
+        }
+        assert record_field_declaration(
+            "items", schema, "updated_at"
+        ) == FieldDeclaration("integer", fmt)
+
+    def test_a_cursor_field_declaring_epoch_on_a_string_type_is_refused(self) -> None:
+        # cursor_bounds reads an epoch cursor back only from an
+        # integer-typed field; a string-typed field checkpoints and reads
+        # back through the ISO-8601 branch instead, which cannot parse a
+        # bare epoch tick count.
+        schema = {
+            "properties": {
+                "updated_at": {
+                    "type": "string",
+                    "format": "epoch_seconds",
+                    "encoding": {"name": "epoch", "unit": "SECOND"},
+                }
+            }
+        }
+        with pytest.raises(ReadError, match="not 'integer'"):
+            record_field_declaration("items", schema, "updated_at")
+
+    def test_a_cursor_field_declaring_epoch_with_an_unsupported_unit_is_refused(
+        self,
+    ) -> None:
+        # cursor_bounds only ever reads an epoch cursor back in seconds or
+        # milliseconds; MICROSECOND/NANOSECOND/DAY have no matching format.
+        schema = {
+            "properties": {
+                "updated_at": {
+                    "type": "integer",
+                    "format": "epoch_seconds",
+                    "encoding": {"name": "epoch", "unit": "MICROSECOND"},
+                }
+            }
+        }
+        with pytest.raises(ReadError, match="only reads an epoch cursor back"):
+            record_field_declaration("items", schema, "updated_at")
+
+    def test_a_cursor_field_declaring_epoch_with_a_mismatched_format_is_refused(
+        self,
+    ) -> None:
+        # The decoder would render milliseconds while cursor_bounds reads
+        # the checkpoint back as seconds -- a resume from the wrong instant,
+        # not a crash, so it must be refused rather than silently accepted.
+        schema = {
+            "properties": {
+                "updated_at": {
+                    "type": "integer",
+                    "format": "epoch_seconds",
+                    "encoding": {"name": "epoch", "unit": "MILLISECOND"},
+                }
+            }
+        }
+        with pytest.raises(ReadError, match="resumes from the wrong instant"):
+            record_field_declaration("items", schema, "updated_at")
 
     def test_a_cursor_field_declaring_an_unsafe_encoding_is_refused(self) -> None:
         # The checkpoint stores this field's raw wire value and the next

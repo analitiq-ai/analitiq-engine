@@ -952,7 +952,7 @@
         "src.engine.pipeline_config_prep:594"
       ],
       "scope": [
-        "cdk.api.response_schema:199",
+        "cdk.api.response_schema:238",
         "cdk.sql.generic:649",
         "src.config.endpoint_resolver:87",
         "src.config.endpoint_resolver:102"
@@ -970,7 +970,7 @@
         "src.config.endpoint_resolver:106"
       ],
       "scope": [
-        "cdk.api.response_schema:199",
+        "cdk.api.response_schema:238",
         "cdk.sql.generic:649",
         "src.config.endpoint_resolver:87"
       ]

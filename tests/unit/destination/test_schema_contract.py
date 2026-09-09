@@ -694,6 +694,82 @@ class TestSchemaContractFromPylist:
         with pytest.raises(ValueError, match="code_decoder"):
             SchemaContract(schema).check_required_read_encoding()
 
+    def test_a_nested_field_with_a_non_code_top_level_encoding_is_refused(self):
+        # A scalar decoder like iso8601 resolves fine (the name is real)
+        # against a nested field's own declaration, but _build_column would
+        # then apply it to the whole struct value and crash -- only 'code'
+        # is a valid top-level encoding for a nested field.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding": {"name": "iso8601"},
+                    "properties": {
+                        "posted_at": {"type": "string", "arrow_type": "Utf8"}
+                    },
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="'code'"):
+            SchemaContract(schema).check_required_read_encoding()
+
+    def test_a_decoder_with_day_unit_targeting_a_timestamp_is_refused(self):
+        # DAY ticks build only a Date32/Date64 (_ticks_to_array's own DAY
+        # branch requires it); the broad name-vs-kind compatibility check
+        # accepts epoch for Timestamp/Date/Time/Duration since every other
+        # unit reaches those, so DAY needs its own narrower check.
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": "integer",
+                    "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                    "encoding": {"name": "epoch", "unit": "DAY"},
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="DAY"):
+            SchemaContract(schema).check_required_read_encoding()
+
+    def test_a_nested_write_field_with_a_non_code_top_level_encoding_is_refused(self):
+        # A scalar encoder like iso8601 resolves fine against a nested
+        # field's own declaration, but land() would then apply it to the
+        # whole dict/list value and crash -- only 'code' is a valid
+        # top-level encoding_write for a nested field.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding_write": {"name": "iso8601"},
+                    "properties": {
+                        "posted_at": {"type": "string", "arrow_type": "Utf8"}
+                    },
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="'code'"):
+            SchemaContract(schema).check_required_write_encoding()
+
+    def test_json_field_with_code_encoding_routes_through_the_code_hatch(self):
+        # The Json-specific builder must not run ahead of a declared 'code'
+        # hatch -- a field opting into 'code' has opted out of every
+        # implicit rendering, Json's own-native passthrough included.
+        schema = {
+            "properties": {
+                "payload": {
+                    "type": "object",
+                    "arrow_type": "Json",
+                    "encoding": {"name": "code"},
+                },
+            }
+        }
+        contract = SchemaContract(
+            schema, code_decoder=lambda name, values, arrow_type: pa.array(values)
+        )
+        batch = contract.from_pylist([{"payload": "raw"}])
+        assert batch.to_pylist() == [{"payload": "raw"}]
+
 
 class TestSchemaContractJsonSchema:
     """JSON-Schema payloads use ``properties`` and still require arrow_type."""

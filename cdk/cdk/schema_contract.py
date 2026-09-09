@@ -494,9 +494,22 @@ class SchemaContract:
             field_def = self._field_defs.get(f.name) or {}
             encoding = field_def.get("encoding")
             if _is_nested(f.type):
-                if isinstance(encoding, Mapping) and (
-                    encoding.get("name") == READ_CODE_ENCODING_NAME
-                ):
+                if encoding is not None:
+                    if not isinstance(encoding, Mapping):
+                        raise InvalidTypeMapError(
+                            f"field {f.name!r}: 'encoding' must be an "
+                            f"object, got {type(encoding).__name__}"
+                        )
+                    if encoding.get("name") != READ_CODE_ENCODING_NAME:
+                        raise InvalidTypeMapError(
+                            f"field {f.name!r}: a nested (Object/List) "
+                            f"field's own top-level encoding must be "
+                            f"{{'name': 'code'}} -- resolve_decoder can "
+                            f"resolve any catalog name, but _build_column "
+                            f"would then apply it to the whole dict/list "
+                            f"value and crash; declared "
+                            f"{encoding.get('name')!r}"
+                        )
                     if self._code_decoder is None:
                         raise ValueError(
                             f"field {f.name!r} declares encoding name='code' "
@@ -531,6 +544,21 @@ class SchemaContract:
                 raise InvalidTypeMapError(
                     f"field {f.name!r}: encoding {name!r} does not decode a "
                     f"{kind!r} value; arrow_type is {f.type!s}"
+                )
+            if (
+                name in ("epoch", "regex_epoch")
+                and encoding.get("unit") == "DAY"
+                and kind != "date"
+            ):
+                # DAY ticks build only a Date32/Date64 (_ticks_to_array's
+                # own DAY branch requires it); the broad name-vs-kind check
+                # above accepts epoch/regex_epoch for Timestamp/Time/Duration
+                # too, since every other unit reaches those, so DAY is the
+                # one unit that needs its own narrower check here rather
+                # than only inside the decoder closure at data time.
+                raise InvalidTypeMapError(
+                    f"field {f.name!r}: encoding {name!r} with unit 'DAY' "
+                    f"only builds a Date32/Date64 arrow_type, got {f.type!s}"
                 )
 
     @staticmethod
@@ -619,8 +647,24 @@ class SchemaContract:
         for f in self._arrow_schema:
             field_def = self._field_defs.get(f.name) or {}
             if _is_nested(f.type):
-                if "encoding_write" not in field_def:
-                    self._check_nested_write_encoding(field_def, f.type, f.name)
+                encoding_write = field_def.get("encoding_write")
+                if encoding_write is not None:
+                    if not isinstance(encoding_write, Mapping):
+                        raise InvalidTypeMapError(
+                            f"field {f.name!r}: 'encoding_write' must be an "
+                            f"object, got {type(encoding_write).__name__}"
+                        )
+                    if encoding_write.get("name") != WRITE_CODE_ENCODING_NAME:
+                        raise InvalidTypeMapError(
+                            f"field {f.name!r}: a nested (Object/List) "
+                            f"field's own top-level encoding_write must be "
+                            f"{{'name': 'code'}} -- resolve_write_encoders "
+                            f"can resolve any catalog name, but land() would "
+                            f"then apply it to the whole dict/list value and "
+                            f"crash; declared {encoding_write.get('name')!r}"
+                        )
+                    continue
+                self._check_nested_write_encoding(field_def, f.type, f.name)
                 continue
             kind = ARROW_FAMILIES[arrow_family(f.type)].conversion_kind
             encoding_write = field_def.get("encoding_write")
@@ -955,11 +999,18 @@ class SchemaContract:
         """
         if all(v is None for v in values):
             return _all_null_column(field, values)
+        encoding = field_def.get("encoding")
+        if (
+            isinstance(encoding, Mapping)
+            and encoding.get("name") == READ_CODE_ENCODING_NAME
+        ):
+            # Ahead of the Json-specific builder: a field naming 'code' has
+            # opted out of every implicit rendering, Json's own-native
+            # passthrough included, in favor of the connector's own
+            # translation.
+            return SchemaContract._decode_via_code_hatch(field, values, code_decoder)
         if _is_json_field(field_def):
             return _encode_json_column(field, values)
-        encoding = field_def.get("encoding")
-        if encoding is not None and encoding.get("name") == READ_CODE_ENCODING_NAME:
-            return SchemaContract._decode_via_code_hatch(field, values, code_decoder)
         decoder = resolve_decoder(field_def, field)
         if decoder is not None:
             return decoder(field, values)

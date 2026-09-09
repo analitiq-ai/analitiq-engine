@@ -62,6 +62,33 @@ class TestIsoDurationRejectsComponentFreeStrings:
             fn(field, [value])
 
 
+class TestIso8601PreservesNanosecondPrecision:
+    """``datetime.fromisoformat``/``time.fromisoformat`` cap at microseconds
+    and silently drop anything past the sixth fractional digit -- checked
+    only against a Timestamp/Time64 column actually declared at nanosecond
+    resolution; a coarser column loses nothing by going through them.
+    """
+
+    def test_a_nanosecond_fraction_on_a_timestamp_is_not_dropped(self) -> None:
+        field = pa.field("t", pa.timestamp("ns", tz="UTC"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso8601"}}, field)
+        result = fn(field, ["1970-01-01T00:00:00.123456789+00:00", None])
+        assert result[0].value == 123_456_789
+        assert result[1].as_py() is None
+
+    def test_a_nanosecond_fraction_on_a_time64_is_not_dropped(self) -> None:
+        field = pa.field("t", pa.time64("ns"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso8601"}}, field)
+        result = fn(field, ["00:00:00.000000123"])
+        assert result[0].value == 123
+
+    def test_a_microsecond_column_is_unaffected(self) -> None:
+        field = pa.field("t", pa.timestamp("us", tz="UTC"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso8601"}}, field)
+        result = fn(field, ["2024-01-01T00:00:00.123456+00:00"])
+        assert result.to_pylist()[0].microsecond == 123456
+
+
 class TestEpochDecoderPreservesTheInstantAcrossTargetZones:
     """Epoch ticks are an absolute UTC instant. Decoding into a Timestamp
     column with a non-UTC tz must shift the wall-clock time to that zone,
