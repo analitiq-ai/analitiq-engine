@@ -19,6 +19,7 @@ from typing import Any, Final
 
 import pyarrow as pa
 import pyarrow.compute as pc
+import re2
 
 from ._param_validation import require_enum_param, require_list_param, require_str_param
 from .conversions import Conversion, classify_conversion
@@ -34,13 +35,6 @@ from .grammar import (
 
 #: One decoded column: the raw wire values in, a typed ``pa.Array`` out.
 DecodeFn = Callable[[pa.Field, "list[Any]"], pa.Array]
-
-_UNIT_SHORT: Final[dict[str, str]] = {
-    "SECOND": "s",
-    "MILLISECOND": "ms",
-    "MICROSECOND": "us",
-    "NANOSECOND": "ns",
-}
 
 _PARAM_SPLIT: Final[Pattern[str]] = re.compile(r"\s*,\s*")
 
@@ -379,7 +373,7 @@ def _ticks_to_array(
                 f"Date32/Date64 arrow_type, got {field.type}"
             )
         return pc.cast(pa.array(ticks, type=pa.date32()), field.type, safe=True)
-    short = _UNIT_SHORT[wire_unit]
+    short = UNIT_LONG_TO_SHORT[wire_unit]
     if pa.types.is_timestamp(field.type):
         naive = pa.array(ticks, type=pa.timestamp(short))
         if field.type.tz is not None:
@@ -488,6 +482,14 @@ def _decode_strptime(config: Mapping[str, Any]) -> DecodeFn:
     return decode
 
 
+#: RE2 logs every compile failure to raw process stderr by default; suppressed
+#: for the same reason ``cdk.type_map.rules``/``cdk.api.param_rules`` suppress
+#: it, so a bad endpoint-authored pattern surfaces as the clean
+#: ``InvalidTypeMapError`` below rather than an uncontrolled C++ log line.
+_RE2_OPTIONS: Final = re2.Options()
+_RE2_OPTIONS.log_errors = False
+
+
 def _decode_regex_epoch(config: Mapping[str, Any]) -> DecodeFn:
     """Extract epoch ticks from a wrapper string via a capturing regex.
 
@@ -496,13 +498,23 @@ def _decode_regex_epoch(config: Mapping[str, Any]) -> DecodeFn:
     the wrapper -- Xero's decorative offset suffix -- is matched but not
     captured, so it is read and discarded rather than shifting the instant
     (ticks are always UTC per the MS/ASP.NET AJAX date convention).
+
+    Compiled and matched with ``re2``, not stdlib ``re``: ``pattern`` is
+    endpoint-authored, untrusted input, matched against every row of every
+    batch, and RE2's linear-time guarantee is what bounds match time against
+    an adversarial pattern (issue #504) -- the same policy already applied to
+    every other author-declared regex in this engine
+    (``cdk.type_map.rules.compile_pattern``, ``cdk.api.param_rules``).
     """
     pattern = require_str_param(config, "pattern", "encoding 'regex_epoch'")
     unit = require_enum_param(config, "unit", EPOCH_UNITS, "encoding 'regex_epoch'")
-    # re.compile has its own bounded, process-wide cache for repeated
-    # patterns; a second one here would only add unbounded growth with no
-    # eviction, for a factory called once per column build, not per row.
-    compiled = re.compile(pattern)
+    try:
+        compiled = re2.compile(pattern, options=_RE2_OPTIONS)
+    except (re2.error, UnicodeEncodeError) as exc:
+        raise InvalidTypeMapError(
+            f"encoding 'regex_epoch' pattern {pattern!r} is not a valid "
+            f"regular expression: {exc}"
+        ) from exc
     if compiled.groups != 1:
         raise InvalidTypeMapError(
             f"encoding 'regex_epoch' pattern {pattern!r} must declare exactly "
@@ -520,7 +532,13 @@ def _decode_regex_epoch(config: Mapping[str, Any]) -> DecodeFn:
                     f"column {field.name!r} at row {row}: encoding 'regex_epoch' "
                     f"expects a string, got {type(v).__name__}"
                 )
-            match = compiled.fullmatch(v)
+            try:
+                match = compiled.fullmatch(v)
+            except UnicodeEncodeError:
+                # A lone surrogate RE2's internal UTF-8 encode step cannot
+                # interpret -- treated as "does not match", the same verdict
+                # every other value this pattern refuses gets.
+                match = None
             if match is None:
                 raise ValueError(
                     f"column {field.name!r} at row {row}: {v!r} does not match "
@@ -685,7 +703,7 @@ def resolve_decoder(field_def: Mapping[str, Any], field: pa.Field) -> DecodeFn |
     name = encoding.get("name")
     if name == CODE_ENCODING_NAME:
         return None
-    factory = _DECODER_FACTORIES.get(name)
+    factory = _DECODER_FACTORIES.get(name) if isinstance(name, str) else None
     if factory is None:
         raise InvalidTypeMapError(
             f"unknown encoding name {name!r} on field {field.name!r}; expected "

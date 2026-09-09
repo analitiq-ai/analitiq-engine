@@ -434,6 +434,44 @@ class TestDeclarativeWireFormatEncoding:
         assert "amount" in connector.last_schema_rejection
         assert "encoding_write" in connector.last_schema_rejection
 
+    async def test_a_nested_gated_leaf_with_no_encoding_write_is_refused_at_configure(
+        self,
+    ) -> None:
+        # resolve_write_encoders only ever rewrites a top-level record key,
+        # so a gated-kind leaf inside an Object/List field would otherwise
+        # reach orjson un-encoded and crash on the first non-null value --
+        # refused here instead, by name and nested path, at the same
+        # configure-time boundary every other case in this class uses.
+        connector = GenericAPIConnector()
+        document = _document_with_field(
+            "meta",
+            {
+                "type": "object",
+                "native_type": "object",
+                "arrow_type": "Object",
+                "properties": {
+                    "posted_at": {
+                        "type": "string",
+                        "native_type": "string",
+                        "arrow_type": "Timestamp(MICROSECOND)",
+                    }
+                },
+            },
+        )
+        connector.set_stream_endpoints({"items": document})
+        await connector.connect(runtime_with(FakeSession()))
+        accepted = await connector.configure_schema(
+            SchemaSpec(
+                stream_id="items",
+                version=1,
+                write_mode=WriteMode.WRITE_MODE_INSERT,
+                ack_timeout_seconds=30,
+            )
+        )
+        assert accepted is False
+        assert "meta.posted_at" in connector.last_schema_rejection
+        assert "encoding_write" in connector.last_schema_rejection
+
     async def test_explicit_decimal_encoding_write_matches_the_old_orjson_default(
         self,
     ) -> None:

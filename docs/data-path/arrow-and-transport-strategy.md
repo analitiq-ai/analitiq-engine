@@ -55,17 +55,20 @@ for how the CDK package is bounded and wired see
    matrix): `iso8601`, `epoch`, `strptime`, `regex_epoch`, `decimal`,
    `bool_map`, `base64`, `iso_duration` on read; the write-side mirror minus
    `regex_epoch`/`iso_duration`. No entry is applied implicitly — a field
-   whose kind requires one and declares none raises `MissingEncodingError`
-   at `SchemaContract` construction (`check_required_read_encoding`) or at
-   the write schema handshake (`check_required_write_encoding`), never at
-   the first record that reaches it. A field naming `{"name": "code"}`
-   routes instead to a `connector.py` override of `ApiDialect.decode_field`
-   / `.encode_field` (`cdk/cdk/api/dialects.py`) for a shape the catalog
-   does not cover. This is API-only and orthogonal to item 3's SQL
-   `native_type`/`arrow_type` DDL rendering: a SQL driver hands back
-   already-typed Python values, so `SchemaContract` never gates a
-   `"columns"`-shaped schema on this at all — only the two API call sites
-   (`cdk/cdk/api/generic.py`, `cdk/cdk/api/write_plan.py`) do.
+   whose kind requires one and declares none, or whose declared entry does
+   not actually resolve (an unknown name, a malformed param), raises
+   `MissingEncodingError` from the opt-in `check_required_read_encoding`
+   or `check_required_write_encoding` methods, called explicitly at the
+   two API call sites (`cdk/cdk/api/generic.py`, `cdk/cdk/api/write_plan.py`)
+   before the first batch, never left to whichever one happens to carry the
+   first non-null value. A field naming `{"name": "code"}` routes instead
+   to a `connector.py` override of `ApiDialect.decode_field` /
+   `.encode_field` (`cdk/cdk/api/dialects.py`) for a shape the catalog does
+   not cover. This is API-only and orthogonal to item 3's SQL
+   `native_type`/`arrow_type` DDL rendering: those two methods are never
+   called for a `"columns"`-shaped (SQL) schema, which keeps the pre-#503
+   tolerant parse (a bare ISO-8601 string, a bare unit-offset integer, or an
+   already-typed Python value) unconditionally instead.
 
 ## Where Arrow is ceremony
 

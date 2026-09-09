@@ -1358,10 +1358,15 @@ class TestFromPylistTemporalRejectsFloatingPoint:
 
     @staticmethod
     def _contract(arrow_type: str, *, encoding: dict | None = None) -> SchemaContract:
-        field_def: dict = {"name": "t", "arrow_type": arrow_type}
+        # "properties" (JSON-Schema/API), not "columns" (SQL): every test in
+        # this class is about the declared-encoding vocabulary, which only
+        # exists for an API endpoint -- a "columns" schema keeps the
+        # tolerant pre-#503 parse unconditionally (Acceptance #9), so
+        # exercising these cases against it would test the wrong shape.
+        field_def: dict = {"arrow_type": arrow_type}
         if encoding is not None:
             field_def["encoding"] = encoding
-        return SchemaContract({"columns": [field_def]})
+        return SchemaContract({"properties": {"t": field_def}})
 
     @staticmethod
     def _epoch_unit_for(arrow_type: str) -> str:
@@ -1554,3 +1559,37 @@ class TestFromPylistTemporalRejectsFloatingPoint:
         )
         batch = contract.from_pylist([{"dates": (1,)}])
         assert batch.column(0)[0].as_py() == [date(1970, 1, 2)]
+
+
+class TestSqlColumnsShapeKeepsTheLegacyTemporalParse:
+    """A database ``"columns"`` schema has no ``encoding`` vocabulary at
+    all, and #503's strict "no implicit decode" refusal must never reach
+    it (Acceptance #9) -- it keeps the exact pre-#503 tolerant parse: a
+    bare ISO-8601 string or a bare unit-offset integer, with no declared
+    ``encoding``, still decodes. The JSON-Schema/API-shaped mirror of each
+    case here (``"properties"``) is covered by
+    ``TestFromPylistTemporalRejectsFloatingPoint``, where the same input
+    now requires a declared ``encoding``.
+    """
+
+    @staticmethod
+    def _columns_contract(arrow_type: str) -> SchemaContract:
+        return SchemaContract({"columns": [{"name": "t", "arrow_type": arrow_type}]})
+
+    def test_bare_iso_string_still_decodes_with_no_declared_encoding(self):
+        contract = self._columns_contract("Timestamp(MICROSECOND)")
+        batch = contract.from_pylist([{"t": "2024-01-02T03:04:05"}])
+        expected = datetime(2024, 1, 2, 3, 4, 5)  # noqa: DTZ001 -- naive on purpose
+        assert batch.column(0)[0].as_py() == expected
+
+    def test_bare_integer_offset_still_decodes_with_no_declared_encoding(self):
+        contract = self._columns_contract("Timestamp(SECOND)")
+        batch = contract.from_pylist([{"t": 1704164645}])
+        expected = datetime(2024, 1, 2, 3, 4, 5)  # noqa: DTZ001 -- naive on purpose
+        assert batch.column(0)[0].as_py() == expected
+
+    def test_native_datetime_value_still_passes_through(self):
+        contract = self._columns_contract("Timestamp(MICROSECOND)")
+        moment = datetime(2024, 1, 1)  # noqa: DTZ001
+        batch = contract.from_pylist([{"t": moment}])
+        assert batch.column(0)[0].as_py() == moment
