@@ -368,6 +368,29 @@ class _LruCachedClassifyErrorConnector(ReferenceConnector):
         return "transient"
 
 
+class _SingledispatchClassifyErrorConnector(ReferenceConnector):
+    """classify_error dispatching on the caught exception's own type."""
+
+    @functools.singledispatchmethod
+    def classify_error(self, exc: BaseException) -> str | None:
+        return "transient"
+
+    classify_error.register(ValueError)(lambda self, exc: "config")
+
+
+class _AsyncCallableObjectClassifyError:
+    """A callable object whose __call__ is async -- still a broken hook."""
+
+    async def __call__(self, exc: BaseException) -> str | None:
+        return "transient"
+
+
+class _AsyncCallableObjectClassifyErrorConnector(ReferenceConnector):
+    """classify_error as a callable object hiding an async __call__."""
+
+    classify_error = _AsyncCallableObjectClassifyError()
+
+
 class _MergeFormDialect(ReferencePostgresDialect):
     """Renders the MERGE form, for the merge_form: 'merge' rendering arm."""
 
@@ -678,6 +701,30 @@ class TestOverrideSurfaceBreaks:
             )
             == []
         )
+
+    def test_singledispatch_classify_error_is_allowed(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A dispatching wrapper is not rejected as non-callable."""
+        assert (
+            check_override_surface(
+                _with_connector(reference_target, _SingledispatchClassifyErrorConnector)
+            )
+            == []
+        )
+
+    def test_async_callable_object_classify_error_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """An async __call__ behind a callable object must still be caught."""
+        violations = check_override_surface(
+            _with_connector(
+                reference_target, _AsyncCallableObjectClassifyErrorConnector
+            )
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "async" in report
 
     def test_staticmethod_hook_is_allowed(
         self, reference_target: ConformanceTarget

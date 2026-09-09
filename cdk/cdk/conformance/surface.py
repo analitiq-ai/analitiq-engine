@@ -30,7 +30,6 @@ without touching this module.
 from __future__ import annotations
 
 import inspect
-import types
 from typing import TYPE_CHECKING, Any
 
 from cdk.base_handler import BaseDestinationHandler
@@ -167,31 +166,35 @@ def _base_call_shapes(base_fn: Any) -> list[tuple[str, list[Any], dict[str, Any]
     ]
 
 
-def _signature_mismatch(
-    base_fn: Any, override_fn: Any, *, takes_self: bool
-) -> str | None:
+def _signature_mismatch(base_fn: Any, override_fn: Any) -> str | None:
     """Explain why *override_fn* cannot take the base hook's calls, if so.
 
     Checked by binding every call shape the base signature admits (see
     :func:`_base_call_shapes`) against the override's signature — so an
     override may add defaulted parameters of its own, but a dropped,
     renamed, de-keyworded, or made-required parameter fails with the
-    binder's own explanation. ``takes_self`` (see :func:`_binds_instance`)
-    is False for a static/classmethod override, a bound-method reference,
-    and a callable object — each already resolves through class-level
-    access with no instance parameter left to place; a plain method that
-    *forgot* ``self`` must not slip through the self-less bind, so the
-    choice comes from what the attribute *is*, never from which bind
-    happens to succeed.
+    binder's own explanation. *override_fn* is always the already-bound,
+    self-less effective callable (see :func:`_effective_callable`), so no
+    implicit-self placeholder is needed here for any override shape.
+
+    ``follow_wrapped=False`` is tried first: a dispatching wrapper
+    (``functools.singledispatchmethod``) copies its original, still-self-ful
+    signature onto itself via ``__wrapped__``, and following that chain
+    would reintroduce exactly the placeholder problem this function no
+    longer needs. A wrapper with no signature of its own (a bound
+    ``functools.lru_cache``) raises instead, so the wrapped signature is
+    the fallback, not the default.
     """
     try:
-        override_sig = inspect.signature(override_fn)
+        override_sig = inspect.signature(override_fn, follow_wrapped=False)
     except (TypeError, ValueError):
-        return "its signature cannot be introspected"
-    self_placeholder = (None,) if takes_self else ()
+        try:
+            override_sig = inspect.signature(override_fn)
+        except (TypeError, ValueError):
+            return "its signature cannot be introspected"
     for shape_name, args, kwargs in _base_call_shapes(base_fn):
         try:
-            override_sig.bind(*self_placeholder, *args, **kwargs)
+            override_sig.bind(*args, **kwargs)
         except TypeError as err:
             base_shape = str(inspect.signature(base_fn))
             return (
@@ -268,24 +271,47 @@ def _audit_dialect_class(dialect_cls: type) -> list[Violation]:
     return violations
 
 
-def _binds_instance(attr: Any) -> bool:
-    """Whether accessing *attr* through the class still carries an instance.
+def _resolve_via_instance(klass: type, raw: Any) -> Any:
+    """Resolve *raw* as an instance of *klass* would, without instantiating it.
 
-    True for a plain function/method (class-level access resolves it
-    unbound, so its signature still carries ``self``) and for any other
-    descriptor whose ``__get__`` would bind an instance (an
-    ``lru_cache``-wrapped method, a custom descriptor) -- ``isfunction``
-    alone misses these, since they are not ``types.FunctionType``. False
-    for ``staticmethod``/``classmethod`` (already self-less) and for a
-    bound method reference or a callable *object* (``types.MethodType``
-    lacks the class-level ``__get__`` that would re-bind it to a new
-    instance, and a plain callable object has no ``__get__`` at all --
-    ``inspect.signature`` already reads either one's effective signature
-    with self, if any, already accounted for).
+    *raw* is one of *klass*'s own ``vars(klass)`` entries. A hand-written
+    classification of "does this kind of attribute carry an implicit
+    self" cannot keep up with every descriptor Python allows
+    (a plain method, ``staticmethod``, ``classmethod``, a callable
+    object, an ``lru_cache``- or ``singledispatchmethod``-wrapped
+    method, ...); each new kind Codex found was one more guess this
+    module hadn't made yet. Every one of those resolves purely from
+    identity and the owning class, never from instance state, when run
+    through the real descriptor protocol -- so a bare, uninitialized
+    stand-in is safe to bind against, and there is nothing left to
+    guess: whatever comes back is already bound exactly as a real call
+    would see it. A plain value with no ``__get__`` (a callable object,
+    a non-callable attribute) is identical whether read from the class
+    or an instance, so it is returned unchanged.
     """
-    return hasattr(type(attr), "__get__") and not isinstance(
-        attr, (staticmethod, classmethod, types.MethodType)
-    )
+    descriptor_get = getattr(type(raw), "__get__", None)
+    if descriptor_get is None:
+        return raw
+    return descriptor_get(raw, object.__new__(klass), klass)
+
+
+def _effective_callable(resolved: Any) -> Any | None:
+    """Return the routine that runs when *resolved* is called, or ``None``.
+
+    A function or bound method (a plain override, a ``staticmethod``, a
+    ``classmethod``, an ``lru_cache``/``singledispatchmethod`` wrapper
+    once bound) is itself that routine. A callable *object* runs through
+    its own ``__call__`` -- resolving that, rather than the object,
+    is what lets :func:`inspect.iscoroutinefunction` and
+    :func:`inspect.signature` see the truth (an async ``__call__``, the
+    real parameter list) instead of reporting on the wrapping object,
+    which is neither.
+    """
+    if inspect.isroutine(resolved):
+        return resolved
+    if not callable(resolved):
+        return None
+    return resolved.__call__
 
 
 def _hook_shape_problem(
@@ -299,7 +325,6 @@ def _hook_shape_problem(
     violation text.
     """
     base_attr = inspect.getattr_static(base_cls, name)
-    override_attr = inspect.getattr_static(klass, name)
     base_callable = callable(base_attr) or isinstance(
         base_attr, (staticmethod, classmethod)
     )
@@ -307,28 +332,23 @@ def _hook_shape_problem(
         # A data attribute (name, quote_char, max_identifier_length, ...):
         # any value is the connector's to set.
         return None
-    override_callable = callable(override_attr) or isinstance(
-        override_attr, (staticmethod, classmethod)
-    )
-    if not override_callable:
+    raw_override = inspect.getattr_static(klass, name)
+    resolved = _resolve_via_instance(klass, raw_override)
+    effective = _effective_callable(resolved)
+    if effective is None:
         return (
             f"{klass.__name__}.{name} replaces the sanctioned {hook_label} "
-            f"with a non-callable {type(override_attr).__name__}; the CDK "
+            f"with a non-callable {type(raw_override).__name__}; the CDK "
             f"calls it."
         )
-    base_fn = inspect.unwrap(getattr(base_cls, name))
-    override_fn = getattr(klass, name)
-    if inspect.iscoroutinefunction(inspect.unwrap(override_fn)):
+    if inspect.iscoroutinefunction(effective):
         return (
             f"{klass.__name__}.{name} is declared async; the CDK calls "
             f"every {hook_label} synchronously and would receive an "
             f"unawaited coroutine instead of the hook's result."
         )
-    mismatch = _signature_mismatch(
-        base_fn,
-        override_fn,
-        takes_self=_binds_instance(override_attr),
-    )
+    base_fn = inspect.unwrap(getattr(base_cls, name))
+    mismatch = _signature_mismatch(base_fn, effective)
     if mismatch is None:
         return None
     return (
