@@ -906,7 +906,7 @@ class TestDeclaredConnectorFacts:
             connector_doc,
         )
 
-    def test_declared_blocks_are_parsed_at_config_load(
+    def test_declared_concurrency_is_parsed_at_config_load(
         self, pipeline_tree: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # A valid declaration loads, and the CDK parse runs on it — spied
@@ -915,32 +915,52 @@ class TestDeclaredConnectorFacts:
         from src.engine import pipeline_config_prep as prep_module
 
         seen: list[Any] = []
-        real_parse = prep_module.parse_declared_error_map
+        real_parse = prep_module.parse_declared_concurrency
 
         def _spy(block: Any, *, source: str = "<inline>"):
             seen.append(block)
             return real_parse(block, source=source)
 
-        monkeypatch.setattr(prep_module, "parse_declared_error_map", _spy)
+        monkeypatch.setattr(prep_module, "parse_declared_concurrency", _spy)
 
         connector_doc = _connector_doc()
-        connector_doc["error_map"] = {"sqlstate": {"08": "unreachable"}}
         connector_doc["concurrency"] = {"max_connections": 4}
         self._write_connector(pipeline_tree, connector_doc)
 
         PipelineConfigPrep().create_config()
-        assert {"sqlstate": {"08": "unreachable"}} in seen
+        assert {"max_connections": 4} in seen
+
+    def test_legacy_error_map_shape_rejected_at_config_load(
+        self, pipeline_tree: Path
+    ) -> None:
+        # Issue #513: the published contract still accepts the pre-#513
+        # sqlstate/exception/vendor_code shape (its own update is tracked by
+        # claude-code-plugins#91, not this repo), so a legacy declaration
+        # passes that first gate -- and must still fail loud at the CDK's
+        # own parse, the second gate _resolve_connection_by_id runs, rather
+        # than silently reaching a worker with a mapping nothing reads any
+        # more.
+        connector_doc = _connector_doc()
+        connector_doc["error_map"] = {"sqlstate": {"08": "unreachable"}}
+        self._write_connector(pipeline_tree, connector_doc)
+        prep = PipelineConfigPrep()
+        with pytest.raises(ConnectorDeclarationError, match="unknown fields"):
+            prep.create_config()
 
     def test_malformed_error_map_identifier_rejected(self, pipeline_tree: Path) -> None:
-        # The published contract enforces the same key grammar the CDK
-        # parser does, so a malformed identifier fails at the first gate.
+        # http is unchanged by issue #513 -- the published contract still
+        # enforces the same status-code key grammar the CDK parser does,
+        # so a malformed status fails at the first gate. (sqlstate/exception
+        # as top-level error_map fields are covered separately, above:
+        # they're now retired, so a block using them fails at the CDK's own
+        # parse -- see test_legacy_error_map_shape_rejected_at_config_load.)
         connector_doc = _connector_doc()
-        connector_doc["error_map"] = {"sqlstate": {"XYZ!": "auth"}}
+        connector_doc["error_map"] = {"http": {"XYZ!": "auth"}}
         self._write_connector(pipeline_tree, connector_doc)
         prep = PipelineConfigPrep()
         with pytest.raises((ContractValidationError, ConnectorDeclarationError)) as err:
             prep.create_config()
-        assert "sqlstate" in str(err.value)
+        assert "http" in str(err.value)
 
     def test_non_positive_concurrency_ceiling_rejected(
         self, pipeline_tree: Path

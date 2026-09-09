@@ -18,11 +18,22 @@ from cdk.api.http import (
     loads_preserving_decimals,
     query_pairs,
 )
-from cdk.declarations import parse_declared_error_map
+from cdk.declarations import CLASS_NAME_SIGNAL, parse_declared_error_map
 
 from .fakes import BASE_URL, FakeResponse, FakeSession, sent_query
 
 pytestmark = pytest.mark.unit
+
+
+def _owner(classify_error_fn):
+    """A minimal object exposing classify_error, for classify_via_hook's
+    (owner, attr) shape -- tests inject a plain function, not a bound
+    method, so this wraps one as the attribute."""
+
+    class _Owner:
+        classify_error = staticmethod(classify_error_fn)
+
+    return _Owner()
 
 
 def _sender(
@@ -75,12 +86,72 @@ class TestFailureFacts:
         exc = ApiResponseError(None, (), status=200, declared_category="config")
         assert failure_facts(exc, error_map=None) == (200, "config")
 
-    def test_a_status_less_error_resolves_by_the_exception_family(self) -> None:
+    def test_an_off_vocabulary_declared_category_maps_to_config(self) -> None:
+        # declared_category takes any string with no construction-time
+        # check, and a connector can raise ApiResponseError directly -- an
+        # off-vocabulary value must not reach a verdict-table KeyError.
+        exc = ApiResponseError(None, (), status=200, declared_category="retry_me")
+        assert failure_facts(exc, error_map=None) == (200, "config")
+
+    def test_a_non_string_declared_category_maps_to_config(self) -> None:
+        # declared_category takes any *type* too -- an AI-authored
+        # connector writing declared_category=SomeEnum.AUTH is exactly as
+        # plausible as a typo'd string, and must not reach a verdict-table
+        # KeyError either (status-less path).
+        exc = aiohttp.ClientPayloadError("truncated")
+        exc.declared_category = 42  # type: ignore[attr-defined]
+        assert failure_facts(exc, error_map=None) == (None, "config")
+
+    def test_a_raising_declared_category_property_maps_to_config(self) -> None:
+        class _Bad(aiohttp.ClientPayloadError):
+            @property
+            def declared_category(self):
+                raise RuntimeError("connector bug")
+
+        assert failure_facts(_Bad("truncated"), error_map=None) == (None, "config")
+
+    def test_a_status_less_error_resolves_by_the_declared_map(self) -> None:
         error_map = parse_declared_error_map(
-            {"exception": {"ClientPayloadError": "transient"}}
+            {
+                "key_attrs": [CLASS_NAME_SIGNAL],
+                "codes": {"ClientPayloadError": "transient"},
+            }
         )
         exc = aiohttp.ClientPayloadError("truncated")
         assert failure_facts(exc, error_map=error_map) == (None, "transient")
+
+    def test_a_status_less_error_falls_back_to_classify_error(self) -> None:
+        exc = aiohttp.ClientPayloadError("truncated")
+        assert failure_facts(
+            exc, error_map=None, classify_error_owner=_owner(lambda e: "transient")
+        ) == (None, "transient")
+
+    def test_map_present_but_silent_then_classify_error_claims(self) -> None:
+        error_map = parse_declared_error_map(
+            {"key_attrs": [CLASS_NAME_SIGNAL], "codes": {"SomethingElse": "auth"}}
+        )
+        exc = aiohttp.ClientPayloadError("truncated")
+        assert failure_facts(
+            exc,
+            error_map=error_map,
+            classify_error_owner=_owner(lambda e: "transient"),
+        ) == (None, "transient")
+
+    def test_a_crashing_classify_error_does_not_displace_the_original_failure(
+        self,
+    ) -> None:
+        # No RuntimeError escapes; the broken classification maps to
+        # "config" (fatal, non-retryable) rather than being guessed at.
+        def _broken(e):
+            raise RuntimeError("connector bug")
+
+        exc = aiohttp.ClientPayloadError("truncated")
+        assert failure_facts(
+            exc, error_map=None, classify_error_owner=_owner(_broken)
+        ) == (
+            None,
+            "config",
+        )
 
 
 @pytest.mark.asyncio

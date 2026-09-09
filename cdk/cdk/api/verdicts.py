@@ -26,6 +26,7 @@ from ..declarations import (
     DECLARED_READ_DETERMINISTIC,
     DECLARED_WRITE_VERDICTS,
     ErrorMap,
+    classify_via_hook,
 )
 from ..exceptions import ReadError, TransientReadError
 from ..types import AckStatus, FailureCategory
@@ -107,14 +108,15 @@ def classify_status(
     The declared ``error_map`` decides next, by status alone. ``None``
     means neither claimed the response and the built-in rule applies.
 
-    A response error resolves by status only. The declared ``exception``
-    family is never consulted here -- a broad ``exception.ClientError``
-    meant for status-less transport blips would otherwise claim
-    deterministic 4xx rejections and turn config defects into infinite
-    retries.
+    A response error resolves by status only. The declared
+    ``key_attrs``/``codes`` lookup and the ``classify_error`` hook are
+    never consulted here -- a broad ``__exception_class__`` match meant
+    for status-less transport blips would otherwise claim deterministic
+    4xx rejections and turn config defects into infinite retries.
     """
     if dialect is not None:
-        category = dialect.classify(status, body)
+        source = f"{type(dialect).__name__}.classify"
+        category = classify_via_hook(dialect, "classify", status, body, source=source)
         if category is not None:
             logger.info("dialect classified HTTP %d -> %s", status, category)
             return category
@@ -128,27 +130,48 @@ def classify_status(
     return None
 
 
-def classify_exception(exc: BaseException, *, error_map: ErrorMap | None) -> str | None:
+def classify_exception(
+    exc: BaseException,
+    *,
+    error_map: ErrorMap | None,
+    classify_error_owner: Any = None,
+    source: str = "classify_error",
+) -> str | None:
     """Name the declared category a status-less transport error carries.
 
     The other half of the disjoint pair: an error that never got a
     response (TLS failure, payload error, timeout) has no status to
-    resolve by, so the declared ``exception`` family is what classifies
-    it. Kept a separate branch from :func:`classify_status` so neither
-    family can claim the other's failures.
+    resolve by, so the declared ``error_map`` (``key_attrs``/``codes``,
+    issue #513) is what classifies it first, then the connector's
+    ``classify_error`` code hook for a signal the map can't express. Kept a
+    separate branch from :func:`classify_status` so neither this nor the
+    HTTP-status path can claim the other's failures. *classify_error_owner*
+    is the connector instance the hook is resolved from (never a
+    pre-resolved callable -- resolving ``classify_error`` is itself
+    untrusted connector code, guarded by :func:`classify_via_hook` the
+    same as calling it); *source* names its class for the hook's WARNING
+    log line (a crash or an off-vocabulary return never raises -- both
+    map to ``"config"``).
     """
-    if error_map is None:
+    if error_map is not None:
+        match = error_map.match_exception(exc)
+        if match is not None:
+            logger.info(
+                "declared error_map classified the transport error: %s %s -> %s",
+                match.signal,
+                match.value,
+                match.category,
+            )
+            return match.category
+    if classify_error_owner is None:
         return None
-    match = error_map.match_exception(exc)
-    if match is None:
-        return None
-    logger.info(
-        "declared error_map classified the transport error: %s %s -> %s",
-        match.family,
-        match.identifier,
-        match.category,
+    category = classify_via_hook(
+        classify_error_owner, "classify_error", exc, source=source
     )
-    return match.category
+    if category is None:
+        return None
+    logger.info("classify_error classified the transport error: %s", category)
+    return category
 
 
 def read_verdict(

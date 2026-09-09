@@ -26,6 +26,18 @@ from cdk.types import AckStatus, FailureCategory
 
 pytestmark = pytest.mark.unit
 
+
+def _owner(classify_error_fn):
+    """A minimal object exposing classify_error, for classify_via_hook's
+    (owner, attr) shape -- tests inject a plain function, not a bound
+    method, so this wraps one as the attribute."""
+
+    class _Owner:
+        classify_error = staticmethod(classify_error_fn)
+
+    return _Owner()
+
+
 # status -> (read is deterministic, write ack, the transport re-attempts it)
 _TABLE = {
     400: (True, AckStatus.ACK_STATUS_FATAL_FAILURE, False),
@@ -98,18 +110,112 @@ class TestClassification:
         assert classify_status(400, {}, dialect=None, error_map=None) is None
 
     def test_a_declared_exception_never_claims_a_response_error(self) -> None:
-        # The two families stay disjoint: a broad exception class meant for
-        # status-less blips must not turn a deterministic 4xx into an
-        # infinite retry.
-        error_map = parse_declared_error_map({"exception": {"ValueError": "transient"}})
+        # The declared exception match and the http match stay disjoint: a
+        # broad exception class meant for status-less blips must not turn a
+        # deterministic 4xx into an infinite retry.
+        error_map = parse_declared_error_map(
+            {"key_attrs": ["__exception_class__"], "codes": {"ValueError": "transient"}}
+        )
         assert classify_status(400, {}, dialect=None, error_map=error_map) is None
 
-    def test_a_status_less_error_resolves_by_the_exception_family(self) -> None:
-        error_map = parse_declared_error_map({"exception": {"ValueError": "transient"}})
+    def test_a_status_less_error_resolves_by_the_declared_map(self) -> None:
+        error_map = parse_declared_error_map(
+            {"key_attrs": ["__exception_class__"], "codes": {"ValueError": "transient"}}
+        )
         assert classify_exception(ValueError("x"), error_map=error_map) == "transient"
+
+    def test_a_status_less_error_falls_back_to_classify_error(self) -> None:
+        # Issue #513: the code escape hatch runs when the declared map (or
+        # its absence) claims nothing.
+        assert (
+            classify_exception(
+                ValueError("x"),
+                error_map=None,
+                classify_error_owner=_owner(lambda exc: "transient"),
+            )
+            == "transient"
+        )
 
     def test_an_undeclared_connector_claims_nothing(self) -> None:
         assert classify_exception(ValueError("x"), error_map=None) is None
+
+    def test_map_present_but_silent_then_classify_error_claims(self) -> None:
+        # The map is declared but doesn't cover this exception -- the hook
+        # still gets its chance.
+        error_map = parse_declared_error_map(
+            {"key_attrs": ["__exception_class__"], "codes": {"SomethingElse": "auth"}}
+        )
+        assert (
+            classify_exception(
+                ValueError("x"),
+                error_map=error_map,
+                classify_error_owner=_owner(lambda exc: "transient"),
+            )
+            == "transient"
+        )
+
+    def test_off_vocabulary_classify_error_return_maps_to_config(self) -> None:
+        # The hook ran and answered -- wrongly. The engine cannot guess
+        # what it meant, so it's treated as a broken classification
+        # mechanism: fatal, non-retryable, the same as a crash.
+        assert (
+            classify_exception(
+                ValueError("x"),
+                error_map=None,
+                classify_error_owner=_owner(lambda exc: "retry_me"),
+            )
+            == "config"
+        )
+
+    def test_a_crashing_classify_error_does_not_displace_the_original_failure(
+        self,
+    ) -> None:
+        # No RuntimeError escapes; the broken hook maps to "config".
+        def _broken(exc):
+            raise RuntimeError("connector bug")
+
+        assert (
+            classify_exception(
+                ValueError("x"), error_map=None, classify_error_owner=_owner(_broken)
+            )
+            == "config"
+        )
+
+    def test_a_crashing_dialect_classify_does_not_displace_the_original_failure(
+        self,
+    ) -> None:
+        class BrokenDialect:
+            def classify(self, status: int, body: object) -> str | None:
+                raise RuntimeError("connector bug")
+
+        assert (
+            classify_status(400, {}, dialect=BrokenDialect(), error_map=None)
+            == "config"
+        )
+
+    def test_off_vocabulary_dialect_classify_return_maps_to_config(self) -> None:
+        class BadDialect:
+            def classify(self, status: int, body: object) -> str | None:
+                return "retry_me"
+
+        assert (
+            classify_status(400, {}, dialect=BadDialect(), error_map=None) == "config"
+        )
+
+    def test_a_dialect_classify_that_raises_resolving_it_maps_to_config(self) -> None:
+        # Resolving dialect.classify (not calling it) is itself an
+        # attribute read on untrusted, potentially AI-authored connector
+        # code -- a connector overriding it as a raising descriptor must
+        # not crash the HTTP response classification either.
+        class BrokenDescriptorDialect:
+            @property
+            def classify(self):
+                raise RuntimeError("connector descriptor bug")
+
+        assert (
+            classify_status(400, {}, dialect=BrokenDescriptorDialect(), error_map=None)
+            == "config"
+        )
 
 
 class TestDeclaredCategorySurvives:

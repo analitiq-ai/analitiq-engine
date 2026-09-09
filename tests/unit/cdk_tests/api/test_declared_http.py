@@ -22,6 +22,7 @@ import aiohttp
 import pytest
 
 from cdk.api import GenericAPIConnector
+from cdk.declarations import CLASS_NAME_SIGNAL
 from cdk.types import AckStatus, FailureCategory
 
 from .fakes import FakeSession, runtime_with
@@ -60,7 +61,12 @@ class TestTransportErrorsReachTheDeclaredMap:
     ) -> None:
         # A bad host or port is deterministic: retrying it burns the whole
         # budget to arrive at the same place.
-        connector = await _connected({"exception": {"ClientConnectorError": "config"}})
+        connector = await _connected(
+            {
+                "key_attrs": [CLASS_NAME_SIGNAL],
+                "codes": {"ClientConnectorError": "config"},
+            }
+        )
         result = connector.os_error_failure(
             aiohttp.ClientConnectorError(MagicMock(), OSError(111, "refused")),
             run_id="run-1",

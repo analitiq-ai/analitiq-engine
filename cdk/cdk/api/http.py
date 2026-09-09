@@ -25,7 +25,7 @@ import aiohttp
 import orjson
 from aiohttp_retry import ExponentialRetry, RetryClient
 
-from ..declarations import ErrorMap
+from ..declarations import ErrorMap, birth_site_category
 from ..rate_limiter import RateLimiter
 from .body import (
     FORM_CONTENT_TYPE,
@@ -208,18 +208,35 @@ def query_pairs(query: Mapping[str, Any]) -> list[tuple[str, Any]]:
 
 
 def failure_facts(
-    exc: BaseException, *, error_map: ErrorMap | None
+    exc: BaseException,
+    *,
+    error_map: ErrorMap | None,
+    classify_error_owner: Any = None,
+    classify_error_source: str = "classify_error",
 ) -> tuple[int | None, str | None]:
     """Read the status and declared category off a caught transport failure.
 
     The one place a client-library exception becomes the two facts every
     verdict is built from, so the read role and the write role cannot
     classify the same failure differently. A response error resolves by its
-    status; a status-less one by the declared exception family. Keeping the
-    branches separate is what stops a broad declared exception class from
-    claiming deterministic 4xx rejections.
+    status; a status-less one by the declared ``error_map`` then the
+    connector's ``classify_error`` hook (issue #513). Keeping the branches
+    separate is what stops a broad declared match from claiming deterministic
+    4xx rejections. *classify_error_owner* is the connector instance the
+    hook is resolved from (never a pre-resolved callable);
+    *classify_error_source* names its class for the hook's WARNING log
+    line (a crash or an off-vocabulary return never raises -- both map to
+    ``"config"``).
+
+    ``exc.declared_category`` (the birth-site value) is untrusted -- a
+    connector can raise any ``ClientResponseError`` subclass with any
+    string there, with no construction-time check -- so it's read through
+    :func:`~cdk.declarations.birth_site_category`, which maps anything
+    broken (wrong type, off-vocabulary, a property that raises) to
+    ``"config"`` rather than reaching a verdict-table ``KeyError`` in the
+    caller.
     """
-    declared = getattr(exc, "declared_category", None)
+    declared = birth_site_category(exc)
     if isinstance(exc, aiohttp.ClientResponseError):
         status = exc.status
         if declared is None and error_map is not None:
@@ -227,7 +244,12 @@ def failure_facts(
             declared = match.category if match is not None else None
         return status, declared
     if declared is None:
-        declared = classify_exception(exc, error_map=error_map)
+        declared = classify_exception(
+            exc,
+            error_map=error_map,
+            classify_error_owner=classify_error_owner,
+            source=classify_error_source,
+        )
     return None, declared
 
 

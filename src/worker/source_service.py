@@ -19,7 +19,13 @@ import pyarrow as pa
 
 import grpc
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.declarations import DECLARED_READ_DETERMINISTIC, ErrorMap, error_map_for
+from cdk.declarations import (
+    DECLARED_READ_DETERMINISTIC,
+    ErrorMap,
+    birth_site_category,
+    classify_via_hook,
+    error_map_for,
+)
 from cdk.exceptions import ReadError, TransportSpecError
 from cdk.sql.exceptions import TlsVerificationError, UnsupportedDialectOperationError
 from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
@@ -59,7 +65,11 @@ _DETERMINISTIC_READ_ERRORS = (
 
 
 def classify_read_error(
-    exc: BaseException, error_map: ErrorMap | None
+    exc: BaseException,
+    error_map: ErrorMap | None,
+    classify_error_owner: Any = None,
+    *,
+    classify_error_source: str = "classify_error",
 ) -> tuple[bool, str | None]:
     """Classify a read failure: declared verdicts first, isinstance ladder after.
 
@@ -70,16 +80,34 @@ def classify_read_error(
     against the raw driver exception — and ``None`` when the verdict came
     from the type ladder. The category crosses the process boundary on the
     ``ReadError`` wire message so the engine reports the declared code
-    instead of re-deriving from text. Resolution order per issue #401:
-    declared verdicts, then the connector's sanctioned typed errors
+    instead of re-deriving from text. Resolution order per issue #401, then
+    #513: declared verdicts, then the connector's ``classify_error`` code
+    hook, then the connector's sanctioned typed errors
     (``_DETERMINISTIC_READ_ERRORS`` — the hook), never text.
+    *classify_error_owner* is the connector instance the hook is resolved
+    from (never a pre-resolved callable -- see :func:`classify_via_hook`).
+
+    A broken birth-site ``declared_category`` (``ReadError`` /
+    ``TransientReadError`` accept any string, with no construction-time
+    check) is not a "try the next source" signal — the engine does not
+    guess at what a broken connector declaration might have meant. It
+    maps straight to ``"config"``, the same fatal/non-retryable answer
+    :func:`~cdk.declarations.classify_via_hook` gives a broken
+    ``classify_error`` hook below, so both broken-classification paths in
+    this function agree.
     """
-    birth_site = getattr(exc, "declared_category", None)
-    if isinstance(birth_site, str) and birth_site in DECLARED_READ_DETERMINISTIC:
+    birth_site = birth_site_category(exc)
+    if birth_site is not None:
         return DECLARED_READ_DETERMINISTIC[birth_site], birth_site
     match = error_map.match_exception(exc) if error_map is not None else None
     if match is not None:
         return DECLARED_READ_DETERMINISTIC[match.category], match.category
+    if classify_error_owner is not None:
+        category = classify_via_hook(
+            classify_error_owner, "classify_error", exc, source=classify_error_source
+        )
+        if category is not None:
+            return DECLARED_READ_DETERMINISTIC[category], category
     return isinstance(exc, _DETERMINISTIC_READ_ERRORS), None
 
 
@@ -192,7 +220,21 @@ class SourceWorkerServicer(SourceServiceServicer):
         except (
             Exception
         ) as exc:  # noqa: BLE001 — every failure crosses as a typed event
-            deterministic, declared = classify_read_error(exc, self._error_map)
+            deterministic, declared = classify_read_error(
+                exc,
+                self._error_map,
+                # The Readable protocol declares only read_batches -- a
+                # source connector isn't required to inherit
+                # BaseDestinationHandler, so classify_error may not exist.
+                # classify_read_error resolves it from self._readable
+                # itself (never a pre-resolved callable): resolving a
+                # connector attribute is itself untrusted, potentially
+                # AI-authored code, guarded the same way calling it is.
+                self._readable,
+                classify_error_source=(
+                    f"{type(self._readable).__name__}.classify_error"
+                ),
+            )
             logger.error(
                 "source worker read failed (%s, deterministic=%s, "
                 "classified by %s): %s",

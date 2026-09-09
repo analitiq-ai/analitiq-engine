@@ -288,22 +288,29 @@ Four structured signals cross process boundaries so the tag survives isolation:
   `INTERNAL`) instead of reading the `failure_summary` prose.
 
 A connector may declare its driver's failure taxonomy as data — the
-`error_map` block in `connector.json`: SQLSTATE classes and
-states, exception class names, vendor codes, HTTP statuses, each mapped to
-an engine-owned category (`transient | config | auth | unreachable |
-rate_limited | write_rejected`). The engine alone derives the verdicts
-(`AckStatus`, `FailureCategory`, `ErrorCode`) from a declared category;
-connectors never self-declare verdicts. Classification happens at the
-failure's birth site: the boundary that just caught the driver's error (the
-CDK write ladder, the ADBC boundary, the source worker, both API
-connectors) matches the immediate exception — plus at most its single
-explicit driver link, SQLAlchemy's `orig` or `raise ... from` — against
-the declared map, and the verdict crosses process boundaries as the
-structured signals above (the deterministic flag, the wire
-`declared_category`, the ack's failure category). Nothing downstream
-re-derives a declared classification from exception chains or text, so a
-declaring connector gets deterministic classification for declared
-identifiers with zero connector Python.
+`error_map` block in `connector.json`: `key_attrs` names, in the
+connector's own precedence order, which attributes of its exception carry a
+native error code (or the reserved `"__exception_class__"` to match the
+exception's class name), and `codes` maps whatever native value each
+attribute reads to an engine-owned category (`transient | config | auth |
+unreachable | rate_limited | write_rejected`); `http` maps status codes to
+the same vocabulary, read at the HTTP call site rather than off an
+exception. The engine alone derives the verdicts (`AckStatus`,
+`FailureCategory`, `ErrorCode`) from a declared category; connectors never
+self-declare verdicts. Classification happens at the failure's birth site:
+the boundary that just caught the driver's error (the CDK write ladder, the
+ADBC boundary, the source worker, both API connectors) matches the
+immediate exception — plus at most its single explicit driver link,
+SQLAlchemy's `orig` or `raise ... from` — against the declared map, and the
+verdict crosses process boundaries as the structured signals above (the
+deterministic flag, the wire `declared_category`, the ack's failure
+category). Nothing downstream re-derives a declared classification from
+exception chains or text, so a declaring connector gets deterministic
+classification for declared identifiers with zero connector Python. A
+connector whose native signal needs more than a flat attribute read (nested
+body inspection, a computed match) overrides
+`BaseDestinationHandler.classify_error()` instead, consulted only when the
+declarative map finds nothing.
 
 Engine-side classification reads no exception type and no message text at
 all — there is no phrase table and no class-name table. When nothing was

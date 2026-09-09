@@ -60,7 +60,12 @@ from cdk.connection_runtime import (
     materialize_runtime,
 )
 from cdk.database_utils import acquire_connection
-from cdk.declarations import DECLARED_WRITE_VERDICTS, ErrorMap, error_map_for
+from cdk.declarations import (
+    DECLARED_WRITE_VERDICTS,
+    ErrorMap,
+    classify_via_hook,
+    error_map_for,
+)
 from cdk.exceptions import ReadError
 from cdk.query_builder import Filter, ParamsLike, QueryBuilder, QueryConfig
 from cdk.record_identity import record_digest
@@ -890,7 +895,11 @@ class GenericSQLConnector(BaseDestinationHandler):
         if runtime.is_adbc:
             self._adbc_only = True
             transport_name = "ADBC"
-            backend = AdbcBackend(self.dialect)
+            backend = AdbcBackend(
+                self.dialect,
+                classify_error_owner=self,
+                classify_error_source=f"{type(self).__name__}.classify_error",
+            )
         elif runtime.is_sync_sqlalchemy:
             self._sync_engine = runtime.sync_engine
             transport_name = "sync SQLAlchemy"
@@ -1795,41 +1804,66 @@ class GenericSQLConnector(BaseDestinationHandler):
         wherever a driver error surfaces. Engine-typed failures never route
         through here — the map classifies the driver's errors, not the
         engine's own contracts.
+
+        Declarative ``error_map`` first, ``classify_error`` as the code
+        escape hatch (issue #513): a connector's ``key_attrs``/``codes``
+        lookup covers a flat attribute read; ``classify_error`` is for a
+        native signal that needs more than that.
         """
-        if self._error_map is None:
-            return None
-        match = self._error_map.match_exception(e)
-        if match is None:
-            return None
-        status, category = DECLARED_WRITE_VERDICTS[match.category]
         transport = "adbc" if self._adbc_only else "sqlalchemy"
+        source = f"{type(self).__name__}.classify_error"
+        if self._error_map is not None:
+            match = self._error_map.match_exception(e)
+            if match is not None:
+                status, failure_category = DECLARED_WRITE_VERDICTS[match.category]
+                logger.info(
+                    "declared error_map classified the write failure: "
+                    "%s %s -> %s (%s)",
+                    match.signal,
+                    match.value,
+                    match.category,
+                    type(e).__name__,
+                )
+                return BatchWriteResult(
+                    status=status,
+                    records_written=0,
+                    failure_summary=(
+                        f"{transport}: declared error_map "
+                        f"{match.signal}:{match.value} -> {match.category}: "
+                        f"{type(e).__name__}: {e}"
+                    ),
+                    failure_category=failure_category,
+                )
+        category = classify_via_hook(self, "classify_error", e, source=source)
+        if category is None:
+            return None
+        status, failure_category = DECLARED_WRITE_VERDICTS[category]
         logger.info(
-            "declared error_map classified the write failure: %s %s -> %s (%s)",
-            match.family,
-            match.identifier,
-            match.category,
+            "classify_error classified the write failure: %s (%s)",
+            category,
             type(e).__name__,
         )
         return BatchWriteResult(
             status=status,
             records_written=0,
             failure_summary=(
-                f"{transport}: declared error_map "
-                f"{match.family}:{match.identifier} -> {match.category}: "
+                f"{transport}: classify_error -> {category}: "
                 f"{type(e).__name__}: {e}"
             ),
-            failure_category=category,
+            failure_category=failure_category,
         )
 
     def _classify_unexpected_write_error(self, e: Exception) -> BatchWriteResult:
         """Ack an exception the typed ladder did not claim.
 
-        Declared map first (issue #401): a connector-declared ``error_map``
-        fact (SQLSTATE, vendor code, exception class) claims the failure
-        deterministically, and the engine-owned verdict table derives the
-        ack — connectors declare facts, never verdicts. Only an unclaimed
-        exception falls to the class-name heuristic, and that fallback is
-        logged: the deterministic PEP-249 classes (ProgrammingError,
+        Declared map first (issue #401), then ``classify_error`` (issue
+        #513): a connector-declared ``error_map`` fact (a ``key_attrs``
+        attribute read, or the exception's class name) claims the failure
+        deterministically, then a ``classify_error`` override for a signal
+        the map can't express, and the engine-owned verdict table derives
+        the ack either way — connectors declare facts, never verdicts. Only
+        an unclaimed exception falls to the class-name heuristic, and that
+        fallback is logged: the deterministic PEP-249 classes (ProgrammingError,
         IntegrityError, DataError, NotSupportedError) are fatal — broken
         rendered SQL, a duplicate conflict key inside one source batch, or
         a constraint violation cannot heal between retries against an
@@ -1844,8 +1878,8 @@ class GenericSQLConnector(BaseDestinationHandler):
             return declared
         transport = "adbc" if self._adbc_only else "sqlalchemy"
         logger.info(
-            "no declared error_map fact matched %s; falling back to the "
-            "class-name heuristic",
+            "no declared error_map fact and no classify_error match for "
+            "%s; falling back to the class-name heuristic",
             type(e).__name__,
         )
         if _is_fatal_adbc_error(e):

@@ -226,7 +226,7 @@ class _AdbcHarness:
         self._anchor = sqlite3.connect(
             self._uri, uri=True, check_same_thread=False, isolation_level=None
         )
-        self.backend = AdbcBackend(self.dialect)
+        self.backend = AdbcBackend(self.dialect, classify_error_owner=object())
         self.backend._conn = _SqliteAdbcConnection(self._uri)
         self.backend._runtime = _AdbcRuntimeStub(self._uri)
         self.backend._bulk_load = caps.bulk_mechanism("adbc") or "none"

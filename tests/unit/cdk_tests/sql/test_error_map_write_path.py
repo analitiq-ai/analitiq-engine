@@ -14,7 +14,11 @@ import pyarrow as pa
 import pytest
 
 from cdk.adbc_registry import AdbcConfigurationError
-from cdk.declarations import parse_declared_error_map
+from cdk.declarations import (
+    CLASS_NAME_SIGNAL,
+    classify_via_hook,
+    parse_declared_error_map,
+)
 from cdk.sql.adbc_backend import AdbcBackend, _AdbcStageConnection
 from cdk.sql.backend import StageWritePlan
 from cdk.sql.dialects import SqlDialect, TableAddress
@@ -34,6 +38,16 @@ def _error_map(block):
     return parsed
 
 
+def _by_class(**codes):
+    """A ``key_attrs``/``codes`` block matching on exception class name."""
+    return {"key_attrs": [CLASS_NAME_SIGNAL], "codes": codes}
+
+
+def _by_sqlstate(**codes):
+    """A ``key_attrs``/``codes`` block matching on the ``sqlstate`` attribute."""
+    return {"key_attrs": ["sqlstate"], "codes": codes}
+
+
 class TestAckLadderDeclaredFirst:
     def _handler(self, error_map=None) -> GenericSQLConnector:
         handler = GenericSQLConnector()
@@ -41,9 +55,7 @@ class TestAckLadderDeclaredFirst:
         return handler
 
     def test_declared_transient_overrides_the_fatal_name(self):
-        handler = self._handler(
-            _error_map({"exception": {"ProgrammingError": "transient"}})
-        )
+        handler = self._handler(_error_map(_by_class(ProgrammingError="transient")))
         result = handler._classify_unexpected_write_error(ProgrammingError("boom"))
         assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
         assert (
@@ -52,7 +64,9 @@ class TestAckLadderDeclaredFirst:
         assert "declared error_map" in result.failure_summary
 
     def test_declared_sqlstate_claims_auth(self):
-        handler = self._handler(_error_map({"sqlstate": {"28": "auth"}}))
+        # Issue #513: exact-code match only, no SQLSTATE-class prefix
+        # fallback -- the full code is declared directly.
+        handler = self._handler(_error_map(_by_sqlstate(**{"28000": "auth"})))
         exc = Exception("login refused")
         exc.sqlstate = "28000"
         result = handler._classify_unexpected_write_error(exc)
@@ -60,7 +74,7 @@ class TestAckLadderDeclaredFirst:
         assert result.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
 
     def test_declared_write_rejected_is_fatal_write_rejected(self):
-        handler = self._handler(_error_map({"sqlstate": {"23": "write_rejected"}}))
+        handler = self._handler(_error_map(_by_sqlstate(**{"23505": "write_rejected"})))
         exc = Exception("duplicate key")
         exc.sqlstate = "23505"
         result = handler._classify_unexpected_write_error(exc)
@@ -70,7 +84,7 @@ class TestAckLadderDeclaredFirst:
         )
 
     def test_unclaimed_exception_keeps_the_heuristic(self):
-        handler = self._handler(_error_map({"exception": {"SomeOther": "auth"}}))
+        handler = self._handler(_error_map(_by_class(SomeOther="auth")))
         result = handler._classify_unexpected_write_error(ProgrammingError("boom"))
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert result.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
@@ -83,10 +97,76 @@ class TestAckLadderDeclaredFirst:
     def test_heuristic_fallback_logs(self, caplog):
         import logging
 
-        handler = self._handler(_error_map({"exception": {"SomeOther": "auth"}}))
+        handler = self._handler(_error_map(_by_class(SomeOther="auth")))
         with caplog.at_level(logging.INFO, logger="cdk.sql.generic"):
             handler._classify_unexpected_write_error(ProgrammingError("boom"))
         assert any("class-name heuristic" in r.message for r in caplog.records)
+
+    def test_classify_error_claims_what_the_map_does_not(self):
+        # Issue #513: this is the spec's named root-cause module --
+        # _declared_write_verdict tries the declarative map first, then
+        # falls back to the connector's classify_error code hook.
+        handler = self._handler(None)
+        handler.classify_error = lambda exc: "transient"
+        result = handler._classify_unexpected_write_error(ProgrammingError("boom"))
+        assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
+        assert (
+            result.failure_category == FailureCategory.FAILURE_CATEGORY_WRITE_REJECTED
+        )
+        assert "classify_error" in result.failure_summary
+
+    def test_declared_map_outranks_classify_error(self):
+        handler = self._handler(_error_map(_by_class(ProgrammingError="config")))
+        handler.classify_error = lambda exc: "transient"
+        result = handler._classify_unexpected_write_error(ProgrammingError("boom"))
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
+
+    def test_classify_error_off_vocabulary_return_maps_to_config(self):
+        # The hook ran and answered -- wrongly. The engine cannot guess
+        # what it meant, so it's treated as a broken classification
+        # mechanism: fatal, non-retryable, the same as a crash.
+        handler = self._handler(None)
+        handler.classify_error = lambda exc: "retry_me"
+        result = handler._classify_unexpected_write_error(ProgrammingError("boom"))
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
+
+    def test_a_crashing_classify_error_does_not_displace_the_original_failure(self):
+        # A connector's classify_error is untrusted, potentially AI-authored
+        # code; a bug in it must not crash the write-ack ladder or hide the
+        # original exception -- the crash itself maps to "config" (fatal,
+        # non-retryable), the same as an off-vocabulary return.
+        handler = self._handler(None)
+
+        def _broken(exc):
+            raise RuntimeError("connector bug")
+
+        handler.classify_error = _broken
+        result = handler._classify_unexpected_write_error(ProgrammingError("boom"))
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
+        assert "ProgrammingError" in result.failure_summary
+
+    def test_a_classify_error_that_raises_resolving_it_does_not_displace_the_failure(
+        self,
+    ):
+        # Resolving classify_error (not calling it) is itself an
+        # attribute read on untrusted, potentially AI-authored connector
+        # code -- a connector overriding it as a raising descriptor must
+        # not crash the write-ack ladder either.
+        class _BrokenDescriptorConnector(GenericSQLConnector):
+            def __getattribute__(self, name):
+                if name == "classify_error":
+                    raise RuntimeError("connector descriptor bug")
+                return super().__getattribute__(name)
+
+        handler = _BrokenDescriptorConnector()
+        handler._error_map = None
+        result = handler._classify_unexpected_write_error(ProgrammingError("boom"))
+        assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
+        assert result.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
+        assert "ProgrammingError" in result.failure_summary
 
 
 class TestDriverTimeoutVerdict:
@@ -117,7 +197,7 @@ class TestDriverTimeoutVerdict:
         # config fact makes it fatal instead of retrying forever. This holds
         # inside a bounded block too — the fact is the deadline's own
         # answer, not whether a timeout was configured.
-        handler = self._handler(_error_map({"exception": {"TimeoutError": "config"}}))
+        handler = self._handler(_error_map(_by_class(TimeoutError="config")))
         result = self._timeout(handler, deadline_expired=False)
         assert result.status == AckStatus.ACK_STATUS_FATAL_FAILURE
         assert result.failure_category == FailureCategory.FAILURE_CATEGORY_CONFIG_DEFECT
@@ -133,7 +213,7 @@ class TestDriverTimeoutVerdict:
     def test_engine_cancellation_is_never_overridden(self):
         # The deadline itself expired: the engine cancelled its own
         # statement, so a declared TimeoutError fact must not claim it.
-        handler = self._handler(_error_map({"exception": {"TimeoutError": "config"}}))
+        handler = self._handler(_error_map(_by_class(TimeoutError="config")))
         result = self._timeout(handler, deadline_expired=True)
         assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
         assert "statement timeout" in result.failure_summary
@@ -153,7 +233,7 @@ class TestConnectWiring:
         runtime = MagicMock()
         runtime.connector_id = "demo"
         runtime.declared_sql_capabilities = caps_block()
-        runtime.declared_error_map = {"exception": {"ProgrammingError": "transient"}}
+        runtime.declared_error_map = _by_class(ProgrammingError="transient")
         runtime.is_adbc = False
         runtime.is_sync_sqlalchemy = False
         runtime.driver = "postgresql"
@@ -163,24 +243,125 @@ class TestConnectWiring:
         result = handler._classify_unexpected_write_error(ProgrammingError("boom"))
         assert result.status == AckStatus.ACK_STATUS_RETRYABLE_FAILURE
 
+    @pytest.mark.asyncio
+    async def test_classify_error_reaches_the_adbc_backend_through_connect(self):
+        # AdbcBackend can't reach a connector reference on its own (issue
+        # #513) -- connect() must inject itself (never a pre-resolved
+        # callable -- see classify_via_hook) and a source label naming the
+        # connector class.
+        handler = GenericSQLConnector()
+        runtime = MagicMock()
+        runtime.connector_id = "demo"
+        runtime.declared_sql_capabilities = caps_block()
+        runtime.declared_error_map = None
+        runtime.is_adbc = True
+        runtime.is_sync_sqlalchemy = False
+        runtime.driver = "postgresql"
+        runtime.open_adbc_connection = MagicMock()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()):
+            await handler.connect(runtime)
+        assert handler._backend._classify_error_owner is handler
+        assert (
+            handler._backend._classify_error_source
+            == f"{type(handler).__name__}.classify_error"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_classify_error_descriptor_bug_does_not_crash_connect(self):
+        # Resolving classify_error (not calling it) is itself an
+        # attribute read on untrusted connector code -- connect() must
+        # not crash and leak the just-materialized runtime over a
+        # connector's descriptor bug. classify_via_hook resolves lazily
+        # (only when a driver failure is actually classified), so connect()
+        # itself never touches the broken descriptor at all.
+        class _BrokenDescriptorConnector(GenericSQLConnector):
+            def __getattribute__(self, name):
+                if name == "classify_error":
+                    raise RuntimeError("connector descriptor bug")
+                return super().__getattribute__(name)
+
+        handler = _BrokenDescriptorConnector()
+        runtime = MagicMock()
+        runtime.connector_id = "demo"
+        runtime.declared_sql_capabilities = caps_block()
+        runtime.declared_error_map = None
+        runtime.is_adbc = True
+        runtime.is_sync_sqlalchemy = False
+        runtime.driver = "postgresql"
+        runtime.open_adbc_connection = MagicMock()
+        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()):
+            await handler.connect(runtime)
+        assert (
+            classify_via_hook(
+                handler._backend._classify_error_owner,
+                "classify_error",
+                ProgrammingError("boom"),
+                source=handler._backend._classify_error_source,
+            )
+            == "config"
+        )
+
+
+def _owner(classify_error_fn):
+    """A minimal object exposing classify_error, for classify_via_hook's
+    (owner, attr) shape -- tests inject a plain function, not a bound
+    method, so this wraps one as the attribute."""
+
+    class _Owner:
+        classify_error = staticmethod(classify_error_fn)
+
+    return _Owner()
+
 
 class TestAdbcBoundary:
-    def _backend(self, error_map=None) -> AdbcBackend:
-        backend = AdbcBackend(SqlDialect())
+    def _backend(self, error_map=None, *, classify_error=None) -> AdbcBackend:
+        backend = AdbcBackend(
+            SqlDialect(),
+            classify_error_owner=_owner(classify_error or (lambda exc: None)),
+        )
         backend._error_map = error_map
         return backend
 
     def test_declared_fact_suppresses_the_fatal_reclassification(self):
-        backend = self._backend(
-            _error_map({"exception": {"ProgrammingError": "transient"}})
-        )
+        backend = self._backend(_error_map(_by_class(ProgrammingError="transient")))
+        exc = ProgrammingError("boom")
+        with pytest.raises(ProgrammingError):
+            backend._reraise_driver_error(exc, write_cycle=True)
+
+    def test_classify_error_hook_suppresses_the_fatal_reclassification(self):
+        # Issue #513: the code escape hatch claims a failure the
+        # declarative map doesn't cover, exactly like a declared fact does.
+        backend = self._backend(classify_error=lambda exc: "transient")
         exc = ProgrammingError("boom")
         with pytest.raises(ProgrammingError):
             backend._reraise_driver_error(exc, write_cycle=True)
 
     def test_unclaimed_fatal_name_still_reclassifies(self):
-        backend = self._backend(_error_map({"exception": {"SomeOther": "auth"}}))
+        backend = self._backend(_error_map(_by_class(SomeOther="auth")))
         with pytest.raises(AdbcConfigurationError):
+            backend._reraise_driver_error(ProgrammingError("boom"), write_cycle=True)
+
+    def test_map_present_but_silent_then_hook_claims(self):
+        # The map is declared but doesn't cover this exception -- the hook
+        # still gets its chance, exactly as _declared_write_verdict does.
+        backend = self._backend(
+            _error_map(_by_class(SomeOther="auth")),
+            classify_error=lambda exc: "transient",
+        )
+        exc = ProgrammingError("boom")
+        with pytest.raises(ProgrammingError):
+            backend._reraise_driver_error(exc, write_cycle=True)
+
+    def test_a_crashing_hook_does_not_displace_the_original_failure(self):
+        # The crash maps to "config" (a claim), so the raw exception
+        # propagates for the facade's ack ladder to derive the fatal
+        # config-defect verdict from -- not the unclaimed-fatal-name
+        # reclassification a crash used to fall through to.
+        def _broken(exc):
+            raise RuntimeError("connector bug")
+
+        backend = self._backend(classify_error=_broken)
+        with pytest.raises(ProgrammingError):
             backend._reraise_driver_error(ProgrammingError("boom"), write_cycle=True)
 
     def test_non_fatal_unclaimed_exception_reraises_raw(self):
@@ -192,9 +373,7 @@ class TestAdbcBoundary:
         # Outside the write cycle nothing consumes a declared category —
         # the schema handshake rejects on AdbcConfigurationError — so the
         # fatal promotion must apply regardless of the declaration.
-        backend = self._backend(
-            _error_map({"exception": {"ProgrammingError": "config"}})
-        )
+        backend = self._backend(_error_map(_by_class(ProgrammingError="config")))
         with pytest.raises(AdbcConfigurationError):
             backend._reraise_driver_error(ProgrammingError("boom"), write_cycle=False)
 

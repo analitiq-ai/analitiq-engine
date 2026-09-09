@@ -270,6 +270,34 @@ class BaseDestinationHandler(ABC):
         FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
     )
 
+    # skipcq: PYL-R0201 - an overridable hook, not a utility. The base's
+    # neutral answer reads no attribute; a real override reads its own
+    # instance/driver state, and making this static would hide that it is
+    # an override (same reasoning as not_ready_reason below).
+    def classify_error(self, exc: BaseException) -> str | None:  # skipcq: PYL-R0201
+        """Name the engine-vocabulary category this connector's native error is.
+
+        The code escape hatch (issue #513): consulted only after a bound
+        declared ``error_map``'s ``key_attrs``/``codes`` lookup
+        (:meth:`cdk.declarations.ErrorMap.match_exception`) finds nothing —
+        for a native error signal that isn't a flat attribute read (nested
+        body inspection, a computed match, a method call like gRPC's
+        ``exc.code()``). Called with *exc* as caught -- possibly more than
+        once for the same failure (a transport boundary may consult it to
+        decide whether to reclassify at all, and the write-ack ladder
+        consults it again for the verdict), so implementations must be a
+        pure function of *exc*: no side effects, no state that would make
+        a second call answer differently. A connector whose driver wraps
+        errors (SQLAlchemy's ``.orig``, ``raise ... from``) unwraps it
+        itself, the same way a dialect's SQL-rendering hooks are each
+        responsible for their own system's quirks. Returns ``None`` by
+        default (undeclared, current heuristic fallback applies) — override
+        only when the driver signal genuinely needs code, not the
+        declarative map.
+        """
+        _ = exc  # no-op default
+        return None
+
     def set_endpoint_refs(self, endpoint_refs: Mapping[str, Any]) -> None:
         """Register the ``stream_id → endpoint_ref`` index for this handler.
 
