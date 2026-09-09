@@ -291,6 +291,26 @@ class _ClassifyErrorOverrideConnector(ReferenceConnector):
         return "transient"
 
 
+class _AsyncClassifyErrorConnector(ReferenceConnector):
+    """classify_error declared async -- the CDK calls it synchronously."""
+
+    async def classify_error(self, exc: BaseException) -> str | None:
+        return "transient"
+
+
+class _BrokenSignatureClassifyErrorConnector(ReferenceConnector):
+    """classify_error missing the exc parameter the base signature admits."""
+
+    def classify_error(self) -> str | None:  # type: ignore[override]
+        return "transient"
+
+
+class _NonCallableClassifyErrorConnector(ReferenceConnector):
+    """classify_error replaced with a non-callable value, not a hook."""
+
+    classify_error = "transient"
+
+
 class _MergeFormDialect(ReferencePostgresDialect):
     """Renders the MERGE form, for the merge_form: 'merge' rendering arm."""
 
@@ -524,6 +544,37 @@ class TestOverrideSurfaceBreaks:
             )
             == []
         )
+
+    def test_async_classify_error_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """An async classify_error is still shape-checked, like a dialect hook."""
+        violations = check_override_surface(
+            _with_connector(reference_target, _AsyncClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "async" in report
+
+    def test_broken_signature_classify_error_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        violations = check_override_surface(
+            _with_connector(reference_target, _BrokenSignatureClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "signature" in report
+
+    def test_non_callable_classify_error_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        violations = check_override_surface(
+            _with_connector(reference_target, _NonCallableClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "non-callable" in report
 
     def test_staticmethod_hook_is_allowed(
         self, reference_target: ConformanceTarget

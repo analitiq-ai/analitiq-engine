@@ -32,6 +32,7 @@ from __future__ import annotations
 import inspect
 from typing import TYPE_CHECKING, Any
 
+from cdk.base_handler import BaseDestinationHandler
 from cdk.sql.dialects import SqlDialect
 from cdk.sql.generic import GenericSQLConnector
 
@@ -202,7 +203,9 @@ def _audit_dialect_class(dialect_cls: type) -> list[Violation]:
                     )
                 continue
             if name in sanctioned:
-                mismatch = _hook_shape_problem(klass, name)
+                mismatch = _hook_shape_problem(
+                    klass, name, SqlDialect, hook_label="dialect hook"
+                )
                 if mismatch is not None:
                     violations.append(Violation(CHECK, mismatch))
                 continue
@@ -230,9 +233,17 @@ def _audit_dialect_class(dialect_cls: type) -> list[Violation]:
     return violations
 
 
-def _hook_shape_problem(klass: type, name: str) -> str | None:
-    """Check one sanctioned override's shape against the base definition."""
-    base_attr = inspect.getattr_static(SqlDialect, name)
+def _hook_shape_problem(
+    klass: type, name: str, base_cls: type, *, hook_label: str
+) -> str | None:
+    """Check one sanctioned override's shape against *base_cls*'s definition.
+
+    *base_cls* is the class that declares the hook's contract (``SqlDialect``
+    for a dialect hook, ``BaseDestinationHandler`` for the connector-class
+    ``classify_error`` escape hatch) and *hook_label* names it in the
+    violation text.
+    """
+    base_attr = inspect.getattr_static(base_cls, name)
     override_attr = inspect.getattr_static(klass, name)
     base_callable = callable(base_attr) or isinstance(
         base_attr, (staticmethod, classmethod)
@@ -246,15 +257,16 @@ def _hook_shape_problem(klass: type, name: str) -> str | None:
     )
     if not override_callable:
         return (
-            f"{klass.__name__}.{name} replaces the sanctioned hook with a "
-            f"non-callable {type(override_attr).__name__}; the CDK calls it."
+            f"{klass.__name__}.{name} replaces the sanctioned {hook_label} "
+            f"with a non-callable {type(override_attr).__name__}; the CDK "
+            f"calls it."
         )
-    base_fn = inspect.unwrap(getattr(SqlDialect, name))
+    base_fn = inspect.unwrap(getattr(base_cls, name))
     override_fn = getattr(klass, name)
     if inspect.iscoroutinefunction(inspect.unwrap(override_fn)):
         return (
             f"{klass.__name__}.{name} is declared async; the CDK calls "
-            f"every dialect hook synchronously and would receive an "
+            f"every {hook_label} synchronously and would receive an "
             f"unawaited coroutine instead of the hook's result."
         )
     mismatch = _signature_mismatch(
@@ -265,7 +277,8 @@ def _hook_shape_problem(klass: type, name: str) -> str | None:
     if mismatch is None:
         return None
     return (
-        f"{klass.__name__}.{name} breaks the sanctioned hook signature: " f"{mismatch}"
+        f"{klass.__name__}.{name} breaks the sanctioned {hook_label} "
+        f"signature: {mismatch}"
     )
 
 
@@ -291,6 +304,16 @@ def _audit_connector_class(connector_cls: type) -> list[Violation]:
     violations: list[Violation] = []
     for klass in _mro_span(connector_cls, GenericSQLConnector):
         for name, value in vars(klass).items():
+            if name == "classify_error":
+                mismatch = _hook_shape_problem(
+                    klass,
+                    name,
+                    BaseDestinationHandler,
+                    hook_label="classify_error hook",
+                )
+                if mismatch is not None:
+                    violations.append(Violation(CHECK, mismatch))
+                continue
             if name in CONNECTOR_CLASS_ALLOWED_ATTRS or name in _INTERPRETER_MANAGED:
                 continue
             if _is_dunder(name) and not _is_authored_callable(value):
