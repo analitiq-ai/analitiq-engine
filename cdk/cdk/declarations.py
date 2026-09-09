@@ -184,25 +184,28 @@ class DeclaredMatch:
     category: str
 
     def __post_init__(self) -> None:
-        if self.category not in ERROR_CATEGORY_VALUES:
-            raise ConnectorDeclarationError(
-                f"DeclaredMatch category {self.category!r} is not in the "
-                f"engine vocabulary {list(ERROR_CATEGORY_VALUES)}"
-            )
+        # Every construction site (match_http, _match_signal) already ran
+        # this category through _require_category while parsing self.codes
+        # / self.http, so this can never actually fire today -- kept as the
+        # one shared check (require_declared_category, defined below) so a
+        # future construction site can't smuggle an off-vocabulary category
+        # into a verdict-table lookup by skipping that parse-time gate.
+        require_declared_category(self.category, source="DeclaredMatch")
 
 
 def require_declared_category(category: str, *, source: str) -> str:
-    """Validate a category returned by a connector-authored code hook.
+    """Validate a category against the engine vocabulary.
 
-    Used at the two code-hook return paths —
-    :meth:`~cdk.base_handler.BaseDestinationHandler.classify_error` and a
-    dialect's ``classify()`` — so an off-vocabulary string from either
-    fails loud at the classification site instead of a ``KeyError`` inside
-    :data:`DECLARED_WRITE_VERDICTS` or :data:`DECLARED_READ_DETERMINISTIC`.
-    The declarative ``error_map`` lookup is validated separately, at parse
-    time (:func:`_require_category`) and again on
-    :class:`DeclaredMatch` construction — a hook's return is checked here
-    instead because it is computed at classification time, not parse time.
+    The one shared check: a connector-authored code hook's return
+    (:meth:`~cdk.base_handler.BaseDestinationHandler.classify_error`, a
+    dialect's ``classify()``) and :class:`DeclaredMatch` construction both
+    call this, so an off-vocabulary string fails loud here instead of a
+    ``KeyError`` inside :data:`DECLARED_WRITE_VERDICTS` or
+    :data:`DECLARED_READ_DETERMINISTIC`. The declarative ``error_map``
+    lookup is also checked earlier, at parse time (:func:`_require_category`)
+    -- a different call shape (a JSON-pointer ``path``, not a hook's
+    ``source``) for a different context, not a second implementation of
+    this rule.
     """
     if category not in ERROR_CATEGORY_VALUES:
         raise ConnectorDeclarationError(
