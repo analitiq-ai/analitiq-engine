@@ -731,6 +731,30 @@ class TestSchemaContractFromPylist:
         with pytest.raises(InvalidTypeMapError, match="DAY"):
             SchemaContract(schema).check_required_read_encoding()
 
+    def test_bool_map_and_base64_are_accepted_on_their_matching_kinds(self):
+        # Regression: both were missing from DECODER_KIND_COMPATIBILITY, so
+        # check_required_read_encoding refused every declaration of either
+        # regardless of field type.
+        schema = {
+            "properties": {
+                "active": {
+                    "type": "string",
+                    "arrow_type": "Boolean",
+                    "encoding": {
+                        "name": "bool_map",
+                        "true_values": ["Y"],
+                        "false_values": ["N"],
+                    },
+                },
+                "blob": {
+                    "type": "string",
+                    "arrow_type": "Binary",
+                    "encoding": {"name": "base64"},
+                },
+            }
+        }
+        SchemaContract(schema).check_required_read_encoding()
+
     def test_a_nested_write_field_with_a_non_code_top_level_encoding_is_refused(self):
         # A scalar encoder like iso8601 resolves fine against a nested
         # field's own declaration, but land() would then apply it to the
