@@ -157,7 +157,7 @@ class TestAckLadderDeclaredFirst:
         # not crash the write-ack ladder either.
         class _BrokenDescriptorConnector(GenericSQLConnector):
             @property
-            def classify_error(self):
+            def classify_error(self):  # type: ignore[override]
                 raise RuntimeError("connector descriptor bug")
 
         handler = _BrokenDescriptorConnector()
@@ -275,7 +275,7 @@ class TestConnectWiring:
         # itself never touches the broken descriptor at all.
         class _BrokenDescriptorConnector(GenericSQLConnector):
             @property
-            def classify_error(self):
+            def classify_error(self):  # type: ignore[override]
                 raise RuntimeError("connector descriptor bug")
 
         handler = _BrokenDescriptorConnector()

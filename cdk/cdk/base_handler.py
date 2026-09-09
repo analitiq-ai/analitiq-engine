@@ -270,7 +270,11 @@ class BaseDestinationHandler(ABC):
         FailureCategory.FAILURE_CATEGORY_UNSPECIFIED
     )
 
-    def classify_error(self, exc: BaseException) -> str | None:
+    # skipcq: PYL-R0201 - an overridable hook, not a utility. The base's
+    # neutral answer reads no attribute; a real override reads its own
+    # instance/driver state, and making this static would hide that it is
+    # an override (same reasoning as not_ready_reason below).
+    def classify_error(self, exc: BaseException) -> str | None:  # skipcq: PYL-R0201
         """Name the engine-vocabulary category this connector's native error is.
 
         The code escape hatch (issue #513): consulted only after a bound

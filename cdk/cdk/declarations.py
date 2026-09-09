@@ -1,5 +1,4 @@
-"""Connector-level declared facts (issue #401, generalized by #513): error taxonomy
-+ concurrency.
+"""Connector-level declared facts: error taxonomy + concurrency (#401, #513).
 
 Two families of per-system knowledge move from engine guessing (text
 heuristics, class-name matching) and per-connector code into declared,
