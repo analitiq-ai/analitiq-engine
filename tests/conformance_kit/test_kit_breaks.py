@@ -9,6 +9,7 @@ asserts the kit fails with a message naming the offending member.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 import shutil
 from collections.abc import Sequence
@@ -346,6 +347,29 @@ class _ShadowedClassifyErrorConnector(
     the mixin's override is never called -- tier 1 must catch that."""
 
 
+class _ClassifyErrorSubclassBaseConnector(ReferenceConnector):
+    """A connector-owned base defining classify_error directly."""
+
+    def classify_error(self, exc: BaseException) -> str | None:
+        return "transient"
+
+
+class _ClassifyErrorCooperativeSubclassConnector(_ClassifyErrorSubclassBaseConnector):
+    """A further subclass overriding it again, cooperatively -- not a
+    framework shadow, just ordinary inheritance the check must allow."""
+
+    def classify_error(self, exc: BaseException) -> str | None:
+        return super().classify_error(exc) or "config"
+
+
+class _LruCachedClassifyErrorConnector(ReferenceConnector):
+    """classify_error wrapped in a descriptor other than a plain function."""
+
+    @functools.lru_cache(maxsize=8)
+    def classify_error(self, exc: BaseException) -> str | None:
+        return "transient"
+
+
 class _MergeFormDialect(ReferencePostgresDialect):
     """Renders the MERGE form, for the merge_form: 'merge' rendering arm."""
 
@@ -634,6 +658,30 @@ class TestOverrideSurfaceBreaks:
         report = _messages(violations)
         assert "classify_error" in report
         assert "shadowed" in report
+
+    def test_cooperative_subclass_classify_error_is_allowed(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A subclass re-overriding its own base's classify_error is not shadowing."""
+        assert (
+            check_override_surface(
+                _with_connector(
+                    reference_target, _ClassifyErrorCooperativeSubclassConnector
+                )
+            )
+            == []
+        )
+
+    def test_lru_cached_classify_error_is_allowed(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A non-function descriptor (lru_cache) still resolves self correctly."""
+        assert (
+            check_override_surface(
+                _with_connector(reference_target, _LruCachedClassifyErrorConnector)
+            )
+            == []
+        )
 
     def test_staticmethod_hook_is_allowed(
         self, reference_target: ConformanceTarget

@@ -30,6 +30,7 @@ without touching this module.
 from __future__ import annotations
 
 import inspect
+import types
 from typing import TYPE_CHECKING, Any
 
 from cdk.base_handler import BaseDestinationHandler
@@ -98,6 +99,24 @@ def _mro_span(cls: type, base: type) -> list[type]:
     return [klass for klass in cls.__mro__ if klass not in framework]
 
 
+def _wins_mro(owning_cls: type, owned: frozenset[type], name: str) -> bool:
+    """Whether *name* resolves, on *owning_cls*, to one of *owned*'s classes.
+
+    *owned* is the connector/dialect's own classes (``_mro_span``'s
+    result). A name that instead resolves to a class outside that set is
+    shadowed by the framework's own definition -- typically a neutral
+    no-op -- and is dead code: the connector's intended override never
+    runs. A name that resolves to a *different* member of *owned* is the
+    connector authors' own business (a subclass override, a cooperative
+    ``super()`` chain, or an unrelated sibling): Python offers no static
+    way to tell an intentional cooperative chain from an accidental one
+    without reading the bodies, and flagging it would reject the ordinary
+    case of a subclass overriding its own base's hook.
+    """
+    winner = next((k for k in owning_cls.__mro__ if name in vars(k)), None)
+    return winner in owned
+
+
 def _base_call_shapes(base_fn: Any) -> list[tuple[str, list[Any], dict[str, Any]]]:
     """Enumerate the call shapes the base hook's signature admits.
 
@@ -157,13 +176,12 @@ def _signature_mismatch(
     :func:`_base_call_shapes`) against the override's signature — so an
     override may add defaulted parameters of its own, but a dropped,
     renamed, de-keyworded, or made-required parameter fails with the
-    binder's own explanation. ``takes_self`` is False for a
-    static/classmethod override and for a callable *object* (its resolved
-    signature already carries no instance parameter in both cases — the
-    latter because ``inspect.signature`` reads a callable object's own
-    ``__call__`` with its self already stripped); a plain method that
+    binder's own explanation. ``takes_self`` (see :func:`_binds_instance`)
+    is False for a static/classmethod override, a bound-method reference,
+    and a callable object — each already resolves through class-level
+    access with no instance parameter left to place; a plain method that
     *forgot* ``self`` must not slip through the self-less bind, so the
-    choice comes from the descriptor/object type, never from which bind
+    choice comes from what the attribute *is*, never from which bind
     happens to succeed.
     """
     try:
@@ -186,8 +204,10 @@ def _signature_mismatch(
 def _audit_dialect_class(dialect_cls: type) -> list[Violation]:
     """Audit every attribute the connector's dialect classes define."""
     sanctioned = sanctioned_dialect_surface()
+    span = _mro_span(dialect_cls, SqlDialect)
+    owned = frozenset(span)
     violations: list[Violation] = []
-    for klass in _mro_span(dialect_cls, SqlDialect):
+    for klass in span:
         for name in vars(klass):
             if not _is_audited(name):
                 continue
@@ -206,6 +226,18 @@ def _audit_dialect_class(dialect_cls: type) -> list[Violation]:
                     )
                 continue
             if name in sanctioned:
+                if not _wins_mro(dialect_cls, owned, name):
+                    violations.append(
+                        Violation(
+                            CHECK,
+                            f"{klass.__name__}.{name} is shadowed by an "
+                            f"earlier class in {dialect_cls.__name__}'s MRO "
+                            f"and is never called; declare it on "
+                            f"{dialect_cls.__name__} itself or list "
+                            f"{klass.__name__} before the shadowing base.",
+                        )
+                    )
+                    continue
                 mismatch = _hook_shape_problem(
                     klass, name, SqlDialect, hook_label="dialect hook"
                 )
@@ -234,6 +266,26 @@ def _audit_dialect_class(dialect_cls: type) -> list[Violation]:
                     )
                 )
     return violations
+
+
+def _binds_instance(attr: Any) -> bool:
+    """Whether accessing *attr* through the class still carries an instance.
+
+    True for a plain function/method (class-level access resolves it
+    unbound, so its signature still carries ``self``) and for any other
+    descriptor whose ``__get__`` would bind an instance (an
+    ``lru_cache``-wrapped method, a custom descriptor) -- ``isfunction``
+    alone misses these, since they are not ``types.FunctionType``. False
+    for ``staticmethod``/``classmethod`` (already self-less) and for a
+    bound method reference or a callable *object* (``types.MethodType``
+    lacks the class-level ``__get__`` that would re-bind it to a new
+    instance, and a plain callable object has no ``__get__`` at all --
+    ``inspect.signature`` already reads either one's effective signature
+    with self, if any, already accounted for).
+    """
+    return hasattr(type(attr), "__get__") and not isinstance(
+        attr, (staticmethod, classmethod, types.MethodType)
+    )
 
 
 def _hook_shape_problem(
@@ -275,16 +327,7 @@ def _hook_shape_problem(
     mismatch = _signature_mismatch(
         base_fn,
         override_fn,
-        # Only a plain function/method needs an implicit-self placeholder:
-        # accessed via the class it resolves unbound, so its signature
-        # still carries self. staticmethod/classmethod are already
-        # self-less; a callable *object* (``classify_error = Classifier()``
-        # with ``Classifier.__call__(self, exc)``) is neither -- accessing
-        # it via the class returns the instance itself, and
-        # inspect.signature() on a callable object already reads
-        # __call__'s signature with its own self stripped, so adding a
-        # placeholder here double-counts it and rejects a valid hook.
-        takes_self=inspect.isfunction(override_attr),
+        takes_self=_binds_instance(override_attr),
     )
     if mismatch is None:
         return None
@@ -313,15 +356,16 @@ def _audit_connector_class(connector_cls: type) -> list[Violation]:
     exactly the facade coupling this check exists to refuse; only
     interpreter-stamped metadata dunders are exempt.
     """
+    span = _mro_span(connector_cls, GenericSQLConnector)
+    owned = frozenset(span)
     violations: list[Violation] = []
-    for klass in _mro_span(connector_cls, GenericSQLConnector):
+    for klass in span:
         for name, value in vars(klass).items():
             if name == "classify_error":
-                live = inspect.getattr_static(connector_cls, name, None)
-                if live is not value:
-                    # A framework class earlier in connector_cls's MRO than
-                    # klass also defines classify_error (BaseDestinationHandler
-                    # always does, with its neutral no-op), so the runtime
+                if not _wins_mro(connector_cls, owned, name):
+                    # BaseDestinationHandler -- earlier in connector_cls's
+                    # MRO than every class this loop audits -- also defines
+                    # classify_error with its neutral no-op, so the runtime
                     # attribute lookup on connector_cls never reaches this
                     # definition -- it is dead code, not a working override.
                     violations.append(
