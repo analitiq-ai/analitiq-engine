@@ -424,6 +424,19 @@ class _RaisingClassifyErrorConnector(ReferenceConnector):
     classify_error = _RaisingClassifyErrorDescriptor()
 
 
+def _cyclic_wrapped_classify_error(self: Any, exc: BaseException) -> str | None:
+    return "transient"
+
+
+_cyclic_wrapped_classify_error.__wrapped__ = _cyclic_wrapped_classify_error
+
+
+class _CyclicWrappedClassifyErrorConnector(ReferenceConnector):
+    """A self-referential __wrapped__ chain -- inspect.unwrap raises."""
+
+    classify_error = _cyclic_wrapped_classify_error
+
+
 def _classify_error_forwarding_decorator(
     fn: Any,
 ) -> Any:
@@ -914,6 +927,17 @@ class TestOverrideSurfaceBreaks:
         report = _messages(violations)
         assert "classify_error" in report
         assert "AttributeError" in report
+
+    def test_cyclic_wrapped_classify_error_fails_loud(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A self-referential __wrapped__ chain reports a violation, not a crash."""
+        violations = check_override_surface(
+            _with_connector(reference_target, _CyclicWrappedClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "ValueError" in report
 
     def test_forwarding_wrapper_classify_error_is_allowed(
         self, reference_target: ConformanceTarget

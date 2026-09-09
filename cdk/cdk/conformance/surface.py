@@ -357,6 +357,22 @@ def _hook_shape_problem(
     from *klass* (the class *name* is actually defined on, when that is a
     connector-owned mixin); *hook_label* names the hook in the violation
     text.
+
+    Boundary, reached after several rounds of real gaps in single-layer
+    wrapping (a forwarding decorator, a partial, a callable object) each
+    getting fixed in turn: this validates one layer of wrapping around
+    the actual implementation, not an arbitrary composition of them. A
+    ``functools.wraps`` outer wrapper whose own signature narrows what it
+    forwards to, a class whose ``__call__`` is itself a
+    ``functools.partial``, a wrapper whose asyncness differs from what it
+    wraps -- each is a further composition of mechanisms this function
+    already resolves individually, not a new mechanism, and each admits
+    another one layered on top of it without end. Continuing to chase
+    each composition trades a bounded, well-tested check for an
+    unbounded one; a connector author stacking wrappers this deeply
+    around ``classify_error`` is past what an authoring-time shape check
+    reasonably owns; the actual failure still surfaces at runtime,
+    through ``classify_via_hook``'s existing broken-hook handling.
     """
     base_attr = inspect.getattr_static(base_cls, name)
     base_callable = callable(base_attr) or isinstance(
@@ -371,26 +387,32 @@ def _hook_shape_problem(
     for raw_candidate in _candidate_raws(raw_override):
         try:
             resolved = _resolve_via_instance(owning_cls, raw_candidate)
+            not_callable = not callable(resolved)
+            probe = None if not_callable else inspect.unwrap(_async_probe(resolved))
         except Exception as exc:
-            # classify_via_hook (declarations.py) treats a descriptor that
-            # raises on resolution as a broken hook and maps it to
-            # "config" at runtime, never crashing the caller reporting
-            # the original failure -- tier 1 must catch the same defect
-            # at authoring time, not propagate it out of the conformance
-            # run.
+            # classify_via_hook (declarations.py) treats a broken hook --
+            # resolving it raises, or (same failure stated differently) it
+            # doesn't behave like the classification callable it claims to
+            # be -- as a defect it maps to "config" at runtime, never
+            # crashing the caller reporting the original failure. Tier 1
+            # must catch the same defect at authoring time instead of
+            # propagating it out of the conformance run: a connector
+            # whose classify_error has a self-referential __wrapped__
+            # chain (inspect.unwrap raises ValueError) is exactly this
+            # case, not a reason to abort every other check.
             return (
                 f"{klass.__name__}.{name} raised {type(exc).__name__} "
-                f"resolving the sanctioned {hook_label} ({exc}); a hook "
-                f"must resolve without relying on state "
-                f"{owning_cls.__name__} only sets up in __init__."
+                f"resolving or inspecting the sanctioned {hook_label} "
+                f"({exc}); a hook must resolve and introspect cleanly, "
+                f"without relying on state {owning_cls.__name__} only "
+                f"sets up in __init__."
             )
-        if not callable(resolved):
+        if not_callable:
             return (
                 f"{klass.__name__}.{name} replaces the sanctioned "
                 f"{hook_label} with a non-callable "
                 f"{type(raw_candidate).__name__}; the CDK calls it."
             )
-        probe = inspect.unwrap(_async_probe(resolved))
         if inspect.iscoroutinefunction(probe) or inspect.isasyncgenfunction(probe):
             return (
                 f"{klass.__name__}.{name} is declared async; the CDK calls "
