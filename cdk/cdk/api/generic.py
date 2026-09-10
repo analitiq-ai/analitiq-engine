@@ -1110,15 +1110,18 @@ class GenericAPIConnector(BaseDestinationHandler):
         ``int``, ``float``, ``bool``) survive into the dicts and the body
         serialiser handles them directly; a field whose type has no native
         JSON rendering (``datetime``, ``Decimal``, ``bytes``, ...) is
-        resolved through its declared ``encoding_write`` here, in place,
-        before serialisation -- ``plan.field_encoders`` is built once at
-        schema configure time (``build_write_plan``), never re-derived per
-        batch.
+        resolved through its declared ``encoding_write``, and a Json field
+        through its raw wire string -- both applied inside
+        ``_write_one_by_one``/``_write_in_chunks``'s own per-record/
+        per-chunk error boundary, not here: a data-dependent failure in
+        either (an unrepresentable epoch value, malformed JSON) must fail
+        only the record or chunk it came from, the same as a body-build
+        failure already does, not the whole batch. ``plan.field_encoders``/
+        ``plan.json_fields`` are built once at schema configure time
+        (``build_write_plan``), never re-derived per batch.
         """
         plan = self._streams[batch.stream_id]
         records = batch.records
-        decode_json_fields(records, plan.json_fields)
-        apply_field_encoders(records, plan.field_encoders)
         if plan.max_records is None:
             written, failed_ids, detail, category = await self._write_one_by_one(
                 plan, records, batch.record_ids
@@ -1207,10 +1210,11 @@ class GenericAPIConnector(BaseDestinationHandler):
     ) -> tuple[int, list[str], str, FailureCategory]:
         """Write records one request each.
 
-        Body construction is data-dependent (a record field can feed a
-        derived function) and is caught per record, so a bad record fails
-        just itself. Authoring and programming errors propagate and become
-        fatal for the whole batch.
+        Field encoding, JSON decoding, and body construction are all
+        data-dependent (a record field can feed a derived function or fail
+        to match its declared shape) and are each caught per record, so a
+        bad record fails just itself. Authoring and programming errors
+        propagate and become fatal for the whole batch.
 
         A retryable transport failure re-raises immediately: the base's
         outer catch has no access to the local ``written`` counter, so it
@@ -1224,6 +1228,23 @@ class GenericAPIConnector(BaseDestinationHandler):
         failures = _RecordFailures()
 
         for index, record in enumerate(records):
+            try:
+                decode_json_fields([record], plan.json_fields)
+                apply_field_encoders([record], plan.field_encoders)
+            # A malformed Json string is ValueError (json_utils.py); a
+            # catalog encoder given a value its arrow_type doesn't actually
+            # match is TypeError (e.g. encoding_write 'epoch' handed a
+            # non-datetime) or ValueError (e.g. a value finer than the
+            # declared unit) -- every one of these is this one record's
+            # data, not the endpoint's declaration, so it must fail just
+            # this record, the same as a body-build failure already does,
+            # not the whole batch (issue #503 review: an encoder failure
+            # used to escape this loop entirely from land()).
+            except (ValueError, TypeError) as err:
+                failures.add(
+                    record_ids[index], err, "failed to encode fields for record"
+                )
+                continue
             try:
                 require_conflict_key_values(
                     plan.conflict_keys, (record,), target=plan.endpoint
@@ -1352,6 +1373,8 @@ class GenericAPIConnector(BaseDestinationHandler):
         for start in range(0, len(records), chunk_size):
             chunk = records[start : start + chunk_size]
             try:
+                decode_json_fields(chunk, plan.json_fields)
+                apply_field_encoders(chunk, plan.field_encoders)
                 require_conflict_key_values(
                     plan.conflict_keys, chunk, target=plan.endpoint
                 )
@@ -1359,8 +1382,13 @@ class GenericAPIConnector(BaseDestinationHandler):
                 encoded = encode_body(body, plan.content_type)
             # A chunk with a record the provider cannot match on its
             # conflict keys fails the same way a body that cannot be built
-            # does: deterministic, and the whole chunk with it.
-            except (RequestSpecError, ValueError) as err:
+            # does: deterministic, and the whole chunk with it -- a chunk
+            # is already this method's whole unit of failure (no per-item
+            # isolation inside one, per the class docstring), so a bad
+            # field encoding or malformed Json string joins that same
+            # verdict rather than escaping it as it did before (issue #503
+            # review: this used to run once for the whole batch in land()).
+            except (RequestSpecError, ValueError, TypeError) as err:
                 logger.warning(
                     "failed to build body for chunk at offset %d (%d records "
                     "%s...): %s: %s",

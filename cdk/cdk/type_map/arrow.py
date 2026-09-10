@@ -426,11 +426,19 @@ def _ticks_to_array(
 #: column actually declared at nanosecond resolution. Zero for a value with
 #: six or fewer fractional digits, or none at all. ``[.,]``: ISO-8601 permits
 #: either as the fractional separator, and ``fromisoformat`` accepts both.
+#: Anchored to ``HH:MM:SS`` right after ``T`` (a timestamp) or at the start
+#: of the string (a bare time) -- not an unrestricted search: ISO-8601 also
+#: lets the UTC offset itself carry seconds and a fraction
+#: (``+00:00:01.5``), which ``fromisoformat`` parses and ``.utcoffset()``
+#: then truncates to microseconds the same as the clock time, but is a
+#: wholly separate value neither this function nor a plain ``timedelta``
+#: represents -- an unrestricted search would misattribute the offset's
+#: fraction to the clock time's, corrupting an otherwise-exact tick count.
 #: Raises for a nonzero digit past the ninth: finer than nanoseconds, which
 #: no Arrow tick count can represent, so it is refused rather than dropped
 #: the same silent way ``fromisoformat`` itself drops digits past the sixth.
 def _iso8601_ns_remainder(value: str) -> int:
-    match = re.search(r"[.,](\d+)", value)
+    match = re.search(r"(?:T|^)\d{2}:\d{2}:\d{2}[.,](\d+)", value)
     if match is None:
         return 0
     digits = match.group(1)
@@ -740,6 +748,33 @@ _DURATION_UNIT_NANOS: Final[dict[str, int]] = {
     "ns": 1,
 }
 
+#: The seconds designator's own digits, read straight off the string --
+#: "S" is unambiguous (weeks/days/hours/minutes use "W"/"D"/"H"/"M"), so
+#: this matches only that component regardless of which others are present.
+_DURATION_SECONDS_RE: Final[re.Pattern[str]] = re.compile(r"(\d+)(?:[.,](\d+))?S")
+
+
+def _duration_seconds_fraction(v: str) -> Fraction:
+    """Read the seconds component's exact value straight off the string.
+
+    Not ``parsed.time.seconds`` (an ``isoduration``-built ``Decimal``):
+    that value is built under a Decimal context, and no *fixed* context
+    precision is ever "big enough" -- an ISO-8601 duration string has no
+    length limit, so an arbitrarily long fractional-seconds tail always
+    rounds away under whatever fixed precision is chosen, however wide.
+    Reading the digits directly and building a ``Fraction`` from them is
+    exact regardless of length, the same way :func:`_iso8601_ns_remainder`
+    avoids the analogous bound on the Timestamp side.
+    """
+    match = _DURATION_SECONDS_RE.search(v)
+    if match is None:
+        return Fraction(0)
+    whole, frac = match.group(1), match.group(2) or ""
+    value = Fraction(int(whole))
+    if frac:
+        value += Fraction(int(frac), 10 ** len(frac))
+    return -value if v.startswith("-") else value
+
 
 def _iso_duration_ticks(
     field: pa.Field,
@@ -754,24 +789,26 @@ def _iso_duration_ticks(
     standard) rather than a hand-rolled grammar -- a prior hand-rolled regex
     needed three separate review rounds to reach sign support, both
     fractional-second separators, and rejecting a dangling ``T`` designator,
-    each a gap in the reimplementation rather than in the standard.
-    Accumulated via ``Decimal`` throughout, not a Python ``timedelta``
-    (microsecond resolution only), which would silently truncate a
-    Duration(NANOSECOND) column's sub-microsecond digits before they ever
-    reached pyarrow.
+    each a gap in the reimplementation rather than in the standard. The
+    seconds component's own value is read straight off the string
+    (:func:`_duration_seconds_fraction`), not off ``isoduration``'s parsed
+    ``Decimal``, for the same reason :func:`_iso8601_ns_remainder` does on
+    the Timestamp side: no fixed Decimal context precision is ever wide
+    enough for a fractional-seconds tail an ISO-8601 string can make
+    arbitrarily long.
     """
     if not isinstance(v, str):
         raise ValueError(
             f"column {field.name!r} at row {row}: encoding "
             f"'iso_duration' expects a string, got {type(v).__name__}"
         )
-    # A wide, explicit Decimal context for both the parse and the
-    # arithmetic below: isoduration's own parser builds parsed.time.seconds
-    # under the *ambient* Decimal context, whose default (28 significant
-    # digits) silently rounds a large-but-exact coefficient -- a
-    # >=19-digit second count with a sub-nanosecond fraction already loses
-    # that fraction inside parse_duration() itself, before this function
-    # ever sees it.
+    # A wide, explicit Decimal context for the parse: weeks/days/hours/
+    # minutes are always plain, short integer designators, but isoduration
+    # still builds every component -- these included -- as Decimal under
+    # the *ambient* context, whose default (28 significant digits) would
+    # otherwise round an unrealistically large one. The seconds component
+    # is read independently below, bypassing this (or any fixed) context
+    # entirely.
     with localcontext() as ctx:
         ctx.prec = 50
         try:
@@ -792,21 +829,21 @@ def _iso_duration_ticks(
                 f"not support -- a Duration is a fixed physical length and "
                 f"a month has none"
             )
-        total_seconds = (
-            parsed.date.weeks * 604800
-            + parsed.date.days * 86400
-            + parsed.time.hours * 3600
-            + parsed.time.minutes * 60
-            + parsed.time.seconds
+        # weeks/days/hours/minutes only -- never a fraction in the grammar,
+        # so Fraction(a Decimal) here is an exact conversion regardless of
+        # the context precision they were parsed under.
+        whole_units = (
+            Fraction(parsed.date.weeks) * 604800
+            + Fraction(parsed.date.days) * 86400
+            + Fraction(parsed.time.hours) * 3600
+            + Fraction(parsed.time.minutes) * 60
         )
+    total_seconds = whole_units + _duration_seconds_fraction(v)
     unit = field.type.unit
-    # Fraction, not Decimal division, for the final scale: Decimal/Decimal
-    # rounds to the active context's precision, and no fixed precision is
-    # guaranteed enough for an arbitrarily large coefficient. Fraction(a
-    # Decimal) is an exact conversion, and Fraction arithmetic thereafter
-    # is exact regardless of magnitude -- its denominator is 1 iff the
-    # value truly is an integer tick count.
-    ticks = Fraction(total_seconds) * 1_000_000_000 / _DURATION_UNIT_NANOS[unit]
+    # Fraction division for the final scale, not Decimal: exact regardless
+    # of magnitude -- its denominator is 1 iff the value truly is an
+    # integer tick count.
+    ticks = total_seconds * 1_000_000_000 / _DURATION_UNIT_NANOS[unit]
     if ticks.denominator != 1:
         # The int() this would otherwise feed truncates silently: a
         # fractional component finer than one tick of the column's own

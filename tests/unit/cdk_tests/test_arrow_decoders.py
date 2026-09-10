@@ -95,6 +95,20 @@ class TestIsoDurationScalesToTheDestinationUnit:
         with pytest.raises(ValueError, match="precision finer than"):
             fn(field, ["PT9000000000000000000.0000000001S"])
 
+    def test_no_fixed_precision_is_wide_enough_for_an_arbitrarily_long_fraction(
+        self,
+    ) -> None:
+        # A fixed Decimal context precision, however wide, is never "big
+        # enough": an ISO-8601 duration string has no length limit, so a
+        # long enough run of zeros before a trailing nonzero digit always
+        # rounds away under any fixed bound. The seconds value is read
+        # directly off the string instead, exactly, regardless of length.
+        field = pa.field("d", pa.duration("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
+        value = "PT1." + "0" * 500 + "1S"
+        with pytest.raises(ValueError, match="precision finer than"):
+            fn(field, [value])
+
 
 class TestIsoDurationAcceptsASign:
     def test_a_leading_minus_negates_the_duration(self) -> None:
@@ -187,6 +201,20 @@ class TestIso8601PreservesNanosecondPrecision:
         fn = resolve_decoder({"encoding": {"name": "iso8601"}}, field)
         with pytest.raises(ValueError, match="finer than nanoseconds"):
             fn(field, ["1970-01-01T00:00:00.0000000009+00:00"])
+
+    def test_a_fractional_utc_offset_does_not_contaminate_the_clock_remainder(
+        self,
+    ) -> None:
+        # ISO-8601 lets the UTC offset itself carry seconds and a fraction;
+        # fromisoformat parses it and .utcoffset() truncates it to
+        # microseconds the same as the clock time, but it is a separate
+        # value an unrestricted search would misattribute to the clock
+        # time's own (here, absent) fraction -- corrupting an otherwise
+        # exact whole-second tick count.
+        field = pa.field("t", pa.timestamp("ns", tz="UTC"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso8601"}}, field)
+        result = fn(field, ["1970-01-01T00:00:00+00:00:01.000000001"])
+        assert result[0].value == -1_000_000_000
 
 
 class TestEpochDecoderAcceptsAnIntegralDecimal:

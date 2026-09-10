@@ -547,6 +547,40 @@ class TestDeclarativeWireFormatEncoding:
             b'{"item":{"id":0,"shipped_at":"' + expected_iso + b'"}}'
         )
 
+    async def test_an_unencodable_record_fails_only_itself_not_the_batch(
+        self,
+    ) -> None:
+        # apply_field_encoders used to run once for the whole batch in
+        # land(), before _write_one_by_one's per-record error boundary
+        # ever saw it -- an encoder failure on one record (here, a
+        # sub-second value for an epoch/SECOND field) escaped that
+        # boundary entirely and failed every record in the batch, not
+        # just the one whose data caused it.
+        session = FakeSession([FakeResponse(body={})])
+        document = _document_with_field(
+            "shipped_at",
+            {
+                "type": "integer",
+                "native_type": "timestamptz",
+                "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                "encoding_write": {"name": "epoch", "unit": "SECOND"},
+            },
+        )
+        connector = await _connected(session, document)
+        exact = datetime(2026, 7, 31, 12, 0, 0, 0, tzinfo=timezone.utc)
+        sub_second = datetime(2026, 7, 31, 12, 0, 0, 500_000, tzinfo=timezone.utc)
+        result = await _write(
+            connector,
+            _batch_with(
+                [
+                    {"id": 0, "shipped_at": sub_second},
+                    {"id": 1, "shipped_at": exact},
+                ]
+            ),
+        )
+        assert result.records_written == 1
+        assert result.failed_record_ids == ("r0",)
+
     async def test_explicit_base64_encoding_write_matches_the_old_orjson_default(
         self,
     ) -> None:
