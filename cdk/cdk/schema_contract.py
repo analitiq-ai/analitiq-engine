@@ -605,11 +605,18 @@ class SchemaContract:
     ) -> None:
         """Validate a nested (``Object``/``List``) field's own top-level ``encoding``.
 
-        ``None`` recurses into leaves (:func:`_check_nested_leaf_encoding`);
-        anything else must be exactly ``{"name": "code"}`` -- no catalog
-        decoder targets a struct/list arrow_type, so a real name would
-        resolve fine here and then crash applying a scalar decoder to the
-        whole value in ``_build_column``.
+        ``None`` recurses into leaves (:func:`_check_nested_leaf_encoding`)
+        requiring one for a gated-kind leaf, since nothing else can ever
+        decode it; anything else must be exactly ``{"name": "code"}`` -- no
+        catalog decoder targets a struct/list arrow_type, so a real name
+        would resolve fine here and then crash applying a scalar decoder to
+        the whole value in ``_build_column``. The code hatch still recurses
+        into leaves -- with no kind ever *required* there, since
+        ``decode_field`` covers the whole value regardless of any leaf's
+        kind -- purely to reject a leaf that redundantly declares its own
+        ``encoding``: ``ApiDialect.decode_field`` receives only the whole
+        value and arrow_type, never a leaf's configuration, so a declared
+        leaf ``encoding`` there is silently never resolved or applied.
         """
         if encoding is None:
             _check_nested_leaf_encoding(
@@ -641,6 +648,15 @@ class SchemaContract:
                 f"field {f.name!r} declares encoding name='code' but this "
                 f"SchemaContract was built without a code_decoder"
             )
+        _check_nested_leaf_encoding(
+            key="encoding",
+            override_method="decode_field",
+            requires_encoding_kinds=frozenset(),
+            direction="read",
+            field_def=field_def,
+            arrow_type=f.type,
+            path=f.name,
+        )
 
     def _check_scalar_read_encoding(
         self, f: pa.Field, field_def: dict[str, Any], encoding: Any
@@ -758,6 +774,11 @@ class SchemaContract:
         unconditionally right after this in the one call site, already
         raises for a missing ``code_encoder`` -- see this method's caller's
         docstring for why the write side does not duplicate that check here.
+        The code hatch still recurses into leaves, purely to reject a leaf
+        that redundantly declares its own ``encoding_write``: ``land()``
+        hands the whole dict/list value to ``ApiDialect.encode_field``,
+        never a leaf's configuration, so a declared leaf ``encoding_write``
+        there is silently never resolved or applied.
         """
         encoding_write = field_def.get("encoding_write")
         if encoding_write is None:
@@ -785,6 +806,15 @@ class SchemaContract:
                 f"and crash; declared {encoding_write.get('name')!r}"
             )
         _reject_code_params(encoding_write, "encoding_write", f.name)
+        _check_nested_leaf_encoding(
+            key="encoding_write",
+            override_method="encode_field",
+            requires_encoding_kinds=frozenset(),
+            direction="write",
+            field_def=field_def,
+            arrow_type=f.type,
+            path=f.name,
+        )
 
     @staticmethod
     def _check_scalar_write_encoding(f: pa.Field, field_def: dict[str, Any]) -> None:

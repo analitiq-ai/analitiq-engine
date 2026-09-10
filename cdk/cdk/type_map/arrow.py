@@ -12,7 +12,7 @@ import numbers
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from re import Pattern
 from typing import Any, Final
@@ -317,19 +317,6 @@ def first_blocked_nested_leaf(
 # held before this catalog replaced them.
 
 
-#: pyarrow's own Timestamp/Duration/Time64 storage width. A tick outside
-#: this range makes the eventual ``pa.array(ticks, type=...)`` construction
-#: raise a raw ``OverflowError`` (a C-level int-to-long conversion failure)
-#: instead of pyarrow's own ``ArrowInvalid`` -- which, unlike
-#: ``OverflowError``, is already a ``ValueError`` subclass the worker's
-#: deterministic-error classification recognizes. Checked here, once, so
-#: every caller gets the same named, row-qualified, correctly-classified
-#: failure rather than however far downstream pyarrow's C binding happens
-#: to raise the unchecked one.
-_INT64_MIN: Final[int] = -(2**63)
-_INT64_MAX: Final[int] = 2**63 - 1
-
-
 def _coerce_ticks(field_name: str, values: list[Any]) -> list[int | None]:
     """Read each wire value as an integer tick count, or raise naming the row.
 
@@ -343,17 +330,10 @@ def _coerce_ticks(field_name: str, values: list[Any]) -> list[int | None]:
     formatted with a decimal point (``1700000000.0``), and
     ``loads_preserving_decimals`` (``cdk.api.http``) parses any
     fractional-looking JSON token as ``Decimal`` regardless of the
-    field's declared type.
+    field's declared type. No range check here: whether a tick fits
+    pyarrow's storage is a function of *field.type*'s own unit, decided
+    once the tick is actually scaled to it, in :func:`_scale_tick`.
     """
-
-    def in_range(row: int, tick: int) -> int:
-        if _INT64_MIN <= tick <= _INT64_MAX:
-            return tick
-        raise ValueError(
-            f"column {field_name!r} at row {row}: {tick} is outside the "
-            f"range pyarrow can hold as a tick count"
-        )
-
     ticks: list[int | None] = []
     for row, v in enumerate(values):
         if v is None:
@@ -365,17 +345,16 @@ def _coerce_ticks(field_name: str, values: list[Any]) -> list[int | None]:
                 f"integer epoch tick count"
             )
         if isinstance(v, numbers.Integral):
-            ticks.append(in_range(row, int(v)))
+            ticks.append(int(v))
             continue
         if isinstance(v, str):
             try:
-                parsed = int(v)
+                ticks.append(int(v))
             except ValueError as exc:
                 raise ValueError(
                     f"column {field_name!r} at row {row}: {v!r} is not an integer "
                     f"epoch tick count"
                 ) from exc
-            ticks.append(in_range(row, parsed))
             continue
         if isinstance(v, Decimal):
             # loads_preserving_decimals (cdk.api.http) parses every
@@ -385,7 +364,7 @@ def _coerce_ticks(field_name: str, values: list[Any]) -> list[int | None]:
             # not int -- accepted when it truly is integral, refused by
             # name otherwise rather than silently truncated by int().
             if v == v.to_integral_value():
-                ticks.append(in_range(row, int(v)))
+                ticks.append(int(v))
                 continue
             raise ValueError(
                 f"column {field_name!r} at row {row}: {v!r} is not an "
@@ -398,17 +377,87 @@ def _coerce_ticks(field_name: str, values: list[Any]) -> list[int | None]:
     return ticks
 
 
+#: Nanoseconds per wire epoch unit -- the finest unit either vocabulary
+#: names, so converting *to* it from any wire tick is always an exact
+#: multiply, never a division that could leave a remainder. DAY has no
+#: entry: a date has no sub-day resolution to convert through, and is
+#: built straight from the day count in :func:`_ticks_to_array`'s own
+#: branch for it instead.
+_NANOSECONDS_PER_WIRE_UNIT: Final[dict[str, int]] = {
+    "SECOND": 1_000_000_000,
+    "MILLISECOND": 1_000_000,
+    "MICROSECOND": 1_000,
+    "NANOSECOND": 1,
+}
+
+#: Nanoseconds per pyarrow storage unit, keyed by its own short spelling --
+#: the destination-side mirror of the table above.
+_NANOSECONDS_PER_PYARROW_UNIT: Final[dict[str, int]] = {
+    "s": 1_000_000_000,
+    "ms": 1_000_000,
+    "us": 1_000,
+    "ns": 1,
+}
+
+#: pyarrow's own storage widths. Time32 is the one narrow (int32) case
+#: this catalog's decoders ever build; every other Timestamp/Duration/
+#: Time64 unit is int64 regardless of its declared resolution.
+_INT32_MIN: Final[int] = -(2**31)
+_INT32_MAX: Final[int] = 2**31 - 1
+_INT64_MIN: Final[int] = -(2**63)
+_INT64_MAX: Final[int] = 2**63 - 1
+
+
+def _scale_tick(
+    field: pa.Field,
+    row: int,
+    tick: int,
+    wire_unit: str,
+    storage_unit: str,
+    *,
+    narrow: bool,
+) -> int:
+    """Convert one tick from *wire_unit* to *storage_unit*, or raise naming the row.
+
+    Scales through nanoseconds -- arbitrary-precision Python integer
+    arithmetic, never a pyarrow array built at *wire_unit*'s own width --
+    so a wire tick that would not fit that intermediate's storage (a
+    NANOSECOND epoch for a year-9999 instant overflows int64, even though
+    the same instant is a small, ordinary number of seconds) still
+    converts exactly to a value the destination's own, possibly coarser,
+    unit easily holds. Range-checked against the destination's actual
+    storage width (*narrow* selects int32 for Time32, int64 otherwise)
+    only after scaling -- the wire unit's own range was never the
+    destination's to enforce.
+    """
+    total_ns = tick * _NANOSECONDS_PER_WIRE_UNIT[wire_unit]
+    scaled, remainder = divmod(total_ns, _NANOSECONDS_PER_PYARROW_UNIT[storage_unit])
+    if remainder:
+        raise ValueError(
+            f"column {field.name!r} at row {row}: tick {tick} in unit "
+            f"{wire_unit!r} is not exactly representable in {field.type!s}; "
+            f"it has a nonzero remainder that would otherwise be silently "
+            f"discarded"
+        )
+    lo, hi = (_INT32_MIN, _INT32_MAX) if narrow else (_INT64_MIN, _INT64_MAX)
+    if not lo <= scaled <= hi:
+        raise ValueError(
+            f"column {field.name!r} at row {row}: {scaled} is outside the "
+            f"range pyarrow can hold as a tick count for {field.type!s}"
+        )
+    return scaled
+
+
 def _ticks_to_array(
     field: pa.Field, ticks: list[int | None], wire_unit: str
 ) -> pa.Array:
     """Build ``field.type`` from epoch ticks in *wire_unit*.
 
-    Built through the wire unit's own pyarrow type and cast to ``field.type``
-    (``pc.cast(safe=True)``) rather than hand-computed, so a unit mismatch
-    between the wire and the declared type (ms ticks into a Timestamp(us)
-    column, or seconds-since-midnight into a Time64(MICROSECOND) column) is
-    the same safe-cast every other boundary in this package uses, not a
-    second arithmetic implementation that could disagree with it.
+    Each tick is scaled to ``field.type``'s own storage unit directly
+    (see :func:`_scale_tick`) rather than built through the wire unit's
+    own pyarrow type and safe-cast down to ``field.type`` afterward: a
+    wire tick that would overflow that intermediate's width must not be
+    rejected for a range limit that was never the destination's.
     """
     if wire_unit == "DAY":
         if not pa.types.is_date(field.type):
@@ -417,24 +466,37 @@ def _ticks_to_array(
                 f"Date32/Date64 arrow_type, got {field.type}"
             )
         return pc.cast(pa.array(ticks, type=pa.date32()), field.type, safe=True)
-    short = UNIT_LONG_TO_SHORT[wire_unit]
-    if pa.types.is_timestamp(field.type):
-        naive = pa.array(ticks, type=pa.timestamp(short))
-        if field.type.tz is not None:
-            # Epoch ticks are an absolute UTC instant, not local wall-clock
-            # time in the target zone -- assume_timezone(naive, tz) would
-            # instead reinterpret the tick count as already being local time
-            # in `tz`, shifting the instant by the zone's offset.
-            naive = pc.assume_timezone(naive, "UTC")
-        return pc.cast(naive, field.type, safe=True)
+    if pa.types.is_timestamp(field.type) or pa.types.is_duration(field.type):
+        scaled = [
+            None
+            if t is None
+            else _scale_tick(field, row, t, wire_unit, field.type.unit, narrow=False)
+            for row, t in enumerate(ticks)
+        ]
+        return pa.array(scaled, type=field.type)
     if pa.types.is_date(field.type):
-        naive = pa.array(ticks, type=pa.timestamp(short))
-        return pc.cast(naive, field.type, safe=True)
-    if pa.types.is_duration(field.type):
-        return pc.cast(pa.array(ticks, type=pa.duration(short)), field.type, safe=True)
+        # Date32/Date64 have no unit of their own to scale into directly;
+        # "us" is an arbitrary fixed intermediate precision, safe because
+        # pyarrow floors a Timestamp(us) -> Date cast to the whole day
+        # identically to a same-instant cast from any other Timestamp unit
+        # (verified) -- the scaling itself is still exact, only the
+        # storage width being checked belongs to the intermediate.
+        scaled = [
+            None
+            if t is None
+            else _scale_tick(field, row, t, wire_unit, "us", narrow=False)
+            for row, t in enumerate(ticks)
+        ]
+        return pc.cast(pa.array(scaled, type=pa.timestamp("us")), field.type, safe=True)
     if pa.types.is_time(field.type):
-        wire_time_type = pa.time32(short) if short in ("s", "ms") else pa.time64(short)
-        return pc.cast(pa.array(ticks, type=wire_time_type), field.type, safe=True)
+        narrow = pa.types.is_time32(field.type)
+        scaled = [
+            None
+            if t is None
+            else _scale_tick(field, row, t, wire_unit, field.type.unit, narrow=narrow)
+            for row, t in enumerate(ticks)
+        ]
+        return pa.array(scaled, type=field.type)
     raise InvalidTypeMapError(
         f"column {field.name!r}: epoch ticks cannot build {field.type}; expected "
         f"a Timestamp, Date, Time, or Duration arrow_type"
@@ -723,6 +785,29 @@ def _decode_base64(_config: Mapping[str, Any]) -> DecodeFn:
     return decode
 
 
+#: Microseconds per ISO-8601 duration component. Applied directly to
+#: ``isoduration``'s own ``Decimal`` fields, not through ``timedelta``:
+#: ISO-8601 permits a decimal fraction on *any* one component (``PT1.5H``
+#: is 90 minutes, not "1 hour" with a dropped 0.5), and ``isoduration``
+#: parses every field as ``Decimal`` for exactly that reason, so
+#: ``timedelta``'s integer-only weeks/days/hours/minutes parameters would
+#: have to truncate first. ``timedelta`` is also bounded to
+#: +/-999,999,999 days -- a wire value like ``P2000000000D`` is a
+#: perfectly ordinary tick count in a coarse enough Duration unit, but
+#: raises ``OverflowError`` constructing a ``timedelta`` at all. Unlike
+#: the epoch encoder's chained, nested arithmetic that shipped a real
+#: "1000x too small" bug (see ``TestEpochEncoderUnitArithmetic``), each
+#: factor here multiplies exactly one already-isolated component by one
+#: fixed, unambiguous conversion constant -- nothing chains or nests.
+_MICROSECONDS_PER_DURATION_COMPONENT: Final[dict[str, int]] = {
+    "weeks": 7 * 24 * 3600 * 1_000_000,
+    "days": 24 * 3600 * 1_000_000,
+    "hours": 3600 * 1_000_000,
+    "minutes": 60 * 1_000_000,
+    "seconds": 1_000_000,
+}
+
+
 def _iso_duration_ticks(
     field: pa.Field,
     row: int,
@@ -736,10 +821,11 @@ def _iso_duration_ticks(
     standard) rather than a hand-rolled grammar. Capped at microsecond
     precision, matching every other temporal value this catalog decodes
     through a Python stdlib type (``datetime``/``timedelta`` hold no
-    finer): a fractional second beyond the sixth digit is dropped, not
-    chased. Scaling to ``field.type``'s own declared unit -- and rejecting
-    a value that does not fit evenly into a coarser one -- is
-    :func:`_duration_ticks_in_field_unit`'s job, not this function's.
+    finer): a fractional microsecond beyond the sixth digit is rounded
+    (half-to-even), not chased. Scaling to ``field.type``'s own declared
+    unit -- and rejecting a value that does not fit evenly into a coarser
+    one -- is :func:`_duration_ticks_in_field_unit`'s job, not this
+    function's.
     """
     if not isinstance(v, str):
         raise ValueError(
@@ -764,32 +850,14 @@ def _iso_duration_ticks(
             f"not support -- a Duration is a fixed physical length and "
             f"a month has none"
         )
-    # timedelta's own constructor converts weeks/days/hours/minutes to a
-    # single duration internally -- not hand-multiplied conversion factors
-    # (604800/86400/3600/60), the same class of arithmetic that shipped a
-    # real bug once already in this catalog's epoch encoder (see
-    # TestEpochEncoderUnitArithmetic). All four are always whole in the
-    # ISO-8601 grammar (only seconds may carry a fraction), so this part
-    # is exact with no rounding involved.
-    whole_part = timedelta(
-        weeks=int(parsed.date.weeks),
-        days=int(parsed.date.days),
-        hours=int(parsed.time.hours),
-        minutes=int(parsed.time.minutes),
+    total_micros = (
+        parsed.date.weeks * _MICROSECONDS_PER_DURATION_COMPONENT["weeks"]
+        + parsed.date.days * _MICROSECONDS_PER_DURATION_COMPONENT["days"]
+        + parsed.time.hours * _MICROSECONDS_PER_DURATION_COMPONENT["hours"]
+        + parsed.time.minutes * _MICROSECONDS_PER_DURATION_COMPONENT["minutes"]
+        + parsed.time.seconds * _MICROSECONDS_PER_DURATION_COMPONENT["seconds"]
     )
-    # The seconds component alone can carry a fraction, and routing a
-    # Decimal through float() to hand it to timedelta's own seconds= param
-    # can flip a representable microsecond digit before timedelta ever
-    # sees it (float64 runs out of precision past ~15-17 significant
-    # digits, and a large duration's seconds text can exceed that) --
-    # scaled to microseconds and rounded on the Decimal itself instead,
-    # which is exact for any digit count. Round-half-to-even to match
-    # what timedelta's own float-seconds construction does for the
-    # ordinary case (still exercised by every other caller's magnitude).
-    seconds_micros = int(
-        (parsed.time.seconds * 1_000_000).to_integral_value(rounding=ROUND_HALF_EVEN)
-    )
-    return whole_part // timedelta(microseconds=1) + seconds_micros
+    return int(total_micros.to_integral_value(rounding=ROUND_HALF_EVEN))
 
 
 #: Microseconds per Duration storage unit, keyed by pyarrow's own short

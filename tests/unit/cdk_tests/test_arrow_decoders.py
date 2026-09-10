@@ -110,6 +110,16 @@ class TestIsoDurationScalesToTheDestinationUnit:
         result = fn(field, ["P200000000D"])
         assert result[0].value == 200_000_000 * 86400
 
+    def test_a_day_count_beyond_timedeltas_own_range_still_fits(self) -> None:
+        # timedelta itself is bounded to +/-999,999,999 days; 2,000,000,000
+        # days is a perfectly ordinary tick count in Duration(SECOND) and
+        # must not be rejected for a limit that belongs to a stdlib type
+        # this decoder no longer routes through.
+        field = pa.field("d", pa.duration("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
+        result = fn(field, ["P2000000000D"])
+        assert result[0].value == 2_000_000_000 * 86400
+
     def test_precision_finer_than_the_destination_unit_is_refused(self) -> None:
         # 0.5s has no whole-second tick count -- refused by our own
         # divmod-remainder check (_duration_ticks_in_field_unit), the same
@@ -118,6 +128,41 @@ class TestIsoDurationScalesToTheDestinationUnit:
         fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
         with pytest.raises(ValueError, match="not exactly representable"):
             fn(field, ["PT0.5S"])
+
+
+class TestIsoDurationPreservesFractionalComponents:
+    """ISO-8601 permits a decimal fraction on any one component, not only
+    seconds -- ``PT1.5H`` names 90 minutes, not "1 hour" with the 0.5
+    silently dropped. isoduration parses every component as ``Decimal``
+    for exactly this reason; truncating weeks/days/hours/minutes with
+    ``int()`` (as routing them through timedelta's integer-only
+    constructor parameters would require) silently discards up to just
+    under one full unit of the duration.
+    """
+
+    def test_a_fractional_hour_is_not_truncated(self) -> None:
+        field = pa.field("d", pa.duration("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
+        result = fn(field, ["PT1.5H"])
+        assert result[0].value == 90 * 60
+
+    def test_a_fractional_minute_is_not_truncated(self) -> None:
+        field = pa.field("d", pa.duration("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
+        result = fn(field, ["PT1.5M"])
+        assert result[0].value == 90
+
+    def test_a_fractional_day_is_not_truncated(self) -> None:
+        field = pa.field("d", pa.duration("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
+        result = fn(field, ["P1.5D"])
+        assert result[0].value == int(1.5 * 86400)
+
+    def test_a_fractional_week_is_not_truncated(self) -> None:
+        field = pa.field("d", pa.duration("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
+        result = fn(field, ["P1.5W"])
+        assert result[0].value == int(1.5 * 604800)
 
 
 class TestIsoDurationAcceptsASign:
@@ -279,6 +324,47 @@ class TestEpochDecoderRejectsOutOfRangeTicks:
         fn = resolve_decoder({"encoding": {"name": "epoch", "unit": "SECOND"}}, field)
         with pytest.raises(ValueError, match="outside the range"):
             fn(field, [Decimal("99999999999999999999999999")])
+
+
+class TestEpochScalesToTheDestinationUnitBeforeRangeChecking:
+    """A wire tick that would overflow int64 at *its own* unit can still
+    be an ordinary, small value once scaled to a coarser destination unit
+    -- range-checking before scaling would reject a value the declared
+    arrow_type can represent, rather than the tick actually written.
+    """
+
+    def test_a_year_9999_nanosecond_epoch_fits_a_second_column(self) -> None:
+        # 253402300799000000000 ns overflows int64; the same instant is
+        # 253402300799 whole seconds, comfortably inside it.
+        field = pa.field("t", pa.timestamp("s"), nullable=True)
+        fn = resolve_decoder(
+            {"encoding": {"name": "epoch", "unit": "NANOSECOND"}}, field
+        )
+        result = fn(field, [253402300799000000000])
+        assert result[0].value == 253402300799
+
+    def test_regex_epoch_scales_before_checking_too(self) -> None:
+        field = pa.field("t", pa.timestamp("s"), nullable=True)
+        fn = resolve_decoder(
+            {
+                "encoding": {
+                    "name": "regex_epoch",
+                    "pattern": r"/Date\((\d+)\)/",
+                    "unit": "NANOSECOND",
+                }
+            },
+            field,
+        )
+        result = fn(field, ["/Date(253402300799000000000)/"])
+        assert result[0].value == 253402300799
+
+    def test_a_value_still_outside_int64_after_scaling_is_refused(self) -> None:
+        field = pa.field("t", pa.timestamp("ns"), nullable=True)
+        fn = resolve_decoder(
+            {"encoding": {"name": "epoch", "unit": "NANOSECOND"}}, field
+        )
+        with pytest.raises(ValueError, match="outside the range"):
+            fn(field, [99999999999999999999999999])
 
 
 class TestEpochDecoderPreservesTheInstantAcrossTargetZones:

@@ -776,7 +776,11 @@ class TestSchemaContractFromPylist:
         with pytest.raises(InvalidTypeMapError, match="meta.active"):
             SchemaContract(schema).check_required_read_encoding()
 
-    def test_a_nested_field_with_top_level_code_encoding_skips_leaf_checks(self):
+    def test_a_nested_field_with_top_level_code_encoding_needs_no_leaf_encoding(self):
+        # A leaf with no encoding of its own is fine under the code hatch --
+        # decode_field covers the whole value regardless of any leaf's
+        # kind, so no leaf is ever individually gated here. The missing
+        # code_decoder is still refused, just by that check, not a leaf one.
         schema = {
             "properties": {
                 "meta": {
@@ -794,6 +798,32 @@ class TestSchemaContractFromPylist:
         }
         with pytest.raises(ValueError, match="code_decoder"):
             SchemaContract(schema).check_required_read_encoding()
+
+    def test_a_leaf_declaring_encoding_beneath_a_code_hatch_is_still_refused(self):
+        # ApiDialect.decode_field receives only the whole value and
+        # arrow_type, never a leaf's own configuration -- a leaf's
+        # declared encoding here is silently never resolved or applied,
+        # exactly as unresolved as it would be with no code hatch at all.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding": {"name": "code"},
+                    "properties": {
+                        "posted_at": {
+                            "type": "string",
+                            "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                            "encoding": {"name": "iso8601"},
+                        }
+                    },
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="meta.posted_at"):
+            SchemaContract(
+                schema, code_decoder=lambda name, values, arrow_type: None
+            ).check_required_read_encoding()
 
     def test_a_code_encoding_with_an_extra_param_is_refused(self):
         # The published catalog declares no parameters for 'code' -- it has
@@ -968,6 +998,33 @@ class TestSchemaContractFromPylist:
             }
         }
         with pytest.raises(InvalidTypeMapError, match="takes no parameters"):
+            SchemaContract(schema).check_required_write_encoding()
+
+    def test_a_write_leaf_declaring_encoding_beneath_a_code_hatch_is_still_refused(
+        self,
+    ):
+        # ApiDialect.encode_field receives only the whole value and
+        # arrow_type, never a leaf's own configuration -- a leaf's
+        # declared encoding_write here is silently never resolved or
+        # applied, exactly as unresolved as it would be with no code
+        # hatch at all.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding_write": {"name": "code"},
+                    "properties": {
+                        "posted_at": {
+                            "type": "string",
+                            "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                            "encoding_write": {"name": "iso8601"},
+                        }
+                    },
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="meta.posted_at"):
             SchemaContract(schema).check_required_write_encoding()
 
     def test_epoch_write_output_is_accepted_on_a_number_typed_field(self):
