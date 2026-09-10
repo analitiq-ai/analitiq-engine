@@ -13,8 +13,7 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time
-from decimal import Decimal, InvalidOperation, localcontext
-from fractions import Fraction
+from decimal import Decimal, InvalidOperation
 from re import Pattern
 from typing import Any, Final
 
@@ -419,39 +418,6 @@ def _ticks_to_array(
     )
 
 
-#: Digits 7-9 of an ISO-8601 fractional-seconds component, as an integer
-#: 0-999 -- the precision ``datetime``/``time`` cannot hold at all (both cap
-#: at microseconds), so :func:`_decode_iso8601` reads it straight off the
-#: string and adds it back after the fact, only for a Timestamp/Time64
-#: column actually declared at nanosecond resolution. Zero for a value with
-#: six or fewer fractional digits, or none at all. ``[.,]``: ISO-8601 permits
-#: either as the fractional separator, and ``fromisoformat`` accepts both.
-#: Anchored to ``HH:MM:SS`` right after ``T`` (a timestamp) or at the start
-#: of the string (a bare time) -- not an unrestricted search: ISO-8601 also
-#: lets the UTC offset itself carry seconds and a fraction
-#: (``+00:00:01.5``), which ``fromisoformat`` parses and ``.utcoffset()``
-#: then truncates to microseconds the same as the clock time, but is a
-#: wholly separate value neither this function nor a plain ``timedelta``
-#: represents -- an unrestricted search would misattribute the offset's
-#: fraction to the clock time's, corrupting an otherwise-exact tick count.
-#: Raises for a nonzero digit past the ninth: finer than nanoseconds, which
-#: no Arrow tick count can represent, so it is refused rather than dropped
-#: the same silent way ``fromisoformat`` itself drops digits past the sixth.
-def _iso8601_ns_remainder(value: str) -> int:
-    match = re.search(r"(?:T|^)\d{2}:\d{2}:\d{2}[.,](\d+)", value)
-    if match is None:
-        return 0
-    digits = match.group(1)
-    if len(digits) <= 6:
-        return 0
-    if any(d != "0" for d in digits[9:]):
-        raise ValueError(
-            f"{value!r} has fractional-second precision finer than "
-            f"nanoseconds, which no Arrow tick count can represent"
-        )
-    return int((digits[6:9] + "000")[:3])
-
-
 def _parse_iso8601_scalar(
     field: pa.Field, row: int, v: str, *, is_ts: bool, is_date_type: bool, tz: Any
 ) -> Any:
@@ -474,19 +440,16 @@ def _parse_iso8601_scalar(
         ) from exc
 
 
-def _apply_ns_remainder(array: pa.Array, ns_remainders: list[int]) -> pa.Array:
-    """Add each row's sub-microsecond remainder back onto its raw ticks."""
-    if not any(ns_remainders):
-        return array
-    ticks = array.cast(pa.int64())
-    adjusted = pc.add(ticks, pa.array(ns_remainders, type=pa.int64()))
-    return adjusted.cast(array.type)
-
-
 def _decode_iso8601(_config: Mapping[str, Any]) -> DecodeFn:
     """ISO-8601 text -> Timestamp/Date/Time.
 
     The retired implicit default, now only applied when a field names it.
+    Capped at microsecond precision, matching ``datetime.fromisoformat``
+    (and orjson's own retired native rendering this replaces): a
+    fractional-second digit past the sixth is dropped the same way it
+    always was, including for a column declared at nanosecond resolution
+    -- issue #503's acceptance bar is byte-identical output to the prior
+    implicit behavior, not finer precision than either ever held.
     """
 
     def decode(field: pa.Field, values: list[Any]) -> pa.Array:
@@ -499,19 +462,10 @@ def _decode_iso8601(_config: Mapping[str, Any]) -> DecodeFn:
                 f"Timestamp, Date, or Time arrow_type, got {field.type}"
             )
         tz = field.type.tz if is_ts else None
-        # datetime.fromisoformat/time.fromisoformat silently drop any
-        # fractional digit past the sixth (they cap at microseconds) --
-        # "...000000001" parses to microsecond=0, not 1ns, with no error.
-        # Tracked only when the target actually resolves ticks that fine;
-        # every coarser unit already loses nothing by going through them.
-        track_ns = getattr(field.type, "unit", None) == "ns" and (is_ts or is_time_type)
         parsed: list[Any] = []
-        ns_remainders: list[int] = []
         for row, v in enumerate(values):
             if v is None:
                 parsed.append(None)
-                if track_ns:
-                    ns_remainders.append(0)
                 continue
             if not isinstance(v, str):
                 raise ValueError(
@@ -523,17 +477,7 @@ def _decode_iso8601(_config: Mapping[str, Any]) -> DecodeFn:
                     field, row, v, is_ts=is_ts, is_date_type=is_date_type, tz=tz
                 )
             )
-            if track_ns:
-                try:
-                    ns_remainders.append(_iso8601_ns_remainder(v))
-                except ValueError as exc:
-                    raise ValueError(
-                        f"column {field.name!r} at row {row}: {exc}"
-                    ) from exc
-        array = pa.array(parsed, type=field.type)
-        if track_ns:
-            array = _apply_ns_remainder(array, ns_remainders)
-        return array
+        return pa.array(parsed, type=field.type)
 
     return decode
 
@@ -734,48 +678,6 @@ def _decode_base64(_config: Mapping[str, Any]) -> DecodeFn:
     return decode
 
 
-#: Nanoseconds per Duration tick, keyed by pyarrow's own unit spelling
-#: (``field.type.unit``) -- the resolution :func:`_iso_duration_ticks`
-#: scales straight to, rather than always accumulating nanosecond ticks
-#: and safe-casting down: a coarser unit's own int64 range is far wider
-#: than nanoseconds', so a value like 200000 days fits Duration(SECOND)'s
-#: range but overflows an intermediate nanosecond total that never needed
-#: to exist.
-_DURATION_UNIT_NANOS: Final[dict[str, int]] = {
-    "s": 1_000_000_000,
-    "ms": 1_000_000,
-    "us": 1_000,
-    "ns": 1,
-}
-
-#: The seconds designator's own digits, read straight off the string --
-#: "S" is unambiguous (weeks/days/hours/minutes use "W"/"D"/"H"/"M"), so
-#: this matches only that component regardless of which others are present.
-_DURATION_SECONDS_RE: Final[re.Pattern[str]] = re.compile(r"(\d+)(?:[.,](\d+))?S")
-
-
-def _duration_seconds_fraction(v: str) -> Fraction:
-    """Read the seconds component's exact value straight off the string.
-
-    Not ``parsed.time.seconds`` (an ``isoduration``-built ``Decimal``):
-    that value is built under a Decimal context, and no *fixed* context
-    precision is ever "big enough" -- an ISO-8601 duration string has no
-    length limit, so an arbitrarily long fractional-seconds tail always
-    rounds away under whatever fixed precision is chosen, however wide.
-    Reading the digits directly and building a ``Fraction`` from them is
-    exact regardless of length, the same way :func:`_iso8601_ns_remainder`
-    avoids the analogous bound on the Timestamp side.
-    """
-    match = _DURATION_SECONDS_RE.search(v)
-    if match is None:
-        return Fraction(0)
-    whole, frac = match.group(1), match.group(2) or ""
-    value = Fraction(int(whole))
-    if frac:
-        value += Fraction(int(frac), 10 ** len(frac))
-    return -value if v.startswith("-") else value
-
-
 def _iso_duration_ticks(
     field: pa.Field,
     row: int,
@@ -783,77 +685,49 @@ def _iso_duration_ticks(
     parse_duration: Callable[[str], Any],
     duration_parsing_exception: type[Exception],
 ) -> int:
-    """Parse one ISO-8601 duration string into signed ticks in ``field.type``'s unit.
+    """Parse one ISO-8601 duration string into a signed microsecond tick count.
 
     Parsed by ``isoduration`` (an actual conformant implementation of the
-    standard) rather than a hand-rolled grammar -- a prior hand-rolled regex
-    needed three separate review rounds to reach sign support, both
-    fractional-second separators, and rejecting a dangling ``T`` designator,
-    each a gap in the reimplementation rather than in the standard. The
-    seconds component's own value is read straight off the string
-    (:func:`_duration_seconds_fraction`), not off ``isoduration``'s parsed
-    ``Decimal``, for the same reason :func:`_iso8601_ns_remainder` does on
-    the Timestamp side: no fixed Decimal context precision is ever wide
-    enough for a fractional-seconds tail an ISO-8601 string can make
-    arbitrarily long.
+    standard) rather than a hand-rolled grammar. Capped at microsecond
+    precision, matching every other temporal value this catalog decodes
+    through a Python stdlib type (``datetime``/``timedelta`` hold no
+    finer): a fractional second beyond the sixth digit is dropped, not
+    chased. Scaling to ``field.type``'s own declared unit is left to
+    pyarrow's own safe cast in :func:`_decode_iso_duration` -- a value
+    that does not fit evenly into a coarser unit is rejected there, the
+    same mechanism :func:`_ticks_to_array` already relies on for epoch.
     """
     if not isinstance(v, str):
         raise ValueError(
             f"column {field.name!r} at row {row}: encoding "
             f"'iso_duration' expects a string, got {type(v).__name__}"
         )
-    # A wide, explicit Decimal context for the parse: weeks/days/hours/
-    # minutes are always plain, short integer designators, but isoduration
-    # still builds every component -- these included -- as Decimal under
-    # the *ambient* context, whose default (28 significant digits) would
-    # otherwise round an unrealistically large one. The seconds component
-    # is read independently below, bypassing this (or any fixed) context
-    # entirely.
-    with localcontext() as ctx:
-        ctx.prec = 50
-        try:
-            parsed = parse_duration(v)
-        except duration_parsing_exception as exc:
-            raise ValueError(
-                f"column {field.name!r} at row {row}: {v!r} is not a valid "
-                f"ISO-8601 duration this decoder supports (weeks, days, and "
-                f"clock components only -- no calendar Y/M): {exc}"
-            ) from exc
-        if parsed.date.years or parsed.date.months:
-            # A Duration is a fixed physical length; a calendar year or
-            # month is not (a month is 28-31 days depending which one), so
-            # neither has a tick count to convert to.
-            raise ValueError(
-                f"column {field.name!r} at row {row}: {v!r} names a "
-                f"calendar year/month component, which this decoder does "
-                f"not support -- a Duration is a fixed physical length and "
-                f"a month has none"
-            )
-        # weeks/days/hours/minutes only -- never a fraction in the grammar,
-        # so Fraction(a Decimal) here is an exact conversion regardless of
-        # the context precision they were parsed under.
-        whole_units = (
-            Fraction(parsed.date.weeks) * 604800
-            + Fraction(parsed.date.days) * 86400
-            + Fraction(parsed.time.hours) * 3600
-            + Fraction(parsed.time.minutes) * 60
-        )
-    total_seconds = whole_units + _duration_seconds_fraction(v)
-    unit = field.type.unit
-    # Fraction division for the final scale, not Decimal: exact regardless
-    # of magnitude -- its denominator is 1 iff the value truly is an
-    # integer tick count.
-    ticks = total_seconds * 1_000_000_000 / _DURATION_UNIT_NANOS[unit]
-    if ticks.denominator != 1:
-        # The int() this would otherwise feed truncates silently: a
-        # fractional component finer than one tick of the column's own
-        # unit has no Arrow tick count to land on.
+    try:
+        parsed = parse_duration(v)
+    except duration_parsing_exception as exc:
         raise ValueError(
-            f"column {field.name!r} at row {row}: {v!r} has precision "
-            f"finer than {field.type}'s own tick resolution, which no "
-            f"Arrow tick count can represent"
+            f"column {field.name!r} at row {row}: {v!r} is not a valid "
+            f"ISO-8601 duration this decoder supports (weeks, days, and "
+            f"clock components only -- no calendar Y/M): {exc}"
+        ) from exc
+    if parsed.date.years or parsed.date.months:
+        # A Duration is a fixed physical length; a calendar year or
+        # month is not (a month is 28-31 days depending which one), so
+        # neither has a tick count to convert to.
+        raise ValueError(
+            f"column {field.name!r} at row {row}: {v!r} names a "
+            f"calendar year/month component, which this decoder does "
+            f"not support -- a Duration is a fixed physical length and "
+            f"a month has none"
         )
-    return int(ticks)
+    total_seconds = (
+        parsed.date.weeks * 604800
+        + parsed.date.days * 86400
+        + parsed.time.hours * 3600
+        + parsed.time.minutes * 60
+        + parsed.time.seconds
+    )
+    return int(total_seconds * 1_000_000)
 
 
 def _decode_iso_duration(_config: Mapping[str, Any]) -> DecodeFn:
@@ -882,10 +756,7 @@ def _decode_iso_duration(_config: Mapping[str, Any]) -> DecodeFn:
             )
             for row, v in enumerate(values)
         ]
-        # Ticks are already scaled to field.type's own unit -- no
-        # intermediate nanosecond array (see _DURATION_UNIT_NANOS) and no
-        # cast needed.
-        return pa.array(ticks, type=field.type)
+        return pc.cast(pa.array(ticks, type=pa.duration("us")), field.type, safe=True)
 
     return decode
 

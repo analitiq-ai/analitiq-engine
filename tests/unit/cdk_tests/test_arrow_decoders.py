@@ -38,25 +38,19 @@ class TestBoolMapRejectsOverlappingTokens:
             )
 
 
-class TestIsoDurationPreservesSubMicrosecondPrecision:
-    def test_a_nanosecond_fraction_is_not_truncated(self) -> None:
+class TestIsoDurationCapsAtMicrosecondPrecision:
+    """Matches ``datetime``/``timedelta`` -- neither holds finer than a
+    microsecond, and #503's acceptance bar is behavior matching the prior
+    (stdlib-backed) implicit default, not finer precision than either ever
+    held. A fractional second beyond the sixth digit is dropped, silently,
+    the same way ``timedelta`` would drop it.
+    """
+
+    def test_a_sub_microsecond_fraction_is_dropped(self) -> None:
         field = pa.field("d", pa.duration("ns"), nullable=True)
         fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
         result = fn(field, ["PT1.123456789S"])
-        # `.value` (raw ticks), not `.to_pylist()` -- pyarrow refuses to
-        # materialize a nanosecond Duration as a Python `timedelta` at all
-        # (it caps at microseconds), which is exactly the precision this
-        # decoder must not lose before the array even reaches that boundary.
-        assert result[0].value == 1_123_456_789
-
-    def test_a_sub_nanosecond_fraction_is_refused_not_truncated(self) -> None:
-        # int() on the scaled Decimal would otherwise truncate any
-        # fractional tick silently, the same class of loss
-        # _iso8601_ns_remainder refuses on the Timestamp side.
-        field = pa.field("d", pa.duration("ns"), nullable=True)
-        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
-        with pytest.raises(ValueError, match="precision finer than"):
-            fn(field, ["PT0.0000000009S"])
+        assert result[0].value == 1_123_456_000
 
     def test_a_comma_fractional_separator_is_accepted(self) -> None:
         # ISO-8601 permits "," as well as "." for the fractional separator,
@@ -69,45 +63,23 @@ class TestIsoDurationPreservesSubMicrosecondPrecision:
 
 class TestIsoDurationScalesToTheDestinationUnit:
     def test_a_large_day_count_fits_a_coarse_destination_unit(self) -> None:
-        # Accumulating through an intermediate nanosecond total before
-        # casting down would overflow int64 here even though the value
-        # fits comfortably in Duration(SECOND)'s own much wider range.
+        # A microsecond-tick intermediate array before pyarrow's own safe
+        # cast down to field.type must not overflow int64 here, even
+        # though the microsecond count is far larger than the eventual
+        # Duration(SECOND) value.
         field = pa.field("d", pa.duration("s"), nullable=True)
         fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
         result = fn(field, ["P200000D"])
         assert result[0].value == 200_000 * 86400
 
     def test_precision_finer_than_the_destination_unit_is_refused(self) -> None:
+        # Rejected by pyarrow's own safe cast (the same mechanism
+        # _ticks_to_array already relies on for epoch), not a bespoke
+        # check -- 0.5s has no whole-second tick count.
         field = pa.field("d", pa.duration("s"), nullable=True)
         fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
-        with pytest.raises(ValueError, match="precision finer than"):
+        with pytest.raises(pa.lib.ArrowInvalid, match="would lose data"):
             fn(field, ["PT0.5S"])
-
-    def test_a_large_coefficient_with_a_tiny_remainder_is_refused_not_rounded(
-        self,
-    ) -> None:
-        # The default Decimal context (28 significant digits) would
-        # otherwise round this 29-significant-digit value to exactly
-        # 9000000000000000000 seconds inside isoduration's own parse,
-        # before the integrality check ever saw the true remainder.
-        field = pa.field("d", pa.duration("s"), nullable=True)
-        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
-        with pytest.raises(ValueError, match="precision finer than"):
-            fn(field, ["PT9000000000000000000.0000000001S"])
-
-    def test_no_fixed_precision_is_wide_enough_for_an_arbitrarily_long_fraction(
-        self,
-    ) -> None:
-        # A fixed Decimal context precision, however wide, is never "big
-        # enough": an ISO-8601 duration string has no length limit, so a
-        # long enough run of zeros before a trailing nonzero digit always
-        # rounds away under any fixed bound. The seconds value is read
-        # directly off the string instead, exactly, regardless of length.
-        field = pa.field("d", pa.duration("s"), nullable=True)
-        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
-        value = "PT1." + "0" * 500 + "1S"
-        with pytest.raises(ValueError, match="precision finer than"):
-            fn(field, [value])
 
 
 class TestIsoDurationAcceptsASign:
@@ -159,25 +131,25 @@ class TestIsoDurationRejectsCalendarComponents:
             fn(field, ["P1W2D"])
 
 
-class TestIso8601PreservesNanosecondPrecision:
+class TestIso8601CapsAtMicrosecondPrecision:
     """``datetime.fromisoformat``/``time.fromisoformat`` cap at microseconds
-    and silently drop anything past the sixth fractional digit -- checked
-    only against a Timestamp/Time64 column actually declared at nanosecond
-    resolution; a coarser column loses nothing by going through them.
+    and silently drop anything past the sixth fractional digit -- matching
+    orjson's own retired native rendering, #503's acceptance bar, even
+    against a Timestamp/Time64 column declared at nanosecond resolution.
     """
 
-    def test_a_nanosecond_fraction_on_a_timestamp_is_not_dropped(self) -> None:
+    def test_a_sub_microsecond_fraction_on_a_timestamp_is_dropped(self) -> None:
         field = pa.field("t", pa.timestamp("ns", tz="UTC"), nullable=True)
         fn = resolve_decoder({"encoding": {"name": "iso8601"}}, field)
         result = fn(field, ["1970-01-01T00:00:00.123456789+00:00", None])
-        assert result[0].value == 123_456_789
+        assert result[0].value == 123_456_000
         assert result[1].as_py() is None
 
-    def test_a_nanosecond_fraction_on_a_time64_is_not_dropped(self) -> None:
+    def test_a_sub_microsecond_fraction_on_a_time64_is_dropped(self) -> None:
         field = pa.field("t", pa.time64("ns"), nullable=True)
         fn = resolve_decoder({"encoding": {"name": "iso8601"}}, field)
         result = fn(field, ["00:00:00.000000123"])
-        assert result[0].value == 123
+        assert result[0].value == 0
 
     def test_a_microsecond_column_is_unaffected(self) -> None:
         field = pa.field("t", pa.timestamp("us", tz="UTC"), nullable=True)
@@ -185,36 +157,13 @@ class TestIso8601PreservesNanosecondPrecision:
         result = fn(field, ["2024-01-01T00:00:00.123456+00:00"])
         assert result.to_pylist()[0].microsecond == 123456
 
-    def test_a_comma_fractional_separator_is_not_dropped(self) -> None:
+    def test_a_comma_fractional_separator_is_accepted(self) -> None:
         # ISO-8601 permits "," as well as "." for the fractional separator,
-        # and datetime.fromisoformat accepts both.
-        field = pa.field("t", pa.timestamp("ns", tz="UTC"), nullable=True)
+        # and datetime.fromisoformat accepts both natively.
+        field = pa.field("t", pa.timestamp("us", tz="UTC"), nullable=True)
         fn = resolve_decoder({"encoding": {"name": "iso8601"}}, field)
-        result = fn(field, ["1970-01-01T00:00:00,123456789+00:00"])
-        assert result[0].value == 123_456_789
-
-    def test_precision_finer_than_nanoseconds_is_refused_not_dropped(self) -> None:
-        # fromisoformat drops everything past microseconds silently, and
-        # digits 7-9 are added back explicitly -- a 10th+ digit has nowhere
-        # to go and must be refused rather than dropped the same way.
-        field = pa.field("t", pa.timestamp("ns", tz="UTC"), nullable=True)
-        fn = resolve_decoder({"encoding": {"name": "iso8601"}}, field)
-        with pytest.raises(ValueError, match="finer than nanoseconds"):
-            fn(field, ["1970-01-01T00:00:00.0000000009+00:00"])
-
-    def test_a_fractional_utc_offset_does_not_contaminate_the_clock_remainder(
-        self,
-    ) -> None:
-        # ISO-8601 lets the UTC offset itself carry seconds and a fraction;
-        # fromisoformat parses it and .utcoffset() truncates it to
-        # microseconds the same as the clock time, but it is a separate
-        # value an unrestricted search would misattribute to the clock
-        # time's own (here, absent) fraction -- corrupting an otherwise
-        # exact whole-second tick count.
-        field = pa.field("t", pa.timestamp("ns", tz="UTC"), nullable=True)
-        fn = resolve_decoder({"encoding": {"name": "iso8601"}}, field)
-        result = fn(field, ["1970-01-01T00:00:00+00:00:01.000000001"])
-        assert result[0].value == -1_000_000_000
+        result = fn(field, ["1970-01-01T00:00:00,123456+00:00"])
+        assert result[0].value == 123_456
 
 
 class TestEpochDecoderAcceptsAnIntegralDecimal:
