@@ -68,7 +68,12 @@ for how the CDK package is bounded and wired see
    `native_type`/`arrow_type` DDL rendering: those two methods are never
    called for a `"columns"`-shaped (SQL) schema, which keeps the tolerant
    parse (a bare ISO-8601 string, a bare unit-offset integer, or an
-   already-typed Python value) unconditionally instead.
+   already-typed Python value) unconditionally instead. Resolving
+   `encoding_write` builds a `SchemaContract` over the write-input schema,
+   the same object every other declared schema (SQL columns, an API
+   response) goes through -- so a write-input property must declare
+   `arrow_type` for the same reason any of them must: `SchemaContract`
+   itself refuses to build without one, not a rule this catalog adds.
 
 ## Where Arrow is ceremony
 
