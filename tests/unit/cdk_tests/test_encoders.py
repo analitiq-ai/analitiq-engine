@@ -103,15 +103,25 @@ class TestEpochEncoderPreservesPandasTimestampPrecision:
     """
 
     class _ExtraNanoTimedelta(timedelta):
-        def __new__(cls, base: timedelta, nanoseconds: int) -> Any:
-            obj = super().__new__(
-                cls,
-                days=base.days,
-                seconds=base.seconds,
-                microseconds=base.microseconds,
-            )
-            obj.nanoseconds = nanoseconds  # type: ignore[attr-defined]
-            return obj
+        """A ``timedelta`` carrying an extra ``.nanoseconds`` attribute.
+
+        Built by :func:`_with_extra_nanoseconds` rather than an overridden
+        ``__new__`` -- a same-named-but-different-signature ``__new__``
+        would itself be a DeepSource/pylint finding (a subclass
+        constructor callers can no longer call the way ``timedelta``'s own
+        signature promises).
+        """
+
+    @staticmethod
+    def _with_extra_nanoseconds(
+        base: timedelta, nanoseconds: int
+    ) -> TestEpochEncoderPreservesPandasTimestampPrecision._ExtraNanoTimedelta:
+        cls = TestEpochEncoderPreservesPandasTimestampPrecision._ExtraNanoTimedelta
+        obj = timedelta.__new__(
+            cls, days=base.days, seconds=base.seconds, microseconds=base.microseconds
+        )
+        obj.nanoseconds = nanoseconds  # type: ignore[attr-defined]
+        return obj
 
     class _PandasLikeTimestamp(datetime):
         _extra_ns = 0
@@ -128,11 +138,8 @@ class TestEpochEncoderPreservesPandasTimestampPrecision:
                 tzinfo=self.tzinfo,
             )
             base = datetime.__sub__(plain, other)
-            return (
-                TestEpochEncoderPreservesPandasTimestampPrecision._ExtraNanoTimedelta(
-                    base, self._extra_ns
-                )
-            )
+            outer = TestEpochEncoderPreservesPandasTimestampPrecision
+            return outer._with_extra_nanoseconds(base, self._extra_ns)
 
     def _value(self, extra_ns: int) -> Any:
         value = self._PandasLikeTimestamp(
