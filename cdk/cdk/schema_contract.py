@@ -426,6 +426,26 @@ def _check_declared_json_type(value: Any, field_def: dict[str, Any], path: str) 
         )
 
 
+def _accepts_null(field_def: dict[str, Any]) -> bool:
+    """Whether *field_def*'s own declared JSON Schema ``type`` permits ``null``.
+
+    A ``type`` union naming ``null`` (``["integer", "null"]``) allows it
+    explicitly; a field with no declared ``type`` at all is unconstrained,
+    the same leniency :func:`_check_declared_json_type` already extends
+    to it. A plain string ``type`` (``"integer"``) allows no other
+    rendered value, ``null`` included -- unlike the outer field's own
+    ``None``, which :func:`_bind_code_encoder` already checked against
+    the *contract's* nullability (derived from ``required``), a nested
+    node's ``None`` is checked against its own declared type union: the
+    two are independent JSON Schema concepts (a required key can still
+    hold a nullable value).
+    """
+    declared = field_def.get("type")
+    if declared is None:
+        return True
+    return isinstance(declared, list) and "null" in declared
+
+
 def _check_required_properties(
     value: dict[str, Any], field_def: dict[str, Any], path: str
 ) -> None:
@@ -461,9 +481,20 @@ def _validate_code_output_shape(
     A value with no corresponding declaration (an extra key the schema
     never named) is left unchecked -- the same leniency
     ``_check_nested_leaf_encoding`` and friends already extend to a
-    schema that does not fully enumerate every possible key.
+    schema that does not fully enumerate every possible key. A nested
+    ``None`` is checked against this node's own declared type union
+    (:func:`_accepts_null`), not skipped outright -- a required integer
+    child (present, satisfying ``_check_required_properties``, but
+    ``None``) would otherwise reach the provider as a null the field's
+    own declared type never allowed.
     """
     if value is None:
+        if not _accepts_null(field_def):
+            raise ValueError(
+                f"{path}: ApiDialect.encode_field returned None, but field "
+                f"declares type {field_def.get('type')!r} with no null "
+                f"variant"
+            )
         return
     _check_declared_json_type(value, field_def, path)
     if _is_json_field(field_def):
@@ -1520,6 +1551,11 @@ class SchemaContract:
         fields = []
         defs: dict[str, dict[str, Any]] = {}
         for index, col in enumerate(columns):
+            if not isinstance(col, Mapping):
+                raise ValueError(
+                    f"column at index {index} must be an object, got "
+                    f"{type(col).__name__}"
+                )
             name = col.get("name")
             if not name:
                 raise ValueError(
@@ -1540,13 +1576,17 @@ class SchemaContract:
         fields = []
         defs: dict[str, dict[str, Any]] = {}
         for name, prop in properties.items():
+            if not isinstance(prop, Mapping):
+                raise ValueError(
+                    f"field {name!r} must be an object, got " f"{type(prop).__name__}"
+                )
             arrow_type = SchemaContract._require_arrow_type(prop, name)
             fields.append(pa.field(name, arrow_type, nullable=name not in required))
-            defs[name] = prop
+            defs[name] = dict(prop)
         return pa.schema(fields), defs
 
     @staticmethod
-    def _require_arrow_type(field_def: dict[str, Any], name: str) -> pa.DataType:
+    def _require_arrow_type(field_def: Mapping[str, Any], name: str) -> pa.DataType:
         if not field_def.get("arrow_type"):
             raise ValueError(
                 f"field {name!r} has no 'arrow_type' declaration; "

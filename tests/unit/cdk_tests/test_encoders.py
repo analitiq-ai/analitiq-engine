@@ -9,6 +9,7 @@ directly through :func:`resolve_encoder`.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import pytest
 
@@ -57,13 +58,13 @@ class TestEpochEncoderUnitArithmetic:
             fn("not-a-datetime")
 
     def test_a_datetime_subclass_carries_only_its_microsecond_value(self) -> None:
-        # LandingBatch.records (cdk.base_handler) materialises the whole
-        # batch via RecordBatch.to_pylist() before land() ever calls an
-        # encoder, and to_pylist() itself refuses a genuinely
-        # sub-microsecond Timestamp(NANOSECOND) value outright unless
-        # pandas is installed (not a CDK runtime dependency) -- so any
-        # extra attribute a datetime subclass carries is not something
-        # this encoder can or should read; only .microsecond is real.
+        # The encoder reads sub-microsecond precision off the *delta*
+        # subtraction produces (see TestEpochEncoderPreservesPandasTimestampPrecision
+        # below, for pandas.Timestamp's own Timedelta), not off an
+        # unrelated same-named attribute the datetime value happens to
+        # carry with no effect on its own subtraction -- a plain subclass
+        # with no custom __sub__ still subtracts down to a plain
+        # timedelta, so only .microsecond is real here.
         class _DatetimeSubclass(datetime):
             nanosecond = 789
 
@@ -87,6 +88,74 @@ class TestEpochEncoderUnitArithmetic:
         value = datetime(1969, 12, 31, 23, 59, 59, 500_000, tzinfo=timezone.utc)
         with pytest.raises(ValueError, match="not exactly representable"):
             fn(value)
+
+
+class TestEpochEncoderPreservesPandasTimestampPrecision:
+    """PR #509 review: pyarrow's own Scalar.as_py() for a NANOSECOND
+    Timestamp returns a pandas.Timestamp -- a datetime subclass, so it
+    passes the isinstance check -- whenever pandas is importable, to avoid
+    losing precision a plain datetime cannot hold. Subtracting one from a
+    plain datetime yields a pandas.Timedelta carrying the sub-microsecond
+    remainder on a ``.nanoseconds`` attribute plain datetime.timedelta
+    never has. pandas is not a CDK dependency, so this fakes just that one
+    duck-typed shape (a datetime subclass whose own subtraction returns a
+    timedelta exposing ``.nanoseconds``) rather than importing it.
+    """
+
+    class _ExtraNanoTimedelta(timedelta):
+        def __new__(cls, base: timedelta, nanoseconds: int) -> Any:
+            obj = super().__new__(
+                cls,
+                days=base.days,
+                seconds=base.seconds,
+                microseconds=base.microseconds,
+            )
+            obj.nanoseconds = nanoseconds  # type: ignore[attr-defined]
+            return obj
+
+    class _PandasLikeTimestamp(datetime):
+        _extra_ns = 0
+
+        def __sub__(self, other: Any) -> Any:
+            plain = datetime(
+                self.year,
+                self.month,
+                self.day,
+                self.hour,
+                self.minute,
+                self.second,
+                self.microsecond,
+                tzinfo=self.tzinfo,
+            )
+            base = datetime.__sub__(plain, other)
+            return (
+                TestEpochEncoderPreservesPandasTimestampPrecision._ExtraNanoTimedelta(
+                    base, self._extra_ns
+                )
+            )
+
+    def _value(self, extra_ns: int) -> Any:
+        value = self._PandasLikeTimestamp(
+            1970, 1, 1, 0, 0, 1, 234_567, tzinfo=timezone.utc
+        )
+        value._extra_ns = extra_ns
+        return value
+
+    def test_nanosecond_unit_preserves_the_exact_remainder(self) -> None:
+        fn = resolve_encoder({"name": "epoch", "unit": "NANOSECOND"})
+        assert fn(self._value(891)) == 1_234_567_891
+
+    def test_a_coarser_unit_refuses_a_true_sub_microsecond_remainder(self) -> None:
+        # Previously silently floored away (1234567891 -> 1234567000):
+        # exactly the "not exactly representable" class every other unit
+        # mismatch in this catalog already refuses instead of rounding.
+        fn = resolve_encoder({"name": "epoch", "unit": "MICROSECOND"})
+        with pytest.raises(ValueError, match="not exactly representable"):
+            fn(self._value(891))
+
+    def test_a_coarser_unit_still_succeeds_with_no_true_remainder(self) -> None:
+        fn = resolve_encoder({"name": "epoch", "unit": "MICROSECOND"})
+        assert fn(self._value(0)) == 1_234_567
 
 
 class TestEpochEncoderLeavesWireRangeToTheBodySerializer:

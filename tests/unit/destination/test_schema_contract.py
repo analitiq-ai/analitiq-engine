@@ -1441,6 +1441,49 @@ class TestCodeEncoderResultIsValidated:
         with pytest.raises(ValueError, match="missing required property 'count'"):
             encoders["meta"]({"count": 1})
 
+    def test_a_required_nested_property_present_as_null_is_refused(self):
+        # A present-but-None key satisfies _check_required_properties (the
+        # key exists) but still renders as a null the child's own declared
+        # type ("integer", no "null" variant) never allowed.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding_write": {"name": "code"},
+                    "properties": {
+                        "count": {"type": "integer", "arrow_type": "Int64"},
+                    },
+                    "required": ["count"],
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: {"count": None}
+        )
+        with pytest.raises(ValueError, match="meta'.count: .*returned None"):
+            encoders["meta"]({"count": 1})
+
+    def test_a_nested_property_declaring_null_still_accepts_it(self):
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding_write": {"name": "code"},
+                    "properties": {
+                        "count": {"type": ["integer", "null"], "arrow_type": "Int64"},
+                    },
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: {"count": None}
+        )
+        assert encoders["meta"]({"count": 1}) == {"count": None}
+
     def test_a_wrong_type_item_in_a_nested_list_is_refused(self):
         schema = {
             "properties": {
@@ -1582,6 +1625,51 @@ class TestFieldEncodersRejectNullInputForRequiredFields:
         with pytest.raises(ValueError, match="the field is required"):
             apply_field_encoders([{"shipped_at": None}], encoders)
 
+    def test_an_absent_optional_field_stays_absent_not_an_explicit_null(self):
+        # PR #509 review: encoding every declared field unconditionally via
+        # record.get(name) turned a key the record never carried at all
+        # into an explicit JSON null -- absence and null have different
+        # semantics for many update APIs (null clears a value; an absent
+        # key leaves it untouched).
+        from cdk.api.write_plan import apply_field_encoders
+
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": "string",
+                    "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                    "encoding_write": {"name": "iso8601"},
+                },
+            },
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders()
+        record = {}
+        apply_field_encoders([record], encoders)
+        assert "shipped_at" not in record
+
+    def test_an_absent_required_field_still_raises(self):
+        # The record has no value for a field its own schema says every
+        # record must carry -- the same defect a genuinely present null
+        # raises for, so a record simply missing the key must not slip
+        # through unnoticed just because there is no key to encode.
+        from cdk.api.write_plan import apply_field_encoders
+
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": "string",
+                    "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                    "encoding_write": {"name": "iso8601"},
+                },
+            },
+            "required": ["shipped_at"],
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders()
+        with pytest.raises(ValueError, match="the field is required"):
+            apply_field_encoders([{}], encoders)
+
 
 class TestSchemaContractJsonSchema:
     """JSON-Schema payloads use ``properties`` and still require arrow_type."""
@@ -1660,6 +1748,18 @@ class TestSchemaContractValidation:
         }
         with pytest.raises(ValueError, match="has no 'name' field"):
             SchemaContract(schema)
+
+    def test_a_non_object_column_entry_raises(self):
+        # The container-level check (test_columns_not_a_list_raises) only
+        # catches a wrong-shaped 'columns' itself; a free-form schema like
+        # {"columns": ["bad"]} still reaches the per-entry .get() calls
+        # here and crashed with AttributeError before this check existed.
+        with pytest.raises(ValueError, match="column at index 0 must be an object"):
+            SchemaContract({"columns": ["bad"]})
+
+    def test_a_non_object_property_entry_raises(self):
+        with pytest.raises(ValueError, match="field 'id' must be an object"):
+            SchemaContract({"properties": {"id": "bad"}})
 
     def test_column_without_arrow_type_raises(self):
         schema = {"columns": [{"name": "id"}]}

@@ -151,14 +151,28 @@ def _encode_epoch(config: Mapping[str, Any]) -> Callable[[Any], Any]:
         # exactly that hand arithmetic once already (caught by an
         # anti-pattern audit, not a test -- see TestEpochEncoderUnitArithmetic).
         total_micros = delta // timedelta(microseconds=1)
+        # A plain datetime holds no finer than microsecond precision, but
+        # LandingBatch.records materialises via to_pylist(), and pyarrow's
+        # own Scalar.as_py() for a NANOSECOND Timestamp returns a
+        # pandas.Timestamp -- itself a datetime subclass, so it passes the
+        # isinstance check above -- whenever pandas is importable, to avoid
+        # losing precision a plain datetime cannot hold (pandas is not a
+        # CDK dependency; nothing here imports it). Its Timedelta keeps the
+        # sub-microsecond remainder standard datetime.timedelta arithmetic
+        # cannot represent at all, so getattr is the only way to read it
+        # without importing pandas, and defaults to 0 for every plain
+        # datetime this catalog otherwise receives.
+        extra_ns = getattr(delta, "nanoseconds", 0)
         if micros_per_unit is None:  # NANOSECOND
-            # A plain datetime holds no finer than microsecond precision
-            # (LandingBatch.records materialises via to_pylist(), which
-            # refuses a genuinely sub-microsecond value outright unless
-            # pandas is installed -- not a CDK dependency), so going *to*
-            # nanoseconds from it is an exact multiply, never lossy.
-            ticks = total_micros * 1000
+            ticks = total_micros * 1000 + extra_ns
         else:
+            if extra_ns:
+                raise ValueError(
+                    f"encoding_write 'epoch': {value!r} is not exactly "
+                    f"representable in unit {unit!r}; it has a nonzero "
+                    f"nanosecond remainder that would otherwise be "
+                    f"silently discarded"
+                )
             ticks, remainder = divmod(total_micros, micros_per_unit)
             if remainder:
                 # divmod's own remainder, not // alone: // would otherwise

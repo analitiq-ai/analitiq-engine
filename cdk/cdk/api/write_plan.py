@@ -469,21 +469,30 @@ def apply_field_encoders(
     (``GenericAPIConnector.land``): one pass over the batch's dicts so
     ``encode_body`` never sees a value ``orjson`` cannot render natively --
     a ``datetime``, ``Decimal``, or ``bytes`` a field's ``encoding_write``
-    was declared to bridge. Every declared field's encoder runs
-    unconditionally, ``None`` input included: whether ``None`` is a
-    value to pass through or a defect to reject is a per-field decision
-    (the field's declared nullability), already made once when the
-    encoder was resolved
-    (:func:`~cdk.schema_contract._null_aware_encoder`) -- a blanket
-    "skip when the input is None" rule here would let a *required*
-    field's missing value reach ``encode_body`` as a silent JSON
-    ``null``, the same field still declaring a non-null type.
+    was declared to bridge. A *present* key's encoder always runs, ``None``
+    input included: whether ``None`` is a value to pass through or a
+    defect to reject is a per-field decision (the field's declared
+    nullability), already made once when the encoder was resolved
+    (:func:`~cdk.schema_contract._null_aware_encoder`). A key the record
+    never carried at all is different from one carrying an explicit
+    ``None``: many update APIs give absence and JSON ``null`` different
+    meanings (null clears a value; an absent key leaves it untouched), so
+    an absent optional key is left absent rather than added back as an
+    explicit null the record never declared. A *required* field's
+    absence is still run through the encoder -- discarding a nullable
+    result changes nothing observable, but a required field's encoder
+    raises on ``None`` the same as it would for a genuinely present null,
+    which is what must happen: the record has no value for a field its
+    own schema says every record must carry.
     """
     if not field_encoders:
         return
     for record in records:
         for name, encode in field_encoders.items():
-            record[name] = encode(record.get(name))
+            if name not in record:
+                encode(None)  # validates required-ness; result is moot
+                continue
+            record[name] = encode(record[name])
 
 
 def content_idempotency_key(record: Mapping[str, Any]) -> str:
