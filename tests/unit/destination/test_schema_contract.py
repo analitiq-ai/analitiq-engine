@@ -1251,6 +1251,44 @@ class TestCodeEncoderResultIsValidated:
         )
         assert encoders["a"](None) is None
 
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_a_non_finite_float_is_refused(self, bad: float):
+        # A non-finite float still renders as the JSON type "number" --
+        # the type check alone would accept it -- but encode_body (orjson)
+        # silently serialises any of them as JSON null, changing the
+        # value sent rather than failing the record.
+        schema = {
+            "properties": {
+                "n": {
+                    "type": "number",
+                    "arrow_type": "Float64",
+                    "encoding_write": {"name": "code"},
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: bad
+        )
+        with pytest.raises(ValueError, match="would silently render as JSON null"):
+            encoders["n"](1.5)
+
+    def test_an_ordinary_float_is_still_accepted(self):
+        schema = {
+            "properties": {
+                "n": {
+                    "type": "number",
+                    "arrow_type": "Float64",
+                    "encoding_write": {"name": "code"},
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: 3.14
+        )
+        assert encoders["n"](1.5) == 3.14
+
     def test_an_integer_satisfies_a_declared_number(self):
         schema = {
             "properties": {

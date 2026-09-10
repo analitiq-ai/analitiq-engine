@@ -353,13 +353,23 @@ def _bind_code_encoder(
     kind of encoder's output is actually known. An unchecked result
     (``12345`` for a field declared ``"type": "string"``) would
     otherwise serialise fine and send a request violating the endpoint's
-    own declared input schema.
+    own declared input schema. A non-finite float passes that type check
+    (NaN/Infinity still render as ``"number"``) but ``encode_body``
+    (orjson) silently serialises any of them as JSON ``null`` -- not a
+    type mismatch, but the same class of silent value corruption, so
+    checked separately.
     """
 
     def encode(value: Any) -> Any:
         result = code_encoder(field_name, value, arrow_type)
         if result is None or not json_types:
             return result
+        if isinstance(result, float) and not math.isfinite(result):
+            raise ValueError(
+                f"field {field_name!r}: ApiDialect.encode_field returned "
+                f"{result!r}, which the body serializer would silently "
+                f"render as JSON null instead of failing loud"
+            )
         rendered = _rendered_json_type(result)
         if rendered == "integer" and "number" in json_types:
             # JSON Schema defines every integer as a valid number.
