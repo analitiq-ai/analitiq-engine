@@ -454,9 +454,18 @@ def _decode_iso8601(_config: Mapping[str, Any]) -> DecodeFn:
     Capped at microsecond precision, matching ``datetime.fromisoformat``
     (and orjson's own retired native rendering this replaces): a
     fractional-second digit past the sixth is dropped the same way it
-    always was, including for a column declared at nanosecond resolution
-    -- issue #503's acceptance bar is byte-identical output to the prior
-    implicit behavior, not finer precision than either ever held.
+    always was, including for a column declared at nanosecond resolution.
+
+    Built at microsecond resolution and safe-cast to ``field.type`` --
+    same as every other decoder in this module (:func:`_ticks_to_array`,
+    :func:`_decode_iso_duration`) -- rather than handed straight to
+    ``pa.array(type=field.type)``: a Timestamp/Time column declared at a
+    coarser unit than microseconds (``Timestamp(SECOND)``) must reject a
+    value that does not fit evenly, not silently floor it, the same
+    author intent ``epoch``/``iso_duration`` already refuse identically.
+    Date has no finer unit to lose (pyarrow floors a Timestamp built from
+    a ``date`` uniformly regardless of the source decoder), so it is
+    built directly at ``field.type``.
     """
 
     def decode(field: pa.Field, values: list[Any]) -> pa.Array:
@@ -484,6 +493,12 @@ def _decode_iso8601(_config: Mapping[str, Any]) -> DecodeFn:
                     field, row, v, is_ts=is_ts, is_date_type=is_date_type, tz=tz
                 )
             )
+        if is_ts:
+            wire = pa.array(parsed, type=pa.timestamp("us", tz=tz))
+            return pc.cast(wire, field.type, safe=True)
+        if is_time_type:
+            wire = pa.array(parsed, type=pa.time64("us"))
+            return pc.cast(wire, field.type, safe=True)
         return pa.array(parsed, type=field.type)
 
     return decode

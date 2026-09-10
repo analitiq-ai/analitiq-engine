@@ -184,6 +184,35 @@ class TestIso8601CapsAtMicrosecondPrecision:
         assert result[0].value == 123_456
 
 
+class TestIso8601RefusesPrecisionFinerThanTheDestinationUnit:
+    """Same author intent as ``epoch``/``iso_duration``: a wire value finer
+    than the declared column's own unit must be refused, not silently
+    floored. Rejected by pyarrow's own safe cast (the same mechanism
+    ``_ticks_to_array``/``_decode_iso_duration`` already rely on), not a
+    bespoke check.
+    """
+
+    def test_a_sub_second_fraction_into_a_timestamp_second_column_is_refused(
+        self,
+    ) -> None:
+        field = pa.field("t", pa.timestamp("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso8601"}}, field)
+        with pytest.raises(pa.lib.ArrowInvalid, match="would lose data"):
+            fn(field, ["2024-01-15T13:45:06.5"])
+
+    def test_a_sub_second_fraction_into_a_time32_second_column_is_refused(self) -> None:
+        field = pa.field("t", pa.time32("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso8601"}}, field)
+        with pytest.raises(pa.lib.ArrowInvalid, match="would lose data"):
+            fn(field, ["13:45:06.5"])
+
+    def test_an_exact_value_into_a_timestamp_second_column_still_succeeds(self) -> None:
+        field = pa.field("t", pa.timestamp("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso8601"}}, field)
+        result = fn(field, ["2024-01-15T13:45:06"])
+        assert result[0].as_py().second == 6
+
+
 class TestEpochDecoderAcceptsAnIntegralDecimal:
     """``loads_preserving_decimals`` (``cdk.api.http``) parses any
     fractional-looking JSON token as ``Decimal`` regardless of the field's
