@@ -12,7 +12,7 @@ import numbers
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from re import Pattern
 from typing import Any, Final
@@ -720,14 +720,23 @@ def _iso_duration_ticks(
             f"not support -- a Duration is a fixed physical length and "
             f"a month has none"
         )
-    total_seconds = (
-        parsed.date.weeks * 604800
-        + parsed.date.days * 86400
-        + parsed.time.hours * 3600
-        + parsed.time.minutes * 60
-        + parsed.time.seconds
+    # timedelta's own constructor converts weeks/days/hours/minutes/seconds
+    # to a single duration internally -- not hand-multiplied conversion
+    # factors (604800/86400/3600/60), the same class of arithmetic that
+    # shipped a real bug once already in this catalog's epoch encoder
+    # (see TestEpochEncoderUnitArithmetic). weeks/days/hours/minutes are
+    # always whole in the ISO-8601 grammar (only seconds may carry a
+    # fraction); ``float`` on the seconds Decimal is exact enough for the
+    # microsecond resolution timedelta itself caps at, and timedelta //
+    # timedelta(microseconds=1) is Python's own exact integer division.
+    delta = timedelta(
+        weeks=int(parsed.date.weeks),
+        days=int(parsed.date.days),
+        hours=int(parsed.time.hours),
+        minutes=int(parsed.time.minutes),
+        seconds=float(parsed.time.seconds),
     )
-    return int(total_seconds * 1_000_000)
+    return delta // timedelta(microseconds=1)
 
 
 def _decode_iso_duration(_config: Mapping[str, Any]) -> DecodeFn:

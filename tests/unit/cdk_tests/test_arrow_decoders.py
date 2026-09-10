@@ -46,11 +46,17 @@ class TestIsoDurationCapsAtMicrosecondPrecision:
     the same way ``timedelta`` would drop it.
     """
 
-    def test_a_sub_microsecond_fraction_is_dropped(self) -> None:
+    def test_a_sub_microsecond_fraction_rounds_to_the_nearest_microsecond(
+        self,
+    ) -> None:
+        # timedelta's own construction rounds to the nearest microsecond
+        # (round-half-to-even), not truncation -- built directly from a
+        # timedelta(seconds=...), the value matches whatever timedelta
+        # itself would produce for the same input, by construction.
         field = pa.field("d", pa.duration("ns"), nullable=True)
         fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
         result = fn(field, ["PT1.123456789S"])
-        assert result[0].value == 1_123_456_000
+        assert result[0].value == 1_123_457_000
 
     def test_a_comma_fractional_separator_is_accepted(self) -> None:
         # ISO-8601 permits "," as well as "." for the fractional separator,

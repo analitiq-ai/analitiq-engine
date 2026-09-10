@@ -20,7 +20,7 @@ from __future__ import annotations
 import base64
 import json
 from collections.abc import Callable, Mapping
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
@@ -43,13 +43,14 @@ CODE_ENCODING_NAME: Final[str] = "code"
 #: cannot drift on the four units they do share.
 _EPOCH_UNITS: Final[tuple[str, ...]] = tuple(u for u in _READ_EPOCH_UNITS if u != "DAY")
 
-#: Nanoseconds per unit, the common resolution every unit divides evenly --
-#: including ``NANOSECOND`` itself, so no unit needs a special-cased branch.
-_UNIT_NANOS: Final[dict[str, int]] = {
-    "SECOND": 1_000_000_000,
-    "MILLISECOND": 1_000_000,
-    "MICROSECOND": 1_000,
-    "NANOSECOND": 1,
+#: Microseconds per unit -- the resolution a plain ``datetime`` actually
+#: has (it holds no finer), so ``NANOSECOND`` is the one unit with no
+#: entry: going *to* it from microseconds is an exact multiply, never a
+#: division that could leave a remainder.
+_MICROSECONDS_PER_UNIT: Final[dict[str, int]] = {
+    "SECOND": 1_000_000,
+    "MILLISECOND": 1_000,
+    "MICROSECOND": 1,
 }
 
 _UNIX_EPOCH: Final[datetime] = datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -96,7 +97,7 @@ def _encode_strftime(config: Mapping[str, Any]) -> Callable[[Any], Any]:
 
 def _encode_epoch(config: Mapping[str, Any]) -> Callable[[Any], Any]:
     unit = require_enum_param(config, "unit", _EPOCH_UNITS, "encoding_write 'epoch'")
-    nanos_per_unit = _UNIT_NANOS[unit]
+    micros_per_unit = _MICROSECONDS_PER_UNIT.get(unit)
 
     def encode(value: Any) -> int:
         if not isinstance(value, datetime):
@@ -105,29 +106,27 @@ def _encode_epoch(config: Mapping[str, Any]) -> Callable[[Any], Any]:
                 f"got {type(value).__name__}"
             )
         delta = _as_utc(value) - _UNIX_EPOCH
-        # A plain datetime carries microsecond precision, no more -- which
-        # is all this encoder can ever be handed: LandingBatch.records
-        # (cdk.base_handler) materialises the whole batch via
-        # RecordBatch.to_pylist() before land() ever calls an encoder, and
-        # to_pylist() itself refuses a genuinely sub-microsecond
-        # Timestamp(NANOSECOND)/Time64(NANOSECOND) value outright unless
-        # pandas is installed (not a CDK runtime dependency) -- a
-        # pre-existing limit of that shared, connector-agnostic
-        # materialisation step, not one this catalog's encoders can widen.
-        # Scaled to nanoseconds before dividing so NANOSECOND
-        # (nanos_per_unit == 1) returns the true tick count rather than the
-        # microsecond count relabeled -- every coarser unit divides this
-        # same nanosecond total evenly, when the value itself has no
-        # remainder at that unit.
-        total_nanos = (
-            delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds
-        ) * 1000
-        ticks, remainder = divmod(total_nanos, nanos_per_unit)
+        # timedelta // timedelta is Python's own exact integer division
+        # between two timedeltas (CPython computes it from their exact
+        # microsecond-resolution internal representation) -- not hand
+        # arithmetic on delta.days/.seconds/.microseconds: this same
+        # function shipped a NANOSECOND-ticks-1000x-too-small bug from
+        # exactly that hand arithmetic once already (caught by an
+        # anti-pattern audit, not a test -- see TestEpochEncoderUnitArithmetic).
+        total_micros = delta // timedelta(microseconds=1)
+        if micros_per_unit is None:  # NANOSECOND
+            # A plain datetime holds no finer than microsecond precision
+            # (LandingBatch.records materialises via to_pylist(), which
+            # refuses a genuinely sub-microsecond value outright unless
+            # pandas is installed -- not a CDK dependency), so going *to*
+            # nanoseconds from it is an exact multiply, never lossy.
+            return total_micros * 1000
+        ticks, remainder = divmod(total_micros, micros_per_unit)
         if remainder:
-            # // above would otherwise floor silently -- changing which
-            # instant is sent, not just its precision, and asymmetrically
-            # for a pre-epoch value (floor rounds toward -inf, not toward
-            # the represented instant).
+            # divmod's own remainder, not // alone: // would otherwise
+            # floor silently, changing which instant is sent, not just
+            # its precision, and asymmetrically for a pre-epoch value
+            # (floor rounds toward -inf, not toward the represented instant).
             raise ValueError(
                 f"encoding_write 'epoch': {value!r} is not exactly "
                 f"representable in unit {unit!r}; it has a nonzero "
