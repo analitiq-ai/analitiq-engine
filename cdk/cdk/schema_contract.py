@@ -12,12 +12,13 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from .json_utils import decimals_to_float, decode_json_fields
+from .json_utils import decimals_to_float, declared_json_types, decode_json_fields
 from .type_map import resolve_arrow_type
 from .type_map.arrow import (
     arrow_family,
     classify_arrow_conversion,
     first_blocked_nested_leaf,
+    parse_iso8601_scalar,
     resolve_decoder,
 )
 from .type_map.decoders import CODE_ENCODING_NAME as READ_CODE_ENCODING_NAME
@@ -181,31 +182,18 @@ def _parse_db_temporal_strings(field: pa.Field, values: list[Any]) -> pa.Array:
 
     parsed: list[Any] = []
     for row, v in enumerate(values):
-        if v is None:
-            parsed.append(None)
-            continue
-        if not isinstance(v, str):
+        if v is None or not isinstance(v, str):
+            # A "columns" schema has no `encoding` vocabulary, so a
+            # non-string value is never a wire value to parse -- it is
+            # already the native Python temporal object the driver handed
+            # back, passed through unchanged.
             parsed.append(v)
             continue
-        try:
-            if is_ts:
-                dt = datetime.fromisoformat(v)
-                if tz and dt.tzinfo is None:
-                    raise ValueError(
-                        f"value {v!r} is naive but column declares tz={tz!r}"
-                    )
-                if not tz and dt.tzinfo is not None:
-                    dt = dt.replace(tzinfo=None)
-                parsed.append(dt)
-            elif is_date_type:
-                parsed.append(date.fromisoformat(v[:10]))
-            else:
-                parsed.append(time.fromisoformat(v))
-        except ValueError as exc:
-            raise ValueError(
-                f"column {field.name!r} at row {row}: cannot parse "
-                f"{v!r} as {field.type}: {exc}"
-            ) from exc
+        parsed.append(
+            parse_iso8601_scalar(
+                field, row, v, is_ts=is_ts, is_date_type=is_date_type, tz=tz
+            )
+        )
     return pa.array(parsed, type=field.type)
 
 
@@ -253,28 +241,6 @@ def _reject_code_params(encoding: Mapping[str, Any], key: str, path: str) -> Non
             f"field {path!r}: {key} 'code' takes no parameters; found "
             f"{sorted(extra)!r}"
         )
-
-
-def _declared_json_types(field_def: Mapping[str, Any]) -> list[str]:
-    """Read the non-null JSON type(s) *field_def* declares, in declared order.
-
-    Mirrors ``cdk.api.response_schema.declared_json_types`` exactly (a
-    plain string is one type; a list such as ``["string", "integer",
-    "null"]`` names every real type the union permits plus nullability) --
-    duplicated rather than imported: this module stays free of any
-    ``cdk.api`` import (see the class docstring). A multi-type union is
-    schema-valid for whichever alternative a given response/record actually
-    carries, so a caller checking read compatibility must hold for every
-    declared type (the decoder must handle whichever one shows up), while
-    a caller checking write compatibility only needs the encoder's single
-    output type to be one of them.
-    """
-    declared = field_def.get("type")
-    if isinstance(declared, str):
-        return [declared]
-    if isinstance(declared, list):
-        return [t for t in declared if isinstance(t, str) and t != "null"]
-    return []
 
 
 def _check_nested_leaf_encoding(
@@ -707,7 +673,7 @@ class SchemaContract:
                 f"field {f.name!r}: encoding {name!r} does not decode a "
                 f"{kind!r} value; arrow_type is {f.type!s}"
             )
-        json_types = _declared_json_types(field_def)
+        json_types = declared_json_types(field_def)
         if isinstance(name, str):
             # Every declared alternative must be one the decoder can read:
             # the response is schema-valid for whichever type it actually
@@ -849,7 +815,7 @@ class SchemaContract:
                 f"field {f.name!r}: encoding_write {name!r} does not "
                 f"render a {kind!r} value; arrow_type is {f.type!s}"
             )
-        json_types = _declared_json_types(field_def)
+        json_types = declared_json_types(field_def)
         # The encoder renders one type; the schema is satisfied as long as
         # that type is among the declared alternatives (unlike the read
         # side, which must cover every alternative the wire might send).

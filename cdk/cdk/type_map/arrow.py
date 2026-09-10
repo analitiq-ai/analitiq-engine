@@ -418,10 +418,17 @@ def _ticks_to_array(
     )
 
 
-def _parse_iso8601_scalar(
+def parse_iso8601_scalar(
     field: pa.Field, row: int, v: str, *, is_ts: bool, is_date_type: bool, tz: Any
 ) -> Any:
-    """Parse one wire value into the datetime/date/time ``pa.array`` expects."""
+    """Parse one ISO-8601 wire value into the datetime/date/time ``pa.array`` expects.
+
+    Shared by the declared-encoding decoder (:func:`_decode_iso8601`) and
+    the tolerant database ("columns") path
+    (:func:`~cdk.schema_contract._parse_db_temporal_strings`), which has no
+    ``encoding`` vocabulary to declare this parse with -- one parse, two
+    callers, so they cannot drift on what "ISO-8601" means here.
+    """
     try:
         if is_ts:
             dt = datetime.fromisoformat(v)
@@ -436,7 +443,7 @@ def _parse_iso8601_scalar(
     except ValueError as exc:
         raise ValueError(
             f"column {field.name!r} at row {row}: cannot parse {v!r} as "
-            f"{field.type} via encoding 'iso8601': {exc}"
+            f"{field.type}: {exc}"
         ) from exc
 
 
@@ -473,7 +480,7 @@ def _decode_iso8601(_config: Mapping[str, Any]) -> DecodeFn:
                     f"expects a string, got {type(v).__name__}"
                 )
             parsed.append(
-                _parse_iso8601_scalar(
+                parse_iso8601_scalar(
                     field, row, v, is_ts=is_ts, is_date_type=is_date_type, tz=tz
                 )
             )

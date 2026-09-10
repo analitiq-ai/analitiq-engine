@@ -24,10 +24,10 @@ covers -- neither of those two is applied unless a field names it.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
+from ._param_validation import EncodingParam, param_to_json
 from .grammar import ConversionKind
 
 #: The sentinel name routing to a ``connector.py`` override of
@@ -36,16 +36,6 @@ from .grammar import ConversionKind
 #: carries an entry in :data:`DECODER_PARAMS` -- there is no static param
 #: shape for code the engine does not run.
 CODE_ENCODING_NAME: Final[str] = "code"
-
-
-@dataclass(frozen=True, slots=True)
-class DecoderParam:
-    """One parameter a decoder's ``encoding`` config may/must carry."""
-
-    name: str
-    kind: str  # "string" | "enum" | "list[string]"
-    required: bool = True
-    allowed: tuple[str, ...] = ()
 
 
 #: The unit vocabulary ``epoch`` and ``regex_epoch`` share. The first four
@@ -69,18 +59,18 @@ EPOCH_UNITS: Final[tuple[str, ...]] = (
 #: absent here (other than :data:`CODE_ENCODING_NAME`) is not part of the
 #: published vocabulary and :func:`~cdk.type_map.arrow.resolve_decoder`
 #: refuses it.
-DECODER_PARAMS: Final[dict[str, tuple[DecoderParam, ...]]] = {
+DECODER_PARAMS: Final[dict[str, tuple[EncodingParam, ...]]] = {
     "iso8601": (),
-    "epoch": (DecoderParam("unit", "enum", allowed=EPOCH_UNITS),),
-    "strptime": (DecoderParam("pattern", "string"),),
+    "epoch": (EncodingParam("unit", "enum", allowed=EPOCH_UNITS),),
+    "strptime": (EncodingParam("pattern", "string"),),
     "regex_epoch": (
-        DecoderParam("pattern", "string"),
-        DecoderParam("unit", "enum", allowed=EPOCH_UNITS),
+        EncodingParam("pattern", "string"),
+        EncodingParam("unit", "enum", allowed=EPOCH_UNITS),
     ),
     "decimal": (),
     "bool_map": (
-        DecoderParam("true_values", "list[string]"),
-        DecoderParam("false_values", "list[string]"),
+        EncodingParam("true_values", "list[string]"),
+        EncodingParam("false_values", "list[string]"),
     ),
     "base64": (),
     "iso_duration": (),
@@ -177,17 +167,6 @@ def decoder_matches_json_type(name: str, json_type: str) -> bool:
 DECODERS_CATALOG_VERSION: Final[str] = "1.0.0"
 
 
-def _param_to_json(param: DecoderParam) -> dict[str, Any]:
-    doc: dict[str, Any] = {
-        "name": param.name,
-        "kind": param.kind,
-        "required": param.required,
-    }
-    if param.allowed:
-        doc["allowed"] = list(param.allowed)
-    return doc
-
-
 def build_decoders_catalog() -> dict[str, Any]:
     """Materialise the published document: every decoder name and its params.
 
@@ -196,7 +175,7 @@ def build_decoders_catalog() -> dict[str, Any]:
     types, so there is no grid to flatten, only a vocabulary to publish.
     """
     decoders: dict[str, Any] = {
-        name: {"params": [_param_to_json(p) for p in params]}
+        name: {"params": [param_to_json(p) for p in params]}
         for name, params in DECODER_PARAMS.items()
     }
     decoders[CODE_ENCODING_NAME] = {"params": [], "requires_connector_code": True}

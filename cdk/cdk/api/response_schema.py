@@ -16,14 +16,16 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import Any
 
 from analitiq.contracts.endpoints import ResponseExtraction
 from analitiq.contracts.stream import EndpointRef
 
 from ..exceptions import ReadError
+from ..json_utils import declared_json_types
 from ..type_map import TypeMapper, UnmappedTypeError
 from ..types import EndpointScope
+from ._epoch_formats import CURSOR_EPOCH_FORMAT as _CURSOR_EPOCH_FORMAT
 from .records import split_records_ref
 
 __all__ = [
@@ -79,34 +81,6 @@ def records_items_schema(
             f"{records_ref!r} (no 'properties' under the addressed items)"
         )
     return deepcopy(items)
-
-
-def declared_json_types(field: dict[str, Any]) -> list[str]:
-    """Read the non-null JSON types a field's ``type`` declares, in declared order.
-
-    One reading of JSON Schema's ``type`` for every consumer here: a plain
-    string is one type, a list is a union whose ``null`` member only says
-    the field is nullable -- ``["string", "null"]`` is a string field. A
-    ``type`` that is neither yields nothing.
-    """
-    declared = field.get("type")
-    if isinstance(declared, str):
-        return [declared]
-    if isinstance(declared, list):
-        return [t for t in declared if isinstance(t, str) and t != "null"]
-    return []
-
-
-#: The two ``cursor_bounds`` epoch formats (``cdk.api.replication._EPOCH_UNIT``),
-#: keyed by the matching ``encoding: {"name": "epoch", "unit": ...}`` unit.
-#: Duplicated rather than imported -- ``replication`` imports
-#: :class:`FieldDeclaration` from this module, so the reverse import would
-#: cycle. MICROSECOND/NANOSECOND/DAY have no entry: ``cursor_bounds`` only
-#: ever reads an epoch cursor back in seconds or milliseconds.
-_CURSOR_EPOCH_FORMAT: Final[dict[str, str]] = {
-    "SECOND": "epoch_seconds",
-    "MILLISECOND": "epoch_milliseconds",
-}
 
 
 @dataclass(frozen=True)

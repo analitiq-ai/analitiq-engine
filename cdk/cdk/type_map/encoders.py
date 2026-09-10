@@ -25,7 +25,13 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
 
-from ._param_validation import require_enum_param, require_list_param, require_str_param
+from ._param_validation import (
+    EncodingParam,
+    param_to_json,
+    require_enum_param,
+    require_list_param,
+    require_str_param,
+)
 from .decoders import EPOCH_UNITS as _READ_EPOCH_UNITS
 from .exceptions import InvalidTypeMapError
 from .grammar import ConversionKind
@@ -231,7 +237,7 @@ def resolve_encoder(
             f"{', '.join([*ENCODER_FACTORIES, CODE_ENCODING_NAME])}"
         )
     config = {k: v for k, v in encoding_write.items() if k != "name"}
-    allowed = {p["name"] for p in _PARAM_SHAPES[name]}
+    allowed = {p.name for p in _PARAM_SHAPES[name]}
     unknown = set(config) - allowed
     if unknown:
         raise InvalidTypeMapError(
@@ -316,30 +322,24 @@ def encoding_write_matches_json_type(name: str, json_type: str) -> bool:
 #: The published catalog's own version.
 ENCODERS_CATALOG_VERSION: Final[str] = "1.0.0"
 
-_PARAM_SHAPES: Final[dict[str, list[dict[str, Any]]]] = {
-    "iso8601": [],
-    "strftime": [{"name": "pattern", "kind": "string", "required": True}],
-    "epoch": [
-        {
-            "name": "unit",
-            "kind": "enum",
-            "required": True,
-            "allowed": list(_EPOCH_UNITS),
-        }
-    ],
-    "decimal": [],
-    "bool_map": [
-        {"name": "true_values", "kind": "list[string]", "required": True},
-        {"name": "false_values", "kind": "list[string]", "required": True},
-    ],
-    "base64": [],
+_PARAM_SHAPES: Final[dict[str, tuple[EncodingParam, ...]]] = {
+    "iso8601": (),
+    "strftime": (EncodingParam("pattern", "string"),),
+    "epoch": (EncodingParam("unit", "enum", allowed=_EPOCH_UNITS),),
+    "decimal": (),
+    "bool_map": (
+        EncodingParam("true_values", "list[string]"),
+        EncodingParam("false_values", "list[string]"),
+    ),
+    "base64": (),
 }
 
 
 def build_encoders_catalog() -> dict[str, Any]:
     """Materialise the published document: every encoder name and its params."""
     encoders: dict[str, Any] = {
-        name: {"params": params} for name, params in _PARAM_SHAPES.items()
+        name: {"params": [param_to_json(p) for p in params]}
+        for name, params in _PARAM_SHAPES.items()
     }
     encoders[CODE_ENCODING_NAME] = {"params": [], "requires_connector_code": True}
     return {"version": ENCODERS_CATALOG_VERSION, "encoders": encoders}

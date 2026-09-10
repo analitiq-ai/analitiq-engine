@@ -1,17 +1,42 @@
-"""Shared parameter validation for encoding/encoding_write config dicts.
+"""Shared parameter vocabulary and validation for encoding/encoding_write config dicts.
 
 One set of checks for both directions -- a malformed ``pattern``, ``unit``,
 or value list is refused identically whether it was declared for a decoder
 or an encoder, rather than each catalog growing its own slightly different
-wording.
+wording. :class:`EncodingParam` is the one static-shape representation both
+``decoders.py`` and ``encoders.py`` publish their vocabulary through, rather
+than each declaring its own typed/untyped copy.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from .exceptions import InvalidTypeMapError
+
+
+@dataclass(frozen=True, slots=True)
+class EncodingParam:
+    """One parameter an ``encoding``/``encoding_write`` config may/must carry."""
+
+    name: str
+    kind: str  # "string" | "enum" | "list[string]"
+    required: bool = True
+    allowed: tuple[str, ...] = ()
+
+
+def param_to_json(param: EncodingParam) -> dict[str, Any]:
+    """Render *param* the way a published decoders/encoders catalog document does."""
+    doc: dict[str, Any] = {
+        "name": param.name,
+        "kind": param.kind,
+        "required": param.required,
+    }
+    if param.allowed:
+        doc["allowed"] = list(param.allowed)
+    return doc
 
 
 def require_str_param(config: Mapping[str, Any], name: str, entry: str) -> str:
