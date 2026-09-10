@@ -28,7 +28,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-from .exceptions import InvalidTypeMapError
 from .grammar import ConversionKind
 
 #: The sentinel name routing to a ``connector.py`` override of
@@ -101,11 +100,6 @@ DECODER_PARAMS: Final[dict[str, tuple[DecoderParam, ...]]] = {
 REQUIRES_ENCODING_KINDS: Final[frozenset[ConversionKind]] = frozenset(
     {"timestamp", "date", "time", "duration"}
 )
-
-
-def requires_read_encoding(kind: ConversionKind) -> bool:
-    """Whether a field of this conversion kind must declare ``encoding``."""
-    return kind in REQUIRES_ENCODING_KINDS
 
 
 #: Which conversion kinds each catalog decoder is meant to build. Every
@@ -221,19 +215,3 @@ def load_published_decoders_catalog() -> dict[str, Any]:
     """Return the committed, published decoders catalog document."""
     document: dict[str, Any] = json.loads(DECODERS_CATALOG_PATH.read_text())
     return document
-
-
-def decoder_params(name: str) -> tuple[DecoderParam, ...]:
-    """Return the declared parameters for *name*, or raise if unknown.
-
-    Raises for :data:`CODE_ENCODING_NAME` too -- it has no static param
-    shape to validate against; a caller resolving ``code`` must branch on
-    the name before reaching here.
-    """
-    params = DECODER_PARAMS.get(name)
-    if params is None:
-        raise InvalidTypeMapError(
-            f"unknown decoder {name!r}; expected one of "
-            f"{', '.join([*DECODER_PARAMS, CODE_ENCODING_NAME])}"
-        )
-    return params

@@ -66,8 +66,8 @@ for how the CDK package is bounded and wired see
    `.encode_field` (`cdk/cdk/api/dialects.py`) for a shape the catalog does
    not cover. This is API-only and orthogonal to item 3's SQL
    `native_type`/`arrow_type` DDL rendering: those two methods are never
-   called for a `"columns"`-shaped (SQL) schema, which keeps the pre-#503
-   tolerant parse (a bare ISO-8601 string, a bare unit-offset integer, or an
+   called for a `"columns"`-shaped (SQL) schema, which keeps the tolerant
+   parse (a bare ISO-8601 string, a bare unit-offset integer, or an
    already-typed Python value) unconditionally instead.
 
 ## Where Arrow is ceremony

@@ -216,7 +216,7 @@ def resolve_encoder(
     """Build the encode function a field's declared ``encoding_write`` names.
 
     Returns ``None`` for an undeclared field (the caller decides whether
-    that is an error via :func:`requires_write_encoding`) and for
+    that is an error via :data:`REQUIRES_ENCODING_KINDS`) and for
     :data:`CODE_ENCODING_NAME`, which the caller must special-case before
     calling this -- there is no catalog function backing it.
     """
@@ -254,11 +254,6 @@ def resolve_encoder(
 REQUIRES_ENCODING_KINDS: Final[frozenset[ConversionKind]] = frozenset(
     {"timestamp", "date", "time", "duration", "decimal", "binary"}
 )
-
-
-def requires_write_encoding(kind: ConversionKind) -> bool:
-    """Whether a field of this conversion kind must declare ``encoding_write``."""
-    return kind in REQUIRES_ENCODING_KINDS
 
 
 #: Which conversion kinds each catalog encoder is meant to render. A

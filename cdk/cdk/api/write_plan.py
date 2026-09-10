@@ -297,12 +297,12 @@ def resolve_field_encoders(
         contract.check_required_write_encoding()
         return contract.resolve_write_encoders(code_encoder=code_encoder)
     # TypeMapError (InvalidTypeMapError/MissingEncodingError included) covers
-    # an unknown encoding_write name or a malformed param (wrong 'unit',
-    # missing 'pattern', ...); AttributeError covers a declared
-    # encoding_write that isn't an object at all (e.g. a bare string) --
-    # every one of these is the same class of authoring defect the other
-    # branches here already return as a string rather than raise.
-    except (ValueError, TypeMapError, AttributeError) as err:
+    # an unknown encoding_write name, a malformed param (wrong 'unit',
+    # missing 'pattern', ...), or a declared encoding_write that isn't an
+    # object at all (e.g. a bare string) -- every one of these is the same
+    # class of authoring defect the other branches here already return as a
+    # string rather than raise.
+    except (ValueError, TypeMapError) as err:
         return f"write input schema: {err}"
 
 

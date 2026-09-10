@@ -122,8 +122,8 @@ def _reject_non_native_temporal_values(field: pa.Field, values: list[Any]) -> No
     own, more specific message wins for that case). Called only for a
     JSON-Schema/API endpoint (``SchemaContract._build_column``'s
     ``is_json_schema``); a database ``"columns"`` schema never reaches this
-    -- it keeps the tolerant :func:`_build_legacy_temporal_column` path,
-    since it has no ``encoding`` vocabulary to declare one with.
+    -- it keeps the tolerant :func:`_build_db_temporal_column` path
+    instead, since it has no ``encoding`` vocabulary to declare one with.
     """
     is_duration = pa.types.is_duration(field.type)
     for row, value in enumerate(values):
@@ -145,14 +145,14 @@ def _has_strings(values: list[Any]) -> bool:
     return any(isinstance(v, str) for v in values if v is not None)
 
 
-def _build_legacy_temporal_column(field: pa.Field, values: list[Any]) -> pa.Array:
-    """Build a temporal/duration column the pre-#503 tolerant way.
+def _build_db_temporal_column(field: pa.Field, values: list[Any]) -> pa.Array:
+    """Build a temporal/duration column the tolerant, database way.
 
     Preserved exclusively for a database ``"columns"`` schema (see
     ``SchemaContract._build_column``'s ``is_json_schema``): reject a
     float/Decimal offset (still ambiguous -- pyarrow would silently
     truncate it), parse a bare ISO-8601 string via
-    :func:`_parse_legacy_temporal_strings` (Timestamp/Date/Time only --
+    :func:`_parse_db_temporal_strings` (Timestamp/Date/Time only --
     Duration was never string-parseable here), and otherwise hand the
     value straight to pyarrow, which reads a bare integer as an offset in
     the column's own declared unit. A "columns" schema has no ``encoding``
@@ -162,17 +162,18 @@ def _build_legacy_temporal_column(field: pa.Field, values: list[Any]) -> pa.Arra
     for row, value in enumerate(values):
         _reject_floating_point_offset(field.name, row, value, field.type)
     if _is_temporal(field.type) and _has_strings(values):
-        return _parse_legacy_temporal_strings(field, values)
+        return _parse_db_temporal_strings(field, values)
     return pa.array(values, type=field.type)
 
 
-def _parse_legacy_temporal_strings(field: pa.Field, values: list[Any]) -> pa.Array:
+def _parse_db_temporal_strings(field: pa.Field, values: list[Any]) -> pa.Array:
     """Parse ISO-8601 strings into a timestamp/date/time column.
 
-    Restored verbatim (as the "columns"-only legacy path) from the method
-    #503 removed for a JSON-Schema/API endpoint: PyArrow refuses to coerce
-    strings into a timestamp/date/time array directly, so this parses with
-    the stdlib first and hands typed Python objects to ``pa.array``.
+    A "columns" (database) schema has no ``encoding`` vocabulary, so it
+    always parses this tolerant, unconditional way rather than through a
+    declared decoder: PyArrow refuses to coerce strings into a
+    timestamp/date/time array directly, so this parses with the stdlib
+    first and hands typed Python objects to ``pa.array``.
     """
     is_ts = pa.types.is_timestamp(field.type)
     is_date_type = pa.types.is_date(field.type)
@@ -543,11 +544,10 @@ class SchemaContract:
             # A database "columns" declaration has no `encoding` vocabulary
             # and the driver already hands back typed Python values (real
             # datetime/Decimal objects, never bare epoch ints or ISO text)
-            # -- so this shape keeps the pre-#503 tolerant parse
-            # (`_build_legacy_temporal_column`) unconditionally. The strict
+            # -- so this shape keeps the tolerant parse
+            # (`_build_db_temporal_column`) unconditionally. The strict
             # "no implicit decode" refusal below applies only to a
-            # JSON-Schema/API endpoint, which does have the vocabulary and
-            # is what #503 is about.
+            # JSON-Schema/API endpoint, which does have the vocabulary.
             self._is_json_schema = False
         elif "properties" in endpoint_schema:
             properties = endpoint_schema.get("properties") or {}
@@ -1116,11 +1116,11 @@ class SchemaContract:
         :meth:`SchemaContract.check_required_read_encoding` first.
 
         A database ``"columns"`` schema (``is_json_schema=False``) keeps the
-        pre-#503 tolerant parse instead: it has no ``encoding`` vocabulary at
+        tolerant parse instead: it has no ``encoding`` vocabulary at
         all, and its values already come from the driver as either native
         Python temporal objects (the common case) or -- some drivers, some
         column types -- a bare ISO-8601 string or unit-offset integer, which
-        this must keep accepting exactly as before.
+        this must keep accepting.
         """
         if all(v is None for v in values):
             return _all_null_column(field, values)
@@ -1146,7 +1146,7 @@ class SchemaContract:
             if is_json_schema:
                 _reject_non_native_temporal_values(field, values)
             else:
-                return _build_legacy_temporal_column(field, values)
+                return _build_db_temporal_column(field, values)
         if pa.types.is_decimal(field.type):
             return _build_decimal_column(field, values)
         if pa.types.is_integer(field.type) or pa.types.is_floating(field.type):

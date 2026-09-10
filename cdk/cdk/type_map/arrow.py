@@ -786,7 +786,7 @@ def resolve_decoder(field_def: Mapping[str, Any], field: pa.Field) -> DecodeFn |
     """Build the decode function a field's declared ``encoding`` names.
 
     Returns ``None`` for an undeclared field (the caller decides whether
-    that is an error via :func:`cdk.type_map.decoders.requires_read_encoding`)
+    that is an error via :data:`cdk.type_map.decoders.REQUIRES_ENCODING_KINDS`)
     and for :data:`~cdk.type_map.decoders.CODE_ENCODING_NAME`, which the
     caller must route to ``ApiDialect.decode_field`` before calling this --
     there is no catalog function backing it.
@@ -794,15 +794,20 @@ def resolve_decoder(field_def: Mapping[str, Any], field: pa.Field) -> DecodeFn |
     encoding = field_def.get("encoding")
     if encoding is None:
         return None
+    if not isinstance(encoding, Mapping):
+        raise InvalidTypeMapError(
+            f"field {field.name!r}: 'encoding' must be an object, got "
+            f"{type(encoding).__name__}"
+        )
     name = encoding.get("name")
     if name == CODE_ENCODING_NAME:
         return None
-    factory = _DECODER_FACTORIES.get(name) if isinstance(name, str) else None
-    if factory is None:
+    if not isinstance(name, str) or name not in _DECODER_FACTORIES:
         raise InvalidTypeMapError(
             f"unknown encoding name {name!r} on field {field.name!r}; expected "
             f"one of {', '.join([*_DECODER_FACTORIES, CODE_ENCODING_NAME])}"
         )
+    factory = _DECODER_FACTORIES[name]
     config = {k: v for k, v in encoding.items() if k != "name"}
     allowed = {p.name for p in DECODER_PARAMS[name]}
     unknown = set(config) - allowed

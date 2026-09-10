@@ -20,6 +20,18 @@ from cdk.type_map.exceptions import InvalidTypeMapError
 pytestmark = pytest.mark.unit
 
 
+class TestResolveDecoderRejectsANonObjectEncoding:
+    def test_a_bare_string_encoding_raises_instead_of_attribute_error(self) -> None:
+        # A malformed 'encoding' must fail loud as InvalidTypeMapError, the
+        # deterministic-error type the worker classifies as non-retryable
+        # (src/worker/source_service.py). A raw AttributeError from calling
+        # .get() on the string would instead read as a transient failure and
+        # retry the same authoring defect forever.
+        field = pa.field("a", pa.utf8(), nullable=True)
+        with pytest.raises(InvalidTypeMapError, match="'encoding' must be an object"):
+            resolve_decoder({"encoding": "iso8601"}, field)
+
+
 class TestBoolMapRejectsOverlappingTokens:
     def test_a_token_present_in_both_value_sets_is_refused_at_declaration_time(
         self,
