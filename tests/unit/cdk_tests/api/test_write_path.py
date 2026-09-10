@@ -581,6 +581,57 @@ class TestDeclarativeWireFormatEncoding:
         assert result.records_written == 1
         assert result.failed_record_ids == ("r0",)
 
+    async def test_a_code_hatch_value_orjson_cannot_encode_fails_only_itself(
+        self,
+    ) -> None:
+        # A code-hatch encode_field is connector-authored: this catalog
+        # cannot range-check its output the way _encode_epoch checks its
+        # own. orjson's own TypeError for an int outside its encodable
+        # range must still fail just the one record whose encode_field
+        # call produced it, the same as any other body-build failure --
+        # not escape _write_one_by_one's per-record boundary and abort
+        # every record in the batch.
+        class OverflowingDialect(ApiDialect):
+            def encode_field(self, field_name: str, value: Any, arrow_type: Any) -> Any:
+                return 2**64 if value == "bad" else 1
+
+        class CustomConnector(GenericAPIConnector):
+            dialect_class = OverflowingDialect
+
+        document = _document_with_field(
+            "code_name",
+            {
+                "type": "string",
+                "native_type": "text",
+                "arrow_type": "Utf8",
+                "encoding_write": {"name": "code"},
+            },
+        )
+        session = FakeSession([FakeResponse(body={})])
+        connector = CustomConnector()
+        connector.set_stream_endpoints({"items": document})
+        await connector.connect(runtime_with(session))
+        accepted = await connector.configure_schema(
+            SchemaSpec(
+                stream_id="items",
+                version=1,
+                write_mode=WriteMode.WRITE_MODE_INSERT,
+                ack_timeout_seconds=30,
+            )
+        )
+        assert accepted, connector.last_schema_rejection
+        result = await _write(
+            connector,
+            _batch_with(
+                [
+                    {"id": 0, "code_name": "bad"},
+                    {"id": 1, "code_name": "ok"},
+                ]
+            ),
+        )
+        assert result.records_written == 1
+        assert result.failed_record_ids == ("r0",)
+
     async def test_explicit_base64_encoding_write_matches_the_old_orjson_default(
         self,
     ) -> None:

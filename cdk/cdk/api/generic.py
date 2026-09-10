@@ -1252,12 +1252,19 @@ class GenericAPIConnector(BaseDestinationHandler):
                 encoded, headers = self._prepare_record_request(
                     plan, record, record_ids[index]
                 )
-            # Three defects, one verdict: the body build answers every way
+            # Four defects, one verdict: the body build answers every way
             # its declaration can fail with RequestSpecError; a record with
             # no value for an upsert conflict key, and the engine-owned
             # idempotency key refusing a body it cannot be added to, raise
-            # ValueError. All are deterministic and concern this one record.
-            except (RequestSpecError, ValueError) as err:
+            # ValueError; encode_body's own orjson.dumps raises TypeError
+            # for a value it cannot serialise -- a code-hatch encode_field
+            # returning an int outside orjson's encodable range, or (this
+            # catalog's own defect, surfacing here rather than being caught
+            # earlier) a type _orjson_default never learned to render. All
+            # four are deterministic and concern this one record, matching
+            # _write_in_chunks's identical (RequestSpecError, ValueError,
+            # TypeError) catch around the same encode_body call.
+            except (RequestSpecError, ValueError, TypeError) as err:
                 failures.add(record_ids[index], err, "failed to build body for record")
                 continue
             try:

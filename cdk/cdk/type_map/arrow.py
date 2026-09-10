@@ -408,6 +408,28 @@ _INT64_MIN: Final[int] = -(2**63)
 _INT64_MAX: Final[int] = 2**63 - 1
 
 
+def _require_in_pyarrow_range(
+    field: pa.Field, row: int, value: int, *, narrow: bool
+) -> int:
+    """Return *value* if it fits pyarrow's storage width for ``field.type``, or raise.
+
+    One range-check-and-raise for every caller that scales a tick to a
+    destination unit (:func:`_scale_tick`, :func:`_day_tick`,
+    :func:`_iso_duration_ticks`'s caller) -- so a wording or bound change
+    applies everywhere at once, not to whichever call site a review round
+    happened to touch. *narrow* selects int32 (Time32, Date32) over int64
+    (every other Timestamp/Duration/Time64 unit, regardless of its
+    declared resolution).
+    """
+    lo, hi = (_INT32_MIN, _INT32_MAX) if narrow else (_INT64_MIN, _INT64_MAX)
+    if not lo <= value <= hi:
+        raise ValueError(
+            f"column {field.name!r} at row {row}: {value} is outside the "
+            f"range pyarrow can hold as a tick count for {field.type!s}"
+        )
+    return value
+
+
 def _scale_tick(
     field: pa.Field,
     row: int,
@@ -425,10 +447,9 @@ def _scale_tick(
     NANOSECOND epoch for a year-9999 instant overflows int64, even though
     the same instant is a small, ordinary number of seconds) still
     converts exactly to a value the destination's own, possibly coarser,
-    unit easily holds. Range-checked against the destination's actual
-    storage width (*narrow* selects int32 for Time32, int64 otherwise)
-    only after scaling -- the wire unit's own range was never the
-    destination's to enforce.
+    unit easily holds. Range-checked (:func:`_require_in_pyarrow_range`)
+    against the destination's actual storage width only after scaling --
+    the wire unit's own range was never the destination's to enforce.
     """
     total_ns = tick * _NANOSECONDS_PER_WIRE_UNIT[wire_unit]
     scaled, remainder = divmod(total_ns, _NANOSECONDS_PER_PYARROW_UNIT[storage_unit])
@@ -439,13 +460,7 @@ def _scale_tick(
             f"it has a nonzero remainder that would otherwise be silently "
             f"discarded"
         )
-    lo, hi = (_INT32_MIN, _INT32_MAX) if narrow else (_INT64_MIN, _INT64_MAX)
-    if not lo <= scaled <= hi:
-        raise ValueError(
-            f"column {field.name!r} at row {row}: {scaled} is outside the "
-            f"range pyarrow can hold as a tick count for {field.type!s}"
-        )
-    return scaled
+    return _require_in_pyarrow_range(field, row, scaled, narrow=narrow)
 
 
 _NANOSECONDS_PER_DAY: Final[int] = 24 * 3600 * 1_000_000_000
@@ -464,19 +479,15 @@ def _day_tick(
     days is an ordinary day count but ~17.28e18 microseconds, past
     int64). Floors rather than rejecting sub-day precision, matching
     pyarrow's own Timestamp -> Date safe-cast (verified), then
-    range-checks against Date32's own int32 storage.
+    range-checks (:func:`_require_in_pyarrow_range`) against Date32's own
+    int32 storage.
     """
     days = (
         tick
         if wire_unit is None
         else tick * _NANOSECONDS_PER_WIRE_UNIT[wire_unit] // _NANOSECONDS_PER_DAY
     )
-    if not _INT32_MIN <= days <= _INT32_MAX:
-        raise ValueError(
-            f"column {field.name!r} at row {row}: {days} is outside the "
-            f"range pyarrow can hold as a tick count for {field.type!s}"
-        )
-    return days
+    return _require_in_pyarrow_range(field, row, days, narrow=True)
 
 
 def _ticks_to_array(
@@ -860,8 +871,8 @@ def _iso_duration_ticks(
     finer): a fractional microsecond beyond the sixth digit is rounded
     (half-to-even), not chased. Scaling to ``field.type``'s own declared
     unit -- and rejecting a value that does not fit evenly into a coarser
-    one -- is :func:`_duration_ticks_in_field_unit`'s job, not this
-    function's.
+    one -- is :func:`_scale_tick`'s job (called with wire_unit
+    ``"MICROSECOND"``), not this function's.
     """
     if not isinstance(v, str):
         raise ValueError(
@@ -896,57 +907,6 @@ def _iso_duration_ticks(
     return int(total_micros.to_integral_value(rounding=ROUND_HALF_EVEN))
 
 
-#: Microseconds per Duration storage unit, keyed by pyarrow's own short
-#: spelling (``field.type.unit``). ``ns`` has no entry: scaling *to*
-#: nanoseconds from microseconds is an exact multiply, never a division
-#: that could leave a remainder (mirrors
-#: :data:`cdk.type_map.encoders._MICROSECONDS_PER_UNIT`'s write-side twin).
-_MICROSECONDS_PER_DURATION_UNIT: Final[dict[str, int]] = {
-    "s": 1_000_000,
-    "ms": 1_000,
-    "us": 1,
-}
-
-
-def _duration_ticks_in_field_unit(field: pa.Field, row: int, total_micros: int) -> int:
-    """Scale an exact microsecond count to ``field.type``'s own Duration unit.
-
-    Deliberately not "build a ``duration('us')`` array, then
-    ``pc.cast(safe=True)``" the way :func:`_ticks_to_array` handles epoch:
-    a Duration is stored as int64 regardless of its declared unit, so an
-    ISO-8601 duration naming a very large day count (``P200000000D``) is
-    comfortably representable in a coarser unit like ``Duration(SECOND)``
-    but overflows int64 once forced through a microsecond intermediate --
-    rejecting a value the declared type can hold. Scaling directly, with
-    the same divmod-remainder exactness check :func:`_encode_epoch` already
-    uses on the write side, avoids ever materialising that intermediate.
-    Range-checked against Duration's own int64 storage only after
-    scaling: an otherwise ordinary duration (``P200000D``) can still
-    exceed it once named in a finer unit (``Duration(NANOSECOND)``), and
-    that must raise the same named ``ValueError`` here rather than the
-    raw ``OverflowError`` a too-large Python int triggers deep inside
-    ``pa.array``'s C binding.
-    """
-    unit = field.type.unit
-    if unit == "ns":
-        ticks = total_micros * 1000
-    else:
-        micros_per_unit = _MICROSECONDS_PER_DURATION_UNIT[unit]
-        ticks, remainder = divmod(total_micros, micros_per_unit)
-        if remainder:
-            raise ValueError(
-                f"column {field.name!r} at row {row}: duration is not exactly "
-                f"representable in unit {field.type!s}; it has a nonzero "
-                f"remainder that would otherwise be silently discarded"
-            )
-    if not _INT64_MIN <= ticks <= _INT64_MAX:
-        raise ValueError(
-            f"column {field.name!r} at row {row}: {ticks} is outside the "
-            f"range pyarrow can hold as a tick count for {field.type!s}"
-        )
-    return ticks
-
-
 def _decode_iso_duration(_config: Mapping[str, Any]) -> DecodeFn:
     try:
         from isoduration import parse_duration
@@ -968,12 +928,15 @@ def _decode_iso_duration(_config: Mapping[str, Any]) -> DecodeFn:
         ticks = [
             None
             if v is None
-            else _duration_ticks_in_field_unit(
+            else _scale_tick(
                 field,
                 row,
                 _iso_duration_ticks(
                     field, row, v, parse_duration, DurationParsingException
                 ),
+                "MICROSECOND",
+                field.type.unit,
+                narrow=False,
             )
             for row, v in enumerate(values)
         ]
