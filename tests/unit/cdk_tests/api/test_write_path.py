@@ -591,6 +591,10 @@ class TestDeclarativeWireFormatEncoding:
         # call produced it, the same as any other body-build failure --
         # not escape _write_one_by_one's per-record boundary and abort
         # every record in the batch.
+        # Declared 'integer' (matching what encode_field actually returns)
+        # so the failure under test is orjson's own range rejection, not
+        # this catalog's own declared-JSON-type check -- a legitimate
+        # integer that merely overflows orjson's encodable range.
         class OverflowingDialect(ApiDialect):
             def encode_field(self, field_name: str, value: Any, arrow_type: Any) -> Any:
                 return 2**64 if value == "bad" else 1
@@ -601,7 +605,7 @@ class TestDeclarativeWireFormatEncoding:
         document = _document_with_field(
             "code_name",
             {
-                "type": "string",
+                "type": "integer",
                 "native_type": "text",
                 "arrow_type": "Utf8",
                 "encoding_write": {"name": "code"},

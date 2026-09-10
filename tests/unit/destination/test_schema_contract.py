@@ -1209,6 +1209,86 @@ class TestCodeDecoderResultIsValidated:
         assert batch.to_pylist() == [{"a": "X"}]
 
 
+class TestCodeEncoderResultIsValidated:
+    """ApiDialect.encode_field is connector-authored, not code this catalog
+    controls. Unlike a catalog encoder (checked against the field's
+    declared JSON type at plan time), an unchecked code-hatch result
+    would serialise fine via orjson and send a request violating the
+    endpoint's own declared input schema.
+    """
+
+    _SCHEMA = {
+        "properties": {
+            "a": {
+                "type": "string",
+                "arrow_type": "Utf8",
+                "encoding_write": {"name": "code"},
+            },
+        },
+    }
+
+    def test_a_result_of_the_wrong_json_type_is_refused(self):
+        contract = SchemaContract(self._SCHEMA)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: 12345
+        )
+        with pytest.raises(
+            ValueError, match="renders as 'integer'.*type \\['string'\\]"
+        ):
+            encoders["a"]("some string value")
+
+    def test_a_conforming_result_is_still_accepted(self):
+        contract = SchemaContract(self._SCHEMA)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: value.upper()
+        )
+        assert encoders["a"]("abc") == "ABC"
+
+    def test_none_passes_through_unchecked(self):
+        contract = SchemaContract(self._SCHEMA)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: None
+        )
+        assert encoders["a"](None) is None
+
+    def test_an_integer_satisfies_a_declared_number(self):
+        schema = {
+            "properties": {
+                "n": {
+                    "type": "number",
+                    "arrow_type": "Int64",
+                    "encoding_write": {"name": "code"},
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: 5
+        )
+        assert encoders["n"](5) == 5
+
+    def test_a_json_field_is_checked_as_a_string_not_its_declared_type(self):
+        # arrow_type 'Json' is always a wire-level string blob regardless
+        # of the JSON Schema "type" it declares ("object"/"array"
+        # describes the decoded content, not what encode_field actually
+        # returns) -- checking the declared type literally here would
+        # reject every conforming Json code-hatch encoder.
+        schema = {
+            "properties": {
+                "payload": {
+                    "type": "object",
+                    "arrow_type": "Json",
+                    "encoding_write": {"name": "code"},
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: f"wrapped:{value}"
+        )
+        assert encoders["payload"]('{"a": 1}') == 'wrapped:{"a": 1}'
+
+
 class TestSchemaContractJsonSchema:
     """JSON-Schema payloads use ``properties`` and still require arrow_type."""
 

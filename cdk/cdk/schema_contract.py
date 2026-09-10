@@ -7,7 +7,7 @@ import numbers
 from collections.abc import Callable, Mapping
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, Final
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -311,19 +311,66 @@ def _check_nested_leaf_encoding(
     raise MissingEncodingError(path, str(arrow_type), direction=direction, key=key)
 
 
+#: The JSON Schema type name each Python type ``encode_body`` (orjson)
+#: renders a value as. ``bool`` is checked ahead of ``int`` in
+#: :func:`_rendered_json_type`: a Python ``bool`` is an ``int`` subclass,
+#: and orjson renders it as a JSON boolean, not a 0/1 integer.
+_PYTHON_JSON_TYPE: Final[dict[type, str]] = {
+    str: "string",
+    int: "integer",
+    float: "number",
+    dict: "object",
+    list: "array",
+}
+
+
+def _rendered_json_type(value: Any) -> str | None:
+    """Return the JSON Schema type *value* renders as, or ``None`` if unrenderable."""
+    if isinstance(value, bool):
+        return "boolean"
+    for python_type, json_type in _PYTHON_JSON_TYPE.items():
+        if isinstance(value, python_type):
+            return json_type
+    return None
+
+
 def _bind_code_encoder(
     code_encoder: Callable[[str, Any, pa.DataType], Any],
     field_name: str,
     arrow_type: pa.DataType,
+    json_types: list[str],
 ) -> Callable[[Any], Any]:
     """Close over one field's name/type for ``resolve_write_encoders``.
 
     Lets it return a uniform ``Callable[[Any], Any]`` regardless of
     whether the field resolved to a catalog encoder or the ``code`` hatch.
+    A catalog encoder's rendered JSON type is checked against the
+    field's declared type at plan time
+    (:meth:`SchemaContract._check_scalar_write_encoding`); a code hatch's
+    result has no such static guarantee -- ``ApiDialect.encode_field`` is
+    connector-authored code this catalog does not control -- so a
+    non-null result is checked here, at data time, the one place either
+    kind of encoder's output is actually known. An unchecked result
+    (``12345`` for a field declared ``"type": "string"``) would
+    otherwise serialise fine and send a request violating the endpoint's
+    own declared input schema.
     """
 
     def encode(value: Any) -> Any:
-        return code_encoder(field_name, value, arrow_type)
+        result = code_encoder(field_name, value, arrow_type)
+        if result is None or not json_types:
+            return result
+        rendered = _rendered_json_type(result)
+        if rendered == "integer" and "number" in json_types:
+            # JSON Schema defines every integer as a valid number.
+            return result
+        if rendered not in json_types:
+            raise ValueError(
+                f"field {field_name!r}: ApiDialect.encode_field returned "
+                f"a value that renders as {rendered!r}, but field declares "
+                f"type {json_types!r}"
+            )
+        return result
 
     return encode
 
@@ -890,7 +937,20 @@ class SchemaContract:
                         f"field {f.name!r} declares encoding_write name='code' "
                         f"but no code_encoder was supplied"
                     )
-                encoders[f.name] = _bind_code_encoder(code_encoder, f.name, f.type)
+                # A Json (arrow_type) field is always a wire-level string
+                # regardless of its declared JSON Schema "type" ("object"/
+                # "array" describes the decoded content, not the string
+                # blob ApiDialect.encode_field actually returns) -- the
+                # same distinction _is_json_field exists to make elsewhere
+                # in this class.
+                json_types = (
+                    ["string"]
+                    if _is_json_field(field_def)
+                    else declared_json_types(field_def)
+                )
+                encoders[f.name] = _bind_code_encoder(
+                    code_encoder, f.name, f.type, json_types
+                )
                 continue
             fn = resolve_encoder(encoding_write)
             if fn is not None:
