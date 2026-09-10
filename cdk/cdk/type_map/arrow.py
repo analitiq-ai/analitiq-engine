@@ -448,6 +448,37 @@ def _scale_tick(
     return scaled
 
 
+_NANOSECONDS_PER_DAY: Final[int] = 24 * 3600 * 1_000_000_000
+
+
+def _day_tick(
+    field: pa.Field, row: int, tick: int, *, wire_unit: str | None = None
+) -> int:
+    """Convert one tick to a whole-day count for Date32, or raise naming the row.
+
+    *wire_unit* ``None`` means *tick* already is a day count (the ``DAY``
+    epoch unit). Otherwise floors to the whole day through nanoseconds --
+    arbitrary-precision integer arithmetic, never a Timestamp intermediate
+    at any fixed sub-day precision, which a whole-day epoch value large
+    enough to still fit Date32's int32 day count can overflow (200,000,000
+    days is an ordinary day count but ~17.28e18 microseconds, past
+    int64). Floors rather than rejecting sub-day precision, matching
+    pyarrow's own Timestamp -> Date safe-cast (verified), then
+    range-checks against Date32's own int32 storage.
+    """
+    days = (
+        tick
+        if wire_unit is None
+        else tick * _NANOSECONDS_PER_WIRE_UNIT[wire_unit] // _NANOSECONDS_PER_DAY
+    )
+    if not _INT32_MIN <= days <= _INT32_MAX:
+        raise ValueError(
+            f"column {field.name!r} at row {row}: {days} is outside the "
+            f"range pyarrow can hold as a tick count for {field.type!s}"
+        )
+    return days
+
+
 def _ticks_to_array(
     field: pa.Field, ticks: list[int | None], wire_unit: str
 ) -> pa.Array:
@@ -465,7 +496,11 @@ def _ticks_to_array(
                 f"column {field.name!r}: epoch unit 'DAY' only applies to a "
                 f"Date32/Date64 arrow_type, got {field.type}"
             )
-        return pc.cast(pa.array(ticks, type=pa.date32()), field.type, safe=True)
+        days = [
+            None if t is None else _day_tick(field, row, t)
+            for row, t in enumerate(ticks)
+        ]
+        return pc.cast(pa.array(days, type=pa.date32()), field.type, safe=True)
     if pa.types.is_timestamp(field.type) or pa.types.is_duration(field.type):
         scaled = [
             None
@@ -475,19 +510,20 @@ def _ticks_to_array(
         ]
         return pa.array(scaled, type=field.type)
     if pa.types.is_date(field.type):
-        # Date32/Date64 have no unit of their own to scale into directly;
-        # "us" is an arbitrary fixed intermediate precision, safe because
-        # pyarrow floors a Timestamp(us) -> Date cast to the whole day
-        # identically to a same-instant cast from any other Timestamp unit
-        # (verified) -- the scaling itself is still exact, only the
-        # storage width being checked belongs to the intermediate.
-        scaled = [
-            None
-            if t is None
-            else _scale_tick(field, row, t, wire_unit, "us", narrow=False)
+        # Date32/Date64 have no sub-day unit to scale into directly, and
+        # a Timestamp(us) intermediate (the earlier fix here) reintroduces
+        # exactly the overflow this whole function exists to avoid: a
+        # whole-day epoch value that fits Date32's int32 day count easily
+        # can still overflow int64 microseconds (200,000,000 days is
+        # ~17.28e18 us). Floors straight to a whole-day tick instead --
+        # matching pyarrow's own Timestamp -> Date cast, which floors
+        # sub-day precision rather than rejecting it (verified) -- and
+        # range-checks that against Date32's own int32 storage.
+        days = [
+            None if t is None else _day_tick(field, row, t, wire_unit=wire_unit)
             for row, t in enumerate(ticks)
         ]
-        return pc.cast(pa.array(scaled, type=pa.timestamp("us")), field.type, safe=True)
+        return pc.cast(pa.array(days, type=pa.date32()), field.type, safe=True)
     if pa.types.is_time(field.type):
         narrow = pa.types.is_time32(field.type)
         scaled = [
@@ -884,17 +920,29 @@ def _duration_ticks_in_field_unit(field: pa.Field, row: int, total_micros: int) 
     rejecting a value the declared type can hold. Scaling directly, with
     the same divmod-remainder exactness check :func:`_encode_epoch` already
     uses on the write side, avoids ever materialising that intermediate.
+    Range-checked against Duration's own int64 storage only after
+    scaling: an otherwise ordinary duration (``P200000D``) can still
+    exceed it once named in a finer unit (``Duration(NANOSECOND)``), and
+    that must raise the same named ``ValueError`` here rather than the
+    raw ``OverflowError`` a too-large Python int triggers deep inside
+    ``pa.array``'s C binding.
     """
     unit = field.type.unit
     if unit == "ns":
-        return total_micros * 1000
-    micros_per_unit = _MICROSECONDS_PER_DURATION_UNIT[unit]
-    ticks, remainder = divmod(total_micros, micros_per_unit)
-    if remainder:
+        ticks = total_micros * 1000
+    else:
+        micros_per_unit = _MICROSECONDS_PER_DURATION_UNIT[unit]
+        ticks, remainder = divmod(total_micros, micros_per_unit)
+        if remainder:
+            raise ValueError(
+                f"column {field.name!r} at row {row}: duration is not exactly "
+                f"representable in unit {field.type!s}; it has a nonzero "
+                f"remainder that would otherwise be silently discarded"
+            )
+    if not _INT64_MIN <= ticks <= _INT64_MAX:
         raise ValueError(
-            f"column {field.name!r} at row {row}: duration is not exactly "
-            f"representable in unit {field.type!s}; it has a nonzero "
-            f"remainder that would otherwise be silently discarded"
+            f"column {field.name!r} at row {row}: {ticks} is outside the "
+            f"range pyarrow can hold as a tick count for {field.type!s}"
         )
     return ticks
 

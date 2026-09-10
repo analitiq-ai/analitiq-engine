@@ -129,6 +129,17 @@ class TestIsoDurationScalesToTheDestinationUnit:
         with pytest.raises(ValueError, match="not exactly representable"):
             fn(field, ["PT0.5S"])
 
+    def test_an_ordinary_duration_still_outside_int64_in_a_finer_unit_is_refused(
+        self,
+    ) -> None:
+        # P200000D is an ordinary duration that overflows int64 only once
+        # named in NANOSECOND -- must raise a named ValueError, not the
+        # raw OverflowError pa.array's C binding would otherwise trigger.
+        field = pa.field("d", pa.duration("ns"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
+        with pytest.raises(ValueError, match="outside the range"):
+            fn(field, ["P200000D"])
+
 
 class TestIsoDurationPreservesFractionalComponents:
     """ISO-8601 permits a decimal fraction on any one component, not only
@@ -365,6 +376,26 @@ class TestEpochScalesToTheDestinationUnitBeforeRangeChecking:
         )
         with pytest.raises(ValueError, match="outside the range"):
             fn(field, [99999999999999999999999999])
+
+    def test_a_whole_day_epoch_value_fits_date32_despite_overflowing_microseconds(
+        self,
+    ) -> None:
+        # 200,000,000 days is an ordinary Date32 day count (well inside
+        # its int32 storage), but ~17.28e18 microseconds -- past int64.
+        # Floors straight to a whole-day tick instead of routing through
+        # a fixed microsecond intermediate.
+        field = pa.field("d", pa.date32(), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "epoch", "unit": "SECOND"}}, field)
+        result = fn(field, [200_000_000 * 86400])
+        assert result[0].value == 200_000_000
+
+    def test_sub_day_precision_into_date32_still_floors_not_rejects(self) -> None:
+        # Matches pyarrow's own Timestamp -> Date safe-cast, which floors
+        # sub-day precision rather than raising for it.
+        field = pa.field("d", pa.date32(), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "epoch", "unit": "SECOND"}}, field)
+        result = fn(field, [86400 + 3600])
+        assert result[0].value == 1
 
 
 class TestEpochDecoderPreservesTheInstantAcrossTargetZones:
