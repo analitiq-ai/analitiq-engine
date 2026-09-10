@@ -99,26 +99,37 @@ class TestIsoDurationAcceptsASign:
 
 class TestIsoDurationRejectsComponentFreeStrings:
     def test_a_designator_with_no_component_is_refused(self) -> None:
-        # Every component group is individually optional (so "P3D" and
-        # "PT30S" each parse fine alone), which also makes bare "P"
-        # fullmatch with every group absent -- it names no actual duration
-        # component, and ISO-8601 requires at least one.
         field = pa.field("d", pa.duration("s"), nullable=True)
         fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
-        with pytest.raises(ValueError, match="no duration component"):
+        with pytest.raises(ValueError, match="not a valid ISO-8601 duration"):
             fn(field, ["P"])
 
     @pytest.mark.parametrize("value", ["PT", "P1DT"])
     def test_a_dangling_time_designator_is_refused(self, value: str) -> None:
-        # "T" introduces an optional hour/minute/second section, so a "T"
-        # with nothing after it ("PT" alone, or "P1DT") would otherwise
-        # fullmatch with every T-section group None -- silently decoding
-        # "P1DT" as exactly one day rather than rejecting the malformed
-        # dangling designator.
+        # "T" introduces an hour/minute/second section; a "T" with nothing
+        # after it ("PT" alone, or "P1DT") names no time component.
         field = pa.field("d", pa.duration("s"), nullable=True)
         fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
-        with pytest.raises(ValueError, match="not an ISO-8601 duration"):
+        with pytest.raises(ValueError, match="not a valid ISO-8601 duration"):
             fn(field, [value])
+
+
+class TestIsoDurationRejectsCalendarComponents:
+    def test_a_year_or_month_component_is_refused(self) -> None:
+        # A Duration is a fixed physical length; a calendar year or month
+        # is not (a month is 28-31 days depending which one), so neither
+        # has a tick count to convert to.
+        field = pa.field("d", pa.duration("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
+        with pytest.raises(ValueError, match="calendar year/month"):
+            fn(field, ["P1Y2M3D"])
+
+    def test_weeks_cannot_combine_with_other_components(self) -> None:
+        # ISO-8601: a weeks designator is exclusive of every other one.
+        field = pa.field("d", pa.duration("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
+        with pytest.raises(ValueError, match="not a valid ISO-8601 duration"):
+            fn(field, ["P1W2D"])
 
 
 class TestIso8601PreservesNanosecondPrecision:

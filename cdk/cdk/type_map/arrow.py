@@ -21,6 +21,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import re2
 
+from .._extras import reraise_for_missing_extra
 from ._param_validation import require_enum_param, require_list_param, require_str_param
 from .conversions import Conversion, classify_conversion
 from .decoders import CODE_ENCODING_NAME, DECODER_PARAMS, EPOCH_UNITS
@@ -704,30 +705,6 @@ def _decode_base64(_config: Mapping[str, Any]) -> DecodeFn:
     return decode
 
 
-#: ``PnW`` or ``PnDTnHnMnS``, an optional leading ``-`` stripped and applied
-#: by the caller -- weeks (exclusive per ISO-8601), or days and clock
-#: components. Calendar years/months are deliberately unsupported: a
-#: Duration is a fixed physical length, and a month has none.
-#:
-#: Hand-rolled rather than the ``isoduration`` package (present in this
-#: environment only as a transitive extra of ``jsonschema[format-nongpl]``,
-#: not a declared CDK dependency): its parser accepts the full grammar,
-#: calendar Y/M included, and returns its own ``Duration`` dataclass rather
-#: than a ``datetime.timedelta`` -- a caller would still have to reject Y/M
-#: and convert the result by hand, which is most of what this regex does
-#: directly, without adding a dependency for one decoder in an eight-entry
-#: catalog.
-_ISO_DURATION_RE: Final[re.Pattern[str]] = re.compile(
-    r"^P(?:(?P<weeks>\d+)W)$"
-    r"|"
-    r"^P(?:(?P<days>\d+)D)?"
-    # (?=\d) after T: every component below starts with a digit, so this
-    # rejects a dangling "T" with nothing following it ("P1DT", bare "PT")
-    # rather than fullmatching it with every T-section group None.
-    r"(?:T(?=\d)(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?"
-    r"(?:(?P<seconds>\d+(?:[.,]\d+)?)S)?)?$"
-)
-
 #: Nanoseconds per Duration tick, keyed by pyarrow's own unit spelling
 #: (``field.type.unit``) -- the resolution :func:`_iso_duration_ticks`
 #: scales straight to, rather than always accumulating nanosecond ticks
@@ -743,62 +720,54 @@ _DURATION_UNIT_NANOS: Final[dict[str, int]] = {
 }
 
 
-def _iso_duration_ticks(field: pa.Field, row: int, v: str) -> int:
+def _iso_duration_ticks(
+    field: pa.Field,
+    row: int,
+    v: str,
+    parse_duration: Callable[[str], Any],
+    duration_parsing_exception: type[Exception],
+) -> int:
     """Parse one ISO-8601 duration string into signed ticks in ``field.type``'s unit.
 
-    Accumulated via ``Decimal``, not a Python ``timedelta`` (microsecond
-    resolution only), which would silently truncate a Duration(NANOSECOND)
-    column's sub-microsecond digits before they ever reached pyarrow.
+    Parsed by ``isoduration`` (an actual conformant implementation of the
+    standard) rather than a hand-rolled grammar -- a prior hand-rolled regex
+    needed three separate review rounds to reach sign support, both
+    fractional-second separators, and rejecting a dangling ``T`` designator,
+    each a gap in the reimplementation rather than in the standard.
+    Accumulated via ``Decimal`` throughout, not a Python ``timedelta``
+    (microsecond resolution only), which would silently truncate a
+    Duration(NANOSECOND) column's sub-microsecond digits before they ever
+    reached pyarrow.
     """
     if not isinstance(v, str):
         raise ValueError(
             f"column {field.name!r} at row {row}: encoding "
             f"'iso_duration' expects a string, got {type(v).__name__}"
         )
-    # The sign is stripped before matching, not folded into the regex's
-    # alternation: Python's re refuses two branches naming the same group
-    # ("redefinition of group name"), and a signed ISO-8601 duration's "-"
-    # always precedes "P" whichever alternative follows, so one strip
-    # covers both.
-    negative = v.startswith("-")
-    unsigned = v[1:] if negative else v
-    match = _ISO_DURATION_RE.fullmatch(unsigned)
-    if match is None:
-        raise ValueError(
-            f"column {field.name!r} at row {row}: {v!r} is not an "
-            f"ISO-8601 duration this decoder supports (weeks, days, "
-            f"and clock components only -- no calendar Y/M)"
-        )
-    groups = match.groupdict()
-    if not any(groups[g] for g in ("weeks", "days", "hours", "minutes", "seconds")):
-        # Every component group is optional in the grammar (so "P3D" and
-        # "PT30S" each parse without the others), which also makes bare
-        # "P" fullmatch with every group None -- it names no actual
-        # duration component; at least one designator is required.
-        raise ValueError(
-            f"column {field.name!r} at row {row}: {v!r} names no "
-            f"duration component; an ISO-8601 duration requires at "
-            f"least one"
-        )
     try:
-        # ISO-8601 permits "," as well as "." for the fractional separator
-        # (the sibling iso8601 decoder accepts both); Decimal only ever
-        # accepts ".".
-        seconds = Decimal((groups["seconds"] or "0").replace(",", "."))
-    except InvalidOperation as exc:
+        parsed = parse_duration(v)
+    except duration_parsing_exception as exc:
         raise ValueError(
-            f"column {field.name!r} at row {row}: {v!r} has a "
-            f"seconds component that is not a valid decimal"
+            f"column {field.name!r} at row {row}: {v!r} is not a valid "
+            f"ISO-8601 duration this decoder supports (weeks, days, and "
+            f"clock components only -- no calendar Y/M): {exc}"
         ) from exc
+    if parsed.date.years or parsed.date.months:
+        # A Duration is a fixed physical length; a calendar year or month
+        # is not (a month is 28-31 days depending which one), so neither
+        # has a tick count to convert to.
+        raise ValueError(
+            f"column {field.name!r} at row {row}: {v!r} names a calendar "
+            f"year/month component, which this decoder does not support "
+            f"-- a Duration is a fixed physical length and a month has none"
+        )
     total_seconds = (
-        Decimal(int(groups["weeks"] or 0)) * 604800
-        + Decimal(int(groups["days"] or 0)) * 86400
-        + Decimal(int(groups["hours"] or 0)) * 3600
-        + Decimal(int(groups["minutes"] or 0)) * 60
-        + seconds
+        parsed.date.weeks * 604800
+        + parsed.date.days * 86400
+        + parsed.time.hours * 3600
+        + parsed.time.minutes * 60
+        + parsed.time.seconds
     )
-    if negative:
-        total_seconds = -total_seconds
     unit = field.type.unit
     ticks = total_seconds * 1_000_000_000 / _DURATION_UNIT_NANOS[unit]
     if ticks != ticks.to_integral_value():
@@ -814,6 +783,17 @@ def _iso_duration_ticks(field: pa.Field, row: int, v: str) -> int:
 
 
 def _decode_iso_duration(_config: Mapping[str, Any]) -> DecodeFn:
+    try:
+        from isoduration import parse_duration
+        from isoduration.parser.exceptions import DurationParsingException
+    except ImportError as exc:
+        reraise_for_missing_extra(
+            exc,
+            feature="encoding 'iso_duration'",
+            extra="api",
+            modules=("isoduration",),
+        )
+
     def decode(field: pa.Field, values: list[Any]) -> pa.Array:
         if not pa.types.is_duration(field.type):
             raise InvalidTypeMapError(
@@ -821,7 +801,11 @@ def _decode_iso_duration(_config: Mapping[str, Any]) -> DecodeFn:
                 f"Duration arrow_type, got {field.type}"
             )
         ticks = [
-            None if v is None else _iso_duration_ticks(field, row, v)
+            None
+            if v is None
+            else _iso_duration_ticks(
+                field, row, v, parse_duration, DurationParsingException
+            )
             for row, v in enumerate(values)
         ]
         # Ticks are already scaled to field.type's own unit -- no
