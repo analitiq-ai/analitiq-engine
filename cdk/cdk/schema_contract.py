@@ -435,13 +435,14 @@ def _validate_code_output_shape(
     json_types = _declared_json_types_for_code_output(field_def)
     if json_types:
         rendered = _rendered_json_type(value)
-        if rendered != "integer" or "number" not in json_types:
-            if rendered not in json_types:
-                raise ValueError(
-                    f"{path}: ApiDialect.encode_field returned a value that "
-                    f"renders as {rendered!r}, but field declares type "
-                    f"{json_types!r}"
-                )
+        # JSON Schema defines every integer as a valid number.
+        widened = rendered == "integer" and "number" in json_types
+        if not widened and rendered not in json_types:
+            raise ValueError(
+                f"{path}: ApiDialect.encode_field returned a value that "
+                f"renders as {rendered!r}, but field declares type "
+                f"{json_types!r}"
+            )
     if _is_json_field(field_def):
         return
     if isinstance(value, dict):
