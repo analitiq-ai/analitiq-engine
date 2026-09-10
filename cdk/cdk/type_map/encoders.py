@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import json
+import sys
 from collections.abc import Callable, Mapping
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
@@ -29,6 +30,7 @@ from ._param_validation import (
     EncodingParam,
     param_to_json,
     require_enum_param,
+    require_known_percent_directives,
     require_list_param,
     require_str_param,
 )
@@ -97,32 +99,27 @@ def _encode_iso8601(_config: Mapping[str, Any]) -> Callable[[Any], Any]:
 #: reach data time and render malformed output, not fail loud at
 #: configuration time the way every other encoder's malformed parameter
 #: already does.
-_STRFTIME_DIRECTIVES: Final[frozenset[str]] = frozenset("aAwdbBmyYHIpMSfzZjUWcxX%GuV")
+_STRFTIME_DIRECTIVES: Final[frozenset[str]] = frozenset("aAwdbBmyYHIpMSfzZjUWcxXGuV")
 
-
-def _require_known_strftime_directives(pattern: str, entry: str) -> None:
-    i = 0
-    n = len(pattern)
-    while i < n:
-        if pattern[i] != "%":
-            i += 1
-            continue
-        if i + 1 >= n:
-            raise InvalidTypeMapError(
-                f"{entry}: pattern {pattern!r} ends with a bare '%'"
-            )
-        directive = pattern[i + 1]
-        if directive not in _STRFTIME_DIRECTIVES:
-            raise InvalidTypeMapError(
-                f"{entry}: pattern {pattern!r} names directive '%{directive}', "
-                f"which datetime.strftime does not define"
-            )
-        i += 2
+#: ``%:z`` (a colon-separated UTC offset, ``+00:00``) is a real directive,
+#: but only from Python 3.12 -- on 3.11 (this repo's own CI/dev pin, still
+#: within its ``^3.11`` constraint) ``strftime`` does not recognise it at
+#: all and renders the literal, useless text ``:z`` instead (verified).
+#: Allowed only when the running interpreter actually supports it, so a
+#: pattern valid on one supported runtime is not silently broken on another.
+_STRFTIME_MULTI_CHAR_DIRECTIVES: Final[frozenset[str]] = (
+    frozenset({":z"}) if sys.version_info >= (3, 12) else frozenset()
+)
 
 
 def _encode_strftime(config: Mapping[str, Any]) -> Callable[[Any], Any]:
     pattern = require_str_param(config, "pattern", "encoding_write 'strftime'")
-    _require_known_strftime_directives(pattern, "encoding_write 'strftime'")
+    require_known_percent_directives(
+        pattern,
+        _STRFTIME_DIRECTIVES,
+        "encoding_write 'strftime'",
+        multi_char=_STRFTIME_MULTI_CHAR_DIRECTIVES,
+    )
 
     def encode(value: Any) -> str:
         if not isinstance(value, (datetime, date, time)):

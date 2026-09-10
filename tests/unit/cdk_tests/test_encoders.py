@@ -124,7 +124,7 @@ class TestStrftimeRejectsUnknownDirectivesAtResolveTime:
     """
 
     def test_an_unknown_directive_is_refused_at_resolve_time(self) -> None:
-        with pytest.raises(InvalidTypeMapError, match="does not define"):
+        with pytest.raises(InvalidTypeMapError, match="not supported here"):
             resolve_encoder({"name": "strftime", "pattern": "%Q"})
 
     def test_a_trailing_bare_percent_is_refused(self) -> None:
@@ -139,6 +139,33 @@ class TestStrftimeRejectsUnknownDirectivesAtResolveTime:
         pattern = "".join(f"%{d}" for d in "aAwdbBmyYHIpMSfzZjUWcxXGuV")
         fn = resolve_encoder({"name": "strftime", "pattern": pattern})
         assert fn(datetime(2024, 1, 15, 13, 45, 6, tzinfo=timezone.utc))
+
+    def test_percent_colon_z_is_refused_on_this_runtime(self) -> None:
+        # %:z is a real strftime directive, but only from Python 3.12 --
+        # on this repo's own pinned 3.11 runtime, strftime does not
+        # recognise it and renders the literal, useless text ":z"
+        # (verified directly). Accepting it unconditionally would trade
+        # one silent-garbage runtime for another.
+        import sys
+
+        assert sys.version_info < (3, 12), "re-verify this test once the pin moves"
+        with pytest.raises(InvalidTypeMapError, match="not supported here"):
+            resolve_encoder({"name": "strftime", "pattern": "%Y-%m-%dT%H:%M:%S%:z"})
+
+    def test_percent_colon_z_would_be_accepted_when_the_runtime_supports_it(
+        self,
+    ) -> None:
+        # Exercises require_known_percent_directives' multi_char handling
+        # directly, since this test suite runs on Python 3.11 and cannot
+        # flip the interpreter version to prove the 3.12+ branch inline.
+        from cdk.type_map._param_validation import require_known_percent_directives
+
+        require_known_percent_directives(
+            "%Y-%m-%dT%H:%M:%S%:z",
+            frozenset("aAwdbBmyYHIpMSfzZjUWcxXGu"),
+            "test",
+            multi_char=frozenset({":z"}),
+        )
 
 
 class TestResolveEncoderValidation:

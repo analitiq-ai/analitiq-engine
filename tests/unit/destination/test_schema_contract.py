@@ -1395,6 +1395,167 @@ class TestCodeEncoderResultIsValidated:
         )
         assert encoders["payload"]('{"a": 1}') == 'wrapped:{"a": 1}'
 
+    def test_a_wrong_type_nested_property_is_refused(self):
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding_write": {"name": "code"},
+                    "properties": {
+                        "count": {"type": "integer", "arrow_type": "Int64"},
+                    },
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: {"count": "wrong"}
+        )
+        with pytest.raises(ValueError, match=r"meta'\.count.*renders as 'string'"):
+            encoders["meta"]({"count": 1})
+
+    def test_a_wrong_type_item_in_a_nested_list_is_refused(self):
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding_write": {"name": "code"},
+                    "properties": {
+                        "values": {
+                            "type": "array",
+                            "arrow_type": "List",
+                            "items": {"type": "number", "arrow_type": "Float64"},
+                        },
+                    },
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: {"values": [1.0, "bad", 3.0]}
+        )
+        with pytest.raises(ValueError, match=r"meta'\.values\[1\]"):
+            encoders["meta"]({"values": [1.0, 2.0, 3.0]})
+
+    def test_a_conforming_nested_result_is_still_accepted(self):
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding_write": {"name": "code"},
+                    "properties": {
+                        "count": {"type": "integer", "arrow_type": "Int64"},
+                    },
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: {"count": 5}
+        )
+        assert encoders["meta"]({"count": 1}) == {"count": 5}
+
+    def test_an_undeclared_extra_key_is_left_unchecked(self):
+        # Lenient the same way _check_nested_leaf_encoding already is for
+        # a schema that does not fully enumerate every possible key.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding_write": {"name": "code"},
+                    "properties": {
+                        "count": {"type": "integer", "arrow_type": "Int64"},
+                    },
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: {"count": 5, "extra": object()}
+        )
+        result = encoders["meta"]({"count": 1})
+        assert result["count"] == 5
+
+
+class TestFieldEncodersRejectNullInputForRequiredFields:
+    """apply_field_encoders' own blanket "skip encoding when the input is
+    None" rule (cdk.api.write_plan) never even calls a required field's
+    encoder for a None ARROW value -- the None passed straight through to
+    encode_body as a silent JSON null, the same field's schema still
+    declaring a non-null type. Deciding what None means for one field is
+    now made once, at resolve time, in _null_aware_encoder.
+    """
+
+    def test_a_catalog_encoder_rejects_none_for_a_required_field(self):
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": "string",
+                    "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                    "encoding_write": {"name": "iso8601"},
+                },
+            },
+            "required": ["shipped_at"],
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders()
+        with pytest.raises(ValueError, match="the field is required"):
+            encoders["shipped_at"](None)
+
+    def test_a_catalog_encoder_still_passes_none_through_for_a_nullable_field(self):
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": "string",
+                    "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                    "encoding_write": {"name": "iso8601"},
+                },
+            },
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders()
+        assert encoders["shipped_at"](None) is None
+
+    def test_a_code_hatch_encoder_rejects_none_input_for_a_required_field(self):
+        schema = {
+            "properties": {
+                "a": {
+                    "type": "string",
+                    "arrow_type": "Utf8",
+                    "encoding_write": {"name": "code"},
+                },
+            },
+            "required": ["a"],
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: value.upper()
+        )
+        with pytest.raises(ValueError, match="the field is required"):
+            encoders["a"](None)
+
+    def test_apply_field_encoders_end_to_end(self):
+        from cdk.api.write_plan import apply_field_encoders
+
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": "string",
+                    "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                    "encoding_write": {"name": "iso8601"},
+                },
+            },
+            "required": ["shipped_at"],
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders()
+        with pytest.raises(ValueError, match="the field is required"):
+            apply_field_encoders([{"shipped_at": None}], encoders)
+
 
 class TestSchemaContractJsonSchema:
     """JSON-Schema payloads use ``properties`` and still require arrow_type."""

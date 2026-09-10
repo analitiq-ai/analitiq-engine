@@ -62,3 +62,55 @@ def require_list_param(config: Mapping[str, Any], name: str, entry: str) -> list
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
         raise InvalidTypeMapError(f"{entry!r} requires {name!r} as a list of strings")
     return value
+
+
+def require_known_percent_directives(
+    pattern: str,
+    allowed: frozenset[str],
+    entry: str,
+    *,
+    multi_char: frozenset[str] = frozenset(),
+) -> None:
+    """Reject a ``%``-directive pattern naming a directive outside *allowed*.
+
+    Shared by ``strftime`` (Python's own implementation) and ``strptime``
+    (pyarrow's own, a narrower vocabulary -- notably missing ``%f``/``%Z``/
+    ``%G``, verified directly) so both catalogs refuse an unsupported
+    directive with the same wording and the same one scanning pass, each
+    against its own actual runtime's vocabulary rather than a shared
+    guess. Neither implementation reliably rejects an unknown directive
+    itself (Python's ``strftime`` is platform-dependent -- glibc renders
+    one like ``%Q`` literally; pyarrow's ``strptime`` raises the same
+    generic "failed to parse" error for an unknown directive as for an
+    ordinary value mismatch, so it cannot even be probed for), so this is
+    the only place either gets validated at all. ``%%`` is always
+    accepted, matching the literal-percent escape both implementations
+    honor. *multi_char* names directives longer than one character after
+    the ``%`` (Python 3.12+'s ``%:z``, passed only when the running
+    interpreter actually supports it -- on 3.11 the identical pattern
+    renders the literal, useless text ``:z``, so accepting it
+    unconditionally here would trade one silent-garbage runtime for
+    another).
+    """
+    i = 0
+    n = len(pattern)
+    while i < n:
+        if pattern[i] != "%":
+            i += 1
+            continue
+        if i + 1 >= n:
+            raise InvalidTypeMapError(
+                f"{entry}: pattern {pattern!r} ends with a bare '%'"
+            )
+        rest = pattern[i + 1 :]
+        matched = next((m for m in multi_char if rest.startswith(m)), None)
+        if matched is not None:
+            i += 1 + len(matched)
+            continue
+        directive = pattern[i + 1]
+        if directive != "%" and directive not in allowed:
+            raise InvalidTypeMapError(
+                f"{entry}: pattern {pattern!r} names directive '%{directive}', "
+                f"which is not supported here"
+            )
+        i += 2

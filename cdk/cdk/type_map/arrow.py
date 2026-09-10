@@ -22,7 +22,12 @@ import pyarrow.compute as pc
 import re2
 
 from .._extras import reraise_for_missing_extra
-from ._param_validation import require_enum_param, require_list_param, require_str_param
+from ._param_validation import (
+    require_enum_param,
+    require_known_percent_directives,
+    require_list_param,
+    require_str_param,
+)
 from .conversions import Conversion, classify_conversion
 from .decoders import CODE_ENCODING_NAME, DECODER_PARAMS, EPOCH_UNITS
 from .exceptions import InvalidTypeMapError
@@ -693,13 +698,35 @@ def _decode_epoch(config: Mapping[str, Any]) -> DecodeFn:
     return decode
 
 
+#: Directive letters pyarrow's own ``pc.strptime`` actually parses --
+#: verified directly against Python's ``datetime.strftime``-rendered
+#: text for every directive in :mod:`cdk.type_map.encoders`'s equivalent
+#: table, since pyarrow's own vocabulary is narrower: notably missing
+#: ``%f`` (fractional seconds), ``%Z`` (timezone name), and ``%G``
+#: (ISO year), all of which pyarrow fails to parse even given exactly
+#: the text its own render of the corresponding directive would
+#: produce.
+_STRPTIME_DIRECTIVES: Final[frozenset[str]] = frozenset("aAwdbBmyYHIpMSzjUWcxXuV")
+
+
 def _decode_strptime(config: Mapping[str, Any]) -> DecodeFn:
     """``pc.strptime`` against a declared pattern.
 
     The retired ``source_format`` hatch, now a named, declared catalog
-    entry rather than an unvalidated one.
+    entry rather than an unvalidated one. The pattern's directive
+    vocabulary is checked here, at resolve time
+    (:func:`~cdk.type_map._param_validation.require_known_percent_directives`)
+    -- ``pc.strptime`` itself only fails once it actually processes a
+    non-null value, and an all-null batch (an empty stream, an optional
+    column nobody populated this run) would otherwise leave a malformed
+    pattern like ``%Q`` undetected indefinitely, the exact gap
+    ``check_required_read_encoding`` resolving every decoder up front
+    exists to close.
     """
     pattern = require_str_param(config, "pattern", "encoding 'strptime'")
+    require_known_percent_directives(
+        pattern, _STRPTIME_DIRECTIVES, "encoding 'strptime'"
+    )
 
     def decode(field: pa.Field, values: list[Any]) -> pa.Array:
         for row, v in enumerate(values):

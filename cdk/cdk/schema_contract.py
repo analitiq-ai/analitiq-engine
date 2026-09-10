@@ -334,6 +334,41 @@ def _rendered_json_type(value: Any) -> str | None:
     return None
 
 
+def _null_aware_encoder(
+    encode: Callable[[Any], Any], field_name: str, *, nullable: bool
+) -> Callable[[Any], Any]:
+    """Decide once, at resolve time, what a ``None`` input means for one field.
+
+    ``apply_field_encoders`` (``cdk.api.write_plan``) calls every
+    declared field's encoder unconditionally -- deciding whether
+    ``None`` is a value to pass through or a defect to reject belongs
+    here, where the field's declared nullability is known, not to a
+    blanket "skip encoding when the input is None" rule that would
+    let a required field's missing value reach ``encode_body`` as a
+    silent JSON ``null``, still declared non-null by the same schema.
+    A nullable field's ``None`` passes straight through, unencoded, so
+    the underlying encoder is never asked to render a value that was
+    never actually present -- an encoder is not obligated to handle
+    ``None`` itself.
+    """
+    if nullable:
+
+        def encode_nullable(value: Any) -> Any:
+            return None if value is None else encode(value)
+
+        return encode_nullable
+
+    def encode_required(value: Any) -> Any:
+        if value is None:
+            raise ValueError(
+                f"field {field_name!r}: value is None, but the field is "
+                f"required -- every record must carry a value"
+            )
+        return encode(value)
+
+    return encode_required
+
+
 def _first_non_finite(value: Any) -> float | None:
     """Return the first non-finite float found in *value*, recursively, or ``None``.
 
@@ -360,11 +395,73 @@ def _first_non_finite(value: Any) -> float | None:
     return None
 
 
+def _declared_json_types_for_code_output(field_def: dict[str, Any]) -> list[str]:
+    """Return the JSON types a code hatch's result may render as at one node.
+
+    A Json (arrow_type) node is always a wire-level string regardless of
+    its declared JSON Schema type ("object"/"array" describes the
+    decoded content, not the string blob ``ApiDialect.encode_field``
+    actually returns for it) -- the same distinction ``_is_json_field``
+    makes elsewhere in this class, applied at whichever depth a Json
+    leaf appears, not only the field's own top level.
+    """
+    if _is_json_field(field_def):
+        return ["string"]
+    declared: list[str] = declared_json_types(field_def)
+    return declared
+
+
+def _validate_code_output_shape(
+    value: Any, field_def: dict[str, Any], path: str
+) -> None:
+    """Recursively check a code hatch's result against its declared JSON shape.
+
+    A catalog encoder's declared type is checked once, against the
+    field's own flat declaration
+    (:meth:`SchemaContract._check_scalar_write_encoding`); a code
+    hatch's result can nest arbitrarily deep -- an Object/List field's
+    ``encode_field`` returning ``{"count": "wrong"}`` for a declared
+    ``"integer"`` child -- and checking only the outer value (it still
+    renders as ``"object"``) lets a schema-invalid leaf reach the
+    provider unnoticed. Walks ``"properties"``/``"items"`` the same way
+    the schema itself declares them, naming a mismatch by its full path.
+    A value with no corresponding declaration (an extra key the schema
+    never named) is left unchecked -- the same leniency
+    ``_check_nested_leaf_encoding`` and friends already extend to a
+    schema that does not fully enumerate every possible key.
+    """
+    if value is None:
+        return
+    json_types = _declared_json_types_for_code_output(field_def)
+    if json_types:
+        rendered = _rendered_json_type(value)
+        if rendered != "integer" or "number" not in json_types:
+            if rendered not in json_types:
+                raise ValueError(
+                    f"{path}: ApiDialect.encode_field returned a value that "
+                    f"renders as {rendered!r}, but field declares type "
+                    f"{json_types!r}"
+                )
+    if _is_json_field(field_def):
+        return
+    if isinstance(value, dict):
+        properties = field_def.get("properties") or {}
+        for key, child in value.items():
+            child_def = properties.get(key)
+            if child_def is not None:
+                _validate_code_output_shape(child, child_def, f"{path}.{key}")
+    elif isinstance(value, list):
+        items_def = field_def.get("items")
+        if items_def is not None:
+            for i, item in enumerate(value):
+                _validate_code_output_shape(item, items_def, f"{path}[{i}]")
+
+
 def _bind_code_encoder(
     code_encoder: Callable[[str, Any, pa.DataType], Any],
     field_name: str,
     arrow_type: pa.DataType,
-    json_types: list[str],
+    field_def: dict[str, Any],
     *,
     nullable: bool,
 ) -> Callable[[Any], Any]:
@@ -409,18 +506,7 @@ def _bind_code_encoder(
                 f"{non_finite!r}, which the body serializer would silently "
                 f"render as JSON null instead of failing loud"
             )
-        if not json_types:
-            return result
-        rendered = _rendered_json_type(result)
-        if rendered == "integer" and "number" in json_types:
-            # JSON Schema defines every integer as a valid number.
-            return result
-        if rendered not in json_types:
-            raise ValueError(
-                f"field {field_name!r}: ApiDialect.encode_field returned "
-                f"a value that renders as {rendered!r}, but field declares "
-                f"type {json_types!r}"
-            )
+        _validate_code_output_shape(result, field_def, f"field {field_name!r}")
         return result
 
     return encode
@@ -988,24 +1074,16 @@ class SchemaContract:
                         f"field {f.name!r} declares encoding_write name='code' "
                         f"but no code_encoder was supplied"
                     )
-                # A Json (arrow_type) field is always a wire-level string
-                # regardless of its declared JSON Schema "type" ("object"/
-                # "array" describes the decoded content, not the string
-                # blob ApiDialect.encode_field actually returns) -- the
-                # same distinction _is_json_field exists to make elsewhere
-                # in this class.
-                json_types = (
-                    ["string"]
-                    if _is_json_field(field_def)
-                    else declared_json_types(field_def)
+                bound = _bind_code_encoder(
+                    code_encoder, f.name, f.type, field_def, nullable=f.nullable
                 )
-                encoders[f.name] = _bind_code_encoder(
-                    code_encoder, f.name, f.type, json_types, nullable=f.nullable
+                encoders[f.name] = _null_aware_encoder(
+                    bound, f.name, nullable=f.nullable
                 )
                 continue
             fn = resolve_encoder(encoding_write)
             if fn is not None:
-                encoders[f.name] = fn
+                encoders[f.name] = _null_aware_encoder(fn, f.name, nullable=f.nullable)
         return encoders
 
     def to_db_records(self, record_batch: pa.RecordBatch) -> list[dict[str, Any]]:

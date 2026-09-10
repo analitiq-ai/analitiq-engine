@@ -524,6 +524,41 @@ class TestStrptimeDecodesIntoATimeColumn:
         assert result[1].as_py() is None
 
 
+class TestStrptimeRejectsUnknownDirectivesAtResolveTime:
+    """pc.strptime only fails once it actually processes a non-null
+    value, so an all-null batch would leave a malformed pattern
+    undetected indefinitely -- the exact gap check_required_read_encoding
+    resolving every decoder up front exists to close.
+    """
+
+    def test_an_unknown_directive_is_refused_at_resolve_time(self) -> None:
+        field = pa.field("t", pa.timestamp("s"), nullable=True)
+        with pytest.raises(InvalidTypeMapError, match="not supported here"):
+            resolve_decoder({"encoding": {"name": "strptime", "pattern": "%Q"}}, field)
+
+    @pytest.mark.parametrize("directive", ["%f", "%Z", "%G"])
+    def test_a_directive_pyarrow_does_not_support_is_refused(
+        self, directive: str
+    ) -> None:
+        # Valid Python strftime directives, but pyarrow's own strptime
+        # does not parse them (verified directly) -- accepting them here
+        # would configure successfully and fail only on the first
+        # non-null value.
+        field = pa.field("t", pa.timestamp("s"), nullable=True)
+        with pytest.raises(InvalidTypeMapError, match="not supported here"):
+            resolve_decoder(
+                {"encoding": {"name": "strptime", "pattern": directive}}, field
+            )
+
+    def test_a_valid_pattern_is_still_accepted(self) -> None:
+        field = pa.field("t", pa.timestamp("s"), nullable=True)
+        fn = resolve_decoder(
+            {"encoding": {"name": "strptime", "pattern": "%Y-%m-%d %H:%M:%S"}}, field
+        )
+        result = fn(field, ["2024-01-15 13:45:06"])
+        assert result[0].as_py().isoformat() == "2024-01-15T13:45:06"
+
+
 class TestRegexEpochUsesRE2NotBacktrackingRe:
     """``pattern`` is endpoint-authored, untrusted input matched against
     every row of every batch -- it must be compiled and matched with
