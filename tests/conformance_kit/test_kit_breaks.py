@@ -9,6 +9,7 @@ asserts the kit fails with a message naming the offending member.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 import shutil
 from collections.abc import Sequence
@@ -124,6 +125,14 @@ class _PrivateFacadeOverrideConnector(ReferenceConnector):
 class _ExtraMemberConnector(ReferenceConnector):
     def load_helper(self) -> None:
         return None
+
+
+class _ConfigureSchemaOverrideConnector(ReferenceConnector):
+    """A public GenericSQLConnector/BaseDestinationHandler member, not the
+    sanctioned classify_error hook -- the allowlist must not widen past it."""
+
+    async def configure_schema(self, schema_spec: Any) -> bool:
+        return True
 
 
 class _NoMergeDialect(SqlDialect):
@@ -276,6 +285,292 @@ class _StaticHookConnector(GenericSQLConnector):
     dialect_class = _StaticHookDialect
 
 
+class _ClassifyErrorOverrideConnector(ReferenceConnector):
+    """Overrides the connector-owned error-classification hook (issue #513)."""
+
+    def classify_error(self, exc: BaseException) -> str | None:
+        return "transient"
+
+
+class _AsyncClassifyErrorConnector(ReferenceConnector):
+    """classify_error declared async -- the CDK calls it synchronously."""
+
+    # skipcq: PYL-W0236 - the async-ness IS the deliberate defect this
+    # fixture models; the kit must reject it, and the test below pins that.
+    async def classify_error(self, exc: BaseException) -> str | None:
+        return "transient"
+
+
+class _BrokenSignatureClassifyErrorConnector(ReferenceConnector):
+    """classify_error missing the exc parameter the base signature admits.
+
+    The dropped parameter IS the deliberate defect this fixture models;
+    the kit must reject it, and the test below pins that -- not a bug to
+    fix by adding the parameter back.
+    """
+
+    def classify_error(self) -> str | None:  # type: ignore[override]
+        return "transient"
+
+
+class _NonCallableClassifyErrorConnector(ReferenceConnector):
+    """classify_error replaced with a non-callable value, not a hook."""
+
+    classify_error = "transient"
+
+
+class _ClassifyErrorCallableObject:
+    """A callable object, not a plain method -- accessed via the class it
+    is not descriptor-bound, so it needs no implicit-self placeholder."""
+
+    def __call__(self, exc: BaseException) -> str | None:
+        return "transient"
+
+
+class _CallableObjectClassifyErrorConnector(ReferenceConnector):
+    """classify_error as a valid callable object, not a plain method."""
+
+    classify_error = _ClassifyErrorCallableObject()
+
+
+class _ShadowedClassifyErrorMixin:
+    """Defines classify_error, but trails GenericSQLConnector in the MRO."""
+
+    def classify_error(self, exc: BaseException) -> str | None:
+        return "transient"
+
+
+class _ShadowedClassifyErrorConnector(ReferenceConnector, _ShadowedClassifyErrorMixin):
+    """BaseDestinationHandler's neutral classify_error wins this MRO, so
+    the mixin's override is never called -- tier 1 must catch that."""
+
+
+class _ClassifyErrorSubclassBaseConnector(ReferenceConnector):
+    """A connector-owned base defining classify_error directly."""
+
+    def classify_error(self, exc: BaseException) -> str | None:
+        return "transient"
+
+
+class _ClassifyErrorCooperativeSubclassConnector(_ClassifyErrorSubclassBaseConnector):
+    """A further subclass overriding it again, cooperatively -- not a
+    framework shadow, just ordinary inheritance the check must allow."""
+
+    def classify_error(self, exc: BaseException) -> str | None:
+        return super().classify_error(exc) or "config"
+
+
+class _LruCachedClassifyErrorConnector(ReferenceConnector):
+    """classify_error wrapped in a descriptor other than a plain function."""
+
+    @functools.lru_cache  # noqa: B019 - the caching descriptor IS the fixture
+    def classify_error(self, exc: BaseException) -> str | None:
+        return "transient"
+
+
+class _SingledispatchClassifyErrorConnector(ReferenceConnector):
+    """classify_error dispatching on the caught exception's own type."""
+
+    @functools.singledispatchmethod
+    def classify_error(self, exc: BaseException) -> str | None:
+        return "transient"
+
+    classify_error.register(ValueError)(lambda self, exc: "config")
+
+
+class _AsyncCallableObjectClassifyError:
+    """A callable object whose __call__ is async -- still a broken hook."""
+
+    async def __call__(self, exc: BaseException) -> str | None:
+        return "transient"
+
+
+class _AsyncCallableObjectClassifyErrorConnector(ReferenceConnector):
+    """classify_error as a callable object hiding an async __call__."""
+
+    classify_error = _AsyncCallableObjectClassifyError()
+
+
+class _SingledispatchBrokenDefaultConnector(ReferenceConnector):
+    """singledispatchmethod's default implementation drops exc entirely."""
+
+    @functools.singledispatchmethod
+    def classify_error(self) -> str | None:  # type: ignore[override]
+        return "transient"
+
+
+class _SingledispatchBrokenRegisteredConnector(ReferenceConnector):
+    """A registered implementation, not the default, drops exc."""
+
+    @functools.singledispatchmethod
+    def classify_error(self, exc: BaseException) -> str | None:
+        return "transient"
+
+    # A bare expression statement, not a name binding: only classify_error
+    # itself may be defined on the connector class.
+    classify_error.register(ValueError)(lambda self: "config")  # type: ignore[misc]
+
+
+class _RaisingClassifyErrorDescriptor:
+    """A descriptor whose __get__ needs state object.__new__ never sets up."""
+
+    def __get__(self, obj: Any, objtype: type | None = None) -> Any:
+        return obj.state_from_init.classify
+
+
+class _RaisingClassifyErrorConnector(ReferenceConnector):
+    """classify_error resolution itself raises -- must fail loud, not crash."""
+
+    classify_error = _RaisingClassifyErrorDescriptor()
+
+
+def _cyclic_wrapped_classify_error(self: Any, exc: BaseException) -> str | None:
+    return "transient"
+
+
+_cyclic_wrapped_classify_error.__wrapped__ = _cyclic_wrapped_classify_error
+
+
+class _CyclicWrappedClassifyErrorConnector(ReferenceConnector):
+    """A self-referential __wrapped__ chain -- inspect.unwrap raises."""
+
+    classify_error = _cyclic_wrapped_classify_error
+
+
+def _classify_error_forwarding_decorator(
+    fn: Any,
+) -> Any:
+    """An ordinary functools.wraps decorator forwarding every call through."""
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
+class _WrappedClassifyErrorConnector(ReferenceConnector):
+    """classify_error behind a plain functools.wraps forwarding wrapper."""
+
+    @_classify_error_forwarding_decorator
+    def classify_error(self, exc: BaseException) -> str | None:
+        return "transient"
+
+
+class _BrokenWrappedClassifyErrorConnector(ReferenceConnector):
+    """The forwarded implementation itself drops exc."""
+
+    @_classify_error_forwarding_decorator
+    def classify_error(self) -> str | None:  # type: ignore[override]
+        return "transient"
+
+
+class _AsyncWrappedClassifyErrorConnector(ReferenceConnector):
+    """A synchronous forwarding decorator hides an async implementation."""
+
+    @_classify_error_forwarding_decorator
+    # skipcq: PYL-W0236 - the async-ness IS the deliberate defect this
+    # fixture models; the kit must reject it, and the test below pins that.
+    async def classify_error(self, exc: BaseException) -> str | None:
+        return "transient"
+
+
+def _classify_error_partial_target(exc: BaseException, context: str) -> str | None:
+    return "transient"
+
+
+class _PartialClassifyErrorConnector(ReferenceConnector):
+    """classify_error as a functools.partial with one argument pre-bound."""
+
+    classify_error = functools.partial(_classify_error_partial_target, context="ctx")
+
+
+class _BrokenPartialClassifyErrorConnector(ReferenceConnector):
+    """The partial leaves a required argument unbound beyond exc."""
+
+    classify_error = functools.partial(_classify_error_partial_target)
+
+
+async def _async_partial_target(exc: BaseException) -> str | None:
+    return "transient"
+
+
+class _AsyncPartialClassifyErrorConnector(ReferenceConnector):
+    """A functools.partial wrapping an async function -- still broken."""
+
+    classify_error = functools.partial(_async_partial_target)
+
+
+async def _classify_error_async_generator(self: Any, exc: BaseException) -> Any:
+    yield "transient"
+
+
+class _AsyncGeneratorClassifyErrorConnector(ReferenceConnector):
+    """classify_error written as an async generator, not a coroutine."""
+
+    classify_error = _classify_error_async_generator
+
+
+def _classify_error_sync_generator(self: Any, exc: BaseException) -> Any:
+    yield "transient"
+
+
+class _SyncGeneratorClassifyErrorConnector(ReferenceConnector):
+    """classify_error written as a plain generator, not a coroutine at all."""
+
+    classify_error = _classify_error_sync_generator
+
+
+class _AsyncCallableObjectClassifyErrorForPartial:
+    """A callable object whose __call__ is async, for wrapping in a partial."""
+
+    async def __call__(self, exc: BaseException) -> str | None:
+        return "transient"
+
+
+class _PartialWrappingAsyncCallableObjectConnector(ReferenceConnector):
+    """functools.partial wrapping a callable object, not a plain function."""
+
+    classify_error = functools.partial(_AsyncCallableObjectClassifyErrorForPartial())
+
+
+class _OwnerSensitiveClassifyErrorDescriptor:
+    """Resolves differently depending on which concrete class binds it --
+    correct only against the real leaf connector, broken against the
+    mixin itself. Checking the mixin (the class the attribute is
+    defined on) instead of the real target would wrongly reject this
+    valid hook."""
+
+    def __get__(self, obj: Any, objtype: type | None = None) -> Any:
+        if (
+            objtype is not None
+            and objtype.__name__ == "_OwnerSensitiveClassifyErrorConnector"
+        ):
+
+            def fine(exc: BaseException) -> str | None:
+                return "transient"
+
+            return fine
+
+        def broken() -> str | None:  # missing exc
+            return "transient"
+
+        return broken
+
+
+class _OwnerSensitiveClassifyErrorMixin:
+    """Listed first so it wins the MRO -- isolates owner-threading from
+    the separate shadow-detection check."""
+
+    classify_error = _OwnerSensitiveClassifyErrorDescriptor()
+
+
+class _OwnerSensitiveClassifyErrorConnector(
+    _OwnerSensitiveClassifyErrorMixin, ReferenceConnector
+):
+    """The descriptor must be resolved against this class, not the mixin."""
+
+
 class _MergeFormDialect(ReferencePostgresDialect):
     """Renders the MERGE form, for the merge_form: 'merge' rendering arm."""
 
@@ -373,6 +668,16 @@ class TestOverrideSurfaceBreaks:
         )
         assert violations
         assert "load_helper" in _messages(violations)
+
+    def test_public_facade_override_still_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """classify_error widened the allowlist by exactly one name, not by kind."""
+        violations = check_override_surface(
+            _with_connector(reference_target, _ConfigureSchemaOverrideConnector)
+        )
+        assert violations
+        assert "configure_schema" in _messages(violations)
 
     def test_renamed_keyword_only_parameter_fails(
         self, reference_target: ConformanceTarget
@@ -485,6 +790,269 @@ class TestOverrideSurfaceBreaks:
         assert (
             check_override_surface(
                 _with_connector(reference_target, _ExtraDefaultParamConnector)
+            )
+            == []
+        )
+
+    def test_classify_error_override_is_allowed(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """The connector-owned error-classification hook (issue #513) is sanctioned."""
+        assert (
+            check_override_surface(
+                _with_connector(reference_target, _ClassifyErrorOverrideConnector)
+            )
+            == []
+        )
+
+    def test_async_classify_error_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """An async classify_error is still shape-checked, like a dialect hook."""
+        violations = check_override_surface(
+            _with_connector(reference_target, _AsyncClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "async" in report
+
+    def test_broken_signature_classify_error_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        violations = check_override_surface(
+            _with_connector(reference_target, _BrokenSignatureClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "signature" in report
+
+    def test_non_callable_classify_error_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        violations = check_override_surface(
+            _with_connector(reference_target, _NonCallableClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "non-callable" in report
+
+    def test_callable_object_classify_error_is_allowed(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A callable object isn't descriptor-bound; it needs no self shift."""
+        assert (
+            check_override_surface(
+                _with_connector(reference_target, _CallableObjectClassifyErrorConnector)
+            )
+            == []
+        )
+
+    def test_shadowed_classify_error_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A mixin's classify_error must actually win connector_cls's MRO."""
+        violations = check_override_surface(
+            _with_connector(reference_target, _ShadowedClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "shadowed" in report
+
+    def test_cooperative_subclass_classify_error_is_allowed(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A subclass re-overriding its own base's classify_error is not shadowing."""
+        assert (
+            check_override_surface(
+                _with_connector(
+                    reference_target, _ClassifyErrorCooperativeSubclassConnector
+                )
+            )
+            == []
+        )
+
+    def test_lru_cached_classify_error_is_allowed(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A non-function descriptor (lru_cache) still resolves self correctly."""
+        assert (
+            check_override_surface(
+                _with_connector(reference_target, _LruCachedClassifyErrorConnector)
+            )
+            == []
+        )
+
+    def test_singledispatch_classify_error_is_allowed(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A dispatching wrapper is not rejected as non-callable."""
+        assert (
+            check_override_surface(
+                _with_connector(reference_target, _SingledispatchClassifyErrorConnector)
+            )
+            == []
+        )
+
+    def test_async_callable_object_classify_error_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """An async __call__ behind a callable object must still be caught."""
+        violations = check_override_surface(
+            _with_connector(
+                reference_target, _AsyncCallableObjectClassifyErrorConnector
+            )
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "async" in report
+
+    def test_singledispatch_broken_default_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """The dispatcher's own signature can't mask a broken default impl."""
+        violations = check_override_surface(
+            _with_connector(reference_target, _SingledispatchBrokenDefaultConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "signature" in report
+
+    def test_raising_classify_error_descriptor_fails_loud(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A descriptor that raises on resolution reports a violation, not a crash."""
+        violations = check_override_surface(
+            _with_connector(reference_target, _RaisingClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "AttributeError" in report
+
+    def test_cyclic_wrapped_classify_error_fails_loud(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A self-referential __wrapped__ chain reports a violation, not a crash."""
+        violations = check_override_surface(
+            _with_connector(reference_target, _CyclicWrappedClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "ValueError" in report
+
+    def test_forwarding_wrapper_classify_error_is_allowed(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A plain functools.wraps forwarder resolves to what it forwards to."""
+        assert (
+            check_override_surface(
+                _with_connector(reference_target, _WrappedClassifyErrorConnector)
+            )
+            == []
+        )
+
+    def test_broken_forwarding_wrapper_classify_error_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        violations = check_override_surface(
+            _with_connector(reference_target, _BrokenWrappedClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "signature" in report
+
+    def test_async_forwarded_by_sync_wrapper_classify_error_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """iscoroutinefunction must follow __wrapped__, like signature already does."""
+        violations = check_override_surface(
+            _with_connector(reference_target, _AsyncWrappedClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "async" in report
+
+    def test_partial_classify_error_is_allowed(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A functools.partial's own adjusted signature is what's checked."""
+        assert (
+            check_override_surface(
+                _with_connector(reference_target, _PartialClassifyErrorConnector)
+            )
+            == []
+        )
+
+    def test_broken_partial_classify_error_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        violations = check_override_surface(
+            _with_connector(reference_target, _BrokenPartialClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "signature" in report
+
+    def test_async_partial_classify_error_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        violations = check_override_surface(
+            _with_connector(reference_target, _AsyncPartialClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "async" in report
+
+    def test_async_generator_classify_error_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        violations = check_override_surface(
+            _with_connector(reference_target, _AsyncGeneratorClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "async" in report
+
+    def test_sync_generator_classify_error_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        violations = check_override_surface(
+            _with_connector(reference_target, _SyncGeneratorClassifyErrorConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "yield" in report
+
+    def test_partial_wrapping_async_callable_object_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A partial's async check doesn't look inside a wrapped object's __call__."""
+        violations = check_override_surface(
+            _with_connector(
+                reference_target, _PartialWrappingAsyncCallableObjectConnector
+            )
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "async" in report
+
+    def test_singledispatch_broken_registered_fails(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """A registered implementation, not just the default, must be checked."""
+        violations = check_override_surface(
+            _with_connector(reference_target, _SingledispatchBrokenRegisteredConnector)
+        )
+        report = _messages(violations)
+        assert "classify_error" in report
+        assert "signature" in report
+
+    def test_owner_sensitive_descriptor_resolves_against_the_leaf(
+        self, reference_target: ConformanceTarget
+    ) -> None:
+        """An owner-sensitive descriptor is checked against the real target."""
+        assert (
+            check_override_surface(
+                _with_connector(reference_target, _OwnerSensitiveClassifyErrorConnector)
             )
             == []
         )

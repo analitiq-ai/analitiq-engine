@@ -23,8 +23,10 @@ in a customer pipeline (spec
   addressing without a declaration (or against `catalog: "none"`) — a
   loud error, never a guessed default.
 - **The override surface is the sanctioned one.** The connector class
-  carries `dialect_class` and nothing else; the dialect's public
-  namespace is exactly the public `SqlDialect` surface, minus the
+  carries `dialect_class` and, for a native error signal beyond the
+  declared `error_map` lookup, `classify_error` — nothing else; the
+  dialect's public namespace is exactly the public `SqlDialect`
+  surface, minus the
   framework-owned members (`capabilities`, `for_runtime`,
   `table_address`), with base-compatible signatures. The two that decide
   the declaration — `capabilities` and `for_runtime` — are refused by

@@ -1,10 +1,12 @@
 """The sanctioned-override-surface check (spec sql-write-path section 10).
 
 A connector's per-system code is its dialect: the connector class
-carries ``dialect_class`` and nothing else, and the dialect's public
-namespace is exactly the public :class:`~cdk.sql.dialects.SqlDialect`
-surface — the stage-then-merge hooks, the session/TLS hooks, and the
-existing DDL/discovery/identifier hooks. Overriding a private CDK
+carries ``dialect_class`` and, for a native error signal that needs more
+than the declared ``error_map`` lookup, ``classify_error`` — nothing
+else. The dialect's public namespace is exactly the public
+:class:`~cdk.sql.dialects.SqlDialect` surface — the stage-then-merge
+hooks, the session/TLS hooks, and the existing DDL/discovery/identifier
+hooks. Overriding a private CDK
 internal is contract-less coupling that breaks silently on any CDK
 refactor (the defect class that parked mysql#29); a *public addition*
 of the dialect's own is either a stale hook from an older write path
@@ -27,9 +29,11 @@ without touching this module.
 
 from __future__ import annotations
 
+import functools
 import inspect
 from typing import TYPE_CHECKING, Any
 
+from cdk.base_handler import BaseDestinationHandler
 from cdk.sql.dialects import SqlDialect
 from cdk.sql.generic import GenericSQLConnector
 
@@ -51,9 +55,15 @@ FRAMEWORK_OWNED_DIALECT_ATTRS = frozenset(
     {"capabilities", "for_runtime", "table_address"}
 )
 
-#: The one attribute a connector class may define (ADR section 4: "the
-#: connector class is ``dialect_class = XDialect`` and nothing else").
-CONNECTOR_CLASS_ALLOWED_ATTRS = frozenset({"dialect_class"})
+#: The attributes a connector class may define: ``dialect_class`` (spec
+#: sql-write-path section 4: "the connector class is ``dialect_class =
+#: XDialect`` and nothing else") and ``classify_error``, the code escape
+#: hatch for connector-owned error classification (issue #513; spec
+#: sql-write-path section 5) — resolved by the write path on the
+#: connector instance itself (``sql/generic.py``'s
+#: ``_declared_write_verdict``), never on the dialect, so it is not part
+#: of the dialect's sanctioned surface either.
+CONNECTOR_CLASS_ALLOWED_ATTRS = frozenset({"dialect_class", "classify_error"})
 
 
 def sanctioned_dialect_surface() -> frozenset[str]:
@@ -87,6 +97,24 @@ def _mro_span(cls: type, base: type) -> list[type]:
     """
     framework = set(base.__mro__)
     return [klass for klass in cls.__mro__ if klass not in framework]
+
+
+def _wins_mro(owning_cls: type, owned: frozenset[type], name: str) -> bool:
+    """Whether *name* resolves, on *owning_cls*, to one of *owned*'s classes.
+
+    *owned* is the connector/dialect's own classes (``_mro_span``'s
+    result). A name that instead resolves to a class outside that set is
+    shadowed by the framework's own definition -- typically a neutral
+    no-op -- and is dead code: the connector's intended override never
+    runs. A name that resolves to a *different* member of *owned* is the
+    connector authors' own business (a subclass override, a cooperative
+    ``super()`` chain, or an unrelated sibling): Python offers no static
+    way to tell an intentional cooperative chain from an accidental one
+    without reading the bodies, and flagging it would reject the ordinary
+    case of a subclass overriding its own base's hook.
+    """
+    winner = next((k for k in owning_cls.__mro__ if name in vars(k)), None)
+    return winner in owned
 
 
 def _base_call_shapes(base_fn: Any) -> list[tuple[str, list[Any], dict[str, Any]]]:
@@ -139,29 +167,30 @@ def _base_call_shapes(base_fn: Any) -> list[tuple[str, list[Any], dict[str, Any]
     ]
 
 
-def _signature_mismatch(
-    base_fn: Any, override_fn: Any, *, takes_self: bool
-) -> str | None:
-    """Explain why *override_fn* cannot take the base hook's calls, if so.
+def _signature_mismatch(base_fn: Any, resolved: Any) -> str | None:
+    """Explain why *resolved* cannot take the base hook's calls, if so.
 
     Checked by binding every call shape the base signature admits (see
-    :func:`_base_call_shapes`) against the override's signature — so an
+    :func:`_base_call_shapes`) against *resolved*'s signature — so an
     override may add defaulted parameters of its own, but a dropped,
     renamed, de-keyworded, or made-required parameter fails with the
-    binder's own explanation. ``takes_self`` is False only for
-    static/class-method overrides (whose resolved signature carries no
-    instance parameter); a plain method that *forgot* ``self`` must not
-    slip through the self-less bind, so the choice comes from the
-    descriptor type, never from which bind happens to succeed.
+    binder's own explanation. *resolved* is always the already-bound,
+    self-less form (see :func:`_resolve_via_instance`), so no
+    implicit-self placeholder is needed here for any override shape, and
+    plain :func:`inspect.signature` -- following ``__wrapped__`` by
+    default -- is exactly right: it already reads a callable object's
+    own ``__call__`` and a ``functools.partial``'s adjusted arguments
+    correctly on its own, and it is what lets an ordinary
+    ``functools.wraps`` forwarding decorator resolve to what it actually
+    forwards to instead of its generic ``(*args, **kwargs)`` shape.
     """
     try:
-        override_sig = inspect.signature(override_fn)
+        override_sig = inspect.signature(resolved)
     except (TypeError, ValueError):
         return "its signature cannot be introspected"
-    self_placeholder = (None,) if takes_self else ()
     for shape_name, args, kwargs in _base_call_shapes(base_fn):
         try:
-            override_sig.bind(*self_placeholder, *args, **kwargs)
+            override_sig.bind(*args, **kwargs)
         except TypeError as err:
             base_shape = str(inspect.signature(base_fn))
             return (
@@ -174,8 +203,10 @@ def _signature_mismatch(
 def _audit_dialect_class(dialect_cls: type) -> list[Violation]:
     """Audit every attribute the connector's dialect classes define."""
     sanctioned = sanctioned_dialect_surface()
+    span = _mro_span(dialect_cls, SqlDialect)
+    owned = frozenset(span)
     violations: list[Violation] = []
-    for klass in _mro_span(dialect_cls, SqlDialect):
+    for klass in span:
         for name in vars(klass):
             if not _is_audited(name):
                 continue
@@ -194,7 +225,21 @@ def _audit_dialect_class(dialect_cls: type) -> list[Violation]:
                     )
                 continue
             if name in sanctioned:
-                mismatch = _hook_shape_problem(klass, name)
+                if not _wins_mro(dialect_cls, owned, name):
+                    violations.append(
+                        Violation(
+                            CHECK,
+                            f"{klass.__name__}.{name} is shadowed by an "
+                            f"earlier class in {dialect_cls.__name__}'s MRO "
+                            f"and is never called; declare it on "
+                            f"{dialect_cls.__name__} itself or list "
+                            f"{klass.__name__} before the shadowing base.",
+                        )
+                    )
+                    continue
+                mismatch = _hook_shape_problem(
+                    klass, name, SqlDialect, dialect_cls, hook_label="dialect hook"
+                )
                 if mismatch is not None:
                     violations.append(Violation(CHECK, mismatch))
                 continue
@@ -222,10 +267,114 @@ def _audit_dialect_class(dialect_cls: type) -> list[Violation]:
     return violations
 
 
-def _hook_shape_problem(klass: type, name: str) -> str | None:
-    """Check one sanctioned override's shape against the base definition."""
-    base_attr = inspect.getattr_static(SqlDialect, name)
-    override_attr = inspect.getattr_static(klass, name)
+def _candidate_raws(raw: Any) -> list[Any]:
+    """Every class-dict entry *raw* could resolve to at runtime.
+
+    Normally just ``[raw]``. A ``functools.singledispatchmethod``
+    dispatches to whichever of its registered implementations matches
+    the caught exception's type -- not only the default implementation
+    reached when nothing more specific matches -- so every one of them
+    is a shape a real call could hit and must be checked.
+
+    Deliberately not covered: a registration that is itself something
+    other than a plain function or method (a ``functools.partial``, a
+    callable object -- ``singledispatchmethod`` binds each registration
+    through its own descriptor machinery, which this does not replicate
+    for anything other than the ordinary case), and the dispatcher
+    wrapper's own constraint that its dispatch argument be positional
+    (``_base_call_shapes``' all-keyword shape is a fact about the base
+    contract in general, not a promise every real call site exercises --
+    ``classify_via_hook`` always calls positionally today). Both are
+    ``singledispatchmethod``-specific binding mechanics several layers
+    past the shape this check exists to validate; a connector author
+    relying on either is on their own the same way they would be for any
+    other CDK internal this check does not model.
+    """
+    if isinstance(raw, functools.singledispatchmethod):
+        return list(raw.dispatcher.registry.values())
+    return [raw]
+
+
+def _resolve_via_instance(owning_cls: type, raw: Any) -> Any:
+    """Resolve *raw* as an instance of *owning_cls* would, without instantiating it.
+
+    *owning_cls* is the concrete connector or dialect class a real call
+    resolves against -- not necessarily the class *raw* is defined on
+    when that is a connector-owned mixin, since an owner-sensitive
+    descriptor's ``__get__`` can behave differently depending on which
+    class it is asked to bind to; the resolution here must match what a
+    real call would see, not what the mixin alone would produce.
+
+    A hand-written classification of "does this kind of attribute carry
+    an implicit self" cannot keep up with every descriptor Python allows
+    (a plain method, ``staticmethod``, ``classmethod``, a callable
+    object, an ``lru_cache``-wrapped method, ...); each new kind Codex
+    found was one more guess this module hadn't made yet. Every one of
+    those resolves purely from identity and the owning class, never from
+    instance state, when run through the real descriptor protocol -- so
+    a bare, uninitialized stand-in is safe to bind against, and there is
+    nothing left to guess: whatever comes back is already bound exactly
+    as a real call would see it. A plain value with no ``__get__`` (a
+    callable object, a non-callable attribute) is identical whether read
+    from the class or an instance, so it is returned unchanged.
+    """
+    descriptor_get = getattr(type(raw), "__get__", None)
+    if descriptor_get is None:
+        return raw
+    return descriptor_get(raw, object.__new__(owning_cls), owning_cls)
+
+
+def _async_probe(resolved: Any) -> Any:
+    """Return what the async-ness checks must inspect to see the truth.
+
+    :func:`inspect.iscoroutinefunction` and ``isasyncgenfunction`` already
+    unwrap a function or bound method correctly on their own, and follow a
+    ``functools.partial`` wrapping either of those too -- but not a
+    ``functools.partial`` wrapping a callable *object*, since a partial's
+    own async-ness detection stops at its immediate ``.func``. Recursing
+    on ``.func`` handles that composition (and a partial wrapping a
+    partial) the same way. Neither built-in check looks inside a callable
+    object's own ``__call__`` at all, so an async (or async-generator)
+    ``__call__`` hiding behind one still reads as plain synchronous
+    unless ``__call__`` itself is offered up instead.
+    """
+    if isinstance(resolved, functools.partial):
+        return _async_probe(resolved.func)
+    if inspect.isroutine(resolved):
+        return resolved
+    return resolved.__call__ if callable(resolved) else resolved
+
+
+def _hook_shape_problem(
+    klass: type, name: str, base_cls: type, owning_cls: type, *, hook_label: str
+) -> str | None:
+    """Check one sanctioned override's shape against *base_cls*'s definition.
+
+    *base_cls* is the class that declares the hook's contract (``SqlDialect``
+    for a dialect hook, ``BaseDestinationHandler`` for the connector-class
+    ``classify_error`` escape hatch); *owning_cls* is the concrete
+    connector/dialect class a real call resolves against, which may differ
+    from *klass* (the class *name* is actually defined on, when that is a
+    connector-owned mixin); *hook_label* names the hook in the violation
+    text.
+
+    Boundary, reached after several rounds of real gaps in single-layer
+    wrapping (a forwarding decorator, a partial, a callable object) each
+    getting fixed in turn: this validates one layer of wrapping around
+    the actual implementation, not an arbitrary composition of them. A
+    ``functools.wraps`` outer wrapper whose own signature narrows what it
+    forwards to, a class whose ``__call__`` is itself a
+    ``functools.partial``, a wrapper whose asyncness differs from what it
+    wraps -- each is a further composition of mechanisms this function
+    already resolves individually, not a new mechanism, and each admits
+    another one layered on top of it without end. Continuing to chase
+    each composition trades a bounded, well-tested check for an
+    unbounded one; a connector author stacking wrappers this deeply
+    around ``classify_error`` is past what an authoring-time shape check
+    reasonably owns; the actual failure still surfaces at runtime,
+    through ``classify_via_hook``'s existing broken-hook handling.
+    """
+    base_attr = inspect.getattr_static(base_cls, name)
     base_callable = callable(base_attr) or isinstance(
         base_attr, (staticmethod, classmethod)
     )
@@ -233,32 +382,56 @@ def _hook_shape_problem(klass: type, name: str) -> str | None:
         # A data attribute (name, quote_char, max_identifier_length, ...):
         # any value is the connector's to set.
         return None
-    override_callable = callable(override_attr) or isinstance(
-        override_attr, (staticmethod, classmethod)
-    )
-    if not override_callable:
-        return (
-            f"{klass.__name__}.{name} replaces the sanctioned hook with a "
-            f"non-callable {type(override_attr).__name__}; the CDK calls it."
-        )
-    base_fn = inspect.unwrap(getattr(SqlDialect, name))
-    override_fn = getattr(klass, name)
-    if inspect.iscoroutinefunction(inspect.unwrap(override_fn)):
-        return (
-            f"{klass.__name__}.{name} is declared async; the CDK calls "
-            f"every dialect hook synchronously and would receive an "
-            f"unawaited coroutine instead of the hook's result."
-        )
-    mismatch = _signature_mismatch(
-        base_fn,
-        override_fn,
-        takes_self=not isinstance(override_attr, (staticmethod, classmethod)),
-    )
-    if mismatch is None:
-        return None
-    return (
-        f"{klass.__name__}.{name} breaks the sanctioned hook signature: " f"{mismatch}"
-    )
+    base_fn = inspect.unwrap(getattr(base_cls, name))
+    raw_override = inspect.getattr_static(klass, name)
+    for raw_candidate in _candidate_raws(raw_override):
+        try:
+            resolved = _resolve_via_instance(owning_cls, raw_candidate)
+            not_callable = not callable(resolved)
+            probe = None if not_callable else inspect.unwrap(_async_probe(resolved))
+        except Exception as exc:
+            # classify_via_hook (declarations.py) treats a broken hook --
+            # resolving it raises, or (same failure stated differently) it
+            # doesn't behave like the classification callable it claims to
+            # be -- as a defect it maps to "config" at runtime, never
+            # crashing the caller reporting the original failure. Tier 1
+            # must catch the same defect at authoring time instead of
+            # propagating it out of the conformance run: a connector
+            # whose classify_error has a self-referential __wrapped__
+            # chain (inspect.unwrap raises ValueError) is exactly this
+            # case, not a reason to abort every other check.
+            return (
+                f"{klass.__name__}.{name} raised {type(exc).__name__} "
+                f"resolving or inspecting the sanctioned {hook_label} "
+                f"({exc}); a hook must resolve and introspect cleanly, "
+                f"without relying on state {owning_cls.__name__} only "
+                f"sets up in __init__."
+            )
+        if not_callable:
+            return (
+                f"{klass.__name__}.{name} replaces the sanctioned "
+                f"{hook_label} with a non-callable "
+                f"{type(raw_candidate).__name__}; the CDK calls it."
+            )
+        if inspect.iscoroutinefunction(probe) or inspect.isasyncgenfunction(probe):
+            return (
+                f"{klass.__name__}.{name} is declared async; the CDK calls "
+                f"every {hook_label} synchronously and would receive an "
+                f"unawaited coroutine instead of the hook's result."
+            )
+        if inspect.isgeneratorfunction(probe):
+            return (
+                f"{klass.__name__}.{name} contains a yield; the CDK calls "
+                f"every {hook_label} for its return value, and would "
+                f"receive a generator instead of the hook's result."
+            )
+        mismatch = _signature_mismatch(base_fn, resolved)
+        if mismatch is not None:
+            return (
+                f"{klass.__name__}.{name} breaks the sanctioned "
+                f"{hook_label} signature: {mismatch}"
+            )
+    return None
 
 
 def _is_authored_callable(value: Any) -> bool:
@@ -273,16 +446,46 @@ def _is_authored_callable(value: Any) -> bool:
 
 
 def _audit_connector_class(connector_cls: type) -> list[Violation]:
-    """Audit the connector class: ``dialect_class`` and nothing else.
+    """Audit the connector class: only ``CONNECTOR_CLASS_ALLOWED_ATTRS``.
 
     Dunders are audited too when they are authored callables — a
     connector defining ``__init__`` (or any lifecycle hook) carries
     exactly the facade coupling this check exists to refuse; only
     interpreter-stamped metadata dunders are exempt.
     """
+    span = _mro_span(connector_cls, GenericSQLConnector)
+    owned = frozenset(span)
     violations: list[Violation] = []
-    for klass in _mro_span(connector_cls, GenericSQLConnector):
+    for klass in span:
         for name, value in vars(klass).items():
+            if name == "classify_error":
+                if not _wins_mro(connector_cls, owned, name):
+                    # BaseDestinationHandler -- earlier in connector_cls's
+                    # MRO than every class this loop audits -- also defines
+                    # classify_error with its neutral no-op, so the runtime
+                    # attribute lookup on connector_cls never reaches this
+                    # definition -- it is dead code, not a working override.
+                    violations.append(
+                        Violation(
+                            CHECK,
+                            f"{klass.__name__}.classify_error is shadowed by "
+                            f"an earlier class in {connector_cls.__name__}'s "
+                            f"MRO and is never called; declare it on "
+                            f"{connector_cls.__name__} itself or list "
+                            f"{klass.__name__} before the shadowing base.",
+                        )
+                    )
+                    continue
+                mismatch = _hook_shape_problem(
+                    klass,
+                    name,
+                    BaseDestinationHandler,
+                    connector_cls,
+                    hook_label="classify_error hook",
+                )
+                if mismatch is not None:
+                    violations.append(Violation(CHECK, mismatch))
+                continue
             if name in CONNECTOR_CLASS_ALLOWED_ATTRS or name in _INTERPRETER_MANAGED:
                 continue
             if _is_dunder(name) and not _is_authored_callable(value):
@@ -295,9 +498,10 @@ def _audit_connector_class(connector_cls: type) -> list[Violation]:
                         f"GenericSQLConnector member; the facade's semantics "
                         f"are defined once in the CDK, and the per-system "
                         f"surface is the dialect (spec sql-write-path "
-                        f"section 4: the connector class carries "
-                        f"dialect_class only). Move the quirk onto the "
-                        f"dialect's sanctioned hooks.",
+                        f"section 4). The connector class may only define "
+                        f"{' and '.join(sorted(CONNECTOR_CLASS_ALLOWED_ATTRS))} "
+                        f"(section 5 sanctions classify_error) — move any "
+                        f"other quirk onto the dialect's sanctioned hooks.",
                     )
                 )
             else:
@@ -305,10 +509,12 @@ def _audit_connector_class(connector_cls: type) -> list[Violation]:
                     Violation(
                         CHECK,
                         f"{klass.__name__}.{name} adds a member to the "
-                        f"connector class; the connector class carries "
-                        f"dialect_class only (spec sql-write-path section "
-                        f"4). Helpers belong on the connector's own dialect "
-                        f"class.",
+                        f"connector class; the connector class may only "
+                        f"define "
+                        f"{' and '.join(sorted(CONNECTOR_CLASS_ALLOWED_ATTRS))} "
+                        f"(spec sql-write-path section 4; section 5 sanctions "
+                        f"classify_error). Helpers belong on the connector's "
+                        f"own dialect class.",
                     )
                 )
     return violations
