@@ -87,8 +87,42 @@ def _encode_iso8601(_config: Mapping[str, Any]) -> Callable[[Any], Any]:
     return encode
 
 
+#: Every directive letter ``datetime.strftime`` documents (the standard
+#: library's own table, https://docs.python.org/3/library/datetime.html
+#: #strftime-and-strptime-format-codes). Validated against here rather
+#: than left to ``strftime`` itself to reject an unknown one: that
+#: behavior is platform-dependent -- glibc (this catalog's own CI/prod
+#: Linux target) silently renders an unrecognised directive like ``%Q``
+#: literally instead of raising, so a malformed pattern would otherwise
+#: reach data time and render malformed output, not fail loud at
+#: configuration time the way every other encoder's malformed parameter
+#: already does.
+_STRFTIME_DIRECTIVES: Final[frozenset[str]] = frozenset("aAwdbBmyYHIpMSfzZjUWcxX%GuV")
+
+
+def _require_known_strftime_directives(pattern: str, entry: str) -> None:
+    i = 0
+    n = len(pattern)
+    while i < n:
+        if pattern[i] != "%":
+            i += 1
+            continue
+        if i + 1 >= n:
+            raise InvalidTypeMapError(
+                f"{entry}: pattern {pattern!r} ends with a bare '%'"
+            )
+        directive = pattern[i + 1]
+        if directive not in _STRFTIME_DIRECTIVES:
+            raise InvalidTypeMapError(
+                f"{entry}: pattern {pattern!r} names directive '%{directive}', "
+                f"which datetime.strftime does not define"
+            )
+        i += 2
+
+
 def _encode_strftime(config: Mapping[str, Any]) -> Callable[[Any], Any]:
     pattern = require_str_param(config, "pattern", "encoding_write 'strftime'")
+    _require_known_strftime_directives(pattern, "encoding_write 'strftime'")
 
     def encode(value: Any) -> str:
         if not isinstance(value, (datetime, date, time)):

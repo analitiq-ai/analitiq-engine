@@ -115,6 +115,32 @@ class TestEpochEncoderRejectsWhatTheBodySerializerCannotEncode:
             assert fn(value) > 0
 
 
+class TestStrftimeRejectsUnknownDirectivesAtResolveTime:
+    """datetime.strftime's own behavior for an unrecognised directive is
+    platform-dependent -- glibc (this catalog's Linux CI/prod target)
+    silently renders one like '%Q' literally instead of raising -- so a
+    malformed pattern must be refused when the encoder is resolved, not
+    left to reach data time and render malformed output.
+    """
+
+    def test_an_unknown_directive_is_refused_at_resolve_time(self) -> None:
+        with pytest.raises(InvalidTypeMapError, match="does not define"):
+            resolve_encoder({"name": "strftime", "pattern": "%Q"})
+
+    def test_a_trailing_bare_percent_is_refused(self) -> None:
+        with pytest.raises(InvalidTypeMapError, match="bare '%'"):
+            resolve_encoder({"name": "strftime", "pattern": "%Y%"})
+
+    def test_the_percent_escape_is_still_accepted(self) -> None:
+        fn = resolve_encoder({"name": "strftime", "pattern": "%Y%%"})
+        assert fn(datetime(2024, 1, 15, tzinfo=timezone.utc)) == "2024%"
+
+    def test_every_documented_directive_is_still_accepted(self) -> None:
+        pattern = "".join(f"%{d}" for d in "aAwdbBmyYHIpMSfzZjUWcxXGuV")
+        fn = resolve_encoder({"name": "strftime", "pattern": pattern})
+        assert fn(datetime(2024, 1, 15, 13, 45, 6, tzinfo=timezone.utc))
+
+
 class TestResolveEncoderValidation:
     def test_an_unknown_name_is_refused(self) -> None:
         with pytest.raises(InvalidTypeMapError, match="unknown encoding_write name"):

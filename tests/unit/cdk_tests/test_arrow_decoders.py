@@ -103,6 +103,21 @@ class TestIsoDurationCapsAtMicrosecondPrecision:
         result = fn(field, ["PT1.00000050000000000000000000000001S"])
         assert result[0].value == 1_000_001
 
+    def test_precision_is_sized_from_the_input_not_a_fixed_constant(self) -> None:
+        # A fixed context precision, however generous, is always
+        # defeatable by a long enough input: 61 zero digits between the
+        # apparent tie and the true trailing 1 overflows a fixed 50-digit
+        # context, silently turning the exact value into the tie
+        # 1,000,000.5 (rounds down under round-half-even) instead of the
+        # true 1,000,000.500...001 (rounds up). The context must scale
+        # with len(v) itself, which can never hold more significant
+        # digits than its own length.
+        field = pa.field("d", pa.duration("us"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
+        value = "PT1.0000005" + "0" * 61 + "1S"
+        result = fn(field, [value])
+        assert result[0].value == 1_000_001
+
 
 class TestIsoDurationScalesToTheDestinationUnit:
     def test_a_large_day_count_fits_a_coarse_destination_unit(self) -> None:

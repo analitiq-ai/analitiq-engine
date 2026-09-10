@@ -1289,6 +1289,75 @@ class TestCodeEncoderResultIsValidated:
         )
         assert encoders["n"](1.5) == 3.14
 
+    def test_a_non_finite_float_nested_in_a_dict_is_refused(self):
+        # A dict/list result renders as "object"/"array" at the top level
+        # -- the type check alone never looks inside it -- but orjson
+        # still silently serialises a nested NaN/Infinity as JSON null.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding_write": {"name": "code"},
+                    "properties": {
+                        "value": {"type": "number", "arrow_type": "Float64"},
+                    },
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: {"value": float("nan")}
+        )
+        with pytest.raises(ValueError, match="would silently render as JSON null"):
+            encoders["meta"]({"value": 1.5})
+
+    def test_a_non_finite_float_nested_in_a_list_is_refused(self):
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding_write": {"name": "code"},
+                    "properties": {
+                        "values": {
+                            "type": "array",
+                            "arrow_type": "List",
+                            "items": {"type": "number", "arrow_type": "Float64"},
+                        },
+                    },
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: {
+                "values": [1.0, float("inf"), 2.0]
+            }
+        )
+        with pytest.raises(ValueError, match="would silently render as JSON null"):
+            encoders["meta"]({"values": [1.0, 2.0, 3.0]})
+
+    def test_none_for_a_required_field_is_refused(self):
+        # The field is not in "required" for _SCHEMA (nullable), so this
+        # uses its own schema to exercise the non-nullable branch.
+        schema = {
+            "properties": {
+                "a": {
+                    "type": "string",
+                    "arrow_type": "Utf8",
+                    "encoding_write": {"name": "code"},
+                },
+            },
+            "required": ["a"],
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: None
+        )
+        with pytest.raises(ValueError, match="the field is required"):
+            encoders["a"]("x")
+
     def test_an_integer_satisfies_a_declared_number(self):
         schema = {
             "properties": {

@@ -902,16 +902,11 @@ _MICROSECONDS_PER_DURATION_COMPONENT: Final[dict[str, int]] = {
     "seconds": 1_000_000,
 }
 
-#: Decimal context precision for parsing and scaling one duration string.
-#: The default (28 significant digits) is ambient, not a cap this
-#: function alone controls: ``isoduration``'s own internal arithmetic on
-#: a duration's Decimal components respects it too, so an unusually
-#: precise fractional-seconds string can already be silently rounded
-#: inside ``parse_duration`` itself, before ``parsed.time.seconds`` is
-#: ever multiplied here. 50 digits is comfortably past any realistic
-#: duration text while still bounding the arithmetic cost of a
-#: pathological one.
-_DURATION_DECIMAL_PRECISION: Final[int] = 50
+#: Floor for the Decimal context precision below, so an ordinary short
+#: duration string never pays for context-sizing arithmetic on its own
+#: length and still gets comfortably more than the default 28-digit
+#: context.
+_DURATION_DECIMAL_PRECISION_FLOOR: Final[int] = 50
 
 
 def _iso_duration_ticks(
@@ -942,8 +937,13 @@ def _iso_duration_ticks(
     # internal Decimal arithmetic respects whatever context is active when
     # it runs, so parse_duration itself -- not only the multiply below --
     # can silently round an unusually precise fractional-seconds string.
+    # Sized from *v* itself, not a fixed constant: no fixed precision is
+    # ever safe against an arbitrarily long adversarial input (a fixed
+    # 50-digit context is defeated by a 70-digit one) -- the string can
+    # never hold more significant digits than its own length, so its
+    # length is always a safe, exact upper bound.
     with localcontext() as ctx:
-        ctx.prec = _DURATION_DECIMAL_PRECISION
+        ctx.prec = max(_DURATION_DECIMAL_PRECISION_FLOOR, len(v))
         try:
             parsed = parse_duration(v)
         except duration_parsing_exception as exc:

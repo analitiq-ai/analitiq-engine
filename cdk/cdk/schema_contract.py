@@ -334,11 +334,39 @@ def _rendered_json_type(value: Any) -> str | None:
     return None
 
 
+def _first_non_finite(value: Any) -> float | None:
+    """Return the first non-finite float found in *value*, recursively, or ``None``.
+
+    A code hatch's result can nest a ``NaN``/``Infinity`` inside a dict
+    or list (an Object/List field's encoder returning ``{"value":
+    float("nan")}``), not only carry one at the top level -- ``orjson``
+    silently renders any of them as JSON ``null`` regardless of depth,
+    so the check must walk the whole structure, not just its own top.
+    """
+    if isinstance(value, float):
+        return value if not math.isfinite(value) else None
+    if isinstance(value, dict):
+        for v in value.values():
+            found = _first_non_finite(v)
+            if found is not None:
+                return found
+        return None
+    if isinstance(value, (list, tuple)):
+        for v in value:
+            found = _first_non_finite(v)
+            if found is not None:
+                return found
+        return None
+    return None
+
+
 def _bind_code_encoder(
     code_encoder: Callable[[str, Any, pa.DataType], Any],
     field_name: str,
     arrow_type: pa.DataType,
     json_types: list[str],
+    *,
+    nullable: bool,
 ) -> Callable[[Any], Any]:
     """Close over one field's name/type for ``resolve_write_encoders``.
 
@@ -349,27 +377,40 @@ def _bind_code_encoder(
     (:meth:`SchemaContract._check_scalar_write_encoding`); a code hatch's
     result has no such static guarantee -- ``ApiDialect.encode_field`` is
     connector-authored code this catalog does not control -- so a
-    non-null result is checked here, at data time, the one place either
-    kind of encoder's output is actually known. An unchecked result
-    (``12345`` for a field declared ``"type": "string"``) would
-    otherwise serialise fine and send a request violating the endpoint's
-    own declared input schema. A non-finite float passes that type check
-    (NaN/Infinity still render as ``"number"``) but ``encode_body``
+    result is checked here, at data time, the one place either kind of
+    encoder's output is actually known. An unchecked result (``12345``
+    for a field declared ``"type": "string"``) would otherwise serialise
+    fine and send a request violating the endpoint's own declared input
+    schema; an unchecked ``None`` for a *non-nullable* field the same
+    way (the field's declared ``required`` says every record carries a
+    value, and ``encode_body`` sends JSON ``null`` regardless). A
+    non-finite float, anywhere in a nested result, passes the type check
+    (``NaN``/``Infinity`` still render as ``"number"``, and a dict/list
+    holding one renders as ``"object"``/``"array"``) but ``encode_body``
     (orjson) silently serialises any of them as JSON ``null`` -- not a
     type mismatch, but the same class of silent value corruption, so
-    checked separately.
+    checked separately and recursively.
     """
 
     def encode(value: Any) -> Any:
         result = code_encoder(field_name, value, arrow_type)
-        if result is None or not json_types:
+        if result is None:
+            if not nullable:
+                raise ValueError(
+                    f"field {field_name!r}: ApiDialect.encode_field "
+                    f"returned None, but the field is required -- every "
+                    f"record must carry a value"
+                )
             return result
-        if isinstance(result, float) and not math.isfinite(result):
+        non_finite = _first_non_finite(result)
+        if non_finite is not None:
             raise ValueError(
                 f"field {field_name!r}: ApiDialect.encode_field returned "
-                f"{result!r}, which the body serializer would silently "
+                f"{non_finite!r}, which the body serializer would silently "
                 f"render as JSON null instead of failing loud"
             )
+        if not json_types:
+            return result
         rendered = _rendered_json_type(result)
         if rendered == "integer" and "number" in json_types:
             # JSON Schema defines every integer as a valid number.
@@ -959,7 +1000,7 @@ class SchemaContract:
                     else declared_json_types(field_def)
                 )
                 encoders[f.name] = _bind_code_encoder(
-                    code_encoder, f.name, f.type, json_types
+                    code_encoder, f.name, f.type, json_types, nullable=f.nullable
                 )
                 continue
             fn = resolve_encoder(encoding_write)
