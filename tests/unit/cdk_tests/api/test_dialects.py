@@ -140,6 +140,27 @@ class TestFieldEncodingHooks:
         with pytest.raises(TypeError, match="encode_field"):
             type("BadDialect", (ApiDialect,), {"encode_field": bad_encode_field})
 
+    def test_an_async_decode_field_override_is_refused(self) -> None:
+        # Both call sites invoke the hook synchronously -- an async def
+        # would hand SchemaContract a coroutine where it expects a
+        # pa.Array, failing far from this class-definition-time check.
+        async def bad_decode_field(
+            self: object, field_name: str, values: Any, arrow_type: Any
+        ) -> Any:
+            return values
+
+        with pytest.raises(TypeError, match="async"):
+            type("BadDialect", (ApiDialect,), {"decode_field": bad_decode_field})
+
+    def test_an_async_encode_field_override_is_refused(self) -> None:
+        async def bad_encode_field(
+            self: object, field_name: str, value: Any, arrow_type: Any
+        ) -> Any:
+            return value
+
+        with pytest.raises(TypeError, match="async"):
+            type("BadDialect", (ApiDialect,), {"encode_field": bad_encode_field})
+
     def test_an_unrelated_hook_override_is_still_accepted(self) -> None:
         # The new signature check is scoped to decode_field/encode_field
         # only; it must not start rejecting the other three hooks.

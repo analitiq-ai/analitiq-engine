@@ -105,6 +105,18 @@ class ApiDialect:
             hook = inspect.getattr_static(cls, hook_name)
             if hook is inspect.getattr_static(ApiDialect, hook_name):
                 continue
+            # Both call sites invoke the hook synchronously: a read hook
+            # returning a coroutine fails SchemaContract's "expects a
+            # pa.Array" check with no clue why, and a write hook's
+            # coroutine gets stored in the record and fails serialization
+            # later still -- neither is the loud, class-definition-time
+            # rejection this whole check exists to give an author.
+            if inspect.iscoroutinefunction(hook):
+                raise TypeError(
+                    f"{cls.__name__}.{hook_name} is declared 'async def', "
+                    f"but both call sites invoke it synchronously; remove "
+                    f"'async'"
+                )
             try:
                 inspect.signature(hook).bind(None, None, None, None)
             except TypeError as err:

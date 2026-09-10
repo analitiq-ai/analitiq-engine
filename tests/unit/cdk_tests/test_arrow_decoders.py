@@ -61,10 +61,9 @@ class TestIsoDurationCapsAtMicrosecondPrecision:
     def test_a_sub_microsecond_fraction_rounds_to_the_nearest_microsecond(
         self,
     ) -> None:
-        # timedelta's own construction rounds to the nearest microsecond
-        # (round-half-to-even), not truncation -- built directly from a
-        # timedelta(seconds=...), the value matches whatever timedelta
-        # itself would produce for the same input, by construction.
+        # Round-half-to-even, not truncation -- the seconds Decimal is
+        # scaled to microseconds and rounded directly on the Decimal, not
+        # via timedelta's own float-seconds constructor.
         field = pa.field("d", pa.duration("ns"), nullable=True)
         fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
         result = fn(field, ["PT1.123456789S"])
@@ -77,6 +76,17 @@ class TestIsoDurationCapsAtMicrosecondPrecision:
         fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
         result = fn(field, ["PT0,5S"])
         assert result[0].value == 500
+
+    def test_a_large_seconds_value_is_not_perturbed_by_float_rounding(self) -> None:
+        # float(Decimal("9000000000.000001")) == 9000000000.000002 --
+        # float64 runs out of significant digits at this magnitude, so
+        # routing the seconds Decimal through float() before timedelta
+        # ever saw it silently added a microsecond. Scaling the Decimal
+        # directly to microseconds has no such precision ceiling.
+        field = pa.field("d", pa.duration("us"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
+        result = fn(field, ["PT9000000000.000001S"])
+        assert result[0].value == 9_000_000_000_000_001
 
 
 class TestIsoDurationScalesToTheDestinationUnit:

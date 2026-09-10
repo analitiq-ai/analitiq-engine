@@ -13,7 +13,7 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from re import Pattern
 from typing import Any, Final
 
@@ -764,23 +764,32 @@ def _iso_duration_ticks(
             f"not support -- a Duration is a fixed physical length and "
             f"a month has none"
         )
-    # timedelta's own constructor converts weeks/days/hours/minutes/seconds
-    # to a single duration internally -- not hand-multiplied conversion
-    # factors (604800/86400/3600/60), the same class of arithmetic that
-    # shipped a real bug once already in this catalog's epoch encoder
-    # (see TestEpochEncoderUnitArithmetic). weeks/days/hours/minutes are
-    # always whole in the ISO-8601 grammar (only seconds may carry a
-    # fraction); ``float`` on the seconds Decimal is exact enough for the
-    # microsecond resolution timedelta itself caps at, and timedelta //
-    # timedelta(microseconds=1) is Python's own exact integer division.
-    delta = timedelta(
+    # timedelta's own constructor converts weeks/days/hours/minutes to a
+    # single duration internally -- not hand-multiplied conversion factors
+    # (604800/86400/3600/60), the same class of arithmetic that shipped a
+    # real bug once already in this catalog's epoch encoder (see
+    # TestEpochEncoderUnitArithmetic). All four are always whole in the
+    # ISO-8601 grammar (only seconds may carry a fraction), so this part
+    # is exact with no rounding involved.
+    whole_part = timedelta(
         weeks=int(parsed.date.weeks),
         days=int(parsed.date.days),
         hours=int(parsed.time.hours),
         minutes=int(parsed.time.minutes),
-        seconds=float(parsed.time.seconds),
     )
-    return delta // timedelta(microseconds=1)
+    # The seconds component alone can carry a fraction, and routing a
+    # Decimal through float() to hand it to timedelta's own seconds= param
+    # can flip a representable microsecond digit before timedelta ever
+    # sees it (float64 runs out of precision past ~15-17 significant
+    # digits, and a large duration's seconds text can exceed that) --
+    # scaled to microseconds and rounded on the Decimal itself instead,
+    # which is exact for any digit count. Round-half-to-even to match
+    # what timedelta's own float-seconds construction does for the
+    # ordinary case (still exercised by every other caller's magnitude).
+    seconds_micros = int(
+        (parsed.time.seconds * 1_000_000).to_integral_value(rounding=ROUND_HALF_EVEN)
+    )
+    return whole_part // timedelta(microseconds=1) + seconds_micros
 
 
 #: Microseconds per Duration storage unit, keyed by pyarrow's own short
