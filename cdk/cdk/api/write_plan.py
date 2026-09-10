@@ -492,8 +492,12 @@ def content_idempotency_key(record: Mapping[str, Any]) -> str:
     dedups and a changed row gets a new key.
 
     The record is hashed as sent: declared JSON columns are already decoded
-    to objects by this point, so the key covers what the provider receives
-    rather than the wire encoding of it.
+    to objects and every declared ``encoding_write`` already applied by this
+    point, so the key covers the actual wire values the provider receives --
+    an ``iso8601``-encoded string, not the ``datetime`` object that produced
+    it. A stream that starts declaring (or changes) a field's
+    ``encoding_write`` therefore changes every future record's idempotency
+    key too, the same as any other change to what is actually sent.
     """
     return record_digest(dict(record))
 
