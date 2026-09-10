@@ -317,6 +317,19 @@ def first_blocked_nested_leaf(
 # held before this catalog replaced them.
 
 
+#: pyarrow's own Timestamp/Duration/Time64 storage width. A tick outside
+#: this range makes the eventual ``pa.array(ticks, type=...)`` construction
+#: raise a raw ``OverflowError`` (a C-level int-to-long conversion failure)
+#: instead of pyarrow's own ``ArrowInvalid`` -- which, unlike
+#: ``OverflowError``, is already a ``ValueError`` subclass the worker's
+#: deterministic-error classification recognizes. Checked here, once, so
+#: every caller gets the same named, row-qualified, correctly-classified
+#: failure rather than however far downstream pyarrow's C binding happens
+#: to raise the unchecked one.
+_INT64_MIN: Final[int] = -(2**63)
+_INT64_MAX: Final[int] = 2**63 - 1
+
+
 def _coerce_ticks(field_name: str, values: list[Any]) -> list[int | None]:
     """Read each wire value as an integer tick count, or raise naming the row.
 
@@ -332,6 +345,15 @@ def _coerce_ticks(field_name: str, values: list[Any]) -> list[int | None]:
     fractional-looking JSON token as ``Decimal`` regardless of the
     field's declared type.
     """
+
+    def in_range(row: int, tick: int) -> int:
+        if _INT64_MIN <= tick <= _INT64_MAX:
+            return tick
+        raise ValueError(
+            f"column {field_name!r} at row {row}: {tick} is outside the "
+            f"range pyarrow can hold as a tick count"
+        )
+
     ticks: list[int | None] = []
     for row, v in enumerate(values):
         if v is None:
@@ -343,16 +365,17 @@ def _coerce_ticks(field_name: str, values: list[Any]) -> list[int | None]:
                 f"integer epoch tick count"
             )
         if isinstance(v, numbers.Integral):
-            ticks.append(int(v))
+            ticks.append(in_range(row, int(v)))
             continue
         if isinstance(v, str):
             try:
-                ticks.append(int(v))
+                parsed = int(v)
             except ValueError as exc:
                 raise ValueError(
                     f"column {field_name!r} at row {row}: {v!r} is not an integer "
                     f"epoch tick count"
                 ) from exc
+            ticks.append(in_range(row, parsed))
             continue
         if isinstance(v, Decimal):
             # loads_preserving_decimals (cdk.api.http) parses every
@@ -362,7 +385,7 @@ def _coerce_ticks(field_name: str, values: list[Any]) -> list[int | None]:
             # not int -- accepted when it truly is integral, refused by
             # name otherwise rather than silently truncated by int().
             if v == v.to_integral_value():
-                ticks.append(int(v))
+                ticks.append(in_range(row, int(v)))
                 continue
             raise ValueError(
                 f"column {field_name!r} at row {row}: {v!r} is not an "
@@ -714,10 +737,9 @@ def _iso_duration_ticks(
     precision, matching every other temporal value this catalog decodes
     through a Python stdlib type (``datetime``/``timedelta`` hold no
     finer): a fractional second beyond the sixth digit is dropped, not
-    chased. Scaling to ``field.type``'s own declared unit is left to
-    pyarrow's own safe cast in :func:`_decode_iso_duration` -- a value
-    that does not fit evenly into a coarser unit is rejected there, the
-    same mechanism :func:`_ticks_to_array` already relies on for epoch.
+    chased. Scaling to ``field.type``'s own declared unit -- and rejecting
+    a value that does not fit evenly into a coarser one -- is
+    :func:`_duration_ticks_in_field_unit`'s job, not this function's.
     """
     if not isinstance(v, str):
         raise ValueError(
@@ -761,6 +783,45 @@ def _iso_duration_ticks(
     return delta // timedelta(microseconds=1)
 
 
+#: Microseconds per Duration storage unit, keyed by pyarrow's own short
+#: spelling (``field.type.unit``). ``ns`` has no entry: scaling *to*
+#: nanoseconds from microseconds is an exact multiply, never a division
+#: that could leave a remainder (mirrors
+#: :data:`cdk.type_map.encoders._MICROSECONDS_PER_UNIT`'s write-side twin).
+_MICROSECONDS_PER_DURATION_UNIT: Final[dict[str, int]] = {
+    "s": 1_000_000,
+    "ms": 1_000,
+    "us": 1,
+}
+
+
+def _duration_ticks_in_field_unit(field: pa.Field, row: int, total_micros: int) -> int:
+    """Scale an exact microsecond count to ``field.type``'s own Duration unit.
+
+    Deliberately not "build a ``duration('us')`` array, then
+    ``pc.cast(safe=True)``" the way :func:`_ticks_to_array` handles epoch:
+    a Duration is stored as int64 regardless of its declared unit, so an
+    ISO-8601 duration naming a very large day count (``P200000000D``) is
+    comfortably representable in a coarser unit like ``Duration(SECOND)``
+    but overflows int64 once forced through a microsecond intermediate --
+    rejecting a value the declared type can hold. Scaling directly, with
+    the same divmod-remainder exactness check :func:`_encode_epoch` already
+    uses on the write side, avoids ever materialising that intermediate.
+    """
+    unit = field.type.unit
+    if unit == "ns":
+        return total_micros * 1000
+    micros_per_unit = _MICROSECONDS_PER_DURATION_UNIT[unit]
+    ticks, remainder = divmod(total_micros, micros_per_unit)
+    if remainder:
+        raise ValueError(
+            f"column {field.name!r} at row {row}: duration is not exactly "
+            f"representable in unit {field.type!s}; it has a nonzero "
+            f"remainder that would otherwise be silently discarded"
+        )
+    return ticks
+
+
 def _decode_iso_duration(_config: Mapping[str, Any]) -> DecodeFn:
     try:
         from isoduration import parse_duration
@@ -782,12 +843,16 @@ def _decode_iso_duration(_config: Mapping[str, Any]) -> DecodeFn:
         ticks = [
             None
             if v is None
-            else _iso_duration_ticks(
-                field, row, v, parse_duration, DurationParsingException
+            else _duration_ticks_in_field_unit(
+                field,
+                row,
+                _iso_duration_ticks(
+                    field, row, v, parse_duration, DurationParsingException
+                ),
             )
             for row, v in enumerate(values)
         ]
-        return pc.cast(pa.array(ticks, type=pa.duration("us")), field.type, safe=True)
+        return pa.array(ticks, type=field.type)
 
     return decode
 

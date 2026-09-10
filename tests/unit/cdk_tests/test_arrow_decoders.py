@@ -81,22 +81,32 @@ class TestIsoDurationCapsAtMicrosecondPrecision:
 
 class TestIsoDurationScalesToTheDestinationUnit:
     def test_a_large_day_count_fits_a_coarse_destination_unit(self) -> None:
-        # A microsecond-tick intermediate array before pyarrow's own safe
-        # cast down to field.type must not overflow int64 here, even
-        # though the microsecond count is far larger than the eventual
-        # Duration(SECOND) value.
         field = pa.field("d", pa.duration("s"), nullable=True)
         fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
         result = fn(field, ["P200000D"])
         assert result[0].value == 200_000 * 86400
 
-    def test_precision_finer_than_the_destination_unit_is_refused(self) -> None:
-        # Rejected by pyarrow's own safe cast (the same mechanism
-        # _ticks_to_array already relies on for epoch), not a bespoke
-        # check -- 0.5s has no whole-second tick count.
+    def test_a_day_count_whose_microsecond_form_overflows_int64_still_fits(
+        self,
+    ) -> None:
+        # 200,000,000 days is ~17.3e12 seconds -- comfortably inside
+        # Duration(SECOND)'s int64 storage -- but ~17.3e18 microseconds,
+        # which overflows int64 (max ~9.2e18). Scaling straight to the
+        # destination unit, rather than through a microsecond
+        # intermediate array, must not reject a value the declared type
+        # can actually hold.
         field = pa.field("d", pa.duration("s"), nullable=True)
         fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
-        with pytest.raises(pa.lib.ArrowInvalid, match="would lose data"):
+        result = fn(field, ["P200000000D"])
+        assert result[0].value == 200_000_000 * 86400
+
+    def test_precision_finer_than_the_destination_unit_is_refused(self) -> None:
+        # 0.5s has no whole-second tick count -- refused by our own
+        # divmod-remainder check (_duration_ticks_in_field_unit), the same
+        # exactness _encode_epoch already enforces on the write side.
+        field = pa.field("d", pa.duration("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
+        with pytest.raises(ValueError, match="not exactly representable"):
             fn(field, ["PT0.5S"])
 
 
@@ -233,6 +243,34 @@ class TestEpochDecoderAcceptsAnIntegralDecimal:
             fn(field, [Decimal("1700000000.5")])
 
 
+class TestEpochDecoderRejectsOutOfRangeTicks:
+    """A tick outside pyarrow's int64 storage range must raise ValueError
+    (deterministic, per src.worker.source_service._DETERMINISTIC_READ_ERRORS)
+    rather than the raw OverflowError a too-large Python int triggers deep
+    inside pa.array's C binding -- an OverflowError is not a ValueError
+    subclass, so it would classify as a retryable transient failure and
+    the same permanently invalid record would be re-fetched forever.
+    """
+
+    def test_an_int_wider_than_int64_is_refused_by_name(self) -> None:
+        field = pa.field("t", pa.timestamp("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "epoch", "unit": "SECOND"}}, field)
+        with pytest.raises(ValueError, match="outside the range"):
+            fn(field, [99999999999999999999999999])
+
+    def test_a_string_wider_than_int64_is_refused_by_name(self) -> None:
+        field = pa.field("t", pa.timestamp("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "epoch", "unit": "SECOND"}}, field)
+        with pytest.raises(ValueError, match="outside the range"):
+            fn(field, ["99999999999999999999999999"])
+
+    def test_a_decimal_wider_than_int64_is_refused_by_name(self) -> None:
+        field = pa.field("t", pa.timestamp("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "epoch", "unit": "SECOND"}}, field)
+        with pytest.raises(ValueError, match="outside the range"):
+            fn(field, [Decimal("99999999999999999999999999")])
+
+
 class TestEpochDecoderPreservesTheInstantAcrossTargetZones:
     """Epoch ticks are an absolute UTC instant. Decoding into a Timestamp
     column with a non-UTC tz must shift the wall-clock time to that zone,
@@ -249,6 +287,29 @@ class TestEpochDecoderPreservesTheInstantAcrossTargetZones:
         # 1970-01-01T00:00:00Z is 1969-12-31T19:00:00 in America/New_York
         # (UTC-5, no DST in effect at that date).
         assert result.to_pylist()[0].isoformat() == "1969-12-31T19:00:00-05:00"
+
+
+class TestStrptimeDecodesIntoATimeColumn:
+    """pc.strptime always parses into a Timestamp array; decoding into a
+    declared Time32/Time64 column then casts Timestamp -> Time, which
+    pyarrow's compute kernels do implement (verified against both this
+    repo's floor pyarrow==21.0.0 and its locked 25.0.1) -- this pins that
+    behavior so a future pyarrow floor bump cannot silently regress it.
+    """
+
+    @pytest.mark.parametrize(
+        "time_type", [pa.time32("s"), pa.time32("ms"), pa.time64("us"), pa.time64("ns")]
+    )
+    def test_a_clock_string_decodes_into_the_declared_time_unit(
+        self, time_type: pa.DataType
+    ) -> None:
+        field = pa.field("t", time_type, nullable=True)
+        fn = resolve_decoder(
+            {"encoding": {"name": "strptime", "pattern": "%H:%M:%S"}}, field
+        )
+        result = fn(field, ["13:45:06", None])
+        assert result[0].as_py().isoformat() == "13:45:06"
+        assert result[1].as_py() is None
 
 
 class TestRegexEpochUsesRE2NotBacktrackingRe:

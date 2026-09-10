@@ -89,6 +89,32 @@ class TestEpochEncoderUnitArithmetic:
             fn(value)
 
 
+class TestEpochEncoderRejectsWhatTheBodySerializerCannotEncode:
+    """orjson (cdk.api.http.encode_body) renders a JSON number from either
+    an i64 or a u64, not a plain signed 64-bit span. A wide Timestamp
+    encoded in a finer unit -- a year-9999 value as NANOSECOND -- produces
+    an integer outside even that range; encode_body's own TypeError for it
+    is not caught by the per-record body-build boundary
+    (cdk.api.generic._write_one_by_one), so it must be refused here, where
+    apply_field_encoders' existing (ValueError, TypeError) catch already
+    handles it as this one record's failure.
+    """
+
+    def test_a_year_9999_timestamp_as_nanosecond_is_refused_not_silently_overflowed(
+        self,
+    ) -> None:
+        fn = resolve_encoder({"name": "epoch", "unit": "NANOSECOND"})
+        value = datetime(9999, 1, 1, tzinfo=timezone.utc)
+        with pytest.raises(ValueError, match="outside the range"):
+            fn(value)
+
+    def test_an_ordinary_value_in_every_unit_still_succeeds(self) -> None:
+        value = datetime(2024, 1, 15, 13, 45, 6, tzinfo=timezone.utc)
+        for unit in ("SECOND", "MILLISECOND", "MICROSECOND", "NANOSECOND"):
+            fn = resolve_encoder({"name": "epoch", "unit": unit})
+            assert fn(value) > 0
+
+
 class TestResolveEncoderValidation:
     def test_an_unknown_name_is_refused(self) -> None:
         with pytest.raises(InvalidTypeMapError, match="unknown encoding_write name"):
