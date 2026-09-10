@@ -13,7 +13,8 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
+from fractions import Fraction
 from re import Pattern
 from typing import Any, Final
 
@@ -324,7 +325,13 @@ def _coerce_ticks(field_name: str, values: list[Any]) -> list[int | None]:
     connector's own driver code can hand back a numpy integer scalar
     (``int32``/``int64``), which registers against the ABC but is not a
     Python ``int`` subclass -- the same accommodation
-    ``_reject_floating_point_offset`` makes for numpy floats.
+    ``_reject_floating_point_offset`` makes for numpy floats. A ``Decimal``
+    is accepted too, when integral: a JSON Schema ``"number"``-typed field
+    (as opposed to ``"integer"``) commonly carries a whole-valued epoch
+    formatted with a decimal point (``1700000000.0``), and
+    ``loads_preserving_decimals`` (``cdk.api.http``) parses any
+    fractional-looking JSON token as ``Decimal`` regardless of the
+    field's declared type.
     """
     ticks: list[int | None] = []
     for row, v in enumerate(values):
@@ -348,6 +355,20 @@ def _coerce_ticks(field_name: str, values: list[Any]) -> list[int | None]:
                     f"epoch tick count"
                 ) from exc
             continue
+        if isinstance(v, Decimal):
+            # loads_preserving_decimals (cdk.api.http) parses every
+            # fractional-looking JSON token as Decimal regardless of the
+            # field's declared type, so a JSON Schema "number" field's
+            # whole-valued epoch (`1700000000.0`) arrives here as Decimal,
+            # not int -- accepted when it truly is integral, refused by
+            # name otherwise rather than silently truncated by int().
+            if v == v.to_integral_value():
+                ticks.append(int(v))
+                continue
+            raise ValueError(
+                f"column {field_name!r} at row {row}: {v!r} is not an "
+                f"integer epoch tick count (has a fractional part)"
+            )
         raise ValueError(
             f"column {field_name!r} at row {row}: {v!r} "
             f"({type(v).__name__}) is not an integer epoch tick count"
@@ -744,36 +765,52 @@ def _iso_duration_ticks(
             f"column {field.name!r} at row {row}: encoding "
             f"'iso_duration' expects a string, got {type(v).__name__}"
         )
-    try:
-        parsed = parse_duration(v)
-    except duration_parsing_exception as exc:
-        raise ValueError(
-            f"column {field.name!r} at row {row}: {v!r} is not a valid "
-            f"ISO-8601 duration this decoder supports (weeks, days, and "
-            f"clock components only -- no calendar Y/M): {exc}"
-        ) from exc
-    if parsed.date.years or parsed.date.months:
-        # A Duration is a fixed physical length; a calendar year or month
-        # is not (a month is 28-31 days depending which one), so neither
-        # has a tick count to convert to.
-        raise ValueError(
-            f"column {field.name!r} at row {row}: {v!r} names a calendar "
-            f"year/month component, which this decoder does not support "
-            f"-- a Duration is a fixed physical length and a month has none"
+    # A wide, explicit Decimal context for both the parse and the
+    # arithmetic below: isoduration's own parser builds parsed.time.seconds
+    # under the *ambient* Decimal context, whose default (28 significant
+    # digits) silently rounds a large-but-exact coefficient -- a
+    # >=19-digit second count with a sub-nanosecond fraction already loses
+    # that fraction inside parse_duration() itself, before this function
+    # ever sees it.
+    with localcontext() as ctx:
+        ctx.prec = 50
+        try:
+            parsed = parse_duration(v)
+        except duration_parsing_exception as exc:
+            raise ValueError(
+                f"column {field.name!r} at row {row}: {v!r} is not a valid "
+                f"ISO-8601 duration this decoder supports (weeks, days, and "
+                f"clock components only -- no calendar Y/M): {exc}"
+            ) from exc
+        if parsed.date.years or parsed.date.months:
+            # A Duration is a fixed physical length; a calendar year or
+            # month is not (a month is 28-31 days depending which one), so
+            # neither has a tick count to convert to.
+            raise ValueError(
+                f"column {field.name!r} at row {row}: {v!r} names a "
+                f"calendar year/month component, which this decoder does "
+                f"not support -- a Duration is a fixed physical length and "
+                f"a month has none"
+            )
+        total_seconds = (
+            parsed.date.weeks * 604800
+            + parsed.date.days * 86400
+            + parsed.time.hours * 3600
+            + parsed.time.minutes * 60
+            + parsed.time.seconds
         )
-    total_seconds = (
-        parsed.date.weeks * 604800
-        + parsed.date.days * 86400
-        + parsed.time.hours * 3600
-        + parsed.time.minutes * 60
-        + parsed.time.seconds
-    )
     unit = field.type.unit
-    ticks = total_seconds * 1_000_000_000 / _DURATION_UNIT_NANOS[unit]
-    if ticks != ticks.to_integral_value():
-        # int() below would otherwise truncate silently: a fractional
-        # component finer than one tick of the column's own unit has no
-        # Arrow tick count to land on.
+    # Fraction, not Decimal division, for the final scale: Decimal/Decimal
+    # rounds to the active context's precision, and no fixed precision is
+    # guaranteed enough for an arbitrarily large coefficient. Fraction(a
+    # Decimal) is an exact conversion, and Fraction arithmetic thereafter
+    # is exact regardless of magnitude -- its denominator is 1 iff the
+    # value truly is an integer tick count.
+    ticks = Fraction(total_seconds) * 1_000_000_000 / _DURATION_UNIT_NANOS[unit]
+    if ticks.denominator != 1:
+        # The int() this would otherwise feed truncates silently: a
+        # fractional component finer than one tick of the column's own
+        # unit has no Arrow tick count to land on.
         raise ValueError(
             f"column {field.name!r} at row {row}: {v!r} has precision "
             f"finer than {field.type}'s own tick resolution, which no "

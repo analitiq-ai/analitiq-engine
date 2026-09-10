@@ -71,6 +71,23 @@ class TestEpochEncoderUnitArithmetic:
         value = _DatetimeSubclass(1970, 1, 1, 0, 0, 1, tzinfo=timezone.utc)
         assert fn(value) == 1_000_000_000
 
+    def test_a_value_finer_than_the_configured_unit_is_refused(self) -> None:
+        # Floor division would otherwise silently change the represented
+        # instant (0.5s at unit SECOND becomes 0), not just its precision.
+        fn = resolve_encoder({"name": "epoch", "unit": "SECOND"})
+        value = datetime(1970, 1, 1, 0, 0, 0, 500_000, tzinfo=timezone.utc)
+        with pytest.raises(ValueError, match="not exactly representable"):
+            fn(value)
+
+    def test_a_pre_epoch_value_finer_than_the_configured_unit_is_refused(self) -> None:
+        # Floor division rounds a negative total toward -inf, not toward
+        # the represented instant -- -0.5s at unit SECOND would otherwise
+        # become -1, not 0.
+        fn = resolve_encoder({"name": "epoch", "unit": "SECOND"})
+        value = datetime(1969, 12, 31, 23, 59, 59, 500_000, tzinfo=timezone.utc)
+        with pytest.raises(ValueError, match="not exactly representable"):
+            fn(value)
+
 
 class TestResolveEncoderValidation:
     def test_an_unknown_name_is_refused(self) -> None:

@@ -144,14 +144,18 @@ def decoder_matches_kind(name: str, kind: ConversionKind) -> bool:
 #: ``bool_map`` compares the wire value against ``true_values``/
 #: ``false_values``, both declared as lists of strings
 #: (:func:`cdk.type_map._param_validation.require_list_param`), so only a
-#: JSON string can ever match; ``epoch`` accepts ``numbers.Integral`` or a
-#: numeric string -- covering a ``"number"``-declared field too, since JSON
-#: Schema defines every integer as a valid number and most epoch fields on
-#: real APIs carry whole values; a genuinely fractional wire value still
-#: fails inside the decoder's own closure at data time, this table being
-#: only the declared-type gate, not a value-level check. ``decimal``
-#: accepts anything ``Decimal(str(v))`` parses, which covers a JSON
-#: boolean as readily as a string. Checked eagerly by
+#: JSON string can ever match; ``epoch`` accepts ``numbers.Integral``, an
+#: integral ``Decimal``, or a numeric string -- covering a
+#: ``"number"``-declared field too, since JSON Schema defines every
+#: integer as a valid number and most epoch fields on real APIs carry
+#: whole values, formatted with a decimal point or not;
+#: ``loads_preserving_decimals`` (``cdk.api.http``) parses any
+#: fractional-looking token as ``Decimal`` regardless of the field's
+#: declared type, and a genuinely fractional wire value still fails
+#: inside the decoder's own closure at data time, this table being only
+#: the declared-type gate, not a value-level check. ``decimal`` accepts
+#: anything ``Decimal(str(v))`` parses, which covers a JSON boolean as
+#: readily as a string. Checked eagerly by
 #: :meth:`~cdk.schema_contract.SchemaContract.check_required_read_encoding`
 #: against the field's declared ``type``, the same "fails at plan time, not
 #: on the first non-null response" contract :data:`DECODER_KIND_COMPATIBILITY`

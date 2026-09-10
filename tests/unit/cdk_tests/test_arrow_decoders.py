@@ -9,6 +9,7 @@ directly through :func:`resolve_decoder` rather than through a contract.
 from __future__ import annotations
 
 import time
+from decimal import Decimal
 
 import pyarrow as pa
 import pytest
@@ -81,6 +82,18 @@ class TestIsoDurationScalesToTheDestinationUnit:
         fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
         with pytest.raises(ValueError, match="precision finer than"):
             fn(field, ["PT0.5S"])
+
+    def test_a_large_coefficient_with_a_tiny_remainder_is_refused_not_rounded(
+        self,
+    ) -> None:
+        # The default Decimal context (28 significant digits) would
+        # otherwise round this 29-significant-digit value to exactly
+        # 9000000000000000000 seconds inside isoduration's own parse,
+        # before the integrality check ever saw the true remainder.
+        field = pa.field("d", pa.duration("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
+        with pytest.raises(ValueError, match="precision finer than"):
+            fn(field, ["PT9000000000000000000.0000000001S"])
 
 
 class TestIsoDurationAcceptsASign:
@@ -174,6 +187,26 @@ class TestIso8601PreservesNanosecondPrecision:
         fn = resolve_decoder({"encoding": {"name": "iso8601"}}, field)
         with pytest.raises(ValueError, match="finer than nanoseconds"):
             fn(field, ["1970-01-01T00:00:00.0000000009+00:00"])
+
+
+class TestEpochDecoderAcceptsAnIntegralDecimal:
+    """``loads_preserving_decimals`` (``cdk.api.http``) parses any
+    fractional-looking JSON token as ``Decimal`` regardless of the field's
+    declared type, so a JSON Schema ``"number"``-typed epoch field's whole
+    value (``1700000000.0``) arrives as ``Decimal``, not ``int``.
+    """
+
+    def test_a_whole_valued_decimal_is_accepted(self) -> None:
+        field = pa.field("t", pa.timestamp("s", tz="UTC"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "epoch", "unit": "SECOND"}}, field)
+        result = fn(field, [Decimal("1700000000.0")])
+        assert result[0].value == 1_700_000_000
+
+    def test_a_fractional_decimal_is_refused_not_truncated(self) -> None:
+        field = pa.field("t", pa.timestamp("s", tz="UTC"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "epoch", "unit": "SECOND"}}, field)
+        with pytest.raises(ValueError, match="fractional part"):
+            fn(field, [Decimal("1700000000.5")])
 
 
 class TestEpochDecoderPreservesTheInstantAcrossTargetZones:

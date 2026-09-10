@@ -117,11 +117,23 @@ def _encode_epoch(config: Mapping[str, Any]) -> Callable[[Any], Any]:
         # Scaled to nanoseconds before dividing so NANOSECOND
         # (nanos_per_unit == 1) returns the true tick count rather than the
         # microsecond count relabeled -- every coarser unit divides this
-        # same nanosecond total evenly.
+        # same nanosecond total evenly, when the value itself has no
+        # remainder at that unit.
         total_nanos = (
             delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds
         ) * 1000
-        return total_nanos // nanos_per_unit
+        ticks, remainder = divmod(total_nanos, nanos_per_unit)
+        if remainder:
+            # // above would otherwise floor silently -- changing which
+            # instant is sent, not just its precision, and asymmetrically
+            # for a pre-epoch value (floor rounds toward -inf, not toward
+            # the represented instant).
+            raise ValueError(
+                f"encoding_write 'epoch': {value!r} is not exactly "
+                f"representable in unit {unit!r}; it has a nonzero "
+                f"remainder that would otherwise be silently discarded"
+            )
+        return ticks
 
     return encode
 
