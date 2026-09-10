@@ -247,6 +247,40 @@ class TestCursorFieldType:
             "items", schema, "updated_at"
         ) == FieldDeclaration("string", None)
 
+    @pytest.mark.parametrize("declared_encoding", [None, {"name": "iso8601"}])
+    def test_a_time_of_day_cursor_field_is_refused(
+        self, declared_encoding: dict[str, str] | None
+    ) -> None:
+        # _parse_cursor (cdk.api.replication) reads every string-typed
+        # cursor field as an absolute ISO-8601 moment regardless of
+        # whether 'iso8601' is declared explicitly or no encoding is
+        # declared at all -- both reach the same branch. A Time32/Time64
+        # field's wire value ("12:34:56") is a time of day, not a moment,
+        # so it would checkpoint fine once and fail resuming on the next
+        # run.
+        field: dict[str, Any] = {"type": "string", "arrow_type": "Time64(MICROSECOND)"}
+        if declared_encoding is not None:
+            field["encoding"] = declared_encoding
+        schema = {"properties": {"updated_at": field}}
+        with pytest.raises(ReadError, match="time of day"):
+            record_field_declaration("items", schema, "updated_at")
+
+    def test_a_timestamp_cursor_field_is_unaffected_by_the_time_of_day_check(
+        self,
+    ) -> None:
+        schema = {
+            "properties": {
+                "updated_at": {
+                    "type": "string",
+                    "arrow_type": "Timestamp(MICROSECOND, tz=UTC)",
+                    "encoding": {"name": "iso8601"},
+                }
+            }
+        }
+        assert record_field_declaration(
+            "items", schema, "updated_at"
+        ) == FieldDeclaration("string", None)
+
     @pytest.mark.parametrize(
         ("unit", "fmt"),
         [("SECOND", "epoch_seconds"), ("MILLISECOND", "epoch_milliseconds")],

@@ -1415,6 +1415,32 @@ class TestCodeEncoderResultIsValidated:
         with pytest.raises(ValueError, match=r"meta'\.count.*renders as 'string'"):
             encoders["meta"]({"count": 1})
 
+    def test_a_missing_required_nested_property_is_refused(self):
+        # A dict result the schema names no wrong-typed key in still
+        # renders as "object" and passes the type check above -- a
+        # required child the code hatch simply omitted would otherwise
+        # reach the provider silently violating the endpoint's own
+        # declared input schema.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding_write": {"name": "code"},
+                    "properties": {
+                        "count": {"type": "integer", "arrow_type": "Int64"},
+                    },
+                    "required": ["count"],
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: {}
+        )
+        with pytest.raises(ValueError, match="missing required property 'count'"):
+            encoders["meta"]({"count": 1})
+
     def test_a_wrong_type_item_in_a_nested_list_is_refused(self):
         schema = {
             "properties": {
@@ -1611,6 +1637,19 @@ class TestSchemaContractValidation:
     def test_empty_properties_raises(self):
         with pytest.raises(ValueError, match="'properties' is present but empty"):
             SchemaContract({"properties": {}})
+
+    def test_columns_not_a_list_raises(self):
+        # A truthy-but-wrong-shaped 'columns' slips past the `or []`
+        # fallback and the emptiness check above -- without this, it
+        # crashed later as an unclassified AttributeError deep inside
+        # _schema_from_columns instead of the ValueError every other
+        # malformed-payload case here raises.
+        with pytest.raises(ValueError, match="'columns' must be a list"):
+            SchemaContract({"columns": "not-a-list"})
+
+    def test_properties_not_an_object_raises(self):
+        with pytest.raises(ValueError, match="'properties' must be an object"):
+            SchemaContract({"properties": "not-an-object"})
 
     def test_column_without_name_raises(self):
         schema = {

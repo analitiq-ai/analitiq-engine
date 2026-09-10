@@ -132,17 +132,6 @@ def _encode_strftime(config: Mapping[str, Any]) -> Callable[[Any], Any]:
     return encode
 
 
-#: The integer range orjson can actually serialise (verified: it renders a
-#: JSON number from either an i64 or a u64, so the range is asymmetric --
-#: not a plain signed 64-bit span). A wide Timestamp encoded in a finer
-#: epoch unit (a year-9999 Timestamp(MICROSECOND) as NANOSECOND) can
-#: produce a value outside even this wider range; caught here, at the one
-#: place that computes the tick count, rather than however far downstream
-#: the body serialiser happens to raise its own unchecked TypeError.
-_ORJSON_INT_MIN: Final[int] = -(2**63)
-_ORJSON_INT_MAX: Final[int] = 2**64 - 1
-
-
 def _encode_epoch(config: Mapping[str, Any]) -> Callable[[Any], Any]:
     unit = require_enum_param(config, "unit", _EPOCH_UNITS, "encoding_write 'epoch'")
     micros_per_unit = _MICROSECONDS_PER_UNIT.get(unit)
@@ -182,12 +171,18 @@ def _encode_epoch(config: Mapping[str, Any]) -> Callable[[Any], Any]:
                     f"representable in unit {unit!r}; it has a nonzero "
                     f"remainder that would otherwise be silently discarded"
                 )
-        if not _ORJSON_INT_MIN <= ticks <= _ORJSON_INT_MAX:
-            raise ValueError(
-                f"encoding_write 'epoch': {value!r} in unit {unit!r} is "
-                f"{ticks}, outside the range the body serializer can "
-                f"encode as a JSON number"
-            )
+        # Whether ticks this size can go on the wire is the selected
+        # content_type's question, not this encoder's: a form body
+        # (cdk.api.body.encode_form) renders any integer with plain str()
+        # and has no 64-bit limit, while encode_body's orjson.dumps already
+        # raises its own TypeError for one outside what it can serialise
+        # (verified: orjson renders a JSON number from either an i64 or a
+        # u64, so the range is asymmetric -- not a plain signed 64-bit
+        # span) -- caught per-record/per-chunk alongside every other
+        # body-build failure, in _write_one_by_one and _write_in_chunks.
+        # Enforcing a JSON-specific limit here would reject a value a
+        # form-encoded provider could take exactly (a year-9999
+        # Timestamp(MICROSECOND) encoded as NANOSECOND, say).
         return ticks
 
     return encode

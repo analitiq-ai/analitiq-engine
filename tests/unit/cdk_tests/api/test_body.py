@@ -148,6 +148,27 @@ class TestFormEncoding:
             encode_body([1, 2], FORM_CONTENT_TYPE)
 
 
+class TestIntegerWireLimitIsPerContentType:
+    """PR #509 review: an epoch tick count past what orjson can render as a
+    JSON number (i64/u64) is a real defect only for a JSON body -- a form
+    body renders any integer with plain str() and has no such limit. The
+    limit therefore lives in each content type's own encoder, not upstream
+    of both.
+    """
+
+    _PAST_ORJSON_RANGE = 2**64  # one past orjson's own encodable u64 max
+
+    def test_json_refuses_an_integer_past_its_own_range(self) -> None:
+        with pytest.raises(TypeError, match="64-bit range"):
+            encode_body({"n": self._PAST_ORJSON_RANGE})
+
+    def test_form_encodes_the_same_integer_exactly(self) -> None:
+        assert (
+            encode_body({"n": self._PAST_ORJSON_RANGE}, FORM_CONTENT_TYPE)
+            == f"n={self._PAST_ORJSON_RANGE}".encode()
+        )
+
+
 class TestAnUnsupportedTypeNeverReachesTheWire:
     def test_encoding_refuses_rather_than_sending_json_under_a_lying_header(
         self,

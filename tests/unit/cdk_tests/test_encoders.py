@@ -8,7 +8,7 @@ directly through :func:`resolve_encoder`.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -89,24 +89,24 @@ class TestEpochEncoderUnitArithmetic:
             fn(value)
 
 
-class TestEpochEncoderRejectsWhatTheBodySerializerCannotEncode:
-    """orjson (cdk.api.http.encode_body) renders a JSON number from either
-    an i64 or a u64, not a plain signed 64-bit span. A wide Timestamp
-    encoded in a finer unit -- a year-9999 value as NANOSECOND -- produces
-    an integer outside even that range; encode_body's own TypeError for it
-    is not caught by the per-record body-build boundary
-    (cdk.api.generic._write_one_by_one), so it must be refused here, where
-    apply_field_encoders' existing (ValueError, TypeError) catch already
-    handles it as this one record's failure.
+class TestEpochEncoderLeavesWireRangeToTheBodySerializer:
+    """A wide Timestamp encoded in a finer unit -- a year-9999 value as
+    NANOSECOND -- produces an integer past what orjson can render as a JSON
+    number (PR #509 review: this encoder previously rejected it outright,
+    which also rejected it for a form-encoded body, where
+    cdk.api.body.encode_form renders any integer with plain str() and has
+    no such limit). Whether the ticks fit the wire is the selected
+    content_type's question, answered in cdk.api.http.encode_body /
+    cdk.api.body.encode_form -- this encoder only computes the count.
     """
 
-    def test_a_year_9999_timestamp_as_nanosecond_is_refused_not_silently_overflowed(
-        self,
-    ) -> None:
+    def test_a_year_9999_timestamp_as_nanosecond_still_computes_ticks(self) -> None:
         fn = resolve_encoder({"name": "epoch", "unit": "NANOSECOND"})
         value = datetime(9999, 1, 1, tzinfo=timezone.utc)
-        with pytest.raises(ValueError, match="outside the range"):
-            fn(value)
+        delta = value - datetime(1970, 1, 1, tzinfo=timezone.utc)
+        expected = (delta // timedelta(microseconds=1)) * 1000
+        assert expected > 2**63  # past orjson's own encodable range
+        assert fn(value) == expected
 
     def test_an_ordinary_value_in_every_unit_still_succeeds(self) -> None:
         value = datetime(2024, 1, 15, 13, 45, 6, tzinfo=timezone.utc)

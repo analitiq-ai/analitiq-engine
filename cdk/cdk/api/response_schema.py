@@ -97,6 +97,22 @@ class FieldDeclaration:
     format: str | None
 
 
+def _is_time_of_day(arrow_type: Any) -> bool:
+    """Whether *arrow_type* is Time32/Time64 -- a clock reading, not a moment.
+
+    This module imports the type-map surface, not pyarrow, so the
+    family head is read off the declared string directly (``"Time32"``
+    from ``"Time32(SECOND)"``) rather than through a parsed
+    ``pa.DataType`` -- the same family vocabulary
+    :data:`cdk.type_map.grammar.ARROW_FAMILIES` publishes, just not
+    parsed here.
+    """
+    return isinstance(arrow_type, str) and arrow_type.split("(", 1)[0] in (
+        "Time32",
+        "Time64",
+    )
+
+
 def record_field_declaration(
     endpoint_id: str, items_schema: dict[str, Any], cursor_field: str
 ) -> FieldDeclaration:
@@ -135,6 +151,21 @@ def record_field_declaration(
             f"endpoint {endpoint_id!r}: cursor field {cursor_field!r} declares "
             f"type {field.get('type')!r}; a cursor field needs one plain JSON "
             f"type, nullable or not"
+        )
+    if types[0] == "string" and _is_time_of_day(field.get("arrow_type")):
+        # _parse_cursor (cdk.api.replication) reads every string-typed
+        # cursor field as an absolute ISO-8601 moment via dateutil's
+        # isoparse, regardless of whether 'iso8601' is named explicitly
+        # or no encoding is declared at all (both reach this branch the
+        # same way). A Time32/Time64 field's wire value ("12:34:56") is
+        # a time of day, not a moment -- isoparse cannot make one of it,
+        # so the stream would complete its first run, checkpoint the raw
+        # value, and deterministically fail resuming on the next one.
+        raise ReadError(
+            f"endpoint {endpoint_id!r}: cursor field {cursor_field!r} declares "
+            f"arrow_type {field.get('arrow_type')!r}; incremental replication "
+            f"checkpoints this field as an absolute moment, which a time of "
+            f"day cannot be converted into -- use a Timestamp or Date field"
         )
     fmt = field.get("format")
     encoding = field.get("encoding")

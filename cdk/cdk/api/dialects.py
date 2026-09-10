@@ -97,7 +97,7 @@ class ApiDialect:
             ) from err
         # decode_field/encode_field are optional (reached only when a field
         # opts into 'code'), but an override that IS present must accept the
-        # same four arguments the resolver calls it with -- checked here,
+        # same three arguments the resolver calls it with -- checked here,
         # at class-definition time, for the same reason __init__'s shape is:
         # a bent signature otherwise surfaces as a TypeError deep inside a
         # running read/write, on whichever record first reaches 'code'.
@@ -105,25 +105,46 @@ class ApiDialect:
             hook = inspect.getattr_static(cls, hook_name)
             if hook is inspect.getattr_static(ApiDialect, hook_name):
                 continue
+            # inspect.getattr_static returns the raw class-body descriptor,
+            # bypassing the binding staticmethod/classmethod would actually
+            # do at the real call site (self.dialect.encode_field(...)):
+            # checking the descriptor itself as if it always took an
+            # implicit leading self both accepts a static method's bogus
+            # 'self' parameter (unusable -- the runtime never binds one,
+            # and the first encoded record raises TypeError) and rejects a
+            # correctly-shaped static method with no such parameter.
+            # Unwrapped to the plain function underneath, with the leading
+            # placeholder only where the real call site actually supplies
+            # one, so the check mirrors what running code does exactly.
+            if isinstance(hook, staticmethod):
+                func = hook.__func__
+                placeholders: tuple[None, ...] = (None, None, None)
+            elif isinstance(hook, classmethod):
+                func = hook.__func__
+                placeholders = (None, None, None, None)  # cls, then the 3 real args
+            else:
+                func = hook
+                placeholders = (None, None, None, None)  # self, then the 3 real args
             # Both call sites invoke the hook synchronously: a read hook
             # returning a coroutine fails SchemaContract's "expects a
             # pa.Array" check with no clue why, and a write hook's
             # coroutine gets stored in the record and fails serialization
             # later still -- neither is the loud, class-definition-time
             # rejection this whole check exists to give an author.
-            if inspect.iscoroutinefunction(hook):
+            if inspect.iscoroutinefunction(func):
                 raise TypeError(
                     f"{cls.__name__}.{hook_name} is declared 'async def', "
                     f"but both call sites invoke it synchronously; remove "
                     f"'async'"
                 )
             try:
-                inspect.signature(hook).bind(None, None, None, None)
+                inspect.signature(func).bind(*placeholders)
             except TypeError as err:
+                suffix = "" if isinstance(hook, staticmethod) else ", plus self"
                 raise TypeError(
                     f"{cls.__name__}.{hook_name} does not accept the "
                     f"(field_name, values_or_value, arrow_type) ApiDialect "
-                    f"calls it with, plus self: {err}"
+                    f"calls it with{suffix}: {err}"
                 ) from err
 
     @classmethod

@@ -161,6 +161,40 @@ class TestFieldEncodingHooks:
         with pytest.raises(TypeError, match="async"):
             type("BadDialect", (ApiDialect,), {"encode_field": bad_encode_field})
 
+    def test_a_conforming_staticmethod_override_is_accepted(self) -> None:
+        # inspect.getattr_static returns the raw staticmethod descriptor,
+        # not the bound function a real call site would see -- checking
+        # the descriptor as if it always took an implicit leading self
+        # rejected this correctly-shaped 3-arg staticmethod outright.
+        class Provider(ApiDialect):
+            @staticmethod
+            def encode_field(field_name: str, value: Any, arrow_type: Any) -> Any:
+                return value.upper()
+
+        assert Provider(None).encode_field("f", "a", None) == "A"
+
+    def test_a_staticmethod_override_with_a_bogus_leading_self_is_refused(self) -> None:
+        # The same unwrap-blind check accepted a 4-arg staticmethod with a
+        # bogus unbound leading parameter (a plain function never binds
+        # one to a staticmethod) -- unusable, since the real call site
+        # supplies only the 3 declared arguments, and the first encoded
+        # record would raise TypeError far from this class-definition-time
+        # check. Built via type(), like the arity fixtures above: a
+        # `class ... (ApiDialect):` statement would raise here too, but at
+        # class-body-evaluation time rather than the __init_subclass__
+        # path under test.
+        def bad_encode_field(
+            self: object, field_name: str, value: Any, arrow_type: Any
+        ) -> Any:
+            return value
+
+        with pytest.raises(TypeError, match="encode_field"):
+            type(
+                "BadStaticDialect",
+                (ApiDialect,),
+                {"encode_field": staticmethod(bad_encode_field)},
+            )
+
     def test_an_unrelated_hook_override_is_still_accepted(self) -> None:
         # The new signature check is scoped to decode_field/encode_field
         # only; it must not start rejecting the other three hooks.

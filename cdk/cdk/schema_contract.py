@@ -428,7 +428,10 @@ def _validate_code_output_shape(
     A value with no corresponding declaration (an extra key the schema
     never named) is left unchecked -- the same leniency
     ``_check_nested_leaf_encoding`` and friends already extend to a
-    schema that does not fully enumerate every possible key.
+    schema that does not fully enumerate every possible key. A nested
+    object's own declared ``"required"`` is checked the other direction:
+    a key the schema names but ``value`` omits would otherwise reach the
+    provider silently violating the endpoint's own declared input schema.
     """
     if value is None:
         return
@@ -446,6 +449,12 @@ def _validate_code_output_shape(
     if _is_json_field(field_def):
         return
     if isinstance(value, dict):
+        for required_key in field_def.get("required") or []:
+            if required_key not in value:
+                raise ValueError(
+                    f"{path}: ApiDialect.encode_field's result is missing "
+                    f"required property {required_key!r}"
+                )
         properties = field_def.get("properties") or {}
         for key, child in value.items():
             child_def = properties.get(key)
@@ -691,6 +700,11 @@ class SchemaContract:
                     "SchemaContract: 'columns' is present but empty; the "
                     "contract must declare every column"
                 )
+            if not isinstance(field_defs, list):
+                raise ValueError(
+                    f"SchemaContract: 'columns' must be a list, got "
+                    f"{type(field_defs).__name__}"
+                )
             self._arrow_schema, self._field_defs = self._schema_from_columns(field_defs)
             # A database "columns" declaration has no `encoding` vocabulary
             # and the driver already hands back typed Python values (real
@@ -706,6 +720,11 @@ class SchemaContract:
                 raise ValueError(
                     "SchemaContract: 'properties' is present but empty; "
                     "the contract must declare every field"
+                )
+            if not isinstance(properties, dict):
+                raise ValueError(
+                    f"SchemaContract: 'properties' must be an object, got "
+                    f"{type(properties).__name__}"
                 )
             required = set(endpoint_schema.get("required", []))
             self._arrow_schema, self._field_defs = self._schema_from_properties(
