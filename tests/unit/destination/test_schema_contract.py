@@ -15,6 +15,7 @@ import pyarrow as pa
 import pytest
 
 from cdk.schema_contract import SchemaContract
+from cdk.type_map.exceptions import InvalidTypeMapError, MissingEncodingError
 
 
 class TestSchemaContractColumnsFormat:
@@ -541,12 +542,12 @@ class TestSchemaContractFromPylist:
         with pytest.raises(ValueError, match=r"column 'val' at row 1.*got dict"):
             contract.from_pylist([{"val": "1.5"}, {"val": {"x": 1}}])
 
-    def test_source_format_column_reports_its_own_error_for_a_decimal(self):
-        """A source_format column accepts no numeric value, so its own message
+    def test_strptime_encoding_column_reports_its_own_error_for_a_decimal(self):
+        """A ``strptime`` column accepts no numeric value, so its own message
         must win over the unit-offset guard's.
 
         The guard says the value is not an integer offset, which would imply an
-        integer is taken here. It is not -- source_format parses strings only,
+        integer is taken here. It is not -- ``strptime`` parses strings only,
         so an author told to send an integer would be sent to the wrong fix.
         """
         schema = {
@@ -555,23 +556,23 @@ class TestSchemaContractFromPylist:
                     "name": "created",
                     "arrow_type": "Timestamp(SECOND)",
                     "nullable": True,
-                    "source_format": "%Y-%m-%d",
+                    "encoding": {"name": "strptime", "pattern": "%Y-%m-%d"},
                 },
             ]
         }
         contract = SchemaContract(schema)
 
-        with pytest.raises(TypeError, match=r"source_format only applies to string"):
+        with pytest.raises(TypeError, match=r"encoding 'strptime' expects a string"):
             contract.from_pylist([{"created": Decimal("1.5")}])
 
-    def test_from_pylist_strptime_via_source_format(self):
+    def test_from_pylist_strptime_via_encoding(self):
         schema = {
             "columns": [
                 {
                     "name": "created",
                     "arrow_type": "Timestamp(MICROSECOND, UTC)",
                     "nullable": True,
-                    "source_format": "%Y-%m-%d %H:%M:%S",
+                    "encoding": {"name": "strptime", "pattern": "%Y-%m-%d %H:%M:%S"},
                 },
             ]
         }
@@ -591,6 +592,7 @@ class TestSchemaContractFromPylist:
                     "name": "created",
                     "arrow_type": "Timestamp(MICROSECOND, UTC)",
                     "nullable": True,
+                    "encoding": {"name": "iso8601"},
                 },
             ]
         }
@@ -602,6 +604,1071 @@ class TestSchemaContractFromPylist:
         value = batch.to_pylist()[0]["created"]
         assert value.utcoffset().total_seconds() == 0
         assert (value.year, value.hour, value.second) == (2026, 12, 45)
+
+    def test_missing_encoding_on_a_temporal_column_raises_at_construction(self):
+        schema = {
+            "columns": [
+                {"name": "created", "arrow_type": "Timestamp(MICROSECOND, UTC)"},
+            ]
+        }
+        with pytest.raises(MissingEncodingError, match="encoding"):
+            SchemaContract(schema).check_required_read_encoding()
+
+    def test_a_decoder_incompatible_with_the_arrow_type_is_refused(self):
+        # A Timestamp field naming 'decimal' resolves fine (the name is a
+        # real catalog entry) and would otherwise only fail inside the
+        # decoder's own closure on the first non-null response.
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": "string",
+                    "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                    "encoding": {"name": "decimal"},
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="decimal"):
+            SchemaContract(schema).check_required_read_encoding()
+
+    def test_a_decoder_incompatible_with_the_declared_json_type_is_refused(self):
+        # 'iso8601' reads only a string; an 'integer'-declared field naming
+        # it resolves fine (the name is real, and the arrow kind -- 'time' --
+        # matches too) and would otherwise only fail inside the decoder's
+        # own closure on the first non-null response.
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": "integer",
+                    "arrow_type": "Timestamp(SECOND, UTC)",
+                    "encoding": {"name": "iso8601"},
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="iso8601"):
+            SchemaContract(schema).check_required_read_encoding()
+
+    def test_epoch_is_accepted_on_a_number_typed_field(self):
+        # JSON Schema defines every integer as a valid number, and most
+        # epoch fields on real APIs declare "number" for schema generality
+        # even though they only ever carry whole values.
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": "number",
+                    "arrow_type": "Timestamp(SECOND, UTC)",
+                    "encoding": {"name": "epoch", "unit": "SECOND"},
+                },
+            }
+        }
+        SchemaContract(schema).check_required_read_encoding()
+
+    def test_a_decoder_compatible_with_the_declared_json_type_passes(self):
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": "string",
+                    "arrow_type": "Timestamp(SECOND, UTC)",
+                    "encoding": {"name": "iso8601"},
+                },
+            }
+        }
+        SchemaContract(schema).check_required_read_encoding()
+
+    def test_a_decoder_incompatible_with_one_json_union_member_is_refused(self):
+        # The response is schema-valid for whichever declared alternative
+        # it actually carries, so the decoder must handle every one of
+        # them -- iso8601 reads only a string, and an 'integer' response
+        # would otherwise pass planning and fail decoding.
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": ["string", "integer", "null"],
+                    "arrow_type": "Timestamp(SECOND, UTC)",
+                    "encoding": {"name": "iso8601"},
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="iso8601"):
+            SchemaContract(schema).check_required_read_encoding()
+
+    def test_a_decoder_compatible_with_every_json_union_member_passes(self):
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": ["integer", "string", "null"],
+                    "arrow_type": "Timestamp(SECOND, UTC)",
+                    "encoding": {"name": "epoch", "unit": "SECOND"},
+                },
+            }
+        }
+        SchemaContract(schema).check_required_read_encoding()
+
+    def test_a_nested_gated_leaf_with_no_encoding_is_refused(self):
+        # resolve_decoder is never consulted for a nested leaf --
+        # _build_nested_column hands its raw wire value straight to
+        # pyarrow -- so a gated-kind leaf inside an Object field must be
+        # refused here, by name and nested path, the same as a top-level
+        # field would be.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "properties": {
+                        "posted_at": {
+                            "type": "string",
+                            "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                        }
+                    },
+                },
+            }
+        }
+        with pytest.raises(MissingEncodingError, match="meta.posted_at"):
+            SchemaContract(schema).check_required_read_encoding()
+
+    def test_a_nested_leaf_declaring_its_own_encoding_is_still_refused(self):
+        # The leaf's own encoding is never resolved or applied (only a
+        # top-level encoding: {"name": "code"} on the whole nested field
+        # is), so declaring one here must not be accepted as sufficient.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "properties": {
+                        "posted_at": {
+                            "type": "string",
+                            "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                            "encoding": {"name": "iso8601"},
+                        }
+                    },
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="meta.posted_at"):
+            SchemaContract(schema).check_required_read_encoding()
+
+    def test_a_nested_optional_kind_leaf_declaring_its_own_encoding_is_refused(self):
+        # bool's kind is not in READ_REQUIRES_ENCODING_KINDS (bool_map is
+        # opt-in, never mandatory), so gating the leaf-declaration check on
+        # "does this kind require one" first would let a declared-but-
+        # never-applied bool_map leaf through unchecked -- the same class
+        # of gap the mandatory-kind case above is already refused for.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "properties": {
+                        "active": {
+                            "type": "string",
+                            "arrow_type": "Boolean",
+                            "encoding": {
+                                "name": "bool_map",
+                                "true_values": ["Y"],
+                                "false_values": ["N"],
+                            },
+                        }
+                    },
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="meta.active"):
+            SchemaContract(schema).check_required_read_encoding()
+
+    def test_a_nested_field_with_top_level_code_encoding_needs_no_leaf_encoding(self):
+        # A leaf with no encoding of its own is fine under the code hatch --
+        # decode_field covers the whole value regardless of any leaf's
+        # kind, so no leaf is ever individually gated here. The missing
+        # code_decoder is still refused, just by that check, not a leaf one.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding": {"name": "code"},
+                    "properties": {
+                        "posted_at": {
+                            "type": "string",
+                            "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                        }
+                    },
+                },
+            }
+        }
+        with pytest.raises(ValueError, match="code_decoder"):
+            SchemaContract(schema).check_required_read_encoding()
+
+    def test_a_leaf_declaring_encoding_beneath_a_code_hatch_is_still_refused(self):
+        # ApiDialect.decode_field receives only the whole value and
+        # arrow_type, never a leaf's own configuration -- a leaf's
+        # declared encoding here is silently never resolved or applied,
+        # exactly as unresolved as it would be with no code hatch at all.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding": {"name": "code"},
+                    "properties": {
+                        "posted_at": {
+                            "type": "string",
+                            "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                            "encoding": {"name": "iso8601"},
+                        }
+                    },
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="meta.posted_at"):
+            SchemaContract(
+                schema, code_decoder=lambda name, values, arrow_type: None
+            ).check_required_read_encoding()
+
+    def test_a_code_encoding_with_an_extra_param_is_refused(self):
+        # The published catalog declares no parameters for 'code' -- it has
+        # no factory to read them, and decode_field is called with no
+        # config at all, so a stray param left behind while switching a
+        # field to 'code' would otherwise be silently ignored.
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": "string",
+                    "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                    "encoding": {"name": "code", "pattern": "%Y%m%d"},
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="takes no parameters"):
+            SchemaContract(
+                schema, code_decoder=lambda name, values, arrow_type: None
+            ).check_required_read_encoding()
+
+    def test_a_nested_code_encoding_with_an_extra_param_is_refused(self):
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding": {"name": "code", "pattern": "%Y%m%d"},
+                    "properties": {
+                        "posted_at": {"type": "string", "arrow_type": "Utf8"}
+                    },
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="takes no parameters"):
+            SchemaContract(
+                schema, code_decoder=lambda name, values, arrow_type: None
+            ).check_required_read_encoding()
+
+    def test_a_nested_field_with_a_non_code_top_level_encoding_is_refused(self):
+        # A scalar decoder like iso8601 resolves fine (the name is real)
+        # against a nested field's own declaration, but _build_column would
+        # then apply it to the whole struct value and crash -- only 'code'
+        # is a valid top-level encoding for a nested field.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding": {"name": "iso8601"},
+                    "properties": {
+                        "posted_at": {"type": "string", "arrow_type": "Utf8"}
+                    },
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="'code'"):
+            SchemaContract(schema).check_required_read_encoding()
+
+    def test_a_decoder_with_day_unit_targeting_a_timestamp_is_refused(self):
+        # DAY ticks build only a Date32/Date64 (_ticks_to_array's own DAY
+        # branch requires it); the broad name-vs-kind compatibility check
+        # accepts epoch for Timestamp/Date/Time/Duration since every other
+        # unit reaches those, so DAY needs its own narrower check.
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": "integer",
+                    "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                    "encoding": {"name": "epoch", "unit": "DAY"},
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="DAY"):
+            SchemaContract(schema).check_required_read_encoding()
+
+    def test_bool_map_and_base64_are_accepted_on_their_matching_kinds(self):
+        # Regression: both were missing from DECODER_KIND_COMPATIBILITY, so
+        # check_required_read_encoding refused every declaration of either
+        # regardless of field type.
+        schema = {
+            "properties": {
+                "active": {
+                    "type": "string",
+                    "arrow_type": "Boolean",
+                    "encoding": {
+                        "name": "bool_map",
+                        "true_values": ["Y"],
+                        "false_values": ["N"],
+                    },
+                },
+                "blob": {
+                    "type": "string",
+                    "arrow_type": "Binary",
+                    "encoding": {"name": "base64"},
+                },
+            }
+        }
+        SchemaContract(schema).check_required_read_encoding()
+
+    def test_a_nested_optional_kind_write_leaf_declaring_its_own_encoding_is_refused(
+        self,
+    ):
+        # bool is not in WRITE_REQUIRES_ENCODING_KINDS (bool_map is opt-in
+        # there too), so the leaf-declaration check must not skip it just
+        # because the kind itself is optional.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "properties": {
+                        "active": {
+                            "type": "string",
+                            "arrow_type": "Boolean",
+                            "encoding_write": {
+                                "name": "bool_map",
+                                "true_values": ["Y"],
+                                "false_values": ["N"],
+                            },
+                        }
+                    },
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="meta.active"):
+            SchemaContract(schema).check_required_write_encoding()
+
+    def test_a_nested_write_field_with_a_non_code_top_level_encoding_is_refused(self):
+        # A scalar encoder like iso8601 resolves fine against a nested
+        # field's own declaration, but land() would then apply it to the
+        # whole dict/list value and crash -- only 'code' is a valid
+        # top-level encoding_write for a nested field.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding_write": {"name": "iso8601"},
+                    "properties": {
+                        "posted_at": {"type": "string", "arrow_type": "Utf8"}
+                    },
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="'code'"):
+            SchemaContract(schema).check_required_write_encoding()
+
+    def test_a_write_code_encoding_with_an_extra_param_is_refused(self):
+        schema = {
+            "properties": {
+                "code_name": {
+                    "type": "string",
+                    "arrow_type": "Utf8",
+                    "encoding_write": {"name": "code", "pattern": "%Y%m%d"},
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="takes no parameters"):
+            SchemaContract(schema).check_required_write_encoding()
+
+    def test_a_nested_write_code_encoding_with_an_extra_param_is_refused(self):
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding_write": {"name": "code", "pattern": "%Y%m%d"},
+                    "properties": {
+                        "posted_at": {"type": "string", "arrow_type": "Utf8"}
+                    },
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="takes no parameters"):
+            SchemaContract(schema).check_required_write_encoding()
+
+    def test_a_write_leaf_declaring_encoding_beneath_a_code_hatch_is_still_refused(
+        self,
+    ):
+        # ApiDialect.encode_field receives only the whole value and
+        # arrow_type, never a leaf's own configuration -- a leaf's
+        # declared encoding_write here is silently never resolved or
+        # applied, exactly as unresolved as it would be with no code
+        # hatch at all.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding_write": {"name": "code"},
+                    "properties": {
+                        "posted_at": {
+                            "type": "string",
+                            "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                            "encoding_write": {"name": "iso8601"},
+                        }
+                    },
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="meta.posted_at"):
+            SchemaContract(schema).check_required_write_encoding()
+
+    def test_epoch_write_output_is_accepted_on_a_number_typed_field(self):
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": "number",
+                    "arrow_type": "Timestamp(SECOND, UTC)",
+                    "encoding_write": {"name": "epoch", "unit": "SECOND"},
+                },
+            }
+        }
+        SchemaContract(schema).check_required_write_encoding()
+
+    def test_a_write_encoder_incompatible_with_the_declared_json_type_is_refused(self):
+        # bool_map renders a string token; a 'boolean'-typed field naming
+        # it resolves fine (the name is real, and the arrow kind matches
+        # too) and would otherwise only violate the endpoint's own
+        # declared input schema once the request is actually sent.
+        schema = {
+            "properties": {
+                "active": {
+                    "type": "boolean",
+                    "arrow_type": "Boolean",
+                    "encoding_write": {
+                        "name": "bool_map",
+                        "true_values": ["Y"],
+                        "false_values": ["N"],
+                    },
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="bool_map"):
+            SchemaContract(schema).check_required_write_encoding()
+
+    def test_a_write_encoder_compatible_with_the_declared_json_type_passes(self):
+        schema = {
+            "properties": {
+                "active": {
+                    "type": "string",
+                    "arrow_type": "Boolean",
+                    "encoding_write": {
+                        "name": "bool_map",
+                        "true_values": ["Y"],
+                        "false_values": ["N"],
+                    },
+                },
+            }
+        }
+        SchemaContract(schema).check_required_write_encoding()
+
+    def test_a_write_encoder_output_absent_from_the_json_union_is_refused(self):
+        # bool_map renders a string; a union that never includes 'string'
+        # would otherwise pass configuration and violate the endpoint's
+        # own declared input schema once sent.
+        schema = {
+            "properties": {
+                "active": {
+                    "type": ["boolean", "integer"],
+                    "arrow_type": "Boolean",
+                    "encoding_write": {
+                        "name": "bool_map",
+                        "true_values": ["Y"],
+                        "false_values": ["N"],
+                    },
+                },
+            }
+        }
+        with pytest.raises(InvalidTypeMapError, match="bool_map"):
+            SchemaContract(schema).check_required_write_encoding()
+
+    def test_a_write_encoder_output_present_in_the_json_union_passes(self):
+        schema = {
+            "properties": {
+                "active": {
+                    "type": ["string", "boolean"],
+                    "arrow_type": "Boolean",
+                    "encoding_write": {
+                        "name": "bool_map",
+                        "true_values": ["Y"],
+                        "false_values": ["N"],
+                    },
+                },
+            }
+        }
+        SchemaContract(schema).check_required_write_encoding()
+
+    def test_json_field_with_code_encoding_routes_through_the_code_hatch(self):
+        # The Json-specific builder must not run ahead of a declared 'code'
+        # hatch -- a field opting into 'code' has opted out of every
+        # implicit rendering, Json's own-native passthrough included.
+        schema = {
+            "properties": {
+                "payload": {
+                    "type": "object",
+                    "arrow_type": "Json",
+                    "encoding": {"name": "code"},
+                },
+            }
+        }
+        contract = SchemaContract(
+            schema, code_decoder=lambda name, values, arrow_type: pa.array(values)
+        )
+        batch = contract.from_pylist([{"payload": "raw"}])
+        assert batch.to_pylist() == [{"payload": "raw"}]
+
+
+class TestCodeDecoderResultIsValidated:
+    """ApiDialect.decode_field is connector-authored, not code this catalog
+    controls. A malformed result reaching _assert_non_nullable's own
+    array.null_count raised a raw AttributeError -- not recognised by the
+    worker's deterministic-error classifier, so a broken connector result
+    retried forever instead of failing the configuration loudly.
+    """
+
+    _SCHEMA = {
+        "properties": {
+            "a": {"type": "string", "arrow_type": "Utf8", "encoding": {"name": "code"}},
+        },
+        "required": ["a"],
+    }
+
+    def test_a_non_array_result_is_refused(self):
+        contract = SchemaContract(
+            self._SCHEMA, code_decoder=lambda name, values, arrow_type: None
+        )
+        with pytest.raises(ValueError, match="must return a pa.Array"):
+            contract.from_pylist([{"a": "x"}])
+
+    def test_an_array_of_an_incompatible_type_is_refused(self):
+        # int64 -> Utf8 is 'explicit' in the conversion matrix (requires a
+        # declared 'to_string'), the same verdict an arrived SQL driver
+        # column gets for the identical mismatch (_convert_to_field) --
+        # one policy, not a second one only the code hatch enforces.
+        contract = SchemaContract(
+            self._SCHEMA,
+            code_decoder=lambda name, values, arrow_type: pa.array(
+                [1], type=pa.int64()
+            ),
+        )
+        with pytest.raises(ValueError, match="requires an explicit 'to_string'"):
+            contract.from_pylist([{"a": "x"}])
+
+    def test_an_array_of_a_family_compatible_width_is_safely_cast(self):
+        # Utf8 -> LargeUtf8 is 'auto' in the matrix -- a decoder handing
+        # back the plain string pyarrow infers by default for a field
+        # declared as Json (large_string) must not be rejected merely for
+        # not matching field.type's own concrete width.
+        schema = {
+            "properties": {
+                "payload": {
+                    "type": "object",
+                    "arrow_type": "Json",
+                    "encoding": {"name": "code"},
+                },
+            }
+        }
+        contract = SchemaContract(
+            schema, code_decoder=lambda name, values, arrow_type: pa.array(values)
+        )
+        batch = contract.from_pylist([{"payload": "raw"}])
+        assert batch.to_pylist() == [{"payload": "raw"}]
+
+    def test_an_array_of_the_wrong_length_is_refused(self):
+        contract = SchemaContract(
+            self._SCHEMA,
+            code_decoder=lambda name, values, arrow_type: pa.array(
+                ["x", "y"], type=pa.utf8()
+            ),
+        )
+        with pytest.raises(ValueError, match="2 values for 1 input rows"):
+            contract.from_pylist([{"a": "x"}])
+
+    def test_a_conforming_result_is_still_accepted(self):
+        contract = SchemaContract(
+            self._SCHEMA,
+            code_decoder=lambda name, values, arrow_type: pa.array(
+                [v.upper() for v in values], type=pa.utf8()
+            ),
+        )
+        batch = contract.from_pylist([{"a": "x"}])
+        assert batch.to_pylist() == [{"a": "X"}]
+
+
+class TestCodeEncoderResultIsValidated:
+    """ApiDialect.encode_field is connector-authored, not code this catalog
+    controls. Unlike a catalog encoder (checked against the field's
+    declared JSON type at plan time), an unchecked code-hatch result
+    would serialise fine via orjson and send a request violating the
+    endpoint's own declared input schema.
+    """
+
+    _SCHEMA = {
+        "properties": {
+            "a": {
+                "type": "string",
+                "arrow_type": "Utf8",
+                "encoding_write": {"name": "code"},
+            },
+        },
+    }
+
+    def test_a_result_of_the_wrong_json_type_is_refused(self):
+        contract = SchemaContract(self._SCHEMA)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: 12345
+        )
+        with pytest.raises(
+            ValueError, match="renders as 'integer'.*type \\['string'\\]"
+        ):
+            encoders["a"]("some string value")
+
+    def test_a_conforming_result_is_still_accepted(self):
+        contract = SchemaContract(self._SCHEMA)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: value.upper()
+        )
+        assert encoders["a"]("abc") == "ABC"
+
+    def test_none_passes_through_unchecked(self):
+        contract = SchemaContract(self._SCHEMA)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: None
+        )
+        assert encoders["a"](None) is None
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_a_non_finite_float_is_refused(self, bad: float):
+        # A non-finite float still renders as the JSON type "number" --
+        # the type check alone would accept it -- but encode_body (orjson)
+        # silently serialises any of them as JSON null, changing the
+        # value sent rather than failing the record.
+        schema = {
+            "properties": {
+                "n": {
+                    "type": "number",
+                    "arrow_type": "Float64",
+                    "encoding_write": {"name": "code"},
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: bad
+        )
+        with pytest.raises(ValueError, match="would silently render as JSON null"):
+            encoders["n"](1.5)
+
+    def test_an_ordinary_float_is_still_accepted(self):
+        schema = {
+            "properties": {
+                "n": {
+                    "type": "number",
+                    "arrow_type": "Float64",
+                    "encoding_write": {"name": "code"},
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: 3.14
+        )
+        assert encoders["n"](1.5) == 3.14
+
+    def test_a_non_finite_float_nested_in_a_dict_is_refused(self):
+        # A dict/list result renders as "object"/"array" at the top level
+        # -- the type check alone never looks inside it -- but orjson
+        # still silently serialises a nested NaN/Infinity as JSON null.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding_write": {"name": "code"},
+                    "properties": {
+                        "value": {"type": "number", "arrow_type": "Float64"},
+                    },
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: {"value": float("nan")}
+        )
+        with pytest.raises(ValueError, match="would silently render as JSON null"):
+            encoders["meta"]({"value": 1.5})
+
+    def test_a_non_finite_float_nested_in_a_list_is_refused(self):
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding_write": {"name": "code"},
+                    "properties": {
+                        "values": {
+                            "type": "array",
+                            "arrow_type": "List",
+                            "items": {"type": "number", "arrow_type": "Float64"},
+                        },
+                    },
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: {
+                "values": [1.0, float("inf"), 2.0]
+            }
+        )
+        with pytest.raises(ValueError, match="would silently render as JSON null"):
+            encoders["meta"]({"values": [1.0, 2.0, 3.0]})
+
+    def test_none_for_a_required_field_is_refused(self):
+        # The field is not in "required" for _SCHEMA (nullable), so this
+        # uses its own schema to exercise the non-nullable branch.
+        schema = {
+            "properties": {
+                "a": {
+                    "type": "string",
+                    "arrow_type": "Utf8",
+                    "encoding_write": {"name": "code"},
+                },
+            },
+            "required": ["a"],
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: None
+        )
+        with pytest.raises(ValueError, match="the field is required"):
+            encoders["a"]("x")
+
+    def test_an_integer_satisfies_a_declared_number(self):
+        schema = {
+            "properties": {
+                "n": {
+                    "type": "number",
+                    "arrow_type": "Int64",
+                    "encoding_write": {"name": "code"},
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: 5
+        )
+        assert encoders["n"](5) == 5
+
+    def test_a_json_field_is_checked_as_a_string_not_its_declared_type(self):
+        # arrow_type 'Json' is always a wire-level string blob regardless
+        # of the JSON Schema "type" it declares ("object"/"array"
+        # describes the decoded content, not what encode_field actually
+        # returns) -- checking the declared type literally here would
+        # reject every conforming Json code-hatch encoder.
+        schema = {
+            "properties": {
+                "payload": {
+                    "type": "object",
+                    "arrow_type": "Json",
+                    "encoding_write": {"name": "code"},
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: f"wrapped:{value}"
+        )
+        assert encoders["payload"]('{"a": 1}') == 'wrapped:{"a": 1}'
+
+    def test_a_wrong_type_nested_property_is_refused(self):
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding_write": {"name": "code"},
+                    "properties": {
+                        "count": {"type": "integer", "arrow_type": "Int64"},
+                    },
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: {"count": "wrong"}
+        )
+        with pytest.raises(ValueError, match=r"meta'\.count.*renders as 'string'"):
+            encoders["meta"]({"count": 1})
+
+    def test_a_missing_required_nested_property_is_refused(self):
+        # A dict result the schema names no wrong-typed key in still
+        # renders as "object" and passes the type check above -- a
+        # required child the code hatch simply omitted would otherwise
+        # reach the provider silently violating the endpoint's own
+        # declared input schema.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding_write": {"name": "code"},
+                    "properties": {
+                        "count": {"type": "integer", "arrow_type": "Int64"},
+                    },
+                    "required": ["count"],
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: {}
+        )
+        with pytest.raises(ValueError, match="missing required property 'count'"):
+            encoders["meta"]({"count": 1})
+
+    def test_a_required_nested_property_present_as_null_is_refused(self):
+        # A present-but-None key satisfies _check_required_properties (the
+        # key exists) but still renders as a null the child's own declared
+        # type ("integer", no "null" variant) never allowed.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding_write": {"name": "code"},
+                    "properties": {
+                        "count": {"type": "integer", "arrow_type": "Int64"},
+                    },
+                    "required": ["count"],
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: {"count": None}
+        )
+        with pytest.raises(ValueError, match="meta'.count: .*returned None"):
+            encoders["meta"]({"count": 1})
+
+    def test_a_nested_property_declaring_null_still_accepts_it(self):
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding_write": {"name": "code"},
+                    "properties": {
+                        "count": {"type": ["integer", "null"], "arrow_type": "Int64"},
+                    },
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: {"count": None}
+        )
+        assert encoders["meta"]({"count": 1}) == {"count": None}
+
+    def test_a_wrong_type_item_in_a_nested_list_is_refused(self):
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding_write": {"name": "code"},
+                    "properties": {
+                        "values": {
+                            "type": "array",
+                            "arrow_type": "List",
+                            "items": {"type": "number", "arrow_type": "Float64"},
+                        },
+                    },
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: {"values": [1.0, "bad", 3.0]}
+        )
+        with pytest.raises(ValueError, match=r"meta'\.values\[1\]"):
+            encoders["meta"]({"values": [1.0, 2.0, 3.0]})
+
+    def test_a_conforming_nested_result_is_still_accepted(self):
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding_write": {"name": "code"},
+                    "properties": {
+                        "count": {"type": "integer", "arrow_type": "Int64"},
+                    },
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: {"count": 5}
+        )
+        assert encoders["meta"]({"count": 1}) == {"count": 5}
+
+    def test_an_undeclared_extra_key_is_left_unchecked(self):
+        # Lenient the same way _check_nested_leaf_encoding already is for
+        # a schema that does not fully enumerate every possible key.
+        schema = {
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "arrow_type": "Object",
+                    "encoding_write": {"name": "code"},
+                    "properties": {
+                        "count": {"type": "integer", "arrow_type": "Int64"},
+                    },
+                },
+            }
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: {"count": 5, "extra": object()}
+        )
+        result = encoders["meta"]({"count": 1})
+        assert result["count"] == 5
+
+
+class TestFieldEncodersRejectNullInputForRequiredFields:
+    """apply_field_encoders' own blanket "skip encoding when the input is
+    None" rule (cdk.api.write_plan) never even calls a required field's
+    encoder for a None ARROW value -- the None passed straight through to
+    encode_body as a silent JSON null, the same field's schema still
+    declaring a non-null type. Deciding what None means for one field is
+    now made once, at resolve time, in _null_aware_encoder.
+    """
+
+    def test_a_catalog_encoder_rejects_none_for_a_required_field(self):
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": "string",
+                    "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                    "encoding_write": {"name": "iso8601"},
+                },
+            },
+            "required": ["shipped_at"],
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders()
+        with pytest.raises(ValueError, match="the field is required"):
+            encoders["shipped_at"](None)
+
+    def test_a_catalog_encoder_still_passes_none_through_for_a_nullable_field(self):
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": "string",
+                    "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                    "encoding_write": {"name": "iso8601"},
+                },
+            },
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders()
+        assert encoders["shipped_at"](None) is None
+
+    def test_a_code_hatch_encoder_rejects_none_input_for_a_required_field(self):
+        schema = {
+            "properties": {
+                "a": {
+                    "type": "string",
+                    "arrow_type": "Utf8",
+                    "encoding_write": {"name": "code"},
+                },
+            },
+            "required": ["a"],
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders(
+            code_encoder=lambda name, value, arrow_type: value.upper()
+        )
+        with pytest.raises(ValueError, match="the field is required"):
+            encoders["a"](None)
+
+    def test_apply_field_encoders_end_to_end(self):
+        from cdk.api.write_plan import apply_field_encoders
+
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": "string",
+                    "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                    "encoding_write": {"name": "iso8601"},
+                },
+            },
+            "required": ["shipped_at"],
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders()
+        with pytest.raises(ValueError, match="the field is required"):
+            apply_field_encoders([{"shipped_at": None}], encoders)
+
+    def test_an_absent_optional_field_stays_absent_not_an_explicit_null(self):
+        # PR #509 review: encoding every declared field unconditionally via
+        # record.get(name) turned a key the record never carried at all
+        # into an explicit JSON null -- absence and null have different
+        # semantics for many update APIs (null clears a value; an absent
+        # key leaves it untouched).
+        from cdk.api.write_plan import apply_field_encoders
+
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": "string",
+                    "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                    "encoding_write": {"name": "iso8601"},
+                },
+            },
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders()
+        record = {}
+        apply_field_encoders([record], encoders)
+        assert "shipped_at" not in record
+
+    def test_an_absent_required_field_still_raises(self):
+        # The record has no value for a field its own schema says every
+        # record must carry -- the same defect a genuinely present null
+        # raises for, so a record simply missing the key must not slip
+        # through unnoticed just because there is no key to encode.
+        from cdk.api.write_plan import apply_field_encoders
+
+        schema = {
+            "properties": {
+                "shipped_at": {
+                    "type": "string",
+                    "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                    "encoding_write": {"name": "iso8601"},
+                },
+            },
+            "required": ["shipped_at"],
+        }
+        contract = SchemaContract(schema)
+        encoders = contract.resolve_write_encoders()
+        with pytest.raises(ValueError, match="the field is required"):
+            apply_field_encoders([{}], encoders)
 
 
 class TestSchemaContractJsonSchema:
@@ -659,6 +1726,19 @@ class TestSchemaContractValidation:
         with pytest.raises(ValueError, match="'properties' is present but empty"):
             SchemaContract({"properties": {}})
 
+    def test_columns_not_a_list_raises(self):
+        # A truthy-but-wrong-shaped 'columns' slips past the `or []`
+        # fallback and the emptiness check above -- without this, it
+        # crashed later as an unclassified AttributeError deep inside
+        # _schema_from_columns instead of the ValueError every other
+        # malformed-payload case here raises.
+        with pytest.raises(ValueError, match="'columns' must be a list"):
+            SchemaContract({"columns": "not-a-list"})
+
+    def test_properties_not_an_object_raises(self):
+        with pytest.raises(ValueError, match="'properties' must be an object"):
+            SchemaContract({"properties": "not-an-object"})
+
     def test_column_without_name_raises(self):
         schema = {
             "columns": [
@@ -668,6 +1748,18 @@ class TestSchemaContractValidation:
         }
         with pytest.raises(ValueError, match="has no 'name' field"):
             SchemaContract(schema)
+
+    def test_a_non_object_column_entry_raises(self):
+        # The container-level check (test_columns_not_a_list_raises) only
+        # catches a wrong-shaped 'columns' itself; a free-form schema like
+        # {"columns": ["bad"]} still reaches the per-entry .get() calls
+        # here and crashed with AttributeError before this check existed.
+        with pytest.raises(ValueError, match="column at index 0 must be an object"):
+            SchemaContract({"columns": ["bad"]})
+
+    def test_a_non_object_property_entry_raises(self):
+        with pytest.raises(ValueError, match="field 'id' must be an object"):
+            SchemaContract({"properties": {"id": "bad"}})
 
     def test_column_without_arrow_type_raises(self):
         schema = {"columns": [{"name": "id"}]}
@@ -1125,12 +2217,34 @@ class TestFromPylistNullabilityEnforcement:
             c.from_pylist([{"v": 1.5}, {"v": None}])
 
     def test_timestamp_non_nullable_mixed_raises(self):
-        c = self._contract("Timestamp(MICROSECOND, UTC)", nullable=False)
+        c = SchemaContract(
+            {
+                "columns": [
+                    {
+                        "name": "v",
+                        "arrow_type": "Timestamp(MICROSECOND, UTC)",
+                        "nullable": False,
+                        "encoding": {"name": "iso8601"},
+                    }
+                ]
+            }
+        )
         with pytest.raises(ValueError, match=r"'v' is non-nullable.*\[0\]"):
             c.from_pylist([{"v": None}, {"v": "2026-01-01T00:00:00Z"}])
 
     def test_date_non_nullable_mixed_raises(self):
-        c = self._contract("Date32", nullable=False)
+        c = SchemaContract(
+            {
+                "columns": [
+                    {
+                        "name": "v",
+                        "arrow_type": "Date32",
+                        "nullable": False,
+                        "encoding": {"name": "iso8601"},
+                    }
+                ]
+            }
+        )
         with pytest.raises(ValueError, match=r"'v' is non-nullable.*\[1\]"):
             c.from_pylist([{"v": "2026-01-01"}, {"v": None}])
 
@@ -1149,7 +2263,7 @@ class TestFromPylistNullabilityEnforcement:
         with pytest.raises(ValueError, match=r"'v' is non-nullable.*\[1\]"):
             c.from_pylist([{"v": 0}, {"v": None}])
 
-    def test_source_format_non_nullable_mixed_raises(self):
+    def test_strptime_encoding_non_nullable_mixed_raises(self):
         contract = SchemaContract(
             {
                 "columns": [
@@ -1157,7 +2271,10 @@ class TestFromPylistNullabilityEnforcement:
                         "name": "ts",
                         "arrow_type": "Timestamp(MICROSECOND, UTC)",
                         "nullable": False,
-                        "source_format": "%Y-%m-%d %H:%M:%S",
+                        "encoding": {
+                            "name": "strptime",
+                            "pattern": "%Y-%m-%d %H:%M:%S",
+                        },
                     }
                 ]
             }
@@ -1165,7 +2282,7 @@ class TestFromPylistNullabilityEnforcement:
         with pytest.raises(ValueError, match=r"'ts' is non-nullable.*\[1\]"):
             contract.from_pylist([{"ts": "2026-01-01 00:00:00"}, {"ts": None}])
 
-    def test_source_format_date_non_nullable_mixed_raises(self):
+    def test_strptime_encoding_date_non_nullable_mixed_raises(self):
         contract = SchemaContract(
             {
                 "columns": [
@@ -1173,7 +2290,7 @@ class TestFromPylistNullabilityEnforcement:
                         "name": "d",
                         "arrow_type": "Date32",
                         "nullable": False,
-                        "source_format": "%Y/%m/%d",
+                        "encoding": {"name": "strptime", "pattern": "%Y/%m/%d"},
                     }
                 ]
             }
@@ -1321,8 +2438,26 @@ class TestFromPylistTemporalRejectsFloatingPoint:
     ]
 
     @staticmethod
-    def _contract(arrow_type: str) -> SchemaContract:
-        return SchemaContract({"columns": [{"name": "t", "arrow_type": arrow_type}]})
+    def _contract(arrow_type: str, *, encoding: dict | None = None) -> SchemaContract:
+        # "properties" (JSON-Schema/API), not "columns" (SQL): every test in
+        # this class is about the declared-encoding vocabulary, which only
+        # exists for an API endpoint -- a "columns" schema keeps the
+        # tolerant pre-#503 parse unconditionally (Acceptance #9), so
+        # exercising these cases against it would test the wrong shape.
+        field_def: dict = {"arrow_type": arrow_type}
+        if encoding is not None:
+            field_def["encoding"] = encoding
+        return SchemaContract({"properties": {"t": field_def}})
+
+    @staticmethod
+    def _epoch_unit_for(arrow_type: str) -> str:
+        """The wire unit that reproduces the retired bare-int fallback's
+        reading for *arrow_type*: the type's own declared unit, or ``DAY``
+        for Date32/Date64, whose physical storage has no unit parameter at
+        all but is itself a day count."""
+        if arrow_type.startswith(("Date32", "Date64")):
+            return "DAY"
+        return arrow_type.split("(", 1)[1].rstrip(")").split(",")[0].strip()
 
     @pytest.mark.parametrize("arrow_type", TEMPORAL_TYPES)
     @pytest.mark.parametrize("value", [1.5, 1.0, Decimal("1.5"), Decimal("1.0")])
@@ -1367,20 +2502,30 @@ class TestFromPylistTemporalRejectsFloatingPoint:
         "value", [numpy.int32(1), numpy.int64(1)], ids=["int32", "int64"]
     )
     def test_numpy_integer_offset_still_decodes(self, arrow_type, value):
-        batch = self._contract(arrow_type).from_pylist([{"t": value}])
+        # Retired implicit path: the bare-int fallback is gone, so the same
+        # reading now needs an explicit 'epoch' declaration in the wire's
+        # own unit -- the type's declared unit, or DAY for Date32/Date64.
+        encoding = {"name": "epoch", "unit": self._epoch_unit_for(arrow_type)}
+        batch = self._contract(arrow_type, encoding=encoding).from_pylist(
+            [{"t": value}]
+        )
         assert batch.num_rows == 1
         assert batch.column(0)[0].is_valid
 
     @pytest.mark.parametrize("arrow_type", TEMPORAL_TYPES)
     def test_integer_offset_still_decodes(self, arrow_type):
-        batch = self._contract(arrow_type).from_pylist([{"t": 1}])
+        encoding = {"name": "epoch", "unit": self._epoch_unit_for(arrow_type)}
+        batch = self._contract(arrow_type, encoding=encoding).from_pylist([{"t": 1}])
         assert batch.num_rows == 1
         assert batch.column(0)[0].is_valid
 
     def test_unix_seconds_decode_to_the_declared_instant(self):
         # Naive on purpose: Timestamp(SECOND) declares no timezone.
         expected = datetime(2024, 1, 2, 3, 4, 5)  # noqa: DTZ001
-        batch = self._contract("Timestamp(SECOND)").from_pylist([{"t": 1704164645}])
+        encoding = {"name": "epoch", "unit": "SECOND"}
+        batch = self._contract("Timestamp(SECOND)", encoding=encoding).from_pylist(
+            [{"t": 1704164645}]
+        )
         assert batch.column(0)[0].as_py() == expected
 
     @pytest.mark.parametrize(
@@ -1396,8 +2541,16 @@ class TestFromPylistTemporalRejectsFloatingPoint:
         ],
     )
     def test_iso_8601_strings_still_decode(self, arrow_type, text, expected):
-        batch = self._contract(arrow_type).from_pylist([{"t": text}])
+        batch = self._contract(arrow_type, encoding={"name": "iso8601"}).from_pylist(
+            [{"t": text}]
+        )
         assert batch.column(0)[0].as_py() == expected
+
+    def test_missing_encoding_on_bare_integer_offset_raises(self):
+        # Without a declared encoding, a bare int no longer decodes -- the
+        # class's own name is what this row of the retirement covers.
+        with pytest.raises(MissingEncodingError, match="encoding"):
+            self._contract("Timestamp(SECOND)").from_pylist([{"t": 1704164645}])
 
     @pytest.mark.parametrize("arrow_type", ["Date32", "Duration(MICROSECOND)"])
     def test_nested_temporal_leaf_rejects_floating_point(self, arrow_type):
@@ -1487,3 +2640,37 @@ class TestFromPylistTemporalRejectsFloatingPoint:
         )
         batch = contract.from_pylist([{"dates": (1,)}])
         assert batch.column(0)[0].as_py() == [date(1970, 1, 2)]
+
+
+class TestSqlColumnsShapeKeepsTheLegacyTemporalParse:
+    """A database ``"columns"`` schema has no ``encoding`` vocabulary at
+    all, and #503's strict "no implicit decode" refusal must never reach
+    it (Acceptance #9) -- it keeps the exact pre-#503 tolerant parse: a
+    bare ISO-8601 string or a bare unit-offset integer, with no declared
+    ``encoding``, still decodes. The JSON-Schema/API-shaped mirror of each
+    case here (``"properties"``) is covered by
+    ``TestFromPylistTemporalRejectsFloatingPoint``, where the same input
+    now requires a declared ``encoding``.
+    """
+
+    @staticmethod
+    def _columns_contract(arrow_type: str) -> SchemaContract:
+        return SchemaContract({"columns": [{"name": "t", "arrow_type": arrow_type}]})
+
+    def test_bare_iso_string_still_decodes_with_no_declared_encoding(self):
+        contract = self._columns_contract("Timestamp(MICROSECOND)")
+        batch = contract.from_pylist([{"t": "2024-01-02T03:04:05"}])
+        expected = datetime(2024, 1, 2, 3, 4, 5)  # noqa: DTZ001 -- naive on purpose
+        assert batch.column(0)[0].as_py() == expected
+
+    def test_bare_integer_offset_still_decodes_with_no_declared_encoding(self):
+        contract = self._columns_contract("Timestamp(SECOND)")
+        batch = contract.from_pylist([{"t": 1704164645}])
+        expected = datetime(2024, 1, 2, 3, 4, 5)  # noqa: DTZ001 -- naive on purpose
+        assert batch.column(0)[0].as_py() == expected
+
+    def test_native_datetime_value_still_passes_through(self):
+        contract = self._columns_contract("Timestamp(MICROSECOND)")
+        moment = datetime(2024, 1, 1)  # noqa: DTZ001
+        batch = contract.from_pylist([{"t": moment}])
+        assert batch.column(0)[0].as_py() == moment

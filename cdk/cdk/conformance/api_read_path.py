@@ -70,6 +70,7 @@ from analitiq.contracts.endpoints import (
 from yarl import URL
 
 from cdk.api.body import FORM_CONTENT_TYPE, encode_form, media_type
+from cdk.api.dialects import ApiDialect, dialect_overrides
 from cdk.api.exceptions import RequestSpecError
 from cdk.api.page_loop import Page, PageRequest, PaginationStrategy
 from cdk.api.query_style import declared_query_styles
@@ -93,7 +94,7 @@ from cdk.exceptions import ReadError
 from cdk.json_utils import authored_json
 from cdk.resolver import Resolver, scope_paths
 from cdk.schema_contract import SchemaContract
-from cdk.type_map import TypeMapper
+from cdk.type_map import TypeMapError, TypeMapper
 
 from .api_surface import (
     STAND_IN_ORIGIN,
@@ -135,8 +136,10 @@ _COMPILE_FAILURES = (ReadError, RequestSpecError)
 _ADVANCE_FAILURES = (ReadError, ValueError)
 
 #: What building a record schema raises: ``ReadError`` from the records ref
-#: and the arrow-type resolution, ``ValueError`` from ``SchemaContract``.
-_RECORD_FAILURES = (ReadError, ValueError)
+#: and the arrow-type resolution, ``ValueError`` from ``SchemaContract``,
+#: ``TypeMapError`` (``MissingEncodingError`` included) from a field whose
+#: wire shape needs a declared ``encoding`` and has none.
+_RECORD_FAILURES = (ReadError, ValueError, TypeMapError)
 
 #: The page size the probe reads with. Any positive integer works; a value
 #: unlike the contract's own bounds makes it obvious in a message that the
@@ -1385,6 +1388,23 @@ def _operands_are_declared(probe: _ReadProbe, declared: Predicate) -> bool:
     )
 
 
+def _api_code_decoder(target: ConformanceTarget) -> Any | None:
+    """Build the ``code_decoder`` :meth:`SchemaContract` read-encoding checks need.
+
+    Answers the same question ``cdk.api.generic._read_schema_contract``'s
+    ``dialect_overrides()`` call answers at runtime -- "is 'code' backed by
+    a real override" -- from the class alone, never instantiated: this
+    check never invokes the decoder, only whether one is declared, so
+    handing it the unbound method is enough.
+    """
+    dialect_class = getattr(target.connector_class, "dialect_class", None)
+    if not (isinstance(dialect_class, type) and issubclass(dialect_class, ApiDialect)):
+        return None
+    if not dialect_overrides(dialect_class, "decode_field"):
+        return None
+    return dialect_class.decode_field
+
+
 def check_api_record_schema(target: ConformanceTarget) -> list[Violation]:
     """Certify that each read's declared records become an Arrow schema.
 
@@ -1393,7 +1413,11 @@ def check_api_record_schema(target: ConformanceTarget) -> list[Violation]:
     through the connector's read type-map, and the result builds a
     :class:`~cdk.schema_contract.SchemaContract`. A ref naming a field the
     schema does not declare, or a JSON type the type-map has no rule for,
-    fails the read on its first page.
+    fails the read on its first page -- and so does a field whose
+    ``arrow_type`` has no direct wire-native rendering
+    (``check_required_read_encoding``) and declares no ``encoding``: it
+    would validate here and fail only when a real record is read, which is
+    exactly the gap this check exists to close before that happens.
     """
     violations: list[Violation] = unread_endpoints(RECORDS_CHECK, target)
     mapper = target.type_mapper
@@ -1401,7 +1425,9 @@ def check_api_record_schema(target: ConformanceTarget) -> list[Violation]:
         try:
             items = records_items_schema(label, read.response)
             _resolve_arrow_types(items, mapper)
-            SchemaContract(items)
+            SchemaContract(
+                items, code_decoder=_api_code_decoder(target)
+            ).check_required_read_encoding()
         except _RECORD_FAILURES as err:
             violations.append(
                 Violation(

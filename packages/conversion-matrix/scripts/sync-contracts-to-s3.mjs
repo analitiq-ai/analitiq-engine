@@ -62,6 +62,16 @@ export const ARTIFACTS = [
     channel: "main",
   },
   {
+    prefix: "decoders-catalog",
+    path: "cdk/cdk/type_map/decoders_catalog.json",
+    channel: "main",
+  },
+  {
+    prefix: "encoders-catalog",
+    path: "cdk/cdk/type_map/encoders_catalog.json",
+    channel: "main",
+  },
+  {
     prefix: "contract-consumption",
     path: "cdk/cdk/contract_consumption.json",
     channel: "cdk-release",

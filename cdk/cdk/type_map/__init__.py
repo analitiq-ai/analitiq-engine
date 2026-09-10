@@ -22,6 +22,7 @@ from .conversions import (
 )
 from .exceptions import (
     InvalidTypeMapError,
+    MissingEncodingError,
     TypeMapError,
     TypeMapNotFoundError,
     UnmappedTypeError,
@@ -89,6 +90,7 @@ __all__ = [
     "Conversion",
     "GRAMMAR_VERSION",
     "InvalidTypeMapError",
+    "MissingEncodingError",
     "TYPE_MAP_FILENAME",
     "WRITE_TYPE_MAP_FILENAME",
     "TypeMapError",

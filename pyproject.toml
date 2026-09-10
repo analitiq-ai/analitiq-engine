@@ -71,6 +71,12 @@ pydantic = "^2.0.0"
 # cdk[api]` cannot be imported at all.
 jsonschema = {version = "^4.25", extras = ["format-nongpl"]}
 
+# Backs encoding 'iso_duration' (cdk.type_map.arrow) -- an actual conformant
+# ISO-8601 duration parser rather than a hand-rolled one. Declared here for
+# the same reason as jsonschema above: the CDK puts it behind its [api]
+# extra, and the engine always runs that surface.
+isoduration = "^20.11.0"
+
 # Matches every connector-authored regex pattern this engine executes
 # (type-map native_type/arrow_type rules, API param.pattern): both are
 # untrusted, AI-authored input, and RE2 is automaton-based, so match time is
@@ -256,6 +262,7 @@ module = [
     "pyarrow.*",
     "dateutil.*",
     "re2.*",
+    "isoduration.*",
 ]
 ignore_missing_imports = true
 

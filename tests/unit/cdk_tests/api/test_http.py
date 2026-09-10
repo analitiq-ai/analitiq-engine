@@ -53,16 +53,19 @@ def _sender(
 
 
 class TestSerialisation:
-    def test_a_decimal_keeps_its_exact_digits_in_the_body(self) -> None:
-        # The read path used to narrow body decimals to float for the
-        # stdlib encoder's benefit -- an admitted lossy conversion, done
-        # for a serialiser rather than for the provider.
-        assert encode_body({"amount": Decimal("1.50")}) == b'{"amount":"1.50"}'
+    def test_an_unencoded_decimal_in_the_body_fails_loud(self) -> None:
+        # No implicit rendering survives: a Decimal field must resolve
+        # through its declared encoding_write before reaching encode_body.
+        with pytest.raises(TypeError) as caught:
+            encode_body({"amount": Decimal("1.50")})
+        assert "encoding_write" in str(caught.value.__cause__)
 
-    def test_bytes_go_as_base64(self) -> None:
-        # JSON has no byte string; base64 is the convention, and stringifying
-        # the repr would put "b'\\x00'" on the wire.
-        assert encode_body({"blob": b"\x00\x01"}) == b'{"blob":"AAE="}'
+    def test_unencoded_bytes_in_the_body_fail_loud(self) -> None:
+        # Same rule for the base64 case: JSON has no byte string, and this
+        # function no longer picks a convention for one silently.
+        with pytest.raises(TypeError) as caught:
+            encode_body({"blob": b"\x00\x01"})
+        assert "encoding_write" in str(caught.value.__cause__)
 
     def test_the_decode_keeps_fractional_tokens_exact(self) -> None:
         parsed = loads_preserving_decimals('{"amount": 1.50}')

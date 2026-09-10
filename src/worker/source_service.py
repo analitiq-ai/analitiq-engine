@@ -28,7 +28,7 @@ from cdk.declarations import (
 )
 from cdk.exceptions import ReadError, TransportSpecError
 from cdk.sql.exceptions import TlsVerificationError, UnsupportedDialectOperationError
-from cdk.type_map import InvalidTypeMapError, UnmappedTypeError
+from cdk.type_map import TypeMapError
 from src.grpc.generated.analitiq.v1 import (
     CursorSave,
     PayloadFormat,
@@ -47,8 +47,11 @@ logger = logging.getLogger(__name__)
 _DETERMINISTIC_READ_ERRORS = (
     ReadError,
     UnsupportedDialectOperationError,
-    UnmappedTypeError,
-    InvalidTypeMapError,
+    # Every type-map authoring defect (an unmapped native type, a malformed
+    # or missing 'encoding' declaration, ...) is a contract/config problem
+    # retrying cannot heal -- the common base, not one subclass at a time,
+    # so a new TypeMapError subclass is deterministic by construction.
+    TypeMapError,
     # Deterministic connector/transport-spec validation failures (its own
     # contract): an authoring defect in a value expression that escapes a
     # connector unwrapped must not classify as retryable.

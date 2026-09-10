@@ -233,6 +233,146 @@ class TestCursorFieldType:
         with pytest.raises(ReadError, match="'missing' is not declared"):
             record_field_declaration("items", self._schema("string"), "missing")
 
+    def test_a_cursor_field_declaring_iso8601_is_accepted(self) -> None:
+        # iso8601 doesn't change the raw wire value's shape from what was
+        # always implicit before issue #503 -- an ISO string stays an ISO
+        # string -- so the checkpoint mechanism's own ISO parse still reads
+        # it back correctly.
+        schema = {
+            "properties": {
+                "updated_at": {"type": "string", "encoding": {"name": "iso8601"}}
+            }
+        }
+        assert record_field_declaration(
+            "items", schema, "updated_at"
+        ) == FieldDeclaration("string", None)
+
+    @pytest.mark.parametrize("declared_encoding", [None, {"name": "iso8601"}])
+    def test_a_time_of_day_cursor_field_is_refused(
+        self, declared_encoding: dict[str, str] | None
+    ) -> None:
+        # _parse_cursor (cdk.api.replication) reads every string-typed
+        # cursor field as an absolute ISO-8601 moment regardless of
+        # whether 'iso8601' is declared explicitly or no encoding is
+        # declared at all -- both reach the same branch. A Time32/Time64
+        # field's wire value ("12:34:56") is a time of day, not a moment,
+        # so it would checkpoint fine once and fail resuming on the next
+        # run.
+        field: dict[str, Any] = {"type": "string", "arrow_type": "Time64(MICROSECOND)"}
+        if declared_encoding is not None:
+            field["encoding"] = declared_encoding
+        schema = {"properties": {"updated_at": field}}
+        with pytest.raises(ReadError, match="time of day"):
+            record_field_declaration("items", schema, "updated_at")
+
+    def test_a_timestamp_cursor_field_is_unaffected_by_the_time_of_day_check(
+        self,
+    ) -> None:
+        schema = {
+            "properties": {
+                "updated_at": {
+                    "type": "string",
+                    "arrow_type": "Timestamp(MICROSECOND, tz=UTC)",
+                    "encoding": {"name": "iso8601"},
+                }
+            }
+        }
+        assert record_field_declaration(
+            "items", schema, "updated_at"
+        ) == FieldDeclaration("string", None)
+
+    @pytest.mark.parametrize(
+        ("unit", "fmt"),
+        [("SECOND", "epoch_seconds"), ("MILLISECOND", "epoch_milliseconds")],
+    )
+    def test_a_cursor_field_declaring_epoch_with_a_matching_format_is_accepted(
+        self, unit: str, fmt: str
+    ) -> None:
+        schema = {
+            "properties": {
+                "updated_at": {
+                    "type": "integer",
+                    "format": fmt,
+                    "encoding": {"name": "epoch", "unit": unit},
+                }
+            }
+        }
+        assert record_field_declaration(
+            "items", schema, "updated_at"
+        ) == FieldDeclaration("integer", fmt)
+
+    def test_a_cursor_field_declaring_epoch_on_a_string_type_is_refused(self) -> None:
+        # cursor_bounds reads an epoch cursor back only from an
+        # integer-typed field; a string-typed field checkpoints and reads
+        # back through the ISO-8601 branch instead, which cannot parse a
+        # bare epoch tick count.
+        schema = {
+            "properties": {
+                "updated_at": {
+                    "type": "string",
+                    "format": "epoch_seconds",
+                    "encoding": {"name": "epoch", "unit": "SECOND"},
+                }
+            }
+        }
+        with pytest.raises(ReadError, match="not 'integer'"):
+            record_field_declaration("items", schema, "updated_at")
+
+    def test_a_cursor_field_declaring_epoch_with_an_unsupported_unit_is_refused(
+        self,
+    ) -> None:
+        # cursor_bounds only ever reads an epoch cursor back in seconds or
+        # milliseconds; MICROSECOND/NANOSECOND/DAY have no matching format.
+        schema = {
+            "properties": {
+                "updated_at": {
+                    "type": "integer",
+                    "format": "epoch_seconds",
+                    "encoding": {"name": "epoch", "unit": "MICROSECOND"},
+                }
+            }
+        }
+        with pytest.raises(ReadError, match="only reads an epoch cursor back"):
+            record_field_declaration("items", schema, "updated_at")
+
+    def test_a_cursor_field_declaring_epoch_with_a_mismatched_format_is_refused(
+        self,
+    ) -> None:
+        # The decoder would render milliseconds while cursor_bounds reads
+        # the checkpoint back as seconds -- a resume from the wrong instant,
+        # not a crash, so it must be refused rather than silently accepted.
+        schema = {
+            "properties": {
+                "updated_at": {
+                    "type": "integer",
+                    "format": "epoch_seconds",
+                    "encoding": {"name": "epoch", "unit": "MILLISECOND"},
+                }
+            }
+        }
+        with pytest.raises(ReadError, match="resumes from the wrong instant"):
+            record_field_declaration("items", schema, "updated_at")
+
+    def test_a_cursor_field_declaring_an_unsafe_encoding_is_refused(self) -> None:
+        # The checkpoint stores this field's raw wire value and the next
+        # run's cursor_bounds parses it back strictly as ISO-8601/epoch --
+        # a regex_epoch wrapper string is neither, so it would checkpoint
+        # fine once and then break the stream on its second run.
+        schema = {
+            "properties": {
+                "updated_at": {
+                    "type": "string",
+                    "encoding": {
+                        "name": "regex_epoch",
+                        "pattern": r"/Date\((\d+)\)/",
+                        "unit": "MILLISECOND",
+                    },
+                }
+            }
+        }
+        with pytest.raises(ReadError, match="regex_epoch"):
+            record_field_declaration("items", schema, "updated_at")
+
 
 class TestMapperIsScoped:
     def test_the_endpoint_scope_chooses_the_mapper(self) -> None:

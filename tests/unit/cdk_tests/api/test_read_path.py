@@ -12,11 +12,13 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
+import pyarrow as pa
 import pytest
 from analitiq.contracts.endpoints import Pagination
 from pydantic import TypeAdapter
 
 from cdk.api import GenericAPIConnector
+from cdk.api.dialects import ApiDialect
 from cdk.api.page_loop import PaginationStrategy
 from cdk.api.param_rules import ParamRules
 from cdk.api.read_setup import build_read_strategy
@@ -25,6 +27,7 @@ from cdk.batch_metadata import response_metadata_of
 from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.exceptions import ReadError, TransientReadError
 from cdk.resolver import ResolutionContext, Resolver
+from cdk.type_map.exceptions import MissingEncodingError
 
 from .fakes import (
     BASE_URL,
@@ -1553,6 +1556,154 @@ class TestDecimalPrecision:
         )
         with pytest.raises(ReadError, match="without losing digits"):
             await _read(session, self._keyset_body_document())
+
+
+#: A non-Xero temporal field, for the required-encoding gate tests. Any
+#: field name other than the issue's own Xero example, per the spec's
+#: acceptance criterion that the caller proving the gate not be the one
+#: named in the issue.
+_SHIPPED_AT = {
+    "shipped_at": {
+        "type": "string",
+        "format": "date-time",
+        "native_type": "timestamp",
+        "arrow_type": "Timestamp(MICROSECOND, UTC)",
+    }
+}
+
+
+def _with_encoding(encoding: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "shipped_at": {**_SHIPPED_AT["shipped_at"], "encoding": encoding},
+    }
+
+
+@pytest.mark.asyncio
+class TestDeclarativeWireFormatDecoding:
+    """The engine-side half of issue #503, driven end to end through
+    ``GenericAPIConnector.read_batches`` -- the same call path a real
+    connector runs, not a bare ``SchemaContract`` construction."""
+
+    async def test_a_temporal_field_with_no_declared_encoding_is_refused(self) -> None:
+        # Acceptance: "a non-Xero conformance-kit fixture connector with a
+        # native_type -> arrow_type pair requiring a decode and no declared
+        # encoding raises a loud, named config error at SchemaContract
+        # construction." Driven here through the connector, not directly
+        # against SchemaContract, so the gate's wiring into _plan_read is
+        # what is under test, not just the mechanism it calls.
+        document = endpoint_document(record_fields=_SHIPPED_AT)
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        with pytest.raises(MissingEncodingError, match="shipped_at"):
+            await _read(session, document)
+
+    async def test_explicit_iso8601_still_decodes_bare_iso_text(self) -> None:
+        # Acceptance: removing the implicit default must not silently change
+        # behaviour for a field that declares it explicitly.
+        document = endpoint_document(record_fields=_with_encoding({"name": "iso8601"}))
+        session = FakeSession(
+            [
+                FakeResponse(
+                    text='{"records": [{"id": 1, "name": "a", '
+                    '"shipped_at": "2026-01-02T03:04:05Z"}]}'
+                )
+            ]
+        )
+        batches = await _read(session, document)
+        value = batches[0].column("shipped_at").to_pylist()[0]
+        assert (value.year, value.hour, value.second) == (2026, 3, 5)
+        assert value.utcoffset().total_seconds() == 0
+
+    async def test_xero_shaped_regex_epoch_decodes_the_wrapped_instant(self) -> None:
+        # Acceptance: a Xero-shaped field with encoding: {"name":
+        # "regex_epoch", ...} decodes /Date(1541176290160+0000)/ to the
+        # correct UTC instant with the offset ignored.
+        encoding = {
+            "name": "regex_epoch",
+            "pattern": r"/Date\((\d+)(?:[+-]\d{4})?\)/",
+            "unit": "MILLISECOND",
+        }
+        document = endpoint_document(record_fields=_with_encoding(encoding))
+        session = FakeSession(
+            [
+                FakeResponse(
+                    text='{"records": [{"id": 1, "name": "a", '
+                    '"shipped_at": "/Date(1541176290160+0000)/"}]}'
+                )
+            ]
+        )
+        batches = await _read(session, document)
+        value = batches[0].column("shipped_at").to_pylist()[0]
+        assert value.isoformat() == "2018-11-02T16:31:30.160000+00:00"
+
+    async def test_code_hatch_routes_through_the_dialect_hook(self) -> None:
+        # Acceptance: a fixture declaring {"encoding": {"name": "code"}}
+        # with a connector.py override of the decode hook is invoked and
+        # its returned Arrow array accepted.
+        class UppercasingDialect(ApiDialect):
+            def decode_field(
+                self, field_name: str, values: list[Any], arrow_type: Any
+            ) -> Any:
+                return pa.array(
+                    [None if v is None else v.upper() for v in values], type=arrow_type
+                )
+
+        class CustomConnector(GenericAPIConnector):
+            dialect_class = UppercasingDialect
+
+        record_fields = {
+            "shipped_at": {
+                "type": "string",
+                "native_type": "text",
+                "arrow_type": "Utf8",
+                "encoding": {"name": "code"},
+            }
+        }
+        document = endpoint_document(record_fields=record_fields)
+        session = FakeSession(
+            [
+                FakeResponse(
+                    text='{"records": [{"id": 1, "name": "a", "shipped_at": "hi"}]}'
+                )
+            ]
+        )
+        connector = CustomConnector()
+        runtime = runtime_with(session)
+        batches = []
+        async for batch in connector.read_batches(
+            runtime,
+            {"endpoint_document": document, "stream_source": stream_source()},
+            checkpoint=FakeCheckpoint(),
+            stream_name="items",
+        ):
+            batches.append(batch)
+        assert batches[0].column("shipped_at").to_pylist() == ["HI"]
+
+    async def test_code_hatch_with_no_dialect_override_fails_loud(self) -> None:
+        # A connector declaring "code" with no dialect override must fail
+        # at plan time, before the first request goes out -- the base
+        # ApiDialect.decode_field is never handed to SchemaContract as a
+        # code_decoder in the first place (dialect_overrides() says it
+        # isn't a real override), so check_required_read_encoding refuses
+        # it the same way an undeclared field would, naming it.
+        record_fields = {
+            "shipped_at": {
+                "type": "string",
+                "native_type": "text",
+                "arrow_type": "Utf8",
+                "encoding": {"name": "code"},
+            }
+        }
+        document = endpoint_document(record_fields=record_fields)
+        session = FakeSession(
+            [
+                FakeResponse(
+                    text='{"records": [{"id": 1, "name": "a", "shipped_at": "hi"}]}'
+                )
+            ]
+        )
+        with pytest.raises(ValueError, match="shipped_at"):
+            await _read(session, document)
+        assert session.calls == []
 
 
 @pytest.mark.asyncio
