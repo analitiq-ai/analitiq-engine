@@ -411,6 +411,39 @@ def _declared_json_types_for_code_output(field_def: dict[str, Any]) -> list[str]
     return declared
 
 
+def _check_declared_json_type(value: Any, field_def: dict[str, Any], path: str) -> None:
+    """Refuse *value* if it renders as a JSON type the field never declared."""
+    json_types = _declared_json_types_for_code_output(field_def)
+    if not json_types:
+        return
+    rendered = _rendered_json_type(value)
+    # JSON Schema defines every integer as a valid number.
+    widened = rendered == "integer" and "number" in json_types
+    if not widened and rendered not in json_types:
+        raise ValueError(
+            f"{path}: ApiDialect.encode_field returned a value that renders "
+            f"as {rendered!r}, but field declares type {json_types!r}"
+        )
+
+
+def _check_required_properties(
+    value: dict[str, Any], field_def: dict[str, Any], path: str
+) -> None:
+    """Refuse a nested object *value* missing a key its schema requires.
+
+    The schema's own ``"required"`` names every key a conforming JSON
+    object must carry; a code hatch's result omitting one would
+    otherwise reach the provider silently violating the endpoint's
+    declared input schema.
+    """
+    for required_key in field_def.get("required") or []:
+        if required_key not in value:
+            raise ValueError(
+                f"{path}: ApiDialect.encode_field's result is missing "
+                f"required property {required_key!r}"
+            )
+
+
 def _validate_code_output_shape(
     value: Any, field_def: dict[str, Any], path: str
 ) -> None:
@@ -428,33 +461,15 @@ def _validate_code_output_shape(
     A value with no corresponding declaration (an extra key the schema
     never named) is left unchecked -- the same leniency
     ``_check_nested_leaf_encoding`` and friends already extend to a
-    schema that does not fully enumerate every possible key. A nested
-    object's own declared ``"required"`` is checked the other direction:
-    a key the schema names but ``value`` omits would otherwise reach the
-    provider silently violating the endpoint's own declared input schema.
+    schema that does not fully enumerate every possible key.
     """
     if value is None:
         return
-    json_types = _declared_json_types_for_code_output(field_def)
-    if json_types:
-        rendered = _rendered_json_type(value)
-        # JSON Schema defines every integer as a valid number.
-        widened = rendered == "integer" and "number" in json_types
-        if not widened and rendered not in json_types:
-            raise ValueError(
-                f"{path}: ApiDialect.encode_field returned a value that "
-                f"renders as {rendered!r}, but field declares type "
-                f"{json_types!r}"
-            )
+    _check_declared_json_type(value, field_def, path)
     if _is_json_field(field_def):
         return
     if isinstance(value, dict):
-        for required_key in field_def.get("required") or []:
-            if required_key not in value:
-                raise ValueError(
-                    f"{path}: ApiDialect.encode_field's result is missing "
-                    f"required property {required_key!r}"
-                )
+        _check_required_properties(value, field_def, path)
         properties = field_def.get("properties") or {}
         for key, child in value.items():
             child_def = properties.get(key)
