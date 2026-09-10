@@ -88,6 +88,21 @@ class TestIsoDurationCapsAtMicrosecondPrecision:
         result = fn(field, ["PT9000000000.000001S"])
         assert result[0].value == 9_000_000_000_000_001
 
+    def test_an_unusually_precise_fraction_rounds_on_its_exact_value(self) -> None:
+        # The default (ambient) Decimal context is 28 significant digits,
+        # and isoduration's own internal arithmetic respects it, not only
+        # the multiply in this catalog's own code -- so a duration string
+        # with more than 28 significant digits could be silently rounded
+        # by parse_duration itself before this decoder ever saw the true
+        # value. Widened locally so this 33-significant-digit value scales
+        # to the true 1,000,000.500...001 microseconds (rounds up), not
+        # the apparent tie 1,000,000.5 a context-truncated read would see
+        # (which rounds down under round-half-even).
+        field = pa.field("d", pa.duration("us"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "iso_duration"}}, field)
+        result = fn(field, ["PT1.00000050000000000000000000000001S"])
+        assert result[0].value == 1_000_001
+
 
 class TestIsoDurationScalesToTheDestinationUnit:
     def test_a_large_day_count_fits_a_coarse_destination_unit(self) -> None:
@@ -376,6 +391,61 @@ class TestEpochScalesToTheDestinationUnitBeforeRangeChecking:
         )
         with pytest.raises(ValueError, match="outside the range"):
             fn(field, [99999999999999999999999999])
+
+
+class TestEpochToDate64PreservesItsWiderRange:
+    """Date64 stores milliseconds since the epoch (int64), a far wider
+    range than Date32's int32 day count -- forcing every Date target
+    through a Date32 intermediate caps Date64 at Date32's narrower range
+    for no reason.
+    """
+
+    def test_a_day_count_past_date32s_range_still_fits_date64(self) -> None:
+        field = pa.field("d", pa.date64(), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "epoch", "unit": "DAY"}}, field)
+        result = fn(field, [3_000_000_000])
+        assert result[0].value == 3_000_000_000 * 86_400_000
+
+    def test_date32_still_enforces_its_own_narrower_range(self) -> None:
+        field = pa.field("d", pa.date32(), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "epoch", "unit": "DAY"}}, field)
+        with pytest.raises(ValueError, match="outside the range"):
+            fn(field, [3_000_000_000])
+
+
+class TestEpochDecodedTimesStayWithinOneDay:
+    """A Time value is an elapsed offset from midnight: pyarrow's own
+    array construction enforces only the physical int32/int64 storage
+    width, not the 0 <= value < one-day domain, so an out-of-range tick
+    (a whole day, or negative) would otherwise build silently -- storage-
+    valid but not a representable time of day.
+    """
+
+    def test_a_whole_day_tick_is_refused(self) -> None:
+        field = pa.field("t", pa.time32("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "epoch", "unit": "SECOND"}}, field)
+        with pytest.raises(ValueError, match="single calendar day"):
+            fn(field, [86400])
+
+    def test_a_negative_tick_is_refused(self) -> None:
+        field = pa.field("t", pa.time32("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "epoch", "unit": "SECOND"}}, field)
+        with pytest.raises(ValueError, match="single calendar day"):
+            fn(field, [-1])
+
+    def test_the_boundary_values_are_accepted(self) -> None:
+        field = pa.field("t", pa.time32("s"), nullable=True)
+        fn = resolve_decoder({"encoding": {"name": "epoch", "unit": "SECOND"}}, field)
+        assert fn(field, [0])[0].value == 0
+        assert fn(field, [86399])[0].value == 86399
+
+    def test_time64_is_bound_the_same_way(self) -> None:
+        field = pa.field("t", pa.time64("us"), nullable=True)
+        fn = resolve_decoder(
+            {"encoding": {"name": "epoch", "unit": "MICROSECOND"}}, field
+        )
+        with pytest.raises(ValueError, match="single calendar day"):
+            fn(field, [86400 * 1_000_000])
 
     def test_a_whole_day_epoch_value_fits_date32_despite_overflowing_microseconds(
         self,

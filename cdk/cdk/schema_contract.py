@@ -1157,13 +1157,43 @@ class SchemaContract:
         values: list[Any],
         code_decoder: Callable[[str, list[Any], pa.DataType], pa.Array] | None,
     ) -> pa.Array:
-        """Run the ``code`` escape hatch, or refuse when none was supplied."""
+        """Run the ``code`` escape hatch, or refuse when none was supplied.
+
+        The result is validated here, not left to whatever downstream
+        consumer first touches it wrong: ``ApiDialect.decode_field`` is
+        connector-authored code this catalog does not control, and a
+        result that is not actually a ``pa.Array`` (``None``, a plain
+        list, ...) reaching ``_assert_non_nullable``'s ``array.null_count``
+        raises a raw ``AttributeError`` -- not a ``ValueError`` or
+        ``TypeMapError``, so the worker's deterministic-error classifier
+        does not recognise it and retries the same broken connector
+        result forever instead of failing the configuration loudly. A
+        type that merely differs in width within the same family (a
+        decoder handing back plain ``Utf8`` for a ``Json`` field's
+        ``large_string``) goes through :meth:`_convert_to_field`, the same
+        matrix-backed safe cast an arrived driver column already gets --
+        one policy for "close enough to the declared type", not a second,
+        stricter equality check only the code hatch enforces.
+        """
         if code_decoder is None:
             raise ValueError(
                 f"column {field.name!r} declares encoding name='code' but "
                 f"this SchemaContract was built without a code_decoder"
             )
-        return code_decoder(field.name, values, field.type)
+        array = code_decoder(field.name, values, field.type)
+        if not isinstance(array, pa.Array):
+            raise ValueError(
+                f"column {field.name!r}: ApiDialect.decode_field must return "
+                f"a pa.Array, got {type(array).__name__}"
+            )
+        if len(array) != len(values):
+            raise ValueError(
+                f"column {field.name!r}: ApiDialect.decode_field returned "
+                f"{len(array)} values for {len(values)} input rows"
+            )
+        if array.type == field.type:
+            return array
+        return SchemaContract._convert_to_field(field, array)
 
     @staticmethod
     def _build_numeric_column(field: pa.Field, values: list[Any]) -> pa.Array:

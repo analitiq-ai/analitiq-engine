@@ -1132,6 +1132,83 @@ class TestSchemaContractFromPylist:
         assert batch.to_pylist() == [{"payload": "raw"}]
 
 
+class TestCodeDecoderResultIsValidated:
+    """ApiDialect.decode_field is connector-authored, not code this catalog
+    controls. A malformed result reaching _assert_non_nullable's own
+    array.null_count raised a raw AttributeError -- not recognised by the
+    worker's deterministic-error classifier, so a broken connector result
+    retried forever instead of failing the configuration loudly.
+    """
+
+    _SCHEMA = {
+        "properties": {
+            "a": {"type": "string", "arrow_type": "Utf8", "encoding": {"name": "code"}},
+        },
+        "required": ["a"],
+    }
+
+    def test_a_non_array_result_is_refused(self):
+        contract = SchemaContract(
+            self._SCHEMA, code_decoder=lambda name, values, arrow_type: None
+        )
+        with pytest.raises(ValueError, match="must return a pa.Array"):
+            contract.from_pylist([{"a": "x"}])
+
+    def test_an_array_of_an_incompatible_type_is_refused(self):
+        # int64 -> Utf8 is 'explicit' in the conversion matrix (requires a
+        # declared 'to_string'), the same verdict an arrived SQL driver
+        # column gets for the identical mismatch (_convert_to_field) --
+        # one policy, not a second one only the code hatch enforces.
+        contract = SchemaContract(
+            self._SCHEMA,
+            code_decoder=lambda name, values, arrow_type: pa.array(
+                [1], type=pa.int64()
+            ),
+        )
+        with pytest.raises(ValueError, match="requires an explicit 'to_string'"):
+            contract.from_pylist([{"a": "x"}])
+
+    def test_an_array_of_a_family_compatible_width_is_safely_cast(self):
+        # Utf8 -> LargeUtf8 is 'auto' in the matrix -- a decoder handing
+        # back the plain string pyarrow infers by default for a field
+        # declared as Json (large_string) must not be rejected merely for
+        # not matching field.type's own concrete width.
+        schema = {
+            "properties": {
+                "payload": {
+                    "type": "object",
+                    "arrow_type": "Json",
+                    "encoding": {"name": "code"},
+                },
+            }
+        }
+        contract = SchemaContract(
+            schema, code_decoder=lambda name, values, arrow_type: pa.array(values)
+        )
+        batch = contract.from_pylist([{"payload": "raw"}])
+        assert batch.to_pylist() == [{"payload": "raw"}]
+
+    def test_an_array_of_the_wrong_length_is_refused(self):
+        contract = SchemaContract(
+            self._SCHEMA,
+            code_decoder=lambda name, values, arrow_type: pa.array(
+                ["x", "y"], type=pa.utf8()
+            ),
+        )
+        with pytest.raises(ValueError, match="2 values for 1 input rows"):
+            contract.from_pylist([{"a": "x"}])
+
+    def test_a_conforming_result_is_still_accepted(self):
+        contract = SchemaContract(
+            self._SCHEMA,
+            code_decoder=lambda name, values, arrow_type: pa.array(
+                [v.upper() for v in values], type=pa.utf8()
+            ),
+        )
+        batch = contract.from_pylist([{"a": "x"}])
+        assert batch.to_pylist() == [{"a": "X"}]
+
+
 class TestSchemaContractJsonSchema:
     """JSON-Schema payloads use ``properties`` and still require arrow_type."""
 

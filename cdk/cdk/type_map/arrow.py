@@ -13,7 +13,7 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time
-from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
 from re import Pattern
 from typing import Any, Final
 
@@ -438,6 +438,7 @@ def _scale_tick(
     storage_unit: str,
     *,
     narrow: bool,
+    day_bound: bool = False,
 ) -> int:
     """Convert one tick from *wire_unit* to *storage_unit*, or raise naming the row.
 
@@ -450,6 +451,14 @@ def _scale_tick(
     unit easily holds. Range-checked (:func:`_require_in_pyarrow_range`)
     against the destination's actual storage width only after scaling --
     the wire unit's own range was never the destination's to enforce.
+
+    *day_bound* additionally requires the scaled value to be a genuine
+    elapsed offset from midnight (``0 <= scaled < one day``), for a Time
+    destination: pyarrow's own array construction only enforces the
+    physical int32/int64 width, not the time-of-day domain, so a wire
+    tick of ``86400`` (a whole day) or ``-1`` at unit ``SECOND`` would
+    otherwise build silently -- storage-valid but not a representable
+    time of day.
     """
     total_ns = tick * _NANOSECONDS_PER_WIRE_UNIT[wire_unit]
     scaled, remainder = divmod(total_ns, _NANOSECONDS_PER_PYARROW_UNIT[storage_unit])
@@ -460,33 +469,61 @@ def _scale_tick(
             f"it has a nonzero remainder that would otherwise be silently "
             f"discarded"
         )
-    return _require_in_pyarrow_range(field, row, scaled, narrow=narrow)
+    scaled = _require_in_pyarrow_range(field, row, scaled, narrow=narrow)
+    if day_bound:
+        ticks_per_day = (
+            _NANOSECONDS_PER_DAY // _NANOSECONDS_PER_PYARROW_UNIT[storage_unit]
+        )
+        if not 0 <= scaled < ticks_per_day:
+            raise ValueError(
+                f"column {field.name!r} at row {row}: tick {tick} in unit "
+                f"{wire_unit!r} scales to {scaled}, outside the single "
+                f"calendar day (0 to {ticks_per_day - 1}) a {field.type!s} "
+                f"value can hold"
+            )
+    return scaled
 
 
 _NANOSECONDS_PER_DAY: Final[int] = 24 * 3600 * 1_000_000_000
 
 
+#: Milliseconds per day. Date64's own storage unit -- a day count is not
+#: enough for it: Arrow stores Date64 as milliseconds since the epoch
+#: (always day-aligned), an int64 range wider than Date32's int32 day
+#: count.
+_MILLISECONDS_PER_DAY: Final[int] = 24 * 3600 * 1000
+
+
 def _day_tick(
     field: pa.Field, row: int, tick: int, *, wire_unit: str | None = None
 ) -> int:
-    """Convert one tick to a whole-day count for Date32, or raise naming the row.
+    """Convert one tick to ``field.type``'s own day/millisecond count.
 
     *wire_unit* ``None`` means *tick* already is a day count (the ``DAY``
     epoch unit). Otherwise floors to the whole day through nanoseconds --
     arbitrary-precision integer arithmetic, never a Timestamp intermediate
     at any fixed sub-day precision, which a whole-day epoch value large
-    enough to still fit Date32's int32 day count can overflow (200,000,000
-    days is an ordinary day count but ~17.28e18 microseconds, past
-    int64). Floors rather than rejecting sub-day precision, matching
-    pyarrow's own Timestamp -> Date safe-cast (verified), then
-    range-checks (:func:`_require_in_pyarrow_range`) against Date32's own
-    int32 storage.
+    enough to still fit Date64's own range can overflow (200,000,000 days
+    is an ordinary day count but ~17.28e18 microseconds, past int64).
+    Floors rather than rejecting sub-day precision, matching pyarrow's
+    own Timestamp -> Date safe-cast (verified). Returned in ``field.type``'s
+    own unit -- milliseconds for Date64, days for Date32 -- rather than
+    always the narrower Date32 day count: a day count past Date32's int32
+    range (3,000,000,000 days) still fits Date64's wider int64
+    millisecond range, and forcing every Date target through the Date32
+    intermediate this used to build would reject it. Range-checked
+    (:func:`_require_in_pyarrow_range`) against the actual storage width
+    being returned.
     """
     days = (
         tick
         if wire_unit is None
         else tick * _NANOSECONDS_PER_WIRE_UNIT[wire_unit] // _NANOSECONDS_PER_DAY
     )
+    if pa.types.is_date64(field.type):
+        return _require_in_pyarrow_range(
+            field, row, days * _MILLISECONDS_PER_DAY, narrow=False
+        )
     return _require_in_pyarrow_range(field, row, days, narrow=True)
 
 
@@ -511,7 +548,7 @@ def _ticks_to_array(
             None if t is None else _day_tick(field, row, t)
             for row, t in enumerate(ticks)
         ]
-        return pc.cast(pa.array(days, type=pa.date32()), field.type, safe=True)
+        return pa.array(days, type=field.type)
     if pa.types.is_timestamp(field.type) or pa.types.is_duration(field.type):
         scaled = [
             None
@@ -522,25 +559,36 @@ def _ticks_to_array(
         return pa.array(scaled, type=field.type)
     if pa.types.is_date(field.type):
         # Date32/Date64 have no sub-day unit to scale into directly, and
-        # a Timestamp(us) intermediate (the earlier fix here) reintroduces
+        # a Timestamp(us) intermediate (an earlier fix here) reintroduces
         # exactly the overflow this whole function exists to avoid: a
-        # whole-day epoch value that fits Date32's int32 day count easily
-        # can still overflow int64 microseconds (200,000,000 days is
-        # ~17.28e18 us). Floors straight to a whole-day tick instead --
+        # whole-day epoch value that fits Date32's/Date64's own range
+        # easily can still overflow int64 microseconds (200,000,000 days
+        # is ~17.28e18 us). Floors straight to a whole-day tick instead --
         # matching pyarrow's own Timestamp -> Date cast, which floors
-        # sub-day precision rather than rejecting it (verified) -- and
-        # range-checks that against Date32's own int32 storage.
+        # sub-day precision rather than rejecting it (verified) -- built
+        # directly in field.type's own unit (days for Date32,
+        # milliseconds for Date64, see _day_tick) rather than always
+        # through a Date32 intermediate, which would cap every target at
+        # Date32's narrower int32 range even when field.type is Date64.
         days = [
             None if t is None else _day_tick(field, row, t, wire_unit=wire_unit)
             for row, t in enumerate(ticks)
         ]
-        return pc.cast(pa.array(days, type=pa.date32()), field.type, safe=True)
+        return pa.array(days, type=field.type)
     if pa.types.is_time(field.type):
         narrow = pa.types.is_time32(field.type)
         scaled = [
             None
             if t is None
-            else _scale_tick(field, row, t, wire_unit, field.type.unit, narrow=narrow)
+            else _scale_tick(
+                field,
+                row,
+                t,
+                wire_unit,
+                field.type.unit,
+                narrow=narrow,
+                day_bound=True,
+            )
             for row, t in enumerate(ticks)
         ]
         return pa.array(scaled, type=field.type)
@@ -854,6 +902,17 @@ _MICROSECONDS_PER_DURATION_COMPONENT: Final[dict[str, int]] = {
     "seconds": 1_000_000,
 }
 
+#: Decimal context precision for parsing and scaling one duration string.
+#: The default (28 significant digits) is ambient, not a cap this
+#: function alone controls: ``isoduration``'s own internal arithmetic on
+#: a duration's Decimal components respects it too, so an unusually
+#: precise fractional-seconds string can already be silently rounded
+#: inside ``parse_duration`` itself, before ``parsed.time.seconds`` is
+#: ever multiplied here. 50 digits is comfortably past any realistic
+#: duration text while still bounding the arithmetic cost of a
+#: pathological one.
+_DURATION_DECIMAL_PRECISION: Final[int] = 50
+
 
 def _iso_duration_ticks(
     field: pa.Field,
@@ -879,32 +938,38 @@ def _iso_duration_ticks(
             f"column {field.name!r} at row {row}: encoding "
             f"'iso_duration' expects a string, got {type(v).__name__}"
         )
-    try:
-        parsed = parse_duration(v)
-    except duration_parsing_exception as exc:
-        raise ValueError(
-            f"column {field.name!r} at row {row}: {v!r} is not a valid "
-            f"ISO-8601 duration this decoder supports (weeks, days, and "
-            f"clock components only -- no calendar Y/M): {exc}"
-        ) from exc
-    if parsed.date.years or parsed.date.months:
-        # A Duration is a fixed physical length; a calendar year or
-        # month is not (a month is 28-31 days depending which one), so
-        # neither has a tick count to convert to.
-        raise ValueError(
-            f"column {field.name!r} at row {row}: {v!r} names a "
-            f"calendar year/month component, which this decoder does "
-            f"not support -- a Duration is a fixed physical length and "
-            f"a month has none"
+    # Widened, not the default 28-digit ambient context: isoduration's own
+    # internal Decimal arithmetic respects whatever context is active when
+    # it runs, so parse_duration itself -- not only the multiply below --
+    # can silently round an unusually precise fractional-seconds string.
+    with localcontext() as ctx:
+        ctx.prec = _DURATION_DECIMAL_PRECISION
+        try:
+            parsed = parse_duration(v)
+        except duration_parsing_exception as exc:
+            raise ValueError(
+                f"column {field.name!r} at row {row}: {v!r} is not a valid "
+                f"ISO-8601 duration this decoder supports (weeks, days, "
+                f"and clock components only -- no calendar Y/M): {exc}"
+            ) from exc
+        if parsed.date.years or parsed.date.months:
+            # A Duration is a fixed physical length; a calendar year or
+            # month is not (a month is 28-31 days depending which one), so
+            # neither has a tick count to convert to.
+            raise ValueError(
+                f"column {field.name!r} at row {row}: {v!r} names a "
+                f"calendar year/month component, which this decoder does "
+                f"not support -- a Duration is a fixed physical length and "
+                f"a month has none"
+            )
+        total_micros = (
+            parsed.date.weeks * _MICROSECONDS_PER_DURATION_COMPONENT["weeks"]
+            + parsed.date.days * _MICROSECONDS_PER_DURATION_COMPONENT["days"]
+            + parsed.time.hours * _MICROSECONDS_PER_DURATION_COMPONENT["hours"]
+            + parsed.time.minutes * _MICROSECONDS_PER_DURATION_COMPONENT["minutes"]
+            + parsed.time.seconds * _MICROSECONDS_PER_DURATION_COMPONENT["seconds"]
         )
-    total_micros = (
-        parsed.date.weeks * _MICROSECONDS_PER_DURATION_COMPONENT["weeks"]
-        + parsed.date.days * _MICROSECONDS_PER_DURATION_COMPONENT["days"]
-        + parsed.time.hours * _MICROSECONDS_PER_DURATION_COMPONENT["hours"]
-        + parsed.time.minutes * _MICROSECONDS_PER_DURATION_COMPONENT["minutes"]
-        + parsed.time.seconds * _MICROSECONDS_PER_DURATION_COMPONENT["seconds"]
-    )
-    return int(total_micros.to_integral_value(rounding=ROUND_HALF_EVEN))
+        return int(total_micros.to_integral_value(rounding=ROUND_HALF_EVEN))
 
 
 def _decode_iso_duration(_config: Mapping[str, Any]) -> DecodeFn:
