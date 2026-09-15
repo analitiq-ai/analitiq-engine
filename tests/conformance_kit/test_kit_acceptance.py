@@ -29,7 +29,7 @@ from cdk.conformance import (
     check_type_map_round_trip,
     load_target,
 )
-from cdk.conformance.fakes import minimal_connector_definition
+from cdk.conformance.fakes import minimal_connector_definition, type_map_document
 from cdk.conformance.roundtrip import probe_arrow_types, render_probe
 from cdk.conformance.target import ConformanceTarget
 from cdk.conformance.tier1 import test_definition as kit_definition
@@ -58,14 +58,8 @@ TIER1_MIN_PASSED = 10
 
 
 def _type_map_read_doc(rules: list) -> str:
-    """A minimal ``{$schema, direction, rules}`` type-map-read.json body."""
-    return json.dumps(
-        {
-            "$schema": "https://schemas.analitiq.ai/type-map-read/latest.json",
-            "direction": "read",
-            "rules": rules,
-        }
-    )
+    """A minimal ``type-map-read.json`` body, serialized."""
+    return json.dumps(type_map_document("read", rules))
 
 
 def _skipped_lines(output: str) -> list[str]:

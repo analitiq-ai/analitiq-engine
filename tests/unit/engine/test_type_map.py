@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from cdk.conformance.fakes import type_map_document
 from cdk.type_map import (
     InvalidTypeMapError,
     TypeMapNotFoundError,
@@ -687,14 +688,6 @@ class TestResolveArrowType:
 # ---------------------------------------------------------------------------
 
 
-def _envelope(direction: str, rules: list) -> dict:
-    return {
-        "$schema": f"https://schemas.analitiq.ai/type-map-{direction}/latest.json",
-        "direction": direction,
-        "rules": rules,
-    }
-
-
 def _write_connector(
     root: Path,
     slug: str,
@@ -709,11 +702,11 @@ def _write_connector(
     )
     if type_map is not None:
         (definition / TYPE_MAP_FILENAME).write_text(
-            json.dumps(_envelope("read", type_map))
+            json.dumps(type_map_document("read", type_map))
         )
     if write_type_map is not None:
         (definition / WRITE_TYPE_MAP_FILENAME).write_text(
-            json.dumps(_envelope("write", write_type_map))
+            json.dumps(type_map_document("write", write_type_map))
         )
 
 
@@ -770,7 +763,7 @@ class TestLoadConnectionTypeMap:
         definition.mkdir(parents=True)
         (definition / TYPE_MAP_FILENAME).write_text(
             json.dumps(
-                _envelope(
+                type_map_document(
                     "read",
                     [
                         {
@@ -1697,7 +1690,7 @@ class TestWriteMapLoader:
         definition.mkdir(parents=True)
         (definition / TYPE_MAP_FILENAME).write_text(
             json.dumps(
-                _envelope(
+                type_map_document(
                     "read",
                     [
                         {
@@ -1711,7 +1704,7 @@ class TestWriteMapLoader:
         )
         (definition / WRITE_TYPE_MAP_FILENAME).write_text(
             json.dumps(
-                _envelope(
+                type_map_document(
                     "write",
                     [
                         {

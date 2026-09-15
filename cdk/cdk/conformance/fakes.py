@@ -108,3 +108,18 @@ def minimal_connector_definition(
         "transports": {kind: _MINIMAL_TRANSPORTS[kind]},
         **extra,
     }
+
+
+def type_map_document(direction: str, rules: list[Any]) -> dict[str, Any]:
+    """Return a ``type-map-{direction}.json`` body.
+
+    The ``{$schema, direction, rules}`` envelope: a test authoring a
+    type-map file writes it the way a connector ships
+    it, the way the engine loads it; this is the one statement of which
+    blocks that takes.
+    """
+    return {
+        "$schema": f"https://schemas.analitiq.ai/type-map-{direction}/latest.json",
+        "direction": direction,
+        "rules": rules,
+    }
