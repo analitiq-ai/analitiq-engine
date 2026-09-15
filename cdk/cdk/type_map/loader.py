@@ -51,6 +51,12 @@ def _read_type_map_rules(path: Path, label: str) -> list | None:
     except json.JSONDecodeError as err:
         raise InvalidTypeMapError(f"{label}: {path} is not valid JSON: {err}") from err
     try:
+        # The rule array this returns, not the envelope it came from, is what
+        # parse_rules/parse_write_rules validate against the contract's
+        # TypeMapReadDoc/TypeMapWriteDoc RootModel (rules.py's _parse). The
+        # pinned contract still models that RootModel over the bare array;
+        # when claude-code-plugins#316 makes it the envelope instead, this
+        # unwrap and that validation level have to move together.
         rules: list = payload["rules"]
     except (TypeError, KeyError) as err:
         raise InvalidTypeMapError(
@@ -87,11 +93,11 @@ def _load_write_rules(
     at load (and is caught by connector/registry CI) rather than surfacing later
     as an opaque create_table error.
     """
-    payload = _read_type_map_rules(definition_dir / WRITE_TYPE_MAP_FILENAME, label)
-    if payload is None:
+    raw_rules = _read_type_map_rules(definition_dir / WRITE_TYPE_MAP_FILENAME, label)
+    if raw_rules is None:
         return None
     rules = parse_write_rules(
-        payload, source=str(definition_dir / WRITE_TYPE_MAP_FILENAME)
+        raw_rules, source=str(definition_dir / WRITE_TYPE_MAP_FILENAME)
     )
     logger.info("Loaded write-type-map for %s (%d rules)", label, len(rules))
     return rules
@@ -134,12 +140,12 @@ def load_type_map(connectors_dir: Path, slug: str) -> TypeMapper:
     """
     definition = connector_definition_dir(connectors_dir, slug)
     path = definition / TYPE_MAP_FILENAME
-    payload = _read_type_map_rules(path, f"connector {slug!r}")
-    if payload is None:
+    raw_rules = _read_type_map_rules(path, f"connector {slug!r}")
+    if raw_rules is None:
         raise TypeMapNotFoundError(
             f"connector {slug!r}: required type-map not found at {path}"
         )
-    rules = parse_rules(payload, source=str(path))
+    rules = parse_rules(raw_rules, source=str(path))
     write_rules = _load_write_rules(definition, f"connector {slug!r}")
     logger.info("Loaded type-map for connector '%s' (%d rules)", slug, len(rules))
     return TypeMapper(slug, rules, write_rules)
@@ -158,10 +164,10 @@ def load_connection_type_map(
     """
     definition = connections_dir / connection_id / "definition"
     path = definition / TYPE_MAP_FILENAME
-    payload = _read_type_map_rules(path, f"connection {connection_id!r}")
-    if payload is None:
+    raw_rules = _read_type_map_rules(path, f"connection {connection_id!r}")
+    if raw_rules is None:
         return None
-    rules = parse_rules(payload, source=str(path))
+    rules = parse_rules(raw_rules, source=str(path))
     write_rules = _load_write_rules(definition, f"connection {connection_id!r}")
     logger.info(
         "Loaded connection type-map for '%s' (%d rules)", connection_id, len(rules)
