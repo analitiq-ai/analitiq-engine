@@ -136,13 +136,10 @@ class TestBuildTypeMapper:
         mapper = build_type_mapper("postgres", _RULES, _WRITE_RULES)
         assert mapper is not None
 
-    def test_non_list_rules_payload_rejected(self):
-        with pytest.raises(InvalidTypeMapError, match="JSON array"):
-            build_type_mapper("postgres", {"match": "exact"})
-
-    def test_non_list_write_rules_payload_rejected(self):
-        with pytest.raises(InvalidTypeMapError, match="write-type-map"):
-            build_type_mapper("postgres", _RULES, {"match": "exact"})
+    # build_type_mapper no longer type-checks a payload before handing it to
+    # parse_rules/parse_write_rules -- rules-is-a-list belongs to
+    # analitiq-validator's envelope contract, not published yet (known gap:
+    # analitiq-engine#524, blocked on claude-code-plugins#316).
 
 
 class TestBuildBootstrap:

@@ -107,19 +107,14 @@ def build_type_mapper(
     The worker-bootstrap path: the trusted shell reads the connector's /
     connection's ``type-map-read.json`` (+ optional ``type-map-write.json``) and
     ships the raw arrays in the launch bootstrap; the worker rebuilds the
-    mapper here with the same validation the file loaders apply.
+    mapper here with the same validation the file loaders apply -- neither
+    checks that a payload is actually a list. That check belongs to
+    analitiq-validator's envelope-shape contract, not yet published; tracked
+    as a known gap in issue #524, blocked on claude-code-plugins#316.
     """
-    if not isinstance(rules_payload, list):
-        raise InvalidTypeMapError(
-            f"{label}: type-map payload must be a JSON array of rules"
-        )
     rules = parse_rules(rules_payload, source=f"{label} (bootstrap)")
     write_rules = None
     if write_rules_payload is not None:
-        if not isinstance(write_rules_payload, list):
-            raise InvalidTypeMapError(
-                f"{label}: write-type-map payload must be a JSON array of rules"
-            )
         write_rules = parse_write_rules(
             write_rules_payload, source=f"{label} (bootstrap)"
         )
