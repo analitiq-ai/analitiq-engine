@@ -7,6 +7,15 @@ Two parallel locations are supported:
 - ``connections/{connection_id}/definition/type-map-read.json`` — optional. Covers
   the connection's private endpoints (e.g. user-specific DB tables). Absent
   when a connection only uses public endpoints from its connector.
+
+Each file is a top-level JSON object ``{$schema, direction, rules}``:
+``direction`` is a fixed literal naming which file this is (``"read"`` /
+``"write"``) and ``rules`` is the rule array. That shape -- ``direction``
+matching the file, ``rules`` well-formed -- is analitiq-validator's contract
+to enforce, gated once in DIP CI before a connector is published (one gate
+per document; see schema-contracts.md). This loader trusts a shipped file and
+only unwraps the envelope, rather than re-checking what publishing already
+gated.
 """
 
 from __future__ import annotations
@@ -26,13 +35,14 @@ TYPE_MAP_FILENAME = "type-map-read.json"
 WRITE_TYPE_MAP_FILENAME = "type-map-write.json"
 
 
-def _read_json_array(path: Path, label: str) -> list | None:
-    """Read *path* as a JSON array; ``None`` when absent.
+def _read_type_map_rules(path: Path, label: str) -> list | None:
+    """Read *path*'s rules array out of its envelope.
 
-    Malformed JSON or a non-array document is a hard
-    ``InvalidTypeMapError`` — every type-map consumer (file loaders and the
-    worker-bootstrap path) shares this validation, so the same broken file
-    fails with the same error everywhere.
+    Unwraps the ``{$schema, direction, rules}`` envelope; ``None`` when the
+    file is absent. Malformed JSON, or an envelope with no ``rules`` array,
+    is a hard ``InvalidTypeMapError`` -- a file this broken did not pass the
+    DIP publish gate, so the shell or the checkout is broken, not the
+    document's authored content.
     """
     if not path.is_file():
         return None
@@ -40,9 +50,13 @@ def _read_json_array(path: Path, label: str) -> list | None:
         payload = json.loads(path.read_text())
     except json.JSONDecodeError as err:
         raise InvalidTypeMapError(f"{label}: {path} is not valid JSON: {err}") from err
-    if not isinstance(payload, list):
-        raise InvalidTypeMapError(f"{label}: {path} must contain a JSON array of rules")
-    return payload
+    try:
+        rules: list = payload["rules"]
+    except (TypeError, KeyError) as err:
+        raise InvalidTypeMapError(
+            f"{label}: {path} does not contain a 'rules' array"
+        ) from err
+    return rules
 
 
 def read_raw_type_maps(
@@ -55,10 +69,10 @@ def read_raw_type_maps(
     :func:`build_type_mapper`. ``None`` when the directory has no
     ``type-map-read.json``.
     """
-    rules = _read_json_array(definition_dir / TYPE_MAP_FILENAME, label)
+    rules = _read_type_map_rules(definition_dir / TYPE_MAP_FILENAME, label)
     if rules is None:
         return None
-    write_rules = _read_json_array(definition_dir / WRITE_TYPE_MAP_FILENAME, label)
+    write_rules = _read_type_map_rules(definition_dir / WRITE_TYPE_MAP_FILENAME, label)
     return {"rules": rules, "write_rules": write_rules}
 
 
@@ -73,7 +87,7 @@ def _load_write_rules(
     at load (and is caught by connector/registry CI) rather than surfacing later
     as an opaque create_table error.
     """
-    payload = _read_json_array(definition_dir / WRITE_TYPE_MAP_FILENAME, label)
+    payload = _read_type_map_rules(definition_dir / WRITE_TYPE_MAP_FILENAME, label)
     if payload is None:
         return None
     rules = parse_write_rules(
@@ -125,7 +139,7 @@ def load_type_map(connectors_dir: Path, slug: str) -> TypeMapper:
     """
     definition = connector_definition_dir(connectors_dir, slug)
     path = definition / TYPE_MAP_FILENAME
-    payload = _read_json_array(path, f"connector {slug!r}")
+    payload = _read_type_map_rules(path, f"connector {slug!r}")
     if payload is None:
         raise TypeMapNotFoundError(
             f"connector {slug!r}: required type-map not found at {path}"
@@ -149,7 +163,7 @@ def load_connection_type_map(
     """
     definition = connections_dir / connection_id / "definition"
     path = definition / TYPE_MAP_FILENAME
-    payload = _read_json_array(path, f"connection {connection_id!r}")
+    payload = _read_type_map_rules(path, f"connection {connection_id!r}")
     if payload is None:
         return None
     rules = parse_rules(payload, source=str(path))

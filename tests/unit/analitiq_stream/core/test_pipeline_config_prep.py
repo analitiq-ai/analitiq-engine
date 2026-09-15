@@ -140,19 +140,31 @@ def _endpoint_doc(endpoint_id: str) -> dict[str, Any]:
     }
 
 
-def _type_map_rules() -> list:
-    return [
-        {"match": "exact", "native_type": "VARCHAR", "arrow_type": "Utf8"},
-        {"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"},
-    ]
+def _type_map_doc(rules: list) -> dict[str, Any]:
+    return {
+        "$schema": "https://schemas.analitiq.ai/type-map-read/latest.json",
+        "direction": "read",
+        "rules": rules,
+    }
 
 
-def _connection_type_map_rules() -> list:
+def _type_map_rules() -> dict[str, Any]:
+    return _type_map_doc(
+        [
+            {"match": "exact", "native_type": "VARCHAR", "arrow_type": "Utf8"},
+            {"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"},
+        ]
+    )
+
+
+def _connection_type_map_rules() -> dict[str, Any]:
     """Connection-scoped override map: carries a rule the connector's
     map does not, so tests can tell which mapper actually resolved."""
-    return [
-        {"match": "exact", "native_type": "JSONB", "arrow_type": "Utf8"},
-    ]
+    return _type_map_doc(
+        [
+            {"match": "exact", "native_type": "JSONB", "arrow_type": "Utf8"},
+        ]
+    )
 
 
 def _database_endpoint_doc(database_object: dict[str, Any]) -> dict[str, Any]:

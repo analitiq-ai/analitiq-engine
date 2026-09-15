@@ -74,13 +74,25 @@ def _api_document(operations):
     }
 
 
+def _envelope(direction, rules):
+    return {
+        "$schema": f"https://schemas.analitiq.ai/type-map-{direction}/latest.json",
+        "direction": direction,
+        "rules": rules,
+    }
+
+
 def _write_definition(base, *, rules=None, write_rules=None):
     definition = base / "definition"
     definition.mkdir(parents=True)
     if rules is not None:
-        (definition / "type-map-read.json").write_text(json.dumps(rules))
+        (definition / "type-map-read.json").write_text(
+            json.dumps(_envelope("read", rules))
+        )
     if write_rules is not None:
-        (definition / "type-map-write.json").write_text(json.dumps(write_rules))
+        (definition / "type-map-write.json").write_text(
+            json.dumps(_envelope("write", write_rules))
+        )
     return definition
 
 

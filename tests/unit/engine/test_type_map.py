@@ -687,6 +687,14 @@ class TestResolveArrowType:
 # ---------------------------------------------------------------------------
 
 
+def _envelope(direction: str, rules: list) -> dict:
+    return {
+        "$schema": f"https://schemas.analitiq.ai/type-map-{direction}/latest.json",
+        "direction": direction,
+        "rules": rules,
+    }
+
+
 def _write_connector(
     root: Path,
     slug: str,
@@ -700,9 +708,13 @@ def _write_connector(
         json.dumps({"connector_id": "x", "slug": slug, "connector_type": "database"})
     )
     if type_map is not None:
-        (definition / TYPE_MAP_FILENAME).write_text(json.dumps(type_map))
+        (definition / TYPE_MAP_FILENAME).write_text(
+            json.dumps(_envelope("read", type_map))
+        )
     if write_type_map is not None:
-        (definition / WRITE_TYPE_MAP_FILENAME).write_text(json.dumps(write_type_map))
+        (definition / WRITE_TYPE_MAP_FILENAME).write_text(
+            json.dumps(_envelope("write", write_type_map))
+        )
 
 
 class TestLoaders:
@@ -712,10 +724,22 @@ class TestLoaders:
             load_type_map(tmp_path, "empty")
 
     def test_type_map_wrong_root_type(self, tmp_path: Path):
+        # The old bare-array root shape is rejected: the file must now be an
+        # envelope object with a 'rules' array. Envelope correctness
+        # (direction matching the file, rules well-formed) is
+        # analitiq-validator's job at DIP publish time, not re-checked here.
         _write_connector(tmp_path, "bad")
-        (tmp_path / "bad" / "definition" / TYPE_MAP_FILENAME).write_text("{}")
-        with pytest.raises(InvalidTypeMapError, match="must contain a JSON array"):
+        (tmp_path / "bad" / "definition" / TYPE_MAP_FILENAME).write_text("[]")
+        with pytest.raises(InvalidTypeMapError, match="does not contain a 'rules'"):
             load_type_map(tmp_path, "bad")
+
+    def test_type_map_missing_rules_key_rejected(self, tmp_path: Path):
+        _write_connector(tmp_path, "no-rules")
+        (tmp_path / "no-rules" / "definition" / TYPE_MAP_FILENAME).write_text(
+            json.dumps({"$schema": "...", "direction": "read"})
+        )
+        with pytest.raises(InvalidTypeMapError, match="does not contain a 'rules'"):
+            load_type_map(tmp_path, "no-rules")
 
     def test_type_map_malformed_json(self, tmp_path: Path):
         _write_connector(tmp_path, "busted")
@@ -746,13 +770,16 @@ class TestLoadConnectionTypeMap:
         definition.mkdir(parents=True)
         (definition / TYPE_MAP_FILENAME).write_text(
             json.dumps(
-                [
-                    {
-                        "match": "exact",
-                        "native_type": "CUSTOM_ENUM",
-                        "arrow_type": "Utf8",
-                    },
-                ]
+                _envelope(
+                    "read",
+                    [
+                        {
+                            "match": "exact",
+                            "native_type": "CUSTOM_ENUM",
+                            "arrow_type": "Utf8",
+                        },
+                    ],
+                )
             )
         )
         mapper = load_connection_type_map(tmp_path, "my-pg")
@@ -767,11 +794,11 @@ class TestLoadConnectionTypeMap:
         with pytest.raises(InvalidTypeMapError, match="not valid JSON"):
             load_connection_type_map(tmp_path, "broken")
 
-    def test_non_array_root_rejected(self, tmp_path: Path):
+    def test_missing_rules_key_rejected(self, tmp_path: Path):
         definition = tmp_path / "bad" / "definition"
         definition.mkdir(parents=True)
         (definition / TYPE_MAP_FILENAME).write_text("{}")
-        with pytest.raises(InvalidTypeMapError, match="must contain a JSON array"):
+        with pytest.raises(InvalidTypeMapError, match="does not contain a 'rules'"):
             load_connection_type_map(tmp_path, "bad")
 
 
@@ -1647,7 +1674,7 @@ class TestWriteMapLoader:
             load_type_map(tmp_path, "busted")
         assert not isinstance(exc.value, TypeMapNotFoundError)
 
-    def test_non_array_write_map_raises_at_load(self, tmp_path):
+    def test_write_map_missing_rules_key_raises_at_load(self, tmp_path):
         _write_connector(
             tmp_path,
             "wrong",
@@ -1656,7 +1683,7 @@ class TestWriteMapLoader:
             ],
         )
         (tmp_path / "wrong" / "definition" / WRITE_TYPE_MAP_FILENAME).write_text("{}")
-        with pytest.raises(InvalidTypeMapError, match="must contain a JSON array"):
+        with pytest.raises(InvalidTypeMapError, match="does not contain a 'rules'"):
             load_type_map(tmp_path, "wrong")
 
     def test_absent_read_map_raises_not_found(self, tmp_path):
@@ -1670,12 +1697,30 @@ class TestWriteMapLoader:
         definition.mkdir(parents=True)
         (definition / TYPE_MAP_FILENAME).write_text(
             json.dumps(
-                [{"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"}]
+                _envelope(
+                    "read",
+                    [
+                        {
+                            "match": "exact",
+                            "native_type": "BIGINT",
+                            "arrow_type": "Int64",
+                        }
+                    ],
+                )
             )
         )
         (definition / WRITE_TYPE_MAP_FILENAME).write_text(
             json.dumps(
-                [{"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"}]
+                _envelope(
+                    "write",
+                    [
+                        {
+                            "match": "exact",
+                            "arrow_type": "Int64",
+                            "native_type": "BIGINT",
+                        }
+                    ],
+                )
             )
         )
         mapper = load_connection_type_map(tmp_path, "my-pg")

@@ -57,6 +57,17 @@ FIXTURE_ENDPOINTS = sorted(FIXTURES_DIR.glob("*/definition/endpoints/*.json"))
 TIER1_MIN_PASSED = 10
 
 
+def _type_map_read_doc(rules: list) -> str:
+    """A minimal ``{$schema, direction, rules}`` type-map-read.json body."""
+    return json.dumps(
+        {
+            "$schema": "https://schemas.analitiq.ai/type-map-read/latest.json",
+            "direction": "read",
+            "rules": rules,
+        }
+    )
+
+
 def _skipped_lines(output: str) -> list[str]:
     """The suite's own ``SKIPPED [n] <file>:<line>: <reason>`` lines."""
     return [line for line in output.splitlines() if line.startswith("SKIPPED ")]
@@ -193,7 +204,9 @@ class TestThinConnectorPassesVacuously:
             json.dumps(minimal_connector_definition("database", "conformance-thin"))
         )
         (definition_dir / "type-map-read.json").write_text(
-            '[{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}]'
+            _type_map_read_doc(
+                [{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}]
+            )
         )
         target = load_target(tmp_path)
         assert target.connector_class is not None, "thin path falls back"
@@ -231,7 +244,9 @@ class TestUnassessableKindIsNotAPass:
             json.dumps(minimal_connector_definition("file", "unassessed"))
         )
         (definition_dir / "type-map-read.json").write_text(
-            '[{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}]'
+            _type_map_read_doc(
+                [{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}]
+            )
         )
         completed = run_kit_suite(
             "cdk.conformance.tier1",

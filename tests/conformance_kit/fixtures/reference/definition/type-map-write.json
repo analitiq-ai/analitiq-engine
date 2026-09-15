@@ -1,13 +1,61 @@
-[
-  { "match": "exact", "arrow_type": "Boolean", "native_type": "BOOLEAN" },
-  { "match": "exact", "arrow_type": "Int16", "native_type": "SMALLINT" },
-  { "match": "exact", "arrow_type": "Int32", "native_type": "INTEGER" },
-  { "match": "exact", "arrow_type": "Int64", "native_type": "BIGINT" },
-  { "match": "exact", "arrow_type": "Float64", "native_type": "DOUBLE PRECISION" },
-  { "match": "exact", "arrow_type": "Utf8", "native_type": "TEXT" },
-  { "match": "regex", "arrow_type": "^Decimal128\\((?<p>\\d+), (?<s>\\d+)\\)$", "native_type": "NUMERIC(${p}, ${s})" },
-  { "match": "exact", "arrow_type": "Date32", "native_type": "DATE" },
-  { "match": "exact", "arrow_type": "Timestamp(MICROSECOND, UTC)", "native_type": "TIMESTAMPTZ" },
-  { "match": "exact", "arrow_type": "Timestamp(MICROSECOND)", "native_type": "TIMESTAMP" },
-  { "match": "exact", "arrow_type": "Json", "native_type": "JSONB" }
-]
+{
+  "$schema": "https://schemas.analitiq.ai/type-map-write/latest.json",
+  "direction": "write",
+  "rules": [
+    {
+      "match": "exact",
+      "arrow_type": "Boolean",
+      "native_type": "BOOLEAN"
+    },
+    {
+      "match": "exact",
+      "arrow_type": "Int16",
+      "native_type": "SMALLINT"
+    },
+    {
+      "match": "exact",
+      "arrow_type": "Int32",
+      "native_type": "INTEGER"
+    },
+    {
+      "match": "exact",
+      "arrow_type": "Int64",
+      "native_type": "BIGINT"
+    },
+    {
+      "match": "exact",
+      "arrow_type": "Float64",
+      "native_type": "DOUBLE PRECISION"
+    },
+    {
+      "match": "exact",
+      "arrow_type": "Utf8",
+      "native_type": "TEXT"
+    },
+    {
+      "match": "regex",
+      "arrow_type": "^Decimal128\\((?<p>\\d+), (?<s>\\d+)\\)$",
+      "native_type": "NUMERIC(${p}, ${s})"
+    },
+    {
+      "match": "exact",
+      "arrow_type": "Date32",
+      "native_type": "DATE"
+    },
+    {
+      "match": "exact",
+      "arrow_type": "Timestamp(MICROSECOND, UTC)",
+      "native_type": "TIMESTAMPTZ"
+    },
+    {
+      "match": "exact",
+      "arrow_type": "Timestamp(MICROSECOND)",
+      "native_type": "TIMESTAMP"
+    },
+    {
+      "match": "exact",
+      "arrow_type": "Json",
+      "native_type": "JSONB"
+    }
+  ]
+}

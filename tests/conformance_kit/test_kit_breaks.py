@@ -1214,7 +1214,15 @@ class TestTargetLoadingBreaks:
         """
         root = tmp_path / "reference"
         shutil.copytree(REFERENCE_DIR, root)
-        (root / "definition" / "type-map-write.json").write_text("[]")
+        (root / "definition" / "type-map-write.json").write_text(
+            json.dumps(
+                {
+                    "$schema": "https://schemas.analitiq.ai/type-map-write/latest.json",
+                    "direction": "write",
+                    "rules": [],
+                }
+            )
+        )
         with pytest.raises(ConformanceSetupError, match="no rules"):
             load_target(root, class_path=REFERENCE_CLASS)
 
