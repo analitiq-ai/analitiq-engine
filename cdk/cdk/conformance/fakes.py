@@ -8,7 +8,7 @@ store present.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 
 from cdk.secrets.protocol import SecretsResolver
 
@@ -107,4 +107,20 @@ def minimal_connector_definition(
         "default_transport": kind,
         "transports": {kind: _MINIMAL_TRANSPORTS[kind]},
         **extra,
+    }
+
+
+def type_map_document(
+    direction: Literal["read", "write"], rules: list[Any]
+) -> dict[str, Any]:
+    """Return a ``type-map-{direction}.json`` body.
+
+    The ``{$schema, direction, rules}`` envelope a connector ships and the
+    engine loads, so a test writes the file the same way instead of
+    hand-rolling the wrapper.
+    """
+    return {
+        "$schema": f"https://schemas.analitiq.ai/type-map-{direction}/latest.json",
+        "direction": direction,
+        "rules": rules,
     }

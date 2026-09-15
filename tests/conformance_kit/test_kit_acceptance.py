@@ -29,7 +29,7 @@ from cdk.conformance import (
     check_type_map_round_trip,
     load_target,
 )
-from cdk.conformance.fakes import minimal_connector_definition
+from cdk.conformance.fakes import minimal_connector_definition, type_map_document
 from cdk.conformance.roundtrip import probe_arrow_types, render_probe
 from cdk.conformance.target import ConformanceTarget
 from cdk.conformance.tier1 import test_definition as kit_definition
@@ -55,6 +55,11 @@ FIXTURE_ENDPOINTS = sorted(FIXTURES_DIR.glob("*/definition/endpoints/*.json"))
 #: floor well above zero guards against the suite silently collecting or
 #: skipping everything.
 TIER1_MIN_PASSED = 10
+
+
+def _type_map_read_doc(rules: list) -> str:
+    """A minimal ``type-map-read.json`` body, serialized."""
+    return json.dumps(type_map_document("read", rules))
 
 
 def _skipped_lines(output: str) -> list[str]:
@@ -193,7 +198,9 @@ class TestThinConnectorPassesVacuously:
             json.dumps(minimal_connector_definition("database", "conformance-thin"))
         )
         (definition_dir / "type-map-read.json").write_text(
-            '[{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}]'
+            _type_map_read_doc(
+                [{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}]
+            )
         )
         target = load_target(tmp_path)
         assert target.connector_class is not None, "thin path falls back"
@@ -231,7 +238,9 @@ class TestUnassessableKindIsNotAPass:
             json.dumps(minimal_connector_definition("file", "unassessed"))
         )
         (definition_dir / "type-map-read.json").write_text(
-            '[{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}]'
+            _type_map_read_doc(
+                [{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}]
+            )
         )
         completed = run_kit_suite(
             "cdk.conformance.tier1",

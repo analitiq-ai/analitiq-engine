@@ -22,6 +22,7 @@ import pyarrow as pa
 import pytest
 from analitiq.contracts.endpoint_identity import derive_db_endpoint_id
 
+from cdk.conformance.fakes import type_map_document
 from cdk.declarations import ConnectorDeclarationError
 from cdk.types import EndpointScope
 from src.config.schema_validator import BundleValidationError, ContractValidationError
@@ -138,21 +139,6 @@ def _endpoint_doc(endpoint_id: str) -> dict[str, Any]:
             },
         },
     }
-
-
-def _type_map_rules() -> list:
-    return [
-        {"match": "exact", "native_type": "VARCHAR", "arrow_type": "Utf8"},
-        {"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"},
-    ]
-
-
-def _connection_type_map_rules() -> list:
-    """Connection-scoped override map: carries a rule the connector's
-    map does not, so tests can tell which mapper actually resolved."""
-    return [
-        {"match": "exact", "native_type": "JSONB", "arrow_type": "Utf8"},
-    ]
 
 
 def _database_endpoint_doc(database_object: dict[str, Any]) -> dict[str, Any]:
@@ -294,7 +280,13 @@ def _build_tree(
     )
     _write_json(
         root / "connectors" / CONNECTOR_ID / "definition" / "type-map-read.json",
-        _type_map_rules(),
+        type_map_document(
+            "read",
+            [
+                {"match": "exact", "native_type": "VARCHAR", "arrow_type": "Utf8"},
+                {"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"},
+            ],
+        ),
     )
     connector_endpoints = [ENDPOINT_SRC]
     if dst_endpoint_scope == "connector":
@@ -307,7 +299,15 @@ def _build_tree(
             dst_definition / "endpoints" / f"{ENDPOINT_DST_CONNECTION}.json",
             private_doc,
         )
-        _write_json(dst_definition / "type-map-read.json", _connection_type_map_rules())
+        _write_json(
+            dst_definition / "type-map-read.json",
+            # Carries a rule the connector's map does not, so the test can
+            # tell which mapper actually resolved.
+            type_map_document(
+                "read",
+                [{"match": "exact", "native_type": "JSONB", "arrow_type": "Utf8"}],
+            ),
+        )
     for endpoint_id in connector_endpoints:
         _write_json(
             root

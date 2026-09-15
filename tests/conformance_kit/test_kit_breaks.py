@@ -42,7 +42,7 @@ from cdk.conformance import (
 from cdk.conformance import target as target_module
 from cdk.conformance import violation_report
 from cdk.conformance.api_surface import api_base_url
-from cdk.conformance.fakes import minimal_connector_definition
+from cdk.conformance.fakes import minimal_connector_definition, type_map_document
 from cdk.conformance.target import (
     ConformanceSetupError,
     ConformanceTarget,
@@ -1214,7 +1214,9 @@ class TestTargetLoadingBreaks:
         """
         root = tmp_path / "reference"
         shutil.copytree(REFERENCE_DIR, root)
-        (root / "definition" / "type-map-write.json").write_text("[]")
+        (root / "definition" / "type-map-write.json").write_text(
+            json.dumps(type_map_document("write", []))
+        )
         with pytest.raises(ConformanceSetupError, match="no rules"):
             load_target(root, class_path=REFERENCE_CLASS)
 

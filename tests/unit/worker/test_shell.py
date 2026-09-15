@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from cdk.conformance.fakes import type_map_document
 from cdk.type_map import InvalidTypeMapError
 from cdk.type_map.loader import build_type_mapper
 from src.worker.shell import build_bootstrap, read_type_map_payloads
@@ -78,9 +79,13 @@ def _write_definition(base, *, rules=None, write_rules=None):
     definition = base / "definition"
     definition.mkdir(parents=True)
     if rules is not None:
-        (definition / "type-map-read.json").write_text(json.dumps(rules))
+        (definition / "type-map-read.json").write_text(
+            json.dumps(type_map_document("read", rules))
+        )
     if write_rules is not None:
-        (definition / "type-map-write.json").write_text(json.dumps(write_rules))
+        (definition / "type-map-write.json").write_text(
+            json.dumps(type_map_document("write", write_rules))
+        )
     return definition
 
 
@@ -124,13 +129,10 @@ class TestBuildTypeMapper:
         mapper = build_type_mapper("postgres", _RULES, _WRITE_RULES)
         assert mapper is not None
 
-    def test_non_list_rules_payload_rejected(self):
-        with pytest.raises(InvalidTypeMapError, match="JSON array"):
-            build_type_mapper("postgres", {"match": "exact"})
-
-    def test_non_list_write_rules_payload_rejected(self):
-        with pytest.raises(InvalidTypeMapError, match="write-type-map"):
-            build_type_mapper("postgres", _RULES, {"match": "exact"})
+    # build_type_mapper no longer type-checks a payload before handing it to
+    # parse_rules/parse_write_rules -- rules-is-a-list belongs to
+    # analitiq-validator's envelope contract, not published yet (known gap:
+    # analitiq-engine#524, blocked on claude-code-plugins#316).
 
 
 class TestBuildBootstrap:
