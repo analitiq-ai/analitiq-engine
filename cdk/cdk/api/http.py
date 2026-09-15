@@ -13,7 +13,6 @@ the URL rules (:mod:`cdk.api.urls`) testable without one.
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 from collections.abc import Mapping
@@ -131,22 +130,21 @@ def loads_preserving_decimals(payload: str) -> Any:
 
 
 def _orjson_default(obj: Any) -> Any:
-    """Serialise the types orjson does not handle natively.
+    """Fail loud on any type orjson cannot serialise natively.
 
-    orjson handles ``datetime`` / ``date`` / ``time`` / ``UUID`` /
-    dataclasses / enums / numpy scalars directly -- only ``Decimal`` and
-    ``bytes`` reach this hook. A ``Decimal`` renders as its exact decimal
-    string: precision is the one thing that cannot be recovered downstream,
-    and most providers accept string-or-number for a numeric field.
-    ``bytes`` is base64-encoded per JSON convention.
+    Every wire shape orjson has no native rendering for -- ``datetime`` /
+    ``date`` / ``time`` (declaratively, no longer through orjson's own
+    native rendering), ``Decimal``, ``bytes`` -- is resolved through a
+    field's declared ``encoding_write`` before the record dict reaches
+    :func:`encode_body` (``cdk.type_map.encoders.resolve_encoder``, applied
+    in ``GenericAPIConnector.land``). A value of one of those types
+    reaching this hook means that resolution was skipped somewhere, which
+    is a defect to surface loudly, not a second place to render it.
     """
-    if isinstance(obj, Decimal):
-        return str(obj)
-    if isinstance(obj, (bytes, bytearray, memoryview)):
-        return base64.b64encode(bytes(obj)).decode("ascii")
     raise TypeError(
-        f"orjson cannot serialise {type(obj).__name__}; add a handler "
-        f"if this type should appear in API request bodies"
+        f"orjson cannot serialise {type(obj).__name__}; a value of this "
+        f"type must be resolved through a declared 'encoding_write' before "
+        f"the record reaches encode_body"
     )
 
 
@@ -157,9 +155,17 @@ def encode_body(data: Any, content_type: str | None = None) -> bytes:
     JSON when it declared nothing, which is what every endpoint took before
     ``request.content_type`` existed.
 
-    ``aiohttp``'s own ``json=`` argument calls the stdlib encoder, which
-    understands neither ``datetime`` nor ``Decimal``; orjson handles the
-    first natively and the hook above renders the second losslessly.
+    ``data`` is expected to carry only JSON-native values by the time it
+    reaches here: a field whose Arrow value has no native JSON rendering
+    (``datetime``, ``Decimal``, ``bytes``, ...) is resolved through its
+    declared ``encoding_write`` earlier in the write path
+    (``GenericAPIConnector.land``), not by this function or the hook above,
+    which exists only to fail loud on the type it did not expect.
+    ``OPT_PASSTHROUGH_DATETIME`` turns off orjson's own native
+    ``datetime``/``date``/``time`` rendering for exactly that reason: that
+    rendering was one of the implicit defaults this catalog replaces, and
+    leaving it on would let an un-encoded datetime render silently instead
+    of reaching the hook that now refuses it.
 
     An unsupported media type raises rather than falling back to JSON under
     a header claiming otherwise -- though it should not reach here:
@@ -172,7 +178,9 @@ def encode_body(data: Any, content_type: str | None = None) -> bytes:
         raise RequestSpecError(problem)
     if media_type(content_type) == FORM_CONTENT_TYPE:
         return encode_form(data)
-    return orjson.dumps(data, default=_orjson_default)
+    return orjson.dumps(
+        data, default=_orjson_default, option=orjson.OPT_PASSTHROUGH_DATETIME
+    )
 
 
 def query_value(value: Any) -> Any:

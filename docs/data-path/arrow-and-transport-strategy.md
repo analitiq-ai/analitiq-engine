@@ -44,6 +44,36 @@ for how the CDK package is bounded and wired see
    `arrow_family`, the conformance probe set, and both published artifacts
    derive from that
    one table, so an `arrow_family` added there needs no second edit.
+4. **Wire-format decode/encode.** An `arrow_type` says only the target
+   type; it says nothing about the shape of the JSON value that has to
+   become it. A field whose `arrow_type` has no direct wire-native
+   rendering — the `timestamp`/`date`/`time`/`duration` conversion kinds on
+   read, plus `decimal`/`binary` on write — declares an `encoding` (read)
+   or `encoding_write` (write) block naming a catalog entry
+   (`cdk/cdk/type_map/decoders.py` / `encoders.py`, published as
+   `decoders_catalog.json` / `encoders_catalog.json` beside the conversion
+   matrix): `iso8601`, `epoch`, `strptime`, `regex_epoch`, `decimal`,
+   `bool_map`, `base64`, `iso_duration` on read; the write-side mirror minus
+   `regex_epoch`/`iso_duration`. No entry is applied implicitly — a field
+   whose kind requires one and declares none, or whose declared entry does
+   not actually resolve (an unknown name, a malformed param), raises
+   `MissingEncodingError` from the opt-in `check_required_read_encoding`
+   or `check_required_write_encoding` methods, called explicitly at the
+   two API call sites (`cdk/cdk/api/generic.py`, `cdk/cdk/api/write_plan.py`)
+   before the first batch, never left to whichever one happens to carry the
+   first non-null value. A field naming `{"name": "code"}` routes instead
+   to a `connector.py` override of `ApiDialect.decode_field` /
+   `.encode_field` (`cdk/cdk/api/dialects.py`) for a shape the catalog does
+   not cover. This is API-only and orthogonal to item 3's SQL
+   `native_type`/`arrow_type` DDL rendering: those two methods are never
+   called for a `"columns"`-shaped (SQL) schema, which keeps the tolerant
+   parse (a bare ISO-8601 string, a bare unit-offset integer, or an
+   already-typed Python value) unconditionally instead. Resolving
+   `encoding_write` builds a `SchemaContract` over the write-input schema,
+   the same object every other declared schema (SQL columns, an API
+   response) goes through -- so a write-input property must declare
+   `arrow_type` for the same reason any of them must: `SchemaContract`
+   itself refuses to build without one, not a rule this catalog adds.
 
 ## Where Arrow is ceremony
 

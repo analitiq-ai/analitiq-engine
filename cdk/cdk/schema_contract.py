@@ -4,17 +4,36 @@ import json
 import logging
 import math
 import numbers
-from datetime import date, datetime, time
+from collections.abc import Callable, Mapping
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, Final
 
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from .json_utils import decimals_to_float, decode_json_fields
+from .json_utils import decimals_to_float, declared_json_types, decode_json_fields
 from .type_map import resolve_arrow_type
-from .type_map.arrow import classify_arrow_conversion, first_blocked_nested_leaf
-from .type_map.exceptions import InvalidTypeMapError
+from .type_map.arrow import (
+    arrow_family,
+    classify_arrow_conversion,
+    first_blocked_nested_leaf,
+    parse_iso8601_scalar,
+    resolve_decoder,
+)
+from .type_map.decoders import CODE_ENCODING_NAME as READ_CODE_ENCODING_NAME
+from .type_map.decoders import REQUIRES_ENCODING_KINDS as READ_REQUIRES_ENCODING_KINDS
+from .type_map.decoders import decoder_matches_json_type, decoder_matches_kind
+from .type_map.encoders import CODE_ENCODING_NAME as WRITE_CODE_ENCODING_NAME
+from .type_map.encoders import ENCODER_JSON_TYPE
+from .type_map.encoders import REQUIRES_ENCODING_KINDS as WRITE_REQUIRES_ENCODING_KINDS
+from .type_map.encoders import (
+    encoding_write_matches_json_type,
+    encoding_write_matches_kind,
+    resolve_encoder,
+)
+from .type_map.exceptions import InvalidTypeMapError, MissingEncodingError
+from .type_map.grammar import ARROW_FAMILIES
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +113,90 @@ def _reject_floating_point_offset(
     )
 
 
+def _reject_non_native_temporal_values(field: pa.Field, values: list[Any]) -> None:
+    """Refuse a non-native, non-decoded temporal/duration value.
+
+    Neither a native Python object nor resolved through a decoder -- the
+    removed implicit-epoch path, made an unconditional refusal rather than
+    an opt-in check. Also rejects a float/Decimal offset
+    (``_reject_floating_point_offset``, ahead of the native check so its
+    own, more specific message wins for that case). Called only for a
+    JSON-Schema/API endpoint (``SchemaContract._build_column``'s
+    ``is_json_schema``); a database ``"columns"`` schema never reaches this
+    -- it keeps the tolerant :func:`_build_db_temporal_column` path
+    instead, since it has no ``encoding`` vocabulary to declare one with.
+    """
+    is_duration = pa.types.is_duration(field.type)
+    for row, value in enumerate(values):
+        if value is None:
+            continue
+        _reject_floating_point_offset(field.name, row, value, field.type)
+        native = (
+            isinstance(value, timedelta)
+            if is_duration
+            else isinstance(value, (datetime, date, time))
+        )
+        if not native:
+            raise MissingEncodingError(
+                field.name, str(field.type), direction="read", key="encoding"
+            )
+
+
+def _has_strings(values: list[Any]) -> bool:
+    return any(isinstance(v, str) for v in values if v is not None)
+
+
+def _build_db_temporal_column(field: pa.Field, values: list[Any]) -> pa.Array:
+    """Build a temporal/duration column the tolerant, database way.
+
+    Preserved exclusively for a database ``"columns"`` schema (see
+    ``SchemaContract._build_column``'s ``is_json_schema``): reject a
+    float/Decimal offset (still ambiguous -- pyarrow would silently
+    truncate it), parse a bare ISO-8601 string via
+    :func:`_parse_db_temporal_strings` (Timestamp/Date/Time only --
+    Duration was never string-parseable here), and otherwise hand the
+    value straight to pyarrow, which reads a bare integer as an offset in
+    the column's own declared unit. A "columns" schema has no ``encoding``
+    vocabulary at all, and some drivers still hand back exactly these two
+    shapes rather than an already-typed Python object.
+    """
+    for row, value in enumerate(values):
+        _reject_floating_point_offset(field.name, row, value, field.type)
+    if _is_temporal(field.type) and _has_strings(values):
+        return _parse_db_temporal_strings(field, values)
+    return pa.array(values, type=field.type)
+
+
+def _parse_db_temporal_strings(field: pa.Field, values: list[Any]) -> pa.Array:
+    """Parse ISO-8601 strings into a timestamp/date/time column.
+
+    A "columns" (database) schema has no ``encoding`` vocabulary, so it
+    always parses this tolerant, unconditional way rather than through a
+    declared decoder: PyArrow refuses to coerce strings into a
+    timestamp/date/time array directly, so this parses with the stdlib
+    first and hands typed Python objects to ``pa.array``.
+    """
+    is_ts = pa.types.is_timestamp(field.type)
+    is_date_type = pa.types.is_date(field.type)
+    tz = getattr(field.type, "tz", None) if is_ts else None
+
+    parsed: list[Any] = []
+    for row, v in enumerate(values):
+        if v is None or not isinstance(v, str):
+            # A "columns" schema has no `encoding` vocabulary, so a
+            # non-string value is never a wire value to parse -- it is
+            # already the native Python temporal object the driver handed
+            # back, passed through unchanged.
+            parsed.append(v)
+            continue
+        parsed.append(
+            parse_iso8601_scalar(
+                field, row, v, is_ts=is_ts, is_date_type=is_date_type, tz=tz
+            )
+        )
+    return pa.array(parsed, type=field.type)
+
+
 def _is_nested(arrow_type: pa.DataType) -> bool:
     return bool(
         pa.types.is_struct(arrow_type)
@@ -102,8 +205,367 @@ def _is_nested(arrow_type: pa.DataType) -> bool:
     )
 
 
-def _has_strings(values: list[Any]) -> bool:
-    return any(isinstance(v, str) for v in values if v is not None)
+def _epoch_day_unit_mismatch(name: Any, encoding: Mapping[str, Any], kind: str) -> bool:
+    """Whether *encoding* is an epoch decoder with unit ``DAY`` for a non-``date`` kind.
+
+    ``_ticks_to_array``'s own ``DAY`` branch builds only a Date32/Date64;
+    the broad name-vs-kind compatibility table accepts ``epoch``/
+    ``regex_epoch`` for Timestamp/Time/Duration too, since every other unit
+    legitimately reaches those, so ``DAY`` needs this narrower check rather
+    than only the one inside the decoder closure at data time.
+    """
+    return (
+        name in ("epoch", "regex_epoch")
+        and encoding.get("unit") == "DAY"
+        and kind != "date"
+    )
+
+
+def _reject_code_params(encoding: Mapping[str, Any], key: str, path: str) -> None:
+    """Refuse any key besides ``name`` on a ``{"name": "code"}`` declaration.
+
+    The published catalog declares no parameters for ``code`` (it has no
+    factory to read them -- ``resolve_decoder``/``resolve_encoder`` never
+    even see this branch, since the caller special-cases it before
+    reaching either), and ``decode_field``/``encode_field`` are called with
+    no config at all. An extra key here is never applied and never
+    resolves to an error on its own, unlike a misspelled key on every
+    other catalog entry (rejected by the unknown-parameter check in
+    ``resolve_decoder``/``resolve_encoder``) -- refused here instead, by
+    name, so an author who leaves a stray param behind while switching a
+    field to ``code`` is told rather than silently ignored.
+    """
+    extra = set(encoding) - {"name"}
+    if extra:
+        raise InvalidTypeMapError(
+            f"field {path!r}: {key} 'code' takes no parameters; found "
+            f"{sorted(extra)!r}"
+        )
+
+
+def _check_nested_leaf_encoding(
+    *,
+    key: str,
+    override_method: str,
+    requires_encoding_kinds: frozenset[str],
+    direction: str,
+    field_def: dict[str, Any],
+    arrow_type: pa.DataType,
+    path: str,
+) -> None:
+    """Recurse into a struct/list leaf, refusing a gated-kind leaf unconditionally.
+
+    One walk for both directions: read and write refuse a nested leaf that
+    needs decoding/encoding by the identical mechanism -- neither
+    ``_build_nested_column`` (read) nor ``resolve_write_encoders`` (write)
+    ever resolves or applies a leaf's own declaration, only a top-level
+    ``{"name": "code"}`` on the whole nested field (checked by the caller
+    before ever recursing here), so a leaf that needs one is refused by its
+    full nested path whether or not it declares its own *key*, naming the
+    ``ApiDialect`` override method that would have to cover it instead.
+    """
+    if pa.types.is_struct(arrow_type):
+        sub_defs = field_def.get("properties") or {}
+        for child in arrow_type:
+            child_def = sub_defs.get(child.name) or {}
+            _check_nested_leaf_encoding(
+                key=key,
+                override_method=override_method,
+                requires_encoding_kinds=requires_encoding_kinds,
+                direction=direction,
+                field_def=child_def,
+                arrow_type=child.type,
+                path=f"{path}.{child.name}",
+            )
+        return
+    if pa.types.is_list(arrow_type) or pa.types.is_large_list(arrow_type):
+        item_def = field_def.get("items") or {}
+        _check_nested_leaf_encoding(
+            key=key,
+            override_method=override_method,
+            requires_encoding_kinds=requires_encoding_kinds,
+            direction=direction,
+            field_def=item_def,
+            arrow_type=arrow_type.value_type,
+            path=f"{path}[]",
+        )
+        return
+    if key in field_def:
+        # Checked before the requires-kind gate below: a leaf's own
+        # encoding is refused whether or not its kind is one that
+        # mandates a declaration -- an optional-encoding kind (bool's
+        # bool_map, binary's base64) is just as unresolved at nested depth
+        # as a mandatory one, so gating on requires_encoding_kinds first
+        # would let a declared-but-never-applied bool_map/base64 leaf
+        # through unchecked.
+        raise InvalidTypeMapError(
+            f"field {path!r} declares {key!r}, but a nested leaf's own "
+            f"{key} is never resolved or applied -- declare {key}: "
+            f"{{'name': 'code'}} on the top-level nested field instead, "
+            f"which covers the whole value via a connector.py "
+            f"ApiDialect.{override_method} override"
+        )
+    kind = ARROW_FAMILIES[arrow_family(arrow_type)].conversion_kind
+    if kind not in requires_encoding_kinds:
+        return
+    raise MissingEncodingError(path, str(arrow_type), direction=direction, key=key)
+
+
+#: The JSON Schema type name each Python type ``encode_body`` (orjson)
+#: renders a value as. ``bool`` is checked ahead of ``int`` in
+#: :func:`_rendered_json_type`: a Python ``bool`` is an ``int`` subclass,
+#: and orjson renders it as a JSON boolean, not a 0/1 integer.
+_PYTHON_JSON_TYPE: Final[dict[type, str]] = {
+    str: "string",
+    int: "integer",
+    float: "number",
+    dict: "object",
+    list: "array",
+}
+
+
+def _rendered_json_type(value: Any) -> str | None:
+    """Return the JSON Schema type *value* renders as, or ``None`` if unrenderable."""
+    if isinstance(value, bool):
+        return "boolean"
+    for python_type, json_type in _PYTHON_JSON_TYPE.items():
+        if isinstance(value, python_type):
+            return json_type
+    return None
+
+
+def _null_aware_encoder(
+    encode: Callable[[Any], Any], field_name: str, *, nullable: bool
+) -> Callable[[Any], Any]:
+    """Decide once, at resolve time, what a ``None`` input means for one field.
+
+    ``apply_field_encoders`` (``cdk.api.write_plan``) calls every
+    declared field's encoder unconditionally -- deciding whether
+    ``None`` is a value to pass through or a defect to reject belongs
+    here, where the field's declared nullability is known, not to a
+    blanket "skip encoding when the input is None" rule that would
+    let a required field's missing value reach ``encode_body`` as a
+    silent JSON ``null``, still declared non-null by the same schema.
+    A nullable field's ``None`` passes straight through, unencoded, so
+    the underlying encoder is never asked to render a value that was
+    never actually present -- an encoder is not obligated to handle
+    ``None`` itself.
+    """
+    if nullable:
+
+        def encode_nullable(value: Any) -> Any:
+            return None if value is None else encode(value)
+
+        return encode_nullable
+
+    def encode_required(value: Any) -> Any:
+        if value is None:
+            raise ValueError(
+                f"field {field_name!r}: value is None, but the field is "
+                f"required -- every record must carry a value"
+            )
+        return encode(value)
+
+    return encode_required
+
+
+def _first_non_finite(value: Any) -> float | None:
+    """Return the first non-finite float found in *value*, recursively, or ``None``.
+
+    A code hatch's result can nest a ``NaN``/``Infinity`` inside a dict
+    or list (an Object/List field's encoder returning ``{"value":
+    float("nan")}``), not only carry one at the top level -- ``orjson``
+    silently renders any of them as JSON ``null`` regardless of depth,
+    so the check must walk the whole structure, not just its own top.
+    """
+    if isinstance(value, float):
+        return value if not math.isfinite(value) else None
+    if isinstance(value, dict):
+        for v in value.values():
+            found = _first_non_finite(v)
+            if found is not None:
+                return found
+        return None
+    if isinstance(value, (list, tuple)):
+        for v in value:
+            found = _first_non_finite(v)
+            if found is not None:
+                return found
+        return None
+    return None
+
+
+def _declared_json_types_for_code_output(field_def: dict[str, Any]) -> list[str]:
+    """Return the JSON types a code hatch's result may render as at one node.
+
+    A Json (arrow_type) node is always a wire-level string regardless of
+    its declared JSON Schema type ("object"/"array" describes the
+    decoded content, not the string blob ``ApiDialect.encode_field``
+    actually returns for it) -- the same distinction ``_is_json_field``
+    makes elsewhere in this class, applied at whichever depth a Json
+    leaf appears, not only the field's own top level.
+    """
+    if _is_json_field(field_def):
+        return ["string"]
+    declared: list[str] = declared_json_types(field_def)
+    return declared
+
+
+def _check_declared_json_type(value: Any, field_def: dict[str, Any], path: str) -> None:
+    """Refuse *value* if it renders as a JSON type the field never declared."""
+    json_types = _declared_json_types_for_code_output(field_def)
+    if not json_types:
+        return
+    rendered = _rendered_json_type(value)
+    # JSON Schema defines every integer as a valid number.
+    widened = rendered == "integer" and "number" in json_types
+    if not widened and rendered not in json_types:
+        raise ValueError(
+            f"{path}: ApiDialect.encode_field returned a value that renders "
+            f"as {rendered!r}, but field declares type {json_types!r}"
+        )
+
+
+def _accepts_null(field_def: dict[str, Any]) -> bool:
+    """Whether *field_def*'s own declared JSON Schema ``type`` permits ``null``.
+
+    A ``type`` union naming ``null`` (``["integer", "null"]``) allows it
+    explicitly; a field with no declared ``type`` at all is unconstrained,
+    the same leniency :func:`_check_declared_json_type` already extends
+    to it. A plain string ``type`` (``"integer"``) allows no other
+    rendered value, ``null`` included -- unlike the outer field's own
+    ``None``, which :func:`_bind_code_encoder` already checked against
+    the *contract's* nullability (derived from ``required``), a nested
+    node's ``None`` is checked against its own declared type union: the
+    two are independent JSON Schema concepts (a required key can still
+    hold a nullable value).
+    """
+    declared = field_def.get("type")
+    if declared is None:
+        return True
+    return isinstance(declared, list) and "null" in declared
+
+
+def _check_required_properties(
+    value: dict[str, Any], field_def: dict[str, Any], path: str
+) -> None:
+    """Refuse a nested object *value* missing a key its schema requires.
+
+    The schema's own ``"required"`` names every key a conforming JSON
+    object must carry; a code hatch's result omitting one would
+    otherwise reach the provider silently violating the endpoint's
+    declared input schema.
+    """
+    for required_key in field_def.get("required") or []:
+        if required_key not in value:
+            raise ValueError(
+                f"{path}: ApiDialect.encode_field's result is missing "
+                f"required property {required_key!r}"
+            )
+
+
+def _validate_code_output_shape(
+    value: Any, field_def: dict[str, Any], path: str
+) -> None:
+    """Recursively check a code hatch's result against its declared JSON shape.
+
+    A catalog encoder's declared type is checked once, against the
+    field's own flat declaration
+    (:meth:`SchemaContract._check_scalar_write_encoding`); a code
+    hatch's result can nest arbitrarily deep -- an Object/List field's
+    ``encode_field`` returning ``{"count": "wrong"}`` for a declared
+    ``"integer"`` child -- and checking only the outer value (it still
+    renders as ``"object"``) lets a schema-invalid leaf reach the
+    provider unnoticed. Walks ``"properties"``/``"items"`` the same way
+    the schema itself declares them, naming a mismatch by its full path.
+    A value with no corresponding declaration (an extra key the schema
+    never named) is left unchecked -- the same leniency
+    ``_check_nested_leaf_encoding`` and friends already extend to a
+    schema that does not fully enumerate every possible key. A nested
+    ``None`` is checked against this node's own declared type union
+    (:func:`_accepts_null`), not skipped outright -- a required integer
+    child (present, satisfying ``_check_required_properties``, but
+    ``None``) would otherwise reach the provider as a null the field's
+    own declared type never allowed.
+    """
+    if value is None:
+        if not _accepts_null(field_def):
+            raise ValueError(
+                f"{path}: ApiDialect.encode_field returned None, but field "
+                f"declares type {field_def.get('type')!r} with no null "
+                f"variant"
+            )
+        return
+    _check_declared_json_type(value, field_def, path)
+    if _is_json_field(field_def):
+        return
+    if isinstance(value, dict):
+        _check_required_properties(value, field_def, path)
+        properties = field_def.get("properties") or {}
+        for key, child in value.items():
+            child_def = properties.get(key)
+            if child_def is not None:
+                _validate_code_output_shape(child, child_def, f"{path}.{key}")
+    elif isinstance(value, list):
+        items_def = field_def.get("items")
+        if items_def is not None:
+            for i, item in enumerate(value):
+                _validate_code_output_shape(item, items_def, f"{path}[{i}]")
+
+
+def _bind_code_encoder(
+    code_encoder: Callable[[str, Any, pa.DataType], Any],
+    field_name: str,
+    arrow_type: pa.DataType,
+    field_def: dict[str, Any],
+    *,
+    nullable: bool,
+) -> Callable[[Any], Any]:
+    """Close over one field's name/type for ``resolve_write_encoders``.
+
+    Lets it return a uniform ``Callable[[Any], Any]`` regardless of
+    whether the field resolved to a catalog encoder or the ``code`` hatch.
+    A catalog encoder's rendered JSON type is checked against the
+    field's declared type at plan time
+    (:meth:`SchemaContract._check_scalar_write_encoding`); a code hatch's
+    result has no such static guarantee -- ``ApiDialect.encode_field`` is
+    connector-authored code this catalog does not control -- so a
+    result is checked here, at data time, the one place either kind of
+    encoder's output is actually known. An unchecked result (``12345``
+    for a field declared ``"type": "string"``) would otherwise serialise
+    fine and send a request violating the endpoint's own declared input
+    schema; an unchecked ``None`` for a *non-nullable* field the same
+    way (the field's declared ``required`` says every record carries a
+    value, and ``encode_body`` sends JSON ``null`` regardless). A
+    non-finite float, anywhere in a nested result, passes the type check
+    (``NaN``/``Infinity`` still render as ``"number"``, and a dict/list
+    holding one renders as ``"object"``/``"array"``) but ``encode_body``
+    (orjson) silently serialises any of them as JSON ``null`` -- not a
+    type mismatch, but the same class of silent value corruption, so
+    checked separately and recursively.
+    """
+
+    def encode(value: Any) -> Any:
+        result = code_encoder(field_name, value, arrow_type)
+        if result is None:
+            if not nullable:
+                raise ValueError(
+                    f"field {field_name!r}: ApiDialect.encode_field "
+                    f"returned None, but the field is required -- every "
+                    f"record must carry a value"
+                )
+            return result
+        non_finite = _first_non_finite(result)
+        if non_finite is not None:
+            raise ValueError(
+                f"field {field_name!r}: ApiDialect.encode_field returned "
+                f"{non_finite!r}, which the body serializer would silently "
+                f"render as JSON null instead of failing loud"
+            )
+        _validate_code_output_shape(result, field_def, f"field {field_name!r}")
+        return result
+
+    return encode
 
 
 def _all_null_column(field: pa.Field, values: list[Any]) -> pa.Array:
@@ -113,30 +575,6 @@ def _all_null_column(field: pa.Field, values: list[Any]) -> pa.Array:
             f"column {field.name!r} is non-nullable but every source value is None"
         )
     return pa.nulls(len(values), type=field.type)
-
-
-def _parse_with_source_format(
-    field: pa.Field, values: list[Any], source_format: str
-) -> pa.Array:
-    """Parse string values by the declared ``source_format`` into a date/timestamp."""
-    for v in values:
-        if v is not None and not isinstance(v, str):
-            raise TypeError(
-                f"column {field.name!r} declares source_format but a "
-                f"non-string value of type {type(v).__name__} was found; "
-                f"source_format only applies to string inputs"
-            )
-    string_col = pa.array(values, type=pa.string())
-    unit = getattr(field.type, "unit", None) or (
-        "us" if pa.types.is_timestamp(field.type) else "s"
-    )
-    parsed = pc.strptime(string_col, format=source_format, unit=unit)
-    if parsed.type == field.type:
-        return parsed
-    tz = getattr(field.type, "tz", None)
-    if tz and not getattr(parsed.type, "tz", None):
-        parsed = pc.assume_timezone(parsed, tz)
-    return pc.cast(parsed, field.type, safe=False)
 
 
 def _build_decimal_column(field: pa.Field, values: list[Any]) -> pa.Array:
@@ -283,9 +721,24 @@ def _prepare_nested_value(
 
 
 class SchemaContract:
-    """Arrow schema mapping for a connector endpoint."""
+    """Arrow schema mapping for a connector endpoint.
 
-    def __init__(self, endpoint_schema: dict[str, Any]) -> None:
+    ``code_decoder``, when given, backs a field declaring
+    ``encoding: {"name": "code"}`` -- routed to a connector's
+    ``ApiDialect.decode_field`` override rather than a catalog entry. It is
+    the caller's business to supply one: this module stays free of any
+    ``cdk.api`` import, so a SQL caller (which has no dialect) simply never
+    passes it, and a field declaring ``"code"`` without one fails loud at
+    the point it is needed rather than being silently skipped.
+    """
+
+    def __init__(
+        self,
+        endpoint_schema: dict[str, Any],
+        *,
+        code_decoder: Callable[[str, list[Any], pa.DataType], pa.Array] | None = None,
+    ) -> None:
+        self._code_decoder = code_decoder
         if "columns" in endpoint_schema:
             field_defs = endpoint_schema.get("columns") or []
             if not field_defs:
@@ -293,7 +746,20 @@ class SchemaContract:
                     "SchemaContract: 'columns' is present but empty; the "
                     "contract must declare every column"
                 )
+            if not isinstance(field_defs, list):
+                raise ValueError(
+                    f"SchemaContract: 'columns' must be a list, got "
+                    f"{type(field_defs).__name__}"
+                )
             self._arrow_schema, self._field_defs = self._schema_from_columns(field_defs)
+            # A database "columns" declaration has no `encoding` vocabulary
+            # and the driver already hands back typed Python values (real
+            # datetime/Decimal objects, never bare epoch ints or ISO text)
+            # -- so this shape keeps the tolerant parse
+            # (`_build_db_temporal_column`) unconditionally. The strict
+            # "no implicit decode" refusal below applies only to a
+            # JSON-Schema/API endpoint, which does have the vocabulary.
+            self._is_json_schema = False
         elif "properties" in endpoint_schema:
             properties = endpoint_schema.get("properties") or {}
             if not properties:
@@ -301,10 +767,16 @@ class SchemaContract:
                     "SchemaContract: 'properties' is present but empty; "
                     "the contract must declare every field"
                 )
+            if not isinstance(properties, dict):
+                raise ValueError(
+                    f"SchemaContract: 'properties' must be an object, got "
+                    f"{type(properties).__name__}"
+                )
             required = set(endpoint_schema.get("required", []))
             self._arrow_schema, self._field_defs = self._schema_from_properties(
                 properties, required
             )
+            self._is_json_schema = True
         else:
             raise ValueError(
                 "SchemaContract: endpoint schema must declare either "
@@ -331,6 +803,354 @@ class SchemaContract:
     @property
     def json_columns(self) -> set:
         return {n for n, defn in self._field_defs.items() if _is_json_field(defn)}
+
+    def check_required_read_encoding(self) -> None:
+        """Raise for a field whose declared ``encoding`` is missing or unresolvable.
+
+        Opt-in, and deliberately not run from ``__init__``: only a caller
+        building this contract from a JSON-Schema API endpoint should call
+        it. SQL's ``"columns"`` shape has no ``encoding`` vocabulary at all,
+        so a SQL caller must never call this -- see
+        ``cdk.api.generic._plan_read`` for the one call site that does.
+
+        Every declared ``encoding`` is resolved here, unconditionally -- not
+        only for a field whose kind requires one -- so an unknown decoder
+        name or a malformed param (a bad ``unit``, a ``regex_epoch`` pattern
+        with the wrong capture-group count, ...) fails here, at plan time,
+        rather than on whichever batch happens to be the first one with a
+        non-null value for that field. ``_build_column``'s own all-null-batch
+        shortcut would otherwise let an all-null batch -- or an optional
+        field a tenant never populates -- through with the bad declaration
+        never checked.
+
+        A resolved decoder naming a real catalog entry is additionally
+        checked for kind compatibility against the target ``arrow_type``,
+        via :func:`~cdk.type_map.decoders.decoder_matches_kind`, and for
+        wire-type compatibility against the field's own declared JSON
+        ``type``, via :func:`~cdk.type_map.decoders.decoder_matches_json_type`
+        -- a Timestamp field naming ``decimal``, or an ``integer``-typed
+        field naming ``iso8601`` (which reads only a string), would
+        otherwise resolve fine (the name is real) and only fail inside the
+        decoder's own closure on the first non-null response.
+
+        A nested (``Object``/``List``) field with no top-level ``encoding``
+        of its own is walked recursively (:func:`_check_nested_leaf_encoding`),
+        refusing any gated-kind leaf regardless of whether the leaf itself
+        declares an ``encoding``: ``_build_nested_column`` hands a nested
+        value's raw wire shape straight to pyarrow with no decode step, so
+        only a top-level ``encoding: {"name": "code"}`` on the whole nested
+        field -- routed to ``ApiDialect.decode_field`` before this loop ever
+        reaches a leaf -- is actually decoded.
+        """
+        for f in self._arrow_schema:
+            field_def = self._field_defs.get(f.name) or {}
+            encoding = field_def.get("encoding")
+            if _is_nested(f.type):
+                self._check_nested_field_encoding(f, field_def, encoding)
+            else:
+                self._check_scalar_read_encoding(f, field_def, encoding)
+
+    def _check_nested_field_encoding(
+        self, f: pa.Field, field_def: dict[str, Any], encoding: Any
+    ) -> None:
+        """Validate a nested (``Object``/``List``) field's own top-level ``encoding``.
+
+        ``None`` recurses into leaves (:func:`_check_nested_leaf_encoding`)
+        requiring one for a gated-kind leaf, since nothing else can ever
+        decode it; anything else must be exactly ``{"name": "code"}`` -- no
+        catalog decoder targets a struct/list arrow_type, so a real name
+        would resolve fine here and then crash applying a scalar decoder to
+        the whole value in ``_build_column``. The code hatch still recurses
+        into leaves -- with no kind ever *required* there, since
+        ``decode_field`` covers the whole value regardless of any leaf's
+        kind -- purely to reject a leaf that redundantly declares its own
+        ``encoding``: ``ApiDialect.decode_field`` receives only the whole
+        value and arrow_type, never a leaf's configuration, so a declared
+        leaf ``encoding`` there is silently never resolved or applied.
+        """
+        if encoding is None:
+            _check_nested_leaf_encoding(
+                key="encoding",
+                override_method="decode_field",
+                requires_encoding_kinds=READ_REQUIRES_ENCODING_KINDS,
+                direction="read",
+                field_def=field_def,
+                arrow_type=f.type,
+                path=f.name,
+            )
+            return
+        if not isinstance(encoding, Mapping):
+            raise InvalidTypeMapError(
+                f"field {f.name!r}: 'encoding' must be an object, got "
+                f"{type(encoding).__name__}"
+            )
+        if encoding.get("name") != READ_CODE_ENCODING_NAME:
+            raise InvalidTypeMapError(
+                f"field {f.name!r}: a nested (Object/List) field's own "
+                f"top-level encoding must be {{'name': 'code'}} -- "
+                f"resolve_decoder can resolve any catalog name, but "
+                f"_build_column would then apply it to the whole dict/list "
+                f"value and crash; declared {encoding.get('name')!r}"
+            )
+        _reject_code_params(encoding, "encoding", f.name)
+        if self._code_decoder is None:
+            raise ValueError(
+                f"field {f.name!r} declares encoding name='code' but this "
+                f"SchemaContract was built without a code_decoder"
+            )
+        _check_nested_leaf_encoding(
+            key="encoding",
+            override_method="decode_field",
+            requires_encoding_kinds=frozenset(),
+            direction="read",
+            field_def=field_def,
+            arrow_type=f.type,
+            path=f.name,
+        )
+
+    def _check_scalar_read_encoding(
+        self, f: pa.Field, field_def: dict[str, Any], encoding: Any
+    ) -> None:
+        """Validate a scalar field's declared (or required-but-absent) ``encoding``."""
+        kind = ARROW_FAMILIES[arrow_family(f.type)].conversion_kind
+        if encoding is None:
+            if kind in READ_REQUIRES_ENCODING_KINDS:
+                raise MissingEncodingError(
+                    f.name, str(f.type), direction="read", key="encoding"
+                )
+            return
+        if not isinstance(encoding, Mapping):
+            raise InvalidTypeMapError(
+                f"field {f.name!r}: 'encoding' must be an object, got "
+                f"{type(encoding).__name__}"
+            )
+        name = encoding.get("name")
+        if name == READ_CODE_ENCODING_NAME:
+            _reject_code_params(encoding, "encoding", f.name)
+            if self._code_decoder is None:
+                raise ValueError(
+                    f"field {f.name!r} declares encoding name='code' but "
+                    f"this SchemaContract was built without a code_decoder"
+                )
+            return
+        resolve_decoder(field_def, f)
+        if isinstance(name, str) and not decoder_matches_kind(name, kind):
+            raise InvalidTypeMapError(
+                f"field {f.name!r}: encoding {name!r} does not decode a "
+                f"{kind!r} value; arrow_type is {f.type!s}"
+            )
+        json_types = declared_json_types(field_def)
+        if isinstance(name, str):
+            # Every declared alternative must be one the decoder can read:
+            # the response is schema-valid for whichever type it actually
+            # carries, and the decoder must handle whichever one shows up.
+            incompatible = [
+                t for t in json_types if not decoder_matches_json_type(name, t)
+            ]
+            if incompatible:
+                raise InvalidTypeMapError(
+                    f"field {f.name!r}: encoding {name!r} does not read a "
+                    f"{incompatible[0]!r}-typed wire value; field declares "
+                    f"type {json_types!r}"
+                )
+        if _epoch_day_unit_mismatch(name, encoding, kind):
+            raise InvalidTypeMapError(
+                f"field {f.name!r}: encoding {name!r} with unit 'DAY' only "
+                f"builds a Date32/Date64 arrow_type, got {f.type!s}"
+            )
+
+    def check_required_write_encoding(self) -> None:
+        """Raise for a field whose write wire shape needs ``encoding_write``.
+
+        Same opt-in contract as :meth:`check_required_read_encoding`; the one
+        call site is ``cdk.api.write_plan.build_write_plan``. Unlike the read
+        side, this checks presence only for a top-level field:
+        :meth:`resolve_write_encoders`, called unconditionally right after
+        this in that one call site, already resolves every declared
+        top-level ``encoding_write`` eagerly (a field is never skipped there
+        based on whether its kind requires one), so a second eager pass here
+        would only repeat that work.
+
+        A declared top-level ``encoding_write`` naming a catalog entry (not
+        ``code``) IS additionally checked here for kind compatibility
+        against the field's own ``arrow_type``, via
+        :func:`~cdk.type_map.encoders.encoding_write_matches_kind`, and for
+        output-type compatibility against the field's declared JSON
+        ``type``, via
+        :func:`~cdk.type_map.encoders.encoding_write_matches_json_type` -- a
+        Timestamp field naming ``decimal``, or a ``"boolean"``-typed field
+        naming ``bool_map`` (which renders a string token), would otherwise
+        pass this method (an entry is present) and ``resolve_write_encoders``
+        (the name resolves), then either crash with a bare ``TypeError`` at
+        ``land()`` on the first non-null value or violate the endpoint's own
+        declared input schema once the request is sent.
+
+        A nested (``Object``/``List``) field with no top-level
+        ``encoding_write`` of its own IS walked recursively here, because
+        nothing else does: :meth:`resolve_write_encoders` only ever rewrites
+        a top-level record key, so a gated-kind leaf several levels down
+        that this method let through would reach ``encode_body`` un-encoded
+        and fail there, unconditionally, on the first non-null value --
+        ``orjson``'s native rendering for exactly these kinds was retired
+        PR-wide, nested included. Refusing it here, by name and path,
+        converts that into the same clean, config-time refusal every other
+        case in this module gets, instead of a crash with no indication
+        which field caused it.
+
+        A nested field that DOES declare its own top-level
+        ``encoding_write`` (necessarily ``{"name": "code"}`` -- no catalog
+        entry targets a struct/list arrow_type) is exempt from that
+        recursion: :meth:`resolve_write_encoders` binds that declaration to
+        the whole nested value via ``code_encoder(field_name, value,
+        arrow_type)``, so a leaf's own encoding is neither required nor
+        applied separately -- recursing here anyway would refuse a
+        correctly-declared field over an encoding it does not need.
+        """
+        for f in self._arrow_schema:
+            field_def = self._field_defs.get(f.name) or {}
+            if _is_nested(f.type):
+                self._check_nested_field_write_encoding(f, field_def)
+            else:
+                self._check_scalar_write_encoding(f, field_def)
+
+    @staticmethod
+    def _check_nested_field_write_encoding(
+        f: pa.Field, field_def: dict[str, Any]
+    ) -> None:
+        """Validate a nested field's own top-level ``encoding_write``.
+
+        Mirrors :meth:`_check_nested_field_encoding` on the read side, minus
+        the code-hook presence check: :meth:`resolve_write_encoders`, called
+        unconditionally right after this in the one call site, already
+        raises for a missing ``code_encoder`` -- see this method's caller's
+        docstring for why the write side does not duplicate that check here.
+        The code hatch still recurses into leaves, purely to reject a leaf
+        that redundantly declares its own ``encoding_write``: ``land()``
+        hands the whole dict/list value to ``ApiDialect.encode_field``,
+        never a leaf's configuration, so a declared leaf ``encoding_write``
+        there is silently never resolved or applied.
+        """
+        encoding_write = field_def.get("encoding_write")
+        if encoding_write is None:
+            _check_nested_leaf_encoding(
+                key="encoding_write",
+                override_method="encode_field",
+                requires_encoding_kinds=WRITE_REQUIRES_ENCODING_KINDS,
+                direction="write",
+                field_def=field_def,
+                arrow_type=f.type,
+                path=f.name,
+            )
+            return
+        if not isinstance(encoding_write, Mapping):
+            raise InvalidTypeMapError(
+                f"field {f.name!r}: 'encoding_write' must be an object, got "
+                f"{type(encoding_write).__name__}"
+            )
+        if encoding_write.get("name") != WRITE_CODE_ENCODING_NAME:
+            raise InvalidTypeMapError(
+                f"field {f.name!r}: a nested (Object/List) field's own "
+                f"top-level encoding_write must be {{'name': 'code'}} -- "
+                f"resolve_write_encoders can resolve any catalog name, but "
+                f"land() would then apply it to the whole dict/list value "
+                f"and crash; declared {encoding_write.get('name')!r}"
+            )
+        _reject_code_params(encoding_write, "encoding_write", f.name)
+        _check_nested_leaf_encoding(
+            key="encoding_write",
+            override_method="encode_field",
+            requires_encoding_kinds=frozenset(),
+            direction="write",
+            field_def=field_def,
+            arrow_type=f.type,
+            path=f.name,
+        )
+
+    @staticmethod
+    def _check_scalar_write_encoding(f: pa.Field, field_def: dict[str, Any]) -> None:
+        """Validate a scalar field's declared or required ``encoding_write``."""
+        kind = ARROW_FAMILIES[arrow_family(f.type)].conversion_kind
+        encoding_write = field_def.get("encoding_write")
+        if encoding_write is None:
+            if kind in WRITE_REQUIRES_ENCODING_KINDS:
+                raise MissingEncodingError(
+                    f.name, str(f.type), direction="write", key="encoding_write"
+                )
+            return
+        if not isinstance(encoding_write, Mapping):
+            # Malformed shape (e.g. a bare string) -- resolve_write_encoders,
+            # called right after this in the one call site, raises the
+            # precise error for this; not duplicated here.
+            return
+        name = encoding_write.get("name")
+        if name == WRITE_CODE_ENCODING_NAME:
+            _reject_code_params(encoding_write, "encoding_write", f.name)
+            return
+        if not isinstance(name, str):
+            # An unknown/non-string name is resolve_write_encoders's error
+            # to raise, not this one's.
+            return
+        if not encoding_write_matches_kind(name, kind):
+            raise InvalidTypeMapError(
+                f"field {f.name!r}: encoding_write {name!r} does not "
+                f"render a {kind!r} value; arrow_type is {f.type!s}"
+            )
+        json_types = declared_json_types(field_def)
+        # The encoder renders one type; the schema is satisfied as long as
+        # that type is among the declared alternatives (unlike the read
+        # side, which must cover every alternative the wire might send).
+        if json_types and not any(
+            encoding_write_matches_json_type(name, t) for t in json_types
+        ):
+            raise InvalidTypeMapError(
+                f"field {f.name!r}: encoding_write {name!r} renders a "
+                f"{ENCODER_JSON_TYPE.get(name)!r}-typed wire value, but "
+                f"field declares type {json_types!r}"
+            )
+
+    def resolve_write_encoders(
+        self,
+        *,
+        code_encoder: Callable[[str, Any, pa.DataType], Any] | None = None,
+    ) -> dict[str, Callable[[Any], Any]]:
+        """Build the field name -> encode function map for every declared entry.
+
+        Every ``encoding_write`` declared on this schema resolves here.
+        Skips a field with none declared -- nothing to apply, and
+        :meth:`check_required_write_encoding` is what refuses that when the
+        field's arrow_type actually needs one. A field naming ``"code"``
+        binds a closure over *code_encoder* and the field's arrow_type; a
+        missing *code_encoder* raises immediately rather than deferring to
+        the first record that reaches it.
+        """
+        encoders: dict[str, Callable[[Any], Any]] = {}
+        for f in self._arrow_schema:
+            field_def = self._field_defs.get(f.name) or {}
+            encoding_write = field_def.get("encoding_write")
+            if encoding_write is None:
+                continue
+            if not isinstance(encoding_write, Mapping):
+                raise InvalidTypeMapError(
+                    f"field {f.name!r}: 'encoding_write' must be an object, "
+                    f"got {type(encoding_write).__name__}"
+                )
+            if encoding_write.get("name") == WRITE_CODE_ENCODING_NAME:
+                if code_encoder is None:
+                    raise ValueError(
+                        f"field {f.name!r} declares encoding_write name='code' "
+                        f"but no code_encoder was supplied"
+                    )
+                bound = _bind_code_encoder(
+                    code_encoder, f.name, f.type, field_def, nullable=f.nullable
+                )
+                encoders[f.name] = _null_aware_encoder(
+                    bound, f.name, nullable=f.nullable
+                )
+                continue
+            fn = resolve_encoder(encoding_write)
+            if fn is not None:
+                encoders[f.name] = _null_aware_encoder(fn, f.name, nullable=f.nullable)
+        return encoders
 
     def to_db_records(self, record_batch: pa.RecordBatch) -> list[dict[str, Any]]:
         """Materialise a batch for a SQL destination.
@@ -371,7 +1191,13 @@ class SchemaContract:
             values = [r.get(field.name) for r in records]
             field_def = self._field_defs.get(field.name) or {}
             try:
-                array = self._build_column(field, values, field_def)
+                array = self._build_column(
+                    field,
+                    values,
+                    field_def,
+                    code_decoder=self._code_decoder,
+                    is_json_schema=self._is_json_schema,
+                )
             except ValueError:
                 # _build_column already names the offending row; passing
                 # it through preserves that precision instead of wrapping
@@ -523,30 +1349,57 @@ class SchemaContract:
         field: pa.Field,
         values: list[Any],
         field_def: dict[str, Any],
+        *,
+        code_decoder: Callable[[str, list[Any], pa.DataType], pa.Array] | None = None,
+        is_json_schema: bool = True,
     ) -> pa.Array:
-        """Dispatch one column's Python values to the builder for its type."""
+        """Dispatch one column's Python values to the builder for its type.
+
+        No decode is implicit for a JSON-Schema/API endpoint (``is_json_schema``):
+        ``iso8601``/``epoch`` (the two shapes this method used to apply
+        automatically to every caller) and every other wire shape reach the
+        arrow_type only through a resolved decoder
+        (:func:`~cdk.type_map.arrow.resolve_decoder`) or the ``code`` hatch
+        -- both driven by the field's declared ``encoding``. A temporal or
+        duration value that is neither already a native Python temporal
+        object nor resolved through one of those two paths is refused here,
+        unconditionally, regardless of whether the caller ran
+        :meth:`SchemaContract.check_required_read_encoding` first.
+
+        A database ``"columns"`` schema (``is_json_schema=False``) keeps the
+        tolerant parse instead: it has no ``encoding`` vocabulary at
+        all, and its values already come from the driver as either native
+        Python temporal objects (the common case) or -- some drivers, some
+        column types -- a bare ISO-8601 string or unit-offset integer, which
+        this must keep accepting.
+        """
         if all(v is None for v in values):
             return _all_null_column(field, values)
+        encoding = field_def.get("encoding")
+        if (
+            isinstance(encoding, Mapping)
+            and encoding.get("name") == READ_CODE_ENCODING_NAME
+        ):
+            # Ahead of the Json-specific builder: a field naming 'code' has
+            # opted out of every implicit rendering, Json's own-native
+            # passthrough included, in favor of the connector's own
+            # translation.
+            return SchemaContract._decode_via_code_hatch(field, values, code_decoder)
         if _is_json_field(field_def):
             return _encode_json_column(field, values)
-        source_format = field_def.get("source_format")
-        if source_format and _is_date_or_timestamp(field.type):
-            # Left ahead of the offset guard: this column accepts no numeric
-            # value at all, so _parse_with_source_format's own "source_format
-            # only applies to string inputs" names the author's actual mistake.
-            # The offset guard's message would say the value is not an integer
-            # offset, which implies an integer would be taken here. It would not.
-            return _parse_with_source_format(field, values, source_format)
+        decoder = resolve_decoder(field_def, field)
+        if decoder is not None:
+            return decoder(field, values)
         if _reads_unit_offsets(field.type):
-            # Ahead of every remaining temporal branch, so the same author
-            # intent is refused identically whether the column carries strings
-            # or takes the bare pa.array path.
-            for row, value in enumerate(values):
-                _reject_floating_point_offset(field.name, row, value, field.type)
+            # Ahead of every remaining branch, so the same author intent is
+            # refused identically whether the column carries strings, a bare
+            # epoch int, or a float/Decimal offset.
+            if is_json_schema:
+                _reject_non_native_temporal_values(field, values)
+            else:
+                return _build_db_temporal_column(field, values)
         if pa.types.is_decimal(field.type):
             return _build_decimal_column(field, values)
-        if _is_temporal(field.type) and _has_strings(values):
-            return SchemaContract._build_temporal_from_strings(field, values)
         if pa.types.is_integer(field.type) or pa.types.is_floating(field.type):
             return SchemaContract._build_numeric_column(field, values)
         if _is_nested(field.type):
@@ -554,47 +1407,48 @@ class SchemaContract:
         return pa.array(values, type=field.type)
 
     @staticmethod
-    def _build_temporal_from_strings(field: pa.Field, values: list[Any]) -> pa.Array:
-        """Parse ISO-8601 strings into a timestamp / date / time column.
+    def _decode_via_code_hatch(
+        field: pa.Field,
+        values: list[Any],
+        code_decoder: Callable[[str, list[Any], pa.DataType], pa.Array] | None,
+    ) -> pa.Array:
+        """Run the ``code`` escape hatch, or refuse when none was supplied.
 
-        Triggered for JSON-Schema ``format: date-time | date | time`` fields
-        whose endpoint declares an Arrow temporal ``arrow_type`` but does not
-        pin a ``source_format``. PyArrow refuses to coerce strings into a
-        timestamp/date/time array directly, so we parse with the stdlib
-        first and hand typed Python objects to ``pa.array``.
+        The result is validated here, not left to whatever downstream
+        consumer first touches it wrong: ``ApiDialect.decode_field`` is
+        connector-authored code this catalog does not control, and a
+        result that is not actually a ``pa.Array`` (``None``, a plain
+        list, ...) reaching ``_assert_non_nullable``'s ``array.null_count``
+        raises a raw ``AttributeError`` -- not a ``ValueError`` or
+        ``TypeMapError``, so the worker's deterministic-error classifier
+        does not recognise it and retries the same broken connector
+        result forever instead of failing the configuration loudly. A
+        type that merely differs in width within the same family (a
+        decoder handing back plain ``Utf8`` for a ``Json`` field's
+        ``large_string``) goes through :meth:`_convert_to_field`, the same
+        matrix-backed safe cast an arrived driver column already gets --
+        one policy for "close enough to the declared type", not a second,
+        stricter equality check only the code hatch enforces.
         """
-        is_ts = pa.types.is_timestamp(field.type)
-        is_date = pa.types.is_date(field.type)
-        tz = getattr(field.type, "tz", None) if is_ts else None
-
-        parsed: list[Any] = []
-        for row, v in enumerate(values):
-            if v is None:
-                parsed.append(None)
-                continue
-            if not isinstance(v, str):
-                parsed.append(v)
-                continue
-            try:
-                if is_ts:
-                    dt = datetime.fromisoformat(v)
-                    if tz and dt.tzinfo is None:
-                        raise ValueError(
-                            f"value {v!r} is naive but column declares tz={tz!r}"
-                        )
-                    if not tz and dt.tzinfo is not None:
-                        dt = dt.replace(tzinfo=None)
-                    parsed.append(dt)
-                elif is_date:
-                    parsed.append(date.fromisoformat(v[:10]))
-                else:
-                    parsed.append(time.fromisoformat(v))
-            except ValueError as exc:
-                raise ValueError(
-                    f"column {field.name!r} at row {row}: cannot parse "
-                    f"{v!r} as {field.type}: {exc}"
-                ) from exc
-        return pa.array(parsed, type=field.type)
+        if code_decoder is None:
+            raise ValueError(
+                f"column {field.name!r} declares encoding name='code' but "
+                f"this SchemaContract was built without a code_decoder"
+            )
+        array = code_decoder(field.name, values, field.type)
+        if not isinstance(array, pa.Array):
+            raise ValueError(
+                f"column {field.name!r}: ApiDialect.decode_field must return "
+                f"a pa.Array, got {type(array).__name__}"
+            )
+        if len(array) != len(values):
+            raise ValueError(
+                f"column {field.name!r}: ApiDialect.decode_field returned "
+                f"{len(array)} values for {len(values)} input rows"
+            )
+        if array.type == field.type:
+            return array
+        return SchemaContract._convert_to_field(field, array)
 
     @staticmethod
     def _build_numeric_column(field: pa.Field, values: list[Any]) -> pa.Array:
@@ -697,6 +1551,11 @@ class SchemaContract:
         fields = []
         defs: dict[str, dict[str, Any]] = {}
         for index, col in enumerate(columns):
+            if not isinstance(col, Mapping):
+                raise ValueError(
+                    f"column at index {index} must be an object, got "
+                    f"{type(col).__name__}"
+                )
             name = col.get("name")
             if not name:
                 raise ValueError(
@@ -717,13 +1576,17 @@ class SchemaContract:
         fields = []
         defs: dict[str, dict[str, Any]] = {}
         for name, prop in properties.items():
+            if not isinstance(prop, Mapping):
+                raise ValueError(
+                    f"field {name!r} must be an object, got " f"{type(prop).__name__}"
+                )
             arrow_type = SchemaContract._require_arrow_type(prop, name)
             fields.append(pa.field(name, arrow_type, nullable=name not in required))
-            defs[name] = prop
+            defs[name] = dict(prop)
         return pa.schema(fields), defs
 
     @staticmethod
-    def _require_arrow_type(field_def: dict[str, Any], name: str) -> pa.DataType:
+    def _require_arrow_type(field_def: Mapping[str, Any], name: str) -> pa.DataType:
         if not field_def.get("arrow_type"):
             raise ValueError(
                 f"field {name!r} has no 'arrow_type' declaration; "

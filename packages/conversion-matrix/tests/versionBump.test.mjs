@@ -7,10 +7,11 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { checkVersionBump } from "../scripts/check-version-bump.mjs";
+import { artifactsFor } from "../scripts/sync-contracts-to-s3.mjs";
 
 const artifact = (version, body) => JSON.stringify({ version, families: body });
 
@@ -141,12 +142,24 @@ function withRepo(run) {
 const runCli = (cli, ref) =>
   execFileSync("node", [cli, ref], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 
+// The main() under test iterates artifactsFor("main") -- every "main"-channel
+// entry, not just the two these tests assert on by name -- so a fixture repo
+// must have a file for each of them or main() ENOENTs on whichever one this
+// list omits. Sourced from the same artifactsFor("main") the CLI itself
+// reads, so a new "main"-channel artifact needs no matching edit here.
+const MAIN_CHANNEL_FILES = artifactsFor("main").map(({ path }) => basename(path));
+
+function writeAllArtifacts(dir, version) {
+  for (const file of MAIN_CHANNEL_FILES) {
+    writeFileSync(join(dir, "cdk", "cdk", "type_map", file), artifact(version, {}));
+  }
+}
+
 test("a bad base ref aborts instead of reporting the artifact as absent", () => {
   // The failure mode this replaces: classifying git's prose as "not in that
   // ref" turns the gate into a no-op that prints success.
   withRepo((dir, cli) => {
-    writeFileSync(join(dir, "cdk", "cdk", "type_map", "conversion_matrix.json"), artifact("1.0.0", {}));
-    writeFileSync(join(dir, "cdk", "cdk", "type_map", "arrow_type_grammar.json"), artifact("1.0.0", {}));
+    writeAllArtifacts(dir, "1.0.0");
     git(dir, ["add", "-A"]);
     git(dir, ["commit", "-qm", "init"]);
     assert.throws(() => runCli(cli, "no-such-ref"), (err) => {
@@ -162,6 +175,7 @@ test("a path absent at the base ref is reported as added, not compared", () => {
     git(dir, ["add", "-A"]);
     git(dir, ["commit", "-qm", "no artifacts yet"]);
     const base = git(dir, ["rev-parse", "HEAD"]).trim();
+    writeAllArtifacts(dir, "1.0.0");
     writeFileSync(join(dir, "cdk", "cdk", "type_map", "conversion_matrix.json"), artifact("2.0.0", {}));
     writeFileSync(join(dir, "cdk", "cdk", "type_map", "arrow_type_grammar.json"), artifact("1.1.0", {}));
     const out = runCli(cli, base);
@@ -174,12 +188,13 @@ test("an unversioned base is reported as not compared, and names the artifact", 
   // The state of main before versioned artifacts existed. The check cannot
   // order against it, and must not print the line it uses for a verified bump.
   withRepo((dir, cli) => {
-    for (const file of ["conversion_matrix.json", "arrow_type_grammar.json"]) {
+    for (const file of MAIN_CHANNEL_FILES) {
       writeFileSync(join(dir, "cdk", "cdk", "type_map", file), JSON.stringify({ families: {} }));
     }
     git(dir, ["add", "-A"]);
     git(dir, ["commit", "-qm", "unversioned"]);
     const base = git(dir, ["rev-parse", "HEAD"]).trim();
+    writeAllArtifacts(dir, "1.0.0");
     writeFileSync(join(dir, "cdk", "cdk", "type_map", "conversion_matrix.json"), artifact("2.0.0", {}));
     writeFileSync(join(dir, "cdk", "cdk", "type_map", "arrow_type_grammar.json"), artifact("1.1.0", {}));
     const out = runCli(cli, base);
@@ -191,9 +206,7 @@ test("an unversioned base is reported as not compared, and names the artifact", 
 
 test("the CLI names which artifact refused to publish", () => {
   withRepo((dir, cli) => {
-    for (const file of ["conversion_matrix.json", "arrow_type_grammar.json"]) {
-      writeFileSync(join(dir, "cdk", "cdk", "type_map", file), artifact("1.0.0", {}));
-    }
+    writeAllArtifacts(dir, "1.0.0");
     git(dir, ["add", "-A"]);
     git(dir, ["commit", "-qm", "init"]);
     const base = git(dir, ["rev-parse", "HEAD"]).trim();

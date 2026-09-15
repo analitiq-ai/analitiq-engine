@@ -1,12 +1,18 @@
 """JSON helpers shared by the CDK (Json-typed column decoding, authored form)."""
 
 import json
+from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel
 
-__all__ = ["authored_json", "decimals_to_float", "decode_json_fields"]
+__all__ = [
+    "authored_json",
+    "decimals_to_float",
+    "declared_json_types",
+    "decode_json_fields",
+]
 
 
 def decimals_to_float(value: Any) -> Any:
@@ -50,6 +56,24 @@ def authored_json(value: Any) -> Any:
     if isinstance(value, BaseModel):
         return value.model_dump(mode="json", by_alias=True, exclude_unset=True)
     return value
+
+
+def declared_json_types(field: Mapping[str, Any]) -> list[str]:
+    """Read the non-null JSON types a field's ``type`` declares, in declared order.
+
+    One reading of JSON Schema's ``type`` for every consumer -- read-side
+    decoder compatibility, write-side encoder compatibility, and the API
+    response-schema resolver alike: a plain string is one type, a list is a
+    union whose ``null`` member only says the field is nullable
+    (``["string", "null"]`` is a string field). A ``type`` that is neither
+    yields nothing.
+    """
+    declared = field.get("type")
+    if isinstance(declared, str):
+        return [declared]
+    if isinstance(declared, list):
+        return [t for t in declared if isinstance(t, str) and t != "null"]
+    return []
 
 
 def decode_json_fields(

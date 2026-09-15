@@ -1,0 +1,56 @@
+{
+  "encoders": {
+    "base64": {
+      "params": []
+    },
+    "bool_map": {
+      "params": [
+        {
+          "kind": "list[string]",
+          "name": "true_values",
+          "required": true
+        },
+        {
+          "kind": "list[string]",
+          "name": "false_values",
+          "required": true
+        }
+      ]
+    },
+    "code": {
+      "params": [],
+      "requires_connector_code": true
+    },
+    "decimal": {
+      "params": []
+    },
+    "epoch": {
+      "params": [
+        {
+          "allowed": [
+            "SECOND",
+            "MILLISECOND",
+            "MICROSECOND",
+            "NANOSECOND"
+          ],
+          "kind": "enum",
+          "name": "unit",
+          "required": true
+        }
+      ]
+    },
+    "iso8601": {
+      "params": []
+    },
+    "strftime": {
+      "params": [
+        {
+          "kind": "string",
+          "name": "pattern",
+          "required": true
+        }
+      ]
+    }
+  },
+  "version": "1.0.0"
+}

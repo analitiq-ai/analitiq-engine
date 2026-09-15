@@ -91,13 +91,24 @@ class TestJsonIsStillTheDefault:
     def test_no_declared_type_encodes_as_json(self) -> None:
         assert encode_body({"a": 1}) == b'{"a":1}'
 
-    def test_a_decimal_keeps_its_exact_digits(self) -> None:
-        # Precision is the one thing that cannot be recovered downstream.
-        assert encode_body({"n": Decimal("1.10")}) == b'{"n":"1.10"}'
+    def test_an_unencoded_decimal_is_refused(self) -> None:
+        # A Decimal has no native JSON rendering: a field of this kind must
+        # resolve through its declared encoding_write (GenericAPIConnector.land)
+        # before reaching here. No implicit default survives it. orjson wraps
+        # the default-hook's TypeError in its own generic one; the original,
+        # naming 'encoding_write', survives as __cause__.
+        with pytest.raises(TypeError, match="not JSON serializable") as excinfo:
+            encode_body({"n": Decimal("1.10")})
+        assert "encoding_write" in str(excinfo.value.__cause__)
 
-    def test_a_datetime_is_handled_by_the_encoder_itself(self) -> None:
+    def test_an_unencoded_datetime_is_refused(self) -> None:
+        # orjson's own native datetime rendering is deliberately turned off
+        # (OPT_PASSTHROUGH_DATETIME): it was one of the implicit defaults
+        # the encoders catalog replaces.
         moment = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
-        assert b"2026-01-02T03:04:05" in encode_body({"at": moment})
+        with pytest.raises(TypeError, match="not JSON serializable") as excinfo:
+            encode_body({"at": moment})
+        assert "encoding_write" in str(excinfo.value.__cause__)
 
 
 class TestFormEncoding:
@@ -135,6 +146,27 @@ class TestFormEncoding:
     def test_a_body_that_is_not_an_object_is_refused(self) -> None:
         with pytest.raises(RequestSpecError, match="name/value pairs"):
             encode_body([1, 2], FORM_CONTENT_TYPE)
+
+
+class TestIntegerWireLimitIsPerContentType:
+    """PR #509 review: an epoch tick count past what orjson can render as a
+    JSON number (i64/u64) is a real defect only for a JSON body -- a form
+    body renders any integer with plain str() and has no such limit. The
+    limit therefore lives in each content type's own encoder, not upstream
+    of both.
+    """
+
+    _PAST_ORJSON_RANGE = 2**64  # one past orjson's own encodable u64 max
+
+    def test_json_refuses_an_integer_past_its_own_range(self) -> None:
+        with pytest.raises(TypeError, match="64-bit range"):
+            encode_body({"n": self._PAST_ORJSON_RANGE})
+
+    def test_form_encodes_the_same_integer_exactly(self) -> None:
+        assert (
+            encode_body({"n": self._PAST_ORJSON_RANGE}, FORM_CONTENT_TYPE)
+            == f"n={self._PAST_ORJSON_RANGE}".encode()
+        )
 
 
 class TestAnUnsupportedTypeNeverReachesTheWire:

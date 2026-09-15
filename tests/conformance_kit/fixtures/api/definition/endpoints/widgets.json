@@ -58,7 +58,11 @@
                   "name": { "type": "string" },
                   "weight_grams": { "type": "integer" },
                   "in_stock": { "type": "boolean" },
-                  "created_at": { "type": "string", "format": "date-time" }
+                  "created_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "encoding": { "name": "iso8601" }
+                  }
                 }
               }
             }

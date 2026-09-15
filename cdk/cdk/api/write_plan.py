@@ -32,7 +32,10 @@ from analitiq.contracts.endpoints import (
 from ..exceptions import TransportSpecError
 from ..record_identity import record_digest
 from ..resolver import Resolver, scope_paths
+from ..schema_contract import SchemaContract
 from ..transport_factory import require_wire_safe_header_name
+from ..type_map.encoders import CODE_ENCODING_NAME
+from ..type_map.exceptions import TypeMapError
 from ..types import RetrySemantics, RetryVerdict, SchemaSpec
 from .body import FORM_CONTENT_TYPE, media_type
 from .exceptions import RequestSpecError
@@ -49,6 +52,7 @@ from .write_response import WRITE_SCOPE_KEYS
 __all__ = [
     "WRITE_MODE_KEYS",
     "StreamWritePlan",
+    "apply_field_encoders",
     "body_with_idempotency_key",
     "build_write_plan",
     "collect_input_field_names",
@@ -56,6 +60,7 @@ __all__ = [
     "content_idempotency_key",
     "idempotency_config_problem",
     "reserved_header_names",
+    "resolve_field_encoders",
     "retry_verdict",
     "write_mode_block",
 ]
@@ -106,6 +111,12 @@ class StreamWritePlan:
     #: serialised -- otherwise the provider receives a quoted string where a
     #: nested object was declared.
     json_fields: set[str] = field(default_factory=set)
+    #: Body field name -> the encode function its declared ``encoding_write``
+    #: resolves to. Applied to every record dict in
+    #: ``GenericAPIConnector.land`` before the body is serialised, so a
+    #: field needing one (``build_write_plan`` refused the schema otherwise)
+    #: never reaches ``encode_body`` un-encoded.
+    field_encoders: dict[str, Callable[[Any], Any]] = field(default_factory=dict)
     #: ``request.body``, or ``None`` when the endpoint declares no template
     #: and the record itself is the body.
     body_spec: Any | None = None
@@ -200,20 +211,48 @@ def write_mode_block(doc: ApiEndpointDoc, mode_key: WriteMode) -> WriteOperation
     return (doc.operations.write or {}).get(mode_key)
 
 
+def _is_code_encoded(field_def: Mapping[str, Any]) -> bool:
+    encoding_write = field_def.get("encoding_write")
+    return (
+        isinstance(encoding_write, Mapping)
+        and encoding_write.get("name") == CODE_ENCODING_NAME
+    )
+
+
 def collect_json_fields(mode_block: WriteOperation) -> set[str]:
     """Body field names declared with ``arrow_type: "Json"``.
 
     The write input schema is free-form JSON Schema in the contract, so
     both shapes it permits are walked: JSON-Schema ``properties`` and the
     flat ``columns`` array.
+
+    A field also declaring ``encoding_write: {"name": "code"}`` is
+    excluded: it has opted out of every implicit rendering, Json's own
+    native passthrough included, the same as the read side's Json builder
+    defers to a declared ``code`` decoder (``SchemaContract._build_column``).
+    ``land`` runs :func:`apply_field_encoders` after this pass decodes
+    ``json_fields`` in place, so a Json field left in both sets would hand
+    its code encoder an already-``json.loads``-ed dict/list instead of the
+    Arrow-typed JSON string ``ApiDialect.encode_field`` promises -- and
+    ``json.loads`` would then also be the wrong parser to run at all if the
+    encoder renders some other wire text, code being an escape hatch for
+    exactly a wire shape no built-in rendering covers.
     """
     schema = mode_block.input.schema_
     names: set[str] = set()
     for name, prop in (schema.get("properties") or {}).items():
-        if isinstance(prop, Mapping) and prop.get("arrow_type") == "Json":
+        if (
+            isinstance(prop, Mapping)
+            and prop.get("arrow_type") == "Json"
+            and not _is_code_encoded(prop)
+        ):
             names.add(name)
     for col in schema.get("columns") or []:
-        if isinstance(col, Mapping) and col.get("arrow_type") == "Json":
+        if (
+            isinstance(col, Mapping)
+            and col.get("arrow_type") == "Json"
+            and not _is_code_encoded(col)
+        ):
             col_name = col.get("name")
             if col_name:
                 names.add(col_name)
@@ -230,6 +269,41 @@ def collect_input_field_names(mode_block: WriteOperation) -> set[str]:
         if isinstance(col, Mapping) and col.get("name"):
             names.add(col["name"])
     return names
+
+
+def resolve_field_encoders(
+    mode_block: WriteOperation,
+    *,
+    code_encoder: Callable[[str, Any, Any], Any] | None = None,
+) -> dict[str, Callable[[Any], Any]] | str:
+    """Build the field-name -> encode function map, or why the schema refuses.
+
+    Reuses :class:`~cdk.schema_contract.SchemaContract` against the write
+    input schema -- the same JSON-Schema/columns shape it already parses on
+    the read side -- so "does this arrow_type need a declared encoding" is
+    answered by the one policy in
+    :meth:`~cdk.schema_contract.SchemaContract.check_required_write_encoding`,
+    never re-derived here. A string return is the rejection reason the ack
+    carries, matching every other configure-time refusal in this module.
+
+    ``code_encoder`` takes ``(field_name, value, arrow_type)`` where
+    ``arrow_type`` is a ``pyarrow.DataType`` -- typed ``Any`` here, like the
+    rest of this package outside ``generic.py``, which never imports
+    pyarrow itself.
+    """
+    schema = mode_block.input.schema_
+    try:
+        contract = SchemaContract(schema)
+        contract.check_required_write_encoding()
+        return contract.resolve_write_encoders(code_encoder=code_encoder)
+    # TypeMapError (InvalidTypeMapError/MissingEncodingError included) covers
+    # an unknown encoding_write name, a malformed param (wrong 'unit',
+    # missing 'pattern', ...), or a declared encoding_write that isn't an
+    # object at all (e.g. a bare string) -- every one of these is the same
+    # class of authoring defect the other branches here already return as a
+    # string rather than raise.
+    except (ValueError, TypeMapError) as err:
+        return f"write input schema: {err}"
 
 
 def reserved_header_names(transport_header_names: Iterable[str]) -> frozenset[str]:
@@ -386,6 +460,41 @@ def body_with_idempotency_key(
     return {**body, plan.idempotency_name: record_id}
 
 
+def apply_field_encoders(
+    records: list[dict[str, Any]], field_encoders: Mapping[str, Callable[[Any], Any]]
+) -> None:
+    """Encode every declared field in place, before the body is serialised.
+
+    Mirrors ``decode_json_fields``'s role on the same call site
+    (``GenericAPIConnector.land``): one pass over the batch's dicts so
+    ``encode_body`` never sees a value ``orjson`` cannot render natively --
+    a ``datetime``, ``Decimal``, or ``bytes`` a field's ``encoding_write``
+    was declared to bridge. A *present* key's encoder always runs, ``None``
+    input included: whether ``None`` is a value to pass through or a
+    defect to reject is a per-field decision (the field's declared
+    nullability), already made once when the encoder was resolved
+    (:func:`~cdk.schema_contract._null_aware_encoder`). A key the record
+    never carried at all is different from one carrying an explicit
+    ``None``: many update APIs give absence and JSON ``null`` different
+    meanings (null clears a value; an absent key leaves it untouched), so
+    an absent optional key is left absent rather than added back as an
+    explicit null the record never declared. A *required* field's
+    absence is still run through the encoder -- discarding a nullable
+    result changes nothing observable, but a required field's encoder
+    raises on ``None`` the same as it would for a genuinely present null,
+    which is what must happen: the record has no value for a field its
+    own schema says every record must carry.
+    """
+    if not field_encoders:
+        return
+    for record in records:
+        for name, encode in field_encoders.items():
+            if name not in record:
+                encode(None)  # validates required-ness; result is moot
+                continue
+            record[name] = encode(record[name])
+
+
 def content_idempotency_key(record: Mapping[str, Any]) -> str:
     """Full-content hash used as the idempotency key in upsert mode.
 
@@ -397,8 +506,12 @@ def content_idempotency_key(record: Mapping[str, Any]) -> str:
     dedups and a changed row gets a new key.
 
     The record is hashed as sent: declared JSON columns are already decoded
-    to objects by this point, so the key covers what the provider receives
-    rather than the wire encoding of it.
+    to objects and every declared ``encoding_write`` already applied by this
+    point, so the key covers the actual wire values the provider receives --
+    an ``iso8601``-encoded string, not the ``datetime`` object that produced
+    it. A stream that starts declaring (or changes) a field's
+    ``encoding_write`` therefore changes every future record's idempotency
+    key too, the same as any other change to what is actually sent.
     """
     return record_digest(dict(record))
 
@@ -494,6 +607,7 @@ def build_write_plan(
     header_names_for: Callable[[str | None], Iterable[str]],
     transport_problem: Callable[[str | None], str | None],
     resolver: Resolver,
+    code_encoder: Callable[[str, Any, Any], Any] | None = None,
 ) -> StreamWritePlan | str:
     """Build the plan for a stream, or return why the schema is refused.
 
@@ -552,10 +666,15 @@ def build_write_plan(
         # reports success -- the same silence the read path refuses.
         table.rules.check_required(table.values)
 
+        field_encoders = resolve_field_encoders(mode_block, code_encoder=code_encoder)
+        if isinstance(field_encoders, str):
+            return field_encoders
+
         plan = StreamWritePlan(
             method=request.method,
             transport_ref=request.transport_ref,
             json_fields=collect_json_fields(mode_block),
+            field_encoders=field_encoders,
             body_spec=request.body,
             content_type=request.content_type,
             params=table.values,

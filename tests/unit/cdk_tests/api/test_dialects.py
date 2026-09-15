@@ -88,6 +88,123 @@ class TestTheRoutesAroundItAreClosed:
         assert dialect.unwrap_page({"result": [1, 2]}) == [1, 2]
 
 
+class TestFieldEncodingHooks:
+    """The two hooks backing ``{"encoding"/"encoding_write": {"name": "code"}}``.
+
+    Unlike the other three, their base is not a neutral pass-through: they
+    are only reached once a field opts in, so a missing override is a
+    config defect, not silence.
+    """
+
+    def test_decode_field_base_raises_naming_the_field(self) -> None:
+        with pytest.raises(NotImplementedError, match="my_field"):
+            ApiDialect().decode_field("my_field", ["a", "b"], None)
+
+    def test_encode_field_base_raises_naming_the_field(self) -> None:
+        with pytest.raises(NotImplementedError, match="my_field"):
+            ApiDialect().encode_field("my_field", "a", None)
+
+    def test_a_conforming_decode_field_override_is_accepted(self) -> None:
+        class Provider(ApiDialect):
+            def decode_field(
+                self, field_name: str, values: Any, arrow_type: Any
+            ) -> Any:
+                return [v.upper() for v in values]
+
+        assert Provider(None).decode_field("f", ["a"], None) == ["A"]
+
+    def test_a_conforming_encode_field_override_is_accepted(self) -> None:
+        class Provider(ApiDialect):
+            def encode_field(self, field_name: str, value: Any, arrow_type: Any) -> Any:
+                return value.upper()
+
+        assert Provider(None).encode_field("f", "a", None) == "A"
+
+    def test_a_decode_field_override_with_the_wrong_arity_is_refused(self) -> None:
+        # Built via type(), not a `class ... (ApiDialect):` statement: a
+        # static override-compatibility scan pattern-matches the latter
+        # syntactically and cannot tell this deliberately-malformed
+        # fixture from a real bug. type() drives the identical runtime
+        # path -- __init_subclass__ fires the same way either way -- so
+        # the mechanism under test is unchanged.
+        def bad_decode_field(self: object, field_name: str) -> Any:
+            return field_name
+
+        with pytest.raises(TypeError, match="decode_field"):
+            type("BadDialect", (ApiDialect,), {"decode_field": bad_decode_field})
+
+    def test_an_encode_field_override_with_the_wrong_arity_is_refused(self) -> None:
+        def bad_encode_field(self: object, field_name: str, value: Any) -> Any:
+            return value
+
+        with pytest.raises(TypeError, match="encode_field"):
+            type("BadDialect", (ApiDialect,), {"encode_field": bad_encode_field})
+
+    def test_an_async_decode_field_override_is_refused(self) -> None:
+        # Both call sites invoke the hook synchronously -- an async def
+        # would hand SchemaContract a coroutine where it expects a
+        # pa.Array, failing far from this class-definition-time check.
+        async def bad_decode_field(
+            self: object, field_name: str, values: Any, arrow_type: Any
+        ) -> Any:
+            return values
+
+        with pytest.raises(TypeError, match="async"):
+            type("BadDialect", (ApiDialect,), {"decode_field": bad_decode_field})
+
+    def test_an_async_encode_field_override_is_refused(self) -> None:
+        async def bad_encode_field(
+            self: object, field_name: str, value: Any, arrow_type: Any
+        ) -> Any:
+            return value
+
+        with pytest.raises(TypeError, match="async"):
+            type("BadDialect", (ApiDialect,), {"encode_field": bad_encode_field})
+
+    def test_a_conforming_staticmethod_override_is_accepted(self) -> None:
+        # inspect.getattr_static returns the raw staticmethod descriptor,
+        # not the bound function a real call site would see -- checking
+        # the descriptor as if it always took an implicit leading self
+        # rejected this correctly-shaped 3-arg staticmethod outright.
+        class Provider(ApiDialect):
+            @staticmethod
+            def encode_field(field_name: str, value: Any, arrow_type: Any) -> Any:
+                return value.upper()
+
+        assert Provider(None).encode_field("f", "a", None) == "A"
+
+    def test_a_staticmethod_override_with_a_bogus_leading_self_is_refused(self) -> None:
+        # The same unwrap-blind check accepted a 4-arg staticmethod with a
+        # bogus unbound leading parameter (a plain function never binds
+        # one to a staticmethod) -- unusable, since the real call site
+        # supplies only the 3 declared arguments, and the first encoded
+        # record would raise TypeError far from this class-definition-time
+        # check. Built via type(), like the arity fixtures above: a
+        # `class ... (ApiDialect):` statement would raise here too, but at
+        # class-body-evaluation time rather than the __init_subclass__
+        # path under test.
+        def bad_encode_field(
+            self: object, field_name: str, value: Any, arrow_type: Any
+        ) -> Any:
+            return value
+
+        with pytest.raises(TypeError, match="encode_field"):
+            type(
+                "BadStaticDialect",
+                (ApiDialect,),
+                {"encode_field": staticmethod(bad_encode_field)},
+            )
+
+    def test_an_unrelated_hook_override_is_still_accepted(self) -> None:
+        # The new signature check is scoped to decode_field/encode_field
+        # only; it must not start rejecting the other three hooks.
+        class Provider(ApiDialect):
+            def unwrap_page(self, body: Any) -> Any:
+                return body
+
+        assert dialect_overrides(Provider, "unwrap_page") is True
+
+
 class TestOverrideProbe:
     def test_it_reports_which_hooks_a_dialect_implements(self) -> None:
         class Provider(ApiDialect):
@@ -97,3 +214,14 @@ class TestOverrideProbe:
         assert dialect_overrides(Provider, "classify") is True
         assert dialect_overrides(Provider, "unwrap_page") is False
         assert dialect_overrides(ApiDialect, "classify") is False
+
+    def test_it_reports_decode_and_encode_field_overrides(self) -> None:
+        class Provider(ApiDialect):
+            def decode_field(
+                self, field_name: str, values: Any, arrow_type: Any
+            ) -> Any:
+                return values
+
+        assert dialect_overrides(Provider, "decode_field") is True
+        assert dialect_overrides(Provider, "encode_field") is False
+        assert dialect_overrides(ApiDialect, "decode_field") is False

@@ -18,7 +18,8 @@ here. The three answer different questions:
 - the SQL ``_record_hash`` identifies a row by the content actually stored,
   read off the batch after the cast to the destination's schema;
 - the API idempotency key identifies a row by the content actually sent, after
-  declared JSON columns are decoded.
+  declared JSON columns are decoded and every declared ``encoding_write`` is
+  applied.
 
 Passing a different basis is the point. Passing it through a different
 canonicalisation is the defect this module prevents.

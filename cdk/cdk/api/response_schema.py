@@ -13,7 +13,7 @@ annotated schema, and ``SchemaContract`` turns it into Arrow.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
@@ -22,8 +22,10 @@ from analitiq.contracts.endpoints import ResponseExtraction
 from analitiq.contracts.stream import EndpointRef
 
 from ..exceptions import ReadError
+from ..json_utils import declared_json_types
 from ..type_map import TypeMapper, UnmappedTypeError
 from ..types import EndpointScope
+from ._epoch_formats import CURSOR_EPOCH_FORMAT as _CURSOR_EPOCH_FORMAT
 from .records import split_records_ref
 
 __all__ = [
@@ -81,22 +83,6 @@ def records_items_schema(
     return deepcopy(items)
 
 
-def declared_json_types(field: dict[str, Any]) -> list[str]:
-    """Read the non-null JSON types a field's ``type`` declares, in declared order.
-
-    One reading of JSON Schema's ``type`` for every consumer here: a plain
-    string is one type, a list is a union whose ``null`` member only says
-    the field is nullable -- ``["string", "null"]`` is a string field. A
-    ``type`` that is neither yields nothing.
-    """
-    declared = field.get("type")
-    if isinstance(declared, str):
-        return [declared]
-    if isinstance(declared, list):
-        return [t for t in declared if isinstance(t, str) and t != "null"]
-    return []
-
-
 @dataclass(frozen=True)
 class FieldDeclaration:
     """What the record schema says a field holds: its JSON type and format.
@@ -109,6 +95,22 @@ class FieldDeclaration:
 
     json_type: str
     format: str | None
+
+
+def _is_time_of_day(arrow_type: Any) -> bool:
+    """Whether *arrow_type* is Time32/Time64 -- a clock reading, not a moment.
+
+    This module imports the type-map surface, not pyarrow, so the
+    family head is read off the declared string directly (``"Time32"``
+    from ``"Time32(SECOND)"``) rather than through a parsed
+    ``pa.DataType`` -- the same family vocabulary
+    :data:`cdk.type_map.grammar.ARROW_FAMILIES` publishes, just not
+    parsed here.
+    """
+    return isinstance(arrow_type, str) and arrow_type.split("(", 1)[0] in (
+        "Time32",
+        "Time64",
+    )
 
 
 def record_field_declaration(
@@ -124,6 +126,18 @@ def record_field_declaration(
     about how a stored value reads. A cursor field the schema does not
     declare, or declares with no or several real types, is an authoring
     defect named here rather than a value guessed at later.
+
+    The checkpoint stores the last record's *raw wire* value for this
+    field (``GenericAPIConnector._read_pages``), and this declaration's
+    ``format`` is what the next run's
+    :func:`~cdk.api.replication.cursor_bounds` parses it back as -- a bare
+    ISO-8601 string or a bare epoch integer, the same two shapes that were
+    ever implicit before issue #503. A field whose declared ``encoding``
+    renders the wire in any other shape (``regex_epoch``'s wrapper string,
+    a ``strptime`` pattern, ...) would checkpoint a value the next run's
+    parse cannot read back, breaking the stream on its second run with no
+    signal until then -- refused here instead, at config time, naming the
+    field.
     """
     field = (items_schema.get("properties") or {}).get(cursor_field)
     if not isinstance(field, dict):
@@ -138,7 +152,63 @@ def record_field_declaration(
             f"type {field.get('type')!r}; a cursor field needs one plain JSON "
             f"type, nullable or not"
         )
+    if types[0] == "string" and _is_time_of_day(field.get("arrow_type")):
+        # _parse_cursor (cdk.api.replication) reads every string-typed
+        # cursor field as an absolute ISO-8601 moment via dateutil's
+        # isoparse, regardless of whether 'iso8601' is named explicitly
+        # or no encoding is declared at all (both reach this branch the
+        # same way). A Time32/Time64 field's wire value ("12:34:56") is
+        # a time of day, not a moment -- isoparse cannot make one of it,
+        # so the stream would complete its first run, checkpoint the raw
+        # value, and deterministically fail resuming on the next one.
+        raise ReadError(
+            f"endpoint {endpoint_id!r}: cursor field {cursor_field!r} declares "
+            f"arrow_type {field.get('arrow_type')!r}; incremental replication "
+            f"checkpoints this field as an absolute moment, which a time of "
+            f"day cannot be converted into -- use a Timestamp or Date field"
+        )
     fmt = field.get("format")
+    encoding = field.get("encoding")
+    if isinstance(encoding, Mapping):
+        name = encoding.get("name")
+        if name not in (None, "iso8601", "epoch"):
+            raise ReadError(
+                f"endpoint {endpoint_id!r}: cursor field {cursor_field!r} "
+                f"declares encoding {name!r}; incremental replication "
+                f"checkpoints this field's raw wire value and can only read "
+                f"it back as a bare ISO-8601 string or bare epoch integer "
+                f"(encoding 'iso8601'/'epoch', or none declared) -- no other "
+                f"encoding's wire shape is understood by the replication "
+                f"cursor"
+            )
+        if name == "epoch":
+            if types[0] != "integer":
+                raise ReadError(
+                    f"endpoint {endpoint_id!r}: cursor field {cursor_field!r} "
+                    f"declares encoding 'epoch' but JSON type {types[0]!r}, "
+                    f"not 'integer'; cursor_bounds reads an epoch cursor back "
+                    f"only from an integer-typed field"
+                )
+            unit = encoding.get("unit")
+            expected_format = (
+                _CURSOR_EPOCH_FORMAT.get(unit) if isinstance(unit, str) else None
+            )
+            if expected_format is None:
+                raise ReadError(
+                    f"endpoint {endpoint_id!r}: cursor field {cursor_field!r} "
+                    f"declares encoding 'epoch' with unit {unit!r}; "
+                    f"incremental replication only reads an epoch cursor "
+                    f"back in {sorted(_CURSOR_EPOCH_FORMAT)!r} units"
+                )
+            if fmt != expected_format:
+                raise ReadError(
+                    f"endpoint {endpoint_id!r}: cursor field {cursor_field!r} "
+                    f"declares encoding 'epoch' with unit {unit!r}, but "
+                    f"format {fmt!r} -- "
+                    f"cursor_bounds reads this field back in whatever unit "
+                    f"format {expected_format!r} names; a mismatch resumes "
+                    f"from the wrong instant"
+                )
     return FieldDeclaration(types[0], fmt if isinstance(fmt, str) and fmt else None)
 
 

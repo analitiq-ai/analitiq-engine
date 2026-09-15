@@ -47,6 +47,7 @@ from analitiq.contracts.endpoints import (
 from pydantic import BaseModel
 
 from ..exceptions import ReadError
+from ._epoch_formats import EPOCH_UNIT as _EPOCH_UNIT
 from .response_schema import FieldDeclaration
 
 __all__ = ["check_mapping_direction", "cursor_bounds", "cursor_mapping_for"]
@@ -77,14 +78,6 @@ _DEFAULT_FORMAT = "date-time"
 
 
 _UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
-
-#: The one place an epoch unit is declared: a bound is rendered as whole
-#: units since the epoch, and an integer cursor whose record field declares
-#: the same format is read back as that many units after it.
-_EPOCH_UNIT: dict[str, timedelta] = {
-    "epoch_seconds": timedelta(seconds=1),
-    "epoch_milliseconds": timedelta(milliseconds=1),
-}
 
 
 def _iso(moment: datetime) -> str:

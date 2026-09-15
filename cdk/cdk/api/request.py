@@ -973,7 +973,8 @@ def _body_number(name: str, value: Any, endpoint: str) -> Any:
     the author has to hear about it.
 
     Record data is a different population and keeps its exact decimal
-    string (see ``encode_body``) -- that precision is the source column's,
+    string (a field's declared ``encoding_write: {"name": "decimal"}``,
+    ``cdk.type_map.encoders``) -- that precision is the source column's,
     not a round trip of a number the provider chose.
     """
     if not isinstance(value, Decimal):
