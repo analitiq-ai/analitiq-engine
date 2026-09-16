@@ -549,7 +549,7 @@ class SqlDialect:
         """
         return not schema_name
 
-    # ---- column type rendering (one write surface: type-map-write.json) -----
+    # ---- column type rendering (one write surface: the write type map) -----
     def render_column_type(
         self,
         arrow_type: str,
@@ -560,7 +560,7 @@ class SqlDialect:
         """Render an Arrow type to this system's native DDL type.
 
         The default is fully declarative: the connector's
-        ``type-map-write.json`` (via ``TypeMapper.to_native_type``) is the
+        write type map (via ``TypeMapper.to_native_type``) is the
         single write-direction surface for every transport — SQLAlchemy,
         ADBC, and the standalone control-plane ``create_table``. A dialect
         overrides this ONLY when rules cannot express the logic (e.g.

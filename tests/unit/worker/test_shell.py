@@ -103,7 +103,7 @@ class TestReadTypeMapPayloads:
             "rules": _RULES,
             "write_rules": _WRITE_RULES,
         }
-        assert payloads["connection"] == {"rules": _RULES, "write_rules": None}
+        assert payloads["connection"] == {"rules": _RULES}
 
     def test_absent_maps_are_none(self, tmp_path):
         payloads = read_type_map_payloads(
@@ -143,6 +143,36 @@ class TestReadTypeMapPayloads:
                 tmp_path / "connectors", "postgres", tmp_path / "connections", "my-pg"
             )
 
+    def test_write_only_directory_is_no_block(self, tmp_path):
+        connections = tmp_path / "connections"
+        definition = connections / "my-pg" / "definition"
+        definition.mkdir(parents=True)
+        (definition / "type-map-write.json").write_text(
+            json.dumps(type_map_document("write", _WRITE_RULES))
+        )
+        payloads = read_type_map_payloads(
+            tmp_path / "connectors", "postgres", connections, "my-pg"
+        )
+        assert payloads["connection"] is None
+
+    def test_present_write_document_is_never_read_as_absent(self, tmp_path):
+        # The block marks "no write document" by leaving write_rules out, so a
+        # write document whose rules are null still reaches the parser.
+        connectors = tmp_path / "connectors"
+        definition = connectors / "postgres" / "definition"
+        definition.mkdir(parents=True)
+        (definition / "type-map-read.json").write_text(
+            json.dumps(type_map_document("read", _RULES))
+        )
+        (definition / "type-map-write.json").write_text(
+            json.dumps(type_map_document("write", None))
+        )
+        payloads = read_type_map_payloads(
+            connectors, "postgres", tmp_path / "connections", "my-pg"
+        )
+        with pytest.raises(InvalidTypeMapError):
+            build_type_mapper("postgres", payloads["connector"])
+
     def test_malformed_map_raises_typed_error(self, tmp_path):
         connectors = tmp_path / "connectors"
         definition = (connectors / "postgres") / "definition"
@@ -157,9 +187,17 @@ class TestReadTypeMapPayloads:
 
 
 class TestBuildTypeMapper:
-    def test_rebuilds_mapper_from_raw_arrays(self):
-        mapper = build_type_mapper("postgres", _RULES, _WRITE_RULES)
-        assert mapper is not None
+    def test_rules_feed_read_and_write_rules_feed_write(self):
+        write_rules = [{"match": "exact", "arrow_type": "Int64", "native_type": "INT8"}]
+        mapper = build_type_mapper(
+            "postgres", {"rules": _RULES, "write_rules": write_rules}
+        )
+        assert mapper.to_arrow_type("BIGINT") == "Int64"
+        assert mapper.to_native_type("Int64") == "INT8"
+
+    def test_block_without_write_rules_has_no_write_map(self):
+        mapper = build_type_mapper("postgres", {"rules": _RULES})
+        assert mapper.has_write_map is False
 
 
 class TestBuildBootstrap:
@@ -191,10 +229,7 @@ class TestBuildBootstrap:
         assert bootstrap["kind"] == "database"
         assert bootstrap["connector_id"] == "postgres"
         assert bootstrap["connection"]["transport_specs"] == {"database": {"dsn": "x"}}
-        assert bootstrap["type_maps"]["connector"] == {
-            "rules": _RULES,
-            "write_rules": None,
-        }
+        assert bootstrap["type_maps"]["connector"] == {"rules": _RULES}
         assert bootstrap["source_config"] == {"stream_source": {}}
         # The whole bootstrap is JSON-safe — it crosses the stdin pipe.
         assert json.loads(json.dumps(bootstrap)) == bootstrap

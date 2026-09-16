@@ -58,7 +58,7 @@ TIER1_MIN_PASSED = 10
 
 
 def _type_map_read_doc(rules: list) -> str:
-    """A minimal ``type-map-read.json`` body, serialized."""
+    """A minimal read-direction type-map document, serialized."""
     return json.dumps(type_map_document("read", rules))
 
 

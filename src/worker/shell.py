@@ -80,7 +80,7 @@ def read_type_map_payloads(
 
     Same directory lookup and JSON validation as the file loaders (one
     parser, one error surface); the worker rebuilds the mappers from these
-    arrays with the same rule validation.
+    blocks with the same rule parsing.
     """
     connector_block = read_raw_type_maps(
         connector_definition_dir(connectors_dir, connector_id),

@@ -590,8 +590,7 @@ class TestLoaders:
             load_type_map(tmp_path, "empty")
 
     def test_type_map_wrong_root_type(self, tmp_path: Path):
-        # The old bare-array root shape is rejected: the file must be an
-        # envelope object carrying 'direction' and 'rules'.
+        # A bare rule array is not an envelope carrying 'direction' and 'rules'.
         _write_connector(tmp_path, "bad")
         (tmp_path / "bad" / "definition" / "type-map-read.json").write_text("[]")
         with pytest.raises(InvalidTypeMapError, match="is not a type-map document"):
@@ -668,6 +667,14 @@ class TestDirectionFromDocument:
         )
         with pytest.raises(TypeMapNotFoundError):
             load_type_map(tmp_path, "writeonly")
+
+    def test_any_type_map_filename_is_read(self, tmp_path: Path):
+        definition = self._definition(tmp_path, "renamed")
+        (definition / "type-map-anything.json").write_text(
+            json.dumps(type_map_document("read", self._READ))
+        )
+        mapper = load_type_map(tmp_path, "renamed")
+        assert mapper.to_arrow_type("text") == "Utf8"
 
     def test_connection_scope_loads_by_direction(self, tmp_path: Path):
         definition = tmp_path / "my-pg" / "definition"
@@ -1396,7 +1403,7 @@ class TestToNativeTypeRegex:
 
 
 # ---------------------------------------------------------------------------
-# Loader — write-type-map.json sibling
+# Loader — write-direction document
 # ---------------------------------------------------------------------------
 
 

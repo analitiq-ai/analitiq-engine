@@ -147,7 +147,7 @@ class TestBuildErrors:
         assert isinstance(exc.value.__cause__, UnmappedTypeError)
 
     def test_no_write_map_raises_chaining_invalid_type_map(self):
-        # A connector that ships only a read type-map (no type-map-write.json)
+        # A connector that ships only a read type-map (no write-direction document)
         # cannot render native DDL types, so to_native_type raises through
         # dialect.render_column_type and create_table fails loudly.
         read_only_mapper = TypeMapper(
@@ -193,8 +193,8 @@ class TestCreateTableExecution:
     async def test_connection_write_rules_compose_over_connector(
         self, pg_mapper, pg_connection_mapper
     ):
-        # A connection-scoped type-map-write.json takes effect in control-plane
-        # create_table (#368): the connection's Utf8 -> CITEXT override wins,
+        # A connection-scoped write type map takes effect in control-plane
+        # create_table: the connection's Utf8 -> CITEXT override wins,
         # while Int64 (no connection rule) still renders through the
         # connector's write map.
         runtime = FakeAdbcRuntime(

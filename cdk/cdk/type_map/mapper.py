@@ -1,11 +1,12 @@
 """Deterministic matcher for type-map.
 
 ``TypeMapper`` returns the first matching rule's output and raises on a miss —
-no defaults, no coercion. Each direction has its **own** rule file: the read
-map (``type-map-read.json``, native → Arrow) feeds :meth:`TypeMapper.to_arrow_type`;
-the optional write map (``type-map-write.json``, Arrow → native) feeds
-:meth:`TypeMapper.to_native_type`. The two are independent rule sets, never one
-inverted at runtime — inverting would be lossy and ambiguous.
+no defaults, no coercion. Each direction has its **own** rule set: the read
+map (the type-map document declaring ``direction: read``, native → Arrow) feeds
+:meth:`TypeMapper.to_arrow_type`; the optional write map (``direction: write``,
+Arrow → native) feeds :meth:`TypeMapper.to_native_type`. The two are
+independent rule sets, never one inverted at runtime — inverting would be
+lossy and ambiguous.
 """
 
 from __future__ import annotations
@@ -26,7 +27,9 @@ from .rules import (
     normalized_native,
 )
 
-# The one substitution token the renderer recognises in a rule's template.
+# A ``${...}`` this does not match is left in the rendered type verbatim. The
+# pinned contract rejects only empty or unclosed tokens, so a malformed name
+# such as ``${length-p}`` reaches the DDL as literal text.
 _SUBSTITUTION_TOKEN: Final[Pattern[str]] = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
@@ -162,8 +165,8 @@ class TypeMapper:
     ) -> str:
         """Map an ``arrow_type`` to its native DDL type.
 
-        The inverse of :meth:`to_arrow_type`, fed by the connector's
-        ``type-map-write.json``. ``params`` supplies per-column hints (e.g.
+        The inverse of :meth:`to_arrow_type`, fed by the connector's write
+        map. ``params`` supplies per-column hints (e.g.
         ``length``) that a rule's ``native_type`` template may reference via
         ``${name}`` alongside any named captures from the arrow_type regex;
         named captures take precedence on a name clash. Hint values are rendered

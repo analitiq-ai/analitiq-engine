@@ -11,15 +11,19 @@ Two parallel locations are supported:
 Each ``type-map-*.json`` document is a top-level JSON object
 ``{$schema, direction, rules}``. ``direction`` (``"read"`` / ``"write"``) says
 which map the document is; the filename does not, so a directory holds at
-most one document per direction. Rule well-formedness is analitiq-validator's
-contract, gated once in DIP CI before a connector is published (one gate per
-document; see schema-contracts.md), so this loader only unwraps the envelope.
+most one document per direction. Document well-formedness, including the
+allowed ``direction`` values, is analitiq-validator's contract, gated once in
+DIP CI before a connector is published (one gate per document; see
+schema-contracts.md), so this loader only unwraps each envelope and keys it by
+``direction``. A ``direction`` other than ``read``/``write`` is keyed and never
+used.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,7 +40,7 @@ _TYPE_MAP_GLOB = "type-map-*.json"
 @dataclass(frozen=True)
 class _TypeMapDocument:
     source: str
-    rules: list
+    rules: object
 
 
 def _read_type_map_documents(
@@ -44,11 +48,12 @@ def _read_type_map_documents(
 ) -> dict[str, _TypeMapDocument]:
     """*definition_dir*'s type-map documents, keyed by their ``direction``.
 
-    A directory with no documents yields ``{}``. Malformed JSON, an envelope
-    without ``direction``/``rules``, or two documents declaring the same
-    direction is a hard ``InvalidTypeMapError`` -- a file
-    this broken did not pass the DIP publish gate, so the shell or the
-    checkout is broken, not the document's authored content.
+    A directory with no documents yields ``{}``. Malformed JSON or an
+    envelope without ``direction``/``rules`` is a hard ``InvalidTypeMapError``
+    -- a file this broken did not pass the DIP publish gate, so the shell or
+    the checkout is broken. Two documents declaring the same direction are
+    also an ``InvalidTypeMapError``: keying by direction would otherwise keep
+    one and silently drop the other.
     """
     documents: dict[str, _TypeMapDocument] = {}
     for path in sorted(definition_dir.glob(_TYPE_MAP_GLOB)):
@@ -58,16 +63,13 @@ def _read_type_map_documents(
             raise InvalidTypeMapError(
                 f"{label}: {path} is not valid JSON: {err}"
             ) from err
+        # parse_rules/parse_write_rules validate the bare rules array against
+        # the pinned contract's RootModel (rules.py's _parse). When
+        # claude-code-plugins#316 makes those models the envelope, this
+        # unwrap, the direction keying and that validation level move together.
         try:
             direction = payload["direction"]
-            # The rule array this returns, not the envelope it came from, is
-            # what parse_rules/parse_write_rules validate against the
-            # contract's TypeMapReadDoc/TypeMapWriteDoc RootModel (rules.py's
-            # _parse). The pinned contract still models that RootModel over
-            # the bare array; when claude-code-plugins#316 makes it the
-            # envelope instead, this unwrap and that validation level have to
-            # move together.
-            rules: list = payload["rules"]
+            rules = payload["rules"]
         except (TypeError, KeyError) as err:
             raise InvalidTypeMapError(
                 f"{label}: {path} is not a type-map document with 'direction' "
@@ -82,30 +84,33 @@ def _read_type_map_documents(
     return documents
 
 
-def read_raw_type_maps(
-    definition_dir: Path, label: str
-) -> dict[str, list | None] | None:
-    """Raw read/write rule arrays from *definition_dir*, unparsed.
+def read_raw_type_maps(definition_dir: Path, label: str) -> dict[str, object] | None:
+    """*definition_dir*'s rule arrays as a raw block, unparsed.
 
-    The worker-bootstrap path: the trusted shell ships these arrays in the
-    launch bootstrap and the worker rebuilds the mappers via
-    :func:`build_type_mapper`. ``None`` when the directory has no read
-    document.
+    The worker-bootstrap path: the trusted shell ships this block in the
+    launch bootstrap and the worker rebuilds the mapper via
+    :func:`build_type_mapper`. ``write_rules`` is present only when a write
+    document is, so a write document whose rules are ``null`` is never read
+    as absent. ``None`` when the directory has no read document; a write
+    document without one is ignored (still read, so a malformed or duplicate
+    one raises).
     """
     documents = _read_type_map_documents(definition_dir, label)
     if "read" not in documents:
         return None
-    write = documents.get("write")
-    return {
-        "rules": documents["read"].rules,
-        "write_rules": None if write is None else write.rules,
-    }
+    block: dict[str, object] = {"rules": documents["read"].rules}
+    if "write" in documents:
+        block["write_rules"] = documents["write"].rules
+    return block
 
 
 def _load_type_mapper(
     definition_dir: Path, label: str, mapper_label: str
 ) -> TypeMapper | None:
     """Parse *definition_dir*'s documents into a mapper; ``None`` with no read map.
+
+    A write document without a read document is ignored (still read, so a
+    malformed or duplicate one raises).
 
     The write map is optional (source-only / API connectors have none), but a
     present one is parsed here, so a broken write map fails at load rather
@@ -129,23 +134,17 @@ def _parse_type_mapper(
     return TypeMapper(mapper_label, rules, write_rules)
 
 
-def build_type_mapper(
-    label: str,
-    rules_payload: list,
-    write_rules_payload: list | None = None,
-) -> TypeMapper:
-    """Build a :class:`TypeMapper` from raw rule payloads (no filesystem).
+def build_type_mapper(label: str, block: Mapping[str, object]) -> TypeMapper:
+    """Build a :class:`TypeMapper` from a :func:`read_raw_type_maps` block.
 
-    The worker-bootstrap path: the trusted shell ships the arrays
-    :func:`read_raw_type_maps` returns in the launch bootstrap, and the worker
-    rebuilds the mapper here with the same rule validation the file loaders
-    apply.
+    The worker-bootstrap path: the worker rebuilds the mapper the trusted
+    shell read, with the same rule parsing the file loaders apply.
     """
     source = f"{label} (bootstrap)"
     write = None
-    if write_rules_payload is not None:
-        write = _TypeMapDocument(source, write_rules_payload)
-    return _parse_type_mapper(label, _TypeMapDocument(source, rules_payload), write)
+    if "write_rules" in block:
+        write = _TypeMapDocument(source, block["write_rules"])
+    return _parse_type_mapper(label, _TypeMapDocument(source, block["rules"]), write)
 
 
 def connector_definition_dir(connectors_dir: Path, slug: str) -> Path:
@@ -157,8 +156,9 @@ def load_type_map(connectors_dir: Path, slug: str) -> TypeMapper:
     """Load and parse a connector's type-map documents.
 
     Raises ``TypeMapNotFoundError`` when no document declares the read
-    direction, ``InvalidTypeMapError`` when one is malformed — the engine
-    cannot canonicalize types without a read map.
+    direction, ``InvalidTypeMapError`` when any document is malformed or two
+    declare the same direction — the engine cannot canonicalize types without
+    a read map.
     """
     definition = connector_definition_dir(connectors_dir, slug)
     mapper = _load_type_mapper(definition, f"connector {slug!r}", slug)

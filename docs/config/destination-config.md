@@ -150,7 +150,7 @@ not carry:
   [`grpc-streaming-architecture.md`](../architecture/grpc-streaming-architecture.md).
 - **Database DDL type resolution.** When `auto_create_table` is on, DDL
   column types come from the dialect's `render_column_type`, backed by the
-  connection-scoped `type-map-write.json` (connection rules over the
+  connection-scoped write type map (connection rules over the
   connector's) — the same path on both transports. Full type-mapping and
   transport detail is in
   [`arrow-and-transport-strategy.md`](../data-path/arrow-and-transport-strategy.md).

@@ -187,10 +187,10 @@ class ConformanceTarget:
     def write_role(self) -> bool:
         """Whether the write-path checks apply to this connector.
 
-        The write-direction type vocabulary lives entirely in
-        the write-direction type-map document, so shipping one is the connector's own
-        statement that it writes; source-only connectors ship none and
-        the write-path checks skip.
+        The write-direction type vocabulary lives entirely in the
+        write-direction type-map document, so shipping one is the
+        connector's own statement that it writes; source-only connectors
+        ship none and the write-path checks skip.
         """
         return self.is_database and self.has_write_map
 
@@ -486,22 +486,8 @@ def _load_type_mapper(definition_dir: Path, connector_id: str) -> TypeMapper | N
         raise ConformanceSetupError(str(err)) from err
     if raw is None:
         return None
-    if raw["write_rules"] == []:
-        # An empty write map is indistinguishable from an absent one once
-        # parsed (has_write_map is rule truthiness), and absence is what
-        # gates every write check off — so the shipped-but-empty file
-        # would silently skip the connector's whole write role.
-        raise ConformanceSetupError(
-            f"connector {connector_id!r} ships a write type map with "
-            f"no rules; a write map that renders no type cannot serve the "
-            f"write role. Add rules or delete the document."
-        )
     try:
-        return build_type_mapper(
-            f"connector {connector_id!r}",
-            raw["rules"] or [],
-            raw["write_rules"],
-        )
+        return build_type_mapper(f"connector {connector_id!r}", raw)
     except InvalidTypeMapError as err:
         raise ConformanceSetupError(str(err)) from err
 

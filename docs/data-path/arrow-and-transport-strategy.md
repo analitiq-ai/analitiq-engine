@@ -35,7 +35,7 @@ for how the CDK package is bounded and wired see
    `SqlDialect.render_column_type` (`cdk/cdk/sql/dialects.py`) is the
    single source of truth for types across all connectors: `arrow_type`,
    the canonical Arrow type string, parses to a `pa.DataType` on the read
-   side, and the connector's own `type-map-write.json` renders it back to a
+   side, and the connector's own write type map renders it back to a
    `native_type` for DDL on the write side. The `arrow_family` heads are
    declared once, in `ARROW_FAMILIES` (`cdk/cdk/type_map/grammar.py`): each
    entry carries its parameter grammar, its `conversion_kind`, the pyarrow

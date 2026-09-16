@@ -46,8 +46,8 @@ Python's also accepts a position just before one trailing newline; and
 ``\Z`` is not accepted at all (RE2 spells the equivalent ``\z``). A pattern
 relying on any of these fails loud, at compile or at match time.
 
-Because these checks are no longer ``model_validator``s on a model this repo
-owns, they are not invariants of the type -- they run in :func:`parse_rules`
+The RE2 checks are not ``model_validator``s on the contract model, so they are
+not invariants of the type -- they run in :func:`parse_rules`
 and :func:`parse_write_rules`. Those two are the only sanctioned way to obtain
 a rule the engine will execute; a rule validated straight off the contract
 model is contract-valid but has not been cleared to run here.
@@ -154,10 +154,9 @@ _BACKREFERENCE_DIGIT: Final[Pattern[str]] = re.compile(r"\\[1-9]")
 # surface performs can never contradict the parser's. That is this surface's
 # whole validation scope: integer ranges, timezone, and arity are enforced
 # only by parse_arrow_type. normalize_arrow_type expands short codes in every
-# LOOKUP input, so either spelling resolves to the same key at lookup time. It
-# no longer does so for the authored rule: the contract's arrow_type pattern
-# admits long-form units only, so a write rule keyed ``Timestamp(us)`` -- legal
-# before the move onto the published models -- no longer validates.
+# LOOKUP input, so either spelling resolves to the same key at lookup time. An
+# authored rule is not expanded: the contract's arrow_type pattern admits
+# long-form units only, so a write rule keyed ``Timestamp(us)`` does not validate.
 _UNIT_LONG_FORMS: Final[frozenset[str]] = frozenset(UNIT_SHORT_TO_LONG.values())
 
 # Allowed long-form units per temporal family, derived from the grammar. The

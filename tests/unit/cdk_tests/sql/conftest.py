@@ -114,19 +114,23 @@ _CONN_WRITE_RULES = [
 @pytest.fixture
 def pg_mapper():
     """Postgres-shaped TypeMapper (read + write rules)."""
-    return build_type_mapper("postgres", _PG_READ_RULES, _PG_WRITE_RULES)
+    return build_type_mapper(
+        "postgres", {"rules": _PG_READ_RULES, "write_rules": _PG_WRITE_RULES}
+    )
 
 
 @pytest.fixture
 def sf_mapper():
     """Snowflake-shaped TypeMapper (read rules only)."""
-    return build_type_mapper("snowflake", _SF_READ_RULES)
+    return build_type_mapper("snowflake", {"rules": _SF_READ_RULES})
 
 
 @pytest.fixture
 def pg_connection_mapper():
     """Connection-scoped TypeMapper composed over ``pg_mapper`` in the fakes."""
-    return build_type_mapper("connection:acme", _CONN_READ_RULES, _CONN_WRITE_RULES)
+    return build_type_mapper(
+        "connection:acme", {"rules": _CONN_READ_RULES, "write_rules": _CONN_WRITE_RULES}
+    )
 
 
 def _scoped_mapper(

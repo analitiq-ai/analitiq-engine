@@ -376,9 +376,9 @@ class ConnectionRuntime:
         (``to_native_type``). A connection only needs to declare the types it
         overrides; the connector map supplies everything else.
 
-        This means a connection endpoint that has a ``type-map-read.json`` but
-        no ``type-map-write.json`` still supports DDL generation: its read
-        overrides take effect and the connector's write rules cover the rest.
+        This means a connection endpoint that has a read map but no write map
+        still supports DDL generation: its read overrides take effect and the
+        connector's write rules cover the rest.
 
         For ``EndpointScope.CONNECTOR`` the connector mapper is returned
         directly; no composition takes place.

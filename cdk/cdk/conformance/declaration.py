@@ -110,11 +110,12 @@ def check_declaration_consistency(target: ConformanceTarget) -> list[Violation]:
     """Certify that ``sql_capabilities`` and the dialect agree.
 
     The write-path checks apply to write-capable database connectors
-    (the ones shipping a write-direction type-map document). A connector *without* a
-    write map is checked for the inverse inconsistency: declaring or
+    (the ones shipping a write-direction type-map document). A connector
+    *without* a write map is checked for the inverse inconsistency: declaring or
     implementing write capability it cannot use — otherwise a forgotten
-    or misnamed write map would silently switch every write check off
-    (the gate's input must not be supplied by the defect it gates).
+    or mis-declared write map (wrong ``direction``) would silently switch
+    every write check off (the gate's input must not be supplied by the
+    defect it gates).
     """
     if not target.is_database:
         return _database_shaped_kind_mismatch(target)

@@ -1207,17 +1207,15 @@ class TestTargetLoadingBreaks:
     def test_empty_write_map_file_is_a_setup_error(self, tmp_path: Any) -> None:
         """A shipped-but-empty write type map must not read as absent.
 
-        Once parsed, an empty write map is indistinguishable from an
-        absent one (has_write_map is rule truthiness), and absence gates
-        the whole write role off — so the file the connector explicitly
-        ships would silently skip every write check.
+        Absence gates the whole write role off, so an empty document read
+        as absent would silently skip every write check.
         """
         root = tmp_path / "reference"
         shutil.copytree(REFERENCE_DIR, root)
         (root / "definition" / "type-map-write.json").write_text(
             json.dumps(type_map_document("write", []))
         )
-        with pytest.raises(ConformanceSetupError, match="no rules"):
+        with pytest.raises(ConformanceSetupError, match="at least 1 item"):
             load_target(root, class_path=REFERENCE_CLASS)
 
 
@@ -1301,7 +1299,11 @@ class TestGateInversionBreaks:
         """
         read_only_mapper = build_type_mapper(
             "no-write-map",
-            [{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}],
+            {
+                "rules": [
+                    {"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}
+                ]
+            },
         )
         doctored = dataclasses.replace(reference_target, type_mapper=read_only_mapper)
         violations = check_declaration_consistency(doctored)
@@ -1323,8 +1325,14 @@ class TestTypeMapBreaks:
         with pytest.raises(InvalidTypeMapError, match=r"exact\.arrow_type"):
             build_type_mapper(
                 "foreign-literal",
-                [{"match": "exact", "native_type": "TEXT", "arrow_type": "Foo"}],
-                [{"match": "exact", "arrow_type": "Foo", "native_type": "TEXT"}],
+                {
+                    "rules": [
+                        {"match": "exact", "native_type": "TEXT", "arrow_type": "Foo"}
+                    ],
+                    "write_rules": [
+                        {"match": "exact", "arrow_type": "Foo", "native_type": "TEXT"}
+                    ],
+                },
             )
 
     def test_source_only_connector_is_held_to_the_arrow_vocabulary(self) -> None:
@@ -1338,8 +1346,11 @@ class TestTypeMapBreaks:
         with pytest.raises(InvalidTypeMapError, match=r"exact\.arrow_type"):
             build_type_mapper(
                 "source-only",
-                [{"match": "exact", "native_type": "TEXT", "arrow_type": "Bogus"}],
-                None,
+                {
+                    "rules": [
+                        {"match": "exact", "native_type": "TEXT", "arrow_type": "Bogus"}
+                    ]
+                },
             )
 
     def test_regex_read_rule_with_a_foreign_literal_output_is_refused(self) -> None:
@@ -1352,33 +1363,41 @@ class TestTypeMapBreaks:
         with pytest.raises(InvalidTypeMapError, match="not a valid Arrow type"):
             build_type_mapper(
                 "regex-foreign-output",
-                [
-                    {"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"},
-                    {
-                        "match": "regex",
-                        "native_type": "^VARCHAR\\((?<n>\\d+)\\)$",
-                        "arrow_type": "Bogus",
-                    },
-                ],
-                [{"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"}],
+                {
+                    "rules": [
+                        {"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"},
+                        {
+                            "match": "regex",
+                            "native_type": "^VARCHAR\\((?<n>\\d+)\\)$",
+                            "arrow_type": "Bogus",
+                        },
+                    ],
+                    "write_rules": [
+                        {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"}
+                    ],
+                },
             )
 
     def test_regex_read_rule_interpolating_a_capture_loads(self) -> None:
         """A templated arrow_type is not a literal family; it must load."""
         mapper = build_type_mapper(
             "regex-templated-output",
-            [
-                {"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"},
-                {
-                    "match": "regex",
-                    "native_type": (
-                        "^NUMERIC\\((?<p>[1-9]|[12][0-9]|3[0-8]), *"
-                        "(?<s>[0-9]|[12][0-9]|3[0-8])\\)$"
-                    ),
-                    "arrow_type": "Decimal128(${p}, ${s})",
-                },
-            ],
-            [{"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"}],
+            {
+                "rules": [
+                    {"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"},
+                    {
+                        "match": "regex",
+                        "native_type": (
+                            "^NUMERIC\\((?<p>[1-9]|[12][0-9]|3[0-8]), *"
+                            "(?<s>[0-9]|[12][0-9]|3[0-8])\\)$"
+                        ),
+                        "arrow_type": "Decimal128(${p}, ${s})",
+                    },
+                ],
+                "write_rules": [
+                    {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"}
+                ],
+            },
         )
         assert check_type_map_round_trip(mapper) == []
 
@@ -1386,14 +1405,18 @@ class TestTypeMapBreaks:
         """A write map rendering no probe must not read as fully certified."""
         mapper = build_type_mapper(
             "zero-coverage",
-            [{"match": "exact", "native_type": "JSONB", "arrow_type": "Json"}],
-            [
-                {
-                    "match": "regex",
-                    "arrow_type": "^(List|LargeList)<.+>$",
-                    "native_type": "JSONB",
-                }
-            ],
+            {
+                "rules": [
+                    {"match": "exact", "native_type": "JSONB", "arrow_type": "Json"}
+                ],
+                "write_rules": [
+                    {
+                        "match": "regex",
+                        "arrow_type": "^(List|LargeList)<.+>$",
+                        "native_type": "JSONB",
+                    }
+                ],
+            },
         )
         violations = check_type_map_round_trip(mapper)
         report = _messages(violations)
@@ -1409,23 +1432,25 @@ class TestTypeMapBreaks:
         """
         mapper = build_type_mapper(
             "partial-family",
-            [
-                {"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"},
-                {
-                    "match": "regex",
-                    "native_type": "^NUMERIC\\((?<p>[1-5]), (?<s>\\d)\\)$",
-                    "arrow_type": "Decimal128(${p}, ${s})",
-                },
-            ],
-            [
-                {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"},
-                # Covers only precision 1-5: matches no probe, but valid.
-                {
-                    "match": "regex",
-                    "arrow_type": "^Decimal128\\((?<p>[1-5]), (?<s>\\d)\\)$",
-                    "native_type": "NUMERIC(${p}, ${s})",
-                },
-            ],
+            {
+                "rules": [
+                    {"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"},
+                    {
+                        "match": "regex",
+                        "native_type": "^NUMERIC\\((?<p>[1-5]), (?<s>\\d)\\)$",
+                        "arrow_type": "Decimal128(${p}, ${s})",
+                    },
+                ],
+                "write_rules": [
+                    {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"},
+                    # Covers only precision 1-5: matches no probe, but valid.
+                    {
+                        "match": "regex",
+                        "arrow_type": "^Decimal128\\((?<p>[1-5]), (?<s>\\d)\\)$",
+                        "native_type": "NUMERIC(${p}, ${s})",
+                    },
+                ],
+            },
         )
         violations = check_type_map_round_trip(mapper)
         assert violations == [], (
@@ -1437,17 +1462,21 @@ class TestTypeMapBreaks:
         """A regex no normalized canonical can match is a dead rule."""
         mapper = build_type_mapper(
             "dead-rule",
-            [{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}],
-            [
-                {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"},
-                # No space after the comma: the normalizer always emits
-                # ", ", so this pattern can never match a probe.
-                {
-                    "match": "regex",
-                    "arrow_type": "^Decimal128\\((?<p>\\d+),(?<s>\\d+)\\)$",
-                    "native_type": "NUMERIC(${p}, ${s})",
-                },
-            ],
+            {
+                "rules": [
+                    {"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}
+                ],
+                "write_rules": [
+                    {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"},
+                    # No space after the comma: the normalizer always emits
+                    # ", ", so this pattern can never match a probe.
+                    {
+                        "match": "regex",
+                        "arrow_type": "^Decimal128\\((?<p>\\d+),(?<s>\\d+)\\)$",
+                        "native_type": "NUMERIC(${p}, ${s})",
+                    },
+                ],
+            },
         )
         violations = check_type_map_round_trip(mapper)
         report = _messages(violations)
@@ -1464,15 +1493,19 @@ class TestTypeMapBreaks:
         """
         mapper = build_type_mapper(
             "case-variant-rule",
-            [{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}],
-            [
-                {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"},
-                {
-                    "match": "regex",
-                    "arrow_type": "^decimal128\\((?<p>\\d+), (?<s>\\d+)\\)$",
-                    "native_type": "NUMERIC(${p}, ${s})",
-                },
-            ],
+            {
+                "rules": [
+                    {"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}
+                ],
+                "write_rules": [
+                    {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"},
+                    {
+                        "match": "regex",
+                        "arrow_type": "^decimal128\\((?<p>\\d+), (?<s>\\d+)\\)$",
+                        "native_type": "NUMERIC(${p}, ${s})",
+                    },
+                ],
+            },
         )
         report = _messages(check_type_map_round_trip(mapper))
         assert "type-map-coverage" in report
@@ -1490,14 +1523,18 @@ class TestTypeMapBreaks:
         """
         mapper = build_type_mapper(
             "hint-break",
-            [{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}],
-            [
-                {
-                    "match": "exact",
-                    "arrow_type": "Utf8",
-                    "native_type": "VARCHAR(${length})",
-                }
-            ],
+            {
+                "rules": [
+                    {"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}
+                ],
+                "write_rules": [
+                    {
+                        "match": "exact",
+                        "arrow_type": "Utf8",
+                        "native_type": "VARCHAR(${length})",
+                    }
+                ],
+            },
         )
         violations = check_type_map_round_trip(mapper)
         report = _messages(violations)
@@ -1509,8 +1546,14 @@ class TestTypeMapBreaks:
         """A write rule rendering a native the read map cannot map back."""
         mapper = build_type_mapper(
             "closure-break",
-            [{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}],
-            [{"match": "exact", "arrow_type": "Utf8", "native_type": "INTERVAL"}],
+            {
+                "rules": [
+                    {"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}
+                ],
+                "write_rules": [
+                    {"match": "exact", "arrow_type": "Utf8", "native_type": "INTERVAL"}
+                ],
+            },
         )
         violations = check_type_map_round_trip(mapper)
         assert violations, "an unreadable rendered native must fail"
@@ -1522,14 +1565,28 @@ class TestTypeMapBreaks:
         """One write/read round that never reaches a fixed point."""
         mapper = build_type_mapper(
             "convergence-break",
-            [
-                {"match": "exact", "native_type": "TEXT", "arrow_type": "LargeUtf8"},
-                {"match": "exact", "native_type": "CLOB", "arrow_type": "LargeUtf8"},
-            ],
-            [
-                {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"},
-                {"match": "exact", "arrow_type": "LargeUtf8", "native_type": "CLOB"},
-            ],
+            {
+                "rules": [
+                    {
+                        "match": "exact",
+                        "native_type": "TEXT",
+                        "arrow_type": "LargeUtf8",
+                    },
+                    {
+                        "match": "exact",
+                        "native_type": "CLOB",
+                        "arrow_type": "LargeUtf8",
+                    },
+                ],
+                "write_rules": [
+                    {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"},
+                    {
+                        "match": "exact",
+                        "arrow_type": "LargeUtf8",
+                        "native_type": "CLOB",
+                    },
+                ],
+            },
         )
         violations = check_type_map_round_trip(mapper)
         report = _messages(violations)

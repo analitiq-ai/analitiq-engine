@@ -450,9 +450,9 @@ class PipelineConfigPrep:
         )
         self._loaded_connectors[connector_id] = document
 
-        # Connector type-map is optional from this layer's perspective:
-        # API-only connectors that never expose SQL native types do not ship
-        # one. Only a genuinely ABSENT map (TypeMapNotFoundError) is benign and
+        # Connector type-map is optional from this layer's perspective. Only a
+        # missing read map (TypeMapNotFoundError, including a
+        # directory holding only a write document) is benign and
         # downgraded to None; a present-but-malformed read or write map is a
         # real config error and propagates so CI catches it at load instead of
         # silently dropping the connector's type resolution.

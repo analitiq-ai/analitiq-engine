@@ -3,8 +3,8 @@
 The API analogue of ``cdk.sql.discovery``: walk the declared response JSON
 Schema to the per-record items schema, then fill each field's
 ``arrow_type`` from the scope-correct read type-map. An API endpoint
-declares per-field JSON ``type``/``format`` and ships a
-``type-map-read.json`` -- the same read type-map the database source path
+declares per-field JSON ``type``/``format`` and ships a read type map
+-- the same read type-map the database source path
 consumes -- so one vocabulary covers both families.
 
 Imports the type-map surface, not ``pyarrow``: this module produces the
@@ -157,7 +157,7 @@ def apply_read_type_map(
     type fails loud naming the field.
 
     The mapper is chosen by the endpoint's scope so a connection-scoped
-    endpoint's ``type-map-read.json`` composes over the connector defaults,
+    endpoint's read type map composes over the connector defaults,
     matching the database path. A missing or invalid type-map is a
     deterministic config defect, so it surfaces as a :class:`ReadError`
     rather than the raw ``RuntimeError`` the worker would classify as
