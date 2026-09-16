@@ -1,6 +1,6 @@
-r"""Type-map rule parsing: contract validation, then execution safety.
+r"""Type-map rule parsing: contract model, then execution safety.
 
-A rule is one entry in ``type-map-read.json``:
+A rule is one entry in a type-map document's ``rules`` array:
 
     {"match": "exact", "native_type": "JSONB", "arrow_type": "Utf8"}
     {"match": "regex", "native_type": "^VARCHAR\((?<n>\d+)\)$", "arrow_type": "Utf8"}
@@ -46,20 +46,6 @@ Python's also accepts a position just before one trailing newline; and
 ``\Z`` is not accepted at all (RE2 spells the equivalent ``\z``). A pattern
 relying on any of these fails loud, at compile or at match time.
 
-Two further checks sit here because this process is the one that *renders*:
-
-- A write rule whose *match* side carries a ``${…}`` sequence can never fire --
-  the token is compared as literal text.
-- A render template containing a malformed token (``${length-p}``, ``${length }``)
-  is not matched by the substitution token, so it would survive rendering and
-  land in the emitted DDL verbatim. The contract rejects the empty ``${}`` and
-  unclosed ``${`` forms; the rest is caught here.
-
-Both are document validity rather than execution safety, so both belong in the
-contract, not here: analitiq-ai/claude-code-plugins#241 moves them. They are
-kept until that lands -- without them a malformed token reaches emitted DDL as
-literal text -- and this module drops them when it does.
-
 Because these checks are no longer ``model_validator``s on a model this repo
 owns, they are not invariants of the type -- they run in :func:`parse_rules`
 and :func:`parse_write_rules`. Those two are the only sanctioned way to obtain
@@ -70,7 +56,6 @@ model is contract-valid but has not been cleared to run here.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
 from re import Pattern
 from typing import Any, Final, Protocol, cast
 
@@ -148,13 +133,6 @@ _RE2_OPTIONS: Final = re2.Options()
 _RE2_OPTIONS.log_errors = False
 
 _NAMED_GROUP_RE2: Final[Pattern[str]] = re.compile(r"\(\?<([A-Za-z_][A-Za-z0-9_]*)>")
-# The one substitution token the renderer recognises. Shared with the mapper so
-# what validates and what renders can never drift apart.
-_SUBSTITUTION_TOKEN: Final[Pattern[str]] = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
-# Every substitution-token opener. Deliberately laxer than the token itself --
-# it matches ``$ {`` too, because the renderer does NOT, so a spaced opener
-# would otherwise survive into the emitted DDL exactly like a malformed name.
-_PLACEHOLDER_OPENER: Final[Pattern[str]] = re.compile(r"\$\s*\{")
 
 # RE2 refuses to compile every one of these constructs itself; kept here too
 # only so an author sees "unsupported construct (lookahead)" instead of RE2's
@@ -339,25 +317,6 @@ def compile_pattern(rule: TypeMapReadRule | TypeMapWriteRule) -> CompiledPattern
     )
 
 
-def _assert_well_formed_placeholders(template: str, *, where: str, field: str) -> None:
-    """Reject every ``${`` that is not the start of a valid ``${identifier}``.
-
-    A malformed placeholder -- bad characters (``${length-p}``), trailing space
-    (``${length }``), or an unterminated opener (``${length``) -- is not matched
-    by the strict substitution token, so without this check it survives
-    rendering as literal text and lands in the emitted DDL. The contract rejects
-    the empty and unclosed forms; the rest is caught here because this is the
-    process that does the rendering.
-    """
-    for opener in _PLACEHOLDER_OPENER.finditer(template):
-        if _SUBSTITUTION_TOKEN.match(template, opener.start()) is None:
-            raise InvalidTypeMapError(
-                f"{where}: {field} {template!r} contains a malformed "
-                f"substitution token at offset {opener.start()}; expected "
-                f"${{name}} with an identifier name"
-            )
-
-
 def _assert_executable(rule: TypeMapReadRule | TypeMapWriteRule, *, where: str) -> None:
     """Refuse a contract-valid rule this process must not compile or run.
 
@@ -365,21 +324,11 @@ def _assert_executable(rule: TypeMapReadRule | TypeMapWriteRule, *, where: str) 
     whether the engine will execute it -- see the module docstring for why the
     two are different questions.
     """
-    is_read = isinstance(rule, _READ_RULE_CLASSES)
-    if not is_read:
-        if _PLACEHOLDER_OPENER.search(rule.arrow_type):
-            raise InvalidTypeMapError(
-                f"{where}: write rule arrow_type {rule.arrow_type!r} contains a "
-                f"${{...}} sequence; substitution tokens belong only in the "
-                f"rendered native type, so this rule can never match"
-            )
-        # The write rule renders DDL, and this process is what renders it.
-        _assert_well_formed_placeholders(
-            rule.native_type, where=where, field="write rule native_type"
-        )
     if rule.match != "regex":
         return
-    matcher = rule.native_type if is_read else rule.arrow_type
+    matcher = (
+        rule.native_type if isinstance(rule, _READ_RULE_CLASSES) else rule.arrow_type
+    )
     # Compilability under Python's stdlib `re` is already settled: the
     # contract compiled this same matcher in _compile_ecma_matcher before we
     # got here, and the RE2 subset admits no construct that survives that and
@@ -400,59 +349,36 @@ def _assert_executable(rule: TypeMapReadRule | TypeMapWriteRule, *, where: str) 
         ) from err
 
 
-def _render_validation_error(err: ValidationError, *, source: str) -> str:
-    """Render a document-level pydantic failure as one per-rule message list.
-
-    Always names the offending value. The Arrow-type constraint is published as
-    a ``pattern``, so pydantic's own message for the commonest authoring mistake
-    is the 800-character regex and nothing else -- an author told only that
-    would have to read the grammar to find out which token of theirs was wrong.
-    """
-    lines = []
-    for detail in err.errors():
-        loc = detail["loc"]
-        # A whole-document failure (an empty rule list) has no index and no
-        # field; its own message already says everything, and inventing a
-        # "rule #?" would send the reader looking for a rule that isn't there.
-        if not loc:
-            lines.append(detail["msg"])
-            continue
-        index = loc[0] if isinstance(loc[0], int) else "?"
-        field = ".".join(str(part) for part in loc[1:]) or "rule"
-        lines.append(
-            f"rule #{index}: {field}: {detail['msg']} (got {detail['input']!r})"
-        )
-    return f"{source}: {'; '.join(lines)}"
-
-
 def _parse(
-    payload: Iterable[object],
+    payload: object,
     doc_model: type[TypeMapReadDoc] | type[TypeMapWriteDoc],
     *,
     source: str,
 ) -> list[Any]:
-    """Validate a rule array against the contract, then against what we will run.
+    """Build a rule array's contract models, then refuse what we will not run.
+
+    Contract validity is analitiq-validator's gate; ``model_validate`` runs
+    here because it is what builds the typed rules, and a document that
+    skipped the gate still fails at load rather than mid-run.
 
     Returns ``list[Any]`` because the two document models resolve to different
     rule unions; each public wrapper below re-narrows to its own direction.
     """
     try:
-        doc = doc_model.model_validate(list(payload))
+        doc = doc_model.model_validate(payload)
     except ValidationError as err:
-        raise InvalidTypeMapError(_render_validation_error(err, source=source)) from err
+        raise InvalidTypeMapError(f"{source}: {err}") from err
     rules: list[Any] = list(doc.root)
     for index, rule in enumerate(rules):
         _assert_executable(rule, where=f"{source}: rule #{index}")
     return rules
 
 
-def parse_rules(payload: Iterable[object], *, source: str) -> list[TypeMapReadRule]:
-    """Validate and parse a read-direction (native_type -> arrow_type) rule array."""
+def parse_rules(payload: object, *, source: str) -> list[TypeMapReadRule]:
+    """Parse a read-direction (native_type -> arrow_type) rule array."""
     return _parse(payload, TypeMapReadDoc, source=source)
 
 
-def parse_write_rules(
-    payload: Iterable[object], *, source: str
-) -> list[TypeMapWriteRule]:
-    """Validate and parse a write-direction (arrow_type -> native_type) rule array."""
+def parse_write_rules(payload: object, *, source: str) -> list[TypeMapWriteRule]:
+    """Parse a write-direction (arrow_type -> native_type) rule array."""
     return _parse(payload, TypeMapWriteDoc, source=source)

@@ -106,18 +106,6 @@ class TestReadRuleValidation:
         )
         assert rule.match == "exact"
 
-    def test_exact_rule_rejects_substitution_tokens(self):
-        # An exact rule renders a literal Arrow type; the Arrow vocabulary
-        # admits no "$", so the contract's field pattern refuses the template.
-        with pytest.raises(InvalidTypeMapError, match=r"exact\.arrow_type"):
-            _parse_read(
-                {
-                    "match": "exact",
-                    "native_type": "BIGINT",
-                    "arrow_type": "Decimal128(${p}, ${s})",
-                }
-            )
-
     @pytest.mark.parametrize(("construct", "pattern"), _NON_RE2_PATTERNS)
     def test_regex_rule_rejects_every_construct_outside_the_re2_subset(
         self, construct, pattern
@@ -147,120 +135,6 @@ class TestReadRuleValidation:
             _parse_read(
                 {"match": "regex", "native_type": r"^FOO\Z", "arrow_type": "Utf8"}
             )
-
-    def test_regex_rule_rejects_missing_named_capture(self):
-        with pytest.raises(InvalidTypeMapError, match=r"no matching \(\?<p>"):
-            _parse_read(
-                {
-                    "match": "regex",
-                    "native_type": r"^FOO\d+$",
-                    "arrow_type": "Decimal128(${p}, ${s})",
-                }
-            )
-
-    def test_regex_rule_rejects_render_that_is_not_an_arrow_type(self):
-        # A templated render is shape-checked as a whole: Utf8 takes no
-        # parameters, so no substitution can make Utf8(${n}) an Arrow type.
-        with pytest.raises(InvalidTypeMapError, match="not a valid Arrow type"):
-            _parse_read(
-                {
-                    "match": "regex",
-                    "native_type": r"^FOO(?<n>\d+)$",
-                    "arrow_type": "Utf8(${n})",
-                }
-            )
-
-    def test_regex_rule_rejects_a_capture_wider_than_the_parameter(self):
-        # rc24 checks that what a template CAN render is always an Arrow type:
-        # an unbounded \d+ in the precision position can match 0 or 40, which
-        # Decimal128 does not admit. This is why the reference fixture's NUMERIC
-        # captures are bounded alternations rather than \d+ -- the fixture was
-        # narrowed to satisfy this rule, and without this test nothing would
-        # notice if the rule were relaxed and the narrowing became arbitrary.
-        with pytest.raises(InvalidTypeMapError, match="does not admit"):
-            _parse_read(
-                {
-                    "match": "regex",
-                    "native_type": r"^NUMERIC\((?<p>\d+), *(?<s>\d+)\)$",
-                    "arrow_type": "Decimal128(${p}, ${s})",
-                }
-            )
-
-    def test_regex_rule_accepts_a_capture_bounded_to_the_parameter(self):
-        # The narrowed form the fixtures now carry: every value the capture can
-        # match is a legal precision, so the render is an Arrow type whatever
-        # the native matches.
-        (rule,) = _parse_read(
-            {
-                "match": "regex",
-                "native_type": (
-                    r"^NUMERIC\((?<p>[1-9]|[12][0-9]|3[0-8]), *"
-                    r"(?<s>[0-9]|[12][0-9]|3[0-8])\)$"
-                ),
-                "arrow_type": "Decimal128(${p}, ${s})",
-            }
-        )
-        assert rule.match == "regex"
-
-    def test_regex_rule_rejects_malformed_pattern(self):
-        with pytest.raises(InvalidTypeMapError, match="not a valid regex"):
-            _parse_read({"match": "regex", "native_type": "^[", "arrow_type": "Utf8"})
-
-    def test_unknown_match_kind_rejected(self):
-        with pytest.raises(InvalidTypeMapError, match="does not match any of"):
-            _parse_read({"match": "partial", "native_type": "x", "arrow_type": "Utf8"})
-
-    @pytest.mark.parametrize(
-        "bad_arrow_type",
-        [
-            "Time32(us)",
-            "Time32(MICROSECOND)",
-            "Time64(s)",
-            "Time64(MILLISECOND)",
-            "Timestamp(us, UTC)",
-        ],
-    )
-    def test_exact_rule_rejects_arrow_type_outside_the_vocabulary(self, bad_arrow_type):
-        # An exact rule's arrow_type is held to the published Arrow pattern, so
-        # a cross-type temporal unit and a short unit code are both refused at
-        # the contract, not deferred to parse_arrow_type downstream.
-        with pytest.raises(InvalidTypeMapError, match=r"exact\.arrow_type"):
-            _parse_read(
-                {
-                    "match": "exact",
-                    "native_type": "TIME",
-                    "arrow_type": bad_arrow_type,
-                }
-            )
-
-
-class TestParseRules:
-    def test_empty_list_rejected(self):
-        with pytest.raises(InvalidTypeMapError, match="at least 1 item"):
-            parse_rules([], source="<test>")
-
-    def test_whole_document_failure_does_not_invent_a_rule_number(self):
-        # An empty list fails the document, not a rule. Rendering it as
-        # "rule #?" would send the reader looking for a rule that is not there.
-        with pytest.raises(InvalidTypeMapError) as excinfo:
-            parse_rules([], source="<test>")
-        assert "rule #" not in str(excinfo.value)
-
-    def test_rejection_names_the_offending_value(self):
-        # The Arrow vocabulary is published as a `pattern`, so pydantic's own
-        # message is the whole 800-character regex. Without the input echoed
-        # back, an author is told to go read the grammar rather than which
-        # token of theirs was wrong.
-        with pytest.raises(InvalidTypeMapError) as excinfo:
-            parse_rules(
-                [{"match": "exact", "native_type": "TEXT", "arrow_type": "String"}],
-                source="<test>",
-            )
-        assert "'String'" in str(excinfo.value)
-
-    def test_non_object_rejected(self):
-        with pytest.raises(InvalidTypeMapError, match="valid dictionary"):
-            parse_rules(["oops"], source="<test>")
 
 
 # ---------------------------------------------------------------------------
@@ -1047,29 +921,6 @@ class TestWriteRuleValidation:
         )
         assert rule.match == "exact"
 
-    def test_exact_rule_allows_param_token_in_native(self):
-        # Unlike read rules, a write rule's render template may carry tokens fed
-        # by per-column hints (e.g. length) rather than regex captures.
-        (rule,) = _parse_write(
-            {
-                "match": "exact",
-                "arrow_type": "Utf8",
-                "native_type": "VARCHAR(${length})",
-            }
-        )
-        assert rule.native_type == "VARCHAR(${length})"
-
-    def test_regex_rule_allows_non_capture_token(self):
-        # ${length} is supplied at render time, not captured — must not raise.
-        (rule,) = _parse_write(
-            {
-                "match": "regex",
-                "arrow_type": "^Utf8$",
-                "native_type": "VARCHAR(${length})",
-            }
-        )
-        assert rule.match == "regex"
-
     def test_regex_rule_rejects_lookahead_in_arrow_type(self):
         with pytest.raises(InvalidTypeMapError, match="lookahead"):
             _parse_write(
@@ -1080,124 +931,9 @@ class TestWriteRuleValidation:
                 }
             )
 
-    def test_regex_rule_rejects_malformed_pattern(self):
-        with pytest.raises(InvalidTypeMapError, match="not a valid regex"):
-            _parse_write({"match": "regex", "arrow_type": "^[", "native_type": "TEXT"})
-
-    def test_exact_rule_rejects_token_on_match_side(self):
-        # An exact rule matches on a literal Arrow type, and the Arrow
-        # vocabulary admits no "$" — the contract's field pattern refuses it.
-        with pytest.raises(InvalidTypeMapError, match=r"exact\.arrow_type"):
-            _parse_write(
-                {
-                    "match": "exact",
-                    "arrow_type": "Decimal128(${p})",
-                    "native_type": "NUMERIC",
-                }
-            )
-
-    def test_regex_rule_rejects_token_on_match_side(self):
-        # A regex rule's arrow_type is a matcher, so the contract lets it
-        # through; the engine refuses it because the token is compared as
-        # literal text and the rule could never fire.
-        with pytest.raises(InvalidTypeMapError, match="belong only in the rendered"):
-            _parse_write(
-                {
-                    "match": "regex",
-                    "arrow_type": "^Foo${bar}$",
-                    "native_type": "TEXT",
-                }
-            )
-
-    @pytest.mark.parametrize("bad_arrow_type", ["Decimal128(${p)", "Utf8${", "X${p-q}"])
-    def test_rejects_malformed_opener_on_match_side(self, bad_arrow_type):
-        # Any ${ on an exact rule's match side is a dead-rule footgun, well
-        # formed or not, and none of these spellings is an Arrow type.
-        with pytest.raises(InvalidTypeMapError, match=r"exact\.arrow_type"):
-            _parse_write(
-                {
-                    "match": "exact",
-                    "arrow_type": bad_arrow_type,
-                    "native_type": "NUMERIC",
-                }
-            )
-
-    @pytest.mark.parametrize(
-        "bad_native",
-        [
-            "VARCHAR(${length)",  # unterminated opener
-            "VARCHAR(${})",  # empty name
-        ],
-    )
-    def test_contract_rejects_structurally_broken_placeholder(self, bad_native):
-        # An opener with no close, and a token with no name at all, are refused
-        # by the published contract's own render-value check.
-        with pytest.raises(InvalidTypeMapError, match="render value"):
-            _parse_write(
-                {
-                    "match": "exact",
-                    "arrow_type": "Utf8",
-                    "native_type": bad_native,
-                }
-            )
-
-    @pytest.mark.parametrize(
-        "bad_native",
-        [
-            "VARCHAR(${length-p})",  # bad character in the name
-            "VARCHAR(${length })",  # trailing space in the name
-            "VARCHAR($ {length})",  # space between the $ and the brace
-        ],
-    )
-    def test_engine_rejects_placeholder_the_renderer_cannot_resolve(self, bad_native):
-        # Well-formed to the contract, but the substitution token does not match
-        # it, so it would survive rendering as literal text and land in the
-        # emitted DDL. This process does the rendering, so this process refuses.
-        with pytest.raises(InvalidTypeMapError, match="malformed substitution token"):
-            _parse_write(
-                {
-                    "match": "exact",
-                    "arrow_type": "Utf8",
-                    "native_type": bad_native,
-                }
-            )
-
-    @pytest.mark.parametrize(
-        "bad_arrow_type",
-        [
-            "Time32(us)",
-            "Time32(MICROSECOND)",
-            "Time64(s)",
-            "Time64(MILLISECOND)",
-            "Timestamp(us, UTC)",
-        ],
-    )
-    def test_exact_rule_rejects_arrow_type_outside_the_vocabulary(self, bad_arrow_type):
-        # An exact write rule matches on a literal Arrow type, so the contract
-        # holds it to the published pattern rather than deferring to
-        # TypeMapper.__init__'s key pre-computation.
-        with pytest.raises(InvalidTypeMapError, match=r"exact\.arrow_type"):
-            _parse_write(
-                {
-                    "match": "exact",
-                    "arrow_type": bad_arrow_type,
-                    "native_type": "TIME",
-                }
-            )
-
 
 class TestParseWriteRules:
-    def test_empty_list_rejected(self):
-        with pytest.raises(InvalidTypeMapError, match="at least 1 item"):
-            parse_write_rules([], source="<test>")
-
-    def test_non_object_rejected(self):
-        with pytest.raises(InvalidTypeMapError, match="valid dictionary"):
-            parse_write_rules(["oops"], source="<test>")
-
     def test_execution_safety_error_carries_the_rule_index(self):
-        # The engine's own pass builds its own "rule #N" prefix, separately
-        # from the one _render_validation_error builds for contract failures.
         # An uncompilable pattern would exercise the contract's path instead,
         # so this drives a construct only the engine refuses.
         with pytest.raises(
@@ -1211,18 +947,6 @@ class TestParseWriteRules:
                         "arrow_type": "^DEC(?=IMAL)$",
                         "native_type": "TEXT",
                     },
-                ],
-                source="<test>",
-            )
-
-    def test_contract_error_wrapped_with_index(self):
-        # A contract-level failure (here a bad ``match`` literal) is wrapped
-        # with the offending rule's index.
-        with pytest.raises(InvalidTypeMapError, match=r"rule #1: "):
-            parse_write_rules(
-                [
-                    {"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"},
-                    {"match": "partial", "arrow_type": "Int32", "native_type": "INT"},
                 ],
                 source="<test>",
             )

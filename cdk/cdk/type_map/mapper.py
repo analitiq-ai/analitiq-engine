@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from typing import Any
+from re import Pattern
+from typing import Any, Final
 
 from .exceptions import InvalidTypeMapError, UnmappedTypeError
 from .rules import (
-    _SUBSTITUTION_TOKEN,
     CompiledPattern,
     TypeMapReadRule,
     TypeMapWriteRule,
@@ -25,6 +25,9 @@ from .rules import (
     normalize_native_type,
     normalized_native,
 )
+
+# The one substitution token the renderer recognises in a rule's template.
+_SUBSTITUTION_TOKEN: Final[Pattern[str]] = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 class TypeMapper:
