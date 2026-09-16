@@ -43,16 +43,16 @@ in a customer pipeline (spec
 - **Declared and implemented agree, both ways.** A declared
   `merge_form` needs `merge_statement_sql`; a `bulk_land` override
   needs a declared `bulk_load` mechanism; a write-capable connector
-  (one shipping `type-map-write.json`) needs `sql_capabilities` and
+  (one shipping a write-direction type map) needs `sql_capabilities` and
   `stage_table_sql`.
 - **Every connector states its type vocabulary.**
-  `definition/type-map-read.json` is what the engine maps discovered
+  The read-direction type map in `definition/` is what the engine maps discovered
   source types through, whatever the connector's kind: a database maps the
   `native_type`s discovery returns, an API the JSON `type`/`format` its
   endpoint fields declare.
 
   Every literal `arrow_type` a rule names must belong to an `arrow_family`
-  the engine can parse. The kit no longer checks this separately: the rule
+  the engine can parse. The kit does not check this separately: the rule
   loader refuses a foreign `arrow_type` against the pinned contract before
   a type map is ever assembled, so a document that would fail the check
   cannot reach it.

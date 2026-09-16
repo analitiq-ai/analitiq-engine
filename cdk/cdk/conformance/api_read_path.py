@@ -122,7 +122,7 @@ RECORDS_CHECK = "api-record-schema"
 #: declaration the request build resolves, and ``ReadError`` from the
 #: probe's own refusals (a request block naming what no page carries) and
 #: from ``build_read_strategy``. Two, not five: the engine
-#: classifies at the boundary now, so the kit no longer has to enumerate
+#: classifies at the boundary, so the kit does not enumerate
 #: the resolver's exception vocabulary -- an enumeration it could only ever
 #: get wrong in one direction, by letting a defect out as a raw traceback
 #: that takes every later probe down with it.
@@ -1256,7 +1256,7 @@ def check_api_read_stop_condition(target: ConformanceTarget) -> list[Violation]:
       ends the stream at page one or never ends it, and no page the provider
       serves can change its mind.
 
-    That a paginated read declares one at all is no longer asked here: the
+    That a paginated read declares one at all is not asked here: the
     contract makes ``stop_when`` required on every member of the pagination
     union, so a block without one is a document the kit refuses at load
     (``endpoint-document-contract``) rather than a probe it drives.
@@ -1424,10 +1424,10 @@ def _resolve_arrow_types(items: dict[str, Any], mapper: TypeMapper | None) -> No
     """
 
     def get_mapper() -> TypeMapper:
-        if mapper is None:
+        if mapper is None or not mapper.has_read_map:
             raise ReadError(
                 "a field needs arrow_type resolution but the connector ships "
-                "no type-map-read.json"
+                "no read type map"
             )
         return mapper
 

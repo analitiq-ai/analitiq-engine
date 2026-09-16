@@ -58,7 +58,7 @@ TIER1_MIN_PASSED = 10
 
 
 def _type_map_read_doc(rules: list) -> str:
-    """A minimal ``type-map-read.json`` body, serialized."""
+    """A minimal read-direction type-map document, serialized."""
     return json.dumps(type_map_document("read", rules))
 
 
@@ -300,7 +300,25 @@ class TestUnassessableKindIsNotAPass:
         )
         target = load_target(tmp_path)
         assert not target.is_database
-        with pytest.raises(AssertionError, match="type-map-read.json"):
+        with pytest.raises(AssertionError, match="read type map"):
+            kit_definition.test_connector_ships_a_read_type_map(target)
+
+    def test_a_write_only_type_map_is_no_read_map(self, tmp_path: Path) -> None:
+        definition_dir = tmp_path / "definition"
+        definition_dir.mkdir()
+        (definition_dir / "connector.json").write_text(
+            json.dumps(minimal_connector_definition("api", "conformance-write-only"))
+        )
+        (definition_dir / "type-map-write.json").write_text(
+            json.dumps(
+                type_map_document(
+                    "write",
+                    [{"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"}],
+                )
+            )
+        )
+        target = load_target(tmp_path)
+        with pytest.raises(AssertionError, match="read type map"):
             kit_definition.test_connector_ships_a_read_type_map(target)
 
 

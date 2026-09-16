@@ -113,7 +113,6 @@ class TestParseBootstrap:
                             "arrow_type": "Int64",
                         },
                     ],
-                    "write_rules": None,
                 },
                 "connection": None,
             }
@@ -121,6 +120,27 @@ class TestParseBootstrap:
         bootstrap = parse_bootstrap(raw)
         assert isinstance(bootstrap.connector_type_mapper, TypeMapper)
         assert bootstrap.connection_type_mapper is None
+
+    def test_write_rules_reach_the_worker_mapper(self):
+        raw = _minimal_raw(
+            type_maps={
+                "connector": {
+                    "rules": [
+                        {
+                            "match": "exact",
+                            "native_type": "BIGINT",
+                            "arrow_type": "Int64",
+                        }
+                    ],
+                    "write_rules": [
+                        {"match": "exact", "arrow_type": "Int64", "native_type": "INT8"}
+                    ],
+                },
+                "connection": None,
+            }
+        )
+        mapper = parse_bootstrap(raw).connector_type_mapper
+        assert mapper.to_native_type("Int64") == "INT8"
 
     def test_build_runtime_carries_pre_resolved_payload(self):
         runtime = parse_bootstrap(_minimal_raw()).build_runtime()

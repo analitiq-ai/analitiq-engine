@@ -16,8 +16,8 @@ Shape::
       "log_level": 20,
       "connection": {<ConnectionRuntime.resolve_spec() payload>},
       "type_maps": {
-        "connector":  {"rules": [...], "write_rules": [...] | null} | null,
-        "connection": {"rules": [...], "write_rules": [...] | null} | null
+        "connector":  {"rules"?: [...], "write_rules"?: [...]} | null,
+        "connection": {"rules"?: [...], "write_rules"?: [...]} | null
       },
       # destination role:
       "endpoint_refs":   {stream_id: {...}},
@@ -67,9 +67,9 @@ class WorkerBootstrap:
 
 
 def _mapper_from(block: dict[str, Any] | None, label: str) -> TypeMapper | None:
-    if not block:
+    if block is None:
         return None
-    return build_type_mapper(label, block.get("rules") or [], block.get("write_rules"))
+    return build_type_mapper(label, block)
 
 
 def parse_bootstrap(raw: dict[str, Any]) -> WorkerBootstrap:

@@ -10,10 +10,10 @@ class InvalidTypeMapError(TypeMapError):
 
 
 class TypeMapNotFoundError(InvalidTypeMapError):
-    """Raised when a *required* type-map file is absent (not malformed).
+    """Raised when no read- or write-direction type-map document is present.
 
-    A distinct subclass so callers can tell "this connector simply ships no
-    type-map" (fine for API connectors) apart from "the type-map is present but
+    A distinct subclass so callers can tell "this connector ships no
+    type-map" apart from "the type-map is present but
     broken" (a hard error that must never be silently downgraded). Subclasses
     :class:`InvalidTypeMapError` so existing broad handlers still catch it.
     """

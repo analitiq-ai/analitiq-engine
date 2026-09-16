@@ -3,8 +3,8 @@
 The API analogue of ``cdk.sql.discovery``: walk the declared response JSON
 Schema to the per-record items schema, then fill each field's
 ``arrow_type`` from the scope-correct read type-map. An API endpoint
-declares per-field JSON ``type``/``format`` and ships a
-``type-map-read.json`` -- the same read type-map the database source path
+declares per-field JSON ``type``/``format`` and ships a read type map
+-- the same read type-map the database source path
 consumes -- so one vocabulary covers both families.
 
 Imports the type-map surface, not ``pyarrow``: this module produces the
@@ -157,14 +157,14 @@ def apply_read_type_map(
     type fails loud naming the field.
 
     The mapper is chosen by the endpoint's scope so a connection-scoped
-    endpoint's ``type-map-read.json`` composes over the connector defaults,
+    endpoint's read type map composes over the connector defaults,
     matching the database path. A missing or invalid type-map is a
     deterministic config defect, so it surfaces as a :class:`ReadError`
     rather than the raw ``RuntimeError`` the worker would classify as
     retryable.
 
     ``endpoint_ref`` is the stream document's ``scope``-discriminated ref,
-    parsed by the read's own funnel. A ref with no scope no longer reaches
+    parsed by the read's own funnel. A ref with no scope never reaches
     here: the union has no such member, so the parse refuses it before the
     read addresses anything. ``EndpointScope(scope)`` still stands between
     the contract's vocabulary and this CDK's, and raises on a scope the CDK
@@ -182,16 +182,21 @@ def apply_read_type_map(
             try:
                 mapper = runtime.type_mapper_for(scope=EndpointScope(scope))
             except (RuntimeError, ValueError) as err:
-                raise ReadError(
-                    f"no usable read type-map for {scope!r}-scoped endpoint; a "
-                    f"field needs arrow_type resolution but the type-map is "
-                    f"absent or invalid"
-                ) from err
+                raise ReadError(_no_read_type_map(scope)) from err
+            if not mapper.has_read_map:
+                raise ReadError(_no_read_type_map(scope))
         return mapper
 
     for name, prop in (items_schema.get("properties") or {}).items():
         if isinstance(prop, dict):
             resolve_field_arrow_type(prop, name, get_mapper)
+
+
+def _no_read_type_map(scope: str) -> str:
+    return (
+        f"no usable read type-map for {scope!r}-scoped endpoint; a field needs "
+        f"arrow_type resolution but the read type-map is absent or invalid"
+    )
 
 
 def resolve_field_arrow_type(

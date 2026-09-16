@@ -13,9 +13,9 @@ Layout (rooted at the project containing ``pipelines/manifest.json``):
     connections/<connection_id>/.secrets/credentials.json
     connections/<connection_id>/definition/endpoints/<endpoint_id>.json
         (private endpoints)
-    connections/<connection_id>/definition/type-map-read.json (optional)
+    connections/<connection_id>/definition/type-map-*.json (optional)
     connectors/<connector_id>/definition/connector.json
-    connectors/<connector_id>/definition/type-map-read.json
+    connectors/<connector_id>/definition/type-map-*.json
     connectors/<connector_id>/definition/endpoints/<endpoint_id>.json (public endpoints)
 
 Identity is ``*_id`` throughout. Cross-document references carry the id
@@ -450,12 +450,12 @@ class PipelineConfigPrep:
         )
         self._loaded_connectors[connector_id] = document
 
-        # Connector type-map is optional from this layer's perspective:
-        # API-only connectors that never expose SQL native types do not ship
-        # one. Only a genuinely ABSENT map (TypeMapNotFoundError) is benign and
-        # downgraded to None; a present-but-malformed read or write map is a
-        # real config error and propagates so CI catches it at load instead of
-        # silently dropping the connector's type resolution.
+        # Connector type-map is optional from this layer's perspective. Only a
+        # directory with no read- or write-direction type-map document
+        # (TypeMapNotFoundError) is benign and downgraded to None; a
+        # present-but-malformed read or write map is a real config error and
+        # propagates so CI catches it at load instead of silently dropping the
+        # connector's type resolution.
         try:
             self._connector_type_mappers[connector_id] = load_type_map(
                 self._paths["connectors"], connector_id

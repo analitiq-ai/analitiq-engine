@@ -22,6 +22,7 @@ from cdk.sql.dialects import SqlDialect
 from cdk.sql.discovery import list_columns, list_schemas, list_tables
 from cdk.sql.exceptions import DiscoveryError
 from cdk.type_map.exceptions import UnmappedTypeError
+from cdk.type_map.loader import build_type_mapper
 
 from .conftest import FakeAdbcRuntime, caps_block
 
@@ -283,6 +284,35 @@ class TestListColumns:
         assert isinstance(exc.value.__cause__, UnmappedTypeError)
 
     @pytest.mark.asyncio
+    async def test_a_write_only_type_map_raises_with_context(self):
+        write_only = build_type_mapper(
+            "postgres",
+            {
+                "write_rules": [
+                    {"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"}
+                ]
+            },
+        )
+        runtime = FakeAdbcRuntime(
+            "postgresql",
+            mapper=write_only,
+            responder=_route(
+                {
+                    "pks": [],
+                    "columns": [
+                        {
+                            "column_name": "id",
+                            "data_type": "bigint",
+                            "is_nullable": "NO",
+                        },
+                    ],
+                }
+            ),
+        )
+        with pytest.raises(DiscoveryError, match="public.users: .*no read type map"):
+            await list_columns(runtime, "public", "users", dialect=SqlDialect())
+
+    @pytest.mark.asyncio
     async def test_missing_expected_column_raises(self, pg_mapper):
         # A row that lacks the expected key (exact + case-insensitive) is a hard
         # DiscoveryError, not a silent KeyError or wrong-column read.
@@ -298,7 +328,7 @@ class TestListColumns:
 class TestConnectionScopedTypeMap:
     """``list_columns`` resolves through the connection-composed read map (#368).
 
-    A connection-authored ``type-map-read.json`` must take effect during
+    A connection-authored read type map must take effect during
     control-plane discovery exactly as it does at stream run time: connection
     rules first, connector rules filling the gaps.
     """

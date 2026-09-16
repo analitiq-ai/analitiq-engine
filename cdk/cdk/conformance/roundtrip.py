@@ -322,14 +322,23 @@ def check_type_map_round_trip(
     """Certify read closure and convergence for every covered probe.
 
     The write-direction half of the type-map contract; a connector
-    shipping no write map has no round trip to certify. A foreign literal
+    shipping no write map has no round trip to certify, and a write map with
+    no read map fails read closure outright. A foreign literal
     cannot reach here at all: ``parse_rules`` refuses an ``arrow_type``
     outside the published vocabulary in both the exact and the regex form,
-    so the kit no longer re-certifies what the loader already guarantees --
+    so the kit does not re-certify what the loader already guarantees --
     one gate per document.
     """
     if not mapper.has_write_map:
         return []
+    if not mapper.has_read_map:
+        return [
+            Violation(
+                CHECK_CLOSURE,
+                "the connector ships a write map but no read type map; no "
+                "table it creates could be read back by the same connector",
+            )
+        ]
     probes = probe_arrow_types(mapper)
     violations: list[Violation] = []
     violations += _misnormalized_write_rules(mapper, probes)
