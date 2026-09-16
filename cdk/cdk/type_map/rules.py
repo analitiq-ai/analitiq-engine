@@ -9,8 +9,7 @@ The rule models themselves are **not defined here**. They are
 ``analitiq.contracts.type_map``, the published contract, and this module imports
 them. Whether a document is valid is that package's question and it is answered
 once, offline, at a pinned version -- a second model of the same shape in this
-repo is how the document acquired two spellings for one concept in the first
-place.
+repo would give the document two spellings for one concept.
 
 What is left here is the part the contract cannot answer: what *this process*
 will agree to compile and run. A connector document is untrusted, AI-authored

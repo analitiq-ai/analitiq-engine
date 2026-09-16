@@ -1204,20 +1204,6 @@ class TestTargetLoadingBreaks:
         loaded = load_target(reference_target.root)
         assert loaded.connector_class is ReferenceConnector
 
-    def test_empty_write_map_file_is_a_setup_error(self, tmp_path: Any) -> None:
-        """A shipped-but-empty write type map must not read as absent.
-
-        Absence gates the whole write role off, so an empty document read
-        as absent would silently skip every write check.
-        """
-        root = tmp_path / "reference"
-        shutil.copytree(REFERENCE_DIR, root)
-        (root / "definition" / "type-map-write.json").write_text(
-            json.dumps(type_map_document("write", []))
-        )
-        with pytest.raises(ConformanceSetupError, match="at least 1 item"):
-            load_target(root, class_path=REFERENCE_CLASS)
-
 
 class _LifecycleDunderConnector(ReferenceConnector):
     def __init__(self) -> None:

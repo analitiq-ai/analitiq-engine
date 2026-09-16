@@ -164,7 +164,7 @@ def apply_read_type_map(
     retryable.
 
     ``endpoint_ref`` is the stream document's ``scope``-discriminated ref,
-    parsed by the read's own funnel. A ref with no scope no longer reaches
+    parsed by the read's own funnel. A ref with no scope never reaches
     here: the union has no such member, so the parse refuses it before the
     read addresses anything. ``EndpointScope(scope)`` still stands between
     the contract's vocabulary and this CDK's, and raises on a scope the CDK

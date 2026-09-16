@@ -1138,32 +1138,32 @@
       "match": [
         "cdk.type_map.mapper:61",
         "cdk.type_map.mapper:139",
-        "cdk.type_map.rules:287",
-        "cdk.type_map.rules:308",
-        "cdk.type_map.rules:326"
+        "cdk.type_map.rules:286",
+        "cdk.type_map.rules:307",
+        "cdk.type_map.rules:325"
       ],
       "native_type": [
-        "cdk.type_map.rules:289",
-        "cdk.type_map.rules:311",
-        "cdk.type_map.rules:329"
+        "cdk.type_map.rules:288",
+        "cdk.type_map.rules:310",
+        "cdk.type_map.rules:328"
       ]
     },
     "analitiq.contracts.type_map.TypeMapReadRegexRule": {
       "arrow_type": [
         "cdk.type_map.mapper:165",
-        "cdk.type_map.rules:311",
-        "cdk.type_map.rules:329"
+        "cdk.type_map.rules:310",
+        "cdk.type_map.rules:328"
       ],
       "match": [
         "cdk.type_map.mapper:61",
         "cdk.type_map.mapper:139",
-        "cdk.type_map.rules:287",
-        "cdk.type_map.rules:308",
-        "cdk.type_map.rules:326"
+        "cdk.type_map.rules:286",
+        "cdk.type_map.rules:307",
+        "cdk.type_map.rules:325"
       ],
       "native_type": [
-        "cdk.type_map.rules:311",
-        "cdk.type_map.rules:329"
+        "cdk.type_map.rules:310",
+        "cdk.type_map.rules:328"
       ]
     },
     "analitiq.contracts.type_map.TypeMapWriteExactRule": {
@@ -1173,30 +1173,30 @@
       "match": [
         "cdk.type_map.mapper:75",
         "cdk.type_map.mapper:201",
-        "cdk.type_map.rules:308",
-        "cdk.type_map.rules:326"
+        "cdk.type_map.rules:307",
+        "cdk.type_map.rules:325"
       ],
       "native_type": [
         "cdk.type_map.mapper:203",
-        "cdk.type_map.rules:311",
-        "cdk.type_map.rules:329"
+        "cdk.type_map.rules:310",
+        "cdk.type_map.rules:328"
       ]
     },
     "analitiq.contracts.type_map.TypeMapWriteRegexRule": {
       "arrow_type": [
-        "cdk.type_map.rules:311",
-        "cdk.type_map.rules:329"
+        "cdk.type_map.rules:310",
+        "cdk.type_map.rules:328"
       ],
       "match": [
         "cdk.type_map.mapper:75",
         "cdk.type_map.mapper:201",
-        "cdk.type_map.rules:308",
-        "cdk.type_map.rules:326"
+        "cdk.type_map.rules:307",
+        "cdk.type_map.rules:325"
       ],
       "native_type": [
         "cdk.type_map.mapper:220",
-        "cdk.type_map.rules:311",
-        "cdk.type_map.rules:329"
+        "cdk.type_map.rules:310",
+        "cdk.type_map.rules:328"
       ]
     }
   },

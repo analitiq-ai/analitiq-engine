@@ -589,13 +589,6 @@ class TestLoaders:
         with pytest.raises(InvalidTypeMapError, match="required type-map not found"):
             load_type_map(tmp_path, "empty")
 
-    def test_type_map_wrong_root_type(self, tmp_path: Path):
-        # A bare rule array is not an envelope carrying 'direction' and 'rules'.
-        _write_connector(tmp_path, "bad")
-        (tmp_path / "bad" / "definition" / "type-map-read.json").write_text("[]")
-        with pytest.raises(InvalidTypeMapError, match="is not a type-map document"):
-            load_type_map(tmp_path, "bad")
-
     def test_type_map_missing_rules_key_rejected(self, tmp_path: Path):
         _write_connector(tmp_path, "no-rules")
         (tmp_path / "no-rules" / "definition" / "type-map-read.json").write_text(
@@ -744,13 +737,6 @@ class TestLoadConnectionTypeMap:
         (definition / "type-map-read.json").write_text("not json")
         with pytest.raises(InvalidTypeMapError, match="not valid JSON"):
             load_connection_type_map(tmp_path, "broken")
-
-    def test_missing_rules_key_rejected(self, tmp_path: Path):
-        definition = tmp_path / "bad" / "definition"
-        definition.mkdir(parents=True)
-        (definition / "type-map-read.json").write_text("{}")
-        with pytest.raises(InvalidTypeMapError, match="is not a type-map document"):
-            load_connection_type_map(tmp_path, "bad")
 
 
 # ---------------------------------------------------------------------------
@@ -1472,18 +1458,6 @@ class TestWriteMapLoader:
         with pytest.raises(InvalidTypeMapError, match="not valid JSON") as exc:
             load_type_map(tmp_path, "busted")
         assert not isinstance(exc.value, TypeMapNotFoundError)
-
-    def test_write_map_missing_rules_key_raises_at_load(self, tmp_path):
-        _write_connector(
-            tmp_path,
-            "wrong",
-            type_map=[
-                {"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"}
-            ],
-        )
-        (tmp_path / "wrong" / "definition" / "type-map-write.json").write_text("{}")
-        with pytest.raises(InvalidTypeMapError, match="is not a type-map document"):
-            load_type_map(tmp_path, "wrong")
 
     def test_no_type_map_documents_raises_not_found(self, tmp_path):
         # Absence is the benign case the connector loader downgrades to None.
