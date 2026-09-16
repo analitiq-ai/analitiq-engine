@@ -32,12 +32,7 @@ from .grammar import (
     load_published_grammar,
     render_arrow_type_grammar,
 )
-from .loader import (
-    TYPE_MAP_FILENAME,
-    WRITE_TYPE_MAP_FILENAME,
-    load_connection_type_map,
-    load_type_map,
-)
+from .loader import load_connection_type_map, load_type_map
 from .mapper import TypeMapper
 from .rules import (
     TypeMapReadRule,
@@ -89,8 +84,6 @@ __all__ = [
     "Conversion",
     "GRAMMAR_VERSION",
     "InvalidTypeMapError",
-    "TYPE_MAP_FILENAME",
-    "WRITE_TYPE_MAP_FILENAME",
     "TypeMapError",
     "TypeMapNotFoundError",
     "TypeMapReadRule",

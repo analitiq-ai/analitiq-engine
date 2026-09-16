@@ -300,7 +300,7 @@ class TestUnassessableKindIsNotAPass:
         )
         target = load_target(tmp_path)
         assert not target.is_database
-        with pytest.raises(AssertionError, match="type-map-read.json"):
+        with pytest.raises(AssertionError, match="read type map"):
             kit_definition.test_connector_ships_a_read_type_map(target)
 
 

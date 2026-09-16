@@ -118,7 +118,8 @@ Two accuracy notes that matter for this design:
 - The top-level discriminator is **`kind`** (`database` / `api` / `file` /
   `stdout`) — this is the key the registry maps to a connector class.
 - The **type map is NOT referenced inside `connector.json`.** It is a separate,
-  *positional* file at `connectors/{connector_id}/definition/type-map-read.json`
+  file under `connectors/{connector_id}/definition/` (`type-map-*.json`, its
+  `direction` field saying read or write)
   (see [arrow-and-transport-strategy.md](../data-path/arrow-and-transport-strategy.md)). The connector's
   data (definition + type map) is therefore modular and co-located — consumed
   by both sides.
@@ -481,8 +482,8 @@ connectors/clickhouse/
   pyproject.toml
 ```
 
-> On-disk, `type-map-read.json` sits *inside* `definition/`
-> (`connectors/{id}/definition/type-map-read.json`), co-located with `connector.json`
+> On-disk, the type-map documents sit *inside* `definition/`
+> (`connectors/{id}/definition/type-map-*.json`), co-located with `connector.json`
 > — the engine's existing layout, preserved.
 
 Two complementary distribution forms:

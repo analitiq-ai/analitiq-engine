@@ -65,7 +65,7 @@ def _database_shaped_kind_mismatch(target: ConformanceTarget) -> list[Violation]
     if target.declared_capabilities is not None:
         evidence.append("declares sql_capabilities")
     if target.has_write_map:
-        evidence.append("ships type-map-write.json")
+        evidence.append("ships a write type map")
     if not evidence:
         return []
     return [
@@ -83,8 +83,8 @@ def _write_signals(target: ConformanceTarget) -> list[str]:
     """Name every write-capability signal the connector carries.
 
     Used to catch the inverse inconsistency of the write-role checks: a
-    connector that declares or implements writing but ships no
-    ``type-map-write.json``. The read-only capability facts (catalog,
+    connector that declares or implements writing but ships no write-direction
+    type-map document. The read-only capability facts (catalog,
     session targeting — and the stage sub-block the parser forces along
     with them) are deliberately not signals: a source-only connector may
     declare them for its read gates.
@@ -110,7 +110,7 @@ def check_declaration_consistency(target: ConformanceTarget) -> list[Violation]:
     """Certify that ``sql_capabilities`` and the dialect agree.
 
     The write-path checks apply to write-capable database connectors
-    (the ones shipping ``type-map-write.json``). A connector *without* a
+    (the ones shipping a write-direction type-map document). A connector *without* a
     write map is checked for the inverse inconsistency: declaring or
     implementing write capability it cannot use — otherwise a forgotten
     or misnamed write map would silently switch every write check off
@@ -125,7 +125,7 @@ def check_declaration_consistency(target: ConformanceTarget) -> list[Violation]:
         return [
             Violation(
                 CHECK,
-                f"the connector ships no type-map-write.json (which makes it "
+                f"the connector ships no write type map (which makes it "
                 f"source-only) but carries write capability: "
                 f"{'; '.join(signals)}. Ship the write map, or remove the "
                 f"write declarations and hooks.",
@@ -137,7 +137,7 @@ def check_declaration_consistency(target: ConformanceTarget) -> list[Violation]:
         violations.append(
             Violation(
                 CHECK,
-                "the connector ships type-map-write.json (a write-capable "
+                "the connector ships a write type map (a write-capable "
                 "connector) but declares no sql_capabilities block in "
                 "connector.json; every write is refused at handshake — the "
                 "engine never guesses an undeclared capability. Declare the "

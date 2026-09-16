@@ -1205,7 +1205,7 @@ class TestTargetLoadingBreaks:
         assert loaded.connector_class is ReferenceConnector
 
     def test_empty_write_map_file_is_a_setup_error(self, tmp_path: Any) -> None:
-        """A shipped-but-empty type-map-write.json must not read as absent.
+        """A shipped-but-empty write type map must not read as absent.
 
         Once parsed, an empty write map is indistinguishable from an
         absent one (has_write_map is rule truthiness), and absence gates
@@ -1293,7 +1293,7 @@ class TestGateInversionBreaks:
     def test_missing_write_map_with_write_hooks_fails(
         self, reference_target: ConformanceTarget
     ) -> None:
-        """A forgotten type-map-write.json must not switch write checks off.
+        """A forgotten write type map must not switch write checks off.
 
         Without this branch, the missing file makes the target
         source-only, every write check skips, and the connector goes
@@ -1306,7 +1306,7 @@ class TestGateInversionBreaks:
         doctored = dataclasses.replace(reference_target, type_mapper=read_only_mapper)
         violations = check_declaration_consistency(doctored)
         report = _messages(violations)
-        assert "type-map-write.json" in report
+        assert "write type map" in report
         assert "stage_table_sql" in report
 
 

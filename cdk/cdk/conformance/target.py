@@ -175,7 +175,7 @@ class ConformanceTarget:
 
     @property
     def has_write_map(self) -> bool:
-        """Whether the connector ships ``type-map-write.json``."""
+        """Whether the connector ships a write-direction type-map document."""
         return self.type_mapper is not None and self.type_mapper.has_write_map
 
     @property
@@ -188,7 +188,7 @@ class ConformanceTarget:
         """Whether the write-path checks apply to this connector.
 
         The write-direction type vocabulary lives entirely in
-        ``type-map-write.json``, so shipping one is the connector's own
+        the write-direction type-map document, so shipping one is the connector's own
         statement that it writes; source-only connectors ship none and
         the write-path checks skip.
         """
@@ -492,9 +492,9 @@ def _load_type_mapper(definition_dir: Path, connector_id: str) -> TypeMapper | N
         # gates every write check off — so the shipped-but-empty file
         # would silently skip the connector's whole write role.
         raise ConformanceSetupError(
-            f"connector {connector_id!r} ships a type-map-write.json with "
+            f"connector {connector_id!r} ships a write type map with "
             f"no rules; a write map that renders no type cannot serve the "
-            f"write role. Add rules or delete the file."
+            f"write role. Add rules or delete the document."
         )
     try:
         return build_type_mapper(

@@ -36,7 +36,7 @@ def test_connector_ships_a_read_type_map(
     fails on its first read.
     """
     assert conformance_target.type_mapper is not None, (
-        "the connector ships no definition/type-map-read.json; the engine "
+        "the connector ships no read type map in definition/; the engine "
         "canonicalizes every source type it discovers through that map"
     )
 

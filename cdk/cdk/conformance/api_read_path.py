@@ -1427,7 +1427,7 @@ def _resolve_arrow_types(items: dict[str, Any], mapper: TypeMapper | None) -> No
         if mapper is None:
             raise ReadError(
                 "a field needs arrow_type resolution but the connector ships "
-                "no type-map-read.json"
+                "no read type map"
             )
         return mapper
 

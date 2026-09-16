@@ -55,7 +55,7 @@ def require_write_role(target: ConformanceTarget) -> None:
     """Skip the calling test when the write-path checks do not apply."""
     if not target.has_write_map:
         pytest.skip(
-            "connector ships no type-map-write.json (source-only); "
+            "connector ships no write type map (source-only); "
             "write-path checks do not apply"
         )
 

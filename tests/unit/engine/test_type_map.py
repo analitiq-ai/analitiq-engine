@@ -31,7 +31,6 @@ from cdk.type_map import (
     normalize_native_type,
     parse_arrow_type,
 )
-from cdk.type_map.loader import TYPE_MAP_FILENAME, WRITE_TYPE_MAP_FILENAME
 from cdk.type_map.rules import _FORBIDDEN_CONSTRUCTS, parse_rules, parse_write_rules
 
 # ---------------------------------------------------------------------------
@@ -701,11 +700,11 @@ def _write_connector(
         json.dumps({"connector_id": "x", "slug": slug, "connector_type": "database"})
     )
     if type_map is not None:
-        (definition / TYPE_MAP_FILENAME).write_text(
+        (definition / "type-map-read.json").write_text(
             json.dumps(type_map_document("read", type_map))
         )
     if write_type_map is not None:
-        (definition / WRITE_TYPE_MAP_FILENAME).write_text(
+        (definition / "type-map-write.json").write_text(
             json.dumps(type_map_document("write", write_type_map))
         )
 
@@ -717,26 +716,26 @@ class TestLoaders:
             load_type_map(tmp_path, "empty")
 
     def test_type_map_wrong_root_type(self, tmp_path: Path):
-        # The old bare-array root shape is rejected: the file must now be an
-        # envelope object with a 'rules' array. Envelope correctness
-        # (direction matching the file, rules well-formed) is
-        # analitiq-validator's job at DIP publish time, not re-checked here.
+        # The old bare-array root shape is rejected: the file must be an
+        # envelope object carrying 'direction' and 'rules'.
         _write_connector(tmp_path, "bad")
-        (tmp_path / "bad" / "definition" / TYPE_MAP_FILENAME).write_text("[]")
-        with pytest.raises(InvalidTypeMapError, match="does not contain a 'rules'"):
+        (tmp_path / "bad" / "definition" / "type-map-read.json").write_text("[]")
+        with pytest.raises(InvalidTypeMapError, match="is not a type-map document"):
             load_type_map(tmp_path, "bad")
 
     def test_type_map_missing_rules_key_rejected(self, tmp_path: Path):
         _write_connector(tmp_path, "no-rules")
-        (tmp_path / "no-rules" / "definition" / TYPE_MAP_FILENAME).write_text(
+        (tmp_path / "no-rules" / "definition" / "type-map-read.json").write_text(
             json.dumps({"$schema": "...", "direction": "read"})
         )
-        with pytest.raises(InvalidTypeMapError, match="does not contain a 'rules'"):
+        with pytest.raises(InvalidTypeMapError, match="is not a type-map document"):
             load_type_map(tmp_path, "no-rules")
 
     def test_type_map_malformed_json(self, tmp_path: Path):
         _write_connector(tmp_path, "busted")
-        (tmp_path / "busted" / "definition" / TYPE_MAP_FILENAME).write_text("not json")
+        (tmp_path / "busted" / "definition" / "type-map-read.json").write_text(
+            "not json"
+        )
         with pytest.raises(InvalidTypeMapError, match="not valid JSON"):
             load_type_map(tmp_path, "busted")
 
@@ -751,6 +750,62 @@ class TestLoaders:
         assert mapper.to_arrow_type("text") == "Utf8"
 
 
+class TestDirectionFromDocument:
+    """A type-map document's ``direction``, not its filename, says which map it is."""
+
+    _READ = [{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}]
+    _WRITE = [{"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"}]
+
+    def _definition(self, tmp_path: Path, slug: str) -> Path:
+        _write_connector(tmp_path, slug)
+        return tmp_path / slug / "definition"
+
+    def test_swapped_filenames_load_by_direction(self, tmp_path: Path):
+        definition = self._definition(tmp_path, "swapped")
+        (definition / "type-map-read.json").write_text(
+            json.dumps(type_map_document("write", self._WRITE))
+        )
+        (definition / "type-map-write.json").write_text(
+            json.dumps(type_map_document("read", self._READ))
+        )
+        mapper = load_type_map(tmp_path, "swapped")
+        assert mapper.to_arrow_type("text") == "Utf8"
+        assert mapper.to_native_type("Int64") == "BIGINT"
+
+    def test_two_documents_declaring_one_direction_rejected(self, tmp_path: Path):
+        definition = self._definition(tmp_path, "twice")
+        (definition / "type-map-read.json").write_text(
+            json.dumps(type_map_document("read", self._READ))
+        )
+        (definition / "type-map-write.json").write_text(
+            json.dumps(type_map_document("read", self._READ))
+        )
+        with pytest.raises(
+            InvalidTypeMapError, match="both declare direction 'read'"
+        ) as exc:
+            load_type_map(tmp_path, "twice")
+        assert "type-map-read.json" in str(exc.value)
+        assert "type-map-write.json" in str(exc.value)
+
+    def test_write_only_document_is_no_read_map(self, tmp_path: Path):
+        definition = self._definition(tmp_path, "writeonly")
+        (definition / "type-map-read.json").write_text(
+            json.dumps(type_map_document("write", self._WRITE))
+        )
+        with pytest.raises(TypeMapNotFoundError):
+            load_type_map(tmp_path, "writeonly")
+
+    def test_connection_scope_loads_by_direction(self, tmp_path: Path):
+        definition = tmp_path / "my-pg" / "definition"
+        definition.mkdir(parents=True)
+        (definition / "type-map-write.json").write_text(
+            json.dumps(type_map_document("read", self._READ))
+        )
+        mapper = load_connection_type_map(tmp_path, "my-pg")
+        assert mapper is not None
+        assert mapper.to_arrow_type("text") == "Utf8"
+
+
 class TestLoadConnectionTypeMap:
     """Connection-scoped type-map lives under ``connections/{alias}/definition/``."""
 
@@ -761,7 +816,7 @@ class TestLoadConnectionTypeMap:
     def test_happy_path(self, tmp_path: Path):
         definition = tmp_path / "my-pg" / "definition"
         definition.mkdir(parents=True)
-        (definition / TYPE_MAP_FILENAME).write_text(
+        (definition / "type-map-read.json").write_text(
             json.dumps(
                 type_map_document(
                     "read",
@@ -783,15 +838,15 @@ class TestLoadConnectionTypeMap:
     def test_malformed_json_raises(self, tmp_path: Path):
         definition = tmp_path / "broken" / "definition"
         definition.mkdir(parents=True)
-        (definition / TYPE_MAP_FILENAME).write_text("not json")
+        (definition / "type-map-read.json").write_text("not json")
         with pytest.raises(InvalidTypeMapError, match="not valid JSON"):
             load_connection_type_map(tmp_path, "broken")
 
     def test_missing_rules_key_rejected(self, tmp_path: Path):
         definition = tmp_path / "bad" / "definition"
         definition.mkdir(parents=True)
-        (definition / TYPE_MAP_FILENAME).write_text("{}")
-        with pytest.raises(InvalidTypeMapError, match="does not contain a 'rules'"):
+        (definition / "type-map-read.json").write_text("{}")
+        with pytest.raises(InvalidTypeMapError, match="is not a type-map document"):
             load_connection_type_map(tmp_path, "bad")
 
 
@@ -1660,9 +1715,7 @@ class TestWriteMapLoader:
                 {"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"}
             ],
         )
-        (tmp_path / "busted" / "definition" / WRITE_TYPE_MAP_FILENAME).write_text(
-            "nope"
-        )
+        (tmp_path / "busted" / "definition" / "type-map-write.json").write_text("nope")
         with pytest.raises(InvalidTypeMapError, match="not valid JSON") as exc:
             load_type_map(tmp_path, "busted")
         assert not isinstance(exc.value, TypeMapNotFoundError)
@@ -1675,8 +1728,8 @@ class TestWriteMapLoader:
                 {"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"}
             ],
         )
-        (tmp_path / "wrong" / "definition" / WRITE_TYPE_MAP_FILENAME).write_text("{}")
-        with pytest.raises(InvalidTypeMapError, match="does not contain a 'rules'"):
+        (tmp_path / "wrong" / "definition" / "type-map-write.json").write_text("{}")
+        with pytest.raises(InvalidTypeMapError, match="is not a type-map document"):
             load_type_map(tmp_path, "wrong")
 
     def test_absent_read_map_raises_not_found(self, tmp_path):
@@ -1688,7 +1741,7 @@ class TestWriteMapLoader:
     def test_connection_scoped_write_map_loaded(self, tmp_path: Path):
         definition = tmp_path / "my-pg" / "definition"
         definition.mkdir(parents=True)
-        (definition / TYPE_MAP_FILENAME).write_text(
+        (definition / "type-map-read.json").write_text(
             json.dumps(
                 type_map_document(
                     "read",
@@ -1702,7 +1755,7 @@ class TestWriteMapLoader:
                 )
             )
         )
-        (definition / WRITE_TYPE_MAP_FILENAME).write_text(
+        (definition / "type-map-write.json").write_text(
             json.dumps(
                 type_map_document(
                     "write",

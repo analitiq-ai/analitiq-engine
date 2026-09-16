@@ -111,6 +111,38 @@ class TestReadTypeMapPayloads:
         )
         assert payloads == {"connector": None, "connection": None}
 
+    def test_blocks_keyed_by_document_direction(self, tmp_path):
+        read_rules = [{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}]
+        definition = tmp_path / "connectors" / "postgres" / "definition"
+        definition.mkdir(parents=True)
+        (definition / "type-map-read.json").write_text(
+            json.dumps(type_map_document("write", _WRITE_RULES))
+        )
+        (definition / "type-map-write.json").write_text(
+            json.dumps(type_map_document("read", read_rules))
+        )
+        payloads = read_type_map_payloads(
+            tmp_path / "connectors", "postgres", tmp_path / "connections", "my-pg"
+        )
+        assert payloads["connector"] == {
+            "rules": read_rules,
+            "write_rules": _WRITE_RULES,
+        }
+
+    def test_two_documents_declaring_one_direction_rejected(self, tmp_path):
+        definition = tmp_path / "connectors" / "postgres" / "definition"
+        definition.mkdir(parents=True)
+        (definition / "type-map-read.json").write_text(
+            json.dumps(type_map_document("write", _WRITE_RULES))
+        )
+        (definition / "type-map-write.json").write_text(
+            json.dumps(type_map_document("write", _WRITE_RULES))
+        )
+        with pytest.raises(InvalidTypeMapError, match="both declare direction 'write'"):
+            read_type_map_payloads(
+                tmp_path / "connectors", "postgres", tmp_path / "connections", "my-pg"
+            )
+
     def test_malformed_map_raises_typed_error(self, tmp_path):
         connectors = tmp_path / "connectors"
         definition = (connectors / "postgres") / "definition"
@@ -128,11 +160,6 @@ class TestBuildTypeMapper:
     def test_rebuilds_mapper_from_raw_arrays(self):
         mapper = build_type_mapper("postgres", _RULES, _WRITE_RULES)
         assert mapper is not None
-
-    # build_type_mapper no longer type-checks a payload before handing it to
-    # parse_rules/parse_write_rules -- rules-is-a-list belongs to
-    # analitiq-validator's envelope contract, not published yet (known gap:
-    # analitiq-engine#524, blocked on claude-code-plugins#316).
 
 
 class TestBuildBootstrap:
