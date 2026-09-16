@@ -3,10 +3,10 @@
 ``TypeMapper`` returns the first matching rule's output and raises on a miss —
 no defaults, no coercion. Each direction has its **own** rule set: the read
 map (the type-map document declaring ``direction: read``, native → Arrow) feeds
-:meth:`TypeMapper.to_arrow_type`; the optional write map (``direction: write``,
-Arrow → native) feeds :meth:`TypeMapper.to_native_type`. The two are
-independent rule sets, never one inverted at runtime — inverting would be
-lossy and ambiguous.
+:meth:`TypeMapper.to_arrow_type`; the write map (``direction: write``,
+Arrow → native) feeds :meth:`TypeMapper.to_native_type`. Either may be absent:
+a source only reads, a destination only writes. The two are independent rule
+sets, never one inverted at runtime — inverting would be lossy and ambiguous.
 """
 
 from __future__ import annotations
@@ -34,9 +34,10 @@ _SUBSTITUTION_TOKEN: Final[Pattern[str]] = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9
 
 
 class TypeMapper:
-    r"""Deterministic native_type -> arrow_type matcher for a connector's type-map.
+    r"""Deterministic matcher over a connector's read and write type maps.
 
-    Built from a list of :class:`TypeMapReadRule` instances. Rule order is
+    Built from :class:`TypeMapReadRule` and :class:`TypeMapWriteRule` lists,
+    either of which may be absent. Rule order is
     authoritative: the author controls specificity by placing narrower
     rules above broader ones (e.g. ``TINYINT(1) → Boolean`` above
     ``^TINYINT(\(\d+\))?$ → Int8``). Instances are immutable and safe
@@ -46,15 +47,11 @@ class TypeMapper:
     def __init__(
         self,
         connector_slug: str,
-        rules: list[TypeMapReadRule],
+        rules: list[TypeMapReadRule] | None,
         write_rules: list[TypeMapWriteRule] | None = None,
     ) -> None:
-        if not rules:
-            raise InvalidTypeMapError(
-                f"connector {connector_slug!r}: type-map must contain at least one rule"
-            )
         self._slug = connector_slug
-        self._rules: tuple[TypeMapReadRule, ...] = tuple(rules)
+        self._rules: tuple[TypeMapReadRule, ...] = tuple(rules or ())
 
         # Precompute one match artefact per rule: either the normalized
         # literal (exact) or the compiled pattern (regex).
@@ -68,8 +65,7 @@ class TypeMapper:
                 self._exact_native.append(None)
                 self._compiled.append(compile_pattern(rule))
 
-        # Write direction (arrow_type -> native_type). Optional: API connectors and
-        # source-only connectors have no write map. Built symmetrically to the
+        # Write direction (arrow_type -> native_type). Built symmetrically to the
         # read side: exact rules keep their normalized literal, regex rules a
         # compiled pattern.
         self._write_rules: tuple[TypeMapWriteRule, ...] = tuple(write_rules or ())
@@ -96,6 +92,10 @@ class TypeMapper:
         return self._write_rules
 
     @property
+    def has_read_map(self) -> bool:
+        return bool(self._rules)
+
+    @property
     def has_write_map(self) -> bool:
         return bool(self._write_rules)
 
@@ -114,19 +114,24 @@ class TypeMapper:
         types therefore inherits the connector mapper's rules for everything
         else — including write rules the connection map never needs to repeat.
         """
-        combined_write = list(primary.write_rules) + list(fallback.write_rules)
         return cls(
             primary.connector_slug,
             list(primary.rules) + list(fallback.rules),
-            combined_write or None,
+            list(primary.write_rules) + list(fallback.write_rules),
         )
 
     def to_arrow_type(self, native: str) -> str:
         """Map a native type string to its Arrow-type-string form.
 
         Pair with :func:`~cdk.type_map.arrow.parse_arrow_type` to
-        get a ``pa.DataType``. Raises :class:`UnmappedTypeError` on miss.
+        get a ``pa.DataType``. Raises :class:`InvalidTypeMapError` if no read
+        type map is loaded, :class:`UnmappedTypeError` on miss.
         """
+        if not self._rules:
+            raise InvalidTypeMapError(
+                f"connector {self._slug!r}: no read type map loaded; cannot "
+                f"map native type {native!r}"
+            )
         normalized = normalize_native_type(native)
         for rule, compiled, exact in zip(
             self._rules, self._compiled, self._exact_native
@@ -171,14 +176,14 @@ class TypeMapper:
         ``${name}`` alongside any named captures from the arrow_type regex;
         named captures take precedence on a name clash. Hint values are rendered
         via ``str()``, so numeric hints (e.g. ``length=255``) are accepted. Raises
-        :class:`InvalidTypeMapError` if this connector has no write-type-map
+        :class:`InvalidTypeMapError` if no write type map is
         loaded, or if the matched template references a token that neither the
         capture groups nor ``params`` provide; raises :class:`UnmappedTypeError`
         (``direction="reverse"``) when no rule matches *arrow_type*.
         """
         if not self._write_rules:
             raise InvalidTypeMapError(
-                f"connector {self._slug!r}: no write-type-map loaded; cannot "
+                f"connector {self._slug!r}: no write type map loaded; cannot "
                 f"render a native type for arrow_type {arrow_type!r}"
             )
         normalized = normalize_arrow_type(arrow_type)

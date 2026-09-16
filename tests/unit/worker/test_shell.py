@@ -143,7 +143,7 @@ class TestReadTypeMapPayloads:
                 tmp_path / "connectors", "postgres", tmp_path / "connections", "my-pg"
             )
 
-    def test_write_only_directory_is_no_block(self, tmp_path):
+    def test_write_only_directory_is_a_write_block(self, tmp_path):
         connections = tmp_path / "connections"
         definition = connections / "my-pg" / "definition"
         definition.mkdir(parents=True)
@@ -153,7 +153,10 @@ class TestReadTypeMapPayloads:
         payloads = read_type_map_payloads(
             tmp_path / "connectors", "postgres", connections, "my-pg"
         )
-        assert payloads["connection"] is None
+        assert payloads["connection"] == {"write_rules": _WRITE_RULES}
+        mapper = build_type_mapper("my-pg", payloads["connection"])
+        assert mapper.has_read_map is False
+        assert mapper.to_native_type("Int64") == "BIGINT"
 
     def test_present_write_document_is_never_read_as_absent(self, tmp_path):
         # The block marks "no write document" by leaving write_rules out, so a

@@ -660,13 +660,35 @@ class TestDirectionFromDocument:
         assert "type-map-read.json" in str(exc.value)
         assert "type-map-write.json" in str(exc.value)
 
-    def test_write_only_document_is_no_read_map(self, tmp_path: Path):
+    def test_write_only_directory_loads_the_write_map(self, tmp_path: Path):
         definition = self._definition(tmp_path, "writeonly")
         (definition / "type-map-read.json").write_text(
             json.dumps(type_map_document("write", self._WRITE))
         )
-        with pytest.raises(TypeMapNotFoundError):
-            load_type_map(tmp_path, "writeonly")
+        mapper = load_type_map(tmp_path, "writeonly")
+        assert mapper.has_read_map is False
+        assert mapper.to_native_type("Int64") == "BIGINT"
+        with pytest.raises(InvalidTypeMapError, match="no read type map"):
+            mapper.to_arrow_type("text")
+
+    def test_read_only_directory_has_no_write_map(self, tmp_path: Path):
+        definition = self._definition(tmp_path, "readonly")
+        (definition / "type-map-read.json").write_text(
+            json.dumps(type_map_document("read", self._READ))
+        )
+        mapper = load_type_map(tmp_path, "readonly")
+        assert mapper.has_read_map is True
+        assert mapper.has_write_map is False
+
+    def test_connection_write_only_directory_loads(self, tmp_path: Path):
+        definition = tmp_path / "my-pg" / "definition"
+        definition.mkdir(parents=True)
+        (definition / "type-map-write.json").write_text(
+            json.dumps(type_map_document("write", self._WRITE))
+        )
+        mapper = load_connection_type_map(tmp_path, "my-pg")
+        assert mapper is not None
+        assert mapper.to_native_type("Int64") == "BIGINT"
 
     def test_any_type_map_filename_is_read(self, tmp_path: Path):
         definition = self._definition(tmp_path, "renamed")
@@ -1145,7 +1167,7 @@ class TestToNativeTypeExact:
             ),
         )
         assert m.has_write_map is False
-        with pytest.raises(InvalidTypeMapError, match="no write-type-map loaded"):
+        with pytest.raises(InvalidTypeMapError, match="no write type map loaded"):
             m.to_native_type("Int64")
 
     def test_empty_write_rules_is_no_write_map(self):
@@ -1160,7 +1182,7 @@ class TestToNativeTypeExact:
             write_rules=[],
         )
         assert m.has_write_map is False
-        with pytest.raises(InvalidTypeMapError, match="no write-type-map loaded"):
+        with pytest.raises(InvalidTypeMapError, match="no write type map loaded"):
             m.to_native_type("Int64")
 
 

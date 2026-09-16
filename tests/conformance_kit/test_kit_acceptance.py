@@ -303,6 +303,24 @@ class TestUnassessableKindIsNotAPass:
         with pytest.raises(AssertionError, match="read type map"):
             kit_definition.test_connector_ships_a_read_type_map(target)
 
+    def test_a_write_only_type_map_is_no_read_map(self, tmp_path: Path) -> None:
+        definition_dir = tmp_path / "definition"
+        definition_dir.mkdir()
+        (definition_dir / "connector.json").write_text(
+            json.dumps(minimal_connector_definition("api", "conformance-write-only"))
+        )
+        (definition_dir / "type-map-write.json").write_text(
+            json.dumps(
+                type_map_document(
+                    "write",
+                    [{"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"}],
+                )
+            )
+        )
+        target = load_target(tmp_path)
+        with pytest.raises(AssertionError, match="read type map"):
+            kit_definition.test_connector_ships_a_read_type_map(target)
+
 
 class TestFixtureConnectorsAreContractValid:
     """The kit's own fixtures pass the published contract (issue #433).

@@ -164,3 +164,22 @@ class TestConnectionScopeComposition:
         composed = rt.type_mapper_for(scope=EndpointScope.CONNECTION)
         assert composed is not cmapper
         assert composed is not nmapper
+
+
+class TestWriteOnlyConnectionMap:
+    def test_write_only_connection_map_overrides_connector_write_rules(self):
+        connection = TypeMapper(
+            "connection:test-conn",
+            None,
+            parse_write_rules(
+                [{"match": "exact", "arrow_type": "Int64", "native_type": "INT8"}],
+                source="<nw>",
+            ),
+        )
+        rt = _runtime(
+            connector_mapper=_connector_mapper(with_write=True),
+            connection_mapper=connection,
+        )
+        mapper = rt.type_mapper_for(scope=EndpointScope.CONNECTION)
+        assert mapper.to_native_type("Int64") == "INT8"
+        assert mapper.to_arrow_type("BIGINT") == "Int64"

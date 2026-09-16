@@ -330,6 +330,14 @@ def check_type_map_round_trip(
     """
     if not mapper.has_write_map:
         return []
+    if not mapper.has_read_map:
+        return [
+            Violation(
+                CHECK_CLOSURE,
+                "the connector ships a write map but no read type map; no "
+                "table it creates could be read back by the same connector",
+            )
+        ]
     probes = probe_arrow_types(mapper)
     violations: list[Violation] = []
     violations += _misnormalized_write_rules(mapper, probes)

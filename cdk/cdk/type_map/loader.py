@@ -11,12 +11,13 @@ Two parallel locations are supported:
 Each ``type-map-*.json`` document is a top-level JSON object
 ``{$schema, direction, rules}``. ``direction`` (``"read"`` / ``"write"``) says
 which map the document is; the filename does not, so a directory holds at
-most one document per direction. Document well-formedness, including the
-allowed ``direction`` values, is analitiq-validator's contract, gated once in
-DIP CI before a connector is published (one gate per document; see
-schema-contracts.md), so this loader only unwraps each envelope and keys it by
-``direction``. A ``direction`` other than ``read``/``write`` is keyed and never
-used.
+most one document per direction. Each direction is optional on its own: a
+source uses the read map, a destination the write map. Document
+well-formedness, including the allowed ``direction`` values, is
+analitiq-validator's contract, gated once in DIP CI before a connector is
+published (one gate per document; see schema-contracts.md), so this loader
+only unwraps each envelope and keys it by ``direction``. A ``direction``
+other than ``read``/``write`` is keyed and never used.
 """
 
 from __future__ import annotations
@@ -35,6 +36,8 @@ logger = logging.getLogger(__name__)
 
 
 _TYPE_MAP_GLOB = "type-map-*.json"
+# Worker-bootstrap block key for each direction's rule array.
+_BLOCK_KEYS = {"read": "rules", "write": "write_rules"}
 
 
 @dataclass(frozen=True)
@@ -89,45 +92,45 @@ def read_raw_type_maps(definition_dir: Path, label: str) -> dict[str, object] | 
 
     The worker-bootstrap path: the trusted shell ships this block in the
     launch bootstrap and the worker rebuilds the mapper via
-    :func:`build_type_mapper`. ``write_rules`` is present only when a write
-    document is, so a write document whose rules are ``null`` is never read
-    as absent. ``None`` when the directory has no read document; a write
-    document without one is ignored (still read, so a malformed or duplicate
-    one raises).
+    :func:`build_type_mapper`. ``rules`` / ``write_rules`` are present only
+    when their document is, so a document whose rules are ``null`` is never
+    read as absent. ``None`` when the directory has neither document.
     """
     documents = _read_type_map_documents(definition_dir, label)
-    if "read" not in documents:
-        return None
-    block: dict[str, object] = {"rules": documents["read"].rules}
-    if "write" in documents:
-        block["write_rules"] = documents["write"].rules
-    return block
+    block: dict[str, object] = {
+        key: documents[direction].rules
+        for direction, key in _BLOCK_KEYS.items()
+        if direction in documents
+    }
+    return block or None
 
 
 def _load_type_mapper(
     definition_dir: Path, label: str, mapper_label: str
 ) -> TypeMapper | None:
-    """Parse *definition_dir*'s documents into a mapper; ``None`` with no read map.
+    """Parse *definition_dir*'s documents into a mapper; ``None`` with neither.
 
-    A write document without a read document is ignored (still read, so a
-    malformed or duplicate one raises).
-
-    The write map is optional (source-only / API connectors have none), but a
-    present one is parsed here, so a broken write map fails at load rather
-    than later as an opaque create_table error.
+    Every present document is parsed here, so a broken map fails at load
+    rather than later as an opaque read or create_table error.
     """
     documents = _read_type_map_documents(definition_dir, label)
-    if "read" not in documents:
+    if "read" not in documents and "write" not in documents:
         return None
-    mapper = _parse_type_mapper(mapper_label, documents["read"], documents.get("write"))
+    mapper = _parse_type_mapper(
+        mapper_label, documents.get("read"), documents.get("write")
+    )
     logger.info("Loaded type-map for %s from %s", label, definition_dir)
     return mapper
 
 
 def _parse_type_mapper(
-    mapper_label: str, read: _TypeMapDocument, write: _TypeMapDocument | None
+    mapper_label: str,
+    read: _TypeMapDocument | None,
+    write: _TypeMapDocument | None,
 ) -> TypeMapper:
-    rules = parse_rules(read.rules, source=read.source)
+    rules = None
+    if read is not None:
+        rules = parse_rules(read.rules, source=read.source)
     write_rules = None
     if write is not None:
         write_rules = parse_write_rules(write.rules, source=write.source)
@@ -141,10 +144,12 @@ def build_type_mapper(label: str, block: Mapping[str, object]) -> TypeMapper:
     shell read, with the same rule parsing the file loaders apply.
     """
     source = f"{label} (bootstrap)"
-    write = None
-    if "write_rules" in block:
-        write = _TypeMapDocument(source, block["write_rules"])
-    return _parse_type_mapper(label, _TypeMapDocument(source, block["rules"]), write)
+    documents = {
+        direction: _TypeMapDocument(source, block[key])
+        for direction, key in _BLOCK_KEYS.items()
+        if key in block
+    }
+    return _parse_type_mapper(label, documents.get("read"), documents.get("write"))
 
 
 def connector_definition_dir(connectors_dir: Path, slug: str) -> Path:
@@ -155,17 +160,17 @@ def connector_definition_dir(connectors_dir: Path, slug: str) -> Path:
 def load_type_map(connectors_dir: Path, slug: str) -> TypeMapper:
     """Load and parse a connector's type-map documents.
 
-    Raises ``TypeMapNotFoundError`` when no document declares the read
-    direction, ``InvalidTypeMapError`` when any document is malformed or two
-    declare the same direction — the engine cannot canonicalize types without
-    a read map.
+    Raises ``TypeMapNotFoundError`` when the directory has no read or write
+    document, ``InvalidTypeMapError`` when any document is malformed or two
+    declare the same direction.
     """
     definition = connector_definition_dir(connectors_dir, slug)
     mapper = _load_type_mapper(definition, f"connector {slug!r}", slug)
     if mapper is None:
         raise TypeMapNotFoundError(
             f"connector {slug!r}: required type-map not found: no "
-            f"{_TYPE_MAP_GLOB} document in {definition} declares direction 'read'"
+            f"{_TYPE_MAP_GLOB} document in {definition} declares direction "
+            f"'read' or 'write'"
         )
     return mapper
 
@@ -177,8 +182,8 @@ def load_connection_type_map(
 
     Lives under ``connections/{connection_id}/definition/`` and governs type
     translation for private endpoints under the same
-    ``connections/{connection_id}/definition/endpoints/`` tree. No read
-    document → ``None``; the caller decides whether that's an error (private
+    ``connections/{connection_id}/definition/endpoints/`` tree. No read or
+    write document → ``None``; the caller decides whether that's an error (private
     endpoints referenced) or fine (pipeline only uses public endpoints).
     """
     return _load_type_mapper(

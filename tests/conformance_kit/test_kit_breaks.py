@@ -1401,6 +1401,19 @@ class TestTypeMapBreaks:
         )
         assert check_type_map_round_trip(mapper) == []
 
+    def test_write_map_without_read_map_fails_closure(self) -> None:
+        """Nothing the write map renders can be read back without a read map."""
+        mapper = build_type_mapper(
+            "write-only",
+            {
+                "write_rules": [
+                    {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"}
+                ]
+            },
+        )
+        report = _messages(check_type_map_round_trip(mapper))
+        assert "no read type map" in report
+
     def test_zero_probe_coverage_fails(self) -> None:
         """A write map rendering no probe must not read as fully certified."""
         mapper = build_type_mapper(
