@@ -182,16 +182,21 @@ def apply_read_type_map(
             try:
                 mapper = runtime.type_mapper_for(scope=EndpointScope(scope))
             except (RuntimeError, ValueError) as err:
-                raise ReadError(
-                    f"no usable read type-map for {scope!r}-scoped endpoint; a "
-                    f"field needs arrow_type resolution but the type-map is "
-                    f"absent or invalid"
-                ) from err
+                raise ReadError(_no_read_type_map(scope)) from err
+            if not mapper.has_read_map:
+                raise ReadError(_no_read_type_map(scope))
         return mapper
 
     for name, prop in (items_schema.get("properties") or {}).items():
         if isinstance(prop, dict):
             resolve_field_arrow_type(prop, name, get_mapper)
+
+
+def _no_read_type_map(scope: str) -> str:
+    return (
+        f"no usable read type-map for {scope!r}-scoped endpoint; a field needs "
+        f"arrow_type resolution but the read type-map is absent or invalid"
+    )
 
 
 def resolve_field_arrow_type(

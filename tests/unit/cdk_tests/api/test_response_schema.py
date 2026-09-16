@@ -17,7 +17,8 @@ from cdk.api.response_schema import (
     resolve_field_arrow_type,
 )
 from cdk.exceptions import ReadError
-from cdk.type_map import UnmappedTypeError
+from cdk.type_map import TypeMapper, UnmappedTypeError
+from cdk.type_map.rules import parse_write_rules
 
 pytestmark = pytest.mark.unit
 
@@ -67,6 +68,8 @@ class _Runtime:
 
 
 class _Mapper:
+    has_read_map = True
+
     def __init__(self, rules: dict[str, str]):
         self._rules = rules
 
@@ -159,6 +162,19 @@ class TestReadTypeMap:
         runtime = _Runtime(error=RuntimeError("mapper absent"))
         with pytest.raises(ReadError, match="no usable read type-map"):
             apply_read_type_map(items, _ENDPOINT_REF, runtime)
+
+    def test_a_write_only_type_map_is_no_read_type_map(self) -> None:
+        items = {"properties": {"id": {"type": "integer"}}}
+        write_only = TypeMapper(
+            "test-connector",
+            None,
+            parse_write_rules(
+                [{"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"}],
+                source="<w>",
+            ),
+        )
+        with pytest.raises(ReadError, match="no usable read type-map"):
+            apply_read_type_map(items, _ENDPOINT_REF, _Runtime(write_only))
 
 
 class TestNestedResolution:

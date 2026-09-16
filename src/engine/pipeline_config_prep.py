@@ -451,10 +451,11 @@ class PipelineConfigPrep:
         self._loaded_connectors[connector_id] = document
 
         # Connector type-map is optional from this layer's perspective. Only a
-        # directory with no type-map document (TypeMapNotFoundError) is benign
-        # and downgraded to None; a present-but-malformed read or write map is a
-        # real config error and propagates so CI catches it at load instead of
-        # silently dropping the connector's type resolution.
+        # directory with no read- or write-direction type-map document
+        # (TypeMapNotFoundError) is benign and downgraded to None; a
+        # present-but-malformed read or write map is a real config error and
+        # propagates so CI catches it at load instead of silently dropping the
+        # connector's type resolution.
         try:
             self._connector_type_mappers[connector_id] = load_type_map(
                 self._paths["connectors"], connector_id

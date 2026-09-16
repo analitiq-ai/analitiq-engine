@@ -89,10 +89,16 @@ async def list_columns(
     (a pgvector ``vector(N)``, a custom domain) resolves here exactly as it
     does at stream run time. An unmapped native type raises
     :class:`DiscoveryError` naming the offending column (the underlying
-    ``UnmappedTypeError`` is chained). A *catalog* scopes both queries to that
+    ``UnmappedTypeError`` is chained), as does a type-map with no read
+    direction. A *catalog* scopes both queries to that
     catalog.
     """
     type_mapper = runtime.type_mapper_for(scope=EndpointScope.CONNECTION)
+    if not type_mapper.has_read_map:
+        raise DiscoveryError(
+            f"{schema}.{table}: the connection has no read type map to map "
+            f"column native types"
+        )
 
     pk_sql, pk_params = dialect.primary_keys_query(schema, table, catalog)
     pk_rows = await fetch_rows(runtime, pk_sql, pk_params)

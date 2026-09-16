@@ -478,6 +478,7 @@ connectors/clickhouse/
   definition/
     connector.json
     type-map-read.json    # direction: read (Clickhouse native_type -> arrow_type)
+    type-map-write.json   # direction: write (arrow_type -> Clickhouse native_type)
   connector.py            # subclass CDK base + override create_table DDL, etc.
   requirements.txt        # clickhouse-connect / clickhouse driver
   pyproject.toml

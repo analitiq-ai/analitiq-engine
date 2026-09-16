@@ -1485,7 +1485,7 @@ class TestWriteMapLoader:
         with pytest.raises(InvalidTypeMapError, match="is not a type-map document"):
             load_type_map(tmp_path, "wrong")
 
-    def test_absent_read_map_raises_not_found(self, tmp_path):
+    def test_no_type_map_documents_raises_not_found(self, tmp_path):
         # Absence is the benign case the connector loader downgrades to None.
         _write_connector(tmp_path, "apionly")  # connector.json only, no type-map
         with pytest.raises(TypeMapNotFoundError, match="required type-map not found"):

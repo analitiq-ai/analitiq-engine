@@ -378,7 +378,9 @@ class ConnectionRuntime:
 
         This means a connection endpoint that has a read map but no write map
         still supports DDL generation: its read overrides take effect and the
-        connector's write rules cover the rest.
+        connector's write rules cover the rest. Likewise a write-only connection
+        map overrides DDL types while the connector's read rules still map every
+        native type.
 
         For ``EndpointScope.CONNECTOR`` the connector mapper is returned
         directly; no composition takes place.

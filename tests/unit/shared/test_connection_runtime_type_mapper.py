@@ -148,7 +148,7 @@ class TestConnectionScopeComposition:
 
     def test_connection_read_only_map_inherits_connector_write_rules(self):
         # A connection with a read override but no write map still supports DDL
-        # generation via the connector's write rules (the core gap from #126).
+        # generation via the connector's write rules.
         rt = _runtime(
             connector_mapper=_connector_mapper(with_write=True),
             connection_mapper=_connection_mapper(with_write=False),

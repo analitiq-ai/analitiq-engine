@@ -2315,6 +2315,29 @@ class TestApiReadPathBreaks:
         assert "'geometry'" in report
         assert "read type-map" in report
 
+    def test_a_write_only_type_map_is_reported_not_raised(self, tmp_path: Path) -> None:
+        root = tmp_path / "api"
+        shutil.copytree(API_REFERENCE_DIR, root)
+        definition = root / "definition"
+        for document in definition.glob("type-map-*.json"):
+            document.unlink()
+        (definition / "type-map-write.json").write_text(
+            json.dumps(
+                type_map_document(
+                    "write",
+                    [
+                        {
+                            "match": "exact",
+                            "arrow_type": "Int64",
+                            "native_type": "BIGINT",
+                        }
+                    ],
+                )
+            )
+        )
+        report = _report(check_api_record_schema(load_target(root)))
+        assert "no read type map" in report
+
     def test_a_named_transport_that_cannot_be_opened_names_the_reads(
         self, tmp_path: Path
     ) -> None:

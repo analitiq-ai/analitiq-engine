@@ -52,7 +52,7 @@ in a customer pipeline (spec
   endpoint fields declare.
 
   Every literal `arrow_type` a rule names must belong to an `arrow_family`
-  the engine can parse. The kit no longer checks this separately: the rule
+  the engine can parse. The kit does not check this separately: the rule
   loader refuses a foreign `arrow_type` against the pinned contract before
   a type map is ever assembled, so a document that would fail the check
   cannot reach it.

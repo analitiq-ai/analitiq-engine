@@ -16,8 +16,8 @@ Shape::
       "log_level": 20,
       "connection": {<ConnectionRuntime.resolve_spec() payload>},
       "type_maps": {
-        "connector":  {"rules": [...], "write_rules"?: [...]} | null,
-        "connection": {"rules": [...], "write_rules"?: [...]} | null
+        "connector":  {"rules"?: [...], "write_rules"?: [...]} | null,
+        "connection": {"rules"?: [...], "write_rules"?: [...]} | null
       },
       # destination role:
       "endpoint_refs":   {stream_id: {...}},
