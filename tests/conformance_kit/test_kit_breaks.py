@@ -2451,6 +2451,7 @@ class TestACompileFindingBelongsToTheCheckThatOwnsIt:
             check_api_read_compiles,
             check_api_read_advances,
             check_api_read_stop_condition,
+            check_api_record_schema,
         ):
             messages = _messages(check(target))
             assert "not driven" not in messages, check.__name__

@@ -25,7 +25,7 @@ from analitiq.contracts.endpoint_identity import derive_db_endpoint_id
 from cdk.conformance.fakes import type_map_document
 from cdk.declarations import ConnectorDeclarationError
 from cdk.types import EndpointScope
-from src.config.schema_validator import ContractValidationError
+from src.config.schema_validator import BundleValidationError, ContractValidationError
 from src.engine.batch_policy import ErrorStrategy
 from src.engine.mapping import MappingDocument, compile_mapping
 from src.engine.pipeline_config_prep import PipelineConfigPrep, _split_stream_ref
@@ -638,6 +638,29 @@ class TestCreateConfigErrorPaths:
             RuntimeError, match="Could not find pipelines/manifest.json"
         ):
             PipelineConfigPrep()
+
+    def test_a_bundle_the_validator_refuses_fails_create_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, schema_mirror: Path
+    ) -> None:
+        """The wiring test for ``validate_bundle``: any refused bundle will do.
+
+        Which cross-document rule refuses it is the validator's to test; this
+        pins that config prep runs the bundle validator and lets its refusal
+        reach the caller before anything is resolved.
+        """
+        root = tmp_path / "project"
+        root.mkdir()
+        _build_tree(root)
+        stream_doc = _stream_doc(STREAM_ID)
+        stream_doc["pipeline_id"] = "00000000-0000-4000-8000-0000000000ff"
+        _write_json(
+            root / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json",
+            stream_doc,
+        )
+        monkeypatch.chdir(root)
+        monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)
+        with pytest.raises(BundleValidationError):
+            PipelineConfigPrep().create_config()
 
     def test_missing_stream_file_rejected(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, schema_mirror: Path

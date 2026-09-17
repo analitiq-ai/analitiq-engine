@@ -105,10 +105,12 @@ class ExpressionValue(StrictModel):
     Widens the contract's expression variant on one axis only: the contract
     publishes the ``get``/``pipe``/``fn`` nodes an authoring UI can offer,
     while the engine compiles a larger op set (see :func:`_compile_expr`). The
-    AST therefore stays an untyped mapping here and is validated -- op by op,
-    arity, and every key the node carries -- at compile time, where the
-    vocabulary is defined. Widening the type does not open the document: a key
-    no op declares is refused there by name, exactly as it is at this level.
+    AST therefore stays an untyped mapping here. Compile time checks the op,
+    arity and every key the node carries, where the vocabulary is defined, so
+    a key no op declares is still refused by name. The shape of a ``get`` path
+    and the ``fn`` op of a pipe stage are not checked there: they are the
+    stream contract's rules, and config prep validates the stream document
+    before it parses the mapping.
     """
 
     kind: Literal["expression"]

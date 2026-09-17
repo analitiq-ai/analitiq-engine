@@ -1,13 +1,13 @@
 """Unit tests for the typed resolved-runtime models and their invariants."""
 
-from typing import Annotated, Literal
+from typing import Literal
 from unittest.mock import MagicMock
 
 import pytest
 from analitiq.contracts.pipelines.config import ErrorHandling as ContractErrorHandling
 from analitiq.contracts.pipelines.config import Runtime as ContractRuntime
 from analitiq.contracts.stream import Replication, StreamSource
-from pydantic import BaseModel, Field, TypeAdapter, create_model
+from pydantic import BaseModel, TypeAdapter, create_model
 
 from src.engine.mapping import MappingDocument
 from src.engine.pipeline_config_prep import _parse_replication, _parse_runtime_config
@@ -21,7 +21,6 @@ from src.models.resolved import (
     ResolvedStream,
     RuntimeConfig,
     _contract_literals,
-    _variant_literals,
     with_effective_safety_window,
 )
 from src.models.state import ReplicationConfig as StateReplicationConfig
@@ -69,43 +68,6 @@ class TestContractLiterals:
         # off it must explain, not raise AttributeError.
         with pytest.raises(RuntimeError, match="does not declare"):
             _contract_literals(type(None), "method")
-
-
-class TestVariantLiterals:
-    """The union reader states which shape it could not read."""
-
-    def test_reads_an_annotated_discriminated_union(self):
-        class A(BaseModel):
-            kind: Literal["a"]
-
-        class B(BaseModel):
-            kind: Literal["b"]
-
-        annotated = Annotated[A | B, Field(discriminator="kind")]
-        assert _variant_literals(annotated, "kind") == {"a", "b"}
-
-    def test_reads_a_bare_union(self):
-        # The contract wraps its unions in Annotated today; the reader does not
-        # depend on that, so dropping the discriminator is not a silent break.
-        class A(BaseModel):
-            kind: Literal["a"]
-
-        class B(BaseModel):
-            kind: Literal["b"]
-
-        assert _variant_literals(A | B, "kind") == {"a", "b"}
-
-    @pytest.mark.parametrize("shape", ["plain_model", "annotated_single"])
-    def test_rejects_an_annotation_that_is_not_a_union(self, shape):
-        # The likeliest shape change: the contract collapses the union to one
-        # model. Before the Annotated strip was explicit this raised a bare
-        # unpack ValueError naming neither the contract nor the cause.
-        class A(BaseModel):
-            kind: Literal["a"]
-
-        annotation = A if shape == "plain_model" else Annotated[A, Field()]
-        with pytest.raises(RuntimeError, match="no longer a union"):
-            _variant_literals(annotation, "kind")
 
 
 class TestErrorHandlingConfig:
@@ -325,26 +287,11 @@ class TestParseRuntimeConfig:
 
 
 class TestReplicationConfig:
-    def test_vocabulary_equals_the_published_contract_enum(self):
-        # Two genuinely independent readings: the engine walks each variant's
-        # method literal, this reads the discriminator mapping pydantic renders
-        # into the published schema. A reader that visited only the first
-        # variant would pass every other test in this class.
-        published = TypeAdapter(Replication).json_schema()["discriminator"]["mapping"]
-        assert _variant_literals(Replication, "method") == set(published)
-
     def test_vocabulary_is_the_one_the_engine_has_handling_for(self):
-        # Same reason as the error-strategy canary: deriving lets a contract
-        # widen this boundary on its own, and the engine branches on the
-        # method, so a new one needs a code path before a pipeline can use it.
-        assert _variant_literals(Replication, "method") == {
-            "full_refresh",
-            "incremental",
-        }
-
-    @pytest.mark.parametrize("method", sorted(_variant_literals(Replication, "method")))
-    def test_accepts_every_contract_method(self, method):
-        assert ReplicationConfig(method=method).method == method
+        # The engine branches on the method, so a method the contract adds
+        # needs a code path before a pipeline can use it.
+        published = TypeAdapter(Replication).json_schema()["discriminator"]["mapping"]
+        assert set(published) == {"full_refresh", "incremental"}
 
     def test_optional_fields_default_absent(self):
         cfg = ReplicationConfig(method="full_refresh")

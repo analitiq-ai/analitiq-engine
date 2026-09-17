@@ -18,7 +18,7 @@ is parsed by the engine's own ``MappingDocument``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Annotated, Any, get_args, get_origin
+from typing import Any, get_args
 
 from analitiq.contracts.connection import ConnectionInput
 from analitiq.contracts.pipelines.config import ErrorHandling as ContractErrorHandling
@@ -140,28 +140,6 @@ def _contract_literals(model: type[BaseModel], field_name: str) -> frozenset[str
             "contract changed shape and this reader must follow it"
         )
     return frozenset(values)
-
-
-def _variant_literals(annotation: Any, field_name: str) -> frozenset[str]:
-    """Read *field_name*'s vocabulary across every variant of a union annotation.
-
-    Accepts the union bare or wrapped in ``Annotated`` (the contract's
-    discriminated unions carry a ``Field(discriminator=...)``); the wrapper is
-    stripped explicitly rather than by unpacking ``get_args``, so an annotation
-    that stops being a union reaches the error below instead of failing on a
-    bare unpack that names neither the contract nor the cause.
-    """
-    if get_origin(annotation) is Annotated:
-        annotation = get_args(annotation)[0]
-    variants = get_args(annotation)
-    if not variants:
-        raise RuntimeError(
-            f"{annotation!r} is no longer a union of contract variants; this "
-            "reader must follow it"
-        )
-    return frozenset().union(
-        *(_contract_literals(variant, field_name) for variant in variants)
-    )
 
 
 @dataclass(frozen=True)

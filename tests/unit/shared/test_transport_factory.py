@@ -306,6 +306,27 @@ class TestHttpSpecValidation:
                 resolver=_resolver(ctx),
             )
 
+    @pytest.mark.parametrize(
+        "rate_limit",
+        [
+            {"max_requests": 10},
+            {"time_window_seconds": 60},
+            # The contract types the window as Any, so an explicit null
+            # passes validation and only this check refuses it.
+            {"max_requests": 5, "time_window_seconds": None},
+        ],
+        ids=["max_requests_only", "time_window_only", "null_time_window"],
+    )
+    def test_rate_limit_missing_one_field_raises_transport_spec_error(self, rate_limit):
+        with pytest.raises(TransportSpecError, match="both"):
+            resolve_http_spec(
+                {
+                    "base_url": "https://api.example.com",
+                    "rate_limit": rate_limit,
+                },
+                resolver=_resolver(),
+            )
+
     def test_a_header_resolving_to_nothing_is_dropped_and_said_out_loud(self, caplog):
         # A transport header is where a credential or an API version lives.
         # Dropped in silence, the provider's 401 maps back to nothing --

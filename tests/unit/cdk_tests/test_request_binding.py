@@ -40,6 +40,10 @@ class TestBindParamRefs:
         out = bind_param_refs({"filters": [{"from_param": "a"}, "static"]}, {"a": 1})
         assert out == {"filters": [{"literal": 1}, "static"]}
 
+    def test_siblings_next_to_marker_raise(self):
+        with pytest.raises(ValueError, match="only key"):
+            bind_param_refs({"x": {"from_param": "a", "extra": 1}}, {"a": 1})
+
     def test_non_string_name_raises(self):
         with pytest.raises(ValueError, match="non-empty string"):
             bind_param_refs({"x": {"from_param": 7}}, {})
