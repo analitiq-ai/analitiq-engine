@@ -19,9 +19,10 @@ refused earlier, by the parse at registration -- but it lands on the same
 ack. Registration runs before the gRPC server exists, so it records the
 parse failure against its stream instead of raising, and the handshake is
 where that stream hears about it while its neighbours sync. The two sets
-are kept apart below so neither quietly stops being tested: one proves the
-contract still decides these documents, the other proves the decision
-reaches one ack rather than the process exit code.
+are kept apart below because the routes differ. Whether the contract still
+decides the second set is not asserted separately -- the ack those tests
+read must name ``ApiEndpointDoc``, so a contract that stopped refusing
+these documents fails them.
 """
 
 from __future__ import annotations

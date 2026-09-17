@@ -105,6 +105,21 @@ def authored_sql_capabilities(connector: Connector | None) -> dict[str, Any] | N
     return block
 
 
+def authored_error_map(connector: Connector | None) -> dict[str, Any] | None:
+    """Return the connector's declared ``error_map`` as its author wrote it.
+
+    The sibling of :func:`authored_sql_capabilities`, and one reader for the
+    same reason: the engine folds this block into the worker payload while
+    the conformance kit certifies the same ``connector.json``, so a second
+    reader going back to the raw file could refuse a definition the engine
+    runs, or accept one it refuses. Every kind may declare it.
+    """
+    if connector is None:
+        return None
+    block: dict[str, Any] | None = authored_json(connector.error_map)
+    return block
+
+
 def _derive_dialect(connector: Connector | None) -> str | None:
     """Return the base SQL dialect (e.g. ``postgresql``) from a definition.
 
@@ -211,9 +226,7 @@ class ConnectionRuntime:
         # (the system's connection ceiling). ``cdk.declarations`` parses
         # them at consumption; absence is additive — no declared mapping /
         # no declared ceiling.
-        self._declared_error_map: dict[str, Any] | None = (
-            authored_json(connector.error_map) if connector is not None else None
-        )
+        self._declared_error_map: dict[str, Any] | None = authored_error_map(connector)
         self._declared_concurrency: dict[str, Any] | None = (
             authored_json(connector.concurrency) if connector is not None else None
         )

@@ -323,10 +323,11 @@ def body_with_idempotency_key(
 ) -> dict[str, Any]:
     """Return the request body with the engine-owned idempotency key added.
 
-    Configure time already rejected a declared non-object body spec; this
-    guards the remaining runtime shapes (a spec-less record body, or a spec
-    that resolved away its object shape). A body already carrying the
-    reserved field is a collision the engine must not silently overwrite.
+    The contract rejects a declared non-object body spec at document load;
+    this guards the shapes only the run can produce (a spec-less record
+    body, or a spec that resolved away its object shape). A body already
+    carrying the reserved field is a collision the engine must not silently
+    overwrite.
     """
     if not isinstance(body, dict):
         raise ValueError(

@@ -22,6 +22,7 @@ from __future__ import annotations
 import pytest
 
 from cdk.conformance.target import ConformanceTarget
+from cdk.connection_runtime import authored_error_map
 from cdk.declarations import (
     ERROR_CATEGORY_VALUES,
     ConnectorDeclarationError,
@@ -34,7 +35,10 @@ APPLIES_TO_KINDS = ("database",)
 
 
 def _declared_error_map(target: ConformanceTarget) -> ErrorMap | None:
-    block = target.definition.get("error_map")
+    # Off the validated model, never the raw file: the engine resolves this
+    # block through ``authored_error_map`` too, and two readers for one block
+    # is the one disagreement the kit must never introduce.
+    block = authored_error_map(target.connector)
     return parse_declared_error_map(block, source=f"connector {target.connector_id!r}")
 
 

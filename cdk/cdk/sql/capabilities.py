@@ -11,9 +11,10 @@ from this block.
 This module is the CDK's typed view of that block. The engine folds the
 declared block into the resolved worker payload (the same channel that
 delivers transport specs), and every side — engine, worker, conformance
-kit — reads it here, off the validated model. ``None`` (no block
-declared) is legal; every consumer treats a needed-but-undeclared shape
-fact as a loud configuration error via
+kit — reads it here: the engine and the kit off the validated model, the
+worker off the block the engine folded in, which came from the same
+model. ``None`` (no block declared) is legal; every consumer treats a
+needed-but-undeclared shape fact as a loud configuration error via
 :func:`undeclared_capability_error` — no base-class default ever fills in
 a guess. The one exception is the ``limits`` member (issue #401), whose
 absence is additive: an undeclared cap means "no declared cap" and
@@ -43,11 +44,11 @@ DIALECT_IMPLEMENTED_BULK_MECHANISMS = frozenset(
 
 
 class SqlCapabilitiesError(ValueError):
-    """The ``sql_capabilities`` declaration is malformed or missing a needed fact.
+    """A consumer site needs a shape fact the connector does not declare.
 
-    A configuration defect: the connector definition (or the resolved payload
-    built from it) either carries a block that does not match the published
-    vocabulary, or omits a fact a consumer site needs. Deterministic —
+    The one thing this can mean: the contract owns the block's shape and
+    vocabulary, so a declaration that reaches here is well formed — what it
+    can still be is silent about a fact some site needs. Deterministic —
     retrying cannot succeed; the fix is authoring-side in the connector's
     ``connector.json``.
     """
