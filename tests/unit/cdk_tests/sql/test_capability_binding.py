@@ -168,9 +168,9 @@ class TestOneBindingSite:
         assert dialect.capabilities.catalog == "full"
 
     def test_for_runtime_names_the_connector_in_a_malformed_declaration(self):
-        runtime = FakeAdbcRuntime(
-            "demo", declared_sql_capabilities=caps_block(catalog="everything")
-        )
+        block = caps_block()
+        block["stage"]["transactional_ddl"] = "yes"
+        runtime = FakeAdbcRuntime("demo", declared_sql_capabilities=block)
         with pytest.raises(SqlCapabilitiesError, match="connector 'demo'"):
             SqlDialect.for_runtime(runtime)
 

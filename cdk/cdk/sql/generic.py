@@ -875,10 +875,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         # the source entry (read_batches) already uses: the factory hands
         # the dialect to hooks that fire later — verify_tls_state on every
         # new DBAPI connection — so a dialect built here must already carry
-        # the declaration those hooks read. (A malformed block already
-        # failed on the trusted side at config load; this parse
-        # re-validates at the process boundary, before anything is
-        # acquired.)
+        # the declaration those hooks read.
         self._bind_capabilities(runtime)
         try:
             await materialize_runtime(runtime, sql_dialect=self.dialect)
@@ -2350,12 +2347,6 @@ class GenericSQLConnector(BaseDestinationHandler):
         cursor advancement with OFFSET would skip rows on every page after
         the first.
         """
-        if not columns:
-            # The first selected column is the ORDER BY fallback and an empty
-            # projection compiles to ``SELECT`` with no columns; fail loudly
-            # rather than emit an invalid statement.
-            raise ReadError("ADBC-only source requires a non-empty column projection")
-
         # The ADBC path quotes every identifier; *address* components were
         # normalized once at construction (the same rule the destination
         # handler applies), so the quoted names target the same physical

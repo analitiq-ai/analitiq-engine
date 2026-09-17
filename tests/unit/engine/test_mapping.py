@@ -119,24 +119,6 @@ class TestTokenArrayPaths:
         out = _compile([_assignment("city", "Utf8", _expr(node))]).run(batch)
         assert out.to_pylist() == [{"city": "Berlin"}, {"city": "Kyiv"}]
 
-    @pytest.mark.parametrize(
-        "node",
-        [
-            {"op": "get", "path": "address.city"},
-            {
-                "op": "pipe",
-                "args": [
-                    {"op": "get", "path": "address.city"},
-                    {"op": "fn", "name": "trim"},
-                ],
-            },
-        ],
-        ids=["at the root", "nested in a pipe"],
-    )
-    def test_a_dotted_string_path_is_refused_not_split(self, node):
-        with pytest.raises(TransformationError, match="array of field-name tokens"):
-            _compile([_assignment("city", "Utf8", _expr(node))])
-
     def test_a_single_token_reads_a_field_whose_name_contains_a_dot(self):
         batch = pa.record_batch([pa.array(["v"])], names=["a.b"])
         out = _compile([_assignment("x", "Utf8", _expr(_get(["a.b"])))]).run(batch)
@@ -145,10 +127,6 @@ class TestTokenArrayPaths:
 
 class TestTargetIsOneSegment:
     """A target names one field on the destination record root."""
-
-    def test_dotted_target_is_refused_with_the_reason(self):
-        with pytest.raises(TransformationError, match="more than one segment"):
-            _compile([_assignment("address.city", "Utf8", _expr(_get("city")))])
 
     def test_nesting_is_declared_with_object_plus_properties(self):
         schema = build_output_schema(
@@ -166,58 +144,8 @@ class TestTargetIsOneSegment:
         assert pa.types.is_struct(schema.field("address").type)
 
 
-class TestValueKindIsExplicit:
-    """``kind`` discriminates the value union and has no default."""
-
-    def test_missing_kind_is_refused(self):
-        with pytest.raises(TransformationError, match="discriminator 'kind'"):
-            _compile([_assignment("s", "Utf8", {"expression": _get("s")})])
-
-    def test_unknown_kind_names_the_expected_tags(self):
-        with pytest.raises(TransformationError, match="'expression', 'constant'"):
-            _compile([_assignment("s", "Utf8", {"kind": "expr", "expr": _get("s")})])
-
-
 class TestDocumentIsClosed:
     """An unknown field is rejected by name, never dropped on the way in."""
-
-    def test_unknown_mapping_field_is_named(self):
-        with pytest.raises(TransformationError, match=r"\bdefaults\b"):
-            compile_mapping(
-                MappingDocument.parse(
-                    {"assignments": [], "defaults": {"on_error": "dlq"}}
-                ),
-                default_strategy=ErrorStrategy.FAIL,
-            )
-
-    def test_unknown_assignment_field_is_named(self):
-        assignment = _assignment("s", "Utf8", _expr(_get("s")))
-        assignment["on_error"] = "dlq"
-        with pytest.raises(TransformationError, match=r"assignments\.0\.on_error"):
-            _compile([assignment])
-
-    def test_unknown_target_field_is_named(self):
-        with pytest.raises(
-            TransformationError, match=r"assignments\.0\.target\.generic_type"
-        ):
-            _compile(
-                [_assignment("s", "Utf8", _expr(_get("s")), generic_type="string")]
-            )
-
-    def test_missing_target_arrow_type_is_named(self):
-        with pytest.raises(
-            TransformationError, match=r"assignments\.0\.target\.arrow_type"
-        ):
-            _compile([{"target": {"path": "s"}, "value": _expr(_get("s"))}])
-
-    def test_non_object_target_is_refused_by_type_not_by_attribute_error(self):
-        """The read boundary reports every bad shape as a named field failure.
-
-        A scalar ``target`` is the one shape that used to reach the dotted-path
-        pre-check as a string and escape as a raw ``AttributeError``.
-        """
-        with pytest.raises(TransformationError, match=r"assignments\.0\.target"):
-            _compile([{"target": "id", "value": _expr(_get("s"))}])
 
     @pytest.mark.parametrize(
         "node",
@@ -653,11 +581,6 @@ class TestFunctionVersionDispatch:
         with pytest.raises(TransformationError, match="Unknown function"):
             _compile([_assignment("o", "Utf8", self._pipe(node))])
 
-    def test_non_fn_op_in_pipe_stage_raises(self):
-        node = _expr({"op": "pipe", "args": [_const_node("x"), _get("y")]})
-        with pytest.raises(TransformationError, match="Expected fn op"):
-            _compile([_assignment("o", "Utf8", node)])
-
 
 class TestConversionMatrix:
     """Type conversion has one authority: the conversion matrix gates each
@@ -984,16 +907,6 @@ class TestValidationRules:
                 ],
             )
 
-    def test_duplicate_assignment_targets_are_refused(self):
-        """Two assignments building one field would let array position decide."""
-        with pytest.raises(TransformationError, match="duplicate target.path"):
-            _compile(
-                [
-                    _assignment("v", "Int64", _expr(_get("v"))),
-                    _assignment("v", "Int64", _expr(_get("w"))),
-                ]
-            )
-
     def test_range_bounds_come_from_the_rule_value_object(self):
         rules = [_rule("range", value={"min": 1, "max": 5})]
         assert _run([{"v": 1}, {"v": 5}], self._validated(rules)) == [
@@ -1071,16 +984,6 @@ class TestValidationErrorStrategy:
             default=default,
         )
         assert failure.strategy is default
-
-    def test_null_strategy_is_a_document_shape_error(self):
-        """The contract's ``strategy`` is a literal, not nullable: ``null`` is
-        rejected at parse, never read as "unset" and never reaches
-        ``ErrorStrategy``."""
-        with pytest.raises(TransformationError, match="strategy"):
-            _compile(
-                [self._validated([_rule("not_null")], {"strategy": None})],
-                ErrorStrategy.FAIL,
-            )
 
     def test_retry_fields_change_nothing(self):
         """A rule is deterministic; the override's retry fields are not read."""

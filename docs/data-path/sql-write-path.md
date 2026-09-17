@@ -346,7 +346,7 @@ the connector as a whole (`copy_from` needs the driver's wire
 connection; `adbc_ingest` needs an ADBC cursor). An absent family lands
 via executemany, the declared default; an empty object declares no bulk
 anywhere; a mechanism a family cannot run (`adbc_ingest` under
-`sqlalchemy`) is unrepresentable — the parse refuses it, so no
+`sqlalchemy`) is unrepresentable — the published contract refuses it, so no
 downstream consumer ever meets a declared-but-unrunnable mechanism. A
 dual-transport connector declares both entries (postgres: ADBC
 connections ingest natively, SQLAlchemy connections COPY) instead of
@@ -431,11 +431,10 @@ Properties:
   block anything — absence means "no declared cap / no declared mapping" and
   current behavior applies. A runtime failure caused by an undeclared cap or
   mapping is a connector defect, fixed by declaring it — never worked around
-  in the engine. Declared content is still validated fail-loud
-  (`cdk.sql.capabilities` for `limits`, `cdk.declarations` for `error_map`
-  and `concurrency`) at config load on the trusted side; `error_map` and
-  `limits` re-validate where the resolved payload is parsed (`concurrency`
-  has no worker-side consumer — the engine's fan-out is its only reader).
+  in the engine. Declared content is still validated fail-loud: the
+  published contract refuses a malformed `limits` or `concurrency` block,
+  and `cdk.declarations` parses `error_map` at config load on the trusted
+  side and again where the resolved payload is parsed.
 - **`error_map` declares facts, never verdicts.** The value vocabulary is
   engine-owned — `transient | config | auth | unreachable | rate_limited |
   write_rejected` — and the engine alone derives `AckStatus`,

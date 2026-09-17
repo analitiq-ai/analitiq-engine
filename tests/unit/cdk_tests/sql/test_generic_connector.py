@@ -148,25 +148,6 @@ class TestReadGuards:
             await _drain(connector, runtime, {}, _checkpoint())
 
     @pytest.mark.asyncio
-    async def test_missing_table_name_raises(self):
-        connector = GenericSQLConnector()
-        runtime = _FakeRuntime(is_adbc=False)
-        # Every other field is contract-valid, so the missing object name is
-        # the only thing the refusal can be about.
-        config = {
-            "endpoint_document": {
-                "$schema": DATABASE_ENDPOINT_SCHEMA_URL,
-                "endpoint_id": "orders",
-                "database_object": {"schema": "public"},
-                "columns": [
-                    {"name": "id", "native_type": "TEXT", "arrow_type": "Utf8"}
-                ],
-            }
-        }
-        with pytest.raises(ReadError, match="database_object.name"):
-            await _drain(connector, runtime, config, _checkpoint())
-
-    @pytest.mark.asyncio
     async def test_incremental_cursor_field_not_in_projection_raises(self):
         # An incremental stream whose projection drops the cursor column
         # would silently degrade to full-scan + upsert every run; the
@@ -182,20 +163,6 @@ class TestReadGuards:
             with pytest.raises(ReadError, match="cursor_field 'deleted_at'"):
                 await _drain(connector, runtime, config, _checkpoint())
         runtime.close.assert_awaited()
-
-    @pytest.mark.asyncio
-    async def test_a_filter_naming_no_field_is_refused_by_the_source_parse(self):
-        # A filter without 'field' used to be skipped, silently widening
-        # the result set, and _build_filters guarded against it. The stream
-        # contract requires the field, so the source parse now refuses the
-        # whole read before a connection is opened -- an unnamed filter
-        # never reaches the query builder to be guarded against.
-        connector = GenericSQLConnector()
-        runtime = _FakeRuntime(is_adbc=False)
-        config = _endpoint_config()
-        config["stream_source"]["filters"] = [{"operator": "eq", "value": 1}]
-        with pytest.raises(ReadError, match="does not satisfy StreamSource"):
-            await _drain(connector, runtime, config, _checkpoint())
 
     @pytest.mark.asyncio
     async def test_incremental_wildcard_projection_passes_cursor_check(self):
@@ -319,23 +286,6 @@ class TestReadAdbcBranch:
         assert params == ["active", "2024-01-02"]
         # Runtime released after the read.
         runtime.close.assert_awaited()
-
-    @pytest.mark.asyncio
-    async def test_empty_columns_rejected(self):
-        # A document declaring no columns compiles to a SELECT with no
-        # projection, so it must be refused before any extraction work.
-        # Releasing the runtime on a read error is pinned by
-        # test_incremental_cursor_field_not_in_projection_raises, which
-        # fails deep enough in the read to have opened one.
-        runtime = _FakeRuntime(is_adbc=True)
-        connector = GenericSQLConnector()
-        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
-            "cdk.sql.generic.SchemaContract"
-        ):
-            config = _endpoint_config(columns=())
-            config["endpoint_document"]["columns"] = []
-            with pytest.raises(ReadError, match="column"):
-                await _drain(connector, runtime, config, _checkpoint())
 
     @pytest.mark.asyncio
     async def test_saves_last_cursor_value_from_batch(self):

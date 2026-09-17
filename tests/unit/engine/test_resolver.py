@@ -95,11 +95,6 @@ class TestResolverRefAndLiteral:
             "ref": "scope.path"
         }
 
-    def test_literal_with_sibling_keys_rejected(self):
-        ctx = ResolutionContext()
-        with pytest.raises(TransportSpecError, match="must be the only key"):
-            Resolver(ctx).resolve({"literal": "ok", "extra": 1})
-
 
 class TestResolverTemplate:
     def test_template_substitutes_scalars(self):
@@ -176,14 +171,6 @@ class TestResolverFunctions:
         with pytest.raises(TransportSpecError, match="Unknown derived function"):
             Resolver(ctx, functions={}).resolve({"function": "no_such", "input": "x"})
 
-    def test_function_with_unexpected_sibling_key_rejected(self):
-        # Sibling key that is not another expression marker (those are
-        # caught by the conflicting-marker rule) and not in the allow-list.
-        ctx = ResolutionContext()
-        resolver = Resolver(ctx, functions={"capture": _capture})
-        with pytest.raises(TransportSpecError, match="unexpected sibling keys"):
-            resolver.resolve({"function": "capture", "input": "x", "bogus": 1})
-
     def test_function_with_allowed_siblings_resolves(self):
         ctx = ResolutionContext()
         resolver = Resolver(ctx, functions={"capture": _capture})
@@ -219,16 +206,6 @@ class TestResolverMarkerDiscipline:
         ctx = ResolutionContext()
         with pytest.raises(TransportSpecError, match="conflicting markers"):
             Resolver(ctx).resolve({"ref": "scope.x", "template": "literal"})
-
-    def test_ref_with_extra_sibling_rejected(self):
-        ctx = ResolutionContext(connection={"parameters": {"host": "h"}})
-        with pytest.raises(TransportSpecError, match="must be the only key"):
-            Resolver(ctx).resolve({"ref": "connection.parameters.host", "extra": 1})
-
-    def test_template_with_extra_sibling_rejected(self):
-        ctx = ResolutionContext()
-        with pytest.raises(TransportSpecError, match="must be the only key"):
-            Resolver(ctx).resolve({"template": "x", "extra": 1})
 
 
 # ---------------------------------------------------------------------------
@@ -564,15 +541,3 @@ class TestDeclarationReaders:
     def test_conflicting_markers_are_named(self):
         problem = expression_node_problem({"ref": "a.b", "template": "c"})
         assert problem is not None and "conflicting markers" in problem
-
-    def test_a_function_sibling_key_is_named(self):
-        problem = expression_node_problem(
-            {"function": "base64_encode", "input": {}, "rogue": 1}
-        )
-        assert problem is not None and "unexpected sibling keys" in problem
-
-    def test_a_sibling_beside_a_bare_marker_is_named(self):
-        problem = expression_node_problem(
-            {"ref": "connection.parameters.host", "extra": 1}
-        )
-        assert problem is not None and "must be the only key" in problem

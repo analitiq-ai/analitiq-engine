@@ -35,8 +35,9 @@ missing limit or error mapping cannot block anything — absence means "no
 declared cap / no declared mapping" and current behavior applies. A runtime
 failure caused by an undeclared cap or mapping is a connector defect, fixed
 by declaring it (or implementing ``classify_error``) — never worked around
-in the engine. Declared content is still validated fail-loud: an
-off-vocabulary category or a malformed block is a configuration error. A
+in the engine. Declared ``error_map`` content is still validated fail-loud:
+an off-vocabulary category or a malformed ``key_attrs``/``codes`` entry is a
+configuration error. A
 connector definition still carrying the retired fixed-family shape (a
 top-level ``sqlstate``/``exception``/``vendor_code`` key) fails the same
 way: unknown fields, not a silently reinterpreted block.
@@ -150,13 +151,10 @@ CLASS_NAME_SIGNAL = "__exception_class__"
 # beyond "a non-empty identifier-shaped string": the attribute's existence
 # and meaning are the connector's own driver's business, not the engine's.
 _KEY_ATTR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-# HTTP status keys are a genuinely universal, fixed-width scalar (unlike a
-# driver attribute name), so this one grammar stays enforced.
-_HTTP_KEY = re.compile(r"^[1-5][0-9]{2}$")
 
 
 class ConnectorDeclarationError(ValueError):
-    """A connector-level declared block (``error_map`` / ``concurrency``) is malformed.
+    """A connector-level declared ``error_map`` block is malformed.
 
     A configuration defect: the connector definition (or the resolved payload
     built from it) carries a block that does not match the published
@@ -391,18 +389,8 @@ def _parse_http(block: Mapping[str, Any], *, source: str) -> dict[int, str]:
     raw = block.get("http")
     if raw is None:
         return {}
-    if not isinstance(raw, Mapping):
-        raise ConnectorDeclarationError(
-            f"error_map.http in {source} must be an object mapping status "
-            f"codes to categories, got {type(raw).__name__}"
-        )
     parsed: dict[int, str] = {}
     for key, value in raw.items():
-        if not isinstance(key, str) or not _HTTP_KEY.match(key):
-            raise ConnectorDeclarationError(
-                f"error_map.http in {source} declares malformed status "
-                f"{key!r}; expected the http key grammar ({_HTTP_KEY.pattern})"
-            )
         parsed[int(key)] = _require_category(value, f"http.{key}", source=source)
     return parsed
 
@@ -452,11 +440,6 @@ class ErrorMap:
         makes a leftover pre-#513 declaration fail loud here rather than
         being silently reinterpreted.
         """
-        if not isinstance(block, Mapping):
-            raise ConnectorDeclarationError(
-                f"error_map in {source} must be an object, "
-                f"got {type(block).__name__}"
-            )
         known = {"key_attrs", "codes", "http"}
         unknown = set(block) - known
         if unknown:
@@ -618,33 +601,14 @@ def error_map_for(runtime: Any) -> ErrorMap | None:
     )
 
 
-def parse_declared_concurrency(
-    block: Any, *, source: str = "<connector definition>"
-) -> int | None:
-    """Parse an optional ``concurrency`` declaration to its connection ceiling.
+def parse_declared_concurrency(block: Any) -> int | None:
+    """Read an optional ``concurrency`` declaration's connection ceiling.
 
-    Returns the declared ``max_connections`` (a positive int), or ``None``
-    when the block is absent — no declared ceiling, current behavior applies.
+    Returns the declared ``max_connections`` (a positive int, as the
+    published contract requires), or ``None`` when the block or the cap is
+    absent — no declared ceiling, current behavior applies.
     """
     if block is None:
         return None
-    if not isinstance(block, Mapping):
-        raise ConnectorDeclarationError(
-            f"concurrency in {source} must be an object, got {type(block).__name__}"
-        )
-    known = {"max_connections"}
-    unknown = set(block) - known
-    if unknown:
-        raise ConnectorDeclarationError(
-            f"concurrency in {source} carries unknown fields {sorted(unknown)}; "
-            f"expected a subset of {sorted(known)}"
-        )
-    value = block.get("max_connections")
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ConnectorDeclarationError(
-            f"concurrency.max_connections in {source} is {value!r}; "
-            f"expected a positive integer"
-        )
-    return int(value)
+    max_connections: int | None = block.get("max_connections")
+    return max_connections

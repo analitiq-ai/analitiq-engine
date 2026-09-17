@@ -28,7 +28,6 @@ from analitiq.contracts.stream import (
     DatabaseConflictKeyedWrite,
     DatabaseKeylessWrite,
     EndpointRef,
-    Replication,
     StreamInput,
     StreamMapping,
     StreamSource,
@@ -165,9 +164,6 @@ def _variant_literals(annotation: Any, field_name: str) -> frozenset[str]:
     )
 
 
-_VALID_REPLICATION_METHODS = _variant_literals(Replication, "method")
-
-
 @dataclass(frozen=True)
 class ReplicationConfig:
     """Source replication policy, typed against the published stream contract.
@@ -181,23 +177,6 @@ class ReplicationConfig:
     method: str
     cursor_field: str | None = None
     tie_breaker_fields: list[str] | None = None
-
-    def __post_init__(self) -> None:
-        if self.method not in _VALID_REPLICATION_METHODS:
-            raise ValueError(
-                f"Unknown replication method {self.method!r}; "
-                f"expected one of {sorted(_VALID_REPLICATION_METHODS)}"
-            )
-        # The contract carries cursor_field as a string on its incremental
-        # replication variant and forbids it on full_refresh, so this engine
-        # view holds a string or None. Fail loud at this boundary if anything
-        # else slips through (e.g. a legacy list), rather than letting it
-        # reach compute_max_cursor as an opaque TypeError.
-        if self.cursor_field is not None and not isinstance(self.cursor_field, str):
-            raise ValueError(
-                "cursor_field must be a string or None; the contract forbids a "
-                f"list, got {type(self.cursor_field).__name__}"
-            )
 
 
 @dataclass

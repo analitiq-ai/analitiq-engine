@@ -69,8 +69,6 @@ def _build_config_dict(
     streams: dict[str, dict[str, Any]] = {}
 
     for stream in stream_configs:
-        if not stream.destinations:
-            raise ValueError(f"Stream {stream.stream_id!r} has no destinations")
         dest = stream.primary_destination()
 
         source_config = _translate_source_config(
@@ -208,12 +206,11 @@ class PipelineRunner:
             # same document (src.main.run_destination_mode).
             apply_log_level(pipeline_config.runtime.logging.log_level)
 
-            # Translate the resolved contract into the engine config dict. This
-            # still validates config (e.g. a stream with no destinations), so it
-            # belongs in the config phase. Done immediately after create_config
-            # so the flag below covers config load + translation only -- not the
-            # directory/engine setup that follows, whose failures (a read-only
-            # filesystem, etc.) are runtime, not config, errors.
+            # Translate the resolved contract into the engine config dict. Done
+            # immediately after create_config so the flag below covers config
+            # load + translation only -- not the directory/engine setup that
+            # follows, whose failures (a read-only filesystem, etc.) are
+            # runtime, not config, errors.
             config_dict = _build_config_dict(pipeline_config, stream_configs)
             config_ready = True
 

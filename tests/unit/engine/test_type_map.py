@@ -100,12 +100,6 @@ _NON_RE2_PATTERNS = [
 
 
 class TestReadRuleValidation:
-    def test_exact_rule_allows_literal_arrow_type(self):
-        (rule,) = _parse_read(
-            {"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"}
-        )
-        assert rule.match == "exact"
-
     @pytest.mark.parametrize(("construct", "pattern"), _NON_RE2_PATTERNS)
     def test_regex_rule_rejects_every_construct_outside_the_re2_subset(
         self, construct, pattern
@@ -930,12 +924,6 @@ class TestNormalizeArrowType:
 
 
 class TestWriteRuleValidation:
-    def test_exact_rule_allows_literal_native(self):
-        (rule,) = _parse_write(
-            {"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"}
-        )
-        assert rule.match == "exact"
-
     def test_regex_rule_rejects_lookahead_in_arrow_type(self):
         with pytest.raises(InvalidTypeMapError, match="lookahead"):
             _parse_write(

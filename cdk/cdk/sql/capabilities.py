@@ -4,14 +4,14 @@ SQL-shape capabilities are facts about the target system — catalog
 addressability, session-targeting regime, merge form, bulk-load mechanism,
 stage shape. They are not derivable from protocol conformance, so they are
 declared as data in the connector definition's ``sql_capabilities`` block
-and validated by the published contract engine-side. The dialect class keeps
-only *rendering*; whether the system has a shape comes from this block.
+and validated by the published contract before anything here reads it. The
+dialect class keeps only *rendering*; whether the system has a shape comes
+from this block.
 
 This module is the CDK's typed view of that block. The engine folds the
 declared block into the resolved worker payload (the same channel that
-delivers transport specs), and both sides parse it here — fail-loud, at the
-process boundary, so a malformed or partially-declared block never reaches a
-consumer site. ``None`` (no block declared) is legal at parse time; every
+delivers transport specs), and both sides read it here. ``None`` (no block
+declared) is legal at parse time; every
 consumer treats a needed-but-undeclared shape fact as a loud configuration
 error via :func:`undeclared_capability_error` — no base-class default ever
 fills in a guess. The one exception is the ``limits`` member (issue #401),
@@ -24,12 +24,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
-
-CATALOG_VALUES = ("none", "read", "full")
-SESSION_TARGETING_VALUES = ("per_statement", "session_default")
-MERGE_FORM_VALUES = ("merge", "insert_on_conflict", "insert_on_duplicate_key", "none")
-STAGE_SCOPE_VALUES = ("temp", "real")
-STAGE_SCHEMA_VALUES = ("target", "dedicated")
 
 #: SQL transport families a bulk mechanism can be declared for. A bulk
 #: mechanism is a fact about a transport, not about the connector as a
@@ -45,16 +39,6 @@ SQL_TRANSPORT_TYPES = ("sqlalchemy", "adbc")
 DIALECT_IMPLEMENTED_BULK_MECHANISMS = frozenset(
     {"copy_from", "load_data_local_infile", "load_job"}
 )
-
-#: The mechanisms each transport family can actually run. Declaring a
-#: mechanism for a family that cannot run it is unrepresentable — the
-#: parse refuses — instead of a state downstream checks must catch
-#: (``adbc_ingest`` on the SQLAlchemy family would silently fall back to
-#: executemany on every batch).
-BULK_MECHANISMS_BY_TRANSPORT: dict[str, frozenset[str]] = {
-    "sqlalchemy": DIALECT_IMPLEMENTED_BULK_MECHANISMS,
-    "adbc": DIALECT_IMPLEMENTED_BULK_MECHANISMS | {"adbc_ingest"},
-}
 
 
 class SqlCapabilitiesError(ValueError):
@@ -80,18 +64,6 @@ def undeclared_capability_error(fact: str, *, need: str) -> SqlCapabilitiesError
         f"(connector.json); the engine never guesses an undeclared "
         f"capability."
     )
-
-
-def _require_enum(
-    value: Any, path: str, allowed: tuple[str, ...], *, source: str
-) -> str:
-    """Validate one declared fact; *path* is the full field path the error names."""
-    if value not in allowed:
-        raise SqlCapabilitiesError(
-            f"sql_capabilities.{path} in {source} is {value!r}; expected "
-            f"one of {list(allowed)}"
-        )
-    return str(value)
 
 
 @dataclass(frozen=True)
@@ -165,149 +137,31 @@ class SqlCapabilities:
     def from_declaration(
         cls, block: Mapping[str, Any], *, source: str = "<connector definition>"
     ) -> SqlCapabilities:
-        """Parse a declared block, failing loud on any vocabulary mismatch.
+        """Read a declared block the published contract has already validated.
 
-        The published contract validates the same shape engine-side; this
-        parse re-validates because the block crosses the process boundary in
-        the resolved worker payload. All five shape facts are required inside
-        a declared block — a partial declaration is a configuration error,
-        not a set of implicit defaults. ``limits`` (issue #401) is the one
-        additive member: caps are optional facts whose absence means "no
-        declared cap", never a refusal.
+        The contract requires all five shape facts inside a declared block
+        and closes their vocabularies, so they are read as given. ``limits``
+        (issue #401) is the one additive member: caps are optional facts
+        whose absence means "no declared cap", never a refusal.
         """
-        if not isinstance(block, Mapping):
-            raise SqlCapabilitiesError(
-                f"sql_capabilities in {source} must be an object, "
-                f"got {type(block).__name__}"
-            )
-        required = {"catalog", "session_targeting", "merge_form", "bulk_load", "stage"}
-        unknown = set(block) - required - {"limits"}
-        if unknown:
-            raise SqlCapabilitiesError(
-                f"sql_capabilities in {source} carries unknown fields "
-                f"{sorted(unknown)}; expected {sorted(required)} plus "
-                f"optional 'limits'"
-            )
-        stage_block = block.get("stage")
-        if not isinstance(stage_block, Mapping):
-            raise SqlCapabilitiesError(
-                f"sql_capabilities.stage in {source} must be an object; "
-                f"it declares the stage-table shape (scope, schema placement, "
-                f"transactional_ddl)"
-            )
-        stage = cls._parse_stage(stage_block, source=source)
+        limits = block.get("limits") or {}
         return cls(
-            catalog=_require_enum(
-                block.get("catalog"), "catalog", CATALOG_VALUES, source=source
+            catalog=block["catalog"],
+            session_targeting=block["session_targeting"],
+            merge_form=block["merge_form"],
+            bulk_load=dict(block["bulk_load"]),
+            stage=cls._parse_stage(block["stage"], source=source),
+            limits=SqlLimits(
+                max_bind_params=limits.get("max_bind_params"),
+                max_identifier_len=limits.get("max_identifier_len"),
             ),
-            session_targeting=_require_enum(
-                block.get("session_targeting"),
-                "session_targeting",
-                SESSION_TARGETING_VALUES,
-                source=source,
-            ),
-            merge_form=_require_enum(
-                block.get("merge_form"), "merge_form", MERGE_FORM_VALUES, source=source
-            ),
-            bulk_load=cls._parse_bulk_load(block.get("bulk_load"), source=source),
-            stage=stage,
-            limits=cls._parse_limits(block.get("limits"), source=source),
         )
-
-    @staticmethod
-    def _parse_limits(block: Any, *, source: str) -> SqlLimits:
-        if block is None:
-            return SqlLimits.undeclared()
-        if not isinstance(block, Mapping):
-            raise SqlCapabilitiesError(
-                f"sql_capabilities.limits in {source} must be an object, "
-                f"got {type(block).__name__}"
-            )
-        known = {"max_bind_params", "max_identifier_len"}
-        unknown = set(block) - known
-        if unknown:
-            raise SqlCapabilitiesError(
-                f"sql_capabilities.limits in {source} carries unknown fields "
-                f"{sorted(unknown)}; expected a subset of {sorted(known)}"
-            )
-        values: dict[str, int | None] = {}
-        for name in known:
-            value = block.get(name)
-            if value is not None and (
-                isinstance(value, bool) or not isinstance(value, int) or value < 1
-            ):
-                raise SqlCapabilitiesError(
-                    f"sql_capabilities.limits.{name} in {source} is "
-                    f"{value!r}; expected a positive integer"
-                )
-            values[name] = value
-        return SqlLimits(
-            max_bind_params=values["max_bind_params"],
-            max_identifier_len=values["max_identifier_len"],
-        )
-
-    @staticmethod
-    def _parse_bulk_load(block: Any, *, source: str) -> dict[str, str]:
-        """Parse the per-transport bulk mapping, refusing unrunnable pairs."""
-        if not isinstance(block, Mapping):
-            raise SqlCapabilitiesError(
-                f"sql_capabilities.bulk_load in {source} must be an object "
-                f"mapping a SQL transport type to its bulk mechanism (an "
-                f"empty object declares none), got {block!r}"
-            )
-        mechanisms: dict[str, str] = {}
-        for transport_type, mechanism in block.items():
-            if transport_type not in SQL_TRANSPORT_TYPES:
-                raise SqlCapabilitiesError(
-                    f"sql_capabilities.bulk_load in {source} names transport "
-                    f"type {transport_type!r}; expected one of "
-                    f"{list(SQL_TRANSPORT_TYPES)}"
-                )
-            allowed = BULK_MECHANISMS_BY_TRANSPORT[transport_type]
-            if not isinstance(mechanism, str) or mechanism not in allowed:
-                detail = ""
-                if mechanism == "adbc_ingest":
-                    detail = (
-                        " (adbc_ingest is the ADBC backend's own landing "
-                        "and cannot run on the sqlalchemy transport)"
-                    )
-                raise SqlCapabilitiesError(
-                    f"sql_capabilities.bulk_load.{transport_type} in {source} "
-                    f"is {mechanism!r}; expected one of "
-                    f"{sorted(allowed)}{detail}"
-                )
-            mechanisms[transport_type] = str(mechanism)
-        return mechanisms
 
     @staticmethod
     def _parse_stage(block: Mapping[str, Any], *, source: str) -> StageCapabilities:
-        known = {"scope", "schema", "dedicated_schema", "transactional_ddl"}
-        unknown = set(block) - known
-        if unknown:
-            raise SqlCapabilitiesError(
-                f"sql_capabilities.stage in {source} carries unknown fields "
-                f"{sorted(unknown)}; expected a subset of {sorted(known)}"
-            )
-        scope = _require_enum(
-            block.get("scope"), "stage.scope", STAGE_SCOPE_VALUES, source=source
-        )
-        schema = _require_enum(
-            block.get("schema"), "stage.schema", STAGE_SCHEMA_VALUES, source=source
-        )
-        dedicated = block.get("dedicated_schema")
-        if schema == "dedicated":
-            if not isinstance(dedicated, str) or not dedicated:
-                raise SqlCapabilitiesError(
-                    f"sql_capabilities.stage in {source} declares schema "
-                    f"'dedicated' but no dedicated_schema name"
-                )
-        elif dedicated is not None:
-            raise SqlCapabilitiesError(
-                f"sql_capabilities.stage in {source} declares "
-                f"dedicated_schema {dedicated!r} but schema placement "
-                f"{schema!r}; dedicated_schema is only meaningful with "
-                f"schema 'dedicated'"
-            )
+        # The contract reads transactional_ddl as a lax boolean ("yes" passes),
+        # and the conformance kit parses the authored JSON rather than the
+        # validated model, so this is the one fact still checked here.
         transactional = block.get("transactional_ddl")
         if not isinstance(transactional, bool):
             raise SqlCapabilitiesError(
@@ -315,9 +169,9 @@ class SqlCapabilities:
                 f"{transactional!r}; expected true or false"
             )
         return StageCapabilities(
-            scope=scope,
-            schema=schema,
-            dedicated_schema=dedicated if schema == "dedicated" else None,
+            scope=block["scope"],
+            schema=block["schema"],
+            dedicated_schema=block.get("dedicated_schema"),
             transactional_ddl=transactional,
         )
 

@@ -74,17 +74,9 @@ class TestErrorMapParse:
                 {"key_attrs": ["sqlstate"], "codes": {"08": "retry_me"}}
             )
 
-    def test_non_object_block_fails(self):
-        with pytest.raises(ConnectorDeclarationError, match="must be an object"):
-            parse_declared_error_map("auth")
-
     def test_non_object_codes_fails(self):
         with pytest.raises(ConnectorDeclarationError, match="must be an object"):
             parse_declared_error_map({"key_attrs": ["sqlstate"], "codes": ["429"]})
-
-    def test_non_object_http_fails(self):
-        with pytest.raises(ConnectorDeclarationError, match="must be an object"):
-            parse_declared_error_map({"http": ["429"]})
 
     def test_key_attrs_without_codes_fails(self):
         with pytest.raises(ConnectorDeclarationError, match="key_attrs without codes"):
@@ -123,11 +115,6 @@ class TestErrorMapParse:
         assert error_map is not None
         assert error_map.codes["-4002"] == "unreachable"
         assert error_map.codes["NoSuchBucket"] == "config"
-
-    @pytest.mark.parametrize("key", ["42", "999", "4290", "abc"])
-    def test_malformed_http_key_fails(self, key):
-        with pytest.raises(ConnectorDeclarationError, match="key grammar"):
-            parse_declared_error_map({"http": {key: "auth"}})
 
 
 class TestErrorMapLookup:
@@ -513,15 +500,6 @@ class TestConcurrencyParse:
 
     def test_absent_block_stays_undeclared(self):
         assert parse_declared_concurrency(None) is None
-
-    def test_unknown_field_fails(self):
-        with pytest.raises(ConnectorDeclarationError, match="unknown fields"):
-            parse_declared_concurrency({"max_conections": 8})
-
-    @pytest.mark.parametrize("value", [0, -1, "8", 2.5, True])
-    def test_non_positive_or_non_int_fails(self, value):
-        with pytest.raises(ConnectorDeclarationError, match="positive integer"):
-            parse_declared_concurrency({"max_connections": value})
 
 
 class TestVerdictTables:

@@ -57,7 +57,6 @@ does with the batch.
 from __future__ import annotations
 
 import json
-from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -72,7 +71,7 @@ from analitiq.contracts.stream import (
     Validation,
     ValidationRule,
 )
-from pydantic import Field, ValidationError, model_validator
+from pydantic import Field, ValidationError
 
 from cdk.type_map.arrow import (
     classify_arrow_conversion,
@@ -137,59 +136,11 @@ class MappingAssignment(StrictModel):
     value: AssignmentValue
     validation: Validation | None = Field(default=None, alias="validate")
 
-    @model_validator(mode="before")
-    @classmethod
-    def _reject_multi_segment_target(cls, data: Any) -> Any:
-        """Say plainly what a dotted target path is wrong about.
-
-        The contract already refuses it, by a published regex whose message is
-        the regex. The rule is not restated here -- only the reason, because a
-        dotted target is the one mapping mistake with a right answer the author
-        cannot guess from the pattern.
-        """
-        if isinstance(data, Mapping):
-            target = data.get("target")
-            # A non-object `target` is the contract's error to report, by type;
-            # reading `.path` off it here would escape this model as a raw
-            # AttributeError instead of a named field failure.
-            path = target.get("path") if isinstance(target, Mapping) else None
-            if isinstance(path, str) and "." in path:
-                raise ValueError(
-                    f"target.path {path!r} has more than one segment; a target "
-                    f"names one field on the destination record root, and "
-                    f"nesting beneath it is declared with arrow_type 'Object' "
-                    f"plus 'properties' (or 'List' plus 'items')"
-                )
-        return data
-
 
 class MappingDocument(StrictModel):
     """A stream's mapping, closed at every level."""
 
     assignments: list[MappingAssignment] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def _assignment_targets_unique(self) -> MappingDocument:
-        """Refuse two assignments building one field.
-
-        Not a contract mirror -- this guard has its own engine-side job: the
-        transform keys built columns by ``target.path``
-        (:meth:`CompiledTransform.run`'s ``built`` dict), so a duplicate
-        would silently collapse to the last assignment's column and grade
-        rules against it. The contract's ``StreamMapping`` refuses the same
-        shape upstream (RULE-STRM-002); rule-field resolution, by contrast,
-        is enforced there alone -- a stray rule that slipped past a
-        different pin fails loud at run time when its head token misses the
-        ``built`` dict.
-        """
-        counts = Counter(a.target.path for a in self.assignments)
-        dups = sorted(path for path, count in counts.items() if count > 1)
-        if dups:
-            raise ValueError(
-                f"assignments declare duplicate target.path values {dups!r}; "
-                f"each destination field is built by exactly one assignment"
-            )
-        return self
 
     @classmethod
     def parse(cls, document: Mapping[str, Any]) -> MappingDocument:
@@ -520,7 +471,7 @@ def _variadic(expr: Any, op: str) -> list[_ExprFn]:
 
 
 def _compile_get(expr: Any, _op: str) -> _ExprFn:
-    path = _expect_token_path(expr.get("path"))
+    path: list[str] = expr["path"]
     return lambda batch: _get_path(batch, path)
 
 
@@ -642,9 +593,7 @@ def _compile_expr(expr: Any) -> _ExprFn:
 
 def _compile_fn(node: Any) -> Callable[[pa.Array], pa.Array]:
     """Compile a ``fn`` AST node (a pipe stage) into a vectorized column function."""
-    op = _expect_node(node)
-    if op != "fn":
-        raise TransformationError(f"Expected fn op in pipe stage, got: {op!r}")
+    _expect_node(node)
     name = node.get("name")
     version = node.get("version", 1)
     args = node.get("args") or []
@@ -1319,22 +1268,3 @@ def _expect_args(expr: dict[str, Any], op: str, count: int) -> list[dict[str, An
             f"{op} expression requires {count} args, got {len(args)}"
         )
     return args
-
-
-def _expect_token_path(path: Any) -> list[str]:
-    """Accept a source path only as an ordered array of field-name tokens.
-
-    A string is refused rather than split. ``"a.b"`` names one field on some
-    sources and two on others, and the answer is the author's to give: ``["a",
-    "b"]`` is nested, ``["a.b"]`` is a single field whose name contains a dot.
-    """
-    if (
-        not isinstance(path, list)
-        or not path
-        or not all(isinstance(segment, str) and segment for segment in path)
-    ):
-        raise TransformationError(
-            f"get expression path must be a non-empty array of field-name "
-            f"tokens, outermost first (e.g. ['address', 'city']); got {path!r}"
-        )
-    return path

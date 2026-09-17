@@ -1279,25 +1279,6 @@ class TestIncremental:
             )
         assert session.calls == []
 
-    async def test_a_cursor_field_the_schema_does_not_declare_is_refused(
-        self,
-    ) -> None:
-        document = self._document()
-        document["operations"]["read"]["replication"]["cursor_mappings"].append(
-            {"cursor_field": "modified", "param": "since", "operator": "gte"}
-        )
-        session = FakeSession([FakeResponse(body=_rows(1))])
-        with pytest.raises(ReadError, match="'modified' is not declared"):
-            await _read(
-                session,
-                document,
-                source=stream_source(
-                    method="incremental", cursor_field="modified", safety_window=60
-                ),
-                checkpoint=FakeCheckpoint({"cursor": "1"}),
-            )
-        assert session.calls == []
-
     async def test_a_cursor_field_with_no_mapping_is_refused(self) -> None:
         # Previously a warning, not a refusal: without a mapping there is
         # no param to carry the bound, so the request would go out

@@ -10,7 +10,6 @@ from analitiq.contracts.endpoints import (
     SingleCursorMapping,
     WindowCursorMapping,
 )
-from pydantic import ValidationError
 
 from cdk.api.replication import cursor_bounds, cursor_mapping_for
 from cdk.api.response_schema import FieldDeclaration
@@ -66,15 +65,6 @@ class TestCursorMapping:
 
     def test_an_undeclared_block_answers_nothing(self) -> None:
         assert cursor_mapping_for(None, "updated_at") is None
-
-    def test_a_block_declaring_no_mapping_at_all_is_unrepresentable(self) -> None:
-        # ``None`` is the only "nothing declared" state left. A parsed block
-        # with an empty ``cursor_mappings`` used to be the other one, and it
-        # is what the contract refuses here -- so the loop above can never
-        # meet it. Pinned rather than dropped: if the contract relaxes
-        # ``min_length``, that state comes back untested.
-        with pytest.raises(ValidationError):
-            Replication(supported_methods=["incremental"], cursor_mappings=[])
 
     def test_another_fields_mapping_is_not_borrowed(self) -> None:
         assert cursor_mapping_for(_replication(_SINGLE), "created_at") is None

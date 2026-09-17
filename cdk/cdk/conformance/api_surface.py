@@ -555,10 +555,10 @@ def _transport_header_violations(
 ) -> list[Violation]:
     """Judge the default transport's headers the way connect() will.
 
-    ``resolve_http_spec`` requires ``headers`` to be an object and resolves
-    every value in it before any read goes out, so a non-object block or a
-    value that cannot resolve fails the whole connector at ``connect()`` --
-    while a check reading only the base URL reports the transport usable.
+    ``resolve_http_spec`` resolves every header value before any read goes
+    out, so a value that cannot resolve fails the whole connector at
+    ``connect()`` -- while a check reading only the base URL reports the
+    transport usable.
 
     Each value gets the base-url treatment: grammar judged always, the
     value deferred only when materialization supplies everything it reads
@@ -570,15 +570,6 @@ def _transport_header_violations(
     declared = block.get("headers")
     if declared is None:
         return []
-    if not isinstance(declared, Mapping):
-        return [
-            Violation(
-                TRANSPORT_CHECK,
-                f"transport {ref!r} declares headers as "
-                f"{declared!r}. The transport build requires an object of "
-                f"name -> value, so {stops}.",
-            )
-        ]
     violations: list[Violation] = []
     for name, value in sorted(declared.items()):
         grammar = materialization_resolver(target).unknown_function_problem(value)
@@ -680,15 +671,11 @@ def _transport_spec_violations(
     spec = dict(block)
     spec["base_url"] = _spec_value(target, block.get("base_url"))
     headers = block.get("headers")
-    if isinstance(headers, Mapping):
+    if headers is not None:
         spec["headers"] = {
             str(name): _spec_value(target, value, drops_if_null=True)
             for name, value in headers.items()
         }
-    elif headers is not None:
-        # The header ladder already reported the shape; stand an empty map
-        # in so the one defect does not hide the rest of the block.
-        spec["headers"] = {}
     try:
         # The engine's own boundary converts the resolver's exception
         # vocabulary (UnresolvedValueError and the KeyError it subclasses

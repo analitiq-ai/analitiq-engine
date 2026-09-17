@@ -106,18 +106,10 @@ def _render_url_template_dsn(dsn_spec: Mapping[str, Any], resolver: Resolver) ->
     :class:`Resolver`; the result is converted to a string using the
     declared ``encoding``; the encoded values are then substituted into
     ``template`` using ``str.format_map``-style replacement. Missing
-    placeholders, missing bindings, and unknown encodings are
-    configuration errors, not runtime warnings.
+    placeholders and missing bindings are configuration errors, not runtime
+    warnings; the published contract refuses the rest of the shape.
     """
-    kind = dsn_spec.get("kind")
-    if kind != "url_template":
-        raise TransportSpecError(
-            f"Unsupported dsn.kind {kind!r}; the connector contract currently "
-            f"defines only 'url_template'"
-        )
-    template = dsn_spec.get("template")
-    if not isinstance(template, str) or not template:
-        raise TransportSpecError("dsn.template must be a non-empty string")
+    template: str = dsn_spec["template"]
 
     raw_bindings = dsn_spec.get("bindings") or {}
     if not isinstance(raw_bindings, Mapping):
@@ -129,16 +121,7 @@ def _render_url_template_dsn(dsn_spec: Mapping[str, Any], resolver: Resolver) ->
             raise TransportSpecError(
                 f"dsn.bindings.{name} must be an object with 'value' and 'encoding'"
             )
-        if "value" not in entry or "encoding" not in entry:
-            raise TransportSpecError(
-                f"dsn.bindings.{name} requires both 'value' and 'encoding'"
-            )
         encoding = entry["encoding"]
-        if encoding not in _ENCODING_QUOTES:
-            raise TransportSpecError(
-                f"dsn.bindings.{name}: unknown encoding {encoding!r}; "
-                f"allowed: {sorted(_ENCODING_QUOTES)}"
-            )
         value = resolver.resolve(entry["value"])
         rendered[name] = _apply_encoding(encoding, value, binding=name)
 
@@ -206,8 +189,6 @@ def _resolve_tls_mode(
     """
     if tls_spec is None:
         return None, None
-    if not isinstance(tls_spec, Mapping):
-        raise TransportSpecError("transports.<ref>.tls must be an object")
 
     raw_mode = tls_spec.get("mode")
     if raw_mode is None:
@@ -361,8 +342,6 @@ def resolve_sqlalchemy_spec(
     mode, ca_pem = _resolve_tls_mode(spec.get("tls"), resolver)
 
     options = spec.get("options") or {}
-    if not isinstance(options, Mapping):
-        raise TransportSpecError("sqlalchemy transport `options` must be an object")
     engine_kwargs: dict[str, Any] = {}
     if "pool_size" in options:
         engine_kwargs["pool_size"] = int(options["pool_size"])
@@ -723,8 +702,6 @@ def _resolve_db_kwargs(
     """
     if raw is None:
         return {}
-    if not isinstance(raw, Mapping):
-        raise TransportSpecError("adbc transport `db_kwargs` must be an object")
     out: dict[str, Any] = {}
     for name, value in raw.items():
         try:
@@ -777,19 +754,11 @@ def resolve_adbc_spec(spec: Mapping[str, Any], *, resolver: Resolver) -> dict[st
     present. Drivers that accept all connection state via ``db_kwargs``
     (Snowflake, BigQuery) typically omit ``dsn``.
     """
-    driver = spec.get("driver")
-    if not isinstance(driver, str) or not driver:
-        raise TransportSpecError("adbc transport requires a non-empty `driver`")
-    driver = driver.lower()
+    driver = spec["driver"].lower()
 
     raw_dsn = spec.get("dsn")
     uri: str | None = None
     if raw_dsn is not None:
-        if not isinstance(raw_dsn, Mapping):
-            raise TransportSpecError(
-                "adbc transport `dsn` must be the structured "
-                "{kind: url_template, template, bindings} object"
-            )
         uri = _render_url_template_dsn(raw_dsn, resolver)
 
     db_kwargs = _resolve_db_kwargs(spec.get("db_kwargs"), resolver)
@@ -1070,8 +1039,6 @@ def resolve_http_spec(spec: Mapping[str, Any], *, resolver: Resolver) -> dict[st
     base_url = require_http_base_url(resolver.resolve(raw_base))
 
     raw_headers = spec.get("headers") or {}
-    if not isinstance(raw_headers, Mapping):
-        raise TransportSpecError("http transport `headers` must be an object")
     headers: dict[str, str] = {}
     for name, value in raw_headers.items():
         resolved = resolver.resolve(value)
@@ -1096,8 +1063,6 @@ def resolve_http_spec(spec: Mapping[str, Any], *, resolver: Resolver) -> dict[st
     raw_rate_limit = spec.get("rate_limit") or {}
     rate_limit: dict[str, int] | None = None
     if raw_rate_limit:
-        if not isinstance(raw_rate_limit, Mapping):
-            raise TransportSpecError("http transport `rate_limit` must be an object")
         max_requests = raw_rate_limit.get("max_requests")
         time_window = raw_rate_limit.get("time_window_seconds")
         if (max_requests is None) != (time_window is None):

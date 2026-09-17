@@ -23,7 +23,6 @@ from contract_documents import (
     http_transport,
     sqlalchemy_transport,
 )
-from pydantic import ValidationError
 
 from cdk.connection_runtime import ConnectionRuntime, _PreResolvedSecretsResolver
 from cdk.exceptions import TransportSpecError
@@ -145,17 +144,6 @@ class TestResolveSpec:
         assert ConnectionInput.model_validate(config).connector_id == "test-connector"
         # Secret pointers never cross.
         assert "secret_refs" not in config
-
-    def test_a_connection_field_outside_the_contract_cannot_be_read(self):
-        # The connection document is the contract's model: a handler setting
-        # the contract does not declare (``max_retries``, ``auth``) has no
-        # place on it, so no engine read of it can exist.
-        with pytest.raises(ValidationError, match="max_retries"):
-            ConnectionInput.model_validate({"connector_id": "demo", "max_retries": 7})
-        with pytest.raises(ValidationError, match="auth"):
-            ConnectionInput.model_validate(
-                {"connector_id": "demo", "auth": {"type": "oauth2"}}
-            )
 
 
 class TestWorkerSideRuntime:
@@ -346,24 +334,6 @@ class TestConnectionContractValidation:
         )._validate_connection_contract(
             {}
         )  # no raise
-
-    def test_an_input_stored_outside_the_two_scopes_is_refused_by_the_contract(
-        self,
-    ):
-        # The contract closes ``storage`` to the two scopes a connection
-        # carries; a definition storing a required input anywhere else is
-        # refused at validation, before a runtime exists to check it.
-        with pytest.raises(ValidationError, match="storage"):
-            connector_document(
-                "database",
-                connection_contract={
-                    "inputs": {
-                        "bogus": contract_input(
-                            required=True, storage="connection.discovered"
-                        )
-                    }
-                },
-            )
 
     def test_empty_parameters_block_still_enforces_required(self):
         # A connection with no parameters block must still raise for a

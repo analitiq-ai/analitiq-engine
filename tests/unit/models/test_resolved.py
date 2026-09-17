@@ -294,27 +294,6 @@ class TestParseRuntimeConfig:
         assert cfg.error_handling.max_retries == 5
         assert cfg.buffer_size == 1234
 
-    def test_invalid_value_fails_loud(self):
-        # Now validated against the contract model, so an out-of-enum strategy
-        # is rejected by the contract (authority) before the engine type.
-        with pytest.raises(ValueError, match="strategy"):
-            _runtime_block({"error_handling": {"strategy": "nope"}})
-
-    def test_retired_batching_key_is_rejected_not_ignored(self):
-        # max_concurrent_batches was dropped from the contract (issue #436).
-        # A pipeline still declaring it must fail here rather than have the key
-        # silently dropped: the author asked for something the engine no longer
-        # offers, and a silent drop reads as if the request was honoured.
-        with pytest.raises(ValueError, match="max_concurrent_batches"):
-            _runtime_block(
-                {"batching": {"batch_size": 200, "max_concurrent_batches": 4}}
-            )
-
-    def test_out_of_range_max_retries_fails_loud(self):
-        # The contract caps max_retries (le=5); the parser enforces it.
-        with pytest.raises(ValueError, match="max_retries"):
-            _runtime_block({"error_handling": {"max_retries": 9}})
-
     def test_omitted_fields_use_engine_defaults_not_contract(self, monkeypatch):
         """Omitted runtime fields fall through to the engine's (env-overridable)
         defaults, never the contract model's own defaults.
@@ -367,16 +346,6 @@ class TestReplicationConfig:
     def test_accepts_every_contract_method(self, method):
         assert ReplicationConfig(method=method).method == method
 
-    def test_rejects_unknown_method(self):
-        with pytest.raises(ValueError, match="Unknown replication method"):
-            ReplicationConfig(method="cdc")
-
-    def test_rejects_non_string_cursor_field(self):
-        # The contract is string|null; a legacy list must fail loud here, not
-        # reach compute_max_cursor as an opaque TypeError.
-        with pytest.raises(ValueError, match="cursor_field must be a string or None"):
-            ReplicationConfig(method="incremental", cursor_field=["updated_at"])
-
     def test_optional_fields_default_absent(self):
         cfg = ReplicationConfig(method="full_refresh")
         assert cfg.cursor_field is None
@@ -421,12 +390,6 @@ class TestParseReplication:
         )
         assert cfg.method == "full_refresh"
         assert cfg.cursor_field is None
-
-    def test_missing_method_fails_loud(self):
-        # method is contract-required; the contract model rejects a block that
-        # omits it (a malformed block must not pass silently).
-        with pytest.raises(ValueError, match="method"):
-            _source_block({"replication": {"cursor_field": "updated_at"}})
 
 
 class TestEffectiveSafetyWindow:

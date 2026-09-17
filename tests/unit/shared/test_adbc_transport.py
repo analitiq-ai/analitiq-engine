@@ -58,10 +58,6 @@ class TestResolveDbKwargs:
     def test_none_returns_empty(self):
         assert _resolve_db_kwargs(None, _resolver()) == {}
 
-    def test_non_mapping_rejected(self):
-        with pytest.raises(TransportSpecError, match="db_kwargs"):
-            _resolve_db_kwargs(["not", "a", "mapping"], _resolver())
-
     def test_scalars_render_to_adbc_option_strings(self):
         # ADBC database/connection options are string-valued; a typed input
         # (an integer port) must reach the driver as a string, the same form
@@ -111,28 +107,10 @@ class TestResolveDbKwargs:
 
 
 class TestResolveAdbcSpec:
-    def test_missing_driver_raises(self):
-        with pytest.raises(TransportSpecError, match="`driver`"):
-            resolve_adbc_spec(
-                {"transport_type": "adbc", "db_kwargs": {"a": "b"}},
-                resolver=_resolver(),
-            )
-
     def test_neither_dsn_nor_db_kwargs_raises(self):
         with pytest.raises(TransportSpecError, match="at least one of"):
             resolve_adbc_spec(
                 {"transport_type": "adbc", "driver": "snowflake"},
-                resolver=_resolver(),
-            )
-
-    def test_dsn_non_mapping_raises(self):
-        with pytest.raises(TransportSpecError, match="dsn"):
-            resolve_adbc_spec(
-                {
-                    "transport_type": "adbc",
-                    "driver": "postgresql",
-                    "dsn": "postgresql://host/db",  # not the structured shape
-                },
                 resolver=_resolver(),
             )
 
