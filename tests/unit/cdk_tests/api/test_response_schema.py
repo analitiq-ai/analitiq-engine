@@ -103,12 +103,40 @@ class TestItemsSchema:
         items = records_items_schema("items", _response(schema, "response.body"))
         assert items["properties"] == {"id": {}}
 
-    def test_a_field_the_schema_does_not_declare_names_what_is_available(self) -> None:
-        # Engine-only: the contract pins the ref's grammar, but the response
-        # schema is free-form JSON Schema there, so whether the ref's path
-        # actually exists in it is decided here and nowhere else.
+    def test_the_walk_follows_a_ref_the_contract_accepts(self) -> None:
+        # The contract resolves the records path through `$ref`/`$defs`, so a
+        # document composed that way is valid and reaches the read. A second,
+        # literal `properties` walk here refused it before the first request.
+        schema = {
+            "type": "object",
+            "properties": {"page": {"$ref": "#/$defs/page"}},
+            "$defs": {
+                "page": {
+                    "type": "object",
+                    "properties": {
+                        "rows": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {"id": {"type": "string"}},
+                            },
+                        }
+                    },
+                }
+            },
+        }
+        items = records_items_schema(
+            "items", _response(schema, "response.body.page.rows")
+        )
+        assert items["properties"] == {"id": {"type": "string"}}
+
+    def test_a_ref_that_resolves_to_nothing_is_a_read_defect(self) -> None:
+        # Unreachable through a contract-validated document -- the gate names
+        # the segment first. Kept because the walk is also reached with blocks
+        # a caller built itself, and answering the response ENVELOPE there
+        # would enumerate its keys as the record's fields.
         schema = {"type": "object", "properties": {"data": {"type": "array"}}}
-        with pytest.raises(ReadError, match=r"available: \['data'\]"):
+        with pytest.raises(ReadError, match="does not resolve to a record schema"):
             records_items_schema("items", _response(schema))
 
     def test_items_without_properties_cannot_be_a_record_schema(self) -> None:
@@ -116,7 +144,7 @@ class TestItemsSchema:
             "type": "object",
             "properties": {"records": {"type": "array", "items": {"type": "string"}}},
         }
-        with pytest.raises(ReadError, match="no 'properties'"):
+        with pytest.raises(ReadError, match="does not resolve to a record schema"):
             records_items_schema("items", _response(schema))
 
 
