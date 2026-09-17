@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from analitiq.contracts.endpoints import ApiEndpointDoc, Idempotency, WriteOperation
+from analitiq.contracts.endpoints import ApiEndpointDoc, WriteOperation
 
 from cdk.api.request import ParamTable, RequestBuilder
 from cdk.api.write_plan import (
@@ -21,7 +21,6 @@ from cdk.api.write_plan import (
     body_with_idempotency_key,
     build_write_plan,
     collect_json_fields,
-    idempotency_config_problem,
     retry_verdict,
     write_mode_block,
 )
@@ -279,12 +278,12 @@ class TestModeDispatch:
 
 
 class TestIdempotencyRefusals:
-    """The cross-block rules the per-model contract validation cannot express.
+    """The one refusal the per-model contract validation cannot express.
 
-    The header rule is one only this side knows: which headers the
-    connection already sends is a session fact, not a document one. The
-    body rule refuses a body template key the engine-owned key would
-    overwrite.
+    Which headers the connection already sends is a session fact, not a
+    document one, so only this side can judge it. Every body-side collision
+    the documents can show is the contract's, and the one they cannot is
+    the runtime's.
     """
 
     def test_a_header_the_connection_already_sends_is_refused(self) -> None:
@@ -313,13 +312,25 @@ class TestIdempotencyRefusals:
         )
         assert isinstance(outcome, str) and "not an HTTP token" in outcome
 
-    def test_a_body_template_field_the_key_reserves_is_refused(self) -> None:
-        problem = idempotency_config_problem(
-            Idempotency.model_validate({"in": "body", "name": "key"}),
-            StreamWritePlan(body_spec={"key": {"literal": "x"}}),
-            reserved_headers=set(),
+    def test_a_pass_through_body_keyed_from_input_is_not_a_collision(self) -> None:
+        # The body IS the record (``{"from_input": "record"}``), so
+        # ``from_input`` is the expression marker, not a declared body field.
+        # A real collision with a record field is the contract's rule (it
+        # walks input.schema) and, for a body whose shape it cannot know, the
+        # runtime's in body_with_idempotency_key.
+        doc = _document(
+            body={"from_input": "record"},
+            idempotency={"in": "body", "name": "from_input"},
         )
-        assert problem is not None and "request.body already declares" in problem
+        plan = build_write_plan(
+            doc,
+            _spec(),
+            header_names_for=lambda _ref: set(),
+            transport_problem=lambda _ref: None,
+            resolver=_resolver(),
+        )
+        assert isinstance(plan, StreamWritePlan)
+        assert plan.idempotency_name == "from_input"
 
 
 class TestTheRequestTheStreamWillActuallySend:

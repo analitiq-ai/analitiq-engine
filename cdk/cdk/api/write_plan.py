@@ -243,17 +243,18 @@ def reserved_header_names(transport_header_names: Iterable[str]) -> frozenset[st
 
 def idempotency_config_problem(
     idempotency: Idempotency,
-    plan: StreamWritePlan,
     *,
     reserved_headers: frozenset[str] | set[str],
 ) -> str | None:
     """Why this ``idempotency`` block cannot work for the stream, or ``None``.
 
-    Judges what the endpoint document alone cannot decide: the header
-    namespace this connection owns, and a body template field the key
-    would overwrite. The contract already refuses the rest -- the block's
-    own shape, the batching exclusion, a non-object body, and a collision
-    with the endpoint's declared headers or the record's declared fields.
+    Judges the one thing the endpoint document alone cannot decide: the
+    header namespace this connection owns. The contract already refuses
+    the rest -- the block's own shape, the batching exclusion, a non-object
+    body, and a collision with the endpoint's declared headers, its body
+    template's own keys, or the record's declared fields. A body whose
+    resolved shape no document can know is judged at run time, in
+    :func:`body_with_idempotency_key`.
     """
     target = idempotency.location
     name = idempotency.name
@@ -269,23 +270,14 @@ def idempotency_config_problem(
         except TransportSpecError as err:
             return f"idempotency.name is unusable as a header: {err}"
     if target == "header" and name.lower() in reserved_headers:
-        # Same rule as the body reserved-field check: these headers are
-        # engine-owned (Content-Type) or carry the connection's own values
-        # (auth and friends). Layering the key over one would silently
-        # break every request -- or send the record id as the credential.
+        # These headers are engine-owned (Content-Type) or carry the
+        # connection's own values (auth and friends). Layering the key over
+        # one would silently break every request -- or send the record id as
+        # the credential.
         return (
             f"idempotency.name {name!r} collides with an engine- or "
             f"connection-owned request header; pick a header the connection "
             f"does not already send"
-        )
-    if (
-        target == "body"
-        and isinstance(plan.body_spec, Mapping)
-        and name in plan.body_spec
-    ):
-        return (
-            f"request.body already declares the field {name!r} that "
-            f"idempotency.name reserves for the engine-owned key"
         )
     return None
 
@@ -427,13 +419,12 @@ def _apply_idempotency(
 
     The author declares placement only -- the VALUE is always the
     engine's -- so what can go wrong is where it would land: a header the
-    connection already sends, a name the client cannot put on the wire, a
-    body template field the key would overwrite.
+    connection already sends, or a name the client cannot put on the wire.
     """
     idempotency = mode_block.idempotency
     if idempotency is None:
         return None
-    problem = idempotency_config_problem(idempotency, plan, reserved_headers=reserved)
+    problem = idempotency_config_problem(idempotency, reserved_headers=reserved)
     if problem is not None:
         return problem
     plan.idempotency_in = idempotency.location
