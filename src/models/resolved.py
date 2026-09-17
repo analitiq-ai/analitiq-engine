@@ -242,8 +242,6 @@ class ResolvedStream:
             raise ValueError("ResolvedStream.stream_id cannot be empty")
 
     def primary_destination(self) -> ResolvedDestination:
-        if not self.destinations:
-            raise ValueError(f"Stream {self.stream_id!r} has no destinations")
         return self.destinations[0]
 
 

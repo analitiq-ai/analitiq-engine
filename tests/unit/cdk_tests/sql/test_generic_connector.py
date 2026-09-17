@@ -321,23 +321,6 @@ class TestReadAdbcBranch:
         runtime.close.assert_awaited()
 
     @pytest.mark.asyncio
-    async def test_empty_columns_rejected(self):
-        # A document declaring no columns compiles to a SELECT with no
-        # projection, so it must be refused before any extraction work.
-        # Releasing the runtime on a read error is pinned by
-        # test_incremental_cursor_field_not_in_projection_raises, which
-        # fails deep enough in the read to have opened one.
-        runtime = _FakeRuntime(is_adbc=True)
-        connector = GenericSQLConnector()
-        with patch("cdk.sql.generic.materialize_runtime", new=AsyncMock()), patch(
-            "cdk.sql.generic.SchemaContract"
-        ):
-            config = _endpoint_config(columns=())
-            config["endpoint_document"]["columns"] = []
-            with pytest.raises(ReadError, match="column"):
-                await _drain(connector, runtime, config, _checkpoint())
-
-    @pytest.mark.asyncio
     async def test_saves_last_cursor_value_from_batch(self):
         runtime = _FakeRuntime(is_adbc=True)
         checkpoint = _checkpoint(cursor=None)

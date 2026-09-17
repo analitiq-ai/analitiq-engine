@@ -24,8 +24,7 @@ class TestEndpointRefModel:
 
     The shape and its rules belong to ``analitiq.contracts.stream``; these
     pin the behaviour the engine depends on -- the derived connection-scoped
-    id, dict-key identity, the dump that feeds the worker, and rejection of
-    every payload the engine must never resolve a file for.
+    id, dict-key identity, and the dump that feeds the worker.
     """
 
     @pytest.mark.unit

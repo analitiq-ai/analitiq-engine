@@ -103,6 +103,14 @@ class TestItemsSchema:
         items = records_items_schema("items", _response(schema, "response.body"))
         assert items["properties"] == {"id": {}}
 
+    def test_a_field_the_schema_does_not_declare_names_what_is_available(self) -> None:
+        # Engine-only: the contract pins the ref's grammar, but the response
+        # schema is free-form JSON Schema there, so whether the ref's path
+        # actually exists in it is decided here and nowhere else.
+        schema = {"type": "object", "properties": {"data": {"type": "array"}}}
+        with pytest.raises(ReadError, match=r"available: \['data'\]"):
+            records_items_schema("items", _response(schema))
+
     def test_items_without_properties_cannot_be_a_record_schema(self) -> None:
         schema = {
             "type": "object",

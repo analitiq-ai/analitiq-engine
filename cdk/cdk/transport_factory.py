@@ -111,16 +111,10 @@ def _render_url_template_dsn(dsn_spec: Mapping[str, Any], resolver: Resolver) ->
     """
     template: str = dsn_spec["template"]
 
-    raw_bindings = dsn_spec.get("bindings") or {}
-    if not isinstance(raw_bindings, Mapping):
-        raise TransportSpecError("dsn.bindings must be an object")
+    raw_bindings: Mapping[str, Any] = dsn_spec["bindings"]
 
     rendered: dict[str, str] = {}
     for name, entry in raw_bindings.items():
-        if not isinstance(entry, Mapping):
-            raise TransportSpecError(
-                f"dsn.bindings.{name} must be an object with 'value' and 'encoding'"
-            )
         encoding = entry["encoding"]
         value = resolver.resolve(entry["value"])
         rendered[name] = _apply_encoding(encoding, value, binding=name)
