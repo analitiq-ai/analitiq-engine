@@ -119,6 +119,29 @@ class TestTokenArrayPaths:
         out = _compile([_assignment("city", "Utf8", _expr(node))]).run(batch)
         assert out.to_pylist() == [{"city": "Berlin"}, {"city": "Kyiv"}]
 
+    @pytest.mark.parametrize(
+        "node",
+        [
+            {"op": "get", "path": "address.city"},
+            {
+                "op": "pipe",
+                "args": [
+                    {"op": "get", "path": "address.city"},
+                    {"op": "fn", "name": "trim"},
+                ],
+            },
+        ],
+        ids=["at the root", "nested in a pipe"],
+    )
+    def test_a_dotted_string_path_is_refused_not_split(self, node):
+        with pytest.raises(TransformationError, match="array of field-name tokens"):
+            _compile([_assignment("city", "Utf8", _expr(node))])
+
+    def test_a_get_without_a_path_is_refused_by_name(self):
+        """A missing ``path`` is a mapping defect, not a raw ``KeyError``."""
+        with pytest.raises(TransformationError, match="array of field-name tokens"):
+            _compile([_assignment("city", "Utf8", _expr({"op": "get"}))])
+
     def test_a_single_token_reads_a_field_whose_name_contains_a_dot(self):
         batch = pa.record_batch([pa.array(["v"])], names=["a.b"])
         out = _compile([_assignment("x", "Utf8", _expr(_get(["a.b"])))]).run(batch)
@@ -905,6 +928,16 @@ class TestValidationRules:
                         },
                     )
                 ],
+            )
+
+    def test_duplicate_assignment_targets_are_refused(self):
+        """Two assignments building one field would let array position decide."""
+        with pytest.raises(TransformationError, match="duplicate target.path"):
+            _compile(
+                [
+                    _assignment("v", "Int64", _expr(_get("v"))),
+                    _assignment("v", "Int64", _expr(_get("w"))),
+                ]
             )
 
     def test_range_bounds_come_from_the_rule_value_object(self):

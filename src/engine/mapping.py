@@ -57,6 +57,7 @@ does with the batch.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -71,7 +72,7 @@ from analitiq.contracts.stream import (
     Validation,
     ValidationRule,
 )
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, model_validator
 
 from cdk.type_map.arrow import (
     classify_arrow_conversion,
@@ -105,12 +106,10 @@ class ExpressionValue(StrictModel):
     Widens the contract's expression variant on one axis only: the contract
     publishes the ``get``/``pipe``/``fn`` nodes an authoring UI can offer,
     while the engine compiles a larger op set (see :func:`_compile_expr`). The
-    AST therefore stays an untyped mapping here. Compile time checks the op,
-    arity and every key the node carries, where the vocabulary is defined, so
-    a key no op declares is still refused by name. The shape of a ``get`` path
-    and the ``fn`` op of a pipe stage are not checked there: they are the
-    stream contract's rules, and config prep validates the stream document
-    before it parses the mapping.
+    AST therefore stays an untyped mapping here and is validated -- op by op,
+    arity, and every key the node carries -- at compile time, where the
+    vocabulary is defined. Widening the type does not open the document: a key
+    no op declares is refused there by name, exactly as it is at this level.
     """
 
     kind: Literal["expression"]
@@ -143,6 +142,27 @@ class MappingDocument(StrictModel):
     """A stream's mapping, closed at every level."""
 
     assignments: list[MappingAssignment] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _assignment_targets_unique(self) -> MappingDocument:
+        """Refuse two assignments building one field.
+
+        Not a contract mirror -- this guard has its own engine-side job: the
+        transform keys built columns by ``target.path``
+        (:meth:`CompiledTransform.run`'s ``built`` dict), so a duplicate
+        would silently collapse to the last assignment's column and grade
+        rules against it. The contract's ``StreamMapping`` refuses the same
+        shape upstream (RULE-STRM-002); a silent wrong answer is not what
+        this boundary may give when a document reaches it by any other route.
+        """
+        counts = Counter(a.target.path for a in self.assignments)
+        dups = sorted(path for path, count in counts.items() if count > 1)
+        if dups:
+            raise ValueError(
+                f"assignments declare duplicate target.path values {dups!r}; "
+                f"each destination field is built by exactly one assignment"
+            )
+        return self
 
     @classmethod
     def parse(cls, document: Mapping[str, Any]) -> MappingDocument:
@@ -473,7 +493,7 @@ def _variadic(expr: Any, op: str) -> list[_ExprFn]:
 
 
 def _compile_get(expr: Any, _op: str) -> _ExprFn:
-    path: list[str] = expr["path"]
+    path = _expect_token_path(expr.get("path"))
     return lambda batch: _get_path(batch, path)
 
 
@@ -1270,3 +1290,24 @@ def _expect_args(expr: dict[str, Any], op: str, count: int) -> list[dict[str, An
             f"{op} expression requires {count} args, got {len(args)}"
         )
     return args
+
+
+def _expect_token_path(path: Any) -> list[str]:
+    """Accept a source path only as an ordered array of field-name tokens.
+
+    A string is refused rather than split. ``"a.b"`` names one field on some
+    sources and two on others, and the answer is the author's to give: ``["a",
+    "b"]`` is nested, ``["a.b"]`` is a single field whose name contains a dot.
+    A path that is neither reads as an all-null column, so the refusal is the
+    only thing between the author and a silently empty field.
+    """
+    if (
+        not isinstance(path, list)
+        or not path
+        or not all(isinstance(segment, str) and segment for segment in path)
+    ):
+        raise TransformationError(
+            f"get expression path must be a non-empty array of field-name "
+            f"tokens, outermost first (e.g. ['address', 'city']); got {path!r}"
+        )
+    return path
