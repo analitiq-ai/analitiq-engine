@@ -1202,6 +1202,29 @@ class TestTargetLoadingBreaks:
         loaded = load_target(reference_target.root)
         assert loaded.connector_class is ReferenceConnector
 
+    def test_capabilities_are_read_the_way_the_engine_reads_them(
+        self, tmp_path: Path
+    ) -> None:
+        """The kit and the engine must judge one definition the same way.
+
+        ``transactional_ddl`` is typed ``bool`` in the contract, which
+        coerces ``"yes"``; the engine only ever sees the coerced model
+        (``authored_json(connector.sql_capabilities)``). A kit that parsed
+        the raw file instead would refuse setup for a connector the engine
+        runs -- a disagreement about the same document, which is the one
+        thing the kit must never introduce.
+        """
+        root = tmp_path / "reference"
+        shutil.copytree(REFERENCE_DIR, root)
+        path = root / "definition" / "connector.json"
+        definition = json.loads(path.read_text())
+        definition["sql_capabilities"]["stage"]["transactional_ddl"] = "yes"
+        path.write_text(json.dumps(definition))
+
+        target = load_target(root, class_path=REFERENCE_CLASS)
+        assert target.declared_capabilities is not None
+        assert target.declared_capabilities.stage.transactional_ddl is True
+
 
 class _LifecycleDunderConnector(ReferenceConnector):
     def __init__(self) -> None:

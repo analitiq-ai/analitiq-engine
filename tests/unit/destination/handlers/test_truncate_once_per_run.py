@@ -138,8 +138,7 @@ _SQLITE_CAPS = SqlCapabilities.from_declaration(
         "merge_form": "none",
         "bulk_load": {},
         "stage": {"scope": "temp", "schema": "target", "transactional_ddl": True},
-    },
-    source="<test>",
+    }
 )
 
 

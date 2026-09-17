@@ -3,9 +3,9 @@
 A conformance run points at one connector package checkout (the registry
 repo layout: the repo root is the package, ``definition/`` holds
 ``connector.json`` and the type maps). Loading is fail-loud: a missing
-definition, a malformed ``sql_capabilities`` block, or an unloadable
-class is a :class:`ConformanceSetupError` naming the file or entry point
-to fix — the suite never runs against a half-loaded target.
+definition, one the published contract rejects, or an unloadable class is
+a :class:`ConformanceSetupError` naming the file or entry point to fix —
+the suite never runs against a half-loaded target.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from analitiq.contracts.shared.common import schema_url_pattern
 from pydantic import TypeAdapter, ValidationError
 
 from cdk._extras import MissingExtraError
+from cdk.connection_runtime import authored_sql_capabilities
 from cdk.registry import (
     DESTINATION_GROUP,
     KIND_DEFAULTS,
@@ -32,11 +33,7 @@ from cdk.registry import (
     load_class,
     load_kind_default,
 )
-from cdk.sql.capabilities import (
-    SqlCapabilities,
-    SqlCapabilitiesError,
-    parse_declared_capabilities,
-)
+from cdk.sql.capabilities import SqlCapabilities, parse_declared_capabilities
 from cdk.sql.dialects import SqlDialect
 from cdk.transport_factory import merged_transports
 from cdk.type_map.exceptions import InvalidTypeMapError
@@ -528,13 +525,10 @@ def load_target(
             f"the connector contract: {err}"
         ) from err
 
-    try:
-        capabilities = parse_declared_capabilities(
-            definition.get("sql_capabilities"),
-            source=str(definition_dir / CONNECTOR_DEFINITION_FILENAME),
-        )
-    except SqlCapabilitiesError as err:
-        raise ConformanceSetupError(str(err)) from err
+    # Read off the validated model, never the raw file: the kit certifies the
+    # connector the engine will run, so it must see the block the contract
+    # produced (authored_sql_capabilities), coercions and all.
+    capabilities = parse_declared_capabilities(authored_sql_capabilities(connector))
 
     connector_class, class_unavailable = _resolve_connector_class(
         connector_id, kind, class_path

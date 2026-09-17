@@ -154,8 +154,7 @@ def _declared_caps(**stage_overrides: Any) -> SqlCapabilities:
             "merge_form": "insert_on_conflict",
             "bulk_load": {},
             "stage": stage,
-        },
-        source="<test>",
+        }
     )
 
 
@@ -723,8 +722,7 @@ class TestDedicatedStageSchemaPreDdl:
                     "dedicated_schema": "_analitiq_staging",
                     "transactional_ddl": True,
                 },
-            },
-            source="<test>",
+            }
         )
         handler.dialect = _PreDdlDialect(caps)
         handler._capabilities = caps

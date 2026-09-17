@@ -10,12 +10,13 @@ from this block.
 
 This module is the CDK's typed view of that block. The engine folds the
 declared block into the resolved worker payload (the same channel that
-delivers transport specs), and both sides read it here. ``None`` (no block
-declared) is legal at parse time; every
-consumer treats a needed-but-undeclared shape fact as a loud configuration
-error via :func:`undeclared_capability_error` — no base-class default ever
-fills in a guess. The one exception is the ``limits`` member (issue #401),
-whose absence is additive: an undeclared cap means "no declared cap" and
+delivers transport specs), and every side — engine, worker, conformance
+kit — reads it here, off the validated model. ``None`` (no block
+declared) is legal; every consumer treats a needed-but-undeclared shape
+fact as a loud configuration error via
+:func:`undeclared_capability_error` — no base-class default ever fills in
+a guess. The one exception is the ``limits`` member (issue #401), whose
+absence is additive: an undeclared cap means "no declared cap" and
 current behavior applies.
 """
 
@@ -134,9 +135,7 @@ class SqlCapabilities:
         return self.bulk_load.get(transport_type)
 
     @classmethod
-    def from_declaration(
-        cls, block: Mapping[str, Any], *, source: str = "<connector definition>"
-    ) -> SqlCapabilities:
+    def from_declaration(cls, block: Mapping[str, Any]) -> SqlCapabilities:
         """Read a declared block the published contract has already validated.
 
         The contract requires all five shape facts inside a declared block
@@ -144,47 +143,34 @@ class SqlCapabilities:
         (issue #401) is the one additive member: caps are optional facts
         whose absence means "no declared cap", never a refusal.
         """
+        stage = block["stage"]
         limits = block.get("limits") or {}
         return cls(
             catalog=block["catalog"],
             session_targeting=block["session_targeting"],
             merge_form=block["merge_form"],
             bulk_load=dict(block["bulk_load"]),
-            stage=cls._parse_stage(block["stage"], source=source),
+            stage=StageCapabilities(
+                scope=stage["scope"],
+                schema=stage["schema"],
+                dedicated_schema=stage.get("dedicated_schema"),
+                transactional_ddl=stage["transactional_ddl"],
+            ),
             limits=SqlLimits(
                 max_bind_params=limits.get("max_bind_params"),
                 max_identifier_len=limits.get("max_identifier_len"),
             ),
         )
 
-    @staticmethod
-    def _parse_stage(block: Mapping[str, Any], *, source: str) -> StageCapabilities:
-        # The contract reads transactional_ddl as a lax boolean ("yes" passes),
-        # and the conformance kit parses the authored JSON rather than the
-        # validated model, so this is the one fact still checked here.
-        transactional = block.get("transactional_ddl")
-        if not isinstance(transactional, bool):
-            raise SqlCapabilitiesError(
-                f"sql_capabilities.stage.transactional_ddl in {source} is "
-                f"{transactional!r}; expected true or false"
-            )
-        return StageCapabilities(
-            scope=block["scope"],
-            schema=block["schema"],
-            dedicated_schema=block.get("dedicated_schema"),
-            transactional_ddl=transactional,
-        )
 
+def parse_declared_capabilities(block: Any) -> SqlCapabilities | None:
+    """Read an optional declaration: ``None`` stays ``None`` (undeclared).
 
-def parse_declared_capabilities(
-    block: Any, *, source: str = "<connector definition>"
-) -> SqlCapabilities | None:
-    """Parse an optional declaration: ``None`` stays ``None`` (undeclared).
-
-    The single entry point both sides use — the trusted engine reading the
-    connector definition and the worker reading its resolved payload — so
-    "undeclared" means the same thing everywhere.
+    The single entry point every side uses — the engine reading the
+    connector definition, the worker reading its resolved payload, the
+    conformance kit reading the definition under test — so "undeclared"
+    means the same thing everywhere.
     """
     if block is None:
         return None
-    return SqlCapabilities.from_declaration(block, source=source)
+    return SqlCapabilities.from_declaration(block)

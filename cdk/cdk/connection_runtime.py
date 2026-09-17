@@ -89,6 +89,22 @@ MATERIALIZATION_CONNECTION_SUBTREES = REQUEST_CONNECTION_SUBTREES + ("secret_ref
 MATERIALIZATION_SECRET_SCOPES = ("secrets",)
 
 
+def authored_sql_capabilities(connector: Connector | None) -> dict[str, Any] | None:
+    """Return the connector's declared ``sql_capabilities`` as its author wrote it.
+
+    One reader for the one block, because two of them disagree: the engine
+    folds this into the worker payload while the conformance kit certifies
+    the same ``connector.json``, and the contract's own coercions (a lax
+    boolean, an aliased field name) only show in the validated model. A
+    reader that went back to the raw file would refuse a definition the
+    engine runs. Only a database connector declares it.
+    """
+    if not isinstance(connector, DatabaseConnector):
+        return None
+    block: dict[str, Any] | None = authored_json(connector.sql_capabilities)
+    return block
+
+
 def _derive_dialect(connector: Connector | None) -> str | None:
     """Return the base SQL dialect (e.g. ``postgresql``) from a definition.
 
@@ -187,11 +203,9 @@ class ConnectionRuntime:
         # takes ``sql_dialect`` untyped). Only a database connector declares
         # it. Worker-side runtimes get it restored from the resolved payload
         # in :meth:`from_resolved_payload`.
-        self._declared_sql_capabilities: dict[str, Any] | None = (
-            authored_json(connector.sql_capabilities)
-            if isinstance(connector, DatabaseConnector)
-            else None
-        )
+        self._declared_sql_capabilities: dict[
+            str, Any
+        ] | None = authored_sql_capabilities(connector)
         # Connector-level declared facts (issue #401), carried the same way:
         # ``error_map`` (the driver's failure taxonomy) and ``concurrency``
         # (the system's connection ceiling). ``cdk.declarations`` parses

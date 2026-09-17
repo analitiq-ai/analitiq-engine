@@ -704,11 +704,6 @@ class TestCreateConfigErrorPaths:
 
 
 # ---------------------------------------------------------------------------
-# Registry-discovered kinds (#137)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # Declared connector facts (#401)
 # ---------------------------------------------------------------------------
 
@@ -716,11 +711,11 @@ class TestCreateConfigErrorPaths:
 class TestDeclaredConnectorFacts:
     """The declared ``error_map`` block (#401) at config load.
 
-    Two gates run on the trusted side and both are pinned here: the
-    published contract validates the declaration's shape, and
-    ``_load_connector`` parses it through the CDK's typed view — the same
-    parse the worker re-runs at its process boundary, so a dropped line
-    here would defer a malformed declaration to a spawned worker.
+    Its grammar is the engine's own (#513 retired the fixed families the
+    published contract still carries), so ``_resolve_connection_by_id``
+    parsing it through the CDK's typed view is the only gate it has — a
+    dropped line here would defer a malformed declaration to a spawned
+    worker.
     """
 
     def _write_connector(self, root: Path, connector_doc: dict[str, Any]) -> None:

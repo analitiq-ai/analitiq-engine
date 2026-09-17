@@ -2,9 +2,9 @@
 
 Three surfaces:
 
-* the parse: a declared ``sql_capabilities`` block validates against the
-  published vocabulary fail-loud at the process boundary — partial or
-  off-vocabulary declarations never reach a consumer site;
+* the parse: a declared ``sql_capabilities`` block, already validated by
+  the published contract, reads into the typed view every consumer site
+  uses;
 * the refusal shape: every needed-but-undeclared fact refuses through
   ``undeclared_capability_error``, naming the missing declaration;
 * the payload channel: the block rides ``resolve_spec()`` into the worker
@@ -24,7 +24,6 @@ from contract_documents import connection_document, connector_document
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.sql.capabilities import (
     SqlCapabilities,
-    SqlCapabilitiesError,
     parse_declared_capabilities,
     undeclared_capability_error,
 )
@@ -67,12 +66,6 @@ class TestParse:
     def test_declared_block_parses_through_the_single_entry_point(self):
         caps = parse_declared_capabilities(caps_block())
         assert isinstance(caps, SqlCapabilities)
-
-    def test_non_bool_transactional_ddl_fails(self):
-        block = caps_block()
-        block["stage"]["transactional_ddl"] = "yes"
-        with pytest.raises(SqlCapabilitiesError, match="transactional_ddl"):
-            SqlCapabilities.from_declaration(block)
 
     def test_supports_upsert_derives_from_merge_form(self):
         assert SqlCapabilities.from_declaration(
@@ -282,32 +275,6 @@ class TestConfigureSchemaUpsertGate:
 
 
 class TestConnectBinding:
-    @pytest.mark.asyncio
-    async def test_malformed_declaration_fails_before_anything_is_acquired(
-        self,
-    ):
-        # The dialect the transport is built with must carry the
-        # declaration, so the parse runs before materialize() -- a block the
-        # parse refuses never reaches a transport, and there is no acquired
-        # runtime to release.
-        handler = GenericSQLConnector()
-        runtime = MagicMock()
-        runtime.connector_id = "demo"
-        runtime.declared_sql_capabilities = caps_block()
-        runtime.declared_sql_capabilities["stage"]["transactional_ddl"] = "yes"
-        runtime.declared_error_map = None
-        runtime.close = AsyncMock()
-        from unittest.mock import patch
-
-        materialize = AsyncMock()
-        with (
-            patch("cdk.sql.generic.materialize_runtime", new=materialize),
-            pytest.raises(SqlCapabilitiesError, match="transactional_ddl"),
-        ):
-            await handler.connect(runtime)
-        materialize.assert_not_awaited()
-        runtime.close.assert_not_awaited()
-
     @staticmethod
     def _adbc_runtime(**overrides):
         runtime = MagicMock()

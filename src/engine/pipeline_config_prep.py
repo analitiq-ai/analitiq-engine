@@ -62,7 +62,6 @@ from analitiq.contracts.stream import (
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.declarations import parse_declared_error_map
 from cdk.secrets import SchemeSecretsResolver, SecretsResolver
-from cdk.sql.capabilities import parse_declared_capabilities
 from cdk.type_map import (
     TypeMapNotFoundError,
     TypeMapper,
@@ -515,15 +514,18 @@ class PipelineConfigPrep:
             connector_type_mapper=self._connector_type_mappers.get(record.connector_id),
             connection_type_mapper=self._connection_type_mapper(connection_id),
         )
-        # Parse the declared blocks (sql_capabilities, issue #390; error_map,
-        # issue #401) on the trusted side, at config load: a
-        # malformed declaration fails here as a config error, never inside a
+        # Parse the declared error_map (issue #401) on the trusted side, at
+        # config load: the engine owns this grammar (issue #513 retired the
+        # fixed families the contract still publishes), so a malformed
+        # declaration must fail here as a config error, never inside a
         # spawned worker where a dead pre-serve process would surface as a
         # connect failure instead. None (no block) is legal; needed-but-
-        # undeclared facts refuse at their consumer sites.
-        source = f"connector {record.connector_id!r}"
-        parse_declared_capabilities(runtime.declared_sql_capabilities, source=source)
-        parse_declared_error_map(runtime.declared_error_map, source=source)
+        # undeclared facts refuse at their consumer sites. sql_capabilities
+        # needs no such gate: its whole grammar is the contract's, applied
+        # above in _load_connector.
+        parse_declared_error_map(
+            runtime.declared_error_map, source=f"connector {record.connector_id!r}"
+        )
         self._resolved_connections[connection_id] = runtime
         logger.info(
             "Resolved connection: connection_id=%s connector=%s",
