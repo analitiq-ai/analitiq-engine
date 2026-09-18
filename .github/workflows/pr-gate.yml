@@ -1,0 +1,31 @@
+name: pr-gate
+
+# Thin caller for the org-wide reusable workflow in analitiq-ai/.github, which
+# posts the `codex-review` and `internal-review` commit statuses on each open
+# PR's head. That repo's README, section `pr-gate.yml`, owns what the statuses
+# mean and which triggers a caller may use; the reusable workflow refuses any
+# other trigger.
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+  issue_comment:
+    types: [created, edited, deleted]
+  schedule:
+    - cron: "*/15 * * * *"
+
+permissions:
+  contents: read
+  statuses: write
+  checks: read
+  pull-requests: read
+  issues: read
+
+jobs:
+  gate:
+    # Comment events fire for every author; only these two can change a status.
+    if: >-
+      github.event_name != 'issue_comment' ||
+      (github.event.issue.pull_request &&
+       (github.event.comment.user.login == 'chatgpt-codex-connector[bot]' ||
+        github.event.comment.user.login == 'Analitiq-Bot'))
+    uses: analitiq-ai/.github/.github/workflows/pr-gate.yml@main

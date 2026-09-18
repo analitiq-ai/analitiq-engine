@@ -120,11 +120,13 @@ A PR can merge into `main` only when every required status check on its head
 commit is green:
 
 1. **Codex review is clean** -- the `codex-review` status, posted by
-   `.github/workflows/codex-gate.yml`. It turns green only when Codex's newest
-   verdict naming the PR's current head commit says "Didn't find any major
-   issues". A bare +1 reaction does not count -- re-request the review so Codex
-   posts a verdict comment. Pushing new commits resets the gate until Codex
-   reviews the new head.
+   `.github/workflows/pr-gate.yml` through the org-wide gate in
+   analitiq-ai/.github, whose README owns the rules. It turns green when
+   Codex's newest verdict naming the PR's current head commit says "Didn't
+   find any major issues", or reads `WAIVED: …` when Codex answered with its
+   out-of-credits message after that commit was pushed. A bare +1 reaction
+   does not count -- re-request the review so Codex posts a verdict comment.
+   Pushing new commits resets the gate until Codex reviews the new head.
 2. **CI is green** -- `pytest`, `pre-commit (all files)`,
    `contract-consumption manifest is current`,
    `contract pin matches the published release`, and `Scan for secrets`.
