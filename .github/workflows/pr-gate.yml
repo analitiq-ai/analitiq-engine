@@ -22,7 +22,8 @@ permissions:
 
 jobs:
   gate:
-    # Comment events fire for every author; only these two can change a status.
+    # Comment events fire for every author; only Codex and Analitiq-Bot can
+    # change a status.
     if: >-
       github.event_name != 'issue_comment' ||
       (github.event.issue.pull_request &&
