@@ -252,12 +252,9 @@ def _filter_landing(
     # Keyed by str: a stream filter's operator vocabulary is wider than the
     # API-only one the map is keyed on, and a database-only operator is
     # exactly the lookup that must come back empty.
-    by_operator: dict[str, FilterLanding] = {
-        operator: landing
-        for operator, landing in (filter_landings or {})
-        .get(declared_filter.field, {})
-        .items()
-    }
+    by_operator: dict[str, FilterLanding] = dict(
+        (filter_landings or {}).get(declared_filter.field, {}).items()
+    )
     landing = by_operator.get(declared_filter.operator)
     if landing is None:
         raise RequestSpecError(
