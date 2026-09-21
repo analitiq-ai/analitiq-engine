@@ -562,7 +562,6 @@ class GenericAPIConnector(BaseDestinationHandler):
                 declared_params=read.params,
                 pagination=pagination,
                 metadata=read.response.metadata,
-                endpoint=endpoint_id,
             )
             if problem is not None:
                 raise ReadError(f"endpoint {endpoint_id!r}: {problem}")

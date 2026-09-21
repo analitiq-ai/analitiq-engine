@@ -303,7 +303,6 @@ def _compile_read(
         declared_params=read.params,
         pagination=read.pagination,
         metadata=read.response.metadata,
-        endpoint=label,
     )
     if problem is not None:
         raise ReadError(problem)

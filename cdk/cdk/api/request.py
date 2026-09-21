@@ -543,7 +543,6 @@ def request_block_problem(
     *,
     reserved_headers: frozenset[str] | set[str],
     resolver: Resolver,
-    endpoint: str,
     controlled_by: Mapping[str, str] = MappingProxyType({}),
     declared_params: Mapping[str, Param] = MappingProxyType({}),
     pagination: Pagination | None = None,

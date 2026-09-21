@@ -499,7 +499,6 @@ def build_write_plan(
             resolver=resolver,
             controlled_by=table.controlled_by,
             declared_params=mode_block.params,
-            endpoint=endpoint_id,
         )
         if problem is not None:
             return problem
