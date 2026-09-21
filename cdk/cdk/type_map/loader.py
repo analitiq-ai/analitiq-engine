@@ -12,8 +12,7 @@ Two parallel locations are supported:
 direction is optional on its own: a source uses the read map, a destination
 the write map. Document well-formedness is analitiq-validator's contract,
 gated once in DIP CI before a connector is published (one gate per document;
-see schema-contracts.md); this loader parses the document into typed rules
-and refuses what this process will not execute.
+see schema-contracts.md); this loader parses the document into typed rules.
 """
 
 from __future__ import annotations

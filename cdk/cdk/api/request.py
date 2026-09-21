@@ -190,11 +190,20 @@ class ParamTable:
             landing = _filter_landing(declared_filter, filter_landings)
             value = declared_filter.value
             if value is None:
-                continue
+                raise RequestSpecError(
+                    f"the stream filters on {declared_filter.field!r} with "
+                    f"operator {declared_filter.operator!r} but gives it no "
+                    f"value, so nothing is sent: the stream would read the "
+                    f"whole collection"
+                )
             if isinstance(landing, FromParamExpression):
                 table.values[landing.from_param] = value
                 continue
-            stream_scope = {"filters": {declared_filter.field: {"value": value}}}
+            # Nested along the path: a placeholder walks it segment by segment.
+            at_field: dict[str, Any] = {"value": value}
+            for segment in reversed(declared_filter.field.split(".")):
+                at_field = {segment: at_field}
+            stream_scope = {"filters": at_field}
             with request_spec_errors(
                 f"filters[{declared_filter.field!r}][{declared_filter.operator!r}]"
             ):

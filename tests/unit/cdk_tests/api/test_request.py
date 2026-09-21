@@ -287,6 +287,41 @@ class TestReadParamTable:
         )
         assert table.values == {"amount_q": "<>0", "amount_min": ">5"}
 
+    def test_a_template_landing_on_a_nested_field_renders(self) -> None:
+        # The placeholder walks the field path segment by segment, so the
+        # filter's value has to sit at that path, not under one dotted key.
+        table = ParamTable.for_read(
+            _params({"cid": {"in": "query", "type": "string", "required": False}}),
+            _resolver(),
+            filters=_filters({"field": "customer.id", "operator": "eq", "value": 5}),
+            filter_landings=_landings(
+                {
+                    "customer.id": {
+                        "eq": {
+                            "param": "cid",
+                            "template": "id:${stream.filters.customer.id.value}",
+                        }
+                    }
+                }
+            ),
+            endpoint="items",
+        )
+        assert table.values == {"cid": "id:5"}
+
+    def test_a_landed_filter_with_no_value_is_refused(self) -> None:
+        # Sending nothing for the param would read the whole collection
+        # while the stream reports it filtered.
+        with pytest.raises(RequestSpecError, match=r"'status'.*'eq'.*no value"):
+            ParamTable.for_read(
+                _params(
+                    {"status": {"in": "query", "type": "string", "required": False}}
+                ),
+                _resolver(),
+                filters=_filters({"field": "status", "operator": "eq"}),
+                filter_landings=_landings({"status": {"eq": {"from_param": "status"}}}),
+                endpoint="items",
+            )
+
     def test_a_filter_whose_operator_has_no_entry_is_refused(self) -> None:
         # The param exists and `eq` lands on it, but the stream asks for
         # `gt`: sending the value as `eq` would silently read a different
