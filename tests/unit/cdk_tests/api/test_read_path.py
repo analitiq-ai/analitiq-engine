@@ -299,12 +299,11 @@ class TestTheRequestTheContractDescribes:
         )
         assert session.calls[0]["headers"]["X-Format"] == "application/json"
 
-    async def test_a_stream_filter_naming_no_declared_param_is_refused(self) -> None:
-        # The filter's value used to sit in the param table with nothing
-        # bound to it: the read issued no filtered param at all and
-        # returned the whole collection, reporting success. A filter that
-        # does not filter is a correctness failure, so the stream fails
-        # before its first request.
+    async def test_a_stream_filter_with_no_landing_is_refused(self) -> None:
+        # A filter the endpoint's `filters` map gives no landing reaches no
+        # param: the read would return the whole collection and report
+        # success. A filter that does not filter is a correctness failure,
+        # so the stream fails before its first request.
         session = FakeSession([FakeResponse(body=_rows(1))])
         with pytest.raises(ReadError, match="customer_number"):
             await _read(
@@ -324,6 +323,57 @@ class TestTheRequestTheContractDescribes:
                 ),
             )
         assert session.calls == []
+
+    async def test_a_stream_filter_reaches_the_wire_through_its_landing(self) -> None:
+        session = FakeSession([FakeResponse(body=_rows(1))])
+        await _read(
+            session,
+            endpoint_document(
+                request={
+                    "method": "GET",
+                    "path": "/items",
+                    "query": {
+                        "customerNumber": {"from_param": "cn"},
+                        "amount": {"from_param": "amount_q"},
+                    },
+                },
+                params={
+                    "cn": {"in": "query", "type": "string", "required": False},
+                    "amount_q": {"in": "query", "type": "string", "required": False},
+                },
+                record_fields={
+                    "customer_number": {
+                        "type": "string",
+                        "native_type": "string",
+                        "arrow_type": "Utf8",
+                    },
+                    "amount": {
+                        "type": "number",
+                        "native_type": "number",
+                        "arrow_type": "Float64",
+                    },
+                },
+                filters={
+                    "customer_number": {"eq": {"from_param": "cn"}},
+                    "amount": {
+                        "neq": {
+                            "param": "amount_q",
+                            "template": "<>${stream.filters.amount.value}",
+                        }
+                    },
+                },
+            ),
+            source=stream_source(
+                filters=[
+                    {"field": "customer_number", "operator": "eq", "value": "C-1"},
+                    {"field": "amount", "operator": "neq", "value": 0},
+                ]
+            ),
+        )
+        assert session.calls[0]["params"] == [
+            ("customerNumber", "C-1"),
+            ("amount", "<>0"),
+        ]
 
     async def test_a_declared_header_shadowing_the_connection_is_refused(
         self,

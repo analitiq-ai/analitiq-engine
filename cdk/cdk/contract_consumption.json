@@ -272,7 +272,7 @@
       ],
       "operations": [
         "cdk.api.generic:191",
-        "cdk.api.request:477",
+        "cdk.api.request:507",
         "cdk.api.write_plan:169",
         "cdk.api.write_plan:384"
       ]
@@ -312,11 +312,11 @@
       ],
       "limit": [
         "cdk.api.read_setup:93",
-        "cdk.api.request:702",
+        "cdk.api.request:732",
         "cdk.api.strategies:163"
       ],
       "stop_when": [
-        "cdk.api.generic:689"
+        "cdk.api.generic:690"
       ],
       "type": [
         "cdk.api.strategies:430"
@@ -355,37 +355,42 @@
         "cdk.sql.generic:2101"
       ]
     },
+    "analitiq.contracts.endpoints.FromParamExpression": {
+      "from_param": [
+        "cdk.api.request:195"
+      ]
+    },
     "analitiq.contracts.endpoints.GetReadRequest": {
       "headers": [
-        "cdk.api.generic:668",
-        "cdk.api.request:559",
-        "cdk.api.request:650"
+        "cdk.api.generic:669",
+        "cdk.api.request:589",
+        "cdk.api.request:680"
       ],
       "headers_remove": [
-        "cdk.api.request:532"
+        "cdk.api.request:562"
       ],
       "method": [
         "cdk.api.generic:517"
       ],
       "path": [
-        "cdk.api.generic:634",
-        "cdk.api.generic:666",
-        "cdk.api.request:841"
+        "cdk.api.generic:635",
+        "cdk.api.generic:667",
+        "cdk.api.request:871"
       ],
       "path_params": [
-        "cdk.api.generic:636",
-        "cdk.api.request:650",
-        "cdk.api.request:844"
+        "cdk.api.generic:637",
+        "cdk.api.request:680",
+        "cdk.api.request:874"
       ],
       "query": [
-        "cdk.api.generic:667",
-        "cdk.api.generic:670",
-        "cdk.api.request:650"
+        "cdk.api.generic:668",
+        "cdk.api.generic:671",
+        "cdk.api.request:680"
       ],
       "transport_ref": [
-        "cdk.api.generic:557",
-        "cdk.api.generic:652",
-        "cdk.api.request:499"
+        "cdk.api.generic:558",
+        "cdk.api.generic:653",
+        "cdk.api.request:529"
       ]
     },
     "analitiq.contracts.endpoints.Idempotency": {
@@ -415,11 +420,11 @@
       ],
       "limit": [
         "cdk.api.read_setup:93",
-        "cdk.api.request:702",
+        "cdk.api.request:732",
         "cdk.api.strategies:163"
       ],
       "stop_when": [
-        "cdk.api.generic:689"
+        "cdk.api.generic:690"
       ],
       "type": [
         "cdk.api.strategies:430"
@@ -433,14 +438,14 @@
     "analitiq.contracts.endpoints.LinkPagination": {
       "limit": [
         "cdk.api.read_setup:93",
-        "cdk.api.request:702",
+        "cdk.api.request:732",
         "cdk.api.strategies:163"
       ],
       "link": [
         "cdk.api.strategies:334"
       ],
       "stop_when": [
-        "cdk.api.generic:689"
+        "cdk.api.generic:690"
       ],
       "type": [
         "cdk.api.strategies:430"
@@ -460,14 +465,14 @@
     "analitiq.contracts.endpoints.OffsetPagination": {
       "limit": [
         "cdk.api.read_setup:93",
-        "cdk.api.request:702",
+        "cdk.api.request:732",
         "cdk.api.strategies:163"
       ],
       "offset": [
         "cdk.api.strategies:193"
       ],
       "stop_when": [
-        "cdk.api.generic:689"
+        "cdk.api.generic:690"
       ],
       "type": [
         "cdk.api.strategies:430"
@@ -476,17 +481,17 @@
     "analitiq.contracts.endpoints.Operations": {
       "read": [
         "cdk.api.generic:191",
-        "cdk.api.request:482"
+        "cdk.api.request:512"
       ],
       "write": [
-        "cdk.api.request:484",
+        "cdk.api.request:514",
         "cdk.api.write_plan:169",
         "cdk.api.write_plan:384"
       ]
     },
     "analitiq.contracts.endpoints.PageCursor": {
       "increment_by": [
-        "cdk.api.request:702",
+        "cdk.api.request:732",
         "cdk.api.strategies:233"
       ],
       "initial": [
@@ -499,15 +504,15 @@
     "analitiq.contracts.endpoints.PagePagination": {
       "limit": [
         "cdk.api.read_setup:93",
-        "cdk.api.request:702",
+        "cdk.api.request:732",
         "cdk.api.strategies:163"
       ],
       "page": [
-        "cdk.api.request:702",
+        "cdk.api.request:732",
         "cdk.api.strategies:226"
       ],
       "stop_when": [
-        "cdk.api.generic:689"
+        "cdk.api.generic:690"
       ],
       "type": [
         "cdk.api.strategies:430"
@@ -515,7 +520,7 @@
     },
     "analitiq.contracts.endpoints.PageSize": {
       "default": [
-        "cdk.api.request:702",
+        "cdk.api.request:732",
         "cdk.api.strategies:167",
         "cdk.api.strategies:168"
       ],
@@ -531,12 +536,12 @@
     "analitiq.contracts.endpoints.Param": {
       "controlled_by": [
         "cdk.api.param_rules:374",
-        "cdk.api.request:175",
-        "cdk.api.request:237",
-        "cdk.api.request:239"
+        "cdk.api.request:177",
+        "cdk.api.request:267",
+        "cdk.api.request:269"
       ],
       "default": [
-        "cdk.api.request:656",
+        "cdk.api.request:686",
         "cdk.request_binding:74"
       ],
       "enum": [
@@ -585,67 +590,70 @@
     },
     "analitiq.contracts.endpoints.PostReadRequest": {
       "body": [
-        "cdk.api.generic:664",
-        "cdk.api.request:650"
+        "cdk.api.generic:665",
+        "cdk.api.request:680"
       ],
       "content_type": [
-        "cdk.api.generic:669",
-        "cdk.api.request:550"
+        "cdk.api.generic:670",
+        "cdk.api.request:580"
       ],
       "headers": [
-        "cdk.api.generic:668",
-        "cdk.api.request:559",
-        "cdk.api.request:650"
+        "cdk.api.generic:669",
+        "cdk.api.request:589",
+        "cdk.api.request:680"
       ],
       "headers_remove": [
-        "cdk.api.request:532"
+        "cdk.api.request:562"
       ],
       "method": [
         "cdk.api.generic:517"
       ],
       "path": [
-        "cdk.api.generic:634",
-        "cdk.api.generic:666",
-        "cdk.api.request:841"
+        "cdk.api.generic:635",
+        "cdk.api.generic:667",
+        "cdk.api.request:871"
       ],
       "path_params": [
-        "cdk.api.generic:636",
-        "cdk.api.request:650",
-        "cdk.api.request:844"
+        "cdk.api.generic:637",
+        "cdk.api.request:680",
+        "cdk.api.request:874"
       ],
       "query": [
-        "cdk.api.generic:667",
-        "cdk.api.generic:670",
-        "cdk.api.request:650"
+        "cdk.api.generic:668",
+        "cdk.api.generic:671",
+        "cdk.api.request:680"
       ],
       "transport_ref": [
-        "cdk.api.generic:557",
-        "cdk.api.generic:652",
-        "cdk.api.request:499"
+        "cdk.api.generic:558",
+        "cdk.api.generic:653",
+        "cdk.api.request:529"
       ]
     },
     "analitiq.contracts.endpoints.ReadOperation": {
+      "filters": [
+        "cdk.api.generic:541"
+      ],
       "pagination": [
         "cdk.api.generic:519"
       ],
       "params": [
         "cdk.api.generic:537",
-        "cdk.api.generic:561",
-        "cdk.api.generic:670"
+        "cdk.api.generic:562",
+        "cdk.api.generic:671"
       ],
       "replication": [
-        "cdk.api.generic:574",
-        "cdk.api.generic:610"
+        "cdk.api.generic:575",
+        "cdk.api.generic:611"
       ],
       "request": [
         "cdk.api.generic:516",
-        "cdk.api.request:499"
+        "cdk.api.request:529"
       ],
       "response": [
         "cdk.api.generic:512",
         "cdk.api.generic:518",
-        "cdk.api.generic:563",
-        "cdk.api.generic:709"
+        "cdk.api.generic:564",
+        "cdk.api.generic:710"
       ]
     },
     "analitiq.contracts.endpoints.RefExpression": {
@@ -659,14 +667,14 @@
         "cdk.api.replication:138"
       ],
       "supported_methods": [
-        "cdk.api.generic:587",
-        "cdk.api.generic:598"
+        "cdk.api.generic:588",
+        "cdk.api.generic:599"
       ]
     },
     "analitiq.contracts.endpoints.ResponseExtraction": {
       "metadata": [
-        "cdk.api.generic:563",
-        "cdk.api.generic:709"
+        "cdk.api.generic:564",
+        "cdk.api.generic:710"
       ],
       "records": [
         "cdk.api.generic:518",
@@ -696,6 +704,14 @@
         "cdk.api.replication:257",
         "cdk.api.replication:312",
         "cdk.api.replication:324"
+      ]
+    },
+    "analitiq.contracts.endpoints.TemplateFilterLanding": {
+      "param": [
+        "cdk.api.request:201"
+      ],
+      "template": [
+        "cdk.api.request:203"
       ]
     },
     "analitiq.contracts.endpoints.WindowCursorMapping": {
@@ -745,7 +761,7 @@
     },
     "analitiq.contracts.endpoints.WriteOperation": {
       "batching": [
-        "cdk.api.generic:991",
+        "cdk.api.generic:992",
         "cdk.api.write_plan:556"
       ],
       "conflict_keys": [
@@ -764,7 +780,7 @@
         "cdk.api.write_plan:543"
       ],
       "request": [
-        "cdk.api.request:499",
+        "cdk.api.request:529",
         "cdk.api.write_plan:475"
       ],
       "response": [
@@ -775,40 +791,40 @@
     },
     "analitiq.contracts.endpoints.WriteRequest": {
       "body": [
-        "cdk.api.request:650",
+        "cdk.api.request:680",
         "cdk.api.write_plan:517"
       ],
       "content_type": [
-        "cdk.api.request:550",
+        "cdk.api.request:580",
         "cdk.api.write_plan:518"
       ],
       "headers": [
-        "cdk.api.request:559",
-        "cdk.api.request:650",
+        "cdk.api.request:589",
+        "cdk.api.request:680",
         "cdk.api.write_plan:540"
       ],
       "headers_remove": [
-        "cdk.api.request:532"
+        "cdk.api.request:562"
       ],
       "method": [
         "cdk.api.write_plan:514"
       ],
       "path": [
-        "cdk.api.request:841",
+        "cdk.api.request:871",
         "cdk.api.write_plan:525"
       ],
       "path_params": [
-        "cdk.api.request:650",
-        "cdk.api.request:844",
+        "cdk.api.request:680",
+        "cdk.api.request:874",
         "cdk.api.write_plan:527"
       ],
       "query": [
-        "cdk.api.request:650",
+        "cdk.api.request:680",
         "cdk.api.write_plan:539",
         "cdk.api.write_plan:543"
       ],
       "transport_ref": [
-        "cdk.api.request:499",
+        "cdk.api.request:529",
         "cdk.api.write_plan:481",
         "cdk.api.write_plan:484",
         "cdk.api.write_plan:515"
@@ -1004,20 +1020,26 @@
     },
     "analitiq.contracts.stream.Filter": {
       "field": [
-        "cdk.api.request:188",
+        "cdk.api.request:197",
+        "cdk.api.request:199",
+        "cdk.api.request:249",
+        "cdk.api.request:255",
         "cdk.sql.generic:2469"
       ],
       "operator": [
+        "cdk.api.request:199",
+        "cdk.api.request:252",
+        "cdk.api.request:255",
         "cdk.sql.generic:2469"
       ],
       "value": [
-        "cdk.api.request:197",
+        "cdk.api.request:191",
         "cdk.sql.generic:2469"
       ]
     },
     "analitiq.contracts.stream.FullRefreshReplication": {
       "method": [
-        "cdk.api.generic:581",
+        "cdk.api.generic:582",
         "src.engine.pipeline_config_prep:160"
       ],
       "tie_breaker_fields": [
@@ -1026,18 +1048,18 @@
     },
     "analitiq.contracts.stream.IncrementalReplication": {
       "cursor_field": [
-        "cdk.api.generic:606",
-        "cdk.api.generic:613",
-        "cdk.api.generic:871",
+        "cdk.api.generic:607",
+        "cdk.api.generic:614",
+        "cdk.api.generic:872",
         "cdk.sql.generic:2137",
         "src.engine.pipeline_config_prep:162"
       ],
       "method": [
-        "cdk.api.generic:581",
+        "cdk.api.generic:582",
         "src.engine.pipeline_config_prep:160"
       ],
       "safety_window_seconds": [
-        "cdk.api.generic:899"
+        "cdk.api.generic:900"
       ],
       "tie_breaker_fields": [
         "src.engine.pipeline_config_prep:166"
@@ -1083,7 +1105,7 @@
         "src.engine.pipeline_config_prep:816"
       ],
       "replication": [
-        "cdk.api.generic:573",
+        "cdk.api.generic:574",
         "cdk.sql.generic:2135",
         "src.engine.pipeline_config_prep:156"
       ],
@@ -1432,9 +1454,9 @@
       ],
       "entries": [
         "cdk.resolver:103",
-        "cdk.resolver:344",
-        "cdk.resolver:393",
-        "cdk.resolver:435"
+        "cdk.resolver:326",
+        "cdk.resolver:385",
+        "cdk.resolver:427"
       ]
     },
     "analitiq.contracts.connector.Concurrency": {
@@ -1451,9 +1473,9 @@
       ],
       "entries": [
         "cdk.resolver:103",
-        "cdk.resolver:344",
-        "cdk.resolver:393",
-        "cdk.resolver:435"
+        "cdk.resolver:326",
+        "cdk.resolver:385",
+        "cdk.resolver:427"
       ]
     },
     "analitiq.contracts.connector.DocumentConnector": {
@@ -1463,9 +1485,9 @@
       ],
       "entries": [
         "cdk.resolver:103",
-        "cdk.resolver:344",
-        "cdk.resolver:393",
-        "cdk.resolver:435"
+        "cdk.resolver:326",
+        "cdk.resolver:385",
+        "cdk.resolver:427"
       ]
     },
     "analitiq.contracts.connector.ErrorMap": {
@@ -1482,9 +1504,9 @@
       ],
       "entries": [
         "cdk.resolver:103",
-        "cdk.resolver:344",
-        "cdk.resolver:393",
-        "cdk.resolver:435"
+        "cdk.resolver:326",
+        "cdk.resolver:385",
+        "cdk.resolver:427"
       ]
     },
     "analitiq.contracts.connector.FileTransport": {
@@ -1514,9 +1536,9 @@
       ],
       "entries": [
         "cdk.resolver:103",
-        "cdk.resolver:344",
-        "cdk.resolver:393",
-        "cdk.resolver:435"
+        "cdk.resolver:326",
+        "cdk.resolver:385",
+        "cdk.resolver:427"
       ]
     },
     "analitiq.contracts.connector.S3Connector": {
@@ -1526,9 +1548,9 @@
       ],
       "entries": [
         "cdk.resolver:103",
-        "cdk.resolver:344",
-        "cdk.resolver:393",
-        "cdk.resolver:435"
+        "cdk.resolver:326",
+        "cdk.resolver:385",
+        "cdk.resolver:427"
       ]
     },
     "analitiq.contracts.connector.S3Transport": {
@@ -1565,9 +1587,9 @@
       ],
       "entries": [
         "cdk.resolver:103",
-        "cdk.resolver:344",
-        "cdk.resolver:393",
-        "cdk.resolver:435"
+        "cdk.resolver:326",
+        "cdk.resolver:385",
+        "cdk.resolver:427"
       ]
     },
     "analitiq.contracts.connector.StdoutTransport": {
@@ -1602,9 +1624,9 @@
       "dumps": [],
       "entries": [
         "cdk.resolver:103",
-        "cdk.resolver:344",
-        "cdk.resolver:393",
-        "cdk.resolver:435"
+        "cdk.resolver:326",
+        "cdk.resolver:385",
+        "cdk.resolver:427"
       ]
     },
     "analitiq.contracts.endpoints.LiteralExpression": {
@@ -1612,9 +1634,9 @@
       "dumps": [],
       "entries": [
         "cdk.resolver:103",
-        "cdk.resolver:344",
-        "cdk.resolver:393",
-        "cdk.resolver:435"
+        "cdk.resolver:326",
+        "cdk.resolver:385",
+        "cdk.resolver:427"
       ]
     },
     "analitiq.contracts.endpoints.PredicateAnd": {
@@ -1713,9 +1735,9 @@
       "dumps": [],
       "entries": [
         "cdk.resolver:103",
-        "cdk.resolver:344",
-        "cdk.resolver:393",
-        "cdk.resolver:435"
+        "cdk.resolver:326",
+        "cdk.resolver:385",
+        "cdk.resolver:427"
       ]
     },
     "analitiq.contracts.endpoints.TemplateExpression": {
@@ -1723,9 +1745,9 @@
       "dumps": [],
       "entries": [
         "cdk.resolver:103",
-        "cdk.resolver:344",
-        "cdk.resolver:393",
-        "cdk.resolver:435"
+        "cdk.resolver:326",
+        "cdk.resolver:385",
+        "cdk.resolver:427"
       ]
     },
     "analitiq.contracts.stream.AssignmentTarget": {

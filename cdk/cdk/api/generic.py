@@ -538,6 +538,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                 resolver,
                 endpoint=endpoint_id,
                 filters=stream_source.filters or [],
+                filter_landings=read.filters,
             )
             # Presence, which ``for_read`` deliberately does not answer:
             # only a caller holding the connection, the secrets and the

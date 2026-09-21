@@ -47,6 +47,9 @@ from urllib.parse import quote
 from analitiq.contracts.endpoints import (
     ApiEndpointDoc,
     Expression,
+    FilterableOperator,
+    FilterLanding,
+    FromParamExpression,
     Pagination,
     Param,
     ReadOperation,
@@ -150,6 +153,8 @@ class ParamTable:
         *,
         endpoint: str,
         filters: Iterable[Filter] = (),
+        filter_landings: Mapping[str, Mapping[FilterableOperator, FilterLanding]]
+        | None = None,
     ) -> ParamTable:
         """Build the read role's table: defaults, then the stream's filters.
 
@@ -158,18 +163,15 @@ class ParamTable:
         would be overwritten on the first page anyway -- or worse, survive
         as a stale value the loop never touched.
 
-        A filter names a param, and a param reaches the provider only
-        through a request binding that names it in turn. One naming no
-        declared param therefore narrows nothing: the stream reads the whole
+        A filter names a record field and an operator; the operation's
+        ``filters`` map (*filter_landings*) says which param carries that
+        pair, verbatim (``from_param``) or rendered (``template``). A filter
+        with no entry there narrows nothing: the stream reads the whole
         collection while reporting success, which for a filter is a
-        correctness failure rather than a slow read. Nothing in the contract
-        links a filter to a param declaration, so this is the only place it
-        can be caught, and it is caught loudly.
-
-        ``filters`` are the stream document's contract ``Filter`` models,
-        so the field a filter names is a required attribute rather than a
-        key that might be missing -- an unnamed filter never reaches here,
-        the stream's parse refuses it.
+        correctness failure rather than a slow read. The stream and the
+        endpoint are separate documents and the pipeline bundle does not
+        carry a connector's endpoints, so the contract cannot check the pair
+        (RULE-STRM-026) -- this is the first place both are in hand.
         """
         uncontrolled = {
             name: decl for name, decl in declared.items() if decl.controlled_by is None
@@ -185,18 +187,20 @@ class ParamTable:
             controlled_by=_controlled_by(declared),
         )
         for declared_filter in filters:
-            target = declared_filter.field
-            if target not in declared:
-                raise RequestSpecError(
-                    f"the stream filters on {target!r}, which "
-                    f"operations.read.params does not declare, so nothing "
-                    f"can send it: the filter narrows nothing and the stream "
-                    f"reads the whole collection. Declared params: "
-                    f"{sorted(declared)}"
-                )
+            landing = _filter_landing(declared_filter, filter_landings)
             value = declared_filter.value
-            if value is not None:
-                table.values[target] = value
+            if value is None:
+                continue
+            if isinstance(landing, FromParamExpression):
+                table.values[landing.from_param] = value
+                continue
+            stream_scope = {"filters": {declared_filter.field: {"value": value}}}
+            with request_spec_errors(
+                f"filters[{declared_filter.field!r}][{declared_filter.operator!r}]"
+            ):
+                table.values[landing.param] = resolver.with_stream(
+                    stream_scope
+                ).resolve({"template": landing.template})
         # Admissibility only, and here rather than at each caller: this is
         # the one construction both the live read and the conformance kit
         # go through, so a value no declaration admits cannot reach a
@@ -229,6 +233,32 @@ class ParamTable:
         # at all reaches it invisible; that one is caught by presence.
         rules.check_admissible(values)
         return cls(rules=rules, values=values, controlled_by=_controlled_by(declared))
+
+
+def _filter_landing(
+    declared_filter: Filter,
+    filter_landings: Mapping[str, Mapping[FilterableOperator, FilterLanding]] | None,
+) -> FilterLanding:
+    """Return the landing the operation's ``filters`` map declares for one filter."""
+    # Keyed by str: a stream filter's operator vocabulary is wider than the
+    # API-only one the map is keyed on, and a database-only operator is
+    # exactly the lookup that must come back empty.
+    by_operator: dict[str, FilterLanding] = {
+        operator: landing
+        for operator, landing in (filter_landings or {})
+        .get(declared_filter.field, {})
+        .items()
+    }
+    landing = by_operator.get(declared_filter.operator)
+    if landing is None:
+        raise RequestSpecError(
+            f"the stream filters on {declared_filter.field!r} with operator "
+            f"{declared_filter.operator!r}, which operations.read.filters "
+            f"gives no landing, so nothing can send it: the filter narrows "
+            f"nothing and the stream reads the whole collection. Declared "
+            f"operators for this field: {sorted(by_operator)}"
+        )
+    return landing
 
 
 def _controlled_by(declared: Mapping[str, Param]) -> dict[str, str]:
