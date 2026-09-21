@@ -897,11 +897,8 @@ def _probe_records(
     """Build the records the scripted page carries.
 
     Shaped like the endpoint's own record schema, plus the keyset ordering
-    field. The field is planted rather than taken from the schema because
-    the engine walks the *provider's* record: ``extract_records`` hands the
-    strategy the raw response objects, so ordering by a field the provider
-    sends and the schema does not declare reads perfectly well. Asserting
-    otherwise would fail a working connector.
+    field. The field is planted because it carries the page key: the value
+    below is what the keyset traversal continues from.
 
     ``key`` is the page's seed, and the ordering field carries it: a keyset
     traversal continues from the last record's value, so two pages whose

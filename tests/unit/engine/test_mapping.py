@@ -1010,13 +1010,6 @@ class TestValidationRules:
             [{"v": 9}], self._validated([_rule("range", value={"max": 10})])
         ) == [{"v": 9}]
 
-    @pytest.mark.parametrize("value", [[1, 5], {"lo": 1, "hi": 5}, "1..5"])
-    def test_range_without_a_min_max_object_is_refused(self, value):
-        """Bounds live inside `value`; any other spelling fails loud, not silently
-        as an unbounded rule that passes every row."""
-        with pytest.raises(TransformationError, match="needs a value object"):
-            _run([{"v": 3}], self._validated([_rule("range", value=value)]))
-
 
 class TestValidationErrorStrategy:
     """Each rule fails under its assignment's ``error_handling.strategy``

@@ -66,12 +66,7 @@ from ..transport_factory import require_wire_safe_header
 from .body import unsupported_media_type
 from .exceptions import RequestSpecError, request_spec_errors
 from .param_rules import ParamRules
-from .query_style import (
-    QueryStyle,
-    declared_query_styles,
-    serialize_query_value,
-    unserializable_style_problem,
-)
+from .query_style import QueryStyle, serialize_query_value
 from .strategies import PRE_PAGE_VALUE_PATHS
 
 __all__ = [
@@ -565,32 +560,7 @@ def request_block_problem(
     )
     if problem is not None:
         return problem
-    problem = _query_style_problem(request_block, declared_params, endpoint)
-    if problem is not None:
-        return problem
     return _controlled_placeholder_problem(request_block, controlled_by)
-
-
-def _query_style_problem(
-    request_block: ReadRequest | WriteRequest,
-    declared_params: Mapping[str, Param],
-    endpoint: str,
-) -> str | None:
-    """Why a declared query serialization cannot be sent, or ``None``.
-
-    The pair is defined or it is not, on every connection and for every
-    value, so it is settled with the rest of the block rather than on the
-    first page whose value happens to be a collection -- which for a
-    param the pagination or replication loop fills would be page two of a
-    read that already committed rows.
-    """
-    for key, style in declared_query_styles(
-        request_block.query, declared_params
-    ).items():
-        problem = unserializable_style_problem(key, style, endpoint=endpoint)
-        if problem is not None:
-            return problem
-    return None
 
 
 #: The connection paths per-request resolution supplies, as prefixes --

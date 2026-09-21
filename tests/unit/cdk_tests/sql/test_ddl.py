@@ -147,8 +147,8 @@ class TestBuildErrors:
         assert isinstance(exc.value.__cause__, UnmappedTypeError)
 
     def test_no_write_map_raises_chaining_invalid_type_map(self):
-        # A connector that ships only a read type-map (no write-direction document)
-        # cannot render native DDL types, so to_native_type raises through
+        # A connector whose type-map.json has no `write` section cannot render
+        # native DDL types, so to_native_type raises through
         # dialect.render_column_type and create_table fails loudly.
         read_only_mapper = TypeMapper(
             "read-only",
@@ -158,7 +158,9 @@ class TestBuildErrors:
             ),
         )
         columns = [ColumnDef("id", "Int64")]
-        with pytest.raises(CreateTableError, match="type-map-write rule") as exc:
+        with pytest.raises(
+            CreateTableError, match=r"no write rule in type-map\.json"
+        ) as exc:
             build_create_table_sql(
                 SqlDialect(),
                 read_only_mapper,

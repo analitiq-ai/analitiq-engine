@@ -40,7 +40,7 @@ from cdk.sql.capabilities import (
 from cdk.sql.dialects import SqlDialect
 from cdk.transport_factory import merged_transports
 from cdk.type_map.exceptions import InvalidTypeMapError
-from cdk.type_map.loader import build_type_mapper, read_raw_type_maps
+from cdk.type_map.loader import build_type_mapper, read_raw_type_map
 from cdk.type_map.mapper import TypeMapper
 
 from .violations import Violation
@@ -481,7 +481,7 @@ def _resolve_connector_class(
 def _load_type_mapper(definition_dir: Path, connector_id: str) -> TypeMapper | None:
     """Build the connector's type mapper from its definition files."""
     try:
-        raw = read_raw_type_maps(definition_dir, f"connector {connector_id!r}")
+        raw = read_raw_type_map(definition_dir, f"connector {connector_id!r}")
     except InvalidTypeMapError as err:
         raise ConformanceSetupError(str(err)) from err
     if raw is None:

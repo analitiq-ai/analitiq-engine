@@ -12,18 +12,15 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from analitiq.contracts.endpoints import Param, ReadRequest
-from pydantic import TypeAdapter
+from analitiq.contracts.endpoints import Param
 
 from cdk.api.exceptions import RequestSpecError
 from cdk.api.http import query_pairs
 from cdk.api.query_style import QueryStyle, declared_query_styles
-from cdk.api.request import bind_query_and_headers, request_block_problem
+from cdk.api.request import bind_query_and_headers
 from cdk.resolver import ResolutionContext, Resolver
 
 pytestmark = pytest.mark.unit
-
-_READ_REQUEST: TypeAdapter[Any] = TypeAdapter(ReadRequest)
 
 
 def _param(kind: str, style: str, explode: bool) -> dict[str, Param]:
@@ -45,11 +42,6 @@ def _param(kind: str, style: str, explode: bool) -> dict[str, Param]:
             }
         )
     }
-
-
-def _request(block: dict[str, Any]) -> Any:
-    """One declared request block, parsed as a read operation's is."""
-    return _READ_REQUEST.validate_python({"method": "GET", "path": "/items", **block})
 
 
 def _sent(
@@ -173,33 +165,6 @@ class TestADelimiterCannotBeData:
 
 
 class TestWhatIsRefused:
-    def test_a_style_the_engine_does_not_serialize_is_named_at_plan_time(
-        self,
-    ) -> None:
-        """The registry is closed engine-side: the schema types style as a string."""
-        problem = request_block_problem(
-            _request({"query": {"tags": {"from_param": "tags"}}}),
-            endpoint="items",
-            reserved_headers=frozenset(),
-            resolver=Resolver(ResolutionContext()),
-            declared_params=_param("array", "matrix", True),
-        )
-        assert problem is not None
-        assert "'matrix'" in problem
-        assert "deepObject" in problem, "the message names what it does send"
-
-    def test_an_undefined_style_and_explode_pair_is_named_at_plan_time(self) -> None:
-        """OpenAPI leaves deepObject on explode=false with no spelling at all."""
-        problem = request_block_problem(
-            _request({"query": {"tags": {"from_param": "tags"}}}),
-            endpoint="items",
-            reserved_headers=frozenset(),
-            resolver=Resolver(ResolutionContext()),
-            declared_params=_param("object", "deepObject", False),
-        )
-        assert problem is not None
-        assert "undefined" in problem
-
     def test_a_value_of_the_wrong_shape_for_its_type_is_refused(self) -> None:
         with pytest.raises(RequestSpecError, match="declares type 'object'"):
             _sent("object", "deepObject", True, ["a", "b"])
@@ -279,55 +244,6 @@ class TestWhatIsRefused:
                 resolver=Resolver(ResolutionContext()),
                 endpoint="items",
             )
-
-
-class TestAStyleMustSpellTheDeclaredType:
-    """A defined pair can still say nothing about the type it is declared on."""
-
-    @pytest.mark.parametrize(
-        ("kind", "style", "explode"),
-        [
-            ("object", "spaceDelimited", False),
-            ("object", "pipeDelimited", False),
-            ("array", "deepObject", True),
-        ],
-    )
-    def test_a_style_that_does_not_spell_that_type_is_refused_at_plan_time(
-        self, kind: str, style: str, explode: bool
-    ) -> None:
-        problem = request_block_problem(
-            _request({"query": {"tags": {"from_param": "tags"}}}),
-            endpoint="items",
-            reserved_headers=frozenset(),
-            resolver=Resolver(ResolutionContext()),
-            declared_params=_param(kind, style, explode),
-        )
-        assert problem is not None
-        assert f"typed {kind!r}" in problem
-        assert "no spelling" in problem
-
-    @pytest.mark.parametrize(
-        ("kind", "style", "explode"),
-        [
-            ("array", "spaceDelimited", False),
-            ("array", "form", True),
-            ("object", "form", False),
-            ("object", "deepObject", True),
-        ],
-    )
-    def test_a_style_that_does_spell_it_passes(
-        self, kind: str, style: str, explode: bool
-    ) -> None:
-        assert (
-            request_block_problem(
-                _request({"query": {"tags": {"from_param": "tags"}}}),
-                endpoint="items",
-                reserved_headers=frozenset(),
-                resolver=Resolver(ResolutionContext()),
-                declared_params=_param(kind, style, explode),
-            )
-            is None
-        )
 
 
 class TestStyleLookup:

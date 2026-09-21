@@ -8,7 +8,9 @@ store present.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any
+
+from analitiq.contracts.type_map import TYPE_MAP_SCHEMA_URL
 
 from cdk.secrets.protocol import SecretsResolver
 
@@ -111,16 +113,16 @@ def minimal_connector_definition(
 
 
 def type_map_document(
-    direction: Literal["read", "write"], rules: list[Any]
+    *, read: list[Any] | None = None, write: list[Any] | None = None
 ) -> dict[str, Any]:
-    """Return a ``type-map-{direction}.json`` body.
+    """Return a ``type-map.json`` body.
 
-    The ``{$schema, direction, rules}`` envelope a connector ships and the
+    The ``{$schema, read?, write?}`` document a connector ships and the
     engine loads, so a test writes the file the same way instead of
-    hand-rolling the wrapper.
+    hand-rolling the wrapper. A direction left ``None`` is omitted.
     """
+    sections = {"read": read, "write": write}
     return {
-        "$schema": f"https://schemas.analitiq.ai/type-map-{direction}/latest.json",
-        "direction": direction,
-        "rules": rules,
+        "$schema": TYPE_MAP_SCHEMA_URL,
+        **{name: rules for name, rules in sections.items() if rules is not None},
     }

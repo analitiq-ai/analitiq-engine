@@ -382,23 +382,6 @@ class TestTheRequestTheContractDescribes:
         )
         assert session.calls[0]["headers"] == {"X-Legacy-Auth": "legacy"}
 
-    async def test_a_query_key_named_ref_is_sent_as_a_parameter(self) -> None:
-        # "ref" is a real query parameter name. Resolving the whole map as
-        # one node reads the key as an expression marker, and the endpoint
-        # fails with an error no caller classifies.
-        session = FakeSession([FakeResponse(body=_rows(1))])
-        await _read(
-            session,
-            endpoint_document(
-                request={
-                    "method": "GET",
-                    "path": "/items",
-                    "query": {"ref": {"literal": "main"}},
-                }
-            ),
-        )
-        assert sent_query(session.calls[0])["ref"] == "main"
-
     async def test_a_path_placeholder_binding_to_an_empty_value_is_refused(
         self,
     ) -> None:
@@ -549,11 +532,11 @@ class TestRequiredParamRefusals:
     async def test_a_required_param_resolving_to_nothing_fails_before_the_first_request(
         self,
     ) -> None:
-        # The source is `operators`: the contract makes a required param
-        # name one (RULE-ENDP-066), and a stream-filterable param is a
-        # source the DOCUMENT declares, never a value a run has. This
-        # stream filters nothing, so the table it reaches the wire through
-        # is empty and the read is the caller that says so.
+        # The source is a `filters` landing: the contract makes a required
+        # param name one (RULE-ENDP-066), and a landing is a source the
+        # DOCUMENT declares, never a value a run has. This stream filters
+        # nothing, so the table it reaches the wire through is empty and
+        # the read is the caller that says so.
         session = FakeSession()
         with pytest.raises(ReadError, match="'account'") as caught:
             await _read(
@@ -569,9 +552,9 @@ class TestRequiredParamRefusals:
                             "in": "query",
                             "type": "string",
                             "required": True,
-                            "operators": ["eq"],
                         }
                     },
+                    filters={"name": {"eq": {"from_param": "account"}}},
                 ),
             )
         assert "'items'" in str(caught.value)

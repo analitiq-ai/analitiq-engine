@@ -1,71 +1,38 @@
-r"""Type-map rule parsing: contract model, then execution safety.
+r"""Type-map rule parsing: the contract model, plus the engine's own normalizers.
 
-A rule is one entry in a type-map document's ``rules`` array:
+A rule is one entry in a ``type-map.json`` section:
 
     {"match": "exact", "native_type": "JSONB", "arrow_type": "Utf8"}
     {"match": "regex", "native_type": "^VARCHAR\((?<n>\d+)\)$", "arrow_type": "Utf8"}
 
-The rule models themselves are **not defined here**. They are
-``analitiq.contracts.type_map``, the published contract, and this module imports
-them. Whether a document is valid is that package's question and it is answered
-once, offline, at a pinned version -- a second model of the same shape in this
-repo would give the document two spellings for one concept.
+The rule models are **not defined here**. They are ``analitiq.contracts.type_map``,
+the published contract, and this module imports them. Whether a document is
+valid is that package's question, answered once, offline, at a pinned version.
 
-What is left here is the part the contract cannot answer: what *this process*
-will agree to compile and run. A connector document is untrusted, AI-authored
-input, and a rule that is perfectly valid can still be one this engine must
-refuse to execute:
-
-- The contract permits any ECMA-262 matcher. This engine additionally requires
-  the RE2 subset -- no lookahead ``(?=…)`` / ``(?!…)``, no lookbehind
-  ``(?<=…)`` / ``(?<!…)``, no atomic groups ``(?>…)``, no numeric ``\1``..``\9``
-  or named ``\k<name>`` / ``(?P=name)`` backreferences. RE2 refuses to compile
-  every one of these constructs itself, so this list is redundant with RE2's
-  own parser -- kept only so an author sees "unsupported construct
-  (lookahead)" instead of RE2's raw parse error.
-- A ``native_type``/``arrow_type`` regex is compiled and matched with
-  ``google-re2``, not Python's backtracking ``re`` (:func:`compile_pattern`,
-  used both here to verify the pattern actually compiles under RE2 and by
-  :class:`~cdk.type_map.mapper.TypeMapper` for the runtime match). RE2 is
-  automaton-based and cannot backtrack, so match time is bounded linearly in
-  input length for any pattern it accepts, regardless of quantifier nesting --
-  a structural guarantee, not a filtered syntax list: ``^(A+)+B$`` has none of
-  the forbidden constructs above and still ran in time exponential in input
-  length under Python's ``re`` (#504).
-- ``(?<name>…)`` is rewritten to Python's ``(?P<name>…)`` so the compiled
-  pattern works with ``re2``'s ``fullmatch`` (RE2 uses the same named-group
-  syntax as Python's ``re``).
-
-RE2 patterns also differ from Python's in ways with no dedicated check here,
-because they only narrow what an already-contract-valid pattern matches
-rather than introducing a new hazard (verified against the installed
-``google-re2``): ``\d``/``\w`` match ASCII digits/word characters only, never
-a Unicode category (Python's do); ``$`` requires true end of string, where
-Python's also accepts a position just before one trailing newline; and
-``\Z`` is not accepted at all (RE2 spells the equivalent ``\z``). A pattern
-relying on any of these fails loud, at compile or at match time.
-
-The RE2 checks are not ``model_validator``s on the contract model, so they are
-not invariants of the type -- they run in :func:`parse_rules`
-and :func:`parse_write_rules`. Those two are the only sanctioned way to obtain
-a rule the engine will execute; a rule validated straight off the contract
-model is contract-valid but has not been cleared to run here.
+Regex matchers are compiled and matched with the contract's own
+:func:`~analitiq.contracts.type_map.compile_matcher`: RE2, the dialect the
+contract fixes for them. The contract refuses at parse time any matcher RE2
+cannot compile, so every rule :func:`parse_type_map` returns is one this
+process can run. RE2 is automaton-based and cannot backtrack, so match time is
+linear in input length for any pattern it accepts -- which is what bounds a
+connector-authored, untrusted pattern against an adversarial input (#504).
 """
 
 from __future__ import annotations
 
 import re
 from re import Pattern
-from typing import Any, Final, Protocol, cast
+from typing import Final, NamedTuple, cast
 
-import re2
 from analitiq.contracts.type_map import (
-    TypeMapReadDoc,
+    TYPE_MAP_SCHEMA_URL,
+    CompiledMatcher,
+    TypeMapDoc,
     TypeMapReadExactRule,
     TypeMapReadRegexRule,
     TypeMapReadRule,
-    TypeMapWriteDoc,
     TypeMapWriteRule,
+    compile_matcher,
 )
 from analitiq.contracts.type_map import (
     normalize_native_type as _contract_normalize_native_type,
@@ -85,7 +52,8 @@ _READ_RULE_CLASSES: Final[tuple[type, ...]] = (
 )
 
 __all__ = [
-    "CompiledPattern",
+    "CompiledMatcher",
+    "ParsedTypeMap",
     "TypeMapReadRule",
     "TypeMapWriteRule",
     "compile_pattern",
@@ -93,59 +61,10 @@ __all__ = [
     "normalize_native_type",
     "normalized_native",
     "parse_rules",
+    "parse_type_map",
     "parse_write_rules",
 ]
 
-
-class _PatternMatch(Protocol):
-    r"""What :class:`CompiledPattern` returns from a successful match.
-
-    ``groupdict()`` gives ``None`` for a named group that exists in the
-    pattern but did not participate in this particular match (an optional
-    group, e.g. ``(?:,(?<s>\d+))?``, when the input omits it) -- the same
-    semantics as stdlib ``re.Match.groupdict()``.
-    """
-
-    def groupdict(self) -> dict[str, str | None]:
-        ...
-
-
-class CompiledPattern(Protocol):
-    """Structural type for a compiled connector-authored regex.
-
-    ``re2`` ships no public type for its compiled-pattern object (its
-    docstring calls itself "a drop-in replacement for the re module" and
-    exposes no stub), so this names the one member :class:`TypeMapper`
-    (``mapper.py``) actually uses rather than typing it as ``Any``.
-    """
-
-    def fullmatch(self, string: str) -> _PatternMatch | None:
-        ...
-
-
-# RE2 logs every compile failure to raw process stderr by default (its
-# `log_errors` option), bypassing this engine's own logging entirely -- a
-# connector document with a bad pattern would otherwise dump an uncontrolled
-# C++ log line to the container's stderr before the clean InvalidTypeMapError
-# below is raised. Verified: this suppresses that output completely.
-_RE2_OPTIONS: Final = re2.Options()
-_RE2_OPTIONS.log_errors = False
-
-_NAMED_GROUP_RE2: Final[Pattern[str]] = re.compile(r"\(\?<([A-Za-z_][A-Za-z0-9_]*)>")
-
-# RE2 refuses to compile every one of these constructs itself; kept here too
-# only so an author sees "unsupported construct (lookahead)" instead of RE2's
-# raw parse error.
-_FORBIDDEN_CONSTRUCTS: Final[tuple[tuple[str, str], ...]] = (
-    ("(?=", "lookahead"),
-    ("(?!", "negative lookahead"),
-    ("(?<=", "lookbehind"),
-    ("(?<!", "negative lookbehind"),
-    ("(?>", "atomic group"),
-    ("(?P=", "Python-style named backreference"),
-    (r"\k<", "named backreference"),
-)
-_BACKREFERENCE_DIGIT: Final[Pattern[str]] = re.compile(r"\\[1-9]")
 
 # The unit vocabulary comes from the shared grammar table
 # (cdk.type_map.grammar) -- the same source parse_arrow_type binds against and
@@ -263,24 +182,6 @@ def normalize_native_type(value: str) -> str:
     return _contract_normalize_native_type(value)
 
 
-def _assert_re2_subset(pattern: str) -> None:
-    """Reject Perl/Python regex extensions that RE2 does not support."""
-    for token, label in _FORBIDDEN_CONSTRUCTS:
-        if token in pattern:
-            raise InvalidTypeMapError(
-                f"regex pattern uses unsupported construct ({label}): {pattern!r}"
-            )
-    if _BACKREFERENCE_DIGIT.search(pattern):
-        raise InvalidTypeMapError(
-            f"regex pattern uses numeric backreference: {pattern!r}"
-        )
-
-
-def _to_python_named_groups(pattern: str) -> str:
-    """Translate RE2-style ``(?<name>...)`` groups to Python ``(?P<name>...)``."""
-    return _NAMED_GROUP_RE2.sub(lambda m: f"(?P<{m.group(1)}>", pattern)
-
-
 def normalized_native(rule: TypeMapReadRule) -> str:
     """Normalize an exact read rule's ``native_type`` to its matching form."""
     if rule.match != "exact":
@@ -288,15 +189,11 @@ def normalized_native(rule: TypeMapReadRule) -> str:
     return normalize_native_type(rule.native_type)
 
 
-def compile_pattern(rule: TypeMapReadRule | TypeMapWriteRule) -> CompiledPattern:
+def compile_pattern(rule: TypeMapReadRule | TypeMapWriteRule) -> CompiledMatcher:
     r"""Compile a regex rule's matcher for forward matching.
 
     The matcher is the ``native_type`` on a read rule and the ``arrow_type`` on a
     write rule -- each direction matches on what the other renders.
-
-    Compiled with ``re2``, not stdlib ``re``: this pattern is connector-
-    authored, untrusted input, and RE2's linear-time guarantee is what bounds
-    match time against an adversarial native-type/arrow-type string (#504).
 
     Read inputs are normalized to uppercase before matching, so literal
     characters in a read pattern must be authored in uppercase too; the pattern
@@ -309,74 +206,37 @@ def compile_pattern(rule: TypeMapReadRule | TypeMapWriteRule) -> CompiledPattern
     matcher = (
         rule.native_type if isinstance(rule, _READ_RULE_CLASSES) else rule.arrow_type
     )
-    return cast(
-        CompiledPattern,
-        re2.compile(_to_python_named_groups(matcher), options=_RE2_OPTIONS),
-    )
+    return compile_matcher(matcher)
 
 
-def _assert_executable(rule: TypeMapReadRule | TypeMapWriteRule, *, where: str) -> None:
-    """Refuse a contract-valid rule this process must not compile or run.
+class ParsedTypeMap(NamedTuple):
+    """A type-map document's rule lists; ``None`` for a direction it omits."""
 
-    The contract has already decided the rule is well-formed. This decides
-    whether the engine will execute it -- see the module docstring for why the
-    two are different questions.
-    """
-    if rule.match != "regex":
-        return
-    matcher = (
-        rule.native_type if isinstance(rule, _READ_RULE_CLASSES) else rule.arrow_type
-    )
-    # Compilability under Python's stdlib `re` is already settled: the
-    # contract compiled this same matcher in _compile_ecma_matcher before we
-    # got here, and the RE2 subset admits no construct that survives that and
-    # then fails Python's compiler. RE2 is a stricter engine, not a superset
-    # (#504) -- compilability under RE2 is settled by neither check, so it is
-    # verified here too: a pattern this process cannot compile with the
-    # engine that will actually match it must fail loud now, not with a raw
-    # error the first time a connector using it is loaded into a mapper.
-    try:
-        _assert_re2_subset(matcher)
-    except InvalidTypeMapError as err:
-        raise InvalidTypeMapError(f"{where}: {err}") from err
-    try:
-        compile_pattern(rule)
-    except re2.error as err:
-        raise InvalidTypeMapError(
-            f"{where}: regex pattern {matcher!r} failed to compile: {err}"
-        ) from err
+    read: list[TypeMapReadRule] | None
+    write: list[TypeMapWriteRule] | None
 
 
-def _parse(
-    payload: object,
-    doc_model: type[TypeMapReadDoc] | type[TypeMapWriteDoc],
-    *,
-    source: str,
-) -> list[Any]:
-    """Build a rule array's contract models, then refuse what we will not run.
+def parse_type_map(document: object, *, source: str) -> ParsedTypeMap:
+    """Build a type-map document's contract models.
 
     Contract validity is analitiq-validator's gate; ``model_validate`` runs
     here because it is what builds the typed rules, and a document that
     skipped the gate still fails at load rather than mid-run.
-
-    Returns ``list[Any]`` because the two document models resolve to different
-    rule unions; each public wrapper below re-narrows to its own direction.
     """
     try:
-        doc = doc_model.model_validate(payload)
+        doc = TypeMapDoc.model_validate(document)
     except ValidationError as err:
         raise InvalidTypeMapError(f"{source}: {err}") from err
-    rules: list[Any] = list(doc.root)
-    for index, rule in enumerate(rules):
-        _assert_executable(rule, where=f"{source}: rule #{index}")
-    return rules
+    return ParsedTypeMap(read=doc.read, write=doc.write)
 
 
 def parse_rules(payload: object, *, source: str) -> list[TypeMapReadRule]:
     """Parse a read-direction (native_type -> arrow_type) rule array."""
-    return _parse(payload, TypeMapReadDoc, source=source)
+    document = {"$schema": TYPE_MAP_SCHEMA_URL, "read": payload}
+    return cast(list[TypeMapReadRule], parse_type_map(document, source=source).read)
 
 
 def parse_write_rules(payload: object, *, source: str) -> list[TypeMapWriteRule]:
     """Parse a write-direction (arrow_type -> native_type) rule array."""
-    return _parse(payload, TypeMapWriteDoc, source=source)
+    document = {"$schema": TYPE_MAP_SCHEMA_URL, "write": payload}
+    return cast(list[TypeMapWriteRule], parse_type_map(document, source=source).write)
