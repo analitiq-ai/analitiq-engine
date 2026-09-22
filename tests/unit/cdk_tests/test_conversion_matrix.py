@@ -6,7 +6,7 @@ boundary consults. These tests pin three things so it cannot silently rot:
 1. the committed published artifact equals what the canonical table generates
    (drift guard);
 2. every ``explicit`` conversion names a function that actually exists in the
-   engine's mapping ``FUNCTION_CATALOG``;
+   engine's mapping ``_FUNCTIONS`` registry;
 3. each declared mode matches what the real builders do -- ``cast_arrow_batch``
    (destination) and the compiled transform retype accept/reject the same pair
    identically, which is the divergence the matrix exists to remove.
@@ -92,7 +92,7 @@ class TestMatrixInvariants:
             classify_conversion("Utf8", "NotAType")
 
 
-class TestMatrixBoundToFunctionCatalog:
+class TestMatrixBoundToFunctions:
     """Every explicit conversion must name a real mapping function."""
 
     def test_explicit_fns_exist_in_catalog(self) -> None:
@@ -105,7 +105,7 @@ class TestMatrixBoundToFunctionCatalog:
         }
         assert named, "expected at least one explicit conversion fn"
         missing = named - set(catalog)
-        assert not missing, f"matrix names fns absent from FUNCTION_CATALOG: {missing}"
+        assert not missing, f"matrix names fns absent from _FUNCTIONS: {missing}"
 
 
 class TestNamedCells:

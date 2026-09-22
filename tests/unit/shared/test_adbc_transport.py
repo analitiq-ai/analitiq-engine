@@ -1,15 +1,13 @@
 """ADBC transport across the resolve/build split.
 
 * ``resolve_adbc_spec`` produces the JSON-safe worker payload and enforces
-  the schema's shape constraints (driver required, anyOf(dsn, db_kwargs),
-  structured dsn). The driver *values* are validated by the published
-  connector schema's ``AdbcTransport.driver`` enum — the engine derives the
-  dbapi module by the upstream packaging convention instead of keeping a
-  table.
+  the schema's ``anyOf(dsn, db_kwargs)`` constraint. The driver *values* are
+  validated by the published connector schema's ``AdbcTransport.driver``
+  enum — the engine derives the dbapi module by the upstream packaging
+  convention instead of keeping a table.
 * ``_resolve_db_kwargs`` renders each value to its ADBC option string,
   drops entries with no value (an explicit None, or a ref to a connection
-  input the user did not supply), and rejects non-mapping inputs and
-  non-scalar values.
+  input the user did not supply), and rejects non-scalar values.
 * ``build_adbc_from_spec`` fails loudly when the connector's driver wheel
   is not installed.
 """
