@@ -418,7 +418,8 @@ class TestValidationRules:
                 assignments,
             )
 
-    def test_a_null_list_ancestor_fails_not_null_like_a_null_struct_parent(self):
+    @pytest.mark.parametrize("rule_type", ["not_null", "required"])
+    def test_a_null_list_ancestor_fails_like_a_null_struct_parent(self, rule_type):
         """One verdict for "an ancestor of the addressed field is null".
 
         `list_flatten` drops a null list's elements where a null struct
@@ -436,7 +437,7 @@ class TestValidationRules:
                     "arrow_type": "Object",
                     "properties": {"sku": {"arrow_type": "Utf8"}},
                 },
-                validate={"rules": [_rule("not_null", field=["lines", "sku"])]},
+                validate={"rules": [_rule(rule_type, field=["lines", "sku"])]},
             )
         ]
         with pytest.raises(TransformationError, match=r"rows \[0, 2\]"):
