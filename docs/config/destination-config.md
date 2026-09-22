@@ -216,9 +216,10 @@ sends the identity-derived `record_id` (first occurrence wins, mirroring
 the SQL anti-join); `upsert` sends a full-content hash, so an identical
 replay dedups while a changed row gets a new key and the provider applies
 the update. The key name must not collide with an already-declared body
-field — the contract rejects those documents — nor with an engine- or
-connection-owned header, which only this connection's resolved transport
-knows, so `configure_schema` rejects that one. The block cannot combine with
+field or an engine-owned header (`Content-Type`, `Content-Length`) — the
+contract rejects those documents — nor with a header this connection's
+resolved transport sends, which only the connection knows, so
+`configure_schema` rejects that one. The block cannot combine with
 a `batching` block: a restart re-batches records, and a per-request key
 spanning several records can never dedup. Without the block, API `insert`
 is at-least-once on a same-run restart.

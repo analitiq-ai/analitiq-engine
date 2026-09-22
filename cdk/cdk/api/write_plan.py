@@ -228,14 +228,12 @@ def idempotency_config_problem(
     target = idempotency.location
     name = idempotency.name
     if target == "header" and name.lower() in reserved_headers:
-        # These headers are engine-owned (Content-Type) or carry the
-        # connection's own values (auth and friends). Layering the key over
-        # one would silently break every request -- or send the record id as
+        # These headers carry the connection's own values (auth and
+        # friends). Layering the key over one would send the record id as
         # the credential.
         return (
-            f"idempotency.name {name!r} collides with an engine- or "
-            f"connection-owned request header; pick a header the connection "
-            f"does not already send"
+            f"idempotency.name {name!r} collides with a header this "
+            f"connection's transport already sends; pick another header"
         )
     return None
 
