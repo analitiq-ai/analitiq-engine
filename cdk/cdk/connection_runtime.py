@@ -103,13 +103,9 @@ def authored_sql_capabilities(connector: Connector | None) -> dict[str, Any] | N
 
 
 def authored_error_map(connector: Connector | None) -> dict[str, Any] | None:
-    """Return the connector's declared ``error_map`` as its author wrote it.
+    """Return the validated ``error_map`` as authored, for the worker payload.
 
-    The sibling of :func:`authored_sql_capabilities`, and one reader for the
-    same reason: the engine folds this block into the worker payload while
-    the conformance kit certifies the same ``connector.json``, so a second
-    reader going back to the raw file could refuse a definition the engine
-    runs, or accept one it refuses. Every kind may declare it.
+    Every kind may declare it.
     """
     if connector is None:
         return None

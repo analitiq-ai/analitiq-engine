@@ -1,8 +1,7 @@
-"""Grammar + lookup tests for the connector-level declared facts (issue #401, #513).
+"""Lookup and verdict-table tests for the connector-level declared facts (#401, #513).
 
-``cdk.declarations`` is the typed, fail-loud view of the ``error_map`` and
-``concurrency`` blocks: declared content is validated strictly (vocabulary,
-key grammar, unknown fields), absence is additive, and the engine-owned
+``cdk.declarations`` reads the ``error_map`` and ``concurrency`` blocks the
+contract has already validated: absence is additive, and the engine-owned
 verdict tables cover the whole category vocabulary.
 
 Issue #513 replaced the four closed families (``sqlstate``/``exception``/
