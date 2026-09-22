@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal, get_args
 
 from analitiq.contracts.endpoints import (
     ApiEndpointDoc,
@@ -41,6 +41,15 @@ from .request import (
     request_block_problem,
     substitute_path,
 )
+
+#: Where the engine places the per-record idempotency key. The two
+#: placements the record-request builder handles, checked against the
+#: contract so a third fails the import rather than a write.
+IdempotencyLocation = Literal["header", "body"]
+if set(get_args(IdempotencyLocation)) != set(
+    get_args(Idempotency.model_fields["location"].annotation)
+):
+    raise TypeError("Idempotency.in: the contract and the engine's placements disagree")
 
 __all__ = [
     "WRITE_MODE_KEYS",
@@ -111,7 +120,7 @@ class StreamWritePlan:
     #: "body") and the name it lands under. ``None`` means the endpoint
     #: declares no key. The VALUE is always engine-owned -- the author
     #: declares placement only.
-    idempotency_in: str | None = None
+    idempotency_in: IdempotencyLocation | None = None
     idempotency_name: str = ""
     #: The stream's write mode key. Insert keys on the engine's
     #: identity-derived record id (SQL insert parity: the first occurrence

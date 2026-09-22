@@ -244,55 +244,6 @@ class TestEndpointRefDispatch:
         assert handler._type_mapper_for_stream("good").connector_slug == "pg"
 
 
-class TestColumnDefStrictness:
-    """A malformed column must be refused loudly rather than silently
-    dropped from the DDL. The contract makes both shapes unrepresentable,
-    so the document never parses -- but registration runs before the gRPC
-    server exists, so it holds that failure against its own stream and the
-    stream's schema handshake is where it is refused, naming both the
-    stream id the engine needs and the field that broke.
-    """
-
-    async def _refusal(self, columns) -> str:
-        from cdk.types import SchemaSpec, WriteMode
-
-        handler = GenericSQLConnector()
-        handler._connected = True
-        handler.set_stream_endpoints({"s1": _endpoint_json(columns, table="t")})
-        with pytest.raises(SchemaConfigurationError) as err:
-            await handler.configure_schema(
-                SchemaSpec(
-                    stream_id="s1",
-                    version=1,
-                    write_mode=WriteMode.WRITE_MODE_INSERT,
-                    ack_timeout_seconds=30,
-                )
-            )
-        return str(err.value)
-
-    @pytest.mark.asyncio
-    async def test_unnamed_column_is_refused(self):
-        """A column without a name never reaches DDL."""
-
-        message = await self._refusal(
-            [
-                {"native_type": "BIGINT", "arrow_type": "Int64"},
-                {"name": "valid", "native_type": "BIGINT", "arrow_type": "Int64"},
-            ]
-        )
-        assert "s1" in message
-        assert "name" in message
-
-    @pytest.mark.asyncio
-    async def test_column_without_arrow_type_is_refused(self):
-        # native_type alone is not enough: DDL consumes the stored
-        # arrow_type (the same declaration the schema contract casts
-        # with), never the read map.
-        message = await self._refusal([{"name": "id", "native_type": "BIGINT"}])
-        assert "s1" in message
-        assert "arrow_type" in message
-
-
 class TestWriteBatchFatalOnTypeMapError:
     """Deterministic config and type-map errors in write_batch must not be retried."""
 

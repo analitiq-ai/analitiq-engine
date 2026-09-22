@@ -74,7 +74,7 @@ from .page_loop import Fetch, Page, PageLoop, PageRequest
 from .query_style import declared_query_styles
 from .read_setup import build_read_strategy, stop_condition
 from .records import extract_records, resolve_response_metadata
-from .replication import check_mapping_direction, cursor_bounds, cursor_mapping_for
+from .replication import cursor_bounds, cursor_mapping_for
 from .request import (
     ParamTable,
     RequestBuilder,
@@ -885,7 +885,6 @@ class GenericAPIConnector(BaseDestinationHandler):
                 f"nothing can send the bound, so the read would return the "
                 f"whole collection on every run"
             )
-        check_mapping_direction(mapping)
         cursor_state = await checkpoint.get_cursor(stream_name, partition)
         cursor_value = (cursor_state or {}).get("cursor")
         # Absent is ``None`` -- the store answers ``None`` for a stream with
@@ -1280,15 +1279,19 @@ class GenericAPIConnector(BaseDestinationHandler):
             )
         )
         body = self._build_body(plan, record=record)
-        if plan.idempotency_in == "body" and key is not None:
-            body = body_with_idempotency_key(plan, body, key)
-        encoded = encode_body(body, plan.content_type)
-        headers = (
-            {plan.idempotency_name: key}
-            if plan.idempotency_in == "header" and key is not None
-            else None
-        )
-        return encoded, headers
+        headers: dict[str, str] | None = None
+        if key is not None:
+            match plan.idempotency_in:
+                case "body":
+                    body = body_with_idempotency_key(plan, body, key)
+                case "header":
+                    headers = {plan.idempotency_name: key}
+                case other:
+                    raise ValueError(
+                        f"idempotency.in {other!r} for endpoint {plan.endpoint!r} "
+                        f"has no placement in the engine"
+                    )
+        return encode_body(body, plan.content_type), headers
 
     async def _write_in_chunks(
         self,

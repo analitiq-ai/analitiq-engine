@@ -708,32 +708,6 @@ class TestCreateConfigErrorPaths:
         with pytest.raises(ValueError, match="Duplicate stream_id"):
             PipelineConfigPrep().create_config()
 
-    @pytest.mark.parametrize("side", ["source", "destination"])
-    def test_missing_endpoint_ref_names_stream_and_side(
-        self, pipeline_tree: Path, side: str
-    ) -> None:
-        """A stream side without ``endpoint_ref`` must fail naming which side
-        (source vs destination) is malformed. The stream contract requires
-        endpoint_ref on both sides, so this surfaces at contract validation."""
-        stream_doc = _stream_doc(STREAM_ID)
-        if side == "source":
-            del stream_doc["source"]["endpoint_ref"]
-            # The source's endpoint_ref is a plain required field.
-            expected = "source/endpoint_ref"
-        else:
-            del stream_doc["destinations"][0]["endpoint_ref"]
-            # The destination SHAPE is selected by endpoint_ref.scope, so a
-            # ref-less destination fails at the union's discriminator, anchored
-            # at the destination entry and naming the selecting key.
-            expected = "destinations/0: endpoint_ref.scope"
-        _write_json(
-            pipeline_tree / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json",
-            stream_doc,
-        )
-        prep = PipelineConfigPrep()
-        with pytest.raises(ContractValidationError, match=expected):
-            prep.create_config()
-
 
 # ---------------------------------------------------------------------------
 # Endpoint schema dispatch (#165)

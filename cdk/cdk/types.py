@@ -14,9 +14,12 @@ different enums.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Final, Protocol, cast, get_args, runtime_checkable
+
+from analitiq.contracts.endpoints import WriteMode as ContractWriteMode
 
 
 class AckStatus(IntEnum):
@@ -79,6 +82,27 @@ class WriteMode(IntEnum):
     WRITE_MODE_INSERT = 1  # Insert only, fail on conflict
     WRITE_MODE_UPSERT = 2  # Upsert (insert or update on conflict)
     WRITE_MODE_TRUNCATE_INSERT = 3  # Truncate table before insert (full refresh)
+
+
+#: The contract's write-mode name -> the wire member it travels as. The one
+#: translation table every hop uses, in both directions.
+WRITE_MODE_BY_NAME: Final[Mapping[str, WriteMode]] = {
+    "insert": WriteMode.WRITE_MODE_INSERT,
+    "upsert": WriteMode.WRITE_MODE_UPSERT,
+    "truncate_insert": WriteMode.WRITE_MODE_TRUNCATE_INSERT,
+}
+WRITE_MODE_NAMES: Final[Mapping[WriteMode, ContractWriteMode]] = {
+    member: cast(ContractWriteMode, name) for name, member in WRITE_MODE_BY_NAME.items()
+}
+
+if set(WRITE_MODE_BY_NAME) != set(get_args(ContractWriteMode)) or set(
+    WRITE_MODE_NAMES
+) != set(WriteMode) - {WriteMode.WRITE_MODE_UNSPECIFIED}:
+    raise TypeError(
+        f"write modes: the contract declares {sorted(get_args(ContractWriteMode))} "
+        f"and the wire {sorted(m.name for m in WriteMode)}, but the engine "
+        f"translates {sorted(WRITE_MODE_BY_NAME)}"
+    )
 
 
 class RetrySemantics(IntEnum):

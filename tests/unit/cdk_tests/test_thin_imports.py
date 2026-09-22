@@ -119,7 +119,7 @@ class TestThinControlPlaneImports:
             for name in (
                 "PageLoop", "Page", "PageRequest", "build_strategy",
                 "resolve_page_size", "evaluate_predicate", "ApiDialect",
-                "UnknownPaginationStrategy", "ConnectorConnectionError",
+                "ConnectorConnectionError",
             ):
                 assert hasattr(cdk.api, name), name
 

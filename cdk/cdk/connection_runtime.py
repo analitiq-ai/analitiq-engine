@@ -29,10 +29,14 @@ import asyncio
 import copy
 import logging
 from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, cast, get_args
 
 from analitiq.contracts.connection import ConnectionInput
-from analitiq.contracts.connector import Connector, DatabaseConnector
+from analitiq.contracts.connector import (
+    Connector,
+    ContractInputStorage,
+    DatabaseConnector,
+)
 from pydantic import ValidationError
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -52,6 +56,7 @@ from cdk.resolver import (
 )
 from cdk.secrets.exceptions import PlaceholderExpansionError, SecretNotFoundError
 from cdk.secrets.protocol import SecretsResolver
+from cdk.sql.capabilities import SQL_TRANSPORT_TYPES
 from cdk.sql.exceptions import TlsVerificationError
 from cdk.transport_factory import (
     HTTP_TRANSPORT_TYPE,
@@ -66,6 +71,15 @@ from cdk.type_map import InvalidTypeMapError, TypeMapper, UnmappedTypeError
 from cdk.types import EndpointScope
 
 logger = logging.getLogger(__name__)
+
+#: The storage scopes the required-input check reads a value from, one per
+#: ``storage`` the contract lets an input declare.
+_INPUT_STORAGE_SCOPES = frozenset({"connection.parameters", "secrets"})
+if _INPUT_STORAGE_SCOPES != frozenset(get_args(ContractInputStorage)):
+    raise TypeError(
+        "connection_contract input storage: the contract and the engine's "
+        "required-input scopes disagree"
+    )
 
 #: The connection-document fields transport materialization puts in scope --
 #: the ONE statement of this fact. ``_build_resolution_context`` builds the
@@ -130,7 +144,7 @@ def _derive_dialect(connector: Connector | None) -> str | None:
         return None
     transport = transports[default_ref]
     transport_type = transport.get("transport_type")
-    if transport_type not in ("sqlalchemy", "adbc"):
+    if transport_type not in SQL_TRANSPORT_TYPES:
         return None
     driver = transport.get("driver")
     if not isinstance(driver, str) or not driver:

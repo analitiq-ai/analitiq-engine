@@ -91,6 +91,22 @@ _ExprFn = Callable[[pa.RecordBatch], pa.Array]
 # added to the mask without the ancestor fold cannot silently exempt itself.
 _NULL_SENSITIVE_RULES: Final[frozenset[str]] = frozenset({"not_null", "required"})
 
+# The rule types ``_rule_failure_mask`` dispatches on, checked against the
+# contract so a rule type it grows fails the import rather than a run.
+_HANDLED_RULE_TYPES: Final[frozenset[str]] = _NULL_SENSITIVE_RULES | {
+    "min_length",
+    "max_length",
+    "pattern",
+    "range",
+    "in_list",
+}
+_RULE_TYPES = frozenset(get_args(ValidationRule.model_fields["type"].annotation))
+if _HANDLED_RULE_TYPES != _RULE_TYPES:
+    raise TypeError(
+        f"validation rule types {sorted(_HANDLED_RULE_TYPES ^ _RULE_TYPES)}: the "
+        f"contract and the engine's rule dispatch disagree"
+    )
+
 
 def build_output_schema(assignments: list[Assignment]) -> pa.Schema:
     """Build the post-transform Arrow schema from a stream's assignments.
@@ -615,8 +631,8 @@ def _rule_failure_mask(
             f"column {label}: validation rule {rule.type!r} is "
             f"invalid for a {value.type} column: {e}"
         ) from e
-    # Reached only if the contract's rule-type vocabulary grows and this match
-    # does not: a rule the engine cannot enforce must fail, never pass silently.
+    # Unreachable while the import check holds; the match above has no
+    # catch-all, so the function still needs a terminal statement.
     raise TransformationError(
         f"column {label}: validation rule type {rule.type!r} has no "
         f"engine implementation"

@@ -47,19 +47,13 @@ from cdk.connection_runtime import ConnectionRuntime
 from cdk.secrets.resolvers.scheme import SchemeSecretsResolver
 from cdk.sql.execution import execute_ddl
 from cdk.sql.generic import GenericSQLConnector
-from cdk.types import BatchWriteResult, Cursor, SchemaSpec, WriteMode
+from cdk.types import WRITE_MODE_BY_NAME, BatchWriteResult, Cursor, SchemaSpec
 
 from ..fakes import MemoryCheckpointStore
 from ..target import ConformanceSetupError, ConformanceTarget, schema_url_of
 
 STREAM_ID = "conformance-stream"
 RUN_ID = "conformance-run"
-
-WRITE_MODES = {
-    "insert": WriteMode.WRITE_MODE_INSERT,
-    "upsert": WriteMode.WRITE_MODE_UPSERT,
-    "truncate_insert": WriteMode.WRITE_MODE_TRUNCATE_INSERT,
-}
 
 _BATCH_SCHEMA = pa.schema(
     [
@@ -274,7 +268,7 @@ class LiveHarness:
                 SchemaSpec(
                     stream_id=STREAM_ID,
                     version=1,
-                    write_mode=WRITE_MODES[mode],
+                    write_mode=WRITE_MODE_BY_NAME[mode],
                     ack_timeout_seconds=60,
                 )
             )

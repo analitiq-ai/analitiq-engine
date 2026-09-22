@@ -27,6 +27,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, get_args
 
+from analitiq.contracts.connector import SqlBulkLoad
 from analitiq.contracts.connector import SqlCapabilities as ContractSqlCapabilities
 from analitiq.contracts.connector import SqlStageCapabilities
 from pydantic import BaseModel
@@ -37,14 +38,29 @@ from pydantic import BaseModel
 #: ``adbc_ingest`` needs an ADBC cursor — so ``bulk_load`` maps each
 #: family to its mechanism instead of declaring one connector-wide value
 #: that only one family could run.
-SQL_TRANSPORT_TYPES = ("sqlalchemy", "adbc")
+SQL_TRANSPORT_TYPES: tuple[str, ...] = tuple(SqlBulkLoad.model_fields)
+
+
+def _bulk_mechanisms(transport_type: str) -> frozenset[str]:
+    # The field is ``Literal[...] | None``: omitting the key is legal.
+    declared, _none = get_args(SqlBulkLoad.model_fields[transport_type].annotation)
+    return frozenset(get_args(declared))
+
 
 #: Mechanisms implemented by the connector's dialect (its ``bulk_land``
-#: hook). ``adbc_ingest`` is not among them: it is the ADBC backend's own
-#: native landing and involves no dialect code.
-DIALECT_IMPLEMENTED_BULK_MECHANISMS = frozenset(
-    {"copy_from", "load_data_local_infile", "load_job"}
-)
+#: hook): every mechanism the SQLAlchemy transport can declare, since that
+#: transport has no native landing of its own.
+DIALECT_IMPLEMENTED_BULK_MECHANISMS: frozenset[str] = _bulk_mechanisms("sqlalchemy")
+
+# ``adbc_ingest`` is the ADBC backend's own native landing and involves no
+# dialect code; every other ADBC mechanism is the dialect's hook. A contract
+# release that adds an ADBC-only mechanism must decide which side runs it.
+if _bulk_mechanisms("adbc") != DIALECT_IMPLEMENTED_BULK_MECHANISMS | {"adbc_ingest"}:
+    raise TypeError(
+        f"SqlBulkLoad.adbc declares {sorted(_bulk_mechanisms('adbc'))}; the "
+        f"engine runs {sorted(DIALECT_IMPLEMENTED_BULK_MECHANISMS)} through the "
+        f"dialect hook and adbc_ingest natively"
+    )
 
 
 #: The values the consumer sites branch on, per shape fact. Hand-kept because

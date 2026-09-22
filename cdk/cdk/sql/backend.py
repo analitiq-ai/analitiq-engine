@@ -25,7 +25,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 from .dialects import TableAddress
 
@@ -33,8 +33,6 @@ if TYPE_CHECKING:
     import pyarrow as pa
 
     from cdk.connection_runtime import ConnectionRuntime
-
-StageScope = Literal["temp", "real"]
 
 _Row = TypeVar("_Row")
 
@@ -55,7 +53,9 @@ class StageWritePlan:
 
     stage: TableAddress
     target: TableAddress
-    scope: StageScope
+    #: A value of the contract's ``stage.scope``; the handled set is checked
+    #: against it in :mod:`cdk.sql.capabilities`.
+    scope: str
     transactional: bool
     create_stage_sql: str
     #: Set on a truncate_insert read's first batch only: the dialect's

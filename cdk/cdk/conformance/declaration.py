@@ -19,7 +19,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cdk.sql.capabilities import DIALECT_IMPLEMENTED_BULK_MECHANISMS, SqlCapabilities
+from cdk.sql.capabilities import (
+    DIALECT_IMPLEMENTED_BULK_MECHANISMS,
+    SQL_TRANSPORT_TYPES,
+    SqlCapabilities,
+)
 from cdk.sql.dialects import dialect_overrides
 
 from .violations import Violation
@@ -57,7 +61,7 @@ def _database_shaped_kind_mismatch(target: ConformanceTarget) -> list[Violation]
         {
             str(block["transport_type"])
             for block in transports.values()
-            if block.get("transport_type") in ("sqlalchemy", "adbc")
+            if block.get("transport_type") in SQL_TRANSPORT_TYPES
         }
     )
     if sql_transports:

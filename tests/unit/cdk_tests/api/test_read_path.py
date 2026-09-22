@@ -1400,27 +1400,6 @@ class TestIncremental:
                 checkpoint=FakeCheckpoint({"cursor": "1"}),
             )
 
-    async def test_a_mapping_facing_the_wrong_way_fails_before_the_first_run(
-        self,
-    ) -> None:
-        # Decidable from the document alone, so it is refused before a
-        # full first run establishes a checkpoint.
-        document = self._document()
-        document["operations"]["read"]["replication"]["cursor_mappings"][0][
-            "operator"
-        ] = "lt"
-        session = FakeSession([FakeResponse(body=_rows(1))])
-        with pytest.raises(ReadError, match="an upper bound"):
-            await _read(
-                session,
-                document,
-                source=stream_source(
-                    method="incremental", cursor_field="id", safety_window=60
-                ),
-                checkpoint=FakeCheckpoint(None),
-            )
-        assert session.calls == []
-
     async def test_no_prior_cursor_reads_everything(self) -> None:
         session = FakeSession([FakeResponse(body=_rows(1))])
         await _read(

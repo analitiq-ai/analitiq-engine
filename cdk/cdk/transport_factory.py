@@ -34,9 +34,9 @@ import ssl as _ssl
 import urllib.parse
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any, Union, get_args
 
-from analitiq.contracts.connector import Connector
+from analitiq.contracts.connector import Connector, DsnBinding
 from sqlalchemy import create_engine, event
 from sqlalchemy import text as _sa_text
 from sqlalchemy.engine import Engine, make_url
@@ -82,6 +82,12 @@ _ENCODING_QUOTES: dict[str, str] = {
     "url_query_key": "",
     "url_query_value": "",
 }
+if set(_ENCODING_QUOTES) != set(
+    get_args(DsnBinding.model_fields["encoding"].annotation)
+):
+    raise TypeError(
+        "DsnBinding.encoding: the contract and the engine's DSN encodings disagree"
+    )
 
 
 def _render_url_template_dsn(dsn_spec: Mapping[str, Any], resolver: Resolver) -> str:

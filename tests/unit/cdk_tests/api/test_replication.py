@@ -133,13 +133,6 @@ class TestSingleBound:
         with pytest.raises(ReadError, match="not an integer"):
             _bounds(_single(), "2026-07-31T12:00:00Z", 120, field_type="integer")
 
-    @pytest.mark.parametrize("field_type", ["number", "boolean", "object", "array"])
-    def test_a_field_type_that_cannot_hold_a_cursor_is_refused(
-        self, field_type: str
-    ) -> None:
-        with pytest.raises(ReadError, match=f"declared as type {field_type!r}"):
-            _bounds(_single(), "1", 0, field_type=field_type)
-
     def test_gt_and_gte_send_the_same_value_under_date_time(self) -> None:
         # Inclusiveness is the provider's fact; the safety window already
         # re-reads the boundary, and date-time truncates nothing.
@@ -168,11 +161,6 @@ class TestSingleBound:
             _window(start_operator="gt", format="date"), "2026-07-31T23:00:00Z", 0
         )
         assert bounds == {"from": "2026-07-30", "to": "2026-08-01"}
-
-    @pytest.mark.parametrize("operator", ["lt", "lte"])
-    def test_an_upper_bound_alone_cannot_resume_a_read(self, operator: str) -> None:
-        with pytest.raises(ReadError, match="an upper bound"):
-            _bounds(_single(operator=operator), "2026-07-31T12:00:00Z", 0)
 
 
 class TestFormat:
@@ -245,21 +233,6 @@ class TestFormat:
         assert _bounds(_single(), 1722427200, 120, field_type="integer") == {
             "since": 1722427080
         }
-
-    @pytest.mark.parametrize("field_format", [None, "int64"])
-    def test_an_id_under_an_epoch_mapping_format_is_refused(
-        self, field_format: str | None
-    ) -> None:
-        # No epoch format on the record field means the integer is an id;
-        # an id has no unit to render as epoch ticks.
-        with pytest.raises(ReadError, match="is an integer id, but the mapping"):
-            _bounds(
-                _single(format="epoch_seconds"),
-                1722427200,
-                0,
-                field_type="integer",
-                field_format=field_format,
-            )
 
     def test_a_zero_cursor_is_the_first_id_not_an_absent_one(self) -> None:
         assert _bounds(_single(), 0, 0, field_type="integer") == {"since": 0}
@@ -337,21 +310,6 @@ class TestFormat:
                 field_format="epoch_seconds",
             )
 
-    @pytest.mark.parametrize("field_format", ["date", "date-time"])
-    def test_an_integer_field_under_a_calendar_format_is_refused(
-        self, field_format: str
-    ) -> None:
-        # An integer is a moment only under an epoch format, which is the
-        # only place its unit is declared.
-        with pytest.raises(ReadError, match="only under an epoch format"):
-            _bounds(
-                _single(),
-                1722427200,
-                0,
-                field_type="integer",
-                field_format=field_format,
-            )
-
     def test_a_date_is_taken_from_the_cursor_in_utc(self) -> None:
         # The window end is rendered in UTC; a cursor carrying an offset
         # must be too, or the range can face backwards across midnight.
@@ -392,22 +350,6 @@ class TestWindowBounds:
     def test_both_ends_share_the_declared_format(self) -> None:
         bounds = _bounds(_window(format="date"), "2026-07-31T12:00:00Z", 0)
         assert bounds == {"from": "2026-07-31", "to": "2026-08-01"}
-
-    @pytest.mark.parametrize(
-        "overrides",
-        [{"start_operator": "lt"}, {"end_operator": "gte"}],
-        ids=["start-faces-up", "end-faces-down"],
-    )
-    def test_a_window_facing_the_wrong_way_is_refused(
-        self, overrides: dict[str, str]
-    ) -> None:
-        with pytest.raises(ReadError, match="start must be gt/gte"):
-            _bounds(_window(**overrides), "2026-07-31T12:00:00Z", 0)
-
-    def test_a_window_over_an_id_cursor_is_refused(self) -> None:
-        # An id has no "now" to bound the window at.
-        with pytest.raises(ReadError, match="needs a timestamp cursor"):
-            _bounds(_window(), "987654321", 0, field_type="integer")
 
     def test_a_cursor_ahead_of_the_clock_past_the_safety_window_is_refused(
         self,
