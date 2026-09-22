@@ -85,11 +85,6 @@ from .exceptions import TransformationError, ValidationFailure
 # A compiled expression: given the source batch, return one value column.
 _ExprFn = Callable[[pa.RecordBatch], pa.Array]
 
-# The rules a null answers rather than skips: every other rule exempts a null
-# value (mirroring the per-record ``if value is not None`` guard), and these
-# are the ones a null LIST ancestor must fail too.
-_NULL_SENSITIVE_RULES: Final[frozenset[str]] = frozenset({"not_null", "required"})
-
 
 def build_output_schema(assignments: list[Assignment]) -> pa.Schema:
     """Build the post-transform Arrow schema from a stream's assignments.
@@ -546,13 +541,13 @@ def _rule_errors(built: Mapping[str, pa.Array], rule: ValidationRule) -> list[st
             f"declared field the built value does not carry: {e}"
         ) from e
     present = pc.is_valid(value)
-    mask = _rule_failure_mask(value, present, rule, label)
+    mask, answers_null = _rule_failure_mask(value, present, rule, label)
     # The passing path stays inside Arrow: `pc.any` answers from the mask's
     # own buffers, where `to_pylist` would allocate a Python object per row
     # per rule on every batch that passes -- the common case, and the hot
     # one. Row indexes are materialised only for a rule that actually
-    # failed, or for the null ancestors a null-sensitive rule must add.
-    ancestors = null_ancestors if rule.type in _NULL_SENSITIVE_RULES else []
+    # failed, or for the null ancestors a null-answering rule must add.
+    ancestors = null_ancestors if answers_null else []
     if not pc.any(mask, min_count=0).as_py():
         if not ancestors:
             return []
@@ -579,10 +574,11 @@ def _rule_failure_mask(
     present: pa.Array,
     rule: ValidationRule,
     label: str,
-) -> pa.Array:
+) -> tuple[pa.Array, bool]:
     """Compute the boolean failure mask for one validation rule.
 
     Failures are ``present AND predicate`` so nulls never trip a value rule.
+    The flag says whether the rule answers a null rather than exempting it.
     """
 
     def failing(predicate: pa.Array) -> pa.Array:
@@ -590,25 +586,28 @@ def _rule_failure_mask(
 
     try:
         match rule.type:
+            # The only rules a null answers rather than skips (every other
+            # rule mirrors the per-record ``if value is not None`` guard).
+            # This arm is the one spelling of that set: `_rule_errors` folds
+            # null LIST ancestors into the failures only on its flag.
             case "not_null" | "required":
-                return pc.is_null(value)
+                return pc.is_null(value), True
             case "min_length":
                 length = pc.utf8_length(_string_form(value))
-                return failing(pc.less(length, rule.value))
+                return failing(pc.less(length, rule.value)), False
             case "max_length":
                 length = pc.utf8_length(_string_form(value))
-                return failing(pc.greater(length, rule.value))
+                return failing(pc.greater(length, rule.value)), False
             case "pattern":
                 matched = pc.match_substring_regex(
                     _string_form(value), pattern=f"^(?:{rule.value})"
                 )
-                return failing(pc.invert(matched))
+                return failing(pc.invert(matched)), False
             case "range":
-                return _range_failure_mask(value, present, rule)
+                return _range_failure_mask(value, present, rule), False
             case "in_list":
-                return failing(
-                    pc.invert(pc.is_in(value, value_set=pa.array(rule.value)))
-                )
+                in_list = pc.is_in(value, value_set=pa.array(rule.value))
+                return failing(pc.invert(in_list)), False
             case _:
                 assert_never(rule.type)
     except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as e:
