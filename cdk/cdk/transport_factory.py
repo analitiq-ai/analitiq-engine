@@ -274,11 +274,6 @@ def _select_transport(
 ) -> tuple[str, Mapping[str, Any]]:
     """Pick the ``transports[ref]`` block, applying ``transport_defaults``."""
     transports = connector.transports
-    if not transports:
-        raise TransportSpecError(
-            f"Connector {connector.connector_id!r} has no `transports` block; "
-            f"cannot materialize transport"
-        )
     ref = transport_ref or connector.default_transport
     if ref not in transports:
         raise KeyError(
@@ -975,33 +970,18 @@ def require_http_base_url(base_url: Any) -> str:
 #: a client refusal); the client rejects the rest of the range outright.
 _HEADER_FORBIDDEN_VALUE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
 
-#: An HTTP field name is a token (RFC 9110 §5.1): no separators, no spaces,
-#: no control characters. The client refuses anything else when it builds
-#: the request.
-_HEADER_NAME_TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
-
 
 def require_wire_safe_header(name: str, value: str) -> str:
     """Return *value* if an HTTP client can send it under *name*, or raise.
 
-    Both halves are judged, because both reach the wire: a field name that
-    is not a token and a value carrying a line break are each refused by
-    the client when the request is built -- after connect() reported
-    success -- so every read on the connector fails with the transport
-    already certified. Refused here instead, where the message can still
-    name the header. Shared with the per-request builder and, through
-    :func:`resolve_http_spec`, with the conformance kit, so one rule covers
-    every route a header takes to the wire.
+    A value carrying a line break is refused by the client when the request
+    is built -- after connect() reported success -- so every read on the
+    connector fails with the transport already certified. Refused here
+    instead, where the message can still name the header. Shared with the
+    per-request builder and, through :func:`resolve_http_spec`, with the
+    conformance kit, so one rule covers every route a header takes to the
+    wire.
     """
-    # `fullmatch`, not `match`: Python's `$` also matches before a trailing
-    # newline, so `match` would pass "X-Foo\n" -- the request-splitting
-    # shape this refusal exists for.
-    if not _HEADER_NAME_TOKEN.fullmatch(name):
-        raise TransportSpecError(
-            f"header name {name!r} is not an HTTP token: a field name "
-            f"carries no spaces, separators or control characters, so no "
-            f"HTTP client will send this one."
-        )
     found = _HEADER_FORBIDDEN_VALUE.search(value)
     if found:
         raise TransportSpecError(
@@ -1254,12 +1234,7 @@ def resolve_transport_spec(
     what a connector worker receives in its launch bootstrap.
     """
     _ref, merged = _select_transport(connector, transport_ref)
-    transport_type = merged.get("transport_type")
-    if not transport_type:
-        raise TransportSpecError(
-            f"Resolved transport spec missing `transport_type`; connector "
-            f"{connector.connector_id!r}, transport {transport_ref!r}"
-        )
+    transport_type = merged["transport_type"]
     kind = _TRANSPORT_KINDS.get(transport_type)
     if kind is None:
         raise NotImplementedError(

@@ -1,7 +1,6 @@
 """Unit tests for the typed resolved-runtime models and their invariants."""
 
 from typing import Literal
-from unittest.mock import MagicMock
 
 import pytest
 from analitiq.contracts.pipelines.config import ErrorHandling as ContractErrorHandling
@@ -9,7 +8,6 @@ from analitiq.contracts.pipelines.config import Runtime as ContractRuntime
 from analitiq.contracts.stream import Replication, StreamSource
 from pydantic import BaseModel, TypeAdapter, create_model
 
-from src.engine.mapping import MappingDocument
 from src.engine.pipeline_config_prep import _parse_replication, _parse_runtime_config
 from src.models.resolved import (
     BatchingConfig,
@@ -18,7 +16,6 @@ from src.models.resolved import (
     PipelineConnections,
     ReplicationConfig,
     ResolvedPipeline,
-    ResolvedStream,
     RuntimeConfig,
     _contract_literals,
     with_effective_safety_window,
@@ -151,10 +148,6 @@ class TestPipelineConnections:
         assert conns.source == "src"
         assert conns.destinations == ["a", "b"]
 
-    def test_rejects_empty_source(self):
-        with pytest.raises(ValueError, match="source cannot be empty"):
-            PipelineConnections(source="", destinations=["a"])
-
 
 class TestResolvedModelGuards:
     def _pipeline(self, pipeline_id="p1"):
@@ -171,19 +164,6 @@ class TestResolvedModelGuards:
     def test_resolved_pipeline_rejects_empty_id(self):
         with pytest.raises(ValueError, match="pipeline_id cannot be empty"):
             self._pipeline(pipeline_id="")
-
-    def _stream(self, stream_id="s1"):
-        return ResolvedStream(
-            stream_id=stream_id,
-            stream_version=1,
-            source=MagicMock(),
-            destinations=[MagicMock()],
-            mapping=MappingDocument(),
-        )
-
-    def test_resolved_stream_rejects_empty_id(self):
-        with pytest.raises(ValueError, match="stream_id cannot be empty"):
-            self._stream(stream_id="")
 
 
 def _runtime_block(block: dict) -> ContractRuntime:

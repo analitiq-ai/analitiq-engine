@@ -49,26 +49,20 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any
+from typing import Any, get_args
+
+from analitiq.contracts.connector import ErrorCategory
 
 from .types import AckStatus, FailureCategory
 
 logger = logging.getLogger(__name__)
 
-# The engine-owned category vocabulary, aligned with the existing
-# FailureCategory and ErrorCode surfaces. The derivation from a category to
-# a verdict is engine-owned too — the per-context tables below are defined
+# The category vocabulary is the contract's. The derivation from a category
+# to a verdict is engine-owned — the per-context tables below are defined
 # once here so every consumer site (write ack ladder, read classification)
 # derives identically. Never in connector.json: connectors declare facts,
 # the engine decides verdicts.
-ERROR_CATEGORY_VALUES = (
-    "transient",
-    "config",
-    "auth",
-    "unreachable",
-    "rate_limited",
-    "write_rejected",
-)
+ERROR_CATEGORY_VALUES: tuple[str, ...] = get_args(ErrorCategory)
 
 # Write context: declared category -> (ack status, failure category).
 # Retryable categories carry WRITE_REJECTED so an exhausted retry classifies
@@ -141,11 +135,10 @@ DECLARED_READ_DETERMINISTIC = MappingProxyType(dict(DECLARED_READ_DETERMINISTIC)
 CLASS_NAME_SIGNAL = "__exception_class__"
 
 
-class ConnectorDeclarationError(ValueError):
-    """A category outside the engine vocabulary reached a verdict lookup.
+class ErrorCategoryDriftError(RuntimeError):
+    """A :class:`DeclaredMatch` carries a category outside the contract vocabulary.
 
-    Raised only by :func:`require_declared_category`, where it means the
-    engine itself built a :class:`DeclaredMatch` wrong.
+    The engine built it, so this is an engine bug, never a connector one.
     """
 
 
@@ -191,7 +184,7 @@ def require_declared_category(category: str, *, source: str) -> str:
     to ``"config"`` instead; see :func:`classify_via_hook`.
     """
     if category not in ERROR_CATEGORY_VALUES:
-        raise ConnectorDeclarationError(
+        raise ErrorCategoryDriftError(
             f"{source} classified an error as {category!r}, which is not "
             f"in the engine vocabulary {list(ERROR_CATEGORY_VALUES)}"
         )

@@ -11,7 +11,7 @@ from ..models.resolved import RuntimeConfig
 from ..state.error_classification import ErrorCode, dominant_error_code
 from ..state.state_manager import StateManager
 from .batch_policy import ErrorStrategy
-from .exceptions import ConfigurationError, StreamProcessingError
+from .exceptions import StreamProcessingError
 from .stream_processor import StreamProcessor
 
 logger = logging.getLogger(__name__)
@@ -92,10 +92,7 @@ class StreamingEngine:
         it.
         """
         pipeline_id = pipeline_config["pipeline_id"]
-        streams = pipeline_config.get("streams", {})
-
-        if not streams:
-            raise ConfigurationError("No streams configured in pipeline")
+        streams = pipeline_config["streams"]
 
         logger.info("Starting pipeline: %s", pipeline_id)
         logger.info("Processing %s streams concurrently", len(streams))

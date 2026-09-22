@@ -11,8 +11,7 @@ source, destination write block) live as explicit typed fields rather than
 ``_runtime`` / ``_endpoint`` magic dict keys. :func:`dump_authored` is where
 the engine serialises a document again (the connection runtime's worker
 payload is the other): the worker bootstrap and the published bundle
-validator parse it back as the same contract model, and the stream mapping
-is parsed by the engine's own ``MappingDocument``.
+validator parse it back as the same contract model.
 """
 
 from __future__ import annotations
@@ -37,7 +36,6 @@ from pydantic import BaseModel
 from cdk.connection_runtime import ConnectionRuntime
 from src.config import settings
 from src.config.schema_validator import EndpointDocument
-from src.engine.mapping import MappingDocument
 from src.models.state import ReplicationConfig as StateReplicationConfig
 from src.shared.logging_setup import resolve_level
 
@@ -69,18 +67,10 @@ def with_effective_safety_window(stream_source: dict[str, Any]) -> dict[str, Any
 
 #: The authored documents serialised again for a reader that parses them
 #: back: the endpoint document and stream source the worker bootstrap
-#: carries to the connector, the run bundle the published validator checks,
-#: and the stream mapping the engine's own
-#: :class:`~src.engine.mapping.MappingDocument` reads (its assignment
-#: targets, constants and validation rules are the contract's models,
-#: parsed from the authored JSON).
+#: carries to the connector, and the run bundle the published validator
+#: checks.
 AuthoredDocument = (
-    EndpointDocument
-    | StreamSource
-    | PipelineInput
-    | StreamInput
-    | ConnectionInput
-    | StreamMapping
+    EndpointDocument | StreamSource | PipelineInput | StreamInput | ConnectionInput
 )
 
 
@@ -88,9 +78,8 @@ def dump_authored(document: AuthoredDocument) -> dict[str, Any]:
     """Serialise an authored document for a reader that parses it back.
 
     The one dump for every document that crosses a boundary whole. The
-    reader parses the JSON back -- into the same contract model, or, for the
-    mapping, into the engine's ``MappingDocument`` reading of that grammar --
-    so ``by_alias`` restores the contract's field names (``$schema``,
+    reader parses the JSON back into the same contract model, so
+    ``by_alias`` restores the contract's field names (``$schema``,
     ``schema``) and ``exclude_unset`` keeps the author's omissions omitted,
     never baking the model's defaults into the wire shape.
     """
@@ -235,11 +224,7 @@ class ResolvedStream:
     stream_version: int
     source: ResolvedSource
     destinations: list[ResolvedDestination]
-    mapping: MappingDocument
-
-    def __post_init__(self) -> None:
-        if not self.stream_id:
-            raise ValueError("ResolvedStream.stream_id cannot be empty")
+    mapping: StreamMapping
 
     def primary_destination(self) -> ResolvedDestination:
         return self.destinations[0]
@@ -339,10 +324,6 @@ class PipelineConnections:
 
     source: str
     destinations: list[str] = field(default_factory=list)
-
-    def __post_init__(self) -> None:
-        if not self.source:
-            raise ValueError("PipelineConnections.source cannot be empty")
 
 
 @dataclass

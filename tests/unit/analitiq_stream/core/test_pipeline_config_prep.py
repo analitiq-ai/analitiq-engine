@@ -21,12 +21,13 @@ from typing import Any
 import pyarrow as pa
 import pytest
 from analitiq.contracts.endpoint_identity import derive_db_endpoint_id
+from analitiq.contracts.stream import StreamMapping
 
 from cdk.conformance.fakes import type_map_document
 from cdk.types import EndpointScope
 from src.config.schema_validator import BundleValidationError, ContractValidationError
 from src.engine.batch_policy import ErrorStrategy
-from src.engine.mapping import MappingDocument, compile_mapping
+from src.engine.mapping import compile_mapping
 from src.engine.pipeline_config_prep import PipelineConfigPrep, _split_stream_ref
 
 # ---------------------------------------------------------------------------
@@ -465,7 +466,7 @@ class TestStreamMappingReachesTheTransform:
         _, stream_configs, _, _, _ = prep.create_config()
 
         mapping = stream_configs[0].mapping
-        assert isinstance(mapping, MappingDocument)
+        assert isinstance(mapping, StreamMapping)
 
         batch = pa.record_batch(
             [pa.array([{"city": "Berlin"}, {"city": "Kyiv"}])], names=["address"]
@@ -672,6 +673,40 @@ class TestCreateConfigErrorPaths:
             FileNotFoundError, match="Streams directory not found|stream file"
         ):
             prep.create_config()
+
+    def test_connection_id_differing_from_its_directory_rejected(
+        self, pipeline_tree: Path
+    ) -> None:
+        """The directory name is the connection's identity on disk."""
+        _write_json(
+            pipeline_tree / "connections" / CONNECTION_SRC_ID / "connection.json",
+            _connection_doc("00000000-0000-4000-8000-0000000000cc"),
+        )
+        with pytest.raises(ValueError, match="Connection id mismatch"):
+            PipelineConfigPrep().create_config()
+
+    def test_stream_document_without_stream_id_rejected(
+        self, pipeline_tree: Path
+    ) -> None:
+        """The contract leaves ``stream_id`` optional; the index needs one."""
+        stream_doc = _stream_doc(STREAM_ID)
+        del stream_doc["stream_id"]
+        _write_json(
+            pipeline_tree / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json",
+            stream_doc,
+        )
+        with pytest.raises(ValueError, match="missing 'stream_id'"):
+            PipelineConfigPrep().create_config()
+
+    def test_two_stream_files_with_one_stream_id_rejected(
+        self, pipeline_tree: Path
+    ) -> None:
+        _write_json(
+            pipeline_tree / "pipelines" / PIPELINE_ID / "streams" / "copy.json",
+            _stream_doc(STREAM_ID),
+        )
+        with pytest.raises(ValueError, match="Duplicate stream_id"):
+            PipelineConfigPrep().create_config()
 
     @pytest.mark.parametrize("side", ["source", "destination"])
     def test_missing_endpoint_ref_names_stream_and_side(

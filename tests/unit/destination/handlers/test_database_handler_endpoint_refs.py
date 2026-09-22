@@ -703,6 +703,27 @@ class TestPrepareWriteBatch:
         assert prepared.num_rows == 2
         assert "_record_hash" in prepared.schema.names
 
+    def test_keyless_insert_refuses_a_declared_record_hash_column(self):
+        """The engine owns ``_record_hash`` as a keyless insert's dedup key."""
+        handler = _stage_capable(GenericSQLConnector())
+        state = _StreamState(
+            write_mode="insert",
+            primary_keys=[],
+            endpoint_document=_endpoint_doc(
+                [
+                    {"name": "id", "native_type": "BIGINT", "arrow_type": "Int64"},
+                    {
+                        "name": "_record_hash",
+                        "native_type": "TEXT",
+                        "arrow_type": "Utf8",
+                    },
+                ],
+                table="t",
+            ),
+        )
+        with pytest.raises(SchemaConfigurationError, match="reserves"):
+            handler._build_column_defs(state)
+
     def test_keyed_insert_collapses_duplicate_keys_first_wins(self):
         import pyarrow as pa
 

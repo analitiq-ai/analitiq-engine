@@ -25,7 +25,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, get_args
+
+from analitiq.contracts.connector import SqlCapabilities as ContractSqlCapabilities
+from analitiq.contracts.connector import SqlStageCapabilities
+from pydantic import BaseModel
 
 #: SQL transport families a bulk mechanism can be declared for. A bulk
 #: mechanism is a fact about a transport, not about the connector as a
@@ -41,6 +45,32 @@ SQL_TRANSPORT_TYPES = ("sqlalchemy", "adbc")
 DIALECT_IMPLEMENTED_BULK_MECHANISMS = frozenset(
     {"copy_from", "load_data_local_infile", "load_job"}
 )
+
+
+#: The values the consumer sites branch on, per shape fact. Hand-kept because
+#: each records what the branches were written to handle; deriving them from
+#: the contract would make a value no branch handles look handled. Checked
+#: against the contract's ``Literal`` below, so a contract release that adds
+#: a value fails at import instead of falling into an else-branch mid-run.
+_HANDLED_VALUES: Mapping[tuple[type[BaseModel], str], frozenset[str]] = {
+    (ContractSqlCapabilities, "catalog"): frozenset({"none", "read", "full"}),
+    (ContractSqlCapabilities, "session_targeting"): frozenset(
+        {"per_statement", "session_default"}
+    ),
+    (ContractSqlCapabilities, "merge_form"): frozenset(
+        {"merge", "insert_on_conflict", "insert_on_duplicate_key", "none"}
+    ),
+    (SqlStageCapabilities, "scope"): frozenset({"temp", "real"}),
+    (SqlStageCapabilities, "schema_"): frozenset({"target", "dedicated"}),
+}
+
+for (_model, _fact), _handled in _HANDLED_VALUES.items():
+    _declared = frozenset(get_args(_model.model_fields[_fact].annotation))
+    if _handled != _declared:
+        raise TypeError(
+            f"{_model.__name__}.{_fact}: the contract declares "
+            f"{sorted(_declared)} but the engine handles {sorted(_handled)}"
+        )
 
 
 class SqlCapabilitiesError(ValueError):

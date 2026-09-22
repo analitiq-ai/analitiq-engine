@@ -504,17 +504,6 @@ def load_target(
     definition_dir = _resolve_definition_dir(root)
     definition = _load_definition(definition_dir)
 
-    connector_id = definition.get("connector_id")
-    if not isinstance(connector_id, str) or not connector_id:
-        raise ConformanceSetupError(
-            f"{definition_dir / CONNECTOR_DEFINITION_FILENAME} declares no "
-            f"connector_id"
-        )
-    kind = definition.get("kind")
-    if not isinstance(kind, str) or not kind:
-        raise ConformanceSetupError(
-            f"{definition_dir / CONNECTOR_DEFINITION_FILENAME} declares no kind"
-        )
     # The published contract is the authority on a definition's shape: the
     # engine refuses a definition it rejects, so the kit cannot certify one.
     try:
@@ -528,6 +517,8 @@ def load_target(
     # The same reader the engine uses, so the kit certifies the block the
     # engine folds into the worker payload.
     capabilities = parse_declared_capabilities(authored_sql_capabilities(connector))
+    connector_id = connector.connector_id
+    kind = connector.kind.value
 
     connector_class, class_unavailable = _resolve_connector_class(
         connector_id, kind, class_path

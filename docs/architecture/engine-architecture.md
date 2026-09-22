@@ -62,7 +62,7 @@ src/
 │   ├── engine.py                # StreamingEngine (fans streams out, aggregates results)
 │   ├── stream_processor.py      # StreamProcessor (one stream: extract -> transform -> load -> checkpoint)
 │   ├── pipeline_config_prep.py  # Loads manifest/pipelines/streams/connections/connectors
-│   ├── mapping.py               # MappingDocument + compile_mapping (mapping AST -> Arrow compute)
+│   ├── mapping.py               # compile_mapping (contract StreamMapping -> Arrow compute)
 │   └── exceptions.py
 │
 ├── worker/                  # Sandboxed connector worker (spawned subprocess)

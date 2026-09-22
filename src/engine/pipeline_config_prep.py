@@ -56,6 +56,7 @@ from analitiq.contracts.stream import (
     EndpointRef,
     IncrementalReplication,
     StreamInput,
+    StreamMapping,
     StreamSource,
 )
 
@@ -84,7 +85,6 @@ from src.config.schema_validator import (
     validate_stream,
 )
 from src.config.utils import author_set, load_json_file
-from src.engine.mapping import MappingDocument
 from src.models.resolved import (
     BatchingConfig,
     ErrorHandlingConfig,
@@ -488,16 +488,13 @@ class PipelineConfigPrep:
 
     def _resolve_connection_by_id(self, connection_id: str) -> ConnectionRuntime:
         """Materialize (or return cached) ConnectionRuntime for a ``connection_id``."""
-        record = self._connection_records.get(connection_id)
-        if record is None:
-            raise ValueError(
-                f"Connection id {connection_id!r} is not present under "
-                f"{self._paths['connections']}; "
-                f"known: {sorted(self._connection_records)}"
-            )
         if connection_id in self._resolved_connections:
             return self._resolved_connections[connection_id]
 
+        # Every id reaching here is indexed: the pipeline's own ids were
+        # indexed above, and the bundle validator ties each stream's
+        # connection ref to one of them.
+        record = self._connection_records[connection_id]
         connector = self._load_connector(record.connector_id)
         # kind is a closed-enum discriminator validated by the connector
         # contract in _load_connector; whether that kind is runnable is the
@@ -823,18 +820,12 @@ class PipelineConfigPrep:
                 )
             )
 
-        # The mapping crosses as the authored document: the engine's
-        # MappingDocument is its own reading of the contract's mapping
-        # grammar (see src.engine.mapping), parsed from the authored JSON.
-        mapping = document.mapping
         return ResolvedStream(
             stream_id=stream_id,
             stream_version=stream_version,
             source=resolved_source,
             destinations=resolved_destinations,
-            mapping=MappingDocument.parse(
-                dump_authored(mapping) if mapping is not None else {}
-            ),
+            mapping=document.mapping or StreamMapping(),
         )
 
     # ------------------------------------------------------------------
