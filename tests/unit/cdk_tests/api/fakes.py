@@ -197,6 +197,7 @@ def endpoint_json(
     *,
     pagination: dict[str, Any] | None = None,
     params: dict[str, Any] | None = None,
+    filters: dict[str, Any] | None = None,
     replication: dict[str, Any] | None = None,
     request: dict[str, Any] | None = None,
     records_ref: str = "response.body.records",
@@ -244,6 +245,8 @@ def endpoint_json(
         read["response"]["metadata"] = response_metadata
     if params:
         read["params"] = params
+    if filters:
+        read["filters"] = filters
     if pagination:
         read["pagination"] = pagination
     if replication:

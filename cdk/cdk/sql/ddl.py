@@ -101,7 +101,7 @@ def build_create_table_sql(
         except (UnmappedTypeError, InvalidTypeMapError) as err:
             raise CreateTableError(
                 f"create_table for {table!r}: column {col.name!r} arrow_type "
-                f"{col.arrow_type!r} has no type-map-write rule"
+                f"{col.arrow_type!r} has no write rule in type-map.json"
             ) from err
         parts = [dialect.quote_ident(col.name), native]
         # A PK column is NOT NULL even if the source declared it nullable.

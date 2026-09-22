@@ -208,25 +208,13 @@ class TestARequiredParamMustDeclareASource:
         with pytest.raises(ContractValidationError):
             validate("api-endpoint", _document(read))
 
-    @pytest.mark.parametrize(
-        ("source", "declaration"),
-        [
-            ("default", {"default": {"literal": "acme"}}),
-            ("operators", {"operators": ["eq"]}),
-        ],
-    )
-    def test_a_required_param_declaring_a_source_is_accepted(
-        self, source: str, declaration: dict[str, Any]
-    ) -> None:
-        # A declared source is not a resolved value: both of these still
-        # resolve to nothing at run time if the connection or the stream
-        # supplies nothing, which is what the engine-side refusals grade.
+    def test_a_required_param_declaring_a_default_is_accepted(self) -> None:
         read = _paginated_read()
         read["params"]["account"] = {
             "in": "query",
             "type": "string",
             "required": True,
-            **declaration,
+            "default": {"literal": "acme"},
         }
         read["request"]["query"]["account"] = {"from_param": "account"}
         validate("api-endpoint", _document(read))

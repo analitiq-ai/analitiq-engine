@@ -19,7 +19,7 @@ from pydantic import ValidationError
 
 from cdk.api.request import endpoint_transport_refs
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.type_map.loader import connector_definition_dir, read_raw_type_maps
+from cdk.type_map.loader import connector_definition_dir, read_raw_type_map
 from src.shared.logging_setup import current_log_level
 
 logger = logging.getLogger(__name__)
@@ -80,17 +80,17 @@ def read_type_map_payloads(
 
     Same directory lookup and JSON validation as the file loaders (one
     parser, one error surface); the worker rebuilds the mappers from these
-    blocks with the same rule parsing.
+    documents with the same rule parsing.
     """
-    connector_block = read_raw_type_maps(
+    connector_document = read_raw_type_map(
         connector_definition_dir(connectors_dir, connector_id),
         f"connector {connector_id!r}",
     )
-    connection_block = read_raw_type_maps(
+    connection_document = read_raw_type_map(
         connections_dir / connection_id / "definition",
         f"connection {connection_id!r}",
     )
-    return {"connector": connector_block, "connection": connection_block}
+    return {"connector": connector_document, "connection": connection_document}
 
 
 async def build_bootstrap(

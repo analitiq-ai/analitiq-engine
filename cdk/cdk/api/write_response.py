@@ -30,7 +30,6 @@ if TYPE_CHECKING:
     from .http import Received
 
 __all__ = [
-    "WRITE_SCOPE_KEYS",
     "DeclaredWriteFailure",
     "WriteOutcome",
     "judge_write_response",
@@ -38,8 +37,7 @@ __all__ = [
 ]
 
 #: The keys of the ``response`` scope a write's declared expressions read,
-#: named once for :func:`write_response_scope` and :data:`WRITE_SCOPE_KEYS`
-#: alike, as the read path names its page scope.
+#: named as the read path names its page scope.
 _SCOPE_BODY = "body"
 _SCOPE_HEADERS = "headers"
 _SCOPE_STATUS = "status"
@@ -75,9 +73,7 @@ def write_response_scope(
     ``metadata`` is the block's own resolved ``metadata`` map, present once
     it has been read so the other expressions can address the declared
     keys under ``response.metadata.<key>``, which the contract admits on a
-    write response. Built here and nowhere else so the configure-time
-    check in :func:`~cdk.api.write_plan.build_write_plan` refuses exactly
-    the references a run could never resolve.
+    write response.
     """
     return {
         _SCOPE_BODY: received.payload,
@@ -85,11 +81,6 @@ def write_response_scope(
         _SCOPE_STATUS: received.status,
         _SCOPE_METADATA: metadata,
     }
-
-
-#: What :func:`write_response_scope` carries under ``response``. Every
-#: declared write-response reference must anchor at one of these.
-WRITE_SCOPE_KEYS = (_SCOPE_BODY, _SCOPE_HEADERS, _SCOPE_STATUS, _SCOPE_METADATA)
 
 
 def _failure_detail(declared: WriteError | None, resolver: Resolver, body: Any) -> str:

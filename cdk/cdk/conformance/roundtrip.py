@@ -46,7 +46,7 @@ from cdk.type_map.grammar import (
     UnitParam,
 )
 from cdk.type_map.rules import (
-    CompiledPattern,
+    CompiledMatcher,
     compile_pattern,
     normalize_arrow_type,
     normalize_native_type,
@@ -242,7 +242,7 @@ def _misnormalized_write_rules(
 
 
 def _unreachable_spelling(
-    pattern: CompiledPattern, candidate: str
+    pattern: CompiledMatcher, candidate: str
 ) -> tuple[str, str, str] | None:
     """Find a spelling of *candidate* that *pattern* matches but never sees.
 

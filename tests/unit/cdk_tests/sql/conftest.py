@@ -19,6 +19,7 @@ from typing import Any
 import pyarrow as pa
 import pytest
 
+from cdk.conformance.fakes import type_map_document
 from cdk.type_map.loader import build_type_mapper
 from cdk.type_map.mapper import TypeMapper
 from cdk.types import EndpointScope
@@ -115,21 +116,22 @@ _CONN_WRITE_RULES = [
 def pg_mapper():
     """Postgres-shaped TypeMapper (read + write rules)."""
     return build_type_mapper(
-        "postgres", {"rules": _PG_READ_RULES, "write_rules": _PG_WRITE_RULES}
+        "postgres", type_map_document(read=_PG_READ_RULES, write=_PG_WRITE_RULES)
     )
 
 
 @pytest.fixture
 def sf_mapper():
     """Snowflake-shaped TypeMapper (read rules only)."""
-    return build_type_mapper("snowflake", {"rules": _SF_READ_RULES})
+    return build_type_mapper("snowflake", type_map_document(read=_SF_READ_RULES))
 
 
 @pytest.fixture
 def pg_connection_mapper():
     """Connection-scoped TypeMapper composed over ``pg_mapper`` in the fakes."""
     return build_type_mapper(
-        "connection:acme", {"rules": _CONN_READ_RULES, "write_rules": _CONN_WRITE_RULES}
+        "connection:acme",
+        type_map_document(read=_CONN_READ_RULES, write=_CONN_WRITE_RULES),
     )
 
 

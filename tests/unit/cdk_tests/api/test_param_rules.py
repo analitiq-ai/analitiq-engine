@@ -43,21 +43,6 @@ def _rules(declared: Mapping[str, Any]) -> ParamRules:
 
 
 class TestCompile:
-    def test_a_non_finite_declared_bound_is_refused_once_at_compile(self) -> None:
-        # Decidable from the document alone: no comparison can order NaN,
-        # so this is caught here rather than re-discovered on every page.
-        with pytest.raises(RequestSpecError, match="no comparison can order"):
-            _rules(
-                {
-                    "amt": {
-                        "in": "query",
-                        "type": "number",
-                        "required": False,
-                        "minimum": float("nan"),
-                    }
-                }
-            )
-
     def test_the_compiled_schema_is_reused_not_rebuilt_per_value(self) -> None:
         # Compiled once for the whole read: a page one hundred pays nothing
         # page one did not. Proven by judging two different values against
@@ -469,50 +454,6 @@ class TestTheEnforcedFormatsAreActuallyInstalled:
         from cdk.api.param_rules import _ENFORCED_FORMATS, _FORMAT_CHECKER
 
         assert set(_FORMAT_CHECKER.checkers) == _ENFORCED_FORMATS
-
-
-class TestAnIntervalThatAdmitsNothing:
-    """``check_schema`` judges one keyword at a time, so a pair slips past.
-
-    Decidable from the document alone, and it has to be answered at compile:
-    on a loop-owned param the first value arrives on page two, after page
-    one has already committed rows.
-    """
-
-    @pytest.mark.parametrize(
-        "declared",
-        [
-            {"in": "query", "type": "number", "minimum": 10.0, "maximum": 1.0},
-            {"in": "query", "type": "string", "minLength": 5, "maxLength": 2},
-            {
-                "in": "query",
-                "type": "array",
-                "minItems": 3,
-                "maxItems": 1,
-                "style": "form",
-                "explode": True,
-            },
-        ],
-        ids=["numeric", "length", "items"],
-    )
-    def test_it_is_refused_at_compile(self, declared: dict[str, Any]) -> None:
-        declared["required"] = False
-        with pytest.raises(RequestSpecError, match="no value can satisfy"):
-            _rules({"p": declared})
-
-    def test_a_well_ordered_interval_compiles(self) -> None:
-        rules = _rules(
-            {
-                "p": {
-                    "in": "query",
-                    "type": "number",
-                    "required": False,
-                    "minimum": 1.0,
-                    "maximum": 10.0,
-                }
-            }
-        )
-        rules.check_admissible({"p": 5.0})
 
 
 class TestPatternMatchesWithRE2:

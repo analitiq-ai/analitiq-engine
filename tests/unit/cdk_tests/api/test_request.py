@@ -6,7 +6,13 @@ from collections.abc import Mapping
 from typing import Any
 
 import pytest
-from analitiq.contracts.endpoints import Pagination, Param, ReadRequest
+from analitiq.contracts.endpoints import (
+    FilterableOperator,
+    FilterLanding,
+    Pagination,
+    Param,
+    ReadRequest,
+)
 from analitiq.contracts.stream import Filter
 from pydantic import TypeAdapter
 
@@ -30,6 +36,9 @@ pytestmark = pytest.mark.unit
 #: the parse rather than out of a key the test sniffed for.
 _READ_REQUEST: TypeAdapter[Any] = TypeAdapter(ReadRequest)
 _PAGINATION: TypeAdapter[Any] = TypeAdapter(Pagination)
+_FILTER_LANDINGS: TypeAdapter[Any] = TypeAdapter(
+    dict[str, dict[FilterableOperator, FilterLanding]]
+)
 
 
 def _filters(*declared: Mapping[str, Any]) -> list[Filter]:
@@ -40,6 +49,11 @@ def _filters(*declared: Mapping[str, Any]) -> list[Filter]:
     the read does with a real stream's filters.
     """
     return [Filter.model_validate(f) for f in declared]
+
+
+def _landings(declared: Mapping[str, Any]) -> Any:
+    """An operation's `filters` map, parsed as ``ReadOperation.filters`` is."""
+    return _FILTER_LANDINGS.validate_python(declared)
 
 
 def _params(declared: Mapping[str, Any]) -> dict[str, Param]:
@@ -193,22 +207,155 @@ class TestReadParamTable:
             ),
             _resolver(),
             filters=_filters({"field": "status", "operator": "eq", "value": "open"}),
+            filter_landings=_landings({"status": {"eq": {"from_param": "status"}}}),
             endpoint="items",
         )
         assert table.values == {"status": "open"}
 
-    def test_a_filter_naming_no_declared_param_is_refused(self) -> None:
-        # A filter reaches the provider as a declared param bound by a
-        # request map. One naming no param narrows nothing: the value sat
-        # in the table, no binding read it, and the stream read the whole
-        # collection while reporting success.
+    def test_a_filter_lands_on_the_param_its_entry_names(self) -> None:
+        # The filter names a RECORD field; the endpoint's `filters` map is
+        # what says which param carries it. Nothing ties the two names.
+        table = ParamTable.for_read(
+            _params({"cn": {"in": "query", "type": "string", "required": False}}),
+            _resolver(),
+            filters=_filters(
+                {"field": "customer_number", "operator": "eq", "value": "C-1"}
+            ),
+            filter_landings=_landings(
+                {"customer_number": {"eq": {"from_param": "cn"}}}
+            ),
+            endpoint="items",
+        )
+        assert table.values == {"cn": "C-1"}
+
+    def test_each_operator_on_one_field_lands_on_its_own_param(self) -> None:
+        table = ParamTable.for_read(
+            _params(
+                {
+                    "since": {"in": "query", "type": "string", "required": False},
+                    "until": {"in": "query", "type": "string", "required": False},
+                }
+            ),
+            _resolver(),
+            filters=_filters(
+                {"field": "created", "operator": "gte", "value": "2020-01-01"},
+                {"field": "created", "operator": "lt", "value": "2021-01-01"},
+            ),
+            filter_landings=_landings(
+                {
+                    "created": {
+                        "gte": {"from_param": "since"},
+                        "lt": {"from_param": "until"},
+                    }
+                }
+            ),
+            endpoint="items",
+        )
+        assert table.values == {"since": "2020-01-01", "until": "2021-01-01"}
+
+    def test_a_template_landing_renders_its_own_filters_value(self) -> None:
+        # A provider spelling the comparison inside the value (`amount=<>0`)
+        # gets the template rendered against THIS filter's value, even with
+        # a second operator on the same field beside it.
+        table = ParamTable.for_read(
+            _params(
+                {
+                    "amount_q": {"in": "query", "type": "string", "required": False},
+                    "amount_min": {"in": "query", "type": "string", "required": False},
+                }
+            ),
+            _resolver(),
+            filters=_filters(
+                {"field": "amount", "operator": "neq", "value": 0},
+                {"field": "amount", "operator": "gt", "value": 5},
+            ),
+            filter_landings=_landings(
+                {
+                    "amount": {
+                        "neq": {
+                            "param": "amount_q",
+                            "template": "<>${stream.filters.amount.value}",
+                        },
+                        "gt": {
+                            "param": "amount_min",
+                            "template": ">${stream.filters.amount.value}",
+                        },
+                    }
+                }
+            ),
+            endpoint="items",
+        )
+        assert table.values == {"amount_q": "<>0", "amount_min": ">5"}
+
+    def test_a_template_landing_on_a_nested_field_renders(self) -> None:
+        # The placeholder walks the field path segment by segment, so the
+        # filter's value has to sit at that path, not under one dotted key.
+        table = ParamTable.for_read(
+            _params({"cid": {"in": "query", "type": "string", "required": False}}),
+            _resolver(),
+            filters=_filters({"field": "customer.id", "operator": "eq", "value": 5}),
+            filter_landings=_landings(
+                {
+                    "customer.id": {
+                        "eq": {
+                            "param": "cid",
+                            "template": "id:${stream.filters.customer.id.value}",
+                        }
+                    }
+                }
+            ),
+            endpoint="items",
+        )
+        assert table.values == {"cid": "id:5"}
+
+    def test_a_landed_filter_with_no_value_is_refused(self) -> None:
+        # Sending nothing for the param would read the whole collection
+        # while the stream reports it filtered.
+        with pytest.raises(RequestSpecError, match=r"'status'.*'eq'.*no value"):
+            ParamTable.for_read(
+                _params(
+                    {"status": {"in": "query", "type": "string", "required": False}}
+                ),
+                _resolver(),
+                filters=_filters({"field": "status", "operator": "eq"}),
+                filter_landings=_landings({"status": {"eq": {"from_param": "status"}}}),
+                endpoint="items",
+            )
+
+    def test_a_filter_whose_operator_has_no_entry_is_refused(self) -> None:
+        # The param exists and `eq` lands on it, but the stream asks for
+        # `gt`: sending the value as `eq` would silently read a different
+        # set of records than the stream declared.
+        with pytest.raises(RequestSpecError, match=r"'amount'.*'gt'"):
+            ParamTable.for_read(
+                _params(
+                    {"amount": {"in": "query", "type": "string", "required": False}}
+                ),
+                _resolver(),
+                filters=_filters({"field": "amount", "operator": "gt", "value": 5}),
+                filter_landings=_landings({"amount": {"eq": {"from_param": "amount"}}}),
+                endpoint="items",
+            )
+
+    def test_a_filter_on_an_endpoint_with_no_filters_map_is_refused(self) -> None:
+        # A filter reaching no param narrows nothing: the stream would read
+        # the whole collection while reporting success.
         with pytest.raises(RequestSpecError, match="customer_number"):
             ParamTable.for_read(
-                _params({"cn": {"in": "query", "type": "string", "required": False}}),
+                _params(
+                    {
+                        "customer_number": {
+                            "in": "query",
+                            "type": "string",
+                            "required": False,
+                        }
+                    }
+                ),
                 _resolver(),
                 filters=_filters(
                     {"field": "customer_number", "operator": "eq", "value": "C-1"}
                 ),
+                filter_landings=None,
                 endpoint="items",
             )
 
@@ -312,6 +459,7 @@ class TestRequestBuilder:
             _params({"tenant": {"in": "query", "type": "string", "required": False}}),
             _resolver(),
             filters=_filters({"field": "tenant", "operator": "eq", "value": "acme"}),
+            filter_landings=_landings({"tenant": {"eq": {"from_param": "tenant"}}}),
             endpoint="items",
         )
         builder = RequestBuilder(
@@ -634,7 +782,6 @@ class TestNeverFillableScopeRefusals:
     def test_a_param_default_reading_a_secret_is_refused(self) -> None:
         problem = request_block_problem(
             _request({"query": {"key": {"from_param": "api_key"}}}),
-            endpoint="items",
             reserved_headers=frozenset(),
             resolver=_resolver(),
             declared_params=_params(
@@ -655,7 +802,6 @@ class TestNeverFillableScopeRefusals:
     def test_a_pagination_value_reading_a_secret_is_refused(self) -> None:
         problem = request_block_problem(
             _request({}),
-            endpoint="items",
             reserved_headers=frozenset(),
             resolver=_resolver(),
             pagination=_pagination(
@@ -706,7 +852,6 @@ class TestNeverFillableScopeRefusals:
         """
         problem = request_block_problem(
             _request({}),
-            endpoint="items",
             reserved_headers=frozenset(),
             resolver=_resolver(),
             pagination=_pagination(block),
@@ -721,7 +866,6 @@ class TestNeverFillableScopeRefusals:
         assert (
             request_block_problem(
                 _request({}),
-                endpoint="items",
                 reserved_headers=frozenset(),
                 resolver=_resolver(),
                 pagination=_pagination(
@@ -759,7 +903,6 @@ class TestNeverFillableScopeRefusals:
                         "body": {"ref": f"connection.{subtree}"},
                     }
                 ),
-                endpoint="items",
                 reserved_headers=frozenset(),
                 resolver=_resolver(),
             )
@@ -778,7 +921,6 @@ class TestNeverFillableScopeRefusals:
         assert (
             request_block_problem(
                 _request({"query": {"q": {"ref": "connection.parameters"}}}),
-                endpoint="items",
                 reserved_headers=frozenset(),
                 resolver=_resolver(),
             )
@@ -815,7 +957,6 @@ class TestNeverFillableScopeRefusals:
                     }
                 }
             ),
-            endpoint="items",
             reserved_headers=frozenset(),
             resolver=_resolver(),
         )
@@ -826,7 +967,6 @@ class TestNeverFillableScopeRefusals:
         """Same shadowing, one map over: params are keyed by author names too."""
         problem = request_block_problem(
             _request({"query": {"k": {"from_param": "api_key"}}}),
-            endpoint="items",
             reserved_headers=frozenset(),
             resolver=_resolver(),
             declared_params=_params(
@@ -850,7 +990,6 @@ class TestNeverFillableScopeRefusals:
         # warn-and-omit fate this walk exists to refuse.
         problem = request_block_problem(
             _request({"query": {"limit": {"ref": "runtime.batchsize"}}}),
-            endpoint="items",
             reserved_headers=frozenset(),
             resolver=_resolver(),
         )
@@ -863,7 +1002,6 @@ class TestNeverFillableScopeRefusals:
         assert (
             request_block_problem(
                 _request({"query": {"limit": {"ref": "runtime.batch_size"}}}),
-                endpoint="items",
                 reserved_headers=frozenset(),
                 resolver=_resolver(batch_size=37),
             )
@@ -875,7 +1013,6 @@ class TestNeverFillableScopeRefusals:
         # write role's shape -- is a value that never arrives on this phase.
         problem = request_block_problem(
             _request({"query": {"limit": {"ref": "runtime.batch_size"}}}),
-            endpoint="items",
             reserved_headers=frozenset(),
             resolver=_resolver(),
         )
@@ -888,7 +1025,6 @@ class TestNeverFillableScopeRefusals:
         assert (
             request_block_problem(
                 _request({"query": {"key": {"from_param": "api_key"}}}),
-                endpoint="items",
                 reserved_headers=frozenset(),
                 resolver=_resolver(),
                 declared_params=_params(
@@ -912,7 +1048,6 @@ class TestRequestBlockRefusals:
     def test_a_declared_header_the_connection_owns_is_refused(self) -> None:
         problem = request_block_problem(
             _request({"headers": {"Authorization": {"literal": "Bearer x"}}}),
-            endpoint="items",
             reserved_headers=frozenset({"authorization"}),
             resolver=_resolver(),
         )
@@ -928,7 +1063,6 @@ class TestRequestBlockRefusals:
                 _request(
                     {"headers": {"X-Legacy-Auth": {"from_param": "Authorization"}}}
                 ),
-                endpoint="items",
                 reserved_headers=frozenset({"authorization"}),
                 resolver=_resolver(),
             )
@@ -941,7 +1075,6 @@ class TestRequestBlockRefusals:
         # the provider sees.
         problem = request_block_problem(
             _request({"headers": {"Authorization": {"from_param": "tok"}}}),
-            endpoint="items",
             reserved_headers=frozenset({"authorization"}),
             resolver=_resolver(),
         )
@@ -956,7 +1089,6 @@ class TestRequestBlockRefusals:
                         "path_params": {"id": {"from_param": "id"}},
                     }
                 ),
-                endpoint="items",
                 reserved_headers=frozenset(),
                 resolver=_resolver(),
             )
@@ -979,7 +1111,6 @@ class TestRequestBlockRefusals:
                     "path_params": {"since": {"from_param": "since"}},
                 }
             ),
-            endpoint="items",
             reserved_headers=frozenset(),
             resolver=_resolver(),
             controlled_by={"since": loop},

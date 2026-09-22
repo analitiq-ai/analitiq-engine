@@ -7,19 +7,11 @@ three different requests -- which is why the published schema REQUIRES
 container that declares neither. This module is what those two fields
 mean.
 
-The vocabulary is OpenAPI's, and it is closed HERE rather than in the
-contract: the schema types ``style`` as a plain string, so a document
-naming one the engine has no serialization for is contract-valid and
-unsendable. Closing it engine-side is the same shape as the derived
-function registry -- a name outside the set resolves on no run, so the
-author hears about it at plan time instead of on the connector's first
-request.
-
-Only the combinations OpenAPI defines are here. Its own table leaves
-``deepObject`` on an array and the delimited styles on an object with no
-meaning at all, and inventing one would put the engine's guess on the
-provider's wire -- so those are refused by name, with what the style does
-serialize named beside them.
+The vocabulary is OpenAPI's, and the contract closes it: ``Param``
+refuses a style, a ``(style, explode)`` pair, or a pair on a type that
+OpenAPI gives no spelling (RULE-ENDP-075), and a query binding must name
+a query param (RULE-ENDP-008). Every declaration that reaches here
+therefore has a defined spelling for its type, so nothing below asks.
 """
 
 from __future__ import annotations
@@ -41,7 +33,6 @@ __all__ = [
     "Sendable",
     "declared_query_styles",
     "serialize_query_value",
-    "unserializable_style_problem",
 ]
 
 
@@ -49,12 +40,9 @@ __all__ = [
 class QueryStyle:
     """One param's declared wire serialization, and what it serializes.
 
-    ``type`` rides along because the three are one declaration: OpenAPI
-    defines a style for an array, for an object, or for both, so
-    ``spaceDelimited`` says nothing about an object and ``deepObject``
-    says nothing about an array. Judging the style and the explode alone
-    accepts a document at plan time that no value of the param can
-    satisfy.
+    ``type`` rides along because ``form`` spells both an array and an
+    object: the style alone cannot say which shape a value must arrive in,
+    and only the declared type may decide that.
     """
 
     type: str
@@ -67,25 +55,8 @@ class QueryStyle:
 _DELIMITERS = {"form": ",", "spaceDelimited": " ", "pipeDelimited": "|"}
 
 #: The declared ``type`` each Python kind answers to -- the contract's two
-#: collection types, named once so the plan-time check and the value-time
-#: one judge the same thing.
+#: collection types.
 _KINDS: dict[str, type] = {"array": list, "object": Mapping}
-
-#: What each style serializes, as ``(style, explode) -> kinds``. Absence is
-#: the whole refusal predicate: a pair that is not a key here has no
-#: defined spelling, and a pair whose kinds exclude the declared type has
-#: none for THAT type, so nothing can send it either way.
-_DEFINED: dict[tuple[str, bool], tuple[type, ...]] = {
-    ("form", True): (list, Mapping),
-    ("form", False): (list, Mapping),
-    ("spaceDelimited", False): (list,),
-    ("pipeDelimited", False): (list,),
-    ("deepObject", True): (Mapping,),
-}
-
-#: The styles this engine serializes at all, for a message that can say
-#: what the author may write instead.
-STYLES = tuple(sorted({style for style, _ in _DEFINED}))
 
 
 def declared_query_styles(
@@ -126,53 +97,6 @@ def declared_query_styles(
     return styles
 
 
-def unserializable_style_problem(
-    key: str, style: QueryStyle, *, endpoint: str
-) -> str | None:
-    """Why this declared serialization cannot be sent, or ``None``.
-
-    A static fact about the document -- the declaration serializes the
-    declared type or it does not, on every connection and for every value
-    -- so it is judged with the rest of the request block, before a page
-    is fetched, rather than on the first value that happens to be a
-    collection. A param a loop fills would otherwise carry an unsendable
-    document as far as page two of a read that had already committed
-    rows.
-    """
-    if style.style not in STYLES:
-        return (
-            f"request.query[{key!r}] for endpoint {endpoint!r} binds a param "
-            f"declaring style {style.style!r}, which has no serialization "
-            f"here; the engine sends {list(STYLES)}"
-        )
-    kinds = _DEFINED.get((style.style, style.explode))
-    if kinds is None:
-        return (
-            f"request.query[{key!r}] for endpoint {endpoint!r} binds a param "
-            f"declaring style {style.style!r} with explode={style.explode}, a "
-            f"combination OpenAPI leaves undefined -- there is no spelling to "
-            f"send. Declare "
-            f"{sorted({f'{s} explode={e}' for s, e in _DEFINED if s == style.style})}"
-        )
-    # A style can be defined and still say nothing about THIS type:
-    # `spaceDelimited` spells an array and no object, `deepObject` an
-    # object and no array. Judging the pair alone certifies a document
-    # every value of which fails.
-    declared_kind = _KINDS.get(style.type)
-    if declared_kind is not None and declared_kind not in kinds:
-        serializes = " and ".join(
-            name for name, kind in _KINDS.items() if kind in kinds
-        )
-        return (
-            f"request.query[{key!r}] for endpoint {endpoint!r} binds a param "
-            f"typed {style.type!r} declaring style {style.style!r} with "
-            f"explode={style.explode}, which serializes {serializes} -- "
-            f"OpenAPI defines no spelling of a {style.type} that way, so no "
-            f"value of this param could be sent"
-        )
-    return None
-
-
 def serialize_query_value(
     key: str,
     value: Any,
@@ -209,13 +133,6 @@ def serialize_query_value(
     ``array`` whose value resolved to one element is still one value, and
     a style describes how MANY are spelled.
     """
-    kinds = _DEFINED.get((style.style, style.explode))
-    if kinds is None:
-        # Refused with the rest of the request block, so reaching here is
-        # a wiring defect rather than an authoring one.
-        raise RequestSpecError(
-            unserializable_style_problem(key, style, endpoint=endpoint) or ""
-        )
     if not isinstance(value, (list, Mapping)):
         return {key: sendable(key, value)}
     # Judged against the param's DECLARED type, not against what the style

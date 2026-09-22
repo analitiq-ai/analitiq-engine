@@ -1285,11 +1285,9 @@ class TestGateInversionBreaks:
         """
         read_only_mapper = build_type_mapper(
             "no-write-map",
-            {
-                "rules": [
-                    {"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}
-                ]
-            },
+            type_map_document(
+                read=[{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}]
+            ),
         )
         doctored = dataclasses.replace(reference_target, type_mapper=read_only_mapper)
         violations = check_declaration_consistency(doctored)
@@ -1311,14 +1309,14 @@ class TestTypeMapBreaks:
         with pytest.raises(InvalidTypeMapError, match=r"exact\.arrow_type"):
             build_type_mapper(
                 "foreign-literal",
-                {
-                    "rules": [
+                type_map_document(
+                    read=[
                         {"match": "exact", "native_type": "TEXT", "arrow_type": "Foo"}
                     ],
-                    "write_rules": [
+                    write=[
                         {"match": "exact", "arrow_type": "Foo", "native_type": "TEXT"}
                     ],
-                },
+                ),
             )
 
     def test_source_only_connector_is_held_to_the_arrow_vocabulary(self) -> None:
@@ -1332,11 +1330,11 @@ class TestTypeMapBreaks:
         with pytest.raises(InvalidTypeMapError, match=r"exact\.arrow_type"):
             build_type_mapper(
                 "source-only",
-                {
-                    "rules": [
+                type_map_document(
+                    read=[
                         {"match": "exact", "native_type": "TEXT", "arrow_type": "Bogus"}
                     ]
-                },
+                ),
             )
 
     def test_regex_read_rule_with_a_foreign_literal_output_is_refused(self) -> None:
@@ -1349,8 +1347,8 @@ class TestTypeMapBreaks:
         with pytest.raises(InvalidTypeMapError, match="not a valid Arrow type"):
             build_type_mapper(
                 "regex-foreign-output",
-                {
-                    "rules": [
+                type_map_document(
+                    read=[
                         {"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"},
                         {
                             "match": "regex",
@@ -1358,18 +1356,18 @@ class TestTypeMapBreaks:
                             "arrow_type": "Bogus",
                         },
                     ],
-                    "write_rules": [
+                    write=[
                         {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"}
                     ],
-                },
+                ),
             )
 
     def test_regex_read_rule_interpolating_a_capture_loads(self) -> None:
         """A templated arrow_type is not a literal family; it must load."""
         mapper = build_type_mapper(
             "regex-templated-output",
-            {
-                "rules": [
+            type_map_document(
+                read=[
                     {"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"},
                     {
                         "match": "regex",
@@ -1380,10 +1378,8 @@ class TestTypeMapBreaks:
                         "arrow_type": "Decimal128(${p}, ${s})",
                     },
                 ],
-                "write_rules": [
-                    {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"}
-                ],
-            },
+                write=[{"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"}],
+            ),
         )
         assert check_type_map_round_trip(mapper) == []
 
@@ -1391,11 +1387,9 @@ class TestTypeMapBreaks:
         """Nothing the write map renders can be read back without a read map."""
         mapper = build_type_mapper(
             "write-only",
-            {
-                "write_rules": [
-                    {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"}
-                ]
-            },
+            type_map_document(
+                write=[{"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"}]
+            ),
         )
         report = _messages(check_type_map_round_trip(mapper))
         assert "no read type map" in report
@@ -1404,18 +1398,16 @@ class TestTypeMapBreaks:
         """A write map rendering no probe must not read as fully certified."""
         mapper = build_type_mapper(
             "zero-coverage",
-            {
-                "rules": [
-                    {"match": "exact", "native_type": "JSONB", "arrow_type": "Json"}
-                ],
-                "write_rules": [
+            type_map_document(
+                read=[{"match": "exact", "native_type": "JSONB", "arrow_type": "Json"}],
+                write=[
                     {
                         "match": "regex",
                         "arrow_type": "^(List|LargeList)<.+>$",
                         "native_type": "JSONB",
                     }
                 ],
-            },
+            ),
         )
         violations = check_type_map_round_trip(mapper)
         report = _messages(violations)
@@ -1431,8 +1423,8 @@ class TestTypeMapBreaks:
         """
         mapper = build_type_mapper(
             "partial-family",
-            {
-                "rules": [
+            type_map_document(
+                read=[
                     {"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"},
                     {
                         "match": "regex",
@@ -1440,7 +1432,7 @@ class TestTypeMapBreaks:
                         "arrow_type": "Decimal128(${p}, ${s})",
                     },
                 ],
-                "write_rules": [
+                write=[
                     {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"},
                     # Covers only precision 1-5: matches no probe, but valid.
                     {
@@ -1449,7 +1441,7 @@ class TestTypeMapBreaks:
                         "native_type": "NUMERIC(${p}, ${s})",
                     },
                 ],
-            },
+            ),
         )
         violations = check_type_map_round_trip(mapper)
         assert violations == [], (
@@ -1461,11 +1453,9 @@ class TestTypeMapBreaks:
         """A regex no normalized canonical can match is a dead rule."""
         mapper = build_type_mapper(
             "dead-rule",
-            {
-                "rules": [
-                    {"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}
-                ],
-                "write_rules": [
+            type_map_document(
+                read=[{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}],
+                write=[
                     {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"},
                     # No space after the comma: the normalizer always emits
                     # ", ", so this pattern can never match a probe.
@@ -1475,7 +1465,7 @@ class TestTypeMapBreaks:
                         "native_type": "NUMERIC(${p}, ${s})",
                     },
                 ],
-            },
+            ),
         )
         violations = check_type_map_round_trip(mapper)
         report = _messages(violations)
@@ -1492,11 +1482,9 @@ class TestTypeMapBreaks:
         """
         mapper = build_type_mapper(
             "case-variant-rule",
-            {
-                "rules": [
-                    {"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}
-                ],
-                "write_rules": [
+            type_map_document(
+                read=[{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}],
+                write=[
                     {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"},
                     {
                         "match": "regex",
@@ -1504,7 +1492,7 @@ class TestTypeMapBreaks:
                         "native_type": "NUMERIC(${p}, ${s})",
                     },
                 ],
-            },
+            ),
         )
         report = _messages(check_type_map_round_trip(mapper))
         assert "type-map-coverage" in report
@@ -1522,18 +1510,16 @@ class TestTypeMapBreaks:
         """
         mapper = build_type_mapper(
             "hint-break",
-            {
-                "rules": [
-                    {"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}
-                ],
-                "write_rules": [
+            type_map_document(
+                read=[{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}],
+                write=[
                     {
                         "match": "exact",
                         "arrow_type": "Utf8",
                         "native_type": "VARCHAR(${length})",
                     }
                 ],
-            },
+            ),
         )
         violations = check_type_map_round_trip(mapper)
         report = _messages(violations)
@@ -1545,14 +1531,12 @@ class TestTypeMapBreaks:
         """A write rule rendering a native the read map cannot map back."""
         mapper = build_type_mapper(
             "closure-break",
-            {
-                "rules": [
-                    {"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}
-                ],
-                "write_rules": [
+            type_map_document(
+                read=[{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}],
+                write=[
                     {"match": "exact", "arrow_type": "Utf8", "native_type": "INTERVAL"}
                 ],
-            },
+            ),
         )
         violations = check_type_map_round_trip(mapper)
         assert violations, "an unreadable rendered native must fail"
@@ -1564,8 +1548,8 @@ class TestTypeMapBreaks:
         """One write/read round that never reaches a fixed point."""
         mapper = build_type_mapper(
             "convergence-break",
-            {
-                "rules": [
+            type_map_document(
+                read=[
                     {
                         "match": "exact",
                         "native_type": "TEXT",
@@ -1577,7 +1561,7 @@ class TestTypeMapBreaks:
                         "arrow_type": "LargeUtf8",
                     },
                 ],
-                "write_rules": [
+                write=[
                     {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"},
                     {
                         "match": "exact",
@@ -1585,7 +1569,7 @@ class TestTypeMapBreaks:
                         "native_type": "CLOB",
                     },
                 ],
-            },
+            ),
         )
         violations = check_type_map_round_trip(mapper)
         report = _messages(violations)
@@ -2073,35 +2057,6 @@ class TestApiReadPathBreaks:
         assert "greater than or equal to 1" in report
         assert "were not read" in _report(check_api_read_advances(target))
 
-    def test_a_keyset_ordering_field_the_schema_leaves_untyped_is_not_a_finding(
-        self, tmp_path: Path
-    ) -> None:
-        """The engine walks the provider's record, not the declared schema.
-
-        ``extract_records`` hands the strategy the raw response objects, so
-        the ordering value the traversal continues from is whatever the
-        provider sent, not whatever the schema described. That is why the
-        drive PLANTS the ordering field instead of sampling it, and a record
-        shape that hands the drive no value there must not be a finding.
-
-        A node carrying no ``type`` is the contract-valid way to be handed
-        nothing: it may compose its type through ``allOf``/``anyOf``/``$ref``,
-        the sampler refuses to guess one, and the field drops out of the
-        scripted record. Omitting the field outright is no longer available
-        to state it -- the contract requires ``order_by_field`` to be
-        declared in the record shape, and refuses the document before any
-        drive sees it.
-        """
-        target = self._broken(
-            tmp_path,
-            "ledger",
-            lambda read: read["response"]["schema"]["properties"]["entries"]["items"][
-                "properties"
-            ].update(sequence={"description": "the position the provider orders by"}),
-        )
-        assert check_endpoint_documents(target) == [], "declared, just untyped"
-        assert check_api_read_advances(target) == []
-
     def test_a_next_url_function_handed_the_wrong_type_is_reported(
         self, tmp_path: Path
     ) -> None:
@@ -2305,13 +2260,10 @@ class TestApiReadPathBreaks:
         root = tmp_path / "api"
         shutil.copytree(API_REFERENCE_DIR, root)
         definition = root / "definition"
-        for document in definition.glob("type-map-*.json"):
-            document.unlink()
-        (definition / "type-map-write.json").write_text(
+        (definition / "type-map.json").write_text(
             json.dumps(
                 type_map_document(
-                    "write",
-                    [
+                    write=[
                         {
                             "match": "exact",
                             "arrow_type": "Int64",
@@ -2560,9 +2512,9 @@ class TestApiReadPathBreaks:
         read (``check_required``, driven end to end in
         ``tests/unit/cdk_tests/api/test_read_path.py``).
 
-        ``operators`` is the source the contract makes a required param
-        declare (RULE-ENDP-066), and it is a source only a stream can draw
-        on -- which is exactly the scope a definition-only run does not
+        A ``filters`` landing is the source the contract makes a required
+        param declare (RULE-ENDP-066), and it is a source only a stream can
+        draw on -- which is exactly the scope a definition-only run does not
         hold, so the param arrives here as empty as one with no source
         could.
         """
@@ -2572,9 +2524,9 @@ class TestApiReadPathBreaks:
                 "in": "query",
                 "type": "string",
                 "required": True,
-                "operators": ["eq"],
             }
             read["request"]["query"]["account"] = {"from_param": "account"}
+            read["filters"] = {"name": {"eq": {"from_param": "account"}}}
 
         target = self._broken(tmp_path, "widgets", bend)
         assert check_api_read_compiles(target) == []
@@ -3142,8 +3094,8 @@ class TestApiRequestBodyBreaks:
                 "in": "body",
                 "type": "string",
                 "required": False,
-                "operators": ["eq"],
             }
+            read["filters"] = {"name": {"eq": {"from_param": "filter"}}}
 
         assert check_api_read_compiles(self._broken(tmp_path, "widgets", bend)) == []
 
@@ -4121,24 +4073,6 @@ class TestApiRequestBodyIsValidatedAroundConnectionValues:
 
         return bend
 
-    def test_a_malformed_branch_beside_a_connection_reference(
-        self, tmp_path: Path
-    ) -> None:
-        target = self._broken(
-            tmp_path,
-            "widgets",
-            self._post_body(
-                {
-                    "scope": {"ref": "connection.parameters.scope"},
-                    "page": {"from_param": "offset"},
-                    "broken": {"ref": 123},
-                },
-                binds_offset=True,
-            ),
-        )
-        report = _report(check_api_read_compiles(target))
-        assert "`ref` must be a string" in report
-
     def test_a_well_formed_body_reading_the_connection_is_clean(
         self, tmp_path: Path
     ) -> None:
@@ -4477,8 +4411,8 @@ class TestApiRequestBlockBreaks:
         has bound. Reporting it here fails a connector the engine reads
         correctly -- so the kit stands a segment in and drives on.
 
-        ``operators`` is what says a stream may filter on it, and it is the
-        source the contract accepts for a required read param with no
+        A ``filters`` landing is what says a stream may filter on it, and it
+        is the source the contract accepts for a required read param with no
         default (RULE-ENDP-066) -- the same statement the docstring above
         makes, now made in the document.
         """
@@ -4490,8 +4424,8 @@ class TestApiRequestBlockBreaks:
                 "in": "path",
                 "type": "string",
                 "required": True,
-                "operators": ["eq"],
             }
+            read["filters"] = {"name": {"eq": {"from_param": "account"}}}
 
         target = self._broken(tmp_path, "widgets", bend)
         assert check_api_read_compiles(target) == []

@@ -14,6 +14,7 @@ import logging
 
 import pytest
 
+from cdk.conformance.fakes import type_map_document
 from cdk.type_map import TypeMapper
 from src.worker.bootstrap import (
     WorkerBootstrap,
@@ -105,15 +106,15 @@ class TestParseBootstrap:
     def test_type_map_blocks_build_mappers(self):
         raw = _minimal_raw(
             type_maps={
-                "connector": {
-                    "rules": [
+                "connector": type_map_document(
+                    read=[
                         {
                             "match": "exact",
                             "native_type": "BIGINT",
                             "arrow_type": "Int64",
                         },
                     ],
-                },
+                ),
                 "connection": None,
             }
         )
@@ -121,21 +122,21 @@ class TestParseBootstrap:
         assert isinstance(bootstrap.connector_type_mapper, TypeMapper)
         assert bootstrap.connection_type_mapper is None
 
-    def test_write_rules_reach_the_worker_mapper(self):
+    def test_write_section_reaches_the_worker_mapper(self):
         raw = _minimal_raw(
             type_maps={
-                "connector": {
-                    "rules": [
+                "connector": type_map_document(
+                    read=[
                         {
                             "match": "exact",
                             "native_type": "BIGINT",
                             "arrow_type": "Int64",
                         }
                     ],
-                    "write_rules": [
+                    write=[
                         {"match": "exact", "arrow_type": "Int64", "native_type": "INT8"}
                     ],
-                },
+                ),
                 "connection": None,
             }
         )
