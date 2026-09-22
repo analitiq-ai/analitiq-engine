@@ -279,18 +279,6 @@ values, materialized by the destination's Arrow schema contract
 (`SchemaContract`, `cdk/cdk/schema_contract.py`), which preserves precision
 across the gRPC boundary.
 
-## Versioning Strategy
-
-End-user mappings need to remain stable for years. The contract is:
-
-1. Functions are versioned (`name@version`).
-2. Every `fn` AST node stores its `version`.
-3. New behavior ships as a new version; the old version stays
-   executable.
-4. When deprecating a version, provide an automatic AST migration plus
-   fixtures, and require fixtures to pass before the migrated mapping
-   is enabled.
-
 ## Stream Fixtures (Recommended)
 
 Fixtures detect schema/type drift and regressions when users edit
