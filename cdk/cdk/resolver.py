@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Any
 
@@ -178,6 +178,7 @@ class ResolutionContext:
     connection: Mapping[str, Any] = field(default_factory=dict)
     secrets: Mapping[str, Any] = field(default_factory=dict)
     auth: Mapping[str, Any] = field(default_factory=dict)
+    stream: Mapping[str, Any] = field(default_factory=dict)
     runtime: Mapping[str, Any] = field(default_factory=dict)
     state: Mapping[str, Any] = field(default_factory=dict)
     derived: Mapping[str, Any] = field(default_factory=dict)
@@ -189,6 +190,7 @@ class ResolutionContext:
         "connection",
         "secrets",
         "auth",
+        "stream",
         "runtime",
         "state",
         "derived",
@@ -241,33 +243,13 @@ class ResolutionContext:
             cursor = cursor[segment]
         return cursor
 
-    def with_runtime(self, runtime: Mapping[str, Any]) -> ResolutionContext:
-        """Return a copy with ``runtime`` replaced — useful per-invocation."""
-        return ResolutionContext(
-            connector=self.connector,
-            connection=self.connection,
-            secrets=self.secrets,
-            auth=self.auth,
-            runtime=runtime,
-            state=self.state,
-            derived=self.derived,
-            request=self.request,
-            response=self.response,
-        )
-
     def with_response(self, response: Mapping[str, Any]) -> ResolutionContext:
         """Return a copy with ``response`` replaced — useful per-page."""
-        return ResolutionContext(
-            connector=self.connector,
-            connection=self.connection,
-            secrets=self.secrets,
-            auth=self.auth,
-            runtime=self.runtime,
-            state=self.state,
-            derived=self.derived,
-            request=self.request,
-            response=response,
-        )
+        return replace(self, response=response)
+
+    def with_stream(self, stream: Mapping[str, Any]) -> ResolutionContext:
+        """Return a copy with ``stream`` replaced — one stream filter's value."""
+        return replace(self, stream=stream)
 
 
 # A registered derived function takes the expression node and the active
@@ -370,6 +352,16 @@ class Resolver:
         one resolution vocabulary, response included.
         """
         return Resolver(self._ctx.with_response(response), functions=self._functions)
+
+    def with_stream(self, stream: Mapping[str, Any]) -> Resolver:
+        """Return a resolver whose ``stream`` scope holds *stream*.
+
+        A ``filters`` template landing renders
+        ``${stream.filters.<field>.value}`` through the same grammar as
+        every other scope, so the stream's filter value is bound as a scope
+        rather than spliced in by a second template renderer.
+        """
+        return Resolver(self._ctx.with_stream(stream), functions=self._functions)
 
     def register(self, name: str, fn: DerivedFunction) -> None:
         if name in self._functions:

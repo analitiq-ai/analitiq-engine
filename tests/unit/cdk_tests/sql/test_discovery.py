@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import pytest
 
+from cdk.conformance.fakes import type_map_document
 from cdk.contract import ColumnDef
 from cdk.sql.dialects import SqlDialect
 from cdk.sql.discovery import list_columns, list_schemas, list_tables
@@ -287,11 +288,11 @@ class TestListColumns:
     async def test_a_write_only_type_map_raises_with_context(self):
         write_only = build_type_mapper(
             "postgres",
-            {
-                "write_rules": [
+            type_map_document(
+                write=[
                     {"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"}
                 ]
-            },
+            ),
         )
         runtime = FakeAdbcRuntime(
             "postgresql",

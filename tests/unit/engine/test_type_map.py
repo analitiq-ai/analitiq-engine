@@ -6,7 +6,6 @@ Covers every acceptance bullet from GH #28:
 - specificity ordering (first-match-wins)
 - whitespace / case normalization
 - hard error on unmapped native types
-- RE2-subset enforcement (lookaround, backreferences rejected)
 - SSL mode lookup + canonical-value validation
 - file loading + caching discipline
 """
@@ -31,7 +30,7 @@ from cdk.type_map import (
     normalize_native_type,
     parse_arrow_type,
 )
-from cdk.type_map.rules import _FORBIDDEN_CONSTRUCTS, parse_rules, parse_write_rules
+from cdk.type_map.rules import parse_rules, parse_write_rules
 
 # ---------------------------------------------------------------------------
 # normalize_native_type
@@ -67,68 +66,6 @@ class TestNormalizeNativeType:
         # what this whole change set exists to remove.
         with pytest.raises(TypeError, match="arrow type must be a string"):
             normalize_arrow_type(None)  # type: ignore[arg-type]
-
-
-# ---------------------------------------------------------------------------
-# Read-rule validation (contract shape, then execution safety)
-# ---------------------------------------------------------------------------
-
-
-def _parse_read(rule: dict):
-    """Parse one read rule through the real entry point."""
-    return parse_rules([rule], source="<test>")
-
-
-def _parse_write(rule: dict):
-    """Parse one write rule through the real entry point."""
-    return parse_write_rules([rule], source="<test>")
-
-
-#: One pattern per construct the engine refuses, mirroring
-#: ``_FORBIDDEN_CONSTRUCTS``. Kept in sync by
-#: ``test_every_forbidden_construct_has_a_case``.
-_NON_RE2_PATTERNS = [
-    ("lookahead", r"^FOO(?=BAR)$"),
-    ("negative lookahead", r"^FOO(?!BAR)$"),
-    ("lookbehind", r"^(?<=BAR)FOO$"),
-    ("negative lookbehind", r"^(?<!BAR)FOO$"),
-    ("atomic group", r"^(?>FOO)BAR$"),
-    ("named backreference", r"^(?<x>\d+)-\k<x>$"),
-    ("Python-style named backreference", r"^(?<x>\d+)-(?P=x)$"),
-    ("numeric backreference", r"^(?<x>\d+)-\1$"),
-]
-
-
-class TestReadRuleValidation:
-    @pytest.mark.parametrize(("construct", "pattern"), _NON_RE2_PATTERNS)
-    def test_regex_rule_rejects_every_construct_outside_the_re2_subset(
-        self, construct, pattern
-    ):
-        # The engine is the only gate on these: Python compiles all of them and
-        # the contract permits any ECMA-262 matcher, so a construct dropped from
-        # _FORBIDDEN_CONSTRUCTS would load clean and silently make the rule
-        # non-portable.
-        with pytest.raises(InvalidTypeMapError):
-            _parse_read(
-                {"match": "regex", "native_type": pattern, "arrow_type": "Utf8"}
-            )
-
-    def test_every_forbidden_construct_has_a_case(self):
-        # _NON_RE2_PATTERNS is a hand-written mirror of the guard's own list;
-        # this is what stops the two drifting apart.
-        declared = {label for _token, label in _FORBIDDEN_CONSTRUCTS}
-        covered = {construct for construct, _pattern in _NON_RE2_PATTERNS}
-        assert declared <= covered, f"untested constructs: {sorted(declared - covered)}"
-
-    def test_a_re2_incompatible_pattern_outside_the_blocklist_is_refused(self):
-        # #504: \Z is not in _FORBIDDEN_CONSTRUCTS (Python compiles it fine)
-        # but RE2 refuses to compile it (RE2 spells the equivalent \z) --
-        # so this fails only if _assert_executable actually compiles the
-        # pattern with re2, not just checks it against the blocklist.
-        with pytest.raises(InvalidTypeMapError, match="failed to compile"):
-            _parse_read(
-                {"match": "regex", "native_type": r"^FOO\Z", "arrow_type": "Utf8"}
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -226,9 +163,8 @@ class TestTypeMapperRegex:
 class TestTypeMapperReDoSBound:
     """#504: a nested-quantifier native_type pattern must not go super-linear.
 
-    ``^(A+)+B$`` has no lookahead, lookbehind, atomic group, or
-    backreference, so it passes the RE2-subset blocklist -- and under
-    Python's backtracking ``re`` it still runs in time exponential in input
+    ``^(A+)+B$`` is a pattern RE2 accepts, and under
+    Python's backtracking ``re`` it runs in time exponential in input
     length on an input with no trailing ``B`` (nothing to anchor the
     backtrack search). The runtime lookup (:meth:`TypeMapper.to_arrow_type`)
     must bound this, not just the load-time compile.
@@ -567,13 +503,9 @@ def _write_connector(
     (definition / "connector.json").write_text(
         json.dumps({"connector_id": "x", "slug": slug, "connector_type": "database"})
     )
-    if type_map is not None:
-        (definition / "type-map-read.json").write_text(
-            json.dumps(type_map_document("read", type_map))
-        )
-    if write_type_map is not None:
-        (definition / "type-map-write.json").write_text(
-            json.dumps(type_map_document("write", write_type_map))
+    if type_map is not None or write_type_map is not None:
+        (definition / "type-map.json").write_text(
+            json.dumps(type_map_document(read=type_map, write=write_type_map))
         )
 
 
@@ -583,19 +515,17 @@ class TestLoaders:
         with pytest.raises(InvalidTypeMapError, match="required type-map not found"):
             load_type_map(tmp_path, "empty")
 
-    def test_type_map_missing_rules_key_rejected(self, tmp_path: Path):
+    def test_document_the_contract_model_rejects_is_invalid(self, tmp_path: Path):
         _write_connector(tmp_path, "no-rules")
-        (tmp_path / "no-rules" / "definition" / "type-map-read.json").write_text(
-            json.dumps({"$schema": "...", "direction": "read"})
+        (tmp_path / "no-rules" / "definition" / "type-map.json").write_text(
+            json.dumps(type_map_document())
         )
-        with pytest.raises(InvalidTypeMapError, match="is not a type-map document"):
+        with pytest.raises(InvalidTypeMapError, match="no-rules"):
             load_type_map(tmp_path, "no-rules")
 
     def test_type_map_malformed_json(self, tmp_path: Path):
         _write_connector(tmp_path, "busted")
-        (tmp_path / "busted" / "definition" / "type-map-read.json").write_text(
-            "not json"
-        )
+        (tmp_path / "busted" / "definition" / "type-map.json").write_text("not json")
         with pytest.raises(InvalidTypeMapError, match="not valid JSON"):
             load_type_map(tmp_path, "busted")
 
@@ -610,90 +540,52 @@ class TestLoaders:
         assert mapper.to_arrow_type("text") == "Utf8"
 
 
-class TestDirectionFromDocument:
-    """A type-map document's ``direction``, not its filename, says which map it is."""
+class TestSingleTypeMapDocument:
+    """One ``type-map.json`` carries the read and write maps, each optional."""
 
     _READ = [{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}]
     _WRITE = [{"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"}]
 
-    def _definition(self, tmp_path: Path, slug: str) -> Path:
-        _write_connector(tmp_path, slug)
-        return tmp_path / slug / "definition"
-
-    def test_swapped_filenames_load_by_direction(self, tmp_path: Path):
-        definition = self._definition(tmp_path, "swapped")
-        (definition / "type-map-read.json").write_text(
-            json.dumps(type_map_document("write", self._WRITE))
+    def test_both_sections_load_both_maps(self, tmp_path: Path):
+        _write_connector(
+            tmp_path, "both", type_map=self._READ, write_type_map=self._WRITE
         )
-        (definition / "type-map-write.json").write_text(
-            json.dumps(type_map_document("read", self._READ))
-        )
-        mapper = load_type_map(tmp_path, "swapped")
+        mapper = load_type_map(tmp_path, "both")
         assert mapper.to_arrow_type("text") == "Utf8"
         assert mapper.to_native_type("Int64") == "BIGINT"
 
-    def test_two_documents_declaring_one_direction_rejected(self, tmp_path: Path):
-        definition = self._definition(tmp_path, "twice")
-        (definition / "type-map-read.json").write_text(
-            json.dumps(type_map_document("read", self._READ))
-        )
-        (definition / "type-map-write.json").write_text(
-            json.dumps(type_map_document("read", self._READ))
-        )
-        with pytest.raises(
-            InvalidTypeMapError, match="both declare direction 'read'"
-        ) as exc:
-            load_type_map(tmp_path, "twice")
-        assert "type-map-read.json" in str(exc.value)
-        assert "type-map-write.json" in str(exc.value)
-
-    def test_write_only_directory_loads_the_write_map(self, tmp_path: Path):
-        definition = self._definition(tmp_path, "writeonly")
-        (definition / "type-map-read.json").write_text(
-            json.dumps(type_map_document("write", self._WRITE))
-        )
+    def test_write_only_document_loads_the_write_map(self, tmp_path: Path):
+        _write_connector(tmp_path, "writeonly", write_type_map=self._WRITE)
         mapper = load_type_map(tmp_path, "writeonly")
         assert mapper.has_read_map is False
         assert mapper.to_native_type("Int64") == "BIGINT"
         with pytest.raises(InvalidTypeMapError, match="no read type map"):
             mapper.to_arrow_type("text")
 
-    def test_read_only_directory_has_no_write_map(self, tmp_path: Path):
-        definition = self._definition(tmp_path, "readonly")
-        (definition / "type-map-read.json").write_text(
-            json.dumps(type_map_document("read", self._READ))
-        )
+    def test_read_only_document_has_no_write_map(self, tmp_path: Path):
+        _write_connector(tmp_path, "readonly", type_map=self._READ)
         mapper = load_type_map(tmp_path, "readonly")
         assert mapper.has_read_map is True
         assert mapper.has_write_map is False
 
-    def test_connection_write_only_directory_loads(self, tmp_path: Path):
+    def test_connection_write_only_document_loads(self, tmp_path: Path):
         definition = tmp_path / "my-pg" / "definition"
         definition.mkdir(parents=True)
-        (definition / "type-map-write.json").write_text(
-            json.dumps(type_map_document("write", self._WRITE))
+        (definition / "type-map.json").write_text(
+            json.dumps(type_map_document(write=self._WRITE))
         )
         mapper = load_connection_type_map(tmp_path, "my-pg")
         assert mapper is not None
         assert mapper.to_native_type("Int64") == "BIGINT"
 
-    def test_any_type_map_filename_is_read(self, tmp_path: Path):
-        definition = self._definition(tmp_path, "renamed")
-        (definition / "type-map-anything.json").write_text(
-            json.dumps(type_map_document("read", self._READ))
+    def test_the_pre_merge_file_names_are_not_read(self, tmp_path: Path):
+        _write_connector(tmp_path, "old-names")
+        definition = tmp_path / "old-names" / "definition"
+        (definition / "type-map-read.json").write_text(
+            json.dumps(type_map_document(read=self._READ))
         )
-        mapper = load_type_map(tmp_path, "renamed")
-        assert mapper.to_arrow_type("text") == "Utf8"
-
-    def test_connection_scope_loads_by_direction(self, tmp_path: Path):
-        definition = tmp_path / "my-pg" / "definition"
-        definition.mkdir(parents=True)
-        (definition / "type-map-write.json").write_text(
-            json.dumps(type_map_document("read", self._READ))
-        )
-        mapper = load_connection_type_map(tmp_path, "my-pg")
-        assert mapper is not None
-        assert mapper.to_arrow_type("text") == "Utf8"
+        with pytest.raises(TypeMapNotFoundError, match="required type-map not found"):
+            load_type_map(tmp_path, "old-names")
 
 
 class TestLoadConnectionTypeMap:
@@ -706,11 +598,10 @@ class TestLoadConnectionTypeMap:
     def test_happy_path(self, tmp_path: Path):
         definition = tmp_path / "my-pg" / "definition"
         definition.mkdir(parents=True)
-        (definition / "type-map-read.json").write_text(
+        (definition / "type-map.json").write_text(
             json.dumps(
                 type_map_document(
-                    "read",
-                    [
+                    read=[
                         {
                             "match": "exact",
                             "native_type": "CUSTOM_ENUM",
@@ -728,7 +619,7 @@ class TestLoadConnectionTypeMap:
     def test_malformed_json_raises(self, tmp_path: Path):
         definition = tmp_path / "broken" / "definition"
         definition.mkdir(parents=True)
-        (definition / "type-map-read.json").write_text("not json")
+        (definition / "type-map.json").write_text("not json")
         with pytest.raises(InvalidTypeMapError, match="not valid JSON"):
             load_connection_type_map(tmp_path, "broken")
 
@@ -916,43 +807,6 @@ class TestNormalizeArrowType:
             "NANOSECOND",
         ):
             normalize_arrow_type(f"Duration({unit})")
-
-
-# ---------------------------------------------------------------------------
-# Write-rule validation (contract shape, then execution safety)
-# ---------------------------------------------------------------------------
-
-
-class TestWriteRuleValidation:
-    def test_regex_rule_rejects_lookahead_in_arrow_type(self):
-        with pytest.raises(InvalidTypeMapError, match="lookahead"):
-            _parse_write(
-                {
-                    "match": "regex",
-                    "arrow_type": "^Foo(?=Bar)$",
-                    "native_type": "TEXT",
-                }
-            )
-
-
-class TestParseWriteRules:
-    def test_execution_safety_error_carries_the_rule_index(self):
-        # An uncompilable pattern would exercise the contract's path instead,
-        # so this drives a construct only the engine refuses.
-        with pytest.raises(
-            InvalidTypeMapError, match=r"rule #1: .*unsupported construct"
-        ):
-            parse_write_rules(
-                [
-                    {"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"},
-                    {
-                        "match": "regex",
-                        "arrow_type": "^DEC(?=IMAL)$",
-                        "native_type": "TEXT",
-                    },
-                ],
-                source="<test>",
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -1381,8 +1235,8 @@ class TestToNativeTypeRegex:
 
     def test_nested_quantifier_bounded_at_runtime_lookup(self):
         # #504, write direction: compile_pattern() compiles the arrow_type
-        # matcher for write rules through the same re2-backed function as
-        # the read side. Same input size as the read-side test -- see its
+        # matcher for write rules through the same RE2 matcher as the read
+        # side. Same input size as the read-side test -- see its
         # comment for the measurement.
         m = _write_mapper(
             [{"match": "regex", "arrow_type": r"^(A+)+B$", "native_type": "X"}]
@@ -1442,7 +1296,7 @@ class TestWriteMapLoader:
                 {"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"}
             ],
         )
-        (tmp_path / "busted" / "definition" / "type-map-write.json").write_text("nope")
+        (tmp_path / "busted" / "definition" / "type-map.json").write_text("nope")
         with pytest.raises(InvalidTypeMapError, match="not valid JSON") as exc:
             load_type_map(tmp_path, "busted")
         assert not isinstance(exc.value, TypeMapNotFoundError)
@@ -1456,25 +1310,17 @@ class TestWriteMapLoader:
     def test_connection_scoped_write_map_loaded(self, tmp_path: Path):
         definition = tmp_path / "my-pg" / "definition"
         definition.mkdir(parents=True)
-        (definition / "type-map-read.json").write_text(
+        (definition / "type-map.json").write_text(
             json.dumps(
                 type_map_document(
-                    "read",
-                    [
+                    read=[
                         {
                             "match": "exact",
                             "native_type": "BIGINT",
                             "arrow_type": "Int64",
                         }
                     ],
-                )
-            )
-        )
-        (definition / "type-map-write.json").write_text(
-            json.dumps(
-                type_map_document(
-                    "write",
-                    [
+                    write=[
                         {
                             "match": "exact",
                             "arrow_type": "Int64",

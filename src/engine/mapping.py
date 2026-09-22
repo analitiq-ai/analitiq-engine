@@ -1116,7 +1116,7 @@ def _rule_failure_mask(
                 )
                 return failing(pc.invert(matched))
             case "range":
-                return _range_failure_mask(value, present, rule, label)
+                return _range_failure_mask(value, present, rule)
             case "in_list":
                 return failing(
                     pc.invert(pc.is_in(value, value_set=pa.array(rule.value)))
@@ -1135,15 +1135,10 @@ def _rule_failure_mask(
 
 
 def _range_failure_mask(
-    value: pa.Array, present: pa.Array, rule: ValidationRule, label: str
+    value: pa.Array, present: pa.Array, rule: ValidationRule
 ) -> pa.Array:
     """Fail rows outside the bounds carried in the rule's ``value`` object."""
     bounds = rule.value
-    if not isinstance(bounds, Mapping) or not {"min", "max"} & set(bounds):
-        raise TransformationError(
-            f"column {label}: validation rule 'range' needs a value "
-            f"object carrying 'min' and/or 'max'; got {bounds!r}"
-        )
     fail = pa.array([False] * len(value))
     minimum = bounds.get("min")
     maximum = bounds.get("max")

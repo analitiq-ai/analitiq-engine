@@ -77,15 +77,6 @@ _CONSTRAINT_KEYWORDS: Final[tuple[str, ...]] = (
 #: not the content.
 _MEASURED: Final = frozenset({"minLength", "maxLength", "minItems", "maxItems"})
 
-#: The keyword pairs that bound one quantity from both ends, low then high.
-#: The metaschema judges a keyword at a time, so it accepts a pair no value
-#: can satisfy.
-_INTERVALS: Final = (
-    ("minimum", "maximum"),
-    ("minLength", "maxLength"),
-    ("minItems", "maxItems"),
-)
-
 #: Every ``format`` this engine ENFORCES, named rather than discovered.
 #: Exactly the set ``jsonschema[format-nongpl]`` supplies, which is what
 #: ``cdk/pyproject.toml``'s ``api`` extra declares -- so the answer is the
@@ -281,16 +272,18 @@ def _keyword_of(attribute: str) -> str:
 def _keyword_defect(name: str, endpoint: str, keyword: str, value: Any) -> str | None:
     """Say how one declared keyword is unusable, or ``None`` if it is fine.
 
-    Everything a single keyword can be wrong about, in one place: a bound no
-    comparison can order, and a ``pattern`` the regex engine cannot compile
-    -- which would otherwise surface as a bare ``re.error``, escaping a
-    module whose whole error vocabulary is :class:`RequestSpecError`.
+    Everything a single keyword can be wrong about, in one place: an
+    ``enum`` member no comparison can order -- the contract refuses a
+    non-finite ``minimum``/``maximum`` but types ``enum`` as ``list[Any]``
+    -- and a ``pattern`` the regex engine cannot compile, which would
+    otherwise surface as a bare ``re.error``, escaping a module whose whole
+    error vocabulary is :class:`RequestSpecError`.
     """
     if _non_finite(value):
         return (
             f"param {name!r} for endpoint {endpoint!r} declares {keyword} "
-            f"{value!r}, which no comparison can order; declare a finite "
-            f"bound or remove the keyword"
+            f"{value!r}, which no comparison can order; declare finite "
+            f"values or remove the keyword"
         )
     if keyword == "pattern":
         # Compiled with `re2`, not stdlib `re`: `pattern` is connector-authored,
@@ -305,23 +298,6 @@ def _keyword_defect(name: str, endpoint: str, keyword: str, value: Any) -> str |
                 f"{value!r}, which is not a valid regular expression: {err}"
             )
     return None
-
-
-def _empty_intervals(
-    name: str, endpoint: str, authored: Mapping[str, Any]
-) -> list[str]:
-    """Say which declared intervals admit nothing at all.
-
-    Has to be answered at compile: on a param a loop owns, the first value
-    arrives on page two, after page one has already committed rows.
-    """
-    return [
-        f"param {name!r} for endpoint {endpoint!r} declares {low} "
-        f"{authored[low]!r} above {high} {authored[high]!r}, which no value "
-        f"can satisfy"
-        for low, high in _INTERVALS
-        if low in authored and high in authored and authored[low] > authored[high]
-    ]
 
 
 def _refuse(problems: Sequence[str]) -> None:
@@ -383,12 +359,12 @@ def _compile_one(name: str, decl: Param, endpoint: str) -> _Rule:
             raise RequestSpecError(defect)
         schema[keyword] = normalize_numbers(value)
         authored[keyword] = value
-    _refuse(_empty_intervals(name, endpoint, authored))
-    # No metaschema pass over ``schema``. Every key in it comes from a
-    # contract field the models already constrain -- ``type`` is a Literal,
-    # the size bounds are non-negative ints, ``pattern`` was compiled above
-    # and the numeric bounds were checked finite -- so there is no shape
-    # left for it to catch. One gate per document: a second validator over
+    # No metaschema pass over ``schema``, and no check that each interval
+    # admits a value. Every key in it comes from a contract field the models
+    # already constrain -- ``type`` is a Literal, the size bounds are
+    # non-negative ints, the numeric bounds are finite and every interval is
+    # ordered (RULE-ENDP-076), and ``pattern`` was compiled above -- so there
+    # is no shape left for it to catch. One gate per document: a second validator over
     # what ``analitiq-contract-models`` already refuses is split-brain, not
     # defence in depth.
     return _Rule(

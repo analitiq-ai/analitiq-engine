@@ -60,18 +60,6 @@ class TestResolutionContextLookup:
         with pytest.raises(TransportSpecError, match="non-empty"):
             ctx.lookup("")
 
-    def test_with_runtime_returns_copy(self):
-        original = ResolutionContext(
-            connection={"parameters": {"host": "h"}},
-            runtime={"batch_size": 10},
-        )
-        clone = original.with_runtime({"batch_size": 99})
-        assert clone is not original
-        assert clone.runtime == {"batch_size": 99}
-        assert clone.connection == original.connection
-        # Original is untouched.
-        assert original.runtime == {"batch_size": 10}
-
 
 # ---------------------------------------------------------------------------
 # Resolver: ref / literal / template

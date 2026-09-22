@@ -235,8 +235,8 @@ def _page_order_by(
 ) -> str:
     """Resolve the ORDER BY column for an OFFSET-paged ADBC read.
 
-    The stream's declared order_by_field wins (a conflict with the
-    incremental cursor is rejected in ``read_batches``), then the cursor,
+    The stream's declared order_by_field wins (the contract refuses one
+    that differs from the incremental cursor, RULE-STRM-043), then the cursor,
     then the first projected column (warned once — an undeclared order
     makes OFFSET paging best-effort).
     """
@@ -2150,20 +2150,6 @@ class GenericSQLConnector(BaseDestinationHandler):
             order_by_field = (
                 database_pagination.order_by_field if database_pagination else None
             )
-            if order_by_field and cursor_field and order_by_field != cursor_field:
-                # Checkpoint advancement takes the cursor value of the
-                # page's last row, which is the maximum only when pages
-                # are ordered by the cursor. An ordering that diverges
-                # from the cursor would save arbitrary cursor values and
-                # silently skip rows on later runs — fail before any
-                # extraction work.
-                raise ReadError(
-                    f"stream {stream_name!r}: database_pagination."
-                    f"order_by_field {order_by_field!r} conflicts with "
-                    f"incremental cursor_field {cursor_field!r}; cursor "
-                    f"checkpointing requires pages ordered by the cursor. "
-                    f"Drop order_by_field or make it the cursor field."
-                )
 
             if cursor_field:
                 # The wildcard projection compiles to SELECT * (see

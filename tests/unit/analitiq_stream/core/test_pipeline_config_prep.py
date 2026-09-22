@@ -23,7 +23,6 @@ import pytest
 from analitiq.contracts.endpoint_identity import derive_db_endpoint_id
 
 from cdk.conformance.fakes import type_map_document
-from cdk.declarations import ConnectorDeclarationError
 from cdk.types import EndpointScope
 from src.config.schema_validator import BundleValidationError, ContractValidationError
 from src.engine.batch_policy import ErrorStrategy
@@ -278,10 +277,9 @@ def _build_tree(
         _connector_doc(),
     )
     _write_json(
-        root / "connectors" / CONNECTOR_ID / "definition" / "type-map-read.json",
+        root / "connectors" / CONNECTOR_ID / "definition" / "type-map.json",
         type_map_document(
-            "read",
-            [
+            read=[
                 {"match": "exact", "native_type": "VARCHAR", "arrow_type": "Utf8"},
                 {"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"},
             ],
@@ -299,12 +297,11 @@ def _build_tree(
             private_doc,
         )
         _write_json(
-            dst_definition / "type-map-read.json",
+            dst_definition / "type-map.json",
             # Carries a rule the connector's map does not, so the test can
             # tell which mapper actually resolved.
             type_map_document(
-                "read",
-                [{"match": "exact", "native_type": "JSONB", "arrow_type": "Utf8"}],
+                read=[{"match": "exact", "native_type": "JSONB", "arrow_type": "Utf8"}],
             ),
         )
     for endpoint_id in connector_endpoints:
@@ -724,23 +721,6 @@ class TestDeclaredConnectorFacts:
             connector_doc,
         )
 
-    def test_legacy_error_map_shape_rejected_at_config_load(
-        self, pipeline_tree: Path
-    ) -> None:
-        # Issue #513: the published contract still accepts the pre-#513
-        # sqlstate/exception/vendor_code shape (its own update is tracked by
-        # claude-code-plugins#91, not this repo), so a legacy declaration
-        # passes that first gate -- and must still fail loud at the CDK's
-        # own parse, the second gate _resolve_connection_by_id runs, rather
-        # than silently reaching a worker with a mapping nothing reads any
-        # more.
-        connector_doc = _connector_doc()
-        connector_doc["error_map"] = {"sqlstate": {"08": "unreachable"}}
-        self._write_connector(pipeline_tree, connector_doc)
-        prep = PipelineConfigPrep()
-        with pytest.raises(ConnectorDeclarationError, match="unknown fields"):
-            prep.create_config()
-
 
 # ---------------------------------------------------------------------------
 # Endpoint schema dispatch (#165)
@@ -930,11 +910,7 @@ class TestConnectionScopedEndpoints:
         root.mkdir()
         _build_tree(root, dst_endpoint_scope="connection")
         (
-            root
-            / "connections"
-            / CONNECTION_DST_ID
-            / "definition"
-            / "type-map-read.json"
+            root / "connections" / CONNECTION_DST_ID / "definition" / "type-map.json"
         ).unlink()
         monkeypatch.chdir(root)
         monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)

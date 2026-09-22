@@ -538,6 +538,7 @@ class GenericAPIConnector(BaseDestinationHandler):
                 resolver,
                 endpoint=endpoint_id,
                 filters=stream_source.filters or [],
+                filter_landings=read.filters,
             )
             # Presence, which ``for_read`` deliberately does not answer:
             # only a caller holding the connection, the secrets and the
@@ -561,7 +562,6 @@ class GenericAPIConnector(BaseDestinationHandler):
                 declared_params=read.params,
                 pagination=pagination,
                 metadata=read.response.metadata,
-                endpoint=endpoint_id,
             )
             if problem is not None:
                 raise ReadError(f"endpoint {endpoint_id!r}: {problem}")

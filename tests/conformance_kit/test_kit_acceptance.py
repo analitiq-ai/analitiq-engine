@@ -58,8 +58,8 @@ TIER1_MIN_PASSED = 10
 
 
 def _type_map_read_doc(rules: list) -> str:
-    """A minimal read-direction type-map document, serialized."""
-    return json.dumps(type_map_document("read", rules))
+    """A minimal read-only type-map document, serialized."""
+    return json.dumps(type_map_document(read=rules))
 
 
 def _skipped_lines(output: str) -> list[str]:
@@ -197,7 +197,7 @@ class TestThinConnectorPassesVacuously:
         (definition_dir / "connector.json").write_text(
             json.dumps(minimal_connector_definition("database", "conformance-thin"))
         )
-        (definition_dir / "type-map-read.json").write_text(
+        (definition_dir / "type-map.json").write_text(
             _type_map_read_doc(
                 [{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}]
             )
@@ -237,7 +237,7 @@ class TestUnassessableKindIsNotAPass:
         (definition_dir / "connector.json").write_text(
             json.dumps(minimal_connector_definition("file", "unassessed"))
         )
-        (definition_dir / "type-map-read.json").write_text(
+        (definition_dir / "type-map.json").write_text(
             _type_map_read_doc(
                 [{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}]
             )
@@ -309,11 +309,12 @@ class TestUnassessableKindIsNotAPass:
         (definition_dir / "connector.json").write_text(
             json.dumps(minimal_connector_definition("api", "conformance-write-only"))
         )
-        (definition_dir / "type-map-write.json").write_text(
+        (definition_dir / "type-map.json").write_text(
             json.dumps(
                 type_map_document(
-                    "write",
-                    [{"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"}],
+                    write=[
+                        {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"}
+                    ],
                 )
             )
         )

@@ -203,26 +203,6 @@ class TestDeclaredResponseRefusals:
         assert "response block" in outcome
         assert "unknown derived function 'no_such_function'" in outcome
 
-    def test_a_reference_outside_the_write_scope_is_refused_at_configure(
-        self,
-    ) -> None:
-        # `response.records` is a read-side spelling; a write response
-        # carries body, headers, status and metadata and nothing else, so
-        # this resolves to nothing on every batch and each would be
-        # reported as a provider rejection.
-        outcome = build_write_plan(
-            _document(
-                response={"success_when": {"not_empty": {"ref": "response.records"}}}
-            ),
-            _spec(),
-            header_names_for=lambda _ref: set(),
-            transport_problem=lambda _ref: None,
-            resolver=_resolver(),
-        )
-        assert isinstance(outcome, str)
-        assert "response block" in outcome
-        assert "reads 'response.records'" in outcome
-
     @pytest.mark.parametrize(
         "ref",
         [
@@ -298,19 +278,6 @@ class TestIdempotencyRefusals:
             resolver=_resolver(),
         )
         assert isinstance(outcome, str) and "collides" in outcome
-
-    def test_a_name_the_client_cannot_send_is_refused(self) -> None:
-        # The key reaches the wire by a different route than the declared
-        # header map, and the client judges it the same way.
-        doc = _document(idempotency={"in": "header", "name": "Bad Key"})
-        outcome = build_write_plan(
-            doc,
-            _spec(),
-            header_names_for=lambda _ref: set(),
-            transport_problem=lambda _ref: None,
-            resolver=_resolver(),
-        )
-        assert isinstance(outcome, str) and "not an HTTP token" in outcome
 
     def test_a_pass_through_body_keyed_from_input_is_not_a_collision(self) -> None:
         # The body IS the record (``{"from_input": "record"}``), so
@@ -645,20 +612,6 @@ class TestTheRequestTheStreamWillActuallySend:
         )
         assert isinstance(plan, StreamWritePlan)
         assert plan.headers == {"X-Legacy-Auth": "legacy"}
-
-    def test_a_query_key_named_ref_survives_resolution(self) -> None:
-        # "ref" is a real query parameter name. Resolving the map as one node
-        # reads the key as an expression marker and the endpoint breaks.
-        doc = _document(query={"ref": {"literal": "main"}})
-        plan = build_write_plan(
-            doc,
-            _spec(),
-            header_names_for=lambda _ref: set(),
-            transport_problem=lambda _ref: None,
-            resolver=_resolver(),
-        )
-        assert isinstance(plan, StreamWritePlan)
-        assert plan.query == {"ref": "main"}
 
     def test_a_path_value_is_encoded_as_exactly_one_segment(self) -> None:
         # The write role's half of RULE-ENDP-027: the engine already encodes

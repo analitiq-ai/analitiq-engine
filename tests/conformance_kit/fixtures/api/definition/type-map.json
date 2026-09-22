@@ -1,7 +1,6 @@
 {
-  "$schema": "https://schemas.analitiq.ai/type-map-read/latest.json",
-  "direction": "read",
-  "rules": [
+  "$schema": "https://schemas.analitiq.ai/type-map/latest.json",
+  "read": [
     {
       "match": "exact",
       "native_type": "BOOLEAN",

@@ -2,8 +2,8 @@
 
 ``TypeMapper`` returns the first matching rule's output and raises on a miss —
 no defaults, no coercion. Each direction has its **own** rule set: the read
-map (the type-map document declaring ``direction: read``, native → Arrow) feeds
-:meth:`TypeMapper.to_arrow_type`; the write map (``direction: write``,
+map (the ``read`` section of ``type-map.json``, native → Arrow) feeds
+:meth:`TypeMapper.to_arrow_type`; the write map (the ``write`` section,
 Arrow → native) feeds :meth:`TypeMapper.to_native_type`. Either may be absent:
 a source only reads, a destination only writes. The two are independent rule
 sets, never one inverted at runtime — inverting would be lossy and ambiguous.
@@ -18,7 +18,7 @@ from typing import Any, Final
 
 from .exceptions import InvalidTypeMapError, UnmappedTypeError
 from .rules import (
-    CompiledPattern,
+    CompiledMatcher,
     TypeMapReadRule,
     TypeMapWriteRule,
     compile_pattern,
@@ -55,7 +55,7 @@ class TypeMapper:
 
         # Precompute one match artefact per rule: either the normalized
         # literal (exact) or the compiled pattern (regex).
-        self._compiled: list[CompiledPattern | None] = []
+        self._compiled: list[CompiledMatcher | None] = []
         self._exact_native: list[str | None] = []
         for rule in self._rules:
             if rule.match == "exact":
@@ -69,7 +69,7 @@ class TypeMapper:
         # read side: exact rules keep their normalized literal, regex rules a
         # compiled pattern.
         self._write_rules: tuple[TypeMapWriteRule, ...] = tuple(write_rules or ())
-        self._write_compiled: list[CompiledPattern | None] = []
+        self._write_compiled: list[CompiledMatcher | None] = []
         self._exact_arrow: list[str | None] = []
         for write_rule in self._write_rules:
             if write_rule.match == "exact":
@@ -141,17 +141,7 @@ class TypeMapper:
                     return rule.arrow_type
                 continue
             assert compiled is not None
-            # `normalized` is runtime input (whatever a driver or API schema
-            # reported), not a pydantic-validated document field like the
-            # rule's own pattern -- a lone surrogate in it makes re2's
-            # internal UTF-8 encoding step raise UnicodeEncodeError instead
-            # of matching or not matching. Treated as a miss on this rule,
-            # the same verdict a value re2 cannot interpret gets everywhere
-            # else it is checked (#504).
-            try:
-                match = compiled.fullmatch(normalized)
-            except UnicodeEncodeError:
-                continue
+            match = compiled.fullmatch(normalized)
             if match is None:
                 continue
             # Drop optional groups that did not participate (groupdict gives
@@ -203,13 +193,7 @@ class TypeMapper:
                     return _substitute_tokens(rule.native_type, hints)
                 continue
             assert compiled is not None
-            # See the read-side comment in to_arrow_type: `normalized` is
-            # runtime input, not a validated document field, so a lone
-            # surrogate can reach re2's fullmatch here too.
-            try:
-                match = compiled.fullmatch(normalized)
-            except UnicodeEncodeError:
-                continue
+            match = compiled.fullmatch(normalized)
             if match is None:
                 continue
             # Drop optional groups that did not participate (groupdict gives them

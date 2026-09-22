@@ -35,12 +35,8 @@ missing limit or error mapping cannot block anything — absence means "no
 declared cap / no declared mapping" and current behavior applies. A runtime
 failure caused by an undeclared cap or mapping is a connector defect, fixed
 by declaring it (or implementing ``classify_error``) — never worked around
-in the engine. Declared ``error_map`` content is still validated fail-loud:
-an off-vocabulary category or a malformed ``key_attrs``/``codes`` entry is a
-configuration error. A
-connector definition still carrying the retired fixed-family shape (a
-top-level ``sqlstate``/``exception``/``vendor_code`` key) fails the same
-way: unknown fields, not a silently reinterpreted block.
+in the engine. Declared content is still validated fail-loud: an
+off-vocabulary category or a malformed block is a configuration error.
 
 Both blocks reach the worker via the resolved payload channel
 (``ConnectionRuntime.resolve_spec`` / ``from_resolved_payload``), the same
@@ -435,19 +431,17 @@ class ErrorMap:
 
         Every field is optional (absence declares nothing); a declared
         field's identifiers and categories are validated strictly, and an
-        unknown top-level field fails -- including the retired fixed-family
-        keys (``sqlstate``/``exception``/``vendor_code``), which is what
-        makes a leftover pre-#513 declaration fail loud here rather than
-        being silently reinterpreted.
+        unknown top-level field fails. The contract refuses the same shapes at
+        config load, but the worker rebuilds this block from its resolved
+        payload (``ConnectionRuntime.from_resolved_payload``), which no
+        contract model reads.
         """
         known = {"key_attrs", "codes", "http"}
         unknown = set(block) - known
         if unknown:
             raise ConnectorDeclarationError(
                 f"error_map in {source} carries unknown fields "
-                f"{sorted(unknown)}; expected a subset of {sorted(known)} "
-                f"(the fixed sqlstate/exception/vendor_code families are "
-                f"retired -- issue #513 -- declare key_attrs + codes instead)"
+                f"{sorted(unknown)}; expected a subset of {sorted(known)}"
             )
         key_attrs = _parse_key_attrs(block, source=source)
         codes = _parse_codes(block, source=source)

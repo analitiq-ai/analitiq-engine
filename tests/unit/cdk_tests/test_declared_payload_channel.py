@@ -16,17 +16,10 @@ from contract_documents import connection_document, connector_document
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.declarations import parse_declared_concurrency
 
-# The vendored ``analitiq.contracts`` package (claude-code-plugins#91's job to
-# update, per issue #513's Decisions) still validates ``error_map`` against
-# the pre-#513 fixed-family shape -- ``connector_document`` below goes
-# through that Pydantic contract, so this file's fixture stays in that shape.
-# This test proves the wire only (the block rides resolve_spec / rebuild
-# verbatim, whatever it contains); the new key_attrs/codes shape and its
-# parsing are exhaustively covered, unconstrained by the vendored contract,
-# in test_declarations.py.
 ERROR_MAP = {
-    "sqlstate": {"08": "unreachable"},
-    "exception": {"OperationalError": "transient"},
+    "key_attrs": ["sqlstate"],
+    "codes": {"08": "unreachable"},
+    "http": {"429": "rate_limited"},
 }
 CONCURRENCY = {"max_connections": 4}
 
@@ -75,6 +68,6 @@ def test_restored_blocks_do_not_share_state_with_the_payload():
     runtime = _trusted_runtime(error_map=ERROR_MAP)
     copied = runtime.declared_error_map
     assert copied is not None
-    copied["sqlstate"]["08"] = "mutated"
+    copied["codes"]["08"] = "mutated"
     # The runtime's own copy is isolated from the caller's mutation.
     assert runtime.declared_error_map == ERROR_MAP

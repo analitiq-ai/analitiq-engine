@@ -43,10 +43,10 @@ in a customer pipeline (spec
 - **Declared and implemented agree, both ways.** A declared
   `merge_form` needs `merge_statement_sql`; a `bulk_land` override
   needs a declared `bulk_load` mechanism; a write-capable connector
-  (one shipping a write-direction type map) needs `sql_capabilities` and
+  (one whose `type-map.json` has a `write` section) needs `sql_capabilities` and
   `stage_table_sql`.
 - **Every connector states its type vocabulary.**
-  The read-direction type map in `definition/` is what the engine maps discovered
+  The `read` section of `definition/type-map.json` is what the engine maps discovered
   source types through, whatever the connector's kind: a database maps the
   `native_type`s discovery returns, an API the JSON `type`/`format` its
   endpoint fields declare.
