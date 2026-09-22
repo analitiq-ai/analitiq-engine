@@ -432,7 +432,9 @@ Properties:
   current behavior applies. A runtime failure caused by an undeclared cap or
   mapping is a connector defect, fixed by declaring it — never worked around
   in the engine. The published contract validates `error_map`, `limits`
-  and `concurrency` at config load; `cdk.declarations` only reads them.
+  and `concurrency` at config load; the engine only reads them
+  (`cdk.declarations` for `error_map` and `concurrency`,
+  `cdk.sql.capabilities` for `limits`).
 - **`error_map` declares facts, never verdicts.** The value vocabulary is
   engine-owned — `transient | config | auth | unreachable | rate_limited |
   write_rejected` — and the engine alone derives `AckStatus`,
