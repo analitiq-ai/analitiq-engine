@@ -64,37 +64,6 @@ class TestErrorMapParse:
         assert error_map.match_http(429) is None
         assert error_map.match_exception(ValueError("x")) is None
 
-    def test_unknown_field_fails(self):
-        with pytest.raises(ConnectorDeclarationError, match="unknown fields"):
-            parse_declared_error_map({"sqlstate": {"08": "unreachable"}})
-
-    def test_off_vocabulary_category_fails(self):
-        with pytest.raises(ConnectorDeclarationError, match="expected one of"):
-            parse_declared_error_map(
-                {"key_attrs": ["sqlstate"], "codes": {"08": "retry_me"}}
-            )
-
-    def test_non_object_codes_fails(self):
-        with pytest.raises(ConnectorDeclarationError, match="must be an object"):
-            parse_declared_error_map({"key_attrs": ["sqlstate"], "codes": ["429"]})
-
-    def test_key_attrs_without_codes_fails(self):
-        with pytest.raises(ConnectorDeclarationError, match="key_attrs without codes"):
-            parse_declared_error_map({"key_attrs": ["sqlstate"]})
-
-    def test_codes_without_key_attrs_fails(self):
-        with pytest.raises(ConnectorDeclarationError, match="key_attrs without codes"):
-            parse_declared_error_map({"codes": {"28000": "auth"}})
-
-    def test_empty_key_attrs_list_fails(self):
-        with pytest.raises(ConnectorDeclarationError, match="non-empty list"):
-            parse_declared_error_map({"key_attrs": [], "codes": {"28000": "auth"}})
-
-    @pytest.mark.parametrize("entry", ["1bad", "bad-name", "", "bad.name", 5])
-    def test_malformed_key_attrs_entry_fails(self, entry):
-        with pytest.raises(ConnectorDeclarationError, match="malformed entry"):
-            parse_declared_error_map({"key_attrs": [entry], "codes": {"28000": "auth"}})
-
     def test_class_name_signal_is_a_legal_key_attrs_entry(self):
         error_map = parse_declared_error_map(
             {"key_attrs": [CLASS_NAME_SIGNAL], "codes": {"ValueError": "config"}}

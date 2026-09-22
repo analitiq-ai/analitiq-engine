@@ -281,9 +281,9 @@ def body_with_idempotency_key(
 ) -> dict[str, Any]:
     """Return the request body with the engine-owned idempotency key added.
 
-    The contract rejects a declared non-object body spec at document load;
-    this guards the shapes only the run can produce (a spec-less record
-    body, or a spec that resolved away its object shape). A body already
+    The contract rejects a missing or non-object body spec at document load;
+    this guards the one shape only the run can produce: a ``from_input``
+    body that resolved to a non-object. A body already
     carrying the reserved field is a collision the engine must not silently
     overwrite.
     """

@@ -701,28 +701,6 @@ class TestCreateConfigErrorPaths:
 
 
 # ---------------------------------------------------------------------------
-# Declared connector facts (#401)
-# ---------------------------------------------------------------------------
-
-
-class TestDeclaredConnectorFacts:
-    """The declared ``error_map`` block (#401) at config load.
-
-    Its grammar is the engine's own (#513 retired the fixed families the
-    published contract still carries), so ``_resolve_connection_by_id``
-    parsing it through the CDK's typed view is the only gate it has — a
-    dropped line here would defer a malformed declaration to a spawned
-    worker.
-    """
-
-    def _write_connector(self, root: Path, connector_doc: dict[str, Any]) -> None:
-        _write_json(
-            root / "connectors" / CONNECTOR_ID / "definition" / "connector.json",
-            connector_doc,
-        )
-
-
-# ---------------------------------------------------------------------------
 # Endpoint schema dispatch (#165)
 # ---------------------------------------------------------------------------
 

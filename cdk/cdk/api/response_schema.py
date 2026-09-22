@@ -40,13 +40,10 @@ def records_items_schema(
 ) -> dict[str, Any]:
     """Resolve the declared ``records`` ref to the per-record items schema.
 
-    The walk is the contract's own :func:`resolve_read_record_schema` --
-    the published record-locator every consumer of the read contract
-    shares. A second walk here was a second gate over a rule the contract
-    already decides, and the two disagreed: this one read ``properties``
-    literally, so a records path composed through ``$ref``/``$defs``
-    validated at document load and was then refused before the first
-    request.
+    The walk is the contract's own :func:`resolve_read_record_schema`,
+    the record-locator every consumer of the read contract shares, so a
+    path composed through ``$ref``/``$defs``/``allOf`` resolves here exactly
+    as it did at document load.
 
     ``None`` from the locator means the ref addressed nothing resolvable.
     That is a refusal, never the response schema itself: the schema is the

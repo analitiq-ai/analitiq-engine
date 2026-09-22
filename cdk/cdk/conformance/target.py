@@ -525,9 +525,8 @@ def load_target(
             f"the connector contract: {err}"
         ) from err
 
-    # Read off the validated model, never the raw file: the kit certifies the
-    # connector the engine will run, so it must see the block the contract
-    # produced (authored_sql_capabilities), coercions and all.
+    # The same reader the engine uses, so the kit certifies the block the
+    # engine folds into the worker payload.
     capabilities = parse_declared_capabilities(authored_sql_capabilities(connector))
 
     connector_class, class_unavailable = _resolve_connector_class(

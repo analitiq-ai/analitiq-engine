@@ -92,12 +92,9 @@ MATERIALIZATION_SECRET_SCOPES = ("secrets",)
 def authored_sql_capabilities(connector: Connector | None) -> dict[str, Any] | None:
     """Return the connector's declared ``sql_capabilities`` as its author wrote it.
 
-    One reader for the one block, because two of them disagree: the engine
-    folds this into the worker payload while the conformance kit certifies
-    the same ``connector.json``, and the contract's own coercions (a lax
-    boolean, an aliased field name) only show in the validated model. A
-    reader that went back to the raw file would refuse a definition the
-    engine runs. Only a database connector declares it.
+    One reader for the one block, so the conformance kit certifies exactly
+    the block the engine folds into the worker payload. Only a database
+    connector declares it.
     """
     if not isinstance(connector, DatabaseConnector):
         return None
@@ -357,8 +354,8 @@ class ConnectionRuntime:
 
         ``None`` means the connector declares no driver-error taxonomy —
         consumers keep their current heuristics (additive absence, unlike
-        the sql_capabilities shape facts). Parsed at consumption via
-        ``cdk.declarations.parse_declared_error_map``.
+        the sql_capabilities shape facts). The contract validated it at
+        config load; consumers read it via ``cdk.declarations.error_map_for``.
         """
         return (
             copy.deepcopy(self._declared_error_map)
