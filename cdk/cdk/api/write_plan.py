@@ -376,8 +376,7 @@ def _apply_idempotency(
 
     The author declares placement only -- the VALUE is always the
     engine's -- so what can go wrong is where it would land: a header the
-    connection or the endpoint already sends, or a body field the record
-    already carries.
+    connection's transport already sends.
     """
     idempotency = mode_block.idempotency
     if idempotency is None:

@@ -1,10 +1,10 @@
 """Where a page's records live in a decoded body, and how to reach them.
 
-``operations.read.response.records.ref`` is one path, read by two pieces of
-code: the payload walk that pulls the records out of a live response, and
-the schema walk that finds the per-record item schema. They parsed the
-anchor separately and could disagree about what a ref meant, so the parse
-is :func:`split_records_ref` and both call it.
+``operations.read.response.records.ref`` is one path. The payload walk
+that pulls the records out of a live response, and the conformance kit,
+parse it with :func:`split_records_ref`; the schema walk that finds the
+per-record item schema resolves it through the contract's
+``resolve_read_record_schema``.
 
 Extraction fails loud. A ref that addresses nothing used to answer zero
 records, and under the loop's empty-page rule zero records ends the
