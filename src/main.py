@@ -186,10 +186,9 @@ async def run_destination_mode() -> None:
     apply_log_level(pipeline_config.runtime.logging.log_level)
 
     # Get destination connection from pipeline config
+    # The pipeline contract requires >= 1 destination (validated when the
+    # pipeline document was loaded), so destinations is non-empty here.
     destinations = pipeline_config.connections.destinations
-    if not destinations:
-        logger.error("Pipeline has no destinations configured")
-        sys.exit(1)
 
     if destination_index >= len(destinations):
         logger.error(
