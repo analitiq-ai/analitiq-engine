@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, cast, get_args
 
 from analitiq.contracts.connection import ConnectionInput
@@ -72,13 +72,19 @@ from cdk.types import EndpointScope
 
 logger = logging.getLogger(__name__)
 
-#: The storage scopes the required-input check reads a value from, one per
-#: ``storage`` the contract lets an input declare.
-_INPUT_STORAGE_SCOPES = frozenset({"connection.parameters", "secrets"})
-if _INPUT_STORAGE_SCOPES != frozenset(get_args(ContractInputStorage)):
+#: Where the required-input check reads an input's value, per ``storage`` the
+#: contract lets an input declare: from (connection parameters, secrets).
+_INPUT_STORAGE: Mapping[
+    str, Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]]
+] = {
+    "connection.parameters": lambda parameters, _secrets: parameters,
+    "secrets": lambda _parameters, secrets: secrets,
+}
+if frozenset(_INPUT_STORAGE) != frozenset(get_args(ContractInputStorage)):
     raise TypeError(
-        "connection_contract input storage: the contract and the engine's "
-        "required-input scopes disagree"
+        f"connection_contract input storage: the contract declares "
+        f"{sorted(get_args(ContractInputStorage))} but the engine reads "
+        f"{sorted(_INPUT_STORAGE)}"
     )
 
 #: The connection-document fields transport materialization puts in scope --
@@ -1167,16 +1173,13 @@ class ConnectionRuntime:
         connector = self._connector
         if connector is None:
             return
-        scopes: dict[str, Mapping[str, Any]] = {
-            "connection.parameters": self._connection.parameters,
-            "secrets": secrets,
-        }
         missing = []
         for name, spec in connector.connection_contract.inputs.items():
             if not spec.required:
                 continue
             storage = spec.storage
-            if scopes[storage].get(name) is None:
+            scope = _INPUT_STORAGE[storage](self._connection.parameters, secrets)
+            if scope.get(name) is None:
                 missing.append(f"{name} ({storage})")
         if missing:
             raise TransportSpecError(

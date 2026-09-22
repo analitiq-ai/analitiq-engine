@@ -8,8 +8,8 @@ testable facts in the connector definition:
   declares which of its own exception's attributes carries its native error
   signal (``key_attrs``, e.g. ``"sqlstate"``, ``"vendor_code"``, or the
   reserved ``"__exception_class__"`` sentinel for matching the exception's
-  class name), and a flat map from that native code to one of the engine's
-  six categories (``codes``). A provider whose failures ride an HTTP status
+  class name), and a flat map from that native code to one of the contract's
+  ``ErrorCategory`` values (``codes``). A provider whose failures ride an HTTP status
   declares that separately (``http``), since a status is read from the
   response, never the exception. The engine reads the declared attribute
   generically — it no longer hardcodes which attribute a family reads or in
@@ -149,7 +149,7 @@ class DeclaredMatch:
     ``signal``/``value`` name the connector's declared fact (a ``key_attrs``
     entry and the native code read off it, or ``"http"`` and a status) —
     developer-chosen identifiers, safe for logs and failure summaries.
-    ``category`` is the engine-vocabulary value the consumer derives its
+    ``category`` is the ``ErrorCategory`` value the consumer derives its
     verdict from; membership is re-checked here so a match constructed
     outside :class:`ErrorMap` can never smuggle an off-vocabulary category
     into a verdict-table lookup.
@@ -167,7 +167,7 @@ class DeclaredMatch:
 
 
 def require_declared_category(category: str, *, source: str) -> str:
-    """Validate a category against the engine vocabulary. Raises loud.
+    """Validate a category against the contract's ``ErrorCategory``. Raises loud.
 
     Reserved for contexts where an off-vocabulary value can only mean an
     *engine* bug, never a connector one -- :class:`DeclaredMatch`
@@ -186,7 +186,7 @@ def require_declared_category(category: str, *, source: str) -> str:
     if category not in ERROR_CATEGORY_VALUES:
         raise ErrorCategoryDriftError(
             f"{source} classified an error as {category!r}, which is not "
-            f"in the engine vocabulary {list(ERROR_CATEGORY_VALUES)}"
+            f"in the contract vocabulary {list(ERROR_CATEGORY_VALUES)}"
         )
     return category
 
@@ -316,7 +316,7 @@ class ErrorMap:
     which attributes of its exception carry a native error signal (or the
     reserved :data:`CLASS_NAME_SIGNAL` to match the exception's class name).
     ``codes`` maps whatever native value each attribute reads to an
-    engine-vocabulary category, with no engine-enforced shape on the native
+    ``ErrorCategory`` value, with no engine-enforced shape on the native
     code itself -- SQLSTATEs, vendor codes, anything a driver emits are all
     just strings to this lookup. ``http`` is unrelated to the exception
     attributes: a status is read at the HTTP call site, never off a raised

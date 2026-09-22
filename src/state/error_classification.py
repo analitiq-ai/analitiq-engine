@@ -347,7 +347,7 @@ def source_code_for_declared_category(category: str) -> ErrorCode | None:
     """
     if category not in _DECLARED_SOURCE_CODES:
         logger.warning(
-            "declared_category %r off the wire is not in the engine "
+            "declared_category %r off the wire is not in the contract "
             "vocabulary; ignoring it",
             category,
         )

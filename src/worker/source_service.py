@@ -74,7 +74,7 @@ def classify_read_error(
     """Classify a read failure: declared verdicts first, isinstance ladder after.
 
     Returns ``(deterministic, declared_category)`` where
-    ``declared_category`` is the engine-vocabulary value the connector's
+    ``declared_category`` is the ``ErrorCategory`` value the connector's
     declarations claimed for this failure — carried on the typed error by
     its birth site (a connector's HTTP status match) or matched here
     against the raw driver exception — and ``None`` when the verdict came

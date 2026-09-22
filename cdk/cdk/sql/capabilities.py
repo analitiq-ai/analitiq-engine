@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, get_args
+from typing import Any, Literal, get_args
 
 from analitiq.contracts.connector import SqlBulkLoad
 from analitiq.contracts.connector import SqlCapabilities as ContractSqlCapabilities
@@ -63,6 +63,10 @@ if _bulk_mechanisms("adbc") != DIALECT_IMPLEMENTED_BULK_MECHANISMS | {"adbc_inge
     )
 
 
+#: The stage-table scopes the stage cycle branches on; typed on the
+#: capability and on the write plan, and checked against the contract below.
+StageScope = Literal["temp", "real"]
+
 #: The values the consumer sites branch on, per shape fact. Hand-kept because
 #: each records what the branches were written to handle; deriving them from
 #: the contract would make a value no branch handles look handled. Checked
@@ -76,7 +80,7 @@ _HANDLED_VALUES: Mapping[tuple[type[BaseModel], str], frozenset[str]] = {
     (ContractSqlCapabilities, "merge_form"): frozenset(
         {"merge", "insert_on_conflict", "insert_on_duplicate_key", "none"}
     ),
-    (SqlStageCapabilities, "scope"): frozenset({"temp", "real"}),
+    (SqlStageCapabilities, "scope"): frozenset(get_args(StageScope)),
     (SqlStageCapabilities, "schema_"): frozenset({"target", "dedicated"}),
 }
 
@@ -118,7 +122,7 @@ def undeclared_capability_error(fact: str, *, need: str) -> SqlCapabilitiesError
 class StageCapabilities:
     """Declared stage-table shape (``sql_capabilities.stage``)."""
 
-    scope: str
+    scope: StageScope
     schema: str
     dedicated_schema: str | None
     transactional_ddl: bool

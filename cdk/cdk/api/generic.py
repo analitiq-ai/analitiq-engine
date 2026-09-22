@@ -26,7 +26,7 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
-from typing import Any
+from typing import Any, assert_never
 
 import aiohttp
 import pyarrow as pa
@@ -1269,28 +1269,22 @@ class GenericAPIConnector(BaseDestinationHandler):
         on the full record content so a changed row gets a new key and the
         provider applies the update instead of replaying its cached response.
         """
-        key = (
-            None
-            if plan.idempotency_in is None
-            else (
+        body = self._build_body(plan, record=record)
+        headers: dict[str, str] | None = None
+        location = plan.idempotency_in
+        if location is not None:
+            key = (
                 record_id
                 if plan.write_mode_key == "insert"
                 else content_idempotency_key(record)
             )
-        )
-        body = self._build_body(plan, record=record)
-        headers: dict[str, str] | None = None
-        if key is not None:
-            match plan.idempotency_in:
+            match location:
                 case "body":
                     body = body_with_idempotency_key(plan, body, key)
                 case "header":
                     headers = {plan.idempotency_name: key}
-                case other:
-                    raise ValueError(
-                        f"idempotency.in {other!r} for endpoint {plan.endpoint!r} "
-                        f"has no placement in the engine"
-                    )
+                case _:
+                    assert_never(location)
         return encode_body(body, plan.content_type), headers
 
     async def _write_in_chunks(

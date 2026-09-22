@@ -275,7 +275,7 @@ class BaseDestinationHandler(ABC):
     # instance/driver state, and making this static would hide that it is
     # an override (same reasoning as not_ready_reason below).
     def classify_error(self, exc: BaseException) -> str | None:  # skipcq: PYL-R0201
-        """Name the engine-vocabulary category this connector's native error is.
+        """Name the ``ErrorCategory`` value this connector's native error is.
 
         The code escape hatch (issue #513): consulted only after a bound
         declared ``error_map``'s ``key_attrs``/``codes`` lookup

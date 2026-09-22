@@ -44,7 +44,9 @@ class TestDeclaredCategoryToCode:
     def test_off_vocabulary_wire_value_is_ignored_and_logged(self, caplog):
         with caplog.at_level(logging.WARNING, logger="src.state.error_classification"):
             assert source_code_for_declared_category("weird") is None
-        assert any("not in the engine vocabulary" in r.message for r in caplog.records)
+        assert any(
+            "not in the contract vocabulary" in r.message for r in caplog.records
+        )
 
 
 class TestUndeclaredSourceFailure:

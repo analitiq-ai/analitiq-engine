@@ -27,6 +27,7 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeVar
 
+from .capabilities import StageScope
 from .dialects import TableAddress
 
 if TYPE_CHECKING:
@@ -53,9 +54,7 @@ class StageWritePlan:
 
     stage: TableAddress
     target: TableAddress
-    #: A value of the contract's ``stage.scope``; the handled set is checked
-    #: against it in :mod:`cdk.sql.capabilities`.
-    scope: str
+    scope: StageScope
     transactional: bool
     create_stage_sql: str
     #: Set on a truncate_insert read's first batch only: the dialect's

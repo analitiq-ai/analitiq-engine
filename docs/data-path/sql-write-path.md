@@ -134,7 +134,7 @@ class StageWritePlan:
     """
     stage: TableAddress            # deterministic stage address (section 6)
     target: TableAddress
-    scope: StageScope              # TEMP or REAL, from the declaration
+    scope: StageScope              # "temp" or "real", from the declaration
     transactional: bool            # from the declaration (section 7)
     create_stage_sql: str          # dialect.stage_table_sql(...)
     truncate_sql: str | None       # first truncate_insert batch only:
@@ -436,8 +436,7 @@ Properties:
   (`cdk.declarations` for `error_map` and `concurrency`,
   `cdk.sql.capabilities` for `limits`).
 - **`error_map` declares facts, never verdicts.** The value vocabulary is
-  engine-owned — `transient | config | auth | unreachable | rate_limited |
-  write_rejected` — and the engine alone derives `AckStatus`,
+  the contract's `ErrorCategory`, and the engine alone derives `AckStatus`,
   `FailureCategory`, and `ErrorCode` from it (the per-context verdict
   tables in `cdk.declarations`, the same trust rule as retry semantics,
   §9). Matching happens at the failure's birth site against the immediate

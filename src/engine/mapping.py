@@ -1,7 +1,7 @@
 """The stream mapping: one typed document, compiled to Arrow compute.
 
-This module owns the whole mapping vocabulary -- the path grammar, the
-expression AST, the function catalog, the validation rules and the output
+This module compiles the contract's mapping vocabulary -- the path grammar,
+the expression AST, the function catalog, the validation rules and the output
 schema. A stream's mapping is the contract's :class:`StreamMapping`, read as the
 validated document, compiled once by
 :func:`compile_mapping` into a :class:`CompiledTransform`, and then applied to
@@ -54,7 +54,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Final, cast, get_args
+from typing import Any, Final, assert_never, cast, get_args
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -87,25 +87,8 @@ _ExprFn = Callable[[pa.RecordBatch], pa.Array]
 
 # The rules a null answers rather than skips: every other rule exempts a null
 # value (mirroring the per-record ``if value is not None`` guard), and these
-# are the ones a null LIST ancestor must fail too. Named once, so a rule type
-# added to the mask without the ancestor fold cannot silently exempt itself.
+# are the ones a null LIST ancestor must fail too.
 _NULL_SENSITIVE_RULES: Final[frozenset[str]] = frozenset({"not_null", "required"})
-
-# The rule types ``_rule_failure_mask`` dispatches on, checked against the
-# contract so a rule type it grows fails the import rather than a run.
-_HANDLED_RULE_TYPES: Final[frozenset[str]] = _NULL_SENSITIVE_RULES | {
-    "min_length",
-    "max_length",
-    "pattern",
-    "range",
-    "in_list",
-}
-_RULE_TYPES = frozenset(get_args(ValidationRule.model_fields["type"].annotation))
-if _HANDLED_RULE_TYPES != _RULE_TYPES:
-    raise TypeError(
-        f"validation rule types {sorted(_HANDLED_RULE_TYPES ^ _RULE_TYPES)}: the "
-        f"contract and the engine's rule dispatch disagree"
-    )
 
 
 def build_output_schema(assignments: list[Assignment]) -> pa.Schema:
@@ -607,7 +590,7 @@ def _rule_failure_mask(
 
     try:
         match rule.type:
-            case rule_type if rule_type in _NULL_SENSITIVE_RULES:
+            case "not_null" | "required":
                 return pc.is_null(value)
             case "min_length":
                 length = pc.utf8_length(_string_form(value))
@@ -626,17 +609,13 @@ def _rule_failure_mask(
                 return failing(
                     pc.invert(pc.is_in(value, value_set=pa.array(rule.value)))
                 )
+            case _:
+                assert_never(rule.type)
     except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as e:
         raise TransformationError(
             f"column {label}: validation rule {rule.type!r} is "
             f"invalid for a {value.type} column: {e}"
         ) from e
-    # Unreachable while the import check holds; the match above has no
-    # catch-all, so the function still needs a terminal statement.
-    raise TransformationError(
-        f"column {label}: validation rule type {rule.type!r} has no "
-        f"engine implementation"
-    )
 
 
 def _range_failure_mask(

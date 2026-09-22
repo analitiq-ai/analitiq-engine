@@ -225,7 +225,9 @@ class TestRequireDeclaredCategory:
         assert require_declared_category("auth", source="test") == "auth"
 
     def test_off_vocabulary_category_fails_loud(self):
-        with pytest.raises(ErrorCategoryDriftError, match="not in the engine"):
+        with pytest.raises(
+            ErrorCategoryDriftError, match="not in the contract vocabulary"
+        ):
             require_declared_category("retry_me", source="test")
 
 
