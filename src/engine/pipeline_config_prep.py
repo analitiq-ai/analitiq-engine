@@ -396,21 +396,22 @@ class PipelineConfigPrep:
 
     def _resolve_connection_by_id(self, connection_id: str) -> ConnectionRuntime:
         """Materialize (or return cached) ConnectionRuntime for a ``connection_id``."""
-        record = self._connection_records.get(connection_id)
-        if record is None:
-            raise ValueError(
-                f"Connection id {connection_id!r} is not present under "
-                f"{self._paths['connections']}; "
-                f"known: {sorted(self._connection_records)}"
-            )
         if connection_id in self._resolved_connections:
             return self._resolved_connections[connection_id]
 
+        # The verdict ties a stream's connection ref to the pipeline's in
+        # base form (``pg_v2`` matches ``pg``), but only the exact ids the
+        # pipeline names were read.
+        record = self._connection_records.get(connection_id)
+        if record is None:
+            raise ValueError(
+                f"Connection id {connection_id!r} is not one of the connections "
+                f"the pipeline names: {sorted(self._connection_records)}"
+            )
         connector = self._load_connector(record.connector_id)
-        # kind is a closed-enum discriminator validated by the connector
-        # contract in _load_connector; whether that kind is runnable is the
-        # worker registry's job (ConnectorNotRegisteredError). Config prep
-        # neither re-checks the shape nor hard-codes a kind set.
+        # Whether the connector's kind is runnable is the worker registry's
+        # job (ConnectorNotRegisteredError); config prep hard-codes no kind
+        # set.
         runtime = ConnectionRuntime(
             connection=record.document,
             connection_id=connection_id,
@@ -606,9 +607,7 @@ class PipelineConfigPrep:
             stream_version=stream_version,
             source=resolved_source,
             destinations=resolved_destinations,
-            mapping=(
-                document.mapping if document.mapping is not None else StreamMapping()
-            ),
+            mapping=document.mapping or StreamMapping(),
         )
 
     # ------------------------------------------------------------------

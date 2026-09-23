@@ -1,18 +1,24 @@
-"""The stream mapping: compiled once to Arrow compute, applied per batch.
+"""The stream mapping: one typed document, compiled to Arrow compute.
 
-A stream's mapping is the contract's own ``StreamMapping`` model, compiled
-once by :func:`compile_mapping` into a :class:`CompiledTransform`, and then
-applied to each ``pa.RecordBatch`` with
-``pyarrow.compute`` -- the batch never leaves Arrow. Every assignment and every
-conversion stage is a vectorized column operation. The mapping grammar -- what
-a document may say -- is the contract's; the validator grades it before a run
-starts, so this module compiles only what that grammar can express.
+This module compiles the contract's mapping vocabulary -- the path grammar,
+the expressions, the function catalog, the validation rules and the output
+schema. A stream's mapping is the contract's :class:`StreamMapping`, read as the
+validated document, compiled once by
+:func:`compile_mapping` into a :class:`CompiledTransform`, and then applied to
+each ``pa.RecordBatch`` with ``pyarrow.compute`` -- the batch never leaves
+Arrow. There is a single transform path: every assignment, every expression
+op, and every function in the catalog is a vectorized column operation.
 
 A source path is an ordered token array (``["a", "b"]``) from the contract
 document all the way to ``pc.struct_field``. Nothing splits a string on a dot
 anywhere on that route: a dotted string is a path plus an unstated splitting
 convention, and when one module split it and another expected tokens, a nested
 read silently produced an all-null column instead of failing.
+
+The compilers cover exactly the contract's expression forms and conversion
+function names, and that is checked at import: a contract release that adds a
+form or a function fails the engine at startup, not on the first batch that
+carries it.
 
 Each validation rule is compiled with its effective error strategy: the
 assignment's ``validate.error_handling.strategy`` when declared, else the
@@ -35,11 +41,12 @@ target type directly (``pa.array``) -- there is no source arrow_type to classify
 Nested (``Object``/``List``) and ``Json`` targets are assembled structurally, not
 through the scalar matrix.
 
-Failures are loud and batch-wide. An unparseable cast or a null in a
-non-nullable column fails the whole batch with a :class:`TransformationError`,
-a mapping defect no strategy relaxes. A row that fails a validation rule fails
-the whole batch with a :class:`ValidationFailure`; the strategy it carries
-decides what the stream does with the batch.
+Failures are loud and batch-wide. An expression that cannot be evaluated, an
+unparseable cast, or a null in a non-nullable column fails the whole batch
+with a :class:`TransformationError`, a mapping defect no strategy relaxes. A
+row that fails a validation rule fails the whole batch with a
+:class:`ValidationFailure`; the strategy it carries decides what the stream
+does with the batch.
 """
 
 from __future__ import annotations
@@ -47,7 +54,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Final, cast
+from typing import Any, Final, assert_never, cast, get_args
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -55,6 +62,7 @@ from analitiq.contracts.stream import (
     Assignment,
     AssignmentValue,
     ConstantAssignmentValue,
+    ExpressionAssignmentValue,
     FnExpression,
     GetExpression,
     PipeExpression,
@@ -76,12 +84,6 @@ from .exceptions import TransformationError, ValidationFailure
 
 # A compiled expression: given the source batch, return one value column.
 _ExprFn = Callable[[pa.RecordBatch], pa.Array]
-
-# The rules a null answers rather than skips: every other rule exempts a null
-# value (mirroring the per-record ``if value is not None`` guard), and these
-# are the ones a null LIST ancestor must fail too. Named once, so a rule type
-# added to the mask without the ancestor fold cannot silently exempt itself.
-_NULL_SENSITIVE_RULES: Final[frozenset[str]] = frozenset({"not_null", "required"})
 
 
 def build_output_schema(assignments: list[Assignment]) -> pa.Schema:
@@ -238,7 +240,8 @@ def compile_mapping(
     happens here once; the returned object is applied per batch.
     ``default_strategy`` is the pipeline's ``runtime.error_handling.strategy``,
     which a validation rule takes unless its assignment overrides it. Raises
-    :class:`TransformationError` for a target type the CDK cannot build.
+    :class:`TransformationError` for a target ``arrow_type`` the engine's type
+    grammar rejects.
     """
     assignments = document.assignments
     output_schema = build_output_schema(assignments)
@@ -294,14 +297,15 @@ def _compile_value(
 
     Returns ``(build_fn, is_const)``. A constant builds a broadcast column at
     the target type (JSON-encoded for a ``Json`` target); an expression
-    compiles to vectorized compute that produces a column at its natural type.
+    compiles to vectorized compute that produces a column at its
+    natural type.
     """
     if isinstance(value, ConstantAssignmentValue):
         # The constant's own arrow_type declares the literal's JSON kind for
         # authoring tools; the column is built at the TARGET type, which is the
         # type the destination receives.
         return _compile_const(value.constant.value, field, is_json), True
-    return _compile_expression(value.expression), False
+    return _compile_expr(value.expression), False
 
 
 def _compile_const(const_value: Any, field: pa.Field, is_json: bool) -> _ExprFn:
@@ -320,20 +324,20 @@ def _compile_const(const_value: Any, field: pa.Field, is_json: bool) -> _ExprFn:
     return build
 
 
-def _compile_expression(expression: GetExpression | PipeExpression) -> _ExprFn:
-    """Compile a source read, and any conversion stages, into a column builder.
+# Expression -> vectorized compute. Each compiler returns a closure over the
+# batch so the (static) expression walk happens once at compile time, not per
+# batch.
 
-    The contract fixes a pipe's positions -- ``args[0]`` is the ``get`` seed
-    and every later entry an ``fn`` stage -- which its field type cannot
-    carry, so the casts narrow the union rather than check it.
-    """
-    if isinstance(expression, GetExpression):
-        return _compile_get(expression)
-    seed = _compile_get(cast(GetExpression, expression.args[0]))
-    stages = [
-        _FUNCTION_CATALOG[cast(FnExpression, stage).name]
-        for stage in expression.args[1:]
-    ]
+
+def _compile_get(expr: GetExpression) -> _ExprFn:
+    path = list(expr.path)
+    return lambda batch: _get_path(batch, path)
+
+
+def _compile_pipe(expr: PipeExpression) -> _ExprFn:
+    # The contract fixes the positions: a `get` seed, then `fn` stages.
+    seed = _compile_get(cast(GetExpression, expr.args[0]))
+    stages = [_FUNCTIONS[cast(FnExpression, stage).name] for stage in expr.args[1:]]
 
     def run_pipe(batch: pa.RecordBatch) -> pa.Array:
         value = seed(batch)
@@ -344,9 +348,24 @@ def _compile_expression(expression: GetExpression | PipeExpression) -> _ExprFn:
     return run_pipe
 
 
-def _compile_get(expression: GetExpression) -> _ExprFn:
-    path = list(expression.path)
-    return lambda batch: _get_path(batch, path)
+_EXPR_COMPILERS: Final[dict[type, Callable[[Any], _ExprFn]]] = {
+    GetExpression: _compile_get,
+    PipeExpression: _compile_pipe,
+}
+
+_EXPRESSION_FORMS = get_args(
+    ExpressionAssignmentValue.model_fields["expression"].annotation
+)
+if set(_EXPR_COMPILERS) != set(_EXPRESSION_FORMS):
+    raise TypeError(
+        "the contract's expression forms and the engine's compilers differ: "
+        f"{sorted(f.__name__ for f in set(_EXPR_COMPILERS) ^ set(_EXPRESSION_FORMS))}"
+    )
+
+
+def _compile_expr(expr: GetExpression | PipeExpression) -> _ExprFn:
+    """Compile one expression node into a vectorized column builder."""
+    return _EXPR_COMPILERS[type(expr)](expr)
 
 
 # ---------------------------------------------------------------------------
@@ -357,8 +376,8 @@ def _compile_get(expression: GetExpression) -> _ExprFn:
 def _get_path(batch: pa.RecordBatch, path: list[str]) -> pa.Array:
     """Read a source column at *path*; a missing column/segment yields all-nulls.
 
-    Mirrors the per-record ``walk_path``: an absent top-level field or a missing
-    nested segment resolves to ``None`` for every row.
+    An absent top-level field or a missing nested segment resolves to
+    ``None`` for every row.
     """
     if path[0] not in batch.schema.names:
         return pa.nulls(batch.num_rows)
@@ -372,12 +391,12 @@ def _get_path(batch: pa.RecordBatch, path: list[str]) -> pa.Array:
 
 
 def _string_form(column: pa.Array) -> pa.Array:
-    """Render a column as strings the way the per-record ``str()`` did.
+    """Render a column as strings, booleans in Python's ``str()`` form.
 
     Booleans become ``"True"``/``"False"`` rather than Arrow's lowercase
     ``"true"``/``"false"``; everything else uses Arrow's string cast. Shared by
-    ``to_string`` and the length/pattern rules so they never diverge on
-    booleans.
+    ``to_string`` and the string-length and pattern rules so they never
+    diverge on booleans.
     """
     if pa.types.is_boolean(column.type):
         return pc.if_else(column, pa.scalar("True"), pa.scalar("False"))
@@ -392,8 +411,9 @@ def _string_form(column: pa.Array) -> pa.Array:
 def _fn_to_string(column: pa.Array) -> pa.Array:
     """Format as string -- the explicit conversion the matrix points authors to.
 
-    Booleans render as ``"True"``/``"False"`` (via :func:`_string_form`);
-    Arrow's cast would emit lowercase ``"true"``/``"false"``.
+    Booleans render as ``"True"``/``"False"`` (via :func:`_string_form`),
+    the form the documented function catalog promises; Arrow's cast would
+    emit lowercase ``"true"``/``"false"``.
     """
     try:
         return _string_form(column)
@@ -403,11 +423,17 @@ def _fn_to_string(column: pa.Array) -> pa.Array:
         ) from e
 
 
-# One kernel per conversion-function name the contract's ``fn`` stage allows;
-# the conversion-matrix tests pin it to every ``fn`` the matrix names.
-_FUNCTION_CATALOG: Final[dict[str, Callable[[pa.Array], pa.Array]]] = {
+#: One kernel per conversion function the contract lets a `pipe` stage name.
+_FUNCTIONS: Final[dict[str, Callable[[pa.Array], pa.Array]]] = {
     "to_string": _fn_to_string,
 }
+
+_FUNCTION_NAMES = get_args(FnExpression.model_fields["name"].annotation)
+if set(_FUNCTIONS) != set(_FUNCTION_NAMES):
+    raise TypeError(
+        "the contract's conversion functions and the engine's kernels differ: "
+        f"{sorted(set(_FUNCTIONS) ^ set(_FUNCTION_NAMES))}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -495,11 +521,10 @@ def _rule_errors(built: Mapping[str, pa.Array], rule: ValidationRule) -> list[st
     """Return the error for *rule* over the built record, or ``[]`` on pass.
 
     The rule becomes a boolean failure mask over the addressed values; a null
-    value is exempt from every rule except ``not_null`` (mirroring the
-    per-record ``if value is not None`` guard), and a null LIST ancestor is
-    the same null one level up -- it fails ``not_null`` on the addressed
-    field exactly as a null struct parent's propagated null does, and is
-    exempt from value rules the same way. A malformed rule (bad regex, type
+    value is exempt from every rule except ``not_null``/``required``, and a
+    null LIST ancestor is the same null one level up -- it fails those rules
+    on the addressed field exactly as a null struct parent's propagated null
+    does, and is exempt from value rules the same way. A malformed rule (bad regex, type
     mismatch, a path into a value that carries no such structure) fails
     loud with a :class:`TransformationError`. When the address crossed a
     ``List``, a batch row fails if any of its elements does.
@@ -508,24 +533,19 @@ def _rule_errors(built: Mapping[str, pa.Array], rule: ValidationRule) -> list[st
     label = _rule_label(tokens)
     try:
         value, row_map, null_ancestors = _addressed_values(built, tokens)
-    except (
-        KeyError,
-        pa.ArrowInvalid,
-        pa.ArrowTypeError,
-        pa.ArrowNotImplementedError,
-    ) as e:
+    except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as e:
         raise TransformationError(
             f"column {label}: validation rule {rule.type!r} addresses a "
             f"declared field the built value does not carry: {e}"
         ) from e
     present = pc.is_valid(value)
-    mask = _rule_failure_mask(value, present, rule, label)
+    mask, answers_null = _rule_failure_mask(value, present, rule, label)
     # The passing path stays inside Arrow: `pc.any` answers from the mask's
     # own buffers, where `to_pylist` would allocate a Python object per row
     # per rule on every batch that passes -- the common case, and the hot
     # one. Row indexes are materialised only for a rule that actually
-    # failed, or for the null ancestors a null-sensitive rule must add.
-    ancestors = null_ancestors if rule.type in _NULL_SENSITIVE_RULES else []
+    # failed, or for the null ancestors a null-answering rule must add.
+    ancestors = null_ancestors if answers_null else []
     if not pc.any(mask, min_count=0).as_py():
         if not ancestors:
             return []
@@ -552,10 +572,11 @@ def _rule_failure_mask(
     present: pa.Array,
     rule: ValidationRule,
     label: str,
-) -> pa.Array:
+) -> tuple[pa.Array, bool]:
     """Compute the boolean failure mask for one validation rule.
 
     Failures are ``present AND predicate`` so nulls never trip a value rule.
+    The flag says whether the rule answers a null rather than exempting it.
     """
 
     def failing(predicate: pa.Array) -> pa.Array:
@@ -563,36 +584,34 @@ def _rule_failure_mask(
 
     try:
         match rule.type:
-            case rule_type if rule_type in _NULL_SENSITIVE_RULES:
-                return pc.is_null(value)
+            # The only rules a null answers rather than skips.
+            # This arm is the one spelling of that set: `_rule_errors` folds
+            # null LIST ancestors into the failures only on its flag.
+            case "not_null" | "required":
+                return pc.is_null(value), True
             case "min_length":
                 length = pc.utf8_length(_string_form(value))
-                return failing(pc.less(length, rule.value))
+                return failing(pc.less(length, rule.value)), False
             case "max_length":
                 length = pc.utf8_length(_string_form(value))
-                return failing(pc.greater(length, rule.value))
+                return failing(pc.greater(length, rule.value)), False
             case "pattern":
                 matched = pc.match_substring_regex(
                     _string_form(value), pattern=f"^(?:{rule.value})"
                 )
-                return failing(pc.invert(matched))
+                return failing(pc.invert(matched)), False
             case "range":
-                return _range_failure_mask(value, present, rule)
+                return _range_failure_mask(value, present, rule), False
             case "in_list":
-                return failing(
-                    pc.invert(pc.is_in(value, value_set=pa.array(rule.value)))
-                )
+                in_list = pc.is_in(value, value_set=pa.array(rule.value))
+                return failing(pc.invert(in_list)), False
+            case _:
+                assert_never(rule.type)
     except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as e:
         raise TransformationError(
             f"column {label}: validation rule {rule.type!r} is "
             f"invalid for a {value.type} column: {e}"
         ) from e
-    # Reached only if the contract's rule-type vocabulary grows and this match
-    # does not: a rule the engine cannot enforce must fail, never pass silently.
-    raise TransformationError(
-        f"column {label}: validation rule type {rule.type!r} has no "
-        f"engine implementation"
-    )
 
 
 def _range_failure_mask(

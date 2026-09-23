@@ -255,8 +255,8 @@ class StreamProcessor:
             # through untouched.
             #
             # Tagged here rather than left to the transform stage's own
-            # boundary: compiling runs before that stage exists, so an
-            # unknown function name in a customer's mapping would otherwise
+            # boundary: compiling runs before that stage exists, so a target
+            # arrow_type the engine cannot parse would otherwise
             # reach the runner untagged and report INTERNAL -- sending them
             # to us over a defect in their own config. Compiling a mapping
             # and running one are the same concept, so they report the same

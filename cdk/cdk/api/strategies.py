@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import Any
+from typing import Any, get_args
 
 from analitiq.contracts.endpoints import (
     CursorPagination,
@@ -46,7 +46,6 @@ from .records import walk_path
 __all__ = [
     "KEYSET_REFUSAL_MARKER",
     "PRE_PAGE_VALUE_PATHS",
-    "UnknownPaginationStrategy",
     "build_strategy",
     "resolve_page_size",
 ]
@@ -93,16 +92,6 @@ FollowUrl = Callable[[str, str], str]
 _StrategyFactory = Callable[
     [Any, dict[str, Any], str, Resolve, FollowUrl], PaginationStrategy
 ]
-
-
-class UnknownPaginationStrategy(ValueError):
-    """A pagination block naming a scheme this build cannot walk.
-
-    The contract's strategy union is closed, so this is a contract-version
-    skew, not an author error: the mirror of a missing connector package
-    naming the operation it cannot perform. A sixth scheme is a contract
-    release, never a subclass.
-    """
 
 
 def resolve_page_size(
@@ -363,10 +352,7 @@ class _Single:
         return None
 
 
-#: The contract's closed strategy union, by its own discriminator. Keyed by
-#: the literal string the union discriminates on rather than by the member
-#: class, so a document parsed on a newer contract still reaches the refusal
-#: below by name instead of falling off an isinstance chain.
+#: The contract's closed strategy union, by its own discriminator tag.
 _STRATEGIES: dict[str, _StrategyFactory] = {
     "offset": _Offset,
     "page": _Page,
@@ -374,6 +360,14 @@ _STRATEGIES: dict[str, _StrategyFactory] = {
     "keyset": _Keyset,
     "link": _Link,
 }
+
+_UNION, _DISCRIMINATOR = get_args(Pagination)
+_PAGINATION_TAGS = frozenset(get_args(member)[1].tag for member in get_args(_UNION))
+if set(_STRATEGIES) != _PAGINATION_TAGS:
+    raise TypeError(
+        f"pagination schemes {sorted(set(_STRATEGIES) ^ _PAGINATION_TAGS)}: the "
+        f"contract's union and the engine's adapters disagree"
+    )
 
 
 def build_strategy(
@@ -397,12 +391,5 @@ def build_strategy(
     """
     if pagination is None:
         return _Single(None, base_params, url, resolve, follow_url)
-    declared = pagination.type
-    strategy = _STRATEGIES.get(declared)
-    if strategy is None:
-        raise UnknownPaginationStrategy(
-            f"pagination.type {declared!r} is not one of "
-            f"{sorted(_STRATEGIES)}; the contract's strategy union is closed, "
-            f"so this build cannot walk it"
-        )
+    strategy = _STRATEGIES[pagination.type]
     return strategy(pagination, base_params, url, resolve, follow_url)

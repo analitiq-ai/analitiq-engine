@@ -1488,7 +1488,7 @@ class TestMappingCompileFailureIsReported:
             "metrics record; it is the only report of why the stream failed"
         )
         assert emitted["stream"]["status"] != "success"
-        # An unknown function name is a defect in the customer's own mapping,
+        # An unparseable target type is a defect in the customer's own mapping,
         # so the record must send them there. Compiling runs before the
         # transform stage's boundary exists, so without a tag at the compile
         # site the failure reaches the runner untagged and reports INTERNAL --

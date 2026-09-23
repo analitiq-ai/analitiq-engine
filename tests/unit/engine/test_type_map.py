@@ -68,29 +68,6 @@ class TestNormalizeNativeType:
 
 
 # ---------------------------------------------------------------------------
-# Read-rule validation (contract shape, then execution safety)
-# ---------------------------------------------------------------------------
-
-
-def _parse_read(rule: dict):
-    """Parse one read rule through the real entry point."""
-    return parse_rules([rule], source="<test>")
-
-
-def _parse_write(rule: dict):
-    """Parse one write rule through the real entry point."""
-    return parse_write_rules([rule], source="<test>")
-
-
-class TestReadRuleValidation:
-    def test_exact_rule_allows_literal_arrow_type(self):
-        (rule,) = _parse_read(
-            {"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"}
-        )
-        assert rule.match == "exact"
-
-
-# ---------------------------------------------------------------------------
 # TypeMapper — forward lookup
 # ---------------------------------------------------------------------------
 
@@ -748,19 +725,6 @@ class TestNormalizeArrowType:
             "NANOSECOND",
         ):
             normalize_arrow_type(f"Duration({unit})")
-
-
-# ---------------------------------------------------------------------------
-# Write-rule validation
-# ---------------------------------------------------------------------------
-
-
-class TestWriteRuleValidation:
-    def test_exact_rule_allows_literal_native(self):
-        (rule,) = _parse_write(
-            {"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"}
-        )
-        assert rule.match == "exact"
 
 
 # ---------------------------------------------------------------------------

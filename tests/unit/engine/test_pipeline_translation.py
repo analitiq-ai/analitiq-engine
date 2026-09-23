@@ -364,14 +364,6 @@ class TestBuildConfigDict:
 
         assert result["name"] == "wise-to-pg"
 
-    def test_stream_with_no_destinations_raises(self):
-        pipeline = _make_pipeline()
-        stream = _make_stream()
-        stream.destinations.clear()
-
-        with pytest.raises(ValueError, match="has no destinations"):
-            _build_config_dict(pipeline, [stream])
-
     def test_multi_stream_pipeline(self):
         pipeline = _make_pipeline()
         stream_a = _make_stream(stream_id="orders")

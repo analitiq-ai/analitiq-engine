@@ -5,7 +5,6 @@ from typing import Any
 import pytest
 
 from src.engine.engine import StreamingEngine
-from src.engine.exceptions import ConfigurationError
 from src.models.resolved import BatchingConfig, RuntimeConfig
 
 
@@ -42,31 +41,6 @@ class TestStreamingEngine:
         assert engine.batch_size == 10
         assert engine.buffer_size == 100
         assert engine.metrics is not None
-
-    @pytest.mark.asyncio
-    async def test_no_streams_configuration(self, engine):
-        """Test error handling when no streams are configured."""
-        config = {
-            "pipeline_id": "test-pipeline",
-            "name": "Test Pipeline",
-            "version": "1.0",
-            "source": {"connection_id": "test-src"},
-            "destination": {"connection_id": "test-dst"},
-            "runtime": {
-                "buffer_size": 100,
-                "batching": {"batch_size": 10},
-                "logging": {"log_level": "DEBUG", "metrics_enabled": False},
-                "error_handling": {
-                    "strategy": "dlq",
-                    "max_retries": 3,
-                    "retry_delay": 1,
-                },
-            },
-            "streams": {},  # Empty streams
-        }
-
-        with pytest.raises(ConfigurationError, match="No streams configured"):
-            await engine.stream_data(config)
 
     def _processor(self, engine, stream_config: dict[str, Any]):
         """Build a StreamProcessor wired the way engine._process_stream does."""

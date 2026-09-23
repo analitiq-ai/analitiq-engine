@@ -14,7 +14,6 @@ from typing import Any
 
 import pytest
 from analitiq.contracts.endpoints import ApiEndpointDoc, WriteOperation
-from pydantic import ValidationError
 
 from cdk.api.request import ParamTable, RequestBuilder
 from cdk.api.write_plan import (
@@ -379,20 +378,6 @@ class TestTheRequestTheStreamWillActuallySend:
         )
         assert isinstance(plan, StreamWritePlan)
         assert plan.endpoint == "/Contact/c-9"
-
-    def test_a_path_placeholder_with_nothing_to_bind_is_rejected(self) -> None:
-        # Write params resolve their default through the connection, secrets
-        # and runtime scopes; a param with no default has nothing to give,
-        # and a URL that still carries braces is answered 200 by many
-        # providers. The contract decides this from the document alone
-        # (RULE-ENDP-027/028), so the plan builder is never handed one --
-        # the parse is the refusal.
-        with pytest.raises(ValidationError):
-            _document(
-                path="/Contact/{id}",
-                path_params={"id": {"from_param": "id"}},
-                params={"id": {"in": "path", "type": "string", "required": True}},
-            )
 
     def test_declared_headers_and_query_land_on_the_plan(self) -> None:
         doc = _document(

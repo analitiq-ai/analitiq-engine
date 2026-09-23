@@ -1,11 +1,7 @@
 """Unit tests for core exceptions module."""
 
 
-from src.engine.exceptions import (
-    ConfigurationError,
-    StreamProcessingError,
-    TransformationError,
-)
+from src.engine.exceptions import StreamProcessingError, TransformationError
 
 
 class TestStreamProcessingError:
@@ -66,17 +62,6 @@ class TestTransformationError:
         assert str(error) == expected
 
 
-class TestConfigurationError:
-    """Test ConfigurationError exception."""
-
-    def test_basic_exception(self):
-        """Test basic configuration error."""
-        error = ConfigurationError("Invalid configuration")
-
-        assert str(error) == "Invalid configuration"
-        assert isinstance(error, Exception)
-
-
 class TestExceptionInteroperability:
     """Test how exceptions work together and with Python's exception system."""
 
@@ -100,7 +85,6 @@ class TestExceptionInteroperability:
         assert isinstance(error, TransformationError)
         assert isinstance(error, StreamProcessingError)
         assert isinstance(error, Exception)
-        assert not isinstance(error, ConfigurationError)
 
 
 class TestExceptionEdgeCases:

@@ -197,9 +197,10 @@ sends the identity-derived `record_id` (first occurrence wins, mirroring
 the SQL anti-join); `upsert` sends a full-content hash, so an identical
 replay dedups while a changed row gets a new key and the provider applies
 the update. `configure_schema` refuses a header key name that collides
-with a header the connection's transport resolved, and a write refuses a
-resolved request body that is not a JSON object. Without the block, API
-`insert` is at-least-once on a same-run restart.
+with a header the connection's transport resolved, and, when the key goes
+in the body (`in: body`), a write refuses a resolved request body that is
+not a JSON object. Without the block, API `insert` is at-least-once on a
+same-run restart.
 
 ### Stdout
 

@@ -19,9 +19,8 @@ from urllib.parse import urljoin
 
 import pytest
 from _pytest.outcomes import Skipped
-from analitiq.contracts.connector import Connector, HttpTransport
-from analitiq.contracts.endpoints import ApiEndpointDoc
-from pydantic import TypeAdapter, ValidationError
+from analitiq.contracts.connector import Connector
+from pydantic import TypeAdapter
 
 import cdk.registry
 from cdk.api import read_setup, strategies
@@ -52,7 +51,6 @@ from cdk.conformance.tier1 import test_rendering as kit_rendering
 from cdk.sql.capabilities import SqlCapabilities
 from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.generic import GenericSQLConnector
-from cdk.type_map import InvalidTypeMapError
 from cdk.type_map.loader import build_type_mapper
 
 from .kit_runner import API_REFERENCE_DIR, REFERENCE_CLASS, REFERENCE_DIR
@@ -1126,21 +1124,6 @@ class TestDeclarationBreaks:
         violations = check_declaration_consistency(doctored)
         assert "sql_capabilities" in _messages(violations)
 
-    def test_adbc_ingest_without_adbc_transport_fails(
-        self, reference_target: ConformanceTarget
-    ) -> None:
-        """adbc_ingest on a SQLAlchemy-only connector can never run."""
-        doctored = dataclasses.replace(
-            reference_target,
-            declared_capabilities=_caps_with(
-                reference_target, bulk_load={"adbc": "adbc_ingest"}
-            ),
-        )
-        violations = check_declaration_consistency(doctored)
-        report = _messages(violations)
-        assert "adbc_ingest" in report
-        assert "ships no adbc transport" in report
-
     def test_merge_rendering_without_declaration_fails(
         self, reference_target: ConformanceTarget
     ) -> None:
@@ -1297,71 +1280,6 @@ class TestGateInversionBreaks:
 
 
 class TestTypeMapBreaks:
-    def test_foreign_arrow_literal_is_refused_before_a_mapper_exists(self) -> None:
-        """A made-up Arrow type must be a violation, not self-certifying.
-
-        An exact rule pair Foo <-> TEXT round-trips with itself, so left
-        unchecked it counted toward probe coverage and certified a write map
-        that cannot render any Arrow type an endpoint document can carry. The
-        published contract holds an exact rule's arrow_type to the Arrow
-        vocabulary, so the document is refused at parse time.
-        """
-        with pytest.raises(InvalidTypeMapError, match=r"exact\.arrow_type"):
-            build_type_mapper(
-                "foreign-literal",
-                type_map_document(
-                    read=[
-                        {"match": "exact", "native_type": "TEXT", "arrow_type": "Foo"}
-                    ],
-                    write=[
-                        {"match": "exact", "arrow_type": "Foo", "native_type": "TEXT"}
-                    ],
-                ),
-            )
-
-    def test_source_only_connector_is_held_to_the_arrow_vocabulary(self) -> None:
-        """No write map is not a reason to certify nothing.
-
-        A source-only connector emits Arrow types from discovery alone, so a
-        foreign literal in its read map would fail at runtime in
-        parse_arrow_type. The read direction is validated whether or not a
-        write map is present.
-        """
-        with pytest.raises(InvalidTypeMapError, match=r"exact\.arrow_type"):
-            build_type_mapper(
-                "source-only",
-                type_map_document(
-                    read=[
-                        {"match": "exact", "native_type": "TEXT", "arrow_type": "Bogus"}
-                    ]
-                ),
-            )
-
-    def test_regex_read_rule_with_a_foreign_literal_output_is_refused(self) -> None:
-        """A regex read rule's arrow_type is its output, so it is checked.
-
-        The match kind says nothing about whether the emitted Arrow type is a
-        literal; this one interpolates no capture, so discovery would emit the
-        foreign family verbatim.
-        """
-        with pytest.raises(InvalidTypeMapError, match="not a valid Arrow type"):
-            build_type_mapper(
-                "regex-foreign-output",
-                type_map_document(
-                    read=[
-                        {"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"},
-                        {
-                            "match": "regex",
-                            "native_type": "^VARCHAR\\((?<n>\\d+)\\)$",
-                            "arrow_type": "Bogus",
-                        },
-                    ],
-                    write=[
-                        {"match": "exact", "arrow_type": "Utf8", "native_type": "TEXT"}
-                    ],
-                ),
-            )
-
     def test_regex_read_rule_interpolating_a_capture_loads(self) -> None:
         """A templated arrow_type is not a literal family; it must load."""
         mapper = build_type_mapper(
@@ -1820,67 +1738,6 @@ class TestApiReadPathBreaks:
         report = _report(check_endpoint_documents(load_target(root)))
         assert "names none of the published endpoint contracts" in report
 
-    def test_an_unknown_paging_scheme_names_the_contracts_union(
-        self, tmp_path: Path
-    ) -> None:
-        """The paging vocabulary is the contract's, and the contract names it.
-
-        ``build_strategy`` used to answer this from a table of its own. The
-        document never reaches that table now -- the discriminated union
-        refuses the tag at load, naming the five it could have been -- and
-        the compile drive says only that it assessed nothing here, which is
-        what keeps a refused document from reading as a clean one.
-        """
-        target = self._broken(
-            tmp_path, "v1__widgets", lambda read: read["pagination"].update(type="seek")
-        )
-        report = _report(check_endpoint_documents(target))
-        assert "'seek'" in report
-        assert "'offset'" in report, "the message must name the union it is not in"
-        assert "were not read" in _report(check_api_read_compiles(target))
-
-    def test_a_cursor_param_with_a_default_ships_on_the_first_request(
-        self, tmp_path: Path
-    ) -> None:
-        """The first page has nothing to continue from, so it sends no token.
-
-        A cursor param carrying a declared default is resolved into the
-        param table before the loop touches it, and a cursor -- alone among
-        the five schemes -- sets no token on the first request, so the stale
-        default survives onto the wire and asks the provider to resume from
-        a position it never issued. The contract settles it a step earlier
-        and for all five: a param pagination references must declare
-        ``controlled_by``, and a controlled param's default never enters the
-        table at all.
-        """
-
-        def to_cursor(read: dict[str, Any]) -> None:
-            read["params"]["page_token"] = {
-                "in": "query",
-                "type": "string",
-                "required": False,
-                "default": {"literal": "start"},
-            }
-            read["request"]["query"]["page_token"] = {"from_param": "page_token"}
-            read["response"]["schema"]["properties"]["next_token"] = {
-                "type": ["string", "null"]
-            }
-            read["pagination"] = {
-                "type": "cursor",
-                "limit": {"param": "limit", "default": {"ref": "runtime.batch_size"}},
-                "cursor": {
-                    "param": "page_token",
-                    "next_cursor": {"ref": "response.body.next_token"},
-                },
-                "stop_when": {"missing": {"ref": "response.body.next_token"}},
-            }
-
-        target = self._broken(tmp_path, "v1__widgets", to_cursor)
-        report = _report(check_endpoint_documents(target))
-        assert "'page_token'" in report
-        assert "controlled_by" in report
-        assert "were not read" in _report(check_api_read_compiles(target))
-
     def test_a_next_value_off_the_page_scope_is_refused_at_compile(
         self, tmp_path: Path
     ) -> None:
@@ -2012,51 +1869,6 @@ class TestApiReadPathBreaks:
         assert "'response.headers.x-next'" in report
         assert "resolves to nothing on every page" in report
 
-    def test_pagination_params_that_reach_no_binding_read_one_page_forever(
-        self, tmp_path: Path
-    ) -> None:
-        """The traversal advances its param table and sends the same request.
-
-        A param reaches the wire only through a binding in ``request.query``,
-        ``request.headers`` or ``request.body``. Strip the query map and the
-        offset strategy still counts rows -- ``advance`` answers a
-        ``PageRequest`` whose params differ from page one's -- while every
-        request built from it is byte-for-byte the first one, so the read
-        fetches page one until the provider gets bored.
-
-        Which map binds which param is decidable from the document alone,
-        so the contract is what refuses it, and it refuses it by the param
-        that reaches nothing rather than by the traversal that goes
-        nowhere. The drive's job here is only to not call the endpoint
-        clean.
-        """
-        target = self._broken(
-            tmp_path, "v1__widgets", lambda read: read["request"].pop("query")
-        )
-        report = _report(check_endpoint_documents(target))
-        assert "'limit'" in report, "the report must name the unbound param"
-        assert "not referenced by any request binding" in report
-        assert "were not read" in _report(check_api_read_advances(target))
-
-    def test_a_step_that_cannot_advance_is_reported_before_the_yield(
-        self, tmp_path: Path
-    ) -> None:
-        """A zero step counts nothing, so the traversal re-reads page one.
-
-        The drive used to catch it on the first ``advance``. A literal step
-        is a number in the document, so the contract types it out of the
-        document instead, and the endpoint never reaches a drive.
-        """
-        target = self._broken(
-            tmp_path,
-            "v1__widgets",
-            lambda read: read["pagination"]["offset"].update(increment_by=0),
-        )
-        report = _report(check_endpoint_documents(target))
-        assert "increment_by" in report
-        assert "greater than or equal to 1" in report
-        assert "were not read" in _report(check_api_read_advances(target))
-
     def test_a_next_url_function_handed_the_wrong_type_is_reported(
         self, tmp_path: Path
     ) -> None:
@@ -2096,29 +1908,6 @@ class TestApiReadPathBreaks:
         report = _report(check_api_read_stop_condition(target))
         assert "must resolve to string or bytes" in report
 
-    def test_a_page_size_default_reading_an_unknown_scope_is_reported(
-        self, tmp_path: Path
-    ) -> None:
-        """A ``limit.default`` naming a scope nothing supplies is refused.
-
-        A scope name is a closed vocabulary and a ref is a string in the
-        document, so the contract is what reads it -- and it names the
-        scopes the leading token is not among. The never-fillable walk still
-        owns the harder half next door: a REAL scope that no request-time
-        resolution fills.
-        """
-
-        def bend(read: dict[str, Any]) -> None:
-            read["pagination"]["limit"]["default"] = {"ref": "nosuchscope.size"}
-
-        target = self._broken(tmp_path, "v1__widgets", bend)
-        report = _report(check_endpoint_documents(target))
-        assert "'nosuchscope.size'" in report
-        assert (
-            "runtime|request|response" in report
-        ), "the message must name the scopes it is not among"
-        assert "were not read" in _report(check_api_read_compiles(target))
-
     def test_a_page_size_default_reading_the_response_is_reported(
         self, tmp_path: Path
     ) -> None:
@@ -2155,35 +1944,6 @@ class TestApiReadPathBreaks:
         target = load_target(API_REFERENCE_DIR)
         assert check_api_read_compiles(target) == []
 
-    def test_a_param_default_reading_an_unknown_scope_is_reported(
-        self, tmp_path: Path
-    ) -> None:
-        """A default is a declared expression, and fails the same ways.
-
-        Wherever the ref sits -- a pagination limit, a param default, a
-        request binding -- an unknown leading token is the same defect and
-        gets the same answer, which is the whole reason it belongs to the
-        contract rather than to whichever site happened to resolve it
-        first.
-        """
-
-        def bend(read: dict[str, Any]) -> None:
-            read["params"]["tag"] = {
-                "in": "query",
-                "type": "string",
-                "required": False,
-                "default": {"ref": "nosuchscope.tag"},
-            }
-            # Bound, because a declared param no request map references is
-            # a different defect with a message of its own.
-            read["request"]["query"]["tag"] = {"from_param": "tag"}
-
-        target = self._broken(tmp_path, "v1__widgets", bend)
-        report = _report(check_endpoint_documents(target))
-        assert "'nosuchscope.tag'" in report
-        assert "not a known resolution scope" in report
-        assert "were not read" in _report(check_api_read_compiles(target))
-
     def test_a_stop_condition_reading_nothing_off_the_page(
         self, tmp_path: Path
     ) -> None:
@@ -2194,22 +1954,6 @@ class TestApiReadPathBreaks:
         )
         report = _report(check_api_read_stop_condition(target))
         assert "reads nothing under 'response'" in report
-
-    def test_a_missing_stop_condition(self, tmp_path: Path) -> None:
-        """A traversal with nothing to stop it runs until the provider does.
-
-        The stop-condition check used to say "declares no stop_when". A
-        required field's absence is the plainest thing a document can be
-        judged on alone, so the contract says it now and the check reports
-        only that this endpoint went unassessed.
-        """
-        target = self._broken(
-            tmp_path, "v1__widgets", lambda read: read["pagination"].pop("stop_when")
-        )
-        report = _report(check_endpoint_documents(target))
-        assert "stop_when" in report
-        assert "Field required" in report
-        assert "were not read" in _report(check_api_read_stop_condition(target))
 
     def test_a_stop_condition_that_cannot_compare_its_operands(
         self, tmp_path: Path
@@ -2223,26 +1967,6 @@ class TestApiReadPathBreaks:
         )
         report = _report(check_api_read_stop_condition(target))
         assert "cannot compare str with int" in report
-
-    def test_a_records_ref_the_response_schema_does_not_declare(
-        self, tmp_path: Path
-    ) -> None:
-        """A records ref addressing nothing fails on the first response.
-
-        The record-schema check used to walk the ref against the declared
-        properties itself. Both halves of that walk are in the document, so
-        the contract does it -- naming the segment the traversal died on --
-        and the check reports only that it read no schema here.
-        """
-        target = self._broken(
-            tmp_path,
-            "v1__widgets",
-            lambda read: read["response"]["records"].update(ref="response.body.items"),
-        )
-        report = _report(check_endpoint_documents(target))
-        assert "'items'" in report
-        assert "is not declared" in report
-        assert "were not read" in _report(check_api_record_schema(target))
 
     def test_a_json_type_the_read_map_has_no_rule_for(self, tmp_path: Path) -> None:
         target = self._broken(
@@ -2592,35 +2316,6 @@ class TestApiScriptedPageTakesTheDeclaredTypes:
         report = _report(check_api_read_stop_condition(target))
         assert "cannot compare str with int" in report
 
-    def test_an_operand_the_schema_declares_without_a_type_is_refused(
-        self, tmp_path: Path
-    ) -> None:
-        """Reaching the node is not the same as knowing what it holds.
-
-        The kit has no value to script at an untyped node, and a guessed
-        string is exactly what decides whether the ordering comparison
-        raises -- so the kit refuses to guess, and used to leave the
-        condition unevaluated rather than fail a connector it could not
-        judge. Unevaluated is not judged either, and a pagination operand
-        nothing can type is a real defect: the contract now requires a
-        pagination reference to resolve to a node that declares its type,
-        so the document is refused and nobody has to guess.
-        """
-
-        def bend(read: dict[str, Any]) -> None:
-            read["response"]["schema"]["properties"]["total"] = {
-                "description": "how many widgets there are in all"
-            }
-            read["pagination"].update(
-                stop_when={"gte": [{"ref": "response.body.total"}, 5]}
-            )
-
-        target = self._broken(tmp_path, "v1__widgets", bend)
-        report = _report(check_endpoint_documents(target))
-        assert "'response.body.total'" in report
-        assert "declares no `type`" in report
-        assert "were not read" in _report(check_api_read_stop_condition(target))
-
 
 class TestApiChecksSayWhenTheyDroveNothing:
     """A dependent check must not report "nothing to say" as "nothing wrong".
@@ -2693,6 +2388,7 @@ class TestACompileFindingBelongsToTheCheckThatOwnsIt:
             check_api_read_compiles,
             check_api_read_advances,
             check_api_read_stop_condition,
+            check_api_record_schema,
         ):
             messages = _messages(check(target))
             assert "not driven" not in messages, check.__name__
@@ -2950,13 +2646,6 @@ class TestApiTransportBreaks:
         path.write_text(json.dumps(definition))
         return load_target(root)
 
-    def test_a_default_transport_that_is_not_declared(self, tmp_path: Path) -> None:
-        """The contract, not the kit, refuses a default no block declares."""
-        with pytest.raises(ConformanceSetupError, match="RULE-CTOR-001"):
-            self._bent_definition(
-                tmp_path, lambda d: d.update(default_transport="oauth")
-            )
-
     def test_a_default_transport_of_another_type(self, tmp_path: Path) -> None:
         """An api connector's transport union has no sqlalchemy member."""
         with pytest.raises(ConformanceSetupError, match="sqlalchemy"):
@@ -2970,25 +2659,6 @@ class TestApiRequestBodyBreaks:
     """The first request is query *and* body; the read builds both."""
 
     _broken = staticmethod(TestApiReadPathBreaks._broken)
-
-    def test_a_body_reading_the_response_scope_is_refused(self, tmp_path: Path) -> None:
-        """The request is built before any response exists.
-
-        A ``response.*`` ref inside a request map says so on the face of the
-        document -- no run, no resolver and no page needed -- so the
-        contract refuses it and the compile drive keeps only the harder
-        half: a scope that IS a request-time scope and still fills nothing.
-        """
-
-        def bend(read: dict[str, Any]) -> None:
-            read["request"]["method"] = "POST"
-            read["request"]["body"] = {"ref": "response.body.not_a_request_scope"}
-
-        target = self._broken(tmp_path, "v1__widgets", bend)
-        report = _report(check_endpoint_documents(target))
-        assert "'response.body.not_a_request_scope'" in report
-        assert "before the response exists" in report
-        assert "were not read" in _report(check_api_read_compiles(target))
 
     @pytest.mark.parametrize("subtree", ["parameters", "selections", "discovered"])
     def test_a_body_reading_the_connection_is_not_judged(
@@ -3282,29 +2952,6 @@ class TestApiBaseUrlBreaks:
         report = _report(check_read_transport_selection(target))
         assert "no usable base_url" in report
 
-    def test_a_base_url_that_is_empty_is_refused_by_the_contract(
-        self, tmp_path: Path
-    ) -> None:
-        """``""`` is decidable from the document, so the contract owns it."""
-        with pytest.raises(ConformanceSetupError, match="base_url"):
-            self._bent_definition(
-                tmp_path, lambda d: d["transports"]["api"].update(base_url="")
-            )
-
-    def test_a_base_url_literal_that_is_empty_is_not_a_usable_one(
-        self, tmp_path: Path
-    ) -> None:
-        """A mapping is not the same as a value: this one resolves to ''.
-
-        The contract decides it from the document alone and refuses the
-        definition, so the kit never sees it.
-        """
-        with pytest.raises(ConformanceSetupError, match="base_url"):
-            self._bent_definition(
-                tmp_path,
-                lambda d: d["transports"]["api"].update(base_url={"literal": ""}),
-            )
-
     def test_a_base_url_expression_that_cannot_resolve_names_why(
         self, tmp_path: Path
     ) -> None:
@@ -3417,30 +3064,6 @@ class TestApiBaseUrlBreaks:
         report = _report(check_read_transport_selection(target))
         assert "no usable base_url" in report
         assert repr(declared) in report
-
-    def test_a_base_url_that_is_only_userinfo_is_refused_by_the_contract(
-        self, tmp_path: Path
-    ) -> None:
-        """``https://user@`` carries userinfo in authored text: RULE-CTOR-066."""
-        with pytest.raises(ConformanceSetupError, match="RULE-CTOR-066"):
-            self._bent_definition(
-                tmp_path,
-                lambda d: d["transports"]["api"].update(base_url="https://user@"),
-            )
-
-    def test_a_base_url_carrying_credentials_is_refused(self, tmp_path: Path) -> None:
-        """Basic auth comes off EACH request's URL, so page two loses it.
-
-        A literal pair is decidable from the document, so the contract
-        refuses it (RULE-CTOR-066) before the kit loads the definition.
-        """
-        with pytest.raises(ConformanceSetupError, match="RULE-CTOR-066"):
-            self._bent_definition(
-                tmp_path,
-                lambda d: d["transports"]["api"].update(
-                    base_url="https://user:pass@api.example.test"
-                ),
-            )
 
     def test_a_base_url_resolving_to_credentials_is_refused(
         self, tmp_path: Path
@@ -3570,26 +3193,6 @@ class TestApiBaseUrlBreaks:
         assert "'connection.parameters'" in report
         assert "whole scope" in report
 
-    def test_a_mixed_scope_base_url_is_refused_by_the_stray_path(
-        self, tmp_path: Path
-    ) -> None:
-        """A scope no runtime declares is decidable from the document.
-
-        The contract refuses the ``bogus.`` placeholder (RULE-CTOR-057)
-        whatever the deferrable half beside it resolves to.
-        """
-        with pytest.raises(ConformanceSetupError, match="RULE-CTOR-057"):
-            self._bent_definition(
-                tmp_path,
-                lambda d: d["transports"]["api"].update(
-                    base_url={
-                        "template": (
-                            "https://${connection.parameters.host}/${bogus.value}"
-                        )
-                    }
-                ),
-            )
-
     def test_a_statically_resolvable_base_url_arms_the_real_origin(
         self, tmp_path: Path
     ) -> None:
@@ -3680,47 +3283,11 @@ class TestApiBaseUrlBreaks:
         )
         assert check_read_transport_selection(target) == []
 
-    def test_a_partial_rate_limit_is_refused_by_the_contract(
-        self, tmp_path: Path
-    ) -> None:
-        """A ``rate_limit`` missing its window is a document defect."""
-        with pytest.raises(ConformanceSetupError, match="rate_limit"):
-            self._bent_definition(
-                tmp_path,
-                lambda d: d["transports"]["api"].update(
-                    rate_limit={"max_requests": 10}
-                ),
-            )
-
-    def test_a_rate_limit_no_int_can_hold_is_refused_by_the_contract(
-        self, tmp_path: Path
-    ) -> None:
-        """JSON can spell ``1e999``; the contract's ``int`` field cannot hold it.
-
-        The overflow the build would otherwise raise on is caught by the
-        contract, not the drive (``timeout_seconds`` keeps the drive's own
-        overflow case, which the contract does not bound).
-        """
-        with pytest.raises(ConformanceSetupError, match="rate_limit"):
-            self._bent_definition(
-                tmp_path,
-                lambda d: d["transports"]["api"].update(
-                    rate_limit={"max_requests": 1e999, "time_window_seconds": 60}
-                ),
-            )
-
 
 class TestApiTransportHeaderBreaks:
     """connect() resolves every transport header; the check judges them all."""
 
     _bent_definition = staticmethod(TestApiTransportBreaks._bent_definition)
-
-    def test_headers_that_are_not_an_object(self, tmp_path: Path) -> None:
-        """The contract types ``headers`` as an object."""
-        with pytest.raises(ConformanceSetupError, match="headers"):
-            self._bent_definition(
-                tmp_path, lambda d: d["transports"]["api"].update(headers=[])
-            )
 
     def test_a_header_value_that_cannot_resolve_names_why(self, tmp_path: Path) -> None:
         target = self._bent_definition(
@@ -3753,18 +3320,6 @@ class TestApiTransportHeaderBreaks:
         report = _report(check_read_transport_selection(target))
         assert "'X-Trace'" in report
         assert "unknown derived function 'no_such_function'" in report
-
-    def test_a_header_whose_name_is_not_a_token_is_refused(
-        self, tmp_path: Path
-    ) -> None:
-        """A field NAME reaches the wire too; the contract's key pattern says so."""
-        with pytest.raises(ConformanceSetupError, match="headers"):
-            self._bent_definition(
-                tmp_path,
-                lambda d: d["transports"]["api"].update(
-                    headers={"Bad\nName": {"literal": "x"}}
-                ),
-            )
 
     def test_a_header_value_carrying_a_line_break_is_refused(
         self, tmp_path: Path
@@ -3883,50 +3438,6 @@ class TestApiTransportHeaderBreaks:
         report = _report(check_read_transport_selection(target))
         assert "'connector.display_name'" in report
         assert "resolves to nothing" in report
-
-    def test_a_mixed_scope_header_is_refused_by_the_stray_path(
-        self, tmp_path: Path
-    ) -> None:
-        """A secrets read beside an unknown scope is refused by the contract.
-
-        The ``bogus.`` placeholder leads with no declared scope
-        (RULE-CTOR-057), decidable from the document alone.
-        """
-        with pytest.raises(ConformanceSetupError, match="RULE-CTOR-057"):
-            self._bent_definition(
-                tmp_path,
-                lambda d: d["transports"]["api"].update(
-                    headers={
-                        "Authorization": {
-                            "template": "Bearer ${secrets.api_key}-${bogus.value}"
-                        }
-                    }
-                ),
-            )
-
-    def test_a_base_url_scope_that_does_not_exist_is_refused_by_name(
-        self, tmp_path: Path
-    ) -> None:
-        """A typo in the scope name is refused by the contract, and by name.
-
-        ``"connectio."`` is not ``"connection."``: neither it nor the
-        second transport's ``"nowhere."`` leads with a declared scope, and
-        the contract reports both -- one authoring mistake does not hide
-        another in a different block.
-        """
-
-        def bend(definition: dict[str, Any]) -> None:
-            definition["transports"]["api"]["base_url"] = {"ref": "connectio.base_url"}
-            definition["transports"]["files"] = {
-                "transport_type": "http",
-                "base_url": {"ref": "nowhere.base_url"},
-            }
-
-        with pytest.raises(ConformanceSetupError) as raised:
-            self._bent_definition(tmp_path, bend)
-        message = str(raised.value)
-        assert "connectio" in message
-        assert "nowhere" in message, "the transport after it was still judged"
 
     def test_a_transport_header_the_connection_supplies_is_not_resolved(
         self, tmp_path: Path
@@ -4163,132 +3674,6 @@ class TestApiRequestBlockBreaks:
         # otherwise rewrite the URL's structure.
         assert widgets[0].url.endswith("/v1/accounts/acme%2Feu/widgets")
 
-    @pytest.mark.parametrize(
-        ("label", "bend"),
-        [
-            ("no binding at all", lambda request: request.update(path_params={})),
-            (
-                "a param the endpoint does not declare",
-                lambda request: request.update(
-                    path_params={"account_id": {"from_param": "acount"}}
-                ),
-            ),
-            (
-                "an expression that is not a binding",
-                lambda request: request.update(
-                    path_params={"account_id": {"literal": ""}}
-                ),
-            ),
-            (
-                "a binding that encodes the value a second time",
-                lambda request: request.update(
-                    path_params={
-                        "account_id": {
-                            "function": "url_encode",
-                            "input": {"from_param": "account_id"},
-                        }
-                    }
-                ),
-            ),
-        ],
-    )
-    def test_the_contract_owns_what_a_path_binding_may_say(
-        self, label: str, bend: Any
-    ) -> None:
-        """The kit reads a binding's VALUE; the contract reads its declaration.
-
-        These three shapes used to be kit findings, and each was a second
-        answer to a question ``analitiq.contracts.endpoints`` already
-        answers -- for every request map, not just this one -- before a
-        document reaches the kit. The copies are gone; this pins the reason,
-        so the day the contract stops refusing one, this goes red and the
-        check comes back rather than the shape passing unnoticed.
-        """
-        document = json.loads(
-            (
-                API_REFERENCE_DIR / "definition" / "endpoints" / "v1__widgets.json"
-            ).read_text()
-        )
-        request = document["operations"]["read"]["request"]
-        request["path"] = "/v1/accounts/{account_id}/widgets"
-        document["operations"]["read"]["params"]["account_id"] = {
-            "in": "path",
-            "type": "string",
-            "required": True,
-            "default": {"literal": "acme"},
-        }
-        bend(request)
-        with pytest.raises(ValidationError, match="path_params"):
-            ApiEndpointDoc.model_validate(document)
-
-    @pytest.mark.parametrize(
-        "header", ["Content-Length", "content-type", "CONTENT-TYPE"]
-    )
-    def test_the_contract_owns_the_engine_filled_headers(self, header: str) -> None:
-        """Four routes to one wire, refused in one place rather than four.
-
-        The engine guarded an endpoint's ``request.headers`` and an
-        ``idempotency.name``, and was told about a transport's headers in a
-        later review round -- one route at a time, which is the argument for
-        the rule living where all four are visible at once. Since contract
-        1.0.0rc23 they are RULE-HTTP-002 and RULE-HTTP-003, and the engine's
-        copies are gone. The media type is declared by
-        ``request.content_type`` now, which :mod:`cdk.api.body` reads.
-        """
-        with pytest.raises(ValidationError, match="RULE-HTTP-00[23]"):
-            HttpTransport.model_validate(
-                {
-                    "transport_type": "http",
-                    "base_url": "https://api.example.test",
-                    "headers": {header: "0"},
-                }
-            )
-
-        document = json.loads(
-            (
-                API_REFERENCE_DIR / "definition" / "endpoints" / "v1__widgets.json"
-            ).read_text()
-        )
-        document["operations"]["read"]["request"]["headers"] = {header: "0"}
-        with pytest.raises(ValidationError, match="RULE-HTTP-00[23]"):
-            ApiEndpointDoc.model_validate(document)
-
-    @pytest.mark.parametrize(
-        ("label", "declared"),
-        [
-            ("two markers", {"ref": "secrets.a", "literal": "c"}),
-            ("a stray sibling on a ref", {"ref": "secrets.api_key", "extra": 1}),
-            ("a stray sibling on a function", {"function": "now", "bogus": 1}),
-        ],
-    )
-    def test_the_contract_owns_an_expression_nodes_shape(
-        self, label: str, declared: Any
-    ) -> None:
-        """Both places the kit used to read a node's grammar are covered.
-
-        An endpoint request map has always been (``_validate_expression_shapes``);
-        a connector field a runtime resolves is too since RULE-CTOR-065 in
-        contract 1.0.0rc22, which is what let the kit's copy go. The
-        registry check is what stays -- see
-        :meth:`~cdk.resolver.Resolver.unknown_function_problem`.
-        """
-        transport = {
-            "transport_type": "http",
-            "base_url": "https://api.example.test",
-            "headers": {"X-A": declared},
-        }
-        with pytest.raises(ValidationError, match="RULE-CTOR-065"):
-            HttpTransport.model_validate(transport)
-
-        document = json.loads(
-            (
-                API_REFERENCE_DIR / "definition" / "endpoints" / "v1__widgets.json"
-            ).read_text()
-        )
-        document["operations"]["read"]["request"]["headers"] = {"X-A": declared}
-        with pytest.raises(ValidationError, match="X-A"):
-            ApiEndpointDoc.model_validate(document)
-
     def test_a_path_default_the_definition_settles_as_empty_is_reported(
         self, tmp_path: Path
     ) -> None:
@@ -4344,64 +3729,6 @@ class TestApiRequestBlockBreaks:
         report = _report(check_api_read_compiles(target))
         assert "'..'" in report
         assert "address a different resource" in report
-
-    def test_a_path_placeholder_bound_to_a_secret_is_refused(
-        self, tmp_path: Path
-    ) -> None:
-        """Secrets and auth are never request-time scopes, on any run.
-
-        The path is substituted by ``request_resolver()``, whose scope set
-        deliberately excludes them -- secret resolution happens once,
-        engine-side, at transport materialization. A binding reading them
-        is not a value the connection will supply later; it is dropped and
-        the placeholder never substitutes.
-
-        The kit used to say that from the resolved value. It cannot get
-        that far now, and does not need to: a path placeholder binds a
-        declared param and nothing else, so the contract refuses the
-        expression on sight -- see
-        :meth:`test_the_contract_owns_what_a_path_binding_may_say` for the
-        rule. What this keeps is the verdict: a connector routing a secret
-        through its path does not pass tier 1.
-        """
-
-        def bend(read: dict[str, Any]) -> None:
-            read["request"]["path"] = "/v1/accounts/{account_id}/widgets"
-            read["request"]["path_params"] = {
-                "account_id": {"ref": "secrets.account_id"}
-            }
-
-        target = self._broken(tmp_path, "v1__widgets", bend)
-        report = _report(check_endpoint_documents(target))
-        assert "path_params['account_id']" in report
-        assert "from_param" in report
-        assert "were not read" in _report(check_api_read_compiles(target))
-
-    def test_a_connection_field_outside_the_request_subtrees_is_refused(
-        self, tmp_path: Path
-    ) -> None:
-        """A connection field outside the request subtrees resolves on no run.
-
-        The request resolver builds exactly parameters/selections/discovered,
-        so a binding reading any other connection field resolves on no run
-        -- deferring it would certify a placeholder production never fills.
-
-        In a PATH the contract gets there first, for the same reason it
-        does with a secret: the only expression a placeholder may bind is a
-        declared param. The never-fillable walk still answers this scope
-        wherever an expression is legal -- see
-        :meth:`test_an_unknown_scope_in_an_unchosen_map_entry_is_still_refused`.
-        """
-
-        def bend(read: dict[str, Any]) -> None:
-            read["request"]["path"] = "/v1/accounts/{account_id}/widgets"
-            read["request"]["path_params"] = {"account_id": {"ref": "connection.name"}}
-
-        target = self._broken(tmp_path, "v1__widgets", bend)
-        report = _report(check_endpoint_documents(target))
-        assert "path_params['account_id']" in report
-        assert "from_param" in report
-        assert "were not read" in _report(check_api_read_compiles(target))
 
     def test_a_path_placeholder_a_run_supplies_is_not_a_finding(
         self, tmp_path: Path

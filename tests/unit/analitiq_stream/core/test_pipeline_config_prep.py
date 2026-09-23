@@ -213,7 +213,6 @@ def _build_tree(
     *,
     manifest_status: str = "active",
     include_stream_file: bool = True,
-    stream_id_in_file: str = STREAM_ID,
     include_manifest: bool = True,
     dst_endpoint_scope: str = "connector",
 ) -> Path:
@@ -232,7 +231,7 @@ def _build_tree(
         )
     _write_json(root / "pipelines" / PIPELINE_ID / "pipeline.json", _pipeline_doc())
     if include_stream_file:
-        stream_doc = _stream_doc(stream_id_in_file, dst_scope=dst_endpoint_scope)
+        stream_doc = _stream_doc(STREAM_ID, dst_scope=dst_endpoint_scope)
         _write_json(
             root / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json",
             stream_doc,

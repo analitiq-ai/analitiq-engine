@@ -1,4 +1,4 @@
-"""Grammar + lookup tests for the connector-level declared facts (issue #401, #513).
+"""Lookup and verdict-table tests for the connector-level declared facts (#401, #513).
 
 ``cdk.declarations`` is the typed view of the ``error_map`` and
 ``concurrency`` blocks: the published contract owns their shape, absence is

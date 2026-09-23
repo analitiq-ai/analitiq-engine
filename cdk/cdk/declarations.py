@@ -8,8 +8,8 @@ testable facts in the connector definition:
   declares which of its own exception's attributes carries its native error
   signal (``key_attrs``, e.g. ``"sqlstate"``, ``"vendor_code"``, or the
   reserved ``"__exception_class__"`` sentinel for matching the exception's
-  class name), and a flat map from that native code to one of the engine's
-  six categories (``codes``). A provider whose failures ride an HTTP status
+  class name), and a flat map from that native code to one of the contract's
+  ``ErrorCategory`` values (``codes``). A provider whose failures ride an HTTP status
   declares that separately (``http``), since a status is read from the
   response, never the exception. The engine reads the declared attribute
   generically — it no longer hardcodes which attribute a family reads or in
@@ -49,26 +49,20 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any
+from typing import Any, get_args
+
+from analitiq.contracts.connector import ErrorCategory
 
 from .types import AckStatus, FailureCategory
 
 logger = logging.getLogger(__name__)
 
-# The engine-owned category vocabulary, aligned with the existing
-# FailureCategory and ErrorCode surfaces. The derivation from a category to
-# a verdict is engine-owned too — the per-context tables below are defined
+# The category vocabulary is the contract's. The derivation from a category
+# to a verdict is engine-owned — the per-context tables below are defined
 # once here so every consumer site (write ack ladder, read classification)
 # derives identically. Never in connector.json: connectors declare facts,
 # the engine decides verdicts.
-ERROR_CATEGORY_VALUES = (
-    "transient",
-    "config",
-    "auth",
-    "unreachable",
-    "rate_limited",
-    "write_rejected",
-)
+ERROR_CATEGORY_VALUES: tuple[str, ...] = get_args(ErrorCategory)
 
 # Write context: declared category -> (ack status, failure category).
 # Retryable categories carry WRITE_REJECTED so an exhausted retry classifies
@@ -148,7 +142,7 @@ class DeclaredMatch:
     ``signal``/``value`` name the connector's declared fact (a ``key_attrs``
     entry and the native code read off it, or ``"http"`` and a status) —
     developer-chosen identifiers, safe for logs and failure summaries.
-    ``category`` is the engine-vocabulary value the consumer derives its
+    ``category`` is the ``ErrorCategory`` value the consumer derives its
     verdict from.
     """
 
@@ -282,7 +276,7 @@ class ErrorMap:
     which attributes of its exception carry a native error signal (or the
     reserved :data:`CLASS_NAME_SIGNAL` to match the exception's class name).
     ``codes`` maps whatever native value each attribute reads to an
-    engine-vocabulary category, with no engine-enforced shape on the native
+    ``ErrorCategory`` value, with no engine-enforced shape on the native
     code itself -- SQLSTATEs, vendor codes, anything a driver emits are all
     just strings to this lookup. ``http`` is unrelated to the exception
     attributes: a status is read at the HTTP call site, never off a raised

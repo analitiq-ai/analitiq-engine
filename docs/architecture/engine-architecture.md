@@ -194,8 +194,6 @@ Defined in `src/engine/exceptions.py`:
 StreamProcessingError                   (base for runtime stream failures)
 └── TransformationError                 (a mapping defect on a batch)
     └── ValidationFailure               (rows failing a rule; carries the strategy)
-
-ConfigurationError                      (config-time failures)
 ```
 
 Concurrent stream failures are aggregated with Python 3.11+
@@ -274,8 +272,8 @@ Four structured signals cross process boundaries so the tag survives isolation:
   regardless of the `ReadError`/`RuntimeError` wrapper its type collapses into.
 - The source worker's `declared_category` (`ReadError` wire message, issue
   the worker classifies a read failure at its birth site against the
-  connector's declared `error_map` and sends the matched engine-vocabulary
-  category; the engine maps it to the published code
+  connector's declared `error_map` and sends the matched `ErrorCategory`
+  value; the engine maps it to the published code
   (`source_code_for_declared_category`) and tags both deterministic and
   retryable errors with it — a declared `rate_limited` 403 that exhausts
   retries reports `RATE_LIMITED`, and an undeclared one reports the extract

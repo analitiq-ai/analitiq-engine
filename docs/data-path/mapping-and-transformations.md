@@ -7,7 +7,10 @@ schema-contract internals see
 
 The implementation lives in `src/engine/mapping.py`: `compile_mapping` compiles
 the stream's contract `StreamMapping` once into vectorized `pyarrow.compute`,
-which is applied to each Arrow batch.
+which is applied to each Arrow batch. The engine compiles exactly the
+expression forms and conversion functions the contract declares; that match
+is checked at startup, so a contract release that adds one fails the engine
+at startup rather than on the first batch that carries it.
 
 ## Overview
 
@@ -67,11 +70,11 @@ A rule on a field under a `List` fails the row when any of its list elements
 fails.
 
 Each rule type compiles to a vectorized boolean mask over the batch. A null
-value is exempt from every rule except `not_null`:
+value is exempt from every rule except `not_null` and `required`:
 
 | `type` | Semantics |
 |--------|-----------|
-| `not_null` | Fails where the value is null |
+| `not_null` (alias `required`) | Fails where the value is null |
 | `min_length` | Unicode length of the value as a string |
 | `max_length` | Same |
 | `pattern` | Anchored regex match (`^(?:pattern)`) against the value as a string |

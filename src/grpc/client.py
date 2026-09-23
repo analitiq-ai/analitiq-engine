@@ -15,7 +15,8 @@ import pyarrow as pa
 
 import grpc
 from cdk.record_identity import record_digest
-from cdk.types import FailureCategory
+from cdk.types import WRITE_MODE_BY_NAME, FailureCategory
+from cdk.types import WriteMode as CdkWriteMode
 from grpc import aio as grpc_aio
 from src.config import settings
 from src.state.error_classification import SchemaHandshakeOutcome
@@ -41,6 +42,14 @@ from .generated.analitiq.v1 import (
 )
 
 logger = logging.getLogger(__name__)
+
+# The CDK translates write modes against its own mirror of the wire enum;
+# a proto change that the mirror misses would send the wrong mode.
+if dict(WriteMode.items()) != {m.name: m.value for m in CdkWriteMode}:
+    raise TypeError(
+        f"cdk.types.WriteMode {[(m.name, m.value) for m in CdkWriteMode]} does "
+        f"not mirror the proto WriteMode {WriteMode.items()}"
+    )
 
 
 _STREAM_TASK_FAILED = object()  # Sentinel pushed onto the response queue when
@@ -977,17 +986,12 @@ class DestinationGRPCClient:
         ack budget the destination derives its statement timeout from.
         """
         write_mode_str = str(config.get("write_mode", "upsert")).lower()
-        write_mode_map = {
-            "insert": WriteMode.WRITE_MODE_INSERT,
-            "upsert": WriteMode.WRITE_MODE_UPSERT,
-            "truncate_insert": WriteMode.WRITE_MODE_TRUNCATE_INSERT,
-        }
-        if write_mode_str not in write_mode_map:
+        if write_mode_str not in WRITE_MODE_BY_NAME:
             raise ValueError(
                 f"Unknown write_mode {write_mode_str!r}; expected one of "
-                f"{sorted(write_mode_map)}"
+                f"{sorted(WRITE_MODE_BY_NAME)}"
             )
-        write_mode = write_mode_map[write_mode_str]
+        write_mode = WRITE_MODE_BY_NAME[write_mode_str]
 
         # Stamp the tightest ack budget any waiter on the path has: this
         # client's own wait (self.timeout), min'ed with a budget an upstream

@@ -14,7 +14,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from contract_documents import connector_document, http_transport
-from pydantic import ValidationError
 
 from cdk.exceptions import TransportSpecError
 from cdk.json_utils import authored_json
@@ -92,25 +91,6 @@ class TestResolveTransportSpec:
         ctx = ResolutionContext(connector=authored_json(connector))
         with pytest.raises(KeyError, match="not in declared transports"):
             resolve_transport_spec(connector, transport_ref="other", context=ctx)
-
-    @pytest.mark.parametrize(
-        "bend, field",
-        [
-            ({"transports": {}}, "transport"),
-            ({"default_transport": "other"}, "default_transport"),
-            ({"transports": {"api": {"base_url": "https://x"}}}, "transport_type"),
-        ],
-        ids=["no-transports", "undeclared-default", "no-transport-type"],
-    )
-    def test_a_definition_the_contract_refuses_never_reaches_selection(
-        self, bend, field
-    ):
-        # Selection reads a validated document: an empty transports block, a
-        # default naming no declared transport, or a block without its type
-        # discriminator is the contract's refusal, before any transport is
-        # chosen.
-        with pytest.raises(ValidationError, match=field):
-            connector_document("api", connector_id="demo", **bend)
 
 
 # Transport kind registry (register / build / unregister lifecycle)

@@ -134,7 +134,7 @@ class StageWritePlan:
     """
     stage: TableAddress            # deterministic stage address (section 6)
     target: TableAddress
-    scope: StageScope              # TEMP or REAL, from the declaration
+    scope: StageScope              # "temp" or "real", from the declaration
     transactional: bool            # from the declaration (section 7)
     create_stage_sql: str          # dialect.stage_table_sql(...)
     truncate_sql: str | None       # first truncate_insert batch only:

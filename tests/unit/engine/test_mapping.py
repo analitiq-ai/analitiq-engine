@@ -1,12 +1,11 @@
 """Behavior coverage for the mapping module: one document, one transform.
 
-A mapping document is read once by ``StreamMapping.model_validate`` and compiled once
-by ``compile_mapping`` into a ``CompiledTransform``; ``.run(batch)`` applies it
-to a ``pa.RecordBatch`` synchronously, raising ``TransformationError`` on any
-failure. These tests assert that contract: the token-array path read, the
-``get``/``pipe`` expressions, the function catalog, the conversion-matrix
-gating, validation rules, and fail-loud batch-wide semantics. Document
-validity is the validator's and is not graded here.
+A contract ``StreamMapping`` is compiled once by ``compile_mapping`` into a
+``CompiledTransform``; ``.run(batch)`` applies it to a ``pa.RecordBatch``
+synchronously, raising ``TransformationError`` on any failure. These tests
+assert that behaviour: token-array path reads, every expression form, the
+function kernels, the conversion-matrix gating, and fail-loud batch-wide
+semantics.
 """
 
 import ast
@@ -22,7 +21,7 @@ import src
 from src.engine.batch_policy import ErrorStrategy
 from src.engine.exceptions import TransformationError
 from src.engine.mapping import (
-    _FUNCTION_CATALOG,
+    _FUNCTIONS,
     ValidationFailure,
     build_output_schema,
     compile_mapping,
@@ -95,7 +94,7 @@ class TestTokenArrayPaths:
     """A source path is an array of tokens from the document to the batch read.
 
     The whole point of the array: there is no split step, so a `get` cannot
-    behave differently depending on how deep in the AST it sits. A dotted
+    behave differently depending on where in the expression it sits. A dotted
     string used to reach the reader unsplit from inside a `pipe`, where
     ``path[0]`` was the first LETTER of the field name and the column came out
     silently all-null.
@@ -234,15 +233,16 @@ class TestFunctionCatalog:
     """Every catalog kernel maps a ``pa.Array`` to a ``pa.Array``. Kernels are
     exercised directly so the input Arrow type is exact and unambiguous."""
 
-    def test_null_input_element_stays_null(self):
-        """A null row passes through as null -- never coerced to "", which
-        would defeat the nullability check."""
+    @pytest.mark.parametrize("name", sorted(_FUNCTIONS))
+    def test_null_input_element_stays_null(self, name):
+        """A null row passes through every elementwise kernel as null -- it is
+        never coerced to "", which would defeat the nullability check."""
         array = pa.array([None, "a"], pa.string())
-        assert _FUNCTION_CATALOG["to_string"](array).to_pylist()[0] is None
+        assert _FUNCTIONS[name](array).to_pylist()[0] is None
 
     def test_to_string_formats_numbers(self):
-        out = _FUNCTION_CATALOG["to_string"](pa.array([1, 2, None], pa.int64()))
-        assert out.to_pylist() == ["1", "2", None]
+        out = _FUNCTIONS["to_string"](pa.array([1, 2, None], pa.int64())).to_pylist()
+        assert out == ["1", "2", None]
 
 
 class TestConversionMatrix:
@@ -426,7 +426,8 @@ class TestValidationRules:
                 assignments,
             )
 
-    def test_a_null_list_ancestor_fails_not_null_like_a_null_struct_parent(self):
+    @pytest.mark.parametrize("rule_type", ["not_null", "required"])
+    def test_a_null_list_ancestor_fails_like_a_null_struct_parent(self, rule_type):
         """One verdict for "an ancestor of the addressed field is null".
 
         `list_flatten` drops a null list's elements where a null struct
@@ -444,7 +445,7 @@ class TestValidationRules:
                     "arrow_type": "Object",
                     "properties": {"sku": {"arrow_type": "Utf8"}},
                 },
-                validate={"rules": [_rule("not_null", field=["lines", "sku"])]},
+                validate={"rules": [_rule(rule_type, field=["lines", "sku"])]},
             )
         ]
         with pytest.raises(TransformationError, match=r"rows \[0, 2\]"):
@@ -533,6 +534,33 @@ class TestValidationRules:
         ]
         with pytest.raises(TransformationError, match=r"rows \[0\]"):
             _run([{"lines": None}, {"lines": []}], assignments)
+
+    def test_rule_on_a_field_the_source_does_not_carry_fails_loud_at_run(self):
+        """A declared field the built value lacks is no silent grade.
+
+        Rules grade the built (pre-conversion) values, so a field the target
+        declares but the source struct does not carry raises out of the
+        field walk and is classified, never treated as an all-pass rule over
+        nothing.
+        """
+        with pytest.raises(TransformationError, match="the built value does not carry"):
+            _run(
+                [{"address": {"city": "Kyiv"}}],
+                [
+                    _assignment(
+                        "address",
+                        "Object",
+                        _expr(_get("address")),
+                        properties={
+                            "city": {"arrow_type": "Utf8"},
+                            "zip": {"arrow_type": "Utf8"},
+                        },
+                        validate={
+                            "rules": [_rule("not_null", field=["address", "zip"])]
+                        },
+                    )
+                ],
+            )
 
     def test_range_bounds_come_from_the_rule_value_object(self):
         rules = [_rule("range", value={"min": 1, "max": 5})]
@@ -715,6 +743,16 @@ class TestBuildOutputSchema:
         assert not schema.field("a").nullable
         assert schema.field("b").nullable
 
+    def test_arrow_type_the_engine_grammar_rejects_names_the_assignment(self):
+        """The contract's type pattern admits a zone the CDK cannot resolve."""
+        assignments = _document(
+            [_assignment("t", "Timestamp(MILLISECOND, Not/AZone)", _expr(_get("t")))]
+        ).assignments
+        with pytest.raises(
+            TransformationError, match=r"assignment\[0\] target='t'.*arrow_type"
+        ):
+            build_output_schema(assignments)
+
 
 class TestPerRecordParity:
     """Edge semantics that must match the deleted per-record evaluator.
@@ -724,7 +762,7 @@ class TestPerRecordParity:
     """
 
     def test_to_string_renders_bool_as_python_str(self):
-        out = _FUNCTION_CATALOG["to_string"](pa.array([True, False, None])).to_pylist()
+        out = _FUNCTIONS["to_string"](pa.array([True, False, None])).to_pylist()
         assert out == ["True", "False", None]
 
     def test_pattern_validation_matches_python_bool_spelling(self):

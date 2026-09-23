@@ -64,6 +64,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 
+from analitiq.contracts.pipelines.data_sync import PublicErrorCode
+
 from cdk.declarations import ERROR_CATEGORY_VALUES
 from cdk.types import FailureCategory
 
@@ -86,6 +88,16 @@ class ErrorCode(str, Enum):
     RATE_LIMITED = "RATE_LIMITED"
     CONFIG_INVALID = "CONFIG_INVALID"
     INTERNAL = "INTERNAL"
+
+
+# The run-status contract publishes this set as ``PublicErrorCode``; a code
+# one side has and the other lacks reaches a customer as a value the control
+# plane cannot read.
+if {m.value for m in ErrorCode} != {m.value for m in PublicErrorCode}:
+    raise TypeError(
+        f"ErrorCode {sorted(m.value for m in ErrorCode)} does not match the "
+        f"contract's PublicErrorCode {sorted(m.value for m in PublicErrorCode)}"
+    )
 
 
 class FailureStage(str, Enum):
@@ -335,7 +347,7 @@ def source_code_for_declared_category(category: str) -> ErrorCode | None:
     """
     if category not in _DECLARED_SOURCE_CODES:
         logger.warning(
-            "declared_category %r off the wire is not in the engine "
+            "declared_category %r off the wire is not in the contract "
             "vocabulary; ignoring it",
             category,
         )

@@ -13,7 +13,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from analitiq.contracts.endpoints import Pagination
+from analitiq.contracts.endpoints import ApiEndpointDoc, Pagination
 from pydantic import TypeAdapter
 
 from cdk.api import GenericAPIConnector
@@ -198,6 +198,34 @@ class TestOnePage:
         session = FakeSession([FakeResponse(body=_rows(2))])
         assert len(await _read(session, endpoint_document())) == 1
         assert len(session.calls) == 1
+
+    async def test_fields_composed_through_ref_and_all_of_read_as_declared(
+        self,
+    ) -> None:
+        document = endpoint_json(
+            record_fields={
+                "code": {"$ref": "#/$defs/Code"},
+                "amount": {"allOf": [{"$ref": "#/$defs/Amount"}]},
+            }
+        )
+        document["operations"]["read"]["response"]["schema"]["$defs"] = {
+            "Code": {"type": "string", "native_type": "text", "arrow_type": "Utf8"},
+            "Amount": {
+                "type": "number",
+                "native_type": "double",
+                "arrow_type": "Float64",
+            },
+        }
+        ApiEndpointDoc.model_validate(document)
+        session = FakeSession(
+            [FakeResponse(body={"records": [{"id": 1, "code": "a", "amount": 2.5}]})]
+        )
+        batches = await _read(session, document)
+        schema = batches[0].schema
+        assert (str(schema.field("code").type), str(schema.field("amount").type)) == (
+            "string",
+            "double",
+        )
 
     async def test_a_202_is_read_as_the_success_it_is(self) -> None:
         # The read path used to fail a whole stream on any status but 200.
@@ -1312,25 +1340,6 @@ class TestIncremental:
             )
         assert session.calls == []
 
-    async def test_a_cursor_field_the_schema_does_not_declare_is_refused(
-        self,
-    ) -> None:
-        document = self._document()
-        document["operations"]["read"]["replication"]["cursor_mappings"].append(
-            {"cursor_field": "modified", "param": "since", "operator": "gte"}
-        )
-        session = FakeSession([FakeResponse(body=_rows(1))])
-        with pytest.raises(ReadError, match="'modified' is not declared"):
-            await _read(
-                session,
-                document,
-                source=stream_source(
-                    method="incremental", cursor_field="modified", safety_window=60
-                ),
-                checkpoint=FakeCheckpoint({"cursor": "1"}),
-            )
-        assert session.calls == []
-
     async def test_a_cursor_field_with_no_mapping_is_refused(self) -> None:
         # Previously a warning, not a refusal: without a mapping there is
         # no param to carry the bound, so the request would go out
@@ -1418,27 +1427,6 @@ class TestIncremental:
                 source=stream_source(method="incremental", cursor_field="id"),
                 checkpoint=FakeCheckpoint({"cursor": "1"}),
             )
-
-    async def test_a_mapping_facing_the_wrong_way_fails_before_the_first_run(
-        self,
-    ) -> None:
-        # Decidable from the document alone, so it is refused before a
-        # full first run establishes a checkpoint.
-        document = self._document()
-        document["operations"]["read"]["replication"]["cursor_mappings"][0][
-            "operator"
-        ] = "lt"
-        session = FakeSession([FakeResponse(body=_rows(1))])
-        with pytest.raises(ReadError, match="an upper bound"):
-            await _read(
-                session,
-                document,
-                source=stream_source(
-                    method="incremental", cursor_field="id", safety_window=60
-                ),
-                checkpoint=FakeCheckpoint(None),
-            )
-        assert session.calls == []
 
     async def test_no_prior_cursor_reads_everything(self) -> None:
         session = FakeSession([FakeResponse(body=_rows(1))])

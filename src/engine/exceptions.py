@@ -58,7 +58,3 @@ class ValidationFailure(TransformationError):
     def __init__(self, message: str, *, strategy: ErrorStrategy) -> None:
         super().__init__(message)
         self.strategy = strategy
-
-
-class ConfigurationError(Exception):
-    """Exception for pipeline configuration errors."""
