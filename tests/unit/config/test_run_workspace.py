@@ -225,6 +225,41 @@ class TestTheLayoutMustBeReadable:
         assert "connectors/api/definition/connector.json" in keys
         assert not any(".secrets" in key or ".git" in key for key in keys)
 
+    def test_a_linked_directory_no_document_sits_behind_is_left_alone(
+        self, workspace_root: Path, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        outside = tmp_path_factory.mktemp("outside")
+        (outside / "a.json").write_text("{}")
+        streams = workspace_root / PIPELINE_DIR / "streams"
+        (streams / "notes").symlink_to(outside)
+        (streams / os.fsdecode(b"x\xff")).symlink_to(outside)
+
+        keys = _read(workspace_root).request.documents.root
+
+        assert f"{PIPELINE_DIR}streams/s1.json" in keys
+        assert not [key for key in keys if "a.json" in key]
+
+    def test_a_linked_location_directory_is_refused_in_printable_words(
+        self, workspace_root: Path, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        streams = workspace_root / PIPELINE_DIR / "streams"
+        outside = tmp_path_factory.mktemp("outside") / "streams"
+        streams.rename(outside)
+        streams.symlink_to(outside)
+
+        with pytest.raises(WorkspaceLayoutError, match="p1/streams") as err:
+            _read(workspace_root)
+
+        str(err.value).encode()
+
+    def test_a_link_back_into_its_own_package_ends(self, workspace_root: Path) -> None:
+        streams = workspace_root / PIPELINE_DIR / "streams"
+        (streams / "loop").symlink_to(streams)
+
+        keys = _read(workspace_root).request.documents.root
+
+        assert f"{PIPELINE_DIR}streams/s1.json" in keys
+
     def test_a_directory_whose_name_is_not_utf8_is_left_alone(
         self, workspace_root: Path
     ) -> None:
