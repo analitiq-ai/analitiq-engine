@@ -681,7 +681,8 @@ The contract tier (no live database) certifies this document's surface:
   `insert_on_duplicate_key` form names no keys in the statement at all
   (MySQL reads them from the unique index), and carries no such
   assertion.
-- **Refusals fire.** Upsert against `merge_form: "none"`, and any needed-but-undeclared capability produce the
+- **Refusals fire.** Upsert with empty `conflict_keys` (never downgraded to
+  insert), upsert against `merge_form: "none"`, and any needed-but-undeclared capability produce the
   loud config error, not SQL.
 - **The override surface is the sanctioned one.** A connector may override
   the §4 hooks plus `session_init_sql`, `verify_tls_state`, and the

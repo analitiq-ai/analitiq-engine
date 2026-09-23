@@ -230,14 +230,14 @@ files = [
 
 [[package]]
 name = "analitiq-contract-models"
-version = "1.0.0rc25"
+version = "1.0.0rc26"
 description = "Analitiq's public contract surface (Pydantic): the authored connector/connection/stream/pipeline/endpoint documents the published JSON Schemas and the validator both derive from, plus the public REST API request/response shapes. Import as `analitiq.contracts`."
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "analitiq_contract_models-1.0.0rc25-py3-none-any.whl", hash = "sha256:36102bc29485910829f457cc58b5eee24ef8c50e0e9320be753e8a86243f9d01"},
-    {file = "analitiq_contract_models-1.0.0rc25.tar.gz", hash = "sha256:dc65e0c3b8c408611297369b5a1fd6eb8fd102146e40e93221b55e802dbf6303"},
+    {file = "analitiq_contract_models-1.0.0rc26-py3-none-any.whl", hash = "sha256:b41d703763fe947ec30d508b7f830c0de8487ab59232bc7cced461505bb75f4a"},
+    {file = "analitiq_contract_models-1.0.0rc26.tar.gz", hash = "sha256:b659fec517393439836d4abca314b71565477473d61e976f68685455ecae6d46"},
 ]
 
 [package.dependencies]
@@ -247,18 +247,18 @@ tzdata = "*"
 
 [[package]]
 name = "analitiq-validator"
-version = "1.0.0rc25"
+version = "1.0.0rc26"
 description = "The Analitiq artifact validator: offline validation of Analitiq documents against the contract models (`analitiq-contract-models`) plus the cross-file and cross-document checks a single-document model cannot express. Today it validates connector-package documents (connector, endpoint, type-map files) and the referential integrity of an assembled pipeline bundle. Import as `analitiq.validator`; CLI `analitiq-validate`."
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "analitiq_validator-1.0.0rc25-py3-none-any.whl", hash = "sha256:bf74b63ef490614f8618403d537dfb6ca4e0b708c23d157a270c4da890c6f9c4"},
-    {file = "analitiq_validator-1.0.0rc25.tar.gz", hash = "sha256:15a193aabe6a1e864735cd9d49f911bc9a06db6a983582c62139b55a23dc390f"},
+    {file = "analitiq_validator-1.0.0rc26-py3-none-any.whl", hash = "sha256:a1a7049d8e06a77ad690bb4754a1496065b04bb0fe250f06eaae805fc5d2b8c6"},
+    {file = "analitiq_validator-1.0.0rc26.tar.gz", hash = "sha256:1d8573b65a9794efbc0a888d831ea727f745d252d931049cfdcdfc4c5d417223"},
 ]
 
 [package.dependencies]
-analitiq-contract-models = "1.0.0rc25"
+analitiq-contract-models = "1.0.0rc26"
 jsonschema = ">=4.18,<5"
 referencing = ">=0.30"
 
@@ -3581,4 +3581,4 @@ s3 = ["boto3"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.11"
-content-hash = "e9329f5972e2f2cc80f6eadd6a62417cc42465b3c161dac4aaec35acabb4e38e"
+content-hash = "9a471394668c895e2f0e0168c565e121acba1ba2fe7f07b931fefd3f2e5fcc5a"

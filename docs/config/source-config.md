@@ -24,6 +24,11 @@ layering rules are in [`settings-reference.md`](settings-reference.md).
   config crosses to the connector. A connector never invents its own
   default; the value the connector sees is always the engine's resolved
   one.
+- **A connection is identified by its directory name.** The engine keys
+  each connection by the name of its directory under `connections/`, which
+  is what a stream's `endpoint_ref.connection_id` reaches; it does not read
+  the `connection_id` inside `connection.json`, and the pinned validator
+  does not check that the two agree.
 - **`source.connection_ref` is runtime-computed, never authored.**
   `pipeline_config_prep` copies `endpoint_ref.connection_id` onto the
   source block as a convenience key; it does not appear in the document a
@@ -35,7 +40,8 @@ A connector declares one or more named `transports`; an operation
 dispatches through the transport its `request.transport_ref` names, or
 through `default_transport` when it names none. Everything that follows
 from a transport travels with it — session, base URL, rate limiter, and
-the header names the connection owns. An operation is judged and sent against
+the header names the connection owns, which an operation's own
+`request.headers` may not shadow. An operation is judged and sent against
 **its** transport's facts, never the default's.
 
 **Containment is per-transport, not per-connection.** Every URL an

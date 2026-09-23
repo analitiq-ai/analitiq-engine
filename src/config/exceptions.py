@@ -7,42 +7,9 @@ class ConfigError(Exception):
     pass
 
 
-class ConfigNotFoundError(ConfigError):
-    """Raised when a configuration file is not found."""
-
-    def __init__(self, path: str, detail: str = ""):
-        self.path = path
-        message = f"Configuration not found: {path}"
-        if detail:
-            message = f"{message} ({detail})"
-        super().__init__(message)
-
-
 class ConfigValidationError(ConfigError):
     """Raised when configuration validation fails."""
 
     def __init__(self, message: str, field: str = ""):
         self.field = field
-        super().__init__(message)
-
-
-class ConnectorNotFoundError(ConfigError):
-    """Raised when a connector is not found."""
-
-    def __init__(self, connector_name: str, detail: str = ""):
-        self.connector_name = connector_name
-        message = f"Connector not found: {connector_name}"
-        if detail:
-            message = f"{message}. {detail}"
-        super().__init__(message)
-
-
-class EndpointNotFoundError(ConfigError):
-    """Raised when an endpoint is not found."""
-
-    def __init__(self, endpoint_ref: object, detail: str = ""):
-        self.endpoint_ref = endpoint_ref
-        message = f"Endpoint not found: {endpoint_ref}"
-        if detail:
-            message = f"{message}. {detail}"
         super().__init__(message)

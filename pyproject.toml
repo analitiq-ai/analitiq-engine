@@ -81,8 +81,8 @@ jsonschema = {version = "^4.25", extras = ["format-nongpl"]}
 # project supports, matching the Docker base image -- no source build.
 google-re2 = "^1.1"
 
-# Published Analitiq contract packages (PyPI). The engine validates on-disk
-# artifacts against these offline, so it never fetches a schema at runtime:
+# Published Analitiq contract packages (PyPI). A run's documents are graded
+# against these offline, so no schema is fetched at runtime:
 #   - contract-models: the single source of artifact shape
 #     (connector/connection/pipeline/stream/endpoint), and the workspace
 #     location tables that pick which files a run's request holds.

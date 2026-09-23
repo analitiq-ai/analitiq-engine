@@ -315,9 +315,9 @@ def _load_endpoints(
 def check_endpoint_documents(target: ConformanceTarget) -> list[Violation]:
     """Certify that every endpoint document the connector ships parses.
 
-    The engine validates each document against the published contract
-    before a stream reads a row, so one it refuses is a connector that
-    cannot run. The kit would otherwise report that as silence: an
+    The validator's workspace verdict grades each document against the
+    published contract before a stream reads a row, so one it refuses is a
+    connector that cannot run. The kit would otherwise report that as silence: an
     unparsed document carries no read operation, no response block and no
     pagination, so every api check passes it by having nothing to drive --
     a green run over an endpoint nothing assessed.
@@ -327,8 +327,8 @@ def check_endpoint_documents(target: ConformanceTarget) -> list[Violation]:
             ENDPOINT_DOCUMENT_CHECK,
             f"endpoint document {stem!r}: {problem}. Every check here drives "
             f"the parsed document, so this endpoint is not assessed at all, "
-            f"and the engine refuses it the same way before its first "
-            f"request.",
+            f"and the validator refuses it the same way before a run's "
+            f"first request.",
         )
         for stem, problem in sorted(target.endpoint_problems.items())
     ]
@@ -516,7 +516,8 @@ def load_target(
             f"{definition_dir / CONNECTOR_DEFINITION_FILENAME} declares no kind"
         )
     # The published contract is the authority on a definition's shape: the
-    # engine refuses a definition it rejects, so the kit cannot certify one.
+    # validator refuses a run over a definition it rejects, so the kit cannot
+    # certify one.
     try:
         connector: Connector = TypeAdapter(Connector).validate_python(definition)
     except ValidationError as err:

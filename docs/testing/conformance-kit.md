@@ -19,8 +19,9 @@ in a customer pipeline (spec
   target-emptying statement is DELETE-shaped, never `TRUNCATE`;
   identical batches build identical plans (self-healing retries) and
   distinct batches never share a stage name.
-- **Refusals fire.** Catalog addressing without a declaration (or
-  against `catalog: "none"`) is a loud error, never a guessed default.
+- **Refusals fire.** Upsert with empty `conflict_keys`, catalog
+  addressing without a declaration (or against `catalog: "none"`) — a
+  loud error, never a guessed default.
 - **The override surface is the sanctioned one.** The connector class
   carries `dialect_class` and, for a native error signal beyond the
   declared `error_map` lookup, `classify_error` — nothing else; the
@@ -42,7 +43,8 @@ in a customer pipeline (spec
 - **Declared and implemented agree, both ways.** A declared
   `merge_form` needs `merge_statement_sql`; a `bulk_land` override
   needs a declared `bulk_load` mechanism; a write-capable connector
-  needs `stage_table_sql`.
+  (a database connector that ships a write type map) needs a
+  `sql_capabilities` block and `stage_table_sql`.
 - **Every connector states its type vocabulary.**
   The read map is what the engine maps discovered source types through,
   whatever the connector's kind: a database maps the `native_type`s

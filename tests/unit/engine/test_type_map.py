@@ -1204,8 +1204,3 @@ class TestToNativeTypeRegex:
             f"nested-quantifier match took {elapsed:.3f}s for 30 chars; "
             f"expected linear-time (RE2), not exponential (backtracking re)"
         )
-
-
-# ---------------------------------------------------------------------------
-# Loader — write-direction document
-# ---------------------------------------------------------------------------
