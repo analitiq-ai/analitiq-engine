@@ -346,6 +346,60 @@ class TestHttpSpecValidation:
         assert spec["headers"] == {"X-Kept": "yes"}
         assert "X-Org" in caplog.text
 
+    def test_resolved_payload_pins_http_contract(self):
+        # Pin the JSON-safe worker payload: base_url resolved through the
+        # resolver and trailing-slash-stripped, header values resolved
+        # with None-valued entries dropped, the timeout default applied,
+        # and rate_limit normalized to ints.
+        ctx = ResolutionContext(
+            connection={
+                "parameters": {
+                    "url": "https://api.example.test/",
+                    "token": "tok-1",
+                    "optional": None,
+                }
+            }
+        )
+        resolved = resolve_http_spec(
+            {
+                "base_url": {"ref": "connection.parameters.url"},
+                "headers": {
+                    "Authorization": {"ref": "connection.parameters.token"},
+                    "X-Optional": {"ref": "connection.parameters.optional"},
+                    "Accept": "application/json",
+                },
+                "rate_limit": {"max_requests": 10, "time_window_seconds": 60},
+            },
+            resolver=_resolver(ctx),
+        )
+        assert resolved == {
+            "transport_type": "http",
+            "base_url": "https://api.example.test",
+            "headers": {"Authorization": "tok-1", "Accept": "application/json"},
+            "timeout_seconds": 30.0,
+            "rate_limit": {"max_requests": 10, "time_window_seconds": 60},
+        }
+
+    @pytest.mark.parametrize("window", ["sixty", 1.5, True, None, 0, -5])
+    def test_rate_limit_window_resolving_to_no_positive_integer_is_refused(
+        self, window
+    ):
+        # The contract admits the window as an expression, so only its
+        # resolved value can be checked, and only here. int() alone would
+        # truncate 1.5, read True as 1 and accept a zero window.
+        ctx = ResolutionContext(connection={"parameters": {"window": window}})
+        with pytest.raises(TransportSpecError, match="time_window_seconds"):
+            resolve_http_spec(
+                {
+                    "base_url": "https://api.example.com",
+                    "rate_limit": {
+                        "max_requests": 10,
+                        "time_window_seconds": {"ref": "connection.parameters.window"},
+                    },
+                },
+                resolver=_resolver(ctx),
+            )
+
     def test_rate_limit_window_accepts_a_value_expression(self):
         ctx = ResolutionContext(connection={"parameters": {"window": 60}})
         spec = resolve_http_spec(

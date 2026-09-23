@@ -39,7 +39,7 @@ def _get(path):
 
 
 def _expr(node):
-    """Wrap an expression AST node as an assignment ``value`` block."""
+    """Wrap an expression node as an assignment ``value`` block."""
     return {"kind": "expression", "expression": node}
 
 

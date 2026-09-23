@@ -5,19 +5,19 @@ mapping at runtime, and the conversion matrix. For Arrow type-system and
 schema-contract internals see
 [`arrow-and-transport-strategy.md`](arrow-and-transport-strategy.md).
 
-The implementation lives in `src/engine/mapping.py`: the mapping is read once
-by `MappingDocument`, compiled once by `compile_mapping` into vectorized
-`pyarrow.compute`, and applied to each Arrow batch.
+The implementation lives in `src/engine/mapping.py`: `compile_mapping` compiles
+the stream's contract `StreamMapping` once into vectorized `pyarrow.compute`,
+which is applied to each Arrow batch.
 
 ## Overview
 
 Each target field is built by exactly one **assignment**:
 
 ```
-Target Field (path + arrow_type)  ←  Value (constant | expression AST)  ←  Optional validation
+Target Field (path + arrow_type)  ←  Value (constant | expression)  ←  Optional validation
 ```
 
-The engine compiles each expression AST once per stream and evaluates it as
+The engine compiles each expression once per stream and evaluates it as
 vectorized Arrow compute over each batch -- the data never leaves Arrow.
 
 ## Source Paths

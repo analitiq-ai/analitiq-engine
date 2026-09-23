@@ -167,9 +167,9 @@ class ConnectionRuntime:
         self._connector_type = connector_type
         self._connector = connector
         # The connector's declared ``sql_capabilities`` block (issue #390),
-        # carried as the JSON its author wrote: the published contract
-        # validates it engine-side, ``cdk.sql.capabilities`` parses that
-        # grammar at consumption. Kept as data here so the core runtime
+        # carried as the JSON its author wrote: the validator's workspace
+        # verdict has already passed it, and ``cdk.sql.capabilities``
+        # converts it at consumption. Kept as data here so the core runtime
         # stays independent of the SQL surface (same reason ``materialize``
         # takes ``sql_dialect`` untyped). Only a database connector declares
         # it. Worker-side runtimes get it restored from the resolved payload

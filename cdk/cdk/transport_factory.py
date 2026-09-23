@@ -49,7 +49,7 @@ if TYPE_CHECKING:
 from cdk._extras import reraise_for_missing_extra
 from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.exceptions import TransportSpecError, UnresolvedValueError
-from cdk.json_utils import authored_json
+from cdk.json_utils import authored_json, positive_int
 from cdk.rate_limiter import RateLimiter
 from cdk.resolver import ResolutionContext, Resolver
 from cdk.sql.dialects import dialect_overrides
@@ -1034,13 +1034,19 @@ def resolve_http_spec(spec: Mapping[str, Any], *, resolver: Resolver) -> dict[st
     raw_rate_limit = spec.get("rate_limit")
     rate_limit: dict[str, int] | None = None
     if raw_rate_limit is not None:
-        # time_window_seconds may be a value-expression; max_requests is a
-        # literal the contract types as a positive int.
+        # time_window_seconds may be a value-expression, so only its
+        # resolved value can be checked; max_requests is a literal the
+        # contract types as a positive int.
+        try:
+            time_window_seconds = positive_int(
+                resolver.resolve(raw_rate_limit["time_window_seconds"]),
+                field="http transport `rate_limit.time_window_seconds`",
+            )
+        except ValueError as err:
+            raise TransportSpecError(str(err)) from err
         rate_limit = {
             "max_requests": int(raw_rate_limit["max_requests"]),
-            "time_window_seconds": int(
-                resolver.resolve(raw_rate_limit["time_window_seconds"])
-            ),
+            "time_window_seconds": time_window_seconds,
         }
 
     return {

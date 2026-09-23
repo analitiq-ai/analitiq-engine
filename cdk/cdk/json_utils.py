@@ -74,3 +74,35 @@ def decode_json_fields(
                     f"Json column {col!r} at row {row}: value is not valid JSON ({exc})"
                 ) from exc
     return records
+
+
+def positive_int(value: Any, *, field: str) -> int:
+    """Read a resolved value as a positive integer, naming *field* on refusal.
+
+    A zero or negative count or step never advances, and a boolean
+    is an author error that Python would otherwise read as 1 -- ``bool`` is
+    an ``int``, so the ordinary integer check passes it.
+
+    A value whose integer value is exact is accepted whatever its Python
+    type. The value can arrive from a response body whose typing the author
+    does not control: the lossless JSON parse turns ``50.0`` into
+    ``Decimal("50")``, and a provider that reports its own page size as a
+    string is not describing a different intent. A fractional value IS a
+    different intent and is refused.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be an integer, got {value!r}")
+    try:
+        number = int(value)
+    except (TypeError, ValueError, ArithmeticError) as err:
+        # ArithmeticError with the other two: JSON can spell `1e400`, which
+        # parses to infinity and overflows on the way to an int. Caught here
+        # so the message names the value that did it.
+        raise ValueError(f"{field} must be an integer, got {value!r}") from err
+    # int() truncates a fractional float/Decimal; a string either parsed
+    # exactly above or raised, so it needs no comparison.
+    if not isinstance(value, str) and number != value:
+        raise ValueError(f"{field} must be an integer, got {value!r}")
+    if number <= 0:
+        raise ValueError(f"{field} must be positive, got {number}")
+    return number

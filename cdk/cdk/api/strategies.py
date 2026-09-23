@@ -38,6 +38,8 @@ from analitiq.contracts.endpoints import (
     Pagination,
 )
 
+from cdk.json_utils import positive_int
+
 from .page_loop import Page, PageRequest, PaginationStrategy, Resolve
 from .records import walk_path
 
@@ -103,41 +105,6 @@ class UnknownPaginationStrategy(ValueError):
     """
 
 
-def _positive_step(value: Any, *, context: str) -> int:
-    """Read a page-advance step, refusing anything that would not advance.
-
-    A zero or negative step re-requests the same page forever, and a boolean
-    is an author error that Python would otherwise read as 1 -- ``bool`` is
-    an ``int``, so the ordinary integer check passes it.
-
-    A step whose integer value is exact is accepted whatever its Python
-    type. The value can arrive from a response body whose typing the author
-    does not control: the lossless JSON parse turns ``50.0`` into
-    ``Decimal("50")``, and a provider that reports its own page size as a
-    string is not describing a different intent. A fractional step IS a
-    different intent and is refused.
-    """
-    if isinstance(value, bool):
-        raise ValueError(f"pagination {context} must be an integer, got {value!r}")
-    try:
-        step = int(value)
-    except (TypeError, ValueError, ArithmeticError) as err:
-        # ArithmeticError with the other two: JSON can spell `1e400`, which
-        # parses to infinity and overflows on the way to an int. Caught here
-        # so the message names the value that did it -- the boundary above
-        # would otherwise classify it correctly and say only "pagination".
-        raise ValueError(
-            f"pagination {context} must be an integer, got {value!r}"
-        ) from err
-    # int() truncates a fractional float/Decimal; a string either parsed
-    # exactly above or raised, so it needs no comparison.
-    if not isinstance(value, str) and step != value:
-        raise ValueError(f"pagination {context} must be an integer, got {value!r}")
-    if step <= 0:
-        raise ValueError(f"pagination {context} must be positive, got {step}")
-    return step
-
-
 def resolve_page_size(
     pagination: Pagination | None,
     *,
@@ -167,7 +134,7 @@ def resolve_page_size(
     if limit.default is not None:
         resolved = resolve(limit.default)
         if resolved is not None:
-            size = _positive_step(resolved, context="limit.default")
+            size = positive_int(resolved, field="pagination limit.default")
         else:
             logger.warning(
                 "pagination limit.default did not resolve; falling back to "
@@ -205,8 +172,9 @@ class _Offset:
         return PageRequest(self._url, {**self._base, self._param: self._next_offset})
 
     def advance(self, page: Page) -> PageRequest | None:
-        step = _positive_step(
-            self._resolve(self._increment_by, page), context="offset.increment_by"
+        step = positive_int(
+            self._resolve(self._increment_by, page),
+            field="pagination offset.increment_by",
         )
         self._next_offset += step
         return PageRequest(self._url, {**self._base, self._param: self._next_offset})
@@ -234,7 +202,9 @@ class _Page:
         self._step = (
             1
             if declared is None
-            else _positive_step(resolve(declared, None), context="page.increment_by")
+            else positive_int(
+                resolve(declared, None), field="pagination page.increment_by"
+            )
         )
         self._base = base
         self._url = url
