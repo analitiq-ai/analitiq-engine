@@ -8,7 +8,6 @@ references -- never a secret location, never a package it does not reference.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -180,103 +179,23 @@ class TestAReferenceTheRequestCannotFollow:
 
 
 class TestTheLayoutMustBeReadable:
-    def test_a_linked_document_is_refused(
-        self, workspace_root: Path, tmp_path_factory: pytest.TempPathFactory
-    ) -> None:
-        outside = tmp_path_factory.mktemp("outside") / "e.json"
-        outside.write_text("{}")
-        linked = workspace_root / "connectors/api/definition/endpoints/linked.json"
-        linked.symlink_to(outside)
-
-        with pytest.raises(WorkspaceLayoutError, match="linked.json"):
-            _read(workspace_root)
-
-    def test_a_linked_directory_inside_a_package_is_refused(
+    def test_links_inside_a_package_are_not_followed(
         self, workspace_root: Path, tmp_path_factory: pytest.TempPathFactory
     ) -> None:
         outside = tmp_path_factory.mktemp("outside")
         (outside / "e.json").write_text("{}")
+        (outside / "s.json").write_text("{}")
         endpoints = workspace_root / "connectors/api/definition/endpoints"
-        for document in endpoints.iterdir():
-            document.unlink()
-        endpoints.rmdir()
-        endpoints.symlink_to(outside)
-
-        with pytest.raises(WorkspaceLayoutError, match="definition/endpoints"):
-            _read(workspace_root)
-
-    def test_links_where_no_document_can_sit_are_left_alone(
-        self, workspace_root: Path, tmp_path_factory: pytest.TempPathFactory
-    ) -> None:
-        """A checkout carries tooling no location names -- a nested worktree's
-        linked virtualenv, a linked secrets directory -- and the run reads
-        past it."""
-        outside = tmp_path_factory.mktemp("outside")
-        venv = workspace_root / "connectors/api/.git/wt/1/.venv"
-        venv.mkdir(parents=True)
-        (venv / "lib64").symlink_to(outside)
-        secrets = workspace_root / "connections/src/.secrets"
-        (secrets / "credentials.json").unlink()
-        secrets.rmdir()
-        secrets.symlink_to(outside)
-
-        keys = _read(workspace_root).request.documents.root
-
-        assert "connectors/api/definition/connector.json" in keys
-        assert not any(".secrets" in key or ".git" in key for key in keys)
-
-    def test_a_linked_directory_no_document_sits_behind_is_left_alone(
-        self, workspace_root: Path, tmp_path_factory: pytest.TempPathFactory
-    ) -> None:
-        outside = tmp_path_factory.mktemp("outside")
-        (outside / "a.json").write_text("{}")
+        (endpoints / "linked.json").symlink_to(outside / "e.json")
         streams = workspace_root / PIPELINE_DIR / "streams"
-        (streams / "notes").symlink_to(outside)
-        (streams / os.fsdecode(b"x\xff")).symlink_to(outside)
-
-        keys = _read(workspace_root).request.documents.root
-
-        assert f"{PIPELINE_DIR}streams/s1.json" in keys
-        assert not [key for key in keys if "a.json" in key]
-
-    def test_a_linked_location_directory_is_refused_in_printable_words(
-        self, workspace_root: Path, tmp_path_factory: pytest.TempPathFactory
-    ) -> None:
-        streams = workspace_root / PIPELINE_DIR / "streams"
-        outside = tmp_path_factory.mktemp("outside") / "streams"
-        streams.rename(outside)
+        (streams / "s1.json").unlink()
+        streams.rmdir()
         streams.symlink_to(outside)
 
-        with pytest.raises(WorkspaceLayoutError, match="p1/streams") as err:
-            _read(workspace_root)
-
-        str(err.value).encode()
-
-    def test_a_link_back_into_its_own_package_ends(self, workspace_root: Path) -> None:
-        streams = workspace_root / PIPELINE_DIR / "streams"
-        (streams / "loop").symlink_to(streams)
-
         keys = _read(workspace_root).request.documents.root
 
-        assert f"{PIPELINE_DIR}streams/s1.json" in keys
-
-    def test_a_directory_whose_name_is_not_utf8_is_left_alone(
-        self, workspace_root: Path
-    ) -> None:
-        (workspace_root / "connectors/api" / os.fsdecode(b"bad\xff")).mkdir()
-
-        keys = _read(workspace_root).request.documents.root
-
-        assert "connectors/api/definition/connector.json" in keys
-
-    def test_a_document_whose_name_is_not_utf8_is_refused(
-        self, workspace_root: Path
-    ) -> None:
-        endpoints = workspace_root / "connectors/api/definition/endpoints"
-        (endpoints / os.fsdecode(b"e\xff.json")).write_text("{}")
-
-        with pytest.raises(WorkspaceLayoutError, match="definition/endpoints/e"):
-            _read(workspace_root)
+        assert "connectors/api/definition/endpoints/e.json" in keys
+        assert not [key for key in keys if "linked" in key or "/streams/" in key]
 
     def test_a_linked_package_directory_is_read(
         self, workspace_root: Path, tmp_path_factory: pytest.TempPathFactory

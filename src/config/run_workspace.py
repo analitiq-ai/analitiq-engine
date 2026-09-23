@@ -13,7 +13,6 @@ at its package model's locations, and a secret location is never read.
 
 from __future__ import annotations
 
-import functools
 import json
 import logging
 import os
@@ -21,7 +20,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import re2
 from analitiq.contracts.connection_package import ConnectionPackage
 from analitiq.contracts.connector_package import ConnectorPackage
 from analitiq.contracts.pipeline_package import PipelinePackage
@@ -201,115 +199,24 @@ def _directories(
     return directories
 
 
-#: How far into a key RE2's bounds are exact; past it they only stay bounds.
-_MAX_KEY_LENGTH = 256
-
-
-@functools.cache
-def _document_key_ranges(
-    model: type[DocumentPackage],
-) -> tuple[tuple[bytes, bytes], ...]:
-    """Bounds on the keys each of ``model``'s readable locations can match.
-
-    RE2 computes them from the contract's own patterns, so which directories
-    can hold a document is never a second, hand-kept table. A bound may admit
-    a key its pattern refuses but never excludes one it accepts, which is all
-    pruning needs.
-    """
-    return tuple(
-        re2.compile(pattern).possiblematchrange(_MAX_KEY_LENGTH)
-        for pattern in model.LOCATIONS.keys() - model.SECRET_LOCATIONS
-    )
-
-
-def _may_hold_document(model: type[DocumentPackage], directory_key: str) -> bool:
-    """Whether a key under ``directory_key`` (ending in ``/``) may be located.
-
-    Only prunes: the bound admits directories no location reaches, so it
-    never decides a refusal.
-    """
-    # The name's bytes on disk, which os.walk decoded with surrogateescape.
-    prefix = os.fsencode(directory_key)
-    return any(
-        low[: len(prefix)] <= prefix <= high
-        for low, high in _document_key_ranges(model)
-    )
-
-
-def _is_utf8(name: str) -> bool:
-    try:
-        name.encode()
-    except UnicodeEncodeError:
-        return False
-    return True
-
-
-def _printable(name: str) -> str:
-    """``name`` with the bytes ``os.walk`` could not decode shown as escapes."""
-    return os.fsencode(name).decode(errors="backslashreplace")
-
-
 def _read_package(
     root: Path, directory: str, model: type[DocumentPackage]
 ) -> dict[str, str]:
-    """Every document at one of ``model``'s locations under ``directory``, by key.
+    """Every document at one of ``model``'s readable locations under ``directory``.
 
     An absent directory reads as no documents; the reference to it is the
-    verdict's to report. A file is a document when ``model`` locates its key
-    at a readable location, and only a document can refuse the run: when it
-    is a link, sits behind a linked directory, or has a name that is not
-    UTF-8. The walk lists what is behind a linked directory to find out, but
-    never reads through one; a link back into its own walk adds no directory
-    and is not followed.
+    verdict's to report. No link is followed, so a document behind one is
+    not in the request.
     """
     package_root = root / directory
-    if not package_root.is_dir():
-        return {}
     documents: dict[str, str] = {}
-    # Per walked directory: the linked directory it is reached through, and
-    # the real directories on its way down, which a followed link must avoid.
-    linked_through: dict[str, str | None] = {str(package_root): None}
-    walked_real: dict[str, frozenset[Path]] = {
-        str(package_root): frozenset({package_root.resolve()})
-    }
-    for current, directories, names in os.walk(package_root, followlinks=True):
-        walked = Path(current).relative_to(package_root)
-        prefix = "" if walked == Path(".") else f"{walked.as_posix()}/"
-        link = linked_through.pop(current)
-        way_down = walked_real.pop(current)
-        followed = []
-        for name in directories:
-            path = Path(current) / name
-            real = path.resolve()
-            if real in way_down or not _may_hold_document(model, f"{prefix}{name}/"):
-                continue
-            followed.append(name)
-            linked_through[str(path)] = link or (
-                f"{prefix}{name}" if path.is_symlink() else None
-            )
-            walked_real[str(path)] = way_down | {real}
-        directories[:] = followed
+    for current, _, names in os.walk(package_root):
         for name in names:
-            key = f"{prefix}{name}"
-            if model.kind_at(key) is None or model.secret_at(key):
+            path = Path(current) / name
+            key = path.relative_to(package_root).as_posix()
+            if model.kind_at(key) is None or model.secret_at(key) or path.is_symlink():
                 continue
-            if link is not None:
-                raise WorkspaceLayoutError(
-                    f"{_printable(directory + link)} is a link, and "
-                    f"{_printable(directory + key)} sits behind it; a package "
-                    f"document must be a file inside its package"
-                )
-            if (Path(current) / name).is_symlink():
-                raise WorkspaceLayoutError(
-                    f"{_printable(directory + key)} is a link; a package "
-                    f"document must be a file inside its package"
-                )
-            if not _is_utf8(key):
-                raise WorkspaceLayoutError(
-                    f"{_printable(directory + key)} is not a UTF-8 name; a "
-                    f"package document's key must be text"
-                )
-            documents[directory + key] = read_config_text(Path(current) / name)
+            documents[directory + key] = read_config_text(path)
     return documents
 
 
