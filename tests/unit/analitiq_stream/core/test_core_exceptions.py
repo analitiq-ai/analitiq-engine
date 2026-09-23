@@ -1,10 +1,7 @@
 """Unit tests for core exceptions module."""
 
 
-from src.engine.exceptions import (
-    StreamProcessingError,
-    TransformationError,
-)
+from src.engine.exceptions import StreamProcessingError, TransformationError
 
 
 class TestStreamProcessingError:

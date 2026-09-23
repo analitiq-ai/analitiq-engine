@@ -64,6 +64,7 @@ def _run(body: str) -> subprocess.CompletedProcess:
         [sys.executable, "-c", script],
         capture_output=True,
         text=True,
+        check=False,
         env=env,
     )
 
