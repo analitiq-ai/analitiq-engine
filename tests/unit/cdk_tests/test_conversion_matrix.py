@@ -6,7 +6,7 @@ boundary consults. These tests pin three things so it cannot silently rot:
 1. the committed published artifact equals what the canonical table generates
    (drift guard);
 2. every ``explicit`` conversion names a function that actually exists in the
-   engine's mapping ``FUNCTION_CATALOG``;
+   engine's mapping ``_FUNCTIONS`` registry;
 3. each declared mode matches what the real builders do -- ``cast_arrow_batch``
    (destination) and the compiled transform retype accept/reject the same pair
    identically, which is the divergence the matrix exists to remove.
@@ -21,6 +21,7 @@ from decimal import Decimal
 import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
+from analitiq.contracts.stream import StreamMapping
 
 from cdk.schema_contract import SchemaContract
 from cdk.type_map.arrow import arrow_family
@@ -36,7 +37,7 @@ from cdk.type_map.exceptions import InvalidTypeMapError
 from cdk.type_map.grammar import ARROW_FAMILIES
 from src.engine.batch_policy import ErrorStrategy
 from src.engine.exceptions import TransformationError
-from src.engine.mapping import _FUNCTION_CATALOG, MappingDocument, compile_mapping
+from src.engine.mapping import _FUNCTIONS, compile_mapping
 
 _VALID_MODES = {"identity", "auto", "explicit", "forbidden"}
 
@@ -91,11 +92,11 @@ class TestMatrixInvariants:
             classify_conversion("Utf8", "NotAType")
 
 
-class TestMatrixBoundToFunctionCatalog:
+class TestMatrixBoundToFunctions:
     """Every explicit conversion must name a real mapping function."""
 
     def test_explicit_fns_exist_in_catalog(self) -> None:
-        catalog = _FUNCTION_CATALOG
+        catalog = _FUNCTIONS
         named = {
             conv["fn"]
             for row in build_conversion_grid().values()
@@ -104,7 +105,7 @@ class TestMatrixBoundToFunctionCatalog:
         }
         assert named, "expected at least one explicit conversion fn"
         missing = named - set(catalog)
-        assert not missing, f"matrix names fns absent from FUNCTION_CATALOG: {missing}"
+        assert not missing, f"matrix names fns absent from _FUNCTIONS: {missing}"
 
 
 class TestNamedCells:
@@ -274,7 +275,7 @@ def _retype_batch(target_arrow_type: str, column: pa.Array) -> pa.RecordBatch:
     ]
     batch = pa.RecordBatch.from_arrays([column], names=["src"])
     return compile_mapping(
-        MappingDocument.parse({"assignments": assignments}),
+        StreamMapping.model_validate({"assignments": assignments}),
         default_strategy=ErrorStrategy.FAIL,
     ).run(batch)
 
@@ -470,7 +471,7 @@ def _retype_nested(target: dict, column: pa.Array) -> pa.RecordBatch:
     ]
     batch = pa.RecordBatch.from_arrays([column], names=["src"])
     return compile_mapping(
-        MappingDocument.parse({"assignments": assignments}),
+        StreamMapping.model_validate({"assignments": assignments}),
         default_strategy=ErrorStrategy.FAIL,
     ).run(batch)
 

@@ -17,10 +17,11 @@ from __future__ import annotations
 
 import pyarrow as pa
 import pytest
+from analitiq.contracts.stream import StreamMapping
 
 from src.engine.batch_policy import ErrorStrategy
 from src.engine.exceptions import TransformationError
-from src.engine.mapping import MappingDocument, build_output_schema, compile_mapping
+from src.engine.mapping import build_output_schema, compile_mapping
 
 _CHECK_ACCOUNT_PROPERTIES = {
     "id": {"arrow_type": "Utf8"},
@@ -29,7 +30,7 @@ _CHECK_ACCOUNT_PROPERTIES = {
 
 
 def _document(assignments):
-    return MappingDocument.parse({"assignments": assignments})
+    return StreamMapping.model_validate({"assignments": assignments})
 
 
 def _run(records, assignments):

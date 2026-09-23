@@ -2,9 +2,9 @@
 
 Three surfaces:
 
-* the parse: a declared ``sql_capabilities`` block validates against the
-  published vocabulary fail-loud at the process boundary — partial or
-  off-vocabulary declarations never reach a consumer site;
+* the parse: a declared ``sql_capabilities`` block, already validated by
+  the published contract, reads into the typed view every consumer site
+  uses;
 * the refusal shape: every needed-but-undeclared fact refuses through
   ``undeclared_capability_error``, naming the missing declaration;
 * the payload channel: the block rides ``resolve_spec()`` into the worker
@@ -24,7 +24,6 @@ from contract_documents import connection_document, connector_document
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.sql.capabilities import (
     SqlCapabilities,
-    SqlCapabilitiesError,
     parse_declared_capabilities,
     undeclared_capability_error,
 )
@@ -67,86 +66,6 @@ class TestParse:
     def test_declared_block_parses_through_the_single_entry_point(self):
         caps = parse_declared_capabilities(caps_block())
         assert isinstance(caps, SqlCapabilities)
-
-    @pytest.mark.parametrize(
-        "field,value",
-        [
-            ("catalog", "sometimes"),
-            ("session_targeting", "both"),
-            ("merge_form", "upsert"),
-            ("bulk_load", "fast"),  # not a mapping
-            ("bulk_load", {"sqlalchemy": "adbc_ingest"}),  # unrunnable pair
-            ("bulk_load", {"http": "copy_from"}),  # unknown transport type
-        ],
-    )
-    def test_off_vocabulary_value_fails_naming_the_field(self, field, value):
-        block = caps_block()
-        block[field] = value
-        with pytest.raises(SqlCapabilitiesError, match=f"sql_capabilities.{field}"):
-            SqlCapabilities.from_declaration(block)
-
-    def test_missing_fact_fails(self):
-        # All five facts are required inside a declared block: a partial
-        # declaration is a configuration error, not implicit defaults.
-        block = caps_block()
-        del block["merge_form"]
-        with pytest.raises(SqlCapabilitiesError, match="merge_form"):
-            SqlCapabilities.from_declaration(block)
-
-    def test_unknown_field_fails(self):
-        block = caps_block()
-        block["fast_mode"] = True
-        with pytest.raises(SqlCapabilitiesError, match="fast_mode"):
-            SqlCapabilities.from_declaration(block)
-
-    def test_missing_stage_fails(self):
-        block = caps_block()
-        del block["stage"]
-        with pytest.raises(SqlCapabilitiesError, match="stage"):
-            SqlCapabilities.from_declaration(block)
-
-    @pytest.mark.parametrize(
-        "field,value,path",
-        [
-            ("scope", "global", "sql_capabilities.stage.scope"),
-            ("schema", "session", "sql_capabilities.stage.schema"),
-        ],
-    )
-    def test_off_vocabulary_stage_value_names_the_full_path(self, field, value, path):
-        block = caps_block()
-        block["stage"][field] = value
-        with pytest.raises(SqlCapabilitiesError, match=path):
-            SqlCapabilities.from_declaration(block)
-
-    def test_unknown_stage_field_fails(self):
-        block = caps_block()
-        block["stage"]["auto_expire"] = True
-        with pytest.raises(SqlCapabilitiesError, match="auto_expire"):
-            SqlCapabilities.from_declaration(block)
-
-    def test_empty_dedicated_schema_fails(self):
-        with pytest.raises(SqlCapabilitiesError, match="dedicated_schema"):
-            SqlCapabilities.from_declaration(
-                caps_block(stage_schema="dedicated", dedicated_schema="")
-            )
-
-    def test_dedicated_schema_required_iff_dedicated(self):
-        with pytest.raises(SqlCapabilitiesError, match="dedicated_schema"):
-            SqlCapabilities.from_declaration(caps_block(stage_schema="dedicated"))
-        with pytest.raises(SqlCapabilitiesError, match="dedicated_schema"):
-            SqlCapabilities.from_declaration(
-                caps_block(stage_schema="target", dedicated_schema="_analitiq")
-            )
-
-    def test_non_bool_transactional_ddl_fails(self):
-        block = caps_block()
-        block["stage"]["transactional_ddl"] = "yes"
-        with pytest.raises(SqlCapabilitiesError, match="transactional_ddl"):
-            SqlCapabilities.from_declaration(block)
-
-    def test_non_mapping_block_fails(self):
-        with pytest.raises(SqlCapabilitiesError, match="must be an object"):
-            parse_declared_capabilities("full")
 
     def test_supports_upsert_derives_from_merge_form(self):
         assert SqlCapabilities.from_declaration(
@@ -356,32 +275,6 @@ class TestConfigureSchemaUpsertGate:
 
 
 class TestConnectBinding:
-    @pytest.mark.asyncio
-    async def test_malformed_declaration_fails_before_anything_is_acquired(
-        self,
-    ):
-        # The trusted side already parses at config load; connect()
-        # re-validates at the process boundary. The dialect the transport
-        # is built with must carry the declaration, so the parse runs
-        # before materialize() — a malformed block never reaches a
-        # transport, and there is no acquired runtime to release.
-        handler = GenericSQLConnector()
-        runtime = MagicMock()
-        runtime.connector_id = "demo"
-        runtime.declared_sql_capabilities = caps_block(catalog="everything")
-        runtime.declared_error_map = None
-        runtime.close = AsyncMock()
-        from unittest.mock import patch
-
-        materialize = AsyncMock()
-        with (
-            patch("cdk.sql.generic.materialize_runtime", new=materialize),
-            pytest.raises(SqlCapabilitiesError, match="sql_capabilities.catalog"),
-        ):
-            await handler.connect(runtime)
-        materialize.assert_not_awaited()
-        runtime.close.assert_not_awaited()
-
     @staticmethod
     def _adbc_runtime(**overrides):
         runtime = MagicMock()

@@ -18,13 +18,12 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-from analitiq.contracts.endpoints import ResponseExtraction
+from analitiq.contracts.endpoints import ResponseExtraction, resolve_read_record_schema
 from analitiq.contracts.stream import EndpointRef
 
 from ..exceptions import ReadError
 from ..type_map import TypeMapper, UnmappedTypeError
 from ..types import EndpointScope
-from .records import split_records_ref
 
 __all__ = [
     "apply_read_type_map",
@@ -39,13 +38,17 @@ __all__ = [
 def records_items_schema(
     endpoint_id: str, response_block: ResponseExtraction
 ) -> dict[str, Any]:
-    """Walk the declared response schema to the per-record items schema.
+    """Resolve the declared ``records`` ref to the per-record items schema.
 
-    The path comes from :func:`cdk.api.records.split_records_ref` -- the
-    same parser the live payload walk uses, so the schema and the data can
-    never be read from two different places in the body. The response
-    schema itself is free-form JSON Schema in the contract, so the walk
-    stays dict-shaped even though the block around it is a model.
+    The walk is the contract's own :func:`resolve_read_record_schema`,
+    the record-locator every consumer of the read contract shares, so a
+    path composed through ``$ref``/``$defs``/``allOf`` resolves here exactly
+    as it did at document load.
+
+    ``None`` from the locator means the ref addressed nothing resolvable.
+    That is a refusal, never the response schema itself: the schema is the
+    ENVELOPE, and handing it back would enumerate ``data``/``next_cursor``
+    as the record's fields.
 
     The answer is a deep copy because :func:`apply_read_type_map`
     annotates each field in place, and this subtree is reached from an
@@ -55,28 +58,13 @@ def records_items_schema(
     ``dict[str, Any]`` field's contents are not, so freezing is no
     protection here.
     """
-    node: Any = response_block.schema_
     records_ref = response_block.records.ref
-    for field in split_records_ref(records_ref):
-        properties = node.get("properties") if isinstance(node, dict) else None
-        if not isinstance(properties, dict) or field not in properties:
-            available = sorted(properties) if isinstance(properties, dict) else []
-            raise ReadError(
-                f"endpoint {endpoint_id!r}: records.ref {records_ref!r} "
-                f"references field {field!r} that is not declared under "
-                f"properties; available: {available}"
-            )
-        node = properties[field]
-
-    items = (
-        node.get("items")
-        if isinstance(node, dict) and node.get("type") == "array"
-        else node
-    )
+    items: Any = resolve_read_record_schema(records_ref, response_block.schema_)
     if not isinstance(items, dict) or not items.get("properties"):
         raise ReadError(
-            f"endpoint {endpoint_id!r}: cannot resolve the record schema at "
-            f"{records_ref!r} (no 'properties' under the addressed items)"
+            f"endpoint {endpoint_id!r}: records.ref {records_ref!r} does not "
+            f"resolve to a record schema in the declared response schema "
+            f"(no object with 'properties' under the addressed path)"
         )
     return deepcopy(items)
 

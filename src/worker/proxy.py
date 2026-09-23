@@ -24,13 +24,13 @@ import pyarrow as pa
 from cdk.base_handler import BaseDestinationHandler, BatchWriteResult, reject_batch
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.types import (
+    WRITE_MODE_NAMES,
     AckStatus,
     Cursor,
     FailureCategory,
     RetrySemantics,
     RetryVerdict,
     SchemaSpec,
-    WriteMode,
 )
 from src.destination.server import SHUTDOWN_REASON_SUCCESS
 from src.grpc.client import DestinationGRPCClient
@@ -40,12 +40,6 @@ from src.worker.shell import build_bootstrap
 from src.worker.spawn import WorkerHandle, spawn_worker
 
 logger = logging.getLogger(__name__)
-
-_WRITE_MODE_NAMES = {
-    WriteMode.WRITE_MODE_INSERT: "insert",
-    WriteMode.WRITE_MODE_UPSERT: "upsert",
-    WriteMode.WRITE_MODE_TRUNCATE_INSERT: "truncate_insert",
-}
 
 
 def _known_ack_status(status: int) -> AckStatus | int:
@@ -291,7 +285,7 @@ class WorkerProxyHandler(BaseDestinationHandler):
             return False
         stream_id = schema_spec.stream_id
         schema_config = {
-            "write_mode": _WRITE_MODE_NAMES[schema_spec.write_mode],
+            "write_mode": WRITE_MODE_NAMES[schema_spec.write_mode],
             "schema_version": schema_spec.version,
             # Forward the engine-stamped ack budget so the worker derives its
             # statement timeout from the budget the engine actually waits on

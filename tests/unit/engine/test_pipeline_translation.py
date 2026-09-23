@@ -8,11 +8,11 @@ from analitiq.contracts.stream import (
     ApiWrite,
     DatabaseConflictKeyedWrite,
     DatabaseKeylessWrite,
+    StreamMapping,
     StreamSource,
     validate_endpoint_ref,
 )
 
-from src.engine.mapping import MappingDocument
 from src.models.resolved import (
     BatchingConfig,
     ErrorHandlingConfig,
@@ -164,7 +164,7 @@ def _make_stream(
         stream_version=stream_version,
         source=src,
         destinations=[dest],
-        mapping=MappingDocument.parse(mapping or {}),
+        mapping=StreamMapping.model_validate(mapping or {}),
     )
 
 
@@ -364,14 +364,6 @@ class TestBuildConfigDict:
 
         assert result["name"] == "wise-to-pg"
 
-    def test_stream_with_no_destinations_raises(self):
-        pipeline = _make_pipeline()
-        stream = _make_stream()
-        stream.destinations.clear()
-
-        with pytest.raises(ValueError, match="has no destinations"):
-            _build_config_dict(pipeline, [stream])
-
     def test_multi_stream_pipeline(self):
         pipeline = _make_pipeline()
         stream_a = _make_stream(stream_id="orders")
@@ -399,7 +391,7 @@ class TestBuildConfigDict:
         assert result["streams"]["orders"]["mapping"] is stream.mapping
         [compiled_assignment] = stream.mapping.assignments
         assert compiled_assignment.target.path == "id"
-        assert compiled_assignment.value.expression == {"op": "get", "path": ["id"]}
+        assert compiled_assignment.value.expression.path == ["id"]
 
     def test_runtime_not_in_config_dict(self):
         pipeline = _make_pipeline(

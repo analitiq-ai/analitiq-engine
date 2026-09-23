@@ -8,24 +8,25 @@ the contract adds is a contract-valid endpoint_ref the CDK refuses at
 ``EndpointScope(value)``, and a scope it renames is a type-mapper lookup that
 fails on every stream -- neither shows up until a run does.
 
-The vocabulary is read off the models through ``_variant_literals``, the
-engine's one reader of a contract Literal, rather than by a second walk of the
-same annotation.
+The vocabulary is read off the discriminator mapping pydantic renders into the
+published schema.
 """
 
 from __future__ import annotations
 
 import pytest
 from analitiq.contracts.stream import EndpointRef
+from pydantic import TypeAdapter
 
 from cdk.types import EndpointScope
-from src.models.resolved import _variant_literals
 
 pytestmark = pytest.mark.unit
 
 #: The scopes a contract-valid endpoint_ref may carry, unioned over both
 #: variants of the contract's discriminated union.
-CONTRACT_SCOPES = _variant_literals(EndpointRef, "scope")
+CONTRACT_SCOPES = set(
+    TypeAdapter(EndpointRef).json_schema()["discriminator"]["mapping"]
+)
 
 
 def test_the_enum_carries_exactly_the_contract_scopes() -> None:

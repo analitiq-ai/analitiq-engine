@@ -9,8 +9,8 @@ back to its load-stage default while every test stays green.
 from unittest.mock import MagicMock
 
 import pytest
+from analitiq.contracts.stream import StreamMapping
 
-from src.engine.mapping import MappingDocument
 from src.engine.stream_processor import DroppedBatch, StreamProcessor
 from src.state.error_classification import ErrorCode, FailureStage, customer_message
 
@@ -19,7 +19,7 @@ def _processor() -> StreamProcessor:
     return StreamProcessor(
         stream_id="s1",
         stream_config={"name": "s1"},
-        mapping=MappingDocument(),
+        mapping=StreamMapping(),
         pipeline_config={},
         pipeline_id="p1",
         state_manager=MagicMock(),

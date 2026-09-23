@@ -6,10 +6,10 @@ declaring it was rejected at destination startup by the very check meant to
 catch typos (issue #435). Nothing failed, because no test tied the
 restatements to each other.
 
-That engine enum is gone: ``src/main.py`` now checks ``write.mode`` against the
-contract's own ``WRITE_MODES``, so there is no second vocabulary left to drift
-from it. What remains restated is the proto enum the mode travels on, and this
-test makes that restatement answer to the contract.
+That engine enum is gone: the contract's own ``WriteMode`` validates
+``write.mode``, so there is no second vocabulary left to drift from it. What
+remains restated is the proto enum the mode travels on, and this test makes
+that restatement answer to the contract.
 """
 
 from __future__ import annotations

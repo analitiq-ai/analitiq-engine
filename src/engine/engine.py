@@ -11,7 +11,7 @@ from ..models.resolved import RuntimeConfig
 from ..state.error_classification import ErrorCode, dominant_error_code
 from ..state.state_manager import StateManager
 from .batch_policy import ErrorStrategy
-from .exceptions import ConfigurationError, StreamProcessingError
+from .exceptions import StreamProcessingError
 from .stream_processor import StreamProcessor
 
 logger = logging.getLogger(__name__)
@@ -92,10 +92,7 @@ class StreamingEngine:
         it.
         """
         pipeline_id = pipeline_config["pipeline_id"]
-        streams = pipeline_config.get("streams", {})
-
-        if not streams:
-            raise ConfigurationError("No streams configured in pipeline")
+        streams = pipeline_config["streams"]
 
         logger.info("Starting pipeline: %s", pipeline_id)
         logger.info("Processing %s streams concurrently", len(streams))
@@ -246,10 +243,7 @@ class StreamingEngine:
             runtime = StreamingEngine._source_runtime(stream_config)
             if runtime is None or runtime.connection_id in gates:
                 continue
-            cap = parse_declared_concurrency(
-                runtime.declared_concurrency,
-                source=f"connector {runtime.connector_id!r}",
-            )
+            cap = parse_declared_concurrency(runtime.declared_concurrency)
             if cap is None:
                 continue
             gates[runtime.connection_id] = asyncio.Semaphore(cap)

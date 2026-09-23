@@ -817,12 +817,7 @@ def _scripted_page(
             _plant(payload, path, continuation)
         elif declared_type(_declared_schema(schema, path)) is None:
             _plant(payload, path, _continuation_value(scheme, key))
-    records_ref = probe.read.response.records.ref
-    try:
-        records_path = split_records_ref(records_ref)
-    except ReadError:
-        # Reported by the record-schema check; the page is still drivable.
-        records_path = []
+    records_path = split_records_ref(probe.read.response.records.ref)
     if records_path:
         _plant(payload, records_path, records)
     return Page(records=records, payload=payload or records)
@@ -884,9 +879,8 @@ def _declared_record(probe: _ReadProbe, *, key: int) -> dict[str, Any] | None:
             records_items_schema(probe.label, probe.read.response), key=key
         )
     except ReadError:
-        # The only failure ``records_items_schema`` raises: a ref that is
-        # not anchored, does not resolve, or reaches something carrying no
-        # records.
+        # The only failure ``records_items_schema`` raises: a ref that does
+        # not resolve, or reaches something carrying no records.
         return None
 
 

@@ -20,6 +20,9 @@ import hashlib
 import logging
 from collections.abc import Sequence
 from dataclasses import replace
+from typing import assert_never
+
+from analitiq.contracts.endpoints import WriteMode
 
 from .backend import StageWritePlan
 from .capabilities import SqlCapabilities
@@ -82,8 +85,6 @@ def rows_per_statement(
 
 
 _STAGE_PREFIX = "_analitiq_stage_"
-
-WriteModeName = str  # "insert" | "upsert" | "truncate_insert" (facade-owned)
 
 
 def stage_table_name(
@@ -232,7 +233,7 @@ def build_stage_write_plan(
     *,
     target: TableAddress,
     columns: Sequence[str],
-    write_mode: WriteModeName,
+    write_mode: WriteMode,
     conflict_keys: Sequence[str],
     identity: Sequence[str],
     truncate_now: bool,
@@ -280,13 +281,15 @@ def build_stage_write_plan(
         mode_sql = render_anti_join_insert_sql(
             dialect, stage, target, columns, identity
         )
-    else:
+    elif write_mode == "truncate_insert":
         mode_sql = render_append_sql(dialect, stage, target, columns)
+    else:
+        assert_never(write_mode)
 
     return StageWritePlan(
         stage=stage,
         target=target,
-        scope=caps.stage.scope,  # type: ignore[arg-type]
+        scope=caps.stage.scope,
         transactional=caps.stage.transactional_ddl,
         create_stage_sql=dialect.stage_table_sql(stage, target, temp=temp),
         truncate_sql=dialect.empty_table_sql(target) if truncate_now else None,

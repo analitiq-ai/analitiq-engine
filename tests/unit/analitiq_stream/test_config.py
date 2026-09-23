@@ -4,12 +4,7 @@ import pytest
 from analitiq.contracts.endpoint_identity import derive_db_endpoint_id
 from analitiq.contracts.stream import validate_endpoint_ref
 
-from src.config import (
-    load_connection,
-    load_connector_definition,
-    resolve_endpoint_ref,
-    validate_artifact,
-)
+from src.config import load_connection, load_connector_definition, resolve_endpoint_ref
 from src.config.endpoint_resolver import (
     ConnectionLookup,
     endpoint_ref_label,
@@ -24,94 +19,13 @@ from src.config.exceptions import (
 from src.models.resolved import dump_endpoint_ref
 
 
-class TestPipelineConfigValidator:
-    """Test suite for pipeline config validation."""
-
-    @pytest.fixture
-    def valid_pipeline(self):
-        return {
-            "$schema": "https://schemas.analitiq.ai/pipeline/latest.json",
-            "display_name": "Test Pipeline",
-            "status": "active",
-            "connections": {
-                "source": "00000000-0000-0000-0000-000000000001",
-                "destinations": ["00000000-0000-0000-0000-000000000002"],
-            },
-            "streams": ["00000000-0000-0000-0000-000000000003"],
-            "schedule": {"type": "manual", "timezone": "UTC"},
-        }
-
-    @pytest.mark.unit
-    def test_missing_connections_fails(self, valid_pipeline):
-        del valid_pipeline["connections"]
-        with pytest.raises(Exception, match="connections"):
-            validate_artifact("pipeline", valid_pipeline)
-
-    @pytest.mark.unit
-    def test_missing_source_fails(self, valid_pipeline):
-        del valid_pipeline["connections"]["source"]
-        with pytest.raises(Exception, match="source"):
-            validate_artifact("pipeline", valid_pipeline)
-
-    @pytest.mark.unit
-    def test_empty_destinations_fails(self, valid_pipeline):
-        valid_pipeline["connections"]["destinations"] = []
-        with pytest.raises(Exception, match="destinations|minItems|too short"):
-            validate_artifact("pipeline", valid_pipeline)
-
-
 class TestEndpointRefModel:
     """The engine's use of the contract's ``endpoint_ref`` variants.
 
     The shape and its rules belong to ``analitiq.contracts.stream``; these
     pin the behaviour the engine depends on -- the derived connection-scoped
-    id, dict-key identity, the dump that feeds the worker, and rejection of
-    every payload the engine must never resolve a file for.
+    id, dict-key identity, and the dump that feeds the worker.
     """
-
-    @pytest.mark.unit
-    def test_connector_ref(self):
-        ref = validate_endpoint_ref(
-            {
-                "scope": "connector",
-                "connection_id": "pipedrive",
-                "endpoint_id": "deals",
-            }
-        )
-        assert ref.scope == "connector"
-        assert ref.connection_id == "pipedrive"
-        assert ref.endpoint_id == "deals"
-
-    @pytest.mark.unit
-    def test_connection_ref_derives_endpoint_id(self):
-        # A connection-scoped ref carries database_object; endpoint_id is
-        # server-derived from it (never client-authored).
-        ref = validate_endpoint_ref(
-            {
-                "scope": "connection",
-                "connection_id": "prod-postgres",
-                "database_object": {"schema": "public", "name": "users"},
-            }
-        )
-        assert ref.scope == "connection"
-        assert ref.connection_id == "prod-postgres"
-        assert ref.database_object is not None
-        assert ref.database_object.schema_ == "public"
-        assert ref.database_object.name == "users"
-        assert ref.endpoint_id == derive_db_endpoint_id(None, "public", "users")
-
-    @pytest.mark.unit
-    def test_connection_scope_requires_database_object(self):
-        """The old ``{scope, connection_id, endpoint_id}`` connection shape is
-        no longer valid: connection refs must carry database_object."""
-        with pytest.raises(ValueError):
-            validate_endpoint_ref(
-                {
-                    "scope": "connection",
-                    "connection_id": "x",
-                    "endpoint_id": "public_users",
-                }
-            )
 
     @pytest.mark.unit
     def test_validation_passes_through_an_existing_instance(self):
@@ -119,63 +33,6 @@ class TestEndpointRefModel:
             {"scope": "connector", "connection_id": "x", "endpoint_id": "y"}
         )
         assert validate_endpoint_ref(original) is original
-
-    @pytest.mark.unit
-    def test_invalid_scope_raises(self):
-        with pytest.raises(ValueError):
-            validate_endpoint_ref(
-                {
-                    "scope": "unknown",
-                    "connection_id": "x",
-                    "endpoint_id": "y",
-                }
-            )
-
-    @pytest.mark.unit
-    def test_missing_required_field_raises(self):
-        with pytest.raises(ValueError):
-            validate_endpoint_ref({"scope": "connector"})
-
-    @pytest.mark.unit
-    def test_unknown_keys_raise(self):
-        """endpoint_ref is closed (additionalProperties: false in the
-        contract); any extra key, including ``x-*``, is rejected."""
-        with pytest.raises(ValueError):
-            validate_endpoint_ref(
-                {
-                    "scope": "connector",
-                    "connection_id": "x",
-                    "endpoint_id": "y",
-                    "extra": "z",
-                }
-            )
-
-    @pytest.mark.unit
-    def test_empty_connection_id_raises(self):
-        with pytest.raises(ValueError):
-            validate_endpoint_ref(
-                {
-                    "scope": "connector",
-                    "connection_id": "",
-                    "endpoint_id": "y",
-                }
-            )
-
-    @pytest.mark.unit
-    def test_empty_endpoint_id_raises(self):
-        with pytest.raises(ValueError):
-            validate_endpoint_ref(
-                {
-                    "scope": "connector",
-                    "connection_id": "x",
-                    "endpoint_id": "",
-                }
-            )
-
-    @pytest.mark.unit
-    def test_non_dict_input_raises(self):
-        with pytest.raises(ValueError):
-            validate_endpoint_ref("connector:x/y")
 
     @pytest.mark.unit
     def test_dump_roundtrip(self):

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from cdk.connection_runtime import ConnectionRuntime
+from cdk.registry import KIND_DEFAULTS
 from src.engine.engine import StreamingEngine
 from src.models.metrics import PipelineMetrics
 from src.models.resolved import (
@@ -69,8 +70,6 @@ def _build_config_dict(
     streams: dict[str, dict[str, Any]] = {}
 
     for stream in stream_configs:
-        if not stream.destinations:
-            raise ValueError(f"Stream {stream.stream_id!r} has no destinations")
         dest = stream.primary_destination()
 
         source_config = _translate_source_config(
@@ -114,8 +113,8 @@ def _translate_source_config(
     runtime handle and the connector type discriminator so the engine
     knows which connector class to instantiate.
 
-    All kinds — built-ins (``api``, ``database``, ``file``, ``stdout``)
-    and non-built-in kinds — receive the same contract-document
+    All kinds — built-ins (the keys of ``KIND_DEFAULTS``) and non-built-in
+    kinds — receive the same contract-document
     pass-through; the connectors read the stream's filters directly off
     ``stream_source``. The worker registry raises
     ``ConnectorNotRegisteredError`` at class-resolution time if no
@@ -128,7 +127,7 @@ def _translate_source_config(
         "_resolved_source": source,
         **source.to_source_config(),
     }
-    if kind not in ("api", "database", "file", "stdout"):
+    if kind not in KIND_DEFAULTS:
         logger.warning(
             "Connector kind %r is not a recognised built-in kind; passing "
             "contract documents through as endpoint_document + stream_source. "
@@ -208,12 +207,11 @@ class PipelineRunner:
             # same document (src.main.run_destination_mode).
             apply_log_level(pipeline_config.runtime.logging.log_level)
 
-            # Translate the resolved contract into the engine config dict. This
-            # still validates config (e.g. a stream with no destinations), so it
-            # belongs in the config phase. Done immediately after create_config
-            # so the flag below covers config load + translation only -- not the
-            # directory/engine setup that follows, whose failures (a read-only
-            # filesystem, etc.) are runtime, not config, errors.
+            # Translate the resolved contract into the engine config dict. Done
+            # immediately after create_config so the flag below covers config
+            # load + translation only -- not the directory/engine setup that
+            # follows, whose failures (a read-only filesystem, etc.) are
+            # runtime, not config, errors.
             config_dict = _build_config_dict(pipeline_config, stream_configs)
             config_ready = True
 

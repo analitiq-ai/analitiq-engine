@@ -26,7 +26,7 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
-from typing import Any
+from typing import Any, assert_never
 
 import aiohttp
 import pyarrow as pa
@@ -74,7 +74,7 @@ from .page_loop import Fetch, Page, PageLoop, PageRequest
 from .query_style import declared_query_styles
 from .read_setup import build_read_strategy, stop_condition
 from .records import extract_records, resolve_response_metadata
-from .replication import check_mapping_direction, cursor_bounds, cursor_mapping_for
+from .replication import cursor_bounds, cursor_mapping_for
 from .request import (
     ParamTable,
     RequestBuilder,
@@ -885,7 +885,6 @@ class GenericAPIConnector(BaseDestinationHandler):
                 f"nothing can send the bound, so the read would return the "
                 f"whole collection on every run"
             )
-        check_mapping_direction(mapping)
         cursor_state = await checkpoint.get_cursor(stream_name, partition)
         cursor_value = (cursor_state or {}).get("cursor")
         # Absent is ``None`` -- the store answers ``None`` for a stream with
@@ -1270,25 +1269,23 @@ class GenericAPIConnector(BaseDestinationHandler):
         on the full record content so a changed row gets a new key and the
         provider applies the update instead of replaying its cached response.
         """
-        key = (
-            None
-            if plan.idempotency_in is None
-            else (
+        body = self._build_body(plan, record=record)
+        headers: dict[str, str] | None = None
+        location = plan.idempotency_in
+        if location is not None:
+            key = (
                 record_id
                 if plan.write_mode_key == "insert"
                 else content_idempotency_key(record)
             )
-        )
-        body = self._build_body(plan, record=record)
-        if plan.idempotency_in == "body" and key is not None:
-            body = body_with_idempotency_key(plan, body, key)
-        encoded = encode_body(body, plan.content_type)
-        headers = (
-            {plan.idempotency_name: key}
-            if plan.idempotency_in == "header" and key is not None
-            else None
-        )
-        return encoded, headers
+            match location:
+                case "body":
+                    body = body_with_idempotency_key(plan, body, key)
+                case "header":
+                    headers = {plan.idempotency_name: key}
+                case _:
+                    assert_never(location)
+        return encode_body(body, plan.content_type), headers
 
     async def _write_in_chunks(
         self,

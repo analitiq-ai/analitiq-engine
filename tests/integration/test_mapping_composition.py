@@ -1,18 +1,19 @@
 """End-to-end mapping composition over a realistic document.
 
-A stream's mapping document is read once by ``MappingDocument.parse``,
+A stream's mapping document is the contract ``StreamMapping``,
 compiled once by ``compile_mapping``, and applied to a ``pa.RecordBatch`` with
 ``.run``. The per-operator behavior is unit-tested in
 ``tests/unit/engine/test_mapping.py``; this file keeps the one composition no
-unit test covers -- a full realistic document mixing a piped ``iso_to_date``
-derivation, identity expressions, and constant scalar / nested-object
+unit test covers -- a full realistic document mixing a piped ``to_string``
+conversion, identity expressions, and constant scalar / nested-object
 broadcasts in a single compile-and-run.
 """
 
 import pyarrow as pa
+from analitiq.contracts.stream import StreamMapping
 
 from src.engine.batch_policy import ErrorStrategy
-from src.engine.mapping import MappingDocument, compile_mapping
+from src.engine.mapping import compile_mapping
 
 
 def _get(path):
@@ -24,14 +25,14 @@ def _pipe(source_path, fn_name):
         "op": "pipe",
         "args": [
             _get(source_path),
-            {"op": "fn", "name": fn_name, "version": 1, "args": []},
+            {"op": "fn", "name": fn_name},
         ],
     }
 
 
 def _compile(assignments):
     return compile_mapping(
-        MappingDocument.parse({"assignments": assignments}),
+        StreamMapping.model_validate({"assignments": assignments}),
         default_strategy=ErrorStrategy.FAIL,
     )
 
@@ -69,11 +70,11 @@ _CHECK_ACCOUNT_PROPERTIES = {
 
 class TestMappingComposition:
     def test_wise_to_sevdesk_transformation(self, sample_wise_record):
-        """Complete Wise->SevDesk transformation including the iso_to_date
-        valueDate derived from the tz-suffixed Wise 'created' value."""
+        """Complete Wise->SevDesk transformation including the piped
+        to_string reference derived from the integer Wise 'id'."""
         assignments = [
             _expr_assignment(
-                "valueDate", "Utf8", _pipe("created", "iso_to_date"), nullable=False
+                "paymtReference", "Utf8", _pipe("id", "to_string"), nullable=False
             ),
             _expr_assignment("amount", "Float64", _get("targetValue"), nullable=False),
             _expr_assignment("paymtPurpose", "Int64", _get("id"), nullable=False),
@@ -90,7 +91,7 @@ class TestMappingComposition:
         out = _compile(assignments).run(batch).to_pylist()
 
         t = out[0]
-        assert t["valueDate"] == "2025-08-16"
+        assert t["paymtReference"] == "123456"
         assert t["amount"] == 100.50
         assert t["paymtPurpose"] == 123456
         assert t["objectName"] == "CheckAccountTransaction"

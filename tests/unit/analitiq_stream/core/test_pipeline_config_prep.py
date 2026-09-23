@@ -21,13 +21,13 @@ from typing import Any
 import pyarrow as pa
 import pytest
 from analitiq.contracts.endpoint_identity import derive_db_endpoint_id
+from analitiq.contracts.stream import StreamMapping
 
 from cdk.conformance.fakes import type_map_document
-from cdk.declarations import ConnectorDeclarationError
 from cdk.types import EndpointScope
 from src.config.schema_validator import BundleValidationError, ContractValidationError
 from src.engine.batch_policy import ErrorStrategy
-from src.engine.mapping import MappingDocument, compile_mapping
+from src.engine.mapping import compile_mapping
 from src.engine.pipeline_config_prep import PipelineConfigPrep, _split_stream_ref
 
 # ---------------------------------------------------------------------------
@@ -239,14 +239,13 @@ def _build_tree(
     *,
     manifest_status: str = "active",
     include_stream_file: bool = True,
-    stream_id_in_file: str = STREAM_ID,
     include_manifest: bool = True,
     dst_endpoint_scope: str = "connector",
 ) -> Path:
     """Materialize a complete pipeline tree under ``root``. Returns ``root``.
 
     Knobs let individual tests inject specific defects (missing manifest,
-    inactive status, stream-id mismatch, missing stream file).
+    inactive status, missing stream file).
     ``dst_endpoint_scope="connection"`` places the destination endpoint
     (plus a connection-scoped type-map) under the destination connection's
     ``definition/`` tree instead of the connector's, and points the stream's
@@ -258,7 +257,7 @@ def _build_tree(
         )
     _write_json(root / "pipelines" / PIPELINE_ID / "pipeline.json", _pipeline_doc())
     if include_stream_file:
-        stream_doc = _stream_doc(stream_id_in_file, dst_scope=dst_endpoint_scope)
+        stream_doc = _stream_doc(STREAM_ID, dst_scope=dst_endpoint_scope)
         _write_json(
             root / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json",
             stream_doc,
@@ -467,45 +466,13 @@ class TestStreamMappingReachesTheTransform:
         _, stream_configs, _, _, _ = prep.create_config()
 
         mapping = stream_configs[0].mapping
-        assert isinstance(mapping, MappingDocument)
+        assert isinstance(mapping, StreamMapping)
 
         batch = pa.record_batch(
             [pa.array([{"city": "Berlin"}, {"city": "Kyiv"}])], names=["address"]
         )
         out = compile_mapping(mapping, default_strategy=ErrorStrategy.FAIL).run(batch)
         assert out.to_pylist() == [{"city": "Berlin"}, {"city": "Kyiv"}]
-
-    def test_a_mapping_the_transform_cannot_run_fails_at_config_prep(
-        self, pipeline_tree: Path
-    ) -> None:
-        """The document is read at the boundary, not first used mid-run.
-
-        A rule addressing a target no assignment declares is refused by the
-        stream contract, which config prep validates against before the
-        engine parses the mapping -- so the failure surfaces here, before
-        the run starts, never mid-batch.
-        """
-        self._write_mapping(
-            pipeline_tree,
-            {
-                "assignments": [
-                    {
-                        "target": {"path": "city", "arrow_type": "Utf8"},
-                        "value": {
-                            "kind": "expression",
-                            "expression": {"op": "get", "path": ["city"]},
-                        },
-                        "validate": {
-                            "rules": [{"type": "not_null", "field": ["elsewhere"]}]
-                        },
-                    },
-                ],
-            },
-        )
-
-        prep = PipelineConfigPrep()
-        with pytest.raises(ContractValidationError, match="names no assignment target"):
-            prep.create_config()
 
 
 # ---------------------------------------------------------------------------
@@ -566,25 +533,6 @@ class TestStreamVersionParsing:
         message = str(exc.value)
         assert f"{missing_bare}_v4" in message  # the full reference
         assert missing_bare in message  # the bare id actually looked up
-
-    def test_two_versioned_refs_of_one_stream_fail_loud(
-        self, pipeline_tree: Path
-    ) -> None:
-        """Distinct versioned refs that strip to the same bare id must be
-        rejected instead of silently dropping one. The pipeline contract
-        enforces this: versioned IDs collapse to their base for the
-        duplicate check."""
-        pipeline_doc = _pipeline_doc()
-        pipeline_doc["streams"] = [f"{STREAM_ID}_v1", f"{STREAM_ID}_v2"]
-        _write_json(
-            pipeline_tree / "pipelines" / PIPELINE_ID / "pipeline.json", pipeline_doc
-        )
-
-        prep = PipelineConfigPrep()
-        with pytest.raises(ContractValidationError, match="duplicate") as exc:
-            prep.create_config()
-        # The contract reports the collapsed base id.
-        assert STREAM_ID in str(exc.value)
 
     def test_omitted_pipeline_id_falls_back_to_manifest_id(
         self, pipeline_tree: Path
@@ -689,35 +637,15 @@ class TestCreateConfigErrorPaths:
         ):
             PipelineConfigPrep()
 
-    def test_stream_id_mismatch_rejected(
+    def test_a_bundle_the_validator_refuses_fails_create_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, schema_mirror: Path
     ) -> None:
-        """Stream file at ``streams/<STREAM_ID>.json`` whose document
-        carries a different ``stream_id`` should be silently re-keyed by
-        the document. Pipeline.streams references the document id, so a
-        mismatch surfaces as ``pipeline.streams references X but no stream
-        file declares that id``."""
-        root = tmp_path / "project"
-        root.mkdir()
-        # A valid-but-different stream_id (the contract requires a UUID) so the
-        # mismatch surfaces from bundle referential validation (the pipeline ref
-        # resolves to no bundled stream document), not from id-shape validation.
-        _build_tree(root, stream_id_in_file="00000000-0000-4000-8000-0000000000cc")
-        monkeypatch.chdir(root)
-        monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)
-        prep = PipelineConfigPrep()
-        with pytest.raises(
-            BundleValidationError,
-            match=r"no bundled stream document declares id",
-        ):
-            prep.create_config()
+        """The wiring test for ``validate_bundle``: any refused bundle will do.
 
-    def test_stream_declaring_foreign_pipeline_rejected(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, schema_mirror: Path
-    ) -> None:
-        """A bundled stream that names a different parent pipeline is a
-        cross-document defect the published bundle validator catches (the engine
-        did not check this before delegating referential validation)."""
+        Which cross-document rule refuses it is the validator's to test; this
+        pins that config prep runs the bundle validator and lets its refusal
+        reach the caller before anything is resolved.
+        """
         root = tmp_path / "project"
         root.mkdir()
         _build_tree(root)
@@ -729,68 +657,7 @@ class TestCreateConfigErrorPaths:
         )
         monkeypatch.chdir(root)
         monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)
-        prep = PipelineConfigPrep()
-        with pytest.raises(BundleValidationError, match="different pipeline"):
-            prep.create_config()
-
-    def test_source_wired_to_destination_connection_rejected(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, schema_mirror: Path
-    ) -> None:
-        """A stream whose source is wired to the destination connection (role
-        mis-wiring) is caught by the bundle validator — the engine has no other
-        check for source/destination role correctness."""
-        root = tmp_path / "project"
-        root.mkdir()
-        _build_tree(root)
-        stream_doc = _stream_doc(STREAM_ID)
-        stream_doc["source"]["endpoint_ref"]["connection_id"] = CONNECTION_DST_ID
-        _write_json(
-            root / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json",
-            stream_doc,
-        )
-        monkeypatch.chdir(root)
-        monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)
-        with pytest.raises(BundleValidationError, match="connections.source"):
-            PipelineConfigPrep().create_config()
-
-    def test_active_pipeline_with_no_runnable_stream_rejected(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, schema_mirror: Path
-    ) -> None:
-        """An active pipeline whose only stream is not itself active runs
-        nothing; the bundle validator's active-gate rejects it."""
-        root = tmp_path / "project"
-        root.mkdir()
-        _build_tree(root)
-        stream_doc = _stream_doc(STREAM_ID)
-        stream_doc["status"] = "draft"
-        _write_json(
-            root / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json",
-            stream_doc,
-        )
-        monkeypatch.chdir(root)
-        monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)
-        with pytest.raises(BundleValidationError, match="runnable stream"):
-            PipelineConfigPrep().create_config()
-
-    def test_connection_scoped_endpoint_missing_rejected(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, schema_mirror: Path
-    ) -> None:
-        """A connection-scoped endpoint_ref with no matching endpoint document
-        on disk is caught by the bundle validator, before file resolution."""
-        root = tmp_path / "project"
-        root.mkdir()
-        _build_tree(root, dst_endpoint_scope="connection")
-        (
-            root
-            / "connections"
-            / CONNECTION_DST_ID
-            / "definition"
-            / "endpoints"
-            / f"{ENDPOINT_DST_CONNECTION}.json"
-        ).unlink()
-        monkeypatch.chdir(root)
-        monkeypatch.setenv("PIPELINE_ID", PIPELINE_ID)
-        with pytest.raises(BundleValidationError, match="no matching bundled endpoint"):
+        with pytest.raises(BundleValidationError):
             PipelineConfigPrep().create_config()
 
     def test_missing_stream_file_rejected(
@@ -807,149 +674,39 @@ class TestCreateConfigErrorPaths:
         ):
             prep.create_config()
 
-    @pytest.mark.parametrize("side", ["source", "destination"])
-    def test_missing_endpoint_ref_names_stream_and_side(
-        self, pipeline_tree: Path, side: str
+    def test_connection_id_differing_from_its_directory_rejected(
+        self, pipeline_tree: Path
     ) -> None:
-        """A stream side without ``endpoint_ref`` must fail naming which side
-        (source vs destination) is malformed. The stream contract requires
-        endpoint_ref on both sides, so this surfaces at contract validation."""
+        """The directory name is the connection's identity on disk."""
+        _write_json(
+            pipeline_tree / "connections" / CONNECTION_SRC_ID / "connection.json",
+            _connection_doc("00000000-0000-4000-8000-0000000000cc"),
+        )
+        with pytest.raises(ValueError, match="Connection id mismatch"):
+            PipelineConfigPrep().create_config()
+
+    def test_stream_document_without_stream_id_rejected(
+        self, pipeline_tree: Path
+    ) -> None:
+        """The contract leaves ``stream_id`` optional; the index needs one."""
         stream_doc = _stream_doc(STREAM_ID)
-        if side == "source":
-            del stream_doc["source"]["endpoint_ref"]
-            # The source's endpoint_ref is a plain required field.
-            expected = "source/endpoint_ref"
-        else:
-            del stream_doc["destinations"][0]["endpoint_ref"]
-            # The destination SHAPE is selected by endpoint_ref.scope, so a
-            # ref-less destination fails at the union's discriminator, anchored
-            # at the destination entry and naming the selecting key.
-            expected = "destinations/0: endpoint_ref.scope"
+        del stream_doc["stream_id"]
         _write_json(
             pipeline_tree / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json",
             stream_doc,
         )
-        prep = PipelineConfigPrep()
-        with pytest.raises(ContractValidationError, match=expected):
-            prep.create_config()
+        with pytest.raises(ValueError, match="missing 'stream_id'"):
+            PipelineConfigPrep().create_config()
 
-    @pytest.mark.parametrize("kind", ["", None])
-    def test_unusable_connector_kind_rejected(self, pipeline_tree: Path, kind) -> None:
-        """A connector document whose ``kind`` is missing or empty must fail
-        loudly. ``kind`` is the connector contract's discriminator, so a
-        missing/empty value is rejected at contract validation."""
-        connector_doc = _connector_doc()
-        if kind is None:
-            del connector_doc["kind"]
-        else:
-            connector_doc["kind"] = kind
-        _write_json(
-            pipeline_tree
-            / "connectors"
-            / CONNECTOR_ID
-            / "definition"
-            / "connector.json",
-            connector_doc,
-        )
-        prep = PipelineConfigPrep()
-        with pytest.raises(ContractValidationError):
-            prep.create_config()
-
-
-# ---------------------------------------------------------------------------
-# Registry-discovered kinds (#137)
-# ---------------------------------------------------------------------------
-
-
-class TestRegistryDiscoveredKinds:
-    def test_kind_outside_contract_enum_rejected(self, pipeline_tree: Path) -> None:
-        """Config prep hardcodes no kind enum of its own -- it defers the
-        authoritative kind set to the published connector contract (#137).
-        The contract's ``kind`` is a closed discriminator, so a kind outside
-        it (e.g. an entry-point package inventing ``graphql``) is rejected at
-        contract validation rather than assembling."""
-        connector_doc = _connector_doc()
-        connector_doc["kind"] = "graphql"
-        _write_json(
-            pipeline_tree
-            / "connectors"
-            / CONNECTOR_ID
-            / "definition"
-            / "connector.json",
-            connector_doc,
-        )
-        prep = PipelineConfigPrep()
-        with pytest.raises(ContractValidationError, match="graphql|discriminator"):
-            prep.create_config()
-
-
-# ---------------------------------------------------------------------------
-# Declared connector facts (#401)
-# ---------------------------------------------------------------------------
-
-
-class TestDeclaredConnectorFacts:
-    """The declared ``error_map`` / ``concurrency`` blocks (#401) at config load.
-
-    Two gates run on the trusted side and both are pinned here: the
-    published contract validates the declaration's shape, and
-    ``_load_connector`` parses it through the CDK's typed view — the same
-    parse the worker re-runs at its process boundary, so a dropped line
-    here would defer a malformed declaration to a spawned worker.
-    """
-
-    def _write_connector(self, root: Path, connector_doc: dict[str, Any]) -> None:
-        _write_json(
-            root / "connectors" / CONNECTOR_ID / "definition" / "connector.json",
-            connector_doc,
-        )
-
-    def test_declared_concurrency_is_parsed_at_config_load(
-        self, pipeline_tree: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # A valid declaration loads, and the CDK parse runs on it — spied
-        # rather than mocked away, so the assertion is that the parse
-        # happened, not that validation was bypassed.
-        from src.engine import pipeline_config_prep as prep_module
-
-        seen: list[Any] = []
-        real_parse = prep_module.parse_declared_concurrency
-
-        def _spy(block: Any, *, source: str = "<inline>"):
-            seen.append(block)
-            return real_parse(block, source=source)
-
-        monkeypatch.setattr(prep_module, "parse_declared_concurrency", _spy)
-
-        connector_doc = _connector_doc()
-        connector_doc["concurrency"] = {"max_connections": 4}
-        self._write_connector(pipeline_tree, connector_doc)
-
-        PipelineConfigPrep().create_config()
-        assert {"max_connections": 4} in seen
-
-    def test_malformed_error_map_identifier_rejected(self, pipeline_tree: Path) -> None:
-        # http is unchanged by issue #513 -- the published contract still
-        # enforces the same status-code key grammar the CDK parser does,
-        # so a malformed status fails at the first gate.
-        connector_doc = _connector_doc()
-        connector_doc["error_map"] = {"http": {"XYZ!": "auth"}}
-        self._write_connector(pipeline_tree, connector_doc)
-        prep = PipelineConfigPrep()
-        with pytest.raises((ContractValidationError, ConnectorDeclarationError)) as err:
-            prep.create_config()
-        assert "http" in str(err.value)
-
-    def test_non_positive_concurrency_ceiling_rejected(
+    def test_two_stream_files_with_one_stream_id_rejected(
         self, pipeline_tree: Path
     ) -> None:
-        connector_doc = _connector_doc()
-        connector_doc["concurrency"] = {"max_connections": 0}
-        self._write_connector(pipeline_tree, connector_doc)
-        prep = PipelineConfigPrep()
-        with pytest.raises((ContractValidationError, ConnectorDeclarationError)) as err:
-            prep.create_config()
-        assert "max_connections" in str(err.value)
+        _write_json(
+            pipeline_tree / "pipelines" / PIPELINE_ID / "streams" / "copy.json",
+            _stream_doc(STREAM_ID),
+        )
+        with pytest.raises(ValueError, match="Duplicate stream_id"):
+            PipelineConfigPrep().create_config()
 
 
 # ---------------------------------------------------------------------------

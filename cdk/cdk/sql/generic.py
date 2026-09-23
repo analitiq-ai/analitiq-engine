@@ -37,10 +37,10 @@ from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any
 
 import pyarrow as pa
-from analitiq.contracts.endpoints import DatabaseEndpointDoc, DatabaseObject
+from analitiq.contracts.endpoints import DatabaseEndpointDoc, DatabaseObject, WriteMode
 from analitiq.contracts.stream import EndpointRef
 from analitiq.contracts.stream import Filter as StreamFilter
 from analitiq.contracts.stream import (
@@ -72,6 +72,7 @@ from cdk.record_identity import record_digest
 from cdk.schema_contract import SchemaContract
 from cdk.type_map import TypeMapError, TypeMapper
 from cdk.types import (
+    WRITE_MODE_NAMES,
     AckStatus,
     CheckpointStore,
     Cursor,
@@ -81,6 +82,7 @@ from cdk.types import (
     RetryVerdict,
     SchemaSpec,
 )
+from cdk.types import WriteMode as WireWriteMode
 from cdk.write_keys import MissingConflictKeyError, require_conflict_key_values
 
 from ..contract import ColumnDef
@@ -222,9 +224,6 @@ def _note_order_by_fallback(table_name: str, column_name: str) -> None:
         table_name,
         column_name,
     )
-
-
-WriteMode = Literal["insert", "upsert", "truncate_insert"]
 
 
 def _page_order_by(
@@ -875,10 +874,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         # the source entry (read_batches) already uses: the factory hands
         # the dialect to hooks that fire later — verify_tls_state on every
         # new DBAPI connection — so a dialect built here must already carry
-        # the declaration those hooks read. (A malformed block already
-        # failed on the trusted side at config load; this parse
-        # re-validates at the process boundary, before anything is
-        # acquired.)
+        # the declaration those hooks read.
         self._bind_capabilities(runtime)
         try:
             await materialize_runtime(runtime, sql_dialect=self.dialect)
@@ -1293,17 +1289,12 @@ class GenericSQLConnector(BaseDestinationHandler):
         return self._capabilities
 
     def _get_write_mode(self, proto_write_mode: int) -> WriteMode:
-        mode_map: dict[int, WriteMode] = {
-            1: "insert",
-            2: "upsert",
-            3: "truncate_insert",
-        }
-        if proto_write_mode not in mode_map:
+        if proto_write_mode not in WRITE_MODE_NAMES:
             raise SchemaConfigurationError(
                 f"Unsupported proto write_mode={proto_write_mode}; expected one "
-                f"of {sorted(mode_map)} (WRITE_MODE_INSERT/UPSERT/TRUNCATE_INSERT)"
+                f"of {sorted(m.name for m in WRITE_MODE_NAMES)}"
             )
-        return mode_map[proto_write_mode]
+        return WRITE_MODE_NAMES[WireWriteMode(proto_write_mode)]
 
     def _build_column_defs(self, state: _StreamState) -> list[ColumnDef]:
         """Contract endpoint columns -> ColumnDefs for the shared DDL builder.
@@ -2336,12 +2327,6 @@ class GenericSQLConnector(BaseDestinationHandler):
         cursor advancement with OFFSET would skip rows on every page after
         the first.
         """
-        if not columns:
-            # The first selected column is the ORDER BY fallback and an empty
-            # projection compiles to ``SELECT`` with no columns; fail loudly
-            # rather than emit an invalid statement.
-            raise ReadError("ADBC-only source requires a non-empty column projection")
-
         # The ADBC path quotes every identifier; *address* components were
         # normalized once at construction (the same rule the destination
         # handler applies), so the quoted names target the same physical

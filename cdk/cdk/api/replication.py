@@ -25,10 +25,8 @@ inclusiveness is the provider's fact, and the safety window already
 re-reads the boundary. Under a format that truncates -- ``date`` and the
 epoch formats -- an exclusive lower bound is rendered one unit earlier:
 ``gt`` on the floored value would exclude the whole unit the cursor sits
-in, and every record after the cursor inside that unit with it. A bound
-facing the wrong way is refused: a single mapping whose operator is
-``lt``/``lte`` bounds the read from above and leaves an incremental
-stream nothing to resume from.
+in, and every record after the cursor inside that unit with it. The
+contract refuses a bound facing the wrong way (RULE-ENDP-077).
 """
 
 from __future__ import annotations
@@ -37,7 +35,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from types import NoneType
-from typing import Any, get_args
+from typing import Any, cast, get_args
 
 from analitiq.contracts.endpoints import (
     Replication,
@@ -49,7 +47,7 @@ from pydantic import BaseModel
 from ..exceptions import ReadError
 from .response_schema import FieldDeclaration
 
-__all__ = ["check_mapping_direction", "cursor_bounds", "cursor_mapping_for"]
+__all__ = ["cursor_bounds", "cursor_mapping_for"]
 
 CursorMapping = SingleCursorMapping | WindowCursorMapping
 
@@ -68,9 +66,6 @@ if _FORMATS != _literal_values(WindowCursorMapping, "format"):
     raise TypeError(
         "the two cursor-mapping forms declare different format vocabularies"
     )
-
-_LOWER: frozenset[str] = frozenset({"gt", "gte"})
-_UPPER: frozenset[str] = frozenset({"lt", "lte"})
 
 #: The format a bound goes out in when the mapping declares none.
 _DEFAULT_FORMAT = "date-time"
@@ -151,10 +146,9 @@ def _parse_cursor(cursor: Any, field: FieldDeclaration) -> datetime | int:
     format the request param takes: a provider may answer ISO timestamps
     and take an epoch ``since``. An ``integer`` field whose format is an
     epoch format holds ticks in THAT unit -- the record's, not the request
-    param's, which may render another; under a calendar format it is
-    contradictory and refused; under no epoch format it holds a monotonic
-    id, which comes back as the ``int``. Any other type cannot be a moment
-    and is refused naming the field's type.
+    param's, which may render another; under no epoch format it holds a
+    monotonic id, which comes back as the ``int``. The contract admits no
+    other cursor field (RULE-ENDP-074, RULE-ENDP-078).
 
     The ISO parser is dateutil's rather than the stdlib's because a cursor
     string is provider data, and narrowing what parses would start failing
@@ -164,37 +158,25 @@ def _parse_cursor(cursor: Any, field: FieldDeclaration) -> datetime | int:
     """
     if field.json_type == "string":
         return _parse_iso(cursor)
-    if field.json_type == "integer":
-        try:
-            ticks = int(str(cursor))
-        except ValueError as err:
-            raise ReadError(
-                f"cursor value {cursor!r} is not an integer; the cursor field is "
-                f"declared as type 'integer'"
-            ) from err
-        unit = _EPOCH_UNIT.get(field.format) if field.format is not None else None
-        if unit is None:
-            if field.format in _FORMATS:
-                raise ReadError(
-                    f"cursor field is declared as type 'integer' with format "
-                    f"{field.format!r}; an integer is a moment only under an "
-                    f"epoch format"
-                )
-            return ticks
-        try:
-            return _UNIX_EPOCH + ticks * unit
-        except OverflowError as err:
-            # A checkpoint fact, not a transient one: the same integer is
-            # out of range on every retry.
-            raise ReadError(
-                f"cursor value {cursor!r} is outside the range a moment can "
-                f"hold; the cursor field declares format {field.format!r}"
-            ) from err
-    raise ReadError(
-        f"cursor field is declared as type {field.json_type!r}, which cannot "
-        f"hold a cursor; an incremental cursor field is a string moment or an "
-        f"integer"
-    )
+    try:
+        ticks = int(str(cursor))
+    except ValueError as err:
+        raise ReadError(
+            f"cursor value {cursor!r} is not an integer; the cursor field is "
+            f"declared as type 'integer'"
+        ) from err
+    unit = _EPOCH_UNIT.get(field.format) if field.format is not None else None
+    if unit is None:
+        return ticks
+    try:
+        return _UNIX_EPOCH + ticks * unit
+    except OverflowError as err:
+        # A checkpoint fact, not a transient one: the same integer is
+        # out of range on every retry.
+        raise ReadError(
+            f"cursor value {cursor!r} is outside the range a moment can "
+            f"hold; the cursor field declares format {field.format!r}"
+        ) from err
 
 
 def _parse_iso(cursor: Any) -> datetime:
@@ -244,31 +226,6 @@ def _lands_after(lower: str | int, upper: str | int) -> bool:
     )
 
 
-def check_mapping_direction(mapping: CursorMapping) -> None:
-    """Refuse a mapping whose bounds face the wrong way.
-
-    Decidable from the document alone, so the read path asks before it
-    looks for a stored cursor: a first run has none and would otherwise
-    read everything, establish a checkpoint, and only then fail.
-    """
-    if isinstance(mapping, SingleCursorMapping):
-        if mapping.operator not in _LOWER:
-            raise ReadError(
-                f"cursor mapping for {mapping.cursor_field!r} binds {mapping.param!r} "
-                f"with operator {mapping.operator!r}, an upper bound; an "
-                f"incremental read needs a lower bound to resume from -- declare "
-                f"a gt/gte operator or a start/end window mapping"
-            )
-        return
-    if mapping.start_operator not in _LOWER or mapping.end_operator not in _UPPER:
-        raise ReadError(
-            f"cursor mapping for {mapping.cursor_field!r} declares "
-            f"start_operator {mapping.start_operator!r} and end_operator "
-            f"{mapping.end_operator!r}; a window's start must be gt/gte and "
-            f"its end lt/lte"
-        )
-
-
 def cursor_bounds(
     mapping: CursorMapping,
     cursor: Any,
@@ -285,8 +242,7 @@ def cursor_bounds(
     lower bound is the cursor moved back by the safety window, in its own
     vocabulary: a moment moves back by seconds, a monotonic id by that
     many ids, floored at zero. A window's upper bound is ``now``, rendered
-    the same way -- an id cursor has no "now", so a window over one is
-    refused. An exclusive lower bound under a truncating format goes out
+    the same way. An exclusive lower bound under a truncating format goes out
     one unit earlier, so the provider's ``gt`` cannot skip the unit the
     cursor sits in. A window whose rendered start lands after its
     rendered end -- a cursor ahead of this clock by more than the safety
@@ -294,22 +250,12 @@ def cursor_bounds(
     a provider answers empty or rejects, and the checkpoint would never
     move.
     """
-    check_mapping_direction(mapping)
     parsed = _parse_cursor(cursor, cursor_field)
     if isinstance(parsed, int):
-        if isinstance(mapping, WindowCursorMapping):
-            raise ReadError(
-                f"cursor value {cursor!r} is an integer id; a start/end window "
-                f"mapping needs a timestamp cursor, or a record field declaring "
-                f"an epoch format"
-            )
-        if mapping.format is not None:
-            raise ReadError(
-                f"cursor value {cursor!r} is an integer id, but the mapping "
-                f"declares format {mapping.format!r}; an id is sent as itself, "
-                f"and a moment needs the record field to declare an epoch format"
-            )
-        return {mapping.param: max(0, parsed - safety_window_seconds)}
+        # The contract pairs an id cursor only with a single mapping that
+        # declares no format (RULE-ENDP-078).
+        single = cast(SingleCursorMapping, mapping)
+        return {single.param: max(0, parsed - safety_window_seconds)}
     fmt = _bound_format(mapping, cursor_field)
     render = _RENDER[fmt]
     start = parsed - timedelta(seconds=safety_window_seconds)

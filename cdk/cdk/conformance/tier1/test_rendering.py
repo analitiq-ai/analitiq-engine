@@ -12,6 +12,7 @@ import re
 from collections.abc import Sequence
 
 import pytest
+from analitiq.contracts.endpoints import WriteMode
 
 from cdk.conformance.skips import (
     require_dialect,
@@ -84,7 +85,7 @@ def _plan(
     dialect: SqlDialect,
     caps: SqlCapabilities,
     *,
-    mode: str,
+    mode: WriteMode,
     columns: Sequence[str] = ("id", "val", "seq"),
     conflict_keys: Sequence[str] = (),
     identity: Sequence[str] = ("id",),
