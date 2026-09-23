@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, TypeVar, cast, get_args
+from typing import Any, TypeVar, cast
 
 from analitiq.contracts.connection import ConnectionInput
 from analitiq.contracts.connector import Connector
@@ -32,7 +32,7 @@ from analitiq.contracts.endpoints import ApiEndpointDoc, DatabaseEndpointDoc
 from analitiq.contracts.pipelines.config import PipelineInput
 from analitiq.contracts.shared.common import schema_url_for
 from analitiq.contracts.stream import StreamInput
-from analitiq.contracts.validation_requests import ValidateSingleDocumentRequest
+from analitiq.contracts.validation_requests import DOCUMENT_SCHEMA_NAMES
 from analitiq.validator import validate_pipeline_bundle
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
@@ -69,9 +69,7 @@ ARTIFACT_KINDS = tuple(_MODELS)
 # type map is never loaded here -- the CDK's type-map loader
 # (``cdk.type_map.rules``) validates it against ``TypeMapDoc`` when it builds
 # the mapper.
-_CONTRACT_KINDS = frozenset(
-    get_args(ValidateSingleDocumentRequest.model_fields["entity"].annotation)
-) - {"type-map"}
+_CONTRACT_KINDS = frozenset(DOCUMENT_SCHEMA_NAMES) - {"type-map"}
 if set(_MODELS) != _CONTRACT_KINDS:
     raise TypeError(
         f"artifact kinds {sorted(set(_MODELS) ^ _CONTRACT_KINDS)}: the contract "

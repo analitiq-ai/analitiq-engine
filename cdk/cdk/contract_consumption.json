@@ -1228,7 +1228,7 @@
       ]
     }
   },
-  "contract_models_version": "1.0.0rc25",
+  "contract_models_version": "1.0.0rc26",
   "kit_reads": {
     "analitiq.contracts.connector.ApiConnector": {
       "connector_id": [
