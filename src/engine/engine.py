@@ -246,10 +246,7 @@ class StreamingEngine:
             runtime = StreamingEngine._source_runtime(stream_config)
             if runtime is None or runtime.connection_id in gates:
                 continue
-            cap = parse_declared_concurrency(
-                runtime.declared_concurrency,
-                source=f"connector {runtime.connector_id!r}",
-            )
+            cap = parse_declared_concurrency(runtime.declared_concurrency)
             if cap is None:
                 continue
             gates[runtime.connection_id] = asyncio.Semaphore(cap)

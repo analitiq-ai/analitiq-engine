@@ -1,9 +1,9 @@
 """Grammar + lookup tests for the connector-level declared facts (issue #401, #513).
 
-``cdk.declarations`` is the typed, fail-loud view of the ``error_map`` and
-``concurrency`` blocks: declared content is validated strictly (vocabulary,
-key grammar, unknown fields), absence is additive, and the engine-owned
-verdict tables cover the whole category vocabulary.
+``cdk.declarations`` is the typed view of the ``error_map`` and
+``concurrency`` blocks: the published contract owns their shape, absence is
+additive, and the engine-owned verdict tables cover the whole category
+vocabulary.
 
 Issue #513 replaced the four closed families (``sqlstate``/``exception``/
 ``vendor_code``, plus the unchanged ``http``) with a single generic
@@ -26,13 +26,11 @@ from cdk.declarations import (
     DECLARED_READ_DETERMINISTIC,
     DECLARED_WRITE_VERDICTS,
     ERROR_CATEGORY_VALUES,
-    ConnectorDeclarationError,
     ErrorMap,
     birth_site_category,
     classify_via_hook,
     parse_declared_concurrency,
     parse_declared_error_map,
-    require_declared_category,
 )
 from cdk.types import AckStatus, FailureCategory
 
@@ -64,45 +62,6 @@ class TestErrorMapParse:
         assert error_map.match_http(429) is None
         assert error_map.match_exception(ValueError("x")) is None
 
-    def test_unknown_field_fails(self):
-        with pytest.raises(ConnectorDeclarationError, match="unknown fields"):
-            parse_declared_error_map({"sqlstate": {"08": "unreachable"}})
-
-    def test_off_vocabulary_category_fails(self):
-        with pytest.raises(ConnectorDeclarationError, match="expected one of"):
-            parse_declared_error_map(
-                {"key_attrs": ["sqlstate"], "codes": {"08": "retry_me"}}
-            )
-
-    def test_non_object_block_fails(self):
-        with pytest.raises(ConnectorDeclarationError, match="must be an object"):
-            parse_declared_error_map("auth")
-
-    def test_non_object_codes_fails(self):
-        with pytest.raises(ConnectorDeclarationError, match="must be an object"):
-            parse_declared_error_map({"key_attrs": ["sqlstate"], "codes": ["429"]})
-
-    def test_non_object_http_fails(self):
-        with pytest.raises(ConnectorDeclarationError, match="must be an object"):
-            parse_declared_error_map({"http": ["429"]})
-
-    def test_key_attrs_without_codes_fails(self):
-        with pytest.raises(ConnectorDeclarationError, match="key_attrs without codes"):
-            parse_declared_error_map({"key_attrs": ["sqlstate"]})
-
-    def test_codes_without_key_attrs_fails(self):
-        with pytest.raises(ConnectorDeclarationError, match="key_attrs without codes"):
-            parse_declared_error_map({"codes": {"28000": "auth"}})
-
-    def test_empty_key_attrs_list_fails(self):
-        with pytest.raises(ConnectorDeclarationError, match="non-empty list"):
-            parse_declared_error_map({"key_attrs": [], "codes": {"28000": "auth"}})
-
-    @pytest.mark.parametrize("entry", ["1bad", "bad-name", "", "bad.name", 5])
-    def test_malformed_key_attrs_entry_fails(self, entry):
-        with pytest.raises(ConnectorDeclarationError, match="malformed entry"):
-            parse_declared_error_map({"key_attrs": [entry], "codes": {"28000": "auth"}})
-
     def test_class_name_signal_is_a_legal_key_attrs_entry(self):
         error_map = parse_declared_error_map(
             {"key_attrs": [CLASS_NAME_SIGNAL], "codes": {"ValueError": "config"}}
@@ -123,11 +82,6 @@ class TestErrorMapParse:
         assert error_map is not None
         assert error_map.codes["-4002"] == "unreachable"
         assert error_map.codes["NoSuchBucket"] == "config"
-
-    @pytest.mark.parametrize("key", ["42", "999", "4290", "abc"])
-    def test_malformed_http_key_fails(self, key):
-        with pytest.raises(ConnectorDeclarationError, match="key grammar"):
-            parse_declared_error_map({"http": {key: "auth"}})
 
 
 class TestErrorMapLookup:
@@ -263,15 +217,6 @@ class TestErrorMapLookup:
 
     def test_unclaimed_exception_matches_nothing(self, error_map):
         assert error_map.match_exception(ValueError("nope")) is None
-
-
-class TestRequireDeclaredCategory:
-    def test_valid_category_passes_through(self):
-        assert require_declared_category("auth", source="test") == "auth"
-
-    def test_off_vocabulary_category_fails_loud(self):
-        with pytest.raises(ConnectorDeclarationError, match="not in the engine"):
-            require_declared_category("retry_me", source="test")
 
 
 class TestClassifyViaHook:
@@ -513,15 +458,6 @@ class TestConcurrencyParse:
 
     def test_absent_block_stays_undeclared(self):
         assert parse_declared_concurrency(None) is None
-
-    def test_unknown_field_fails(self):
-        with pytest.raises(ConnectorDeclarationError, match="unknown fields"):
-            parse_declared_concurrency({"max_conections": 8})
-
-    @pytest.mark.parametrize("value", [0, -1, "8", 2.5, True])
-    def test_non_positive_or_non_int_fails(self, value):
-        with pytest.raises(ConnectorDeclarationError, match="positive integer"):
-            parse_declared_concurrency({"max_connections": value})
 
 
 class TestVerdictTables:

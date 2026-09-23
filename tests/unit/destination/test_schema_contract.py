@@ -163,8 +163,7 @@ class TestSchemaContractCastArrowBatch:
         # does the reverse. No declaration covers a source that ships both, so
         # the matrix forbids the pair rather than publish an "auto" that
         # succeeds on some rows and fails the batch on others: the source
-        # builds temporals with its own parser, and an author who needs a
-        # string parse wires iso_to_timestamp.
+        # builds temporals with its own parser.
         schema = {
             "columns": [
                 {

@@ -15,13 +15,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pyarrow as pa
 import pytest
-from analitiq.contracts.stream import StreamSource, validate_endpoint_ref
+from analitiq.contracts.stream import StreamMapping, StreamSource, validate_endpoint_ref
 
 from cdk.types import FailureCategory
 from src.engine.batch_policy import ErrorStrategy
 from src.engine.engine import StreamingEngine
 from src.engine.exceptions import StreamProcessingError, TransformationError
-from src.engine.mapping import MappingDocument
 from src.engine.stream_processor import SourceBatch, StreamProcessor
 from src.grpc.generated.analitiq.v1 import AckStatus
 from src.models.metrics import PipelineMetrics
@@ -78,13 +77,13 @@ def _make_processor(
     retry_delay: float = 0.01,
     pipeline_metrics: PipelineMetrics | None = None,
     state_manager: Any | None = None,
-    mapping: MappingDocument | None = None,
+    mapping: StreamMapping | None = None,
 ) -> StreamProcessor:
     """Build a StreamProcessor wired to mocks, as run() would have wired it."""
     processor = StreamProcessor(
         stream_id="test-stream-001",
         stream_config=stream_config,
-        mapping=mapping if mapping is not None else MappingDocument(),
+        mapping=mapping if mapping is not None else StreamMapping(),
         pipeline_config={"pipeline_id": "test-pipeline", "name": "Test Pipeline"},
         pipeline_id="test-pipeline",
         state_manager=state_manager if state_manager is not None else MagicMock(),
@@ -211,7 +210,7 @@ def sample_stream_config():
             "connector_type": "api",
             "host": "https://dest.example.com",
         },
-        "mapping": MappingDocument(),
+        "mapping": StreamMapping(),
     }
 
 
@@ -1449,31 +1448,21 @@ class TestMappingCompileFailureIsReported:
 
         monkeypatch.setenv("METRICS_ENABLED", "true")
 
-        # An unknown function name: the document parses (the catalog is not a
-        # document-level fact), and compile_mapping is what refuses it.
-        mapping = MappingDocument.model_validate(
+        # A contract-valid document the engine cannot compile: an Int64
+        # constant has no JSON encoding for a Json target, which the constant
+        # broadcast refuses when the transform is built.
+        mapping = StreamMapping.model_validate(
             {
                 "assignments": [
                     {
                         "target": {
                             "path": "id",
-                            "arrow_type": "Utf8",
+                            "arrow_type": "Json",
                             "nullable": True,
                         },
                         "value": {
-                            "kind": "expression",
-                            "expression": {
-                                "op": "pipe",
-                                "args": [
-                                    {"op": "get", "path": ["id"]},
-                                    {
-                                        "op": "fn",
-                                        "name": "nonexistent_fn",
-                                        "version": 1,
-                                        "args": [],
-                                    },
-                                ],
-                            },
+                            "kind": "constant",
+                            "constant": {"value": 5, "arrow_type": "Int64"},
                         },
                     }
                 ]
@@ -1490,7 +1479,7 @@ class TestMappingCompileFailureIsReported:
 
         with caplog.at_level(
             logging.INFO, logger="src.state.log_emitter"
-        ), pytest.raises(TransformationError, match="Unknown function"):
+        ), pytest.raises(TransformationError, match="Json target requires"):
             await processor.run()
 
         emitted = _emitted_metrics_payloads(caplog)

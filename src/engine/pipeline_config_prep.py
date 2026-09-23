@@ -60,14 +60,13 @@ from analitiq.contracts.stream import (
     EndpointRef,
     IncrementalReplication,
     StreamInput,
+    StreamMapping,
     StreamSource,
 )
 from pydantic import TypeAdapter
 
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.declarations import parse_declared_concurrency, parse_declared_error_map
 from cdk.secrets import SchemeSecretsResolver, SecretsResolver
-from cdk.sql.capabilities import parse_declared_capabilities
 from cdk.type_map import TypeMapper
 from cdk.type_map.loader import parse_type_mapper
 from src.config import settings
@@ -78,7 +77,6 @@ from src.config.endpoint_resolver import (
 )
 from src.config.run_workspace import RunWorkspace, gate_run, read_run_workspace
 from src.config.utils import author_set, load_json_file
-from src.engine.mapping import MappingDocument
 from src.models.resolved import (
     BatchingConfig,
     EndpointDocument,
@@ -91,7 +89,6 @@ from src.models.resolved import (
     ResolvedSource,
     ResolvedStream,
     RuntimeConfig,
-    dump_authored,
 )
 
 logger = logging.getLogger(__name__)
@@ -424,16 +421,6 @@ class PipelineConfigPrep:
             connector_type_mapper=self._connector_type_mappers.get(record.connector_id),
             connection_type_mapper=self._connection_type_mapper(connection_id),
         )
-        # Parse the declared blocks (sql_capabilities, issue #390; error_map
-        # and concurrency, issue #401) on the trusted side, at config load: a
-        # malformed declaration fails here as a config error, never inside a
-        # spawned worker where a dead pre-serve process would surface as a
-        # connect failure instead. None (no block) is legal; needed-but-
-        # undeclared facts refuse at their consumer sites.
-        source = f"connector {record.connector_id!r}"
-        parse_declared_capabilities(runtime.declared_sql_capabilities, source=source)
-        parse_declared_error_map(runtime.declared_error_map, source=source)
-        parse_declared_concurrency(runtime.declared_concurrency, source=source)
         self._resolved_connections[connection_id] = runtime
         logger.info(
             "Resolved connection: connection_id=%s connector=%s",
@@ -614,17 +601,13 @@ class PipelineConfigPrep:
                 )
             )
 
-        # The mapping crosses as the authored document: the engine's
-        # MappingDocument is its own reading of the contract's mapping
-        # grammar (see src.engine.mapping), parsed from the authored JSON.
-        mapping = document.mapping
         return ResolvedStream(
             stream_id=stream_id,
             stream_version=stream_version,
             source=resolved_source,
             destinations=resolved_destinations,
-            mapping=MappingDocument.parse(
-                dump_authored(mapping) if mapping is not None else {}
+            mapping=(
+                document.mapping if document.mapping is not None else StreamMapping()
             ),
         )
 

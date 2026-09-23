@@ -41,11 +41,7 @@ A column is built at the **target**'s `arrow_type`.
 ## Expression Evaluation
 
 A single expression error fails the entire batch and surfaces as a
-transform-stage stream failure. Because each op is a vectorized column
-operation, the boolean and conditional ops (`and`, `or`, `if`) evaluate every
-operand over the whole batch rather than short-circuiting per row; expressions
-are pure, so the result is unchanged, but a branch that would error only on
-rows it does not feed still fails the batch.
+transform-stage stream failure.
 
 ### Vectorized evaluation: known divergences
 
@@ -55,11 +51,7 @@ inherent to typed, vectorized evaluation:
 
 - **Typed intermediates.** Every sub-expression produces a typed Arrow column,
   so a value cannot change type mid-expression the way an untyped Python value
-  could. A `coalesce` whose args have *different concrete types* (e.g. a string
-  fallback for a numeric column, resolved only by a later stage) fails loud
-  instead of carrying a mixed-type value forward.
-- **Boolean truthiness** covers scalars and strings (non-empty is true); a List
-  or Object condition in `if`/`and`/`or` is not supported and fails loud.
+  could.
 - **`to_string` of a temporal** uses Arrow's ISO formatting, which can differ in
   notation/precision from Python's `str(datetime)`.
 - **Validation `pattern`** runs on Arrow's RE2 engine (anchored `^(?:...)`),
@@ -67,17 +59,7 @@ inherent to typed, vectorized evaluation:
 
 ## Function Catalog
 
-Function kernels the engine runs:
-
-| Name | Purpose |
-|------|---------|
-| `iso_to_date` | ISO-8601 timestamp → `YYYY-MM-DD` string |
-| `iso_to_datetime` | ISO-8601 → datetime (timezone-aware) |
-| `iso_to_timestamp` | ISO-8601 → timezone-aware UTC timestamp (same kernel as `iso_to_datetime`) |
-| `trim`, `lower`, `upper` | String normalization |
-| `to_int`, `to_float`, `to_string` | Type coercion |
-| `abs` | Numeric absolute value |
-| `now` | Current UTC datetime |
+The engine ships one function kernel, `to_string`.
 
 ## Validation
 

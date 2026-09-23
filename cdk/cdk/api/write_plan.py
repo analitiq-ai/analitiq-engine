@@ -22,8 +22,6 @@ from typing import Any
 
 from analitiq.contracts.endpoints import (
     ApiEndpointDoc,
-    Batching,
-    Idempotency,
     WriteMode,
     WriteOperation,
     WriteResponse,
@@ -48,10 +46,8 @@ __all__ = [
     "StreamWritePlan",
     "body_with_idempotency_key",
     "build_write_plan",
-    "collect_input_field_names",
     "collect_json_fields",
     "content_idempotency_key",
-    "idempotency_config_problem",
     "reserved_header_names",
     "retry_verdict",
     "write_mode_block",
@@ -189,18 +185,6 @@ def collect_json_fields(mode_block: WriteOperation) -> set[str]:
     return names
 
 
-def collect_input_field_names(mode_block: WriteOperation) -> set[str]:
-    """Every field name the write input schema declares, in both shapes."""
-    schema = mode_block.input.schema_
-    names: set[str] = {
-        name for name in (schema.get("properties") or {}) if isinstance(name, str)
-    }
-    for col in schema.get("columns") or []:
-        if isinstance(col, Mapping) and col.get("name"):
-            names.add(col["name"])
-    return names
-
-
 def reserved_header_names(transport_header_names: Iterable[str]) -> frozenset[str]:
     """Header names an endpoint may not declare: the CONNECTION's own.
 
@@ -222,66 +206,6 @@ def reserved_header_names(transport_header_names: Iterable[str]) -> frozenset[st
     it actually uses never sends.
     """
     return frozenset(name.lower() for name in transport_header_names)
-
-
-def idempotency_config_problem(
-    idempotency: Idempotency,
-    batching: Batching | None,
-    plan: StreamWritePlan,
-    *,
-    reserved_headers: frozenset[str] | set[str],
-    declared_input_fields: set[str],
-) -> str | None:
-    """Why this ``idempotency`` block cannot work for the stream, or ``None``.
-
-    Mirrors the api-endpoint schema's cross-block constraints that
-    per-model validation cannot express: the header namespace this
-    connection owns, the batching exclusion, and body-field collisions. The
-    block's own shape is contract-guaranteed. The contract has no batching
-    mode -- a present ``batching`` block IS the multi-record case, so the
-    exclusion keys on its presence.
-    """
-    target = idempotency.location
-    name = idempotency.name
-    if target == "header" and name.lower() in reserved_headers:
-        # Same rule as the body reserved-field check: these headers are
-        # engine-owned (Content-Type) or carry the connection's own values
-        # (auth and friends). Layering the key over one would silently
-        # break every request -- or send the record id as the credential.
-        return (
-            f"idempotency.name {name!r} collides with an engine- or "
-            f"connection-owned request header; pick a header the connection "
-            f"does not already send"
-        )
-    if batching is not None:
-        return (
-            "idempotency cannot be combined with a batching block: a restart "
-            "re-batches records, so a per-request key over several records "
-            "cannot dedup (issue #286); the api-endpoint schema forbids the "
-            "combination"
-        )
-    if target == "body":
-        if plan.body_spec is not None and not isinstance(plan.body_spec, Mapping):
-            return (
-                f"idempotency.in='body' needs a JSON-object request body; the "
-                f"declared request.body is a {type(plan.body_spec).__name__}"
-            )
-        if isinstance(plan.body_spec, Mapping) and name in plan.body_spec:
-            return (
-                f"request.body already declares the field {name!r} that "
-                f"idempotency.name reserves for the engine-owned key"
-            )
-        if plan.body_spec is None and name in declared_input_fields:
-            # No body template: the record itself is the body, shaped by the
-            # write input schema -- a declared field with the reserved name
-            # would collide on every record at write time, after the ack
-            # already promised exactly-once.
-            return (
-                f"the write input schema already declares the field {name!r} "
-                f"that idempotency.name reserves for the engine-owned key on "
-                f"the pass-through body"
-            )
-    return None
 
 
 def retry_verdict(mode_key: str, plan: StreamWritePlan) -> RetryVerdict:
@@ -325,7 +249,7 @@ def body_with_idempotency_key(
 ) -> dict[str, Any]:
     """Return the request body with the engine-owned idempotency key added.
 
-    Configure time already rejected a declared non-object body spec; this
+    The validator refuses a declared non-object body spec; this
     guards the remaining runtime shapes (a spec-less record body, or a spec
     that resolved away its object shape). A body already carrying the
     reserved field is a collision the engine must not silently overwrite.
@@ -414,32 +338,27 @@ def _batching_problem(plan: StreamWritePlan) -> str | None:
 def _apply_idempotency(
     plan: StreamWritePlan,
     mode_block: WriteOperation,
-    batching: Batching | None,
     *,
     reserved: frozenset[str],
 ) -> str | None:
     """Record where the engine-owned idempotency key lands, or why it cannot.
 
-    The author declares placement only -- the VALUE is always the
-    engine's -- so what can go wrong is where it would land: a header the
-    connection or the endpoint already sends, or a body field the record
-    already carries.
+    Which headers the connection's transport already sends is a session
+    fact no document can know, so a header key layered over one is refused
+    here; every placement rule decidable from the document is the
+    contract's.
     """
     idempotency = mode_block.idempotency
     if idempotency is None:
         return None
-    problem = idempotency_config_problem(
-        idempotency,
-        batching,
-        plan,
-        # The endpoint's own headers join the reserved set: the
-        # engine-owned key must not be layered over a header this
-        # endpoint declares either.
-        reserved_headers=reserved | {name.lower() for name in plan.headers},
-        declared_input_fields=collect_input_field_names(mode_block),
-    )
-    if problem is not None:
-        return problem
+    if idempotency.location == "header" and idempotency.name.lower() in reserved:
+        # Layering the key over a connection-owned header would shadow its
+        # value on every request -- or send the record id as the credential.
+        return (
+            f"idempotency.name {idempotency.name!r} collides with a request "
+            f"header the connection already sends; pick a header the "
+            f"connection does not own"
+        )
     plan.idempotency_in = idempotency.location
     plan.idempotency_name = idempotency.name
     return None
@@ -559,7 +478,7 @@ def build_write_plan(
             return problem
         plan.max_records = batching.max_records
 
-    problem = _apply_idempotency(plan, mode_block, batching, reserved=reserved)
+    problem = _apply_idempotency(plan, mode_block, reserved=reserved)
     if problem is not None:
         return problem
 

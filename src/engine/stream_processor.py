@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
+from analitiq.contracts.stream import StreamMapping
 
 from cdk.batch_metadata import response_metadata_of
 from cdk.contract import Readable
@@ -60,12 +61,7 @@ from .batch_policy import (
     Skipped,
 )
 from .exceptions import StreamProcessingError
-from .mapping import (
-    CompiledTransform,
-    MappingDocument,
-    ValidationFailure,
-    compile_mapping,
-)
+from .mapping import CompiledTransform, ValidationFailure, compile_mapping
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +152,7 @@ class StreamProcessor:
         *,
         stream_id: str,
         stream_config: dict[str, Any],
-        mapping: MappingDocument,
+        mapping: StreamMapping,
         pipeline_config: dict[str, Any],
         pipeline_id: str,
         state_manager: StateManager,

@@ -32,11 +32,7 @@ from cdk.registry import (
     load_class,
     load_kind_default,
 )
-from cdk.sql.capabilities import (
-    SqlCapabilities,
-    SqlCapabilitiesError,
-    parse_declared_capabilities,
-)
+from cdk.sql.capabilities import SqlCapabilities, parse_declared_capabilities
 from cdk.sql.dialects import SqlDialect
 from cdk.transport_factory import merged_transports
 from cdk.type_map.exceptions import InvalidTypeMapError
@@ -526,13 +522,7 @@ def load_target(
             f"the connector contract: {err}"
         ) from err
 
-    try:
-        capabilities = parse_declared_capabilities(
-            definition.get("sql_capabilities"),
-            source=str(definition_dir / CONNECTOR_DEFINITION_FILENAME),
-        )
-    except SqlCapabilitiesError as err:
-        raise ConformanceSetupError(str(err)) from err
+    capabilities = parse_declared_capabilities(definition.get("sql_capabilities"))
 
     connector_class, class_unavailable = _resolve_connector_class(
         connector_id, kind, class_path

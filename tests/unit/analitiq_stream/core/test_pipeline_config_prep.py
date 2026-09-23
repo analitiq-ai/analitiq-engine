@@ -20,12 +20,13 @@ from typing import Any
 import pyarrow as pa
 import pytest
 from analitiq.contracts.endpoint_identity import derive_db_endpoint_id
+from analitiq.contracts.stream import StreamMapping
 
 from cdk.conformance.fakes import type_map_document
 from cdk.types import EndpointScope
 from src.config.run_workspace import WorkspaceRejectedError
 from src.engine.batch_policy import ErrorStrategy
-from src.engine.mapping import MappingDocument, compile_mapping
+from src.engine.mapping import compile_mapping
 from src.engine.pipeline_config_prep import PipelineConfigPrep, _split_stream_ref
 
 # ---------------------------------------------------------------------------
@@ -439,7 +440,7 @@ class TestStreamMappingReachesTheTransform:
         _, stream_configs, _, _, _ = prep.create_config()
 
         mapping = stream_configs[0].mapping
-        assert isinstance(mapping, MappingDocument)
+        assert isinstance(mapping, StreamMapping)
 
         batch = pa.record_batch(
             [pa.array([{"city": "Berlin"}, {"city": "Kyiv"}])], names=["address"]
@@ -615,51 +616,6 @@ class TestCreateConfigErrorPaths:
             RuntimeError, match="Could not find pipelines/manifest.json"
         ):
             PipelineConfigPrep()
-
-
-# ---------------------------------------------------------------------------
-# Declared connector facts (#401)
-# ---------------------------------------------------------------------------
-
-
-class TestDeclaredConnectorFacts:
-    """The declared ``error_map`` / ``concurrency`` blocks (#401) at config load.
-
-    The workspace verdict grades the declaration's shape; ``_load_connector``
-    then parses it through the CDK's typed view -- the same parse the worker
-    re-runs at its process boundary, so a dropped line here would defer a
-    malformed declaration to a spawned worker.
-    """
-
-    def _write_connector(self, root: Path, connector_doc: dict[str, Any]) -> None:
-        _write_json(
-            root / "connectors" / CONNECTOR_ID / "definition" / "connector.json",
-            connector_doc,
-        )
-
-    def test_declared_concurrency_is_parsed_at_config_load(
-        self, pipeline_tree: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # A valid declaration loads, and the CDK parse runs on it — spied
-        # rather than mocked away, so the assertion is that the parse
-        # happened, not that validation was bypassed.
-        from src.engine import pipeline_config_prep as prep_module
-
-        seen: list[Any] = []
-        real_parse = prep_module.parse_declared_concurrency
-
-        def _spy(block: Any, *, source: str = "<inline>"):
-            seen.append(block)
-            return real_parse(block, source=source)
-
-        monkeypatch.setattr(prep_module, "parse_declared_concurrency", _spy)
-
-        connector_doc = _connector_doc()
-        connector_doc["concurrency"] = {"max_connections": 4}
-        self._write_connector(pipeline_tree, connector_doc)
-
-        PipelineConfigPrep().create_config()
-        assert {"max_connections": 4} in seen
 
 
 # ---------------------------------------------------------------------------

@@ -6,10 +6,9 @@ from unittest.mock import MagicMock
 import pytest
 from analitiq.contracts.pipelines.config import ErrorHandling as ContractErrorHandling
 from analitiq.contracts.pipelines.config import Runtime as ContractRuntime
-from analitiq.contracts.stream import Replication, StreamSource
+from analitiq.contracts.stream import Replication, StreamMapping, StreamSource
 from pydantic import BaseModel, Field, TypeAdapter, create_model
 
-from src.engine.mapping import MappingDocument
 from src.engine.pipeline_config_prep import _parse_replication, _parse_runtime_config
 from src.models.resolved import (
     BatchingConfig,
@@ -216,7 +215,7 @@ class TestResolvedModelGuards:
             stream_version=1,
             source=MagicMock(),
             destinations=[MagicMock()],
-            mapping=MappingDocument(),
+            mapping=StreamMapping(),
         )
 
     def test_resolved_stream_rejects_empty_id(self):

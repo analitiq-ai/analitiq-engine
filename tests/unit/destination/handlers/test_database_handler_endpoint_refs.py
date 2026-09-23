@@ -107,7 +107,6 @@ _DECLARED_CAPS = SqlCapabilities.from_declaration(
         "bulk_load": {},
         "stage": {"scope": "temp", "schema": "target", "transactional_ddl": True},
     },
-    source="<test>",
 )
 
 

@@ -21,6 +21,7 @@ from decimal import Decimal
 import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
+from analitiq.contracts.stream import StreamMapping
 
 from cdk.schema_contract import SchemaContract
 from cdk.type_map.arrow import arrow_family
@@ -36,7 +37,7 @@ from cdk.type_map.exceptions import InvalidTypeMapError
 from cdk.type_map.grammar import ARROW_FAMILIES
 from src.engine.batch_policy import ErrorStrategy
 from src.engine.exceptions import TransformationError
-from src.engine.mapping import _FUNCTION_CATALOG, MappingDocument, compile_mapping
+from src.engine.mapping import _FUNCTION_CATALOG, compile_mapping
 
 _VALID_MODES = {"identity", "auto", "explicit", "forbidden"}
 
@@ -274,7 +275,7 @@ def _retype_batch(target_arrow_type: str, column: pa.Array) -> pa.RecordBatch:
     ]
     batch = pa.RecordBatch.from_arrays([column], names=["src"])
     return compile_mapping(
-        MappingDocument.parse({"assignments": assignments}),
+        StreamMapping.model_validate({"assignments": assignments}),
         default_strategy=ErrorStrategy.FAIL,
     ).run(batch)
 
@@ -470,7 +471,7 @@ def _retype_nested(target: dict, column: pa.Array) -> pa.RecordBatch:
     ]
     batch = pa.RecordBatch.from_arrays([column], names=["src"])
     return compile_mapping(
-        MappingDocument.parse({"assignments": assignments}),
+        StreamMapping.model_validate({"assignments": assignments}),
         default_strategy=ErrorStrategy.FAIL,
     ).run(batch)
 

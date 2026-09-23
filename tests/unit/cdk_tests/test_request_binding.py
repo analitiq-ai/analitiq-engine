@@ -192,20 +192,3 @@ class TestResolveParamDefaults:
             "enabled": False,
             "prefix": "",
         }
-
-
-class TestCollectFromInputSelectors:
-    def test_collects_nested_selectors_skipping_literals(self):
-        from cdk.request_binding import collect_from_input_selectors
-
-        spec = {
-            "a": {"from_input": "record.id"},
-            "b": {"items": [{"from_input": "records"}]},
-            "c": {"literal": {"from_input": "record"}},  # data, not a binding
-            "d": {"function": "base64_encode", "input": {"from_input": "record.key"}},
-        }
-        assert collect_from_input_selectors(spec) == {
-            "record.id",
-            "records",
-            "record.key",
-        }

@@ -161,19 +161,6 @@ class ConnectionRuntime:
         connector_type_mapper: TypeMapper | None = None,
         connection_type_mapper: TypeMapper | None = None,
     ) -> None:
-        # Shape check only. The set of valid kinds is owned by the published
-        # connector schema and by the worker registry (an unrunnable kind
-        # raises ConnectorNotRegisteredError at resolution); pinning a
-        # parallel frozen set here would block registry-discovered kinds.
-        if not connector_type or not isinstance(connector_type, str):
-            raise ValueError(
-                f"connector_type must be a non-empty string, " f"got {connector_type!r}"
-            )
-        if not connector_id or not isinstance(connector_id, str):
-            raise ValueError(
-                f"connector_id must be a non-empty string, got {connector_id!r}"
-            )
-
         self._connection = connection
         self._connection_id = connection_id
         self._connector_id = connector_id

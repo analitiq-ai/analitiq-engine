@@ -12,7 +12,7 @@ import pytest
 
 from cdk.contract import ColumnDef
 from cdk.sql.backend import iter_landing_chunks
-from cdk.sql.capabilities import SqlCapabilities, SqlCapabilitiesError, SqlLimits
+from cdk.sql.capabilities import SqlCapabilities, SqlLimits
 from cdk.sql.ddl import build_create_table_sql
 from cdk.sql.dialects import SqlDialect, TableAddress
 from cdk.sql.exceptions import CreateTableError, SchemaConfigurationError
@@ -73,19 +73,6 @@ class TestLimitsGrammar:
         caps = _caps(limits={"max_bind_params": 999})
         assert caps.limits.max_bind_params == 999
         assert caps.limits.max_identifier_len is None
-
-    def test_unknown_limits_field_fails(self):
-        with pytest.raises(SqlCapabilitiesError, match="unknown fields"):
-            _caps(limits={"max_bind_parms": 2100})
-
-    @pytest.mark.parametrize("value", [0, -5, "2100", 2.5, True])
-    def test_non_positive_or_non_int_limit_fails(self, value):
-        with pytest.raises(SqlCapabilitiesError, match="positive integer"):
-            _caps(limits={"max_bind_params": value})
-
-    def test_non_object_limits_fails(self):
-        with pytest.raises(SqlCapabilitiesError, match="must be an object"):
-            _caps(limits=2100)
 
 
 class TestRowsPerStatement:

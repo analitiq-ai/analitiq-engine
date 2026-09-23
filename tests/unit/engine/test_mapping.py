@@ -1,30 +1,28 @@
 """Behavior coverage for the mapping module: one document, one transform.
 
-A mapping document is read once by ``MappingDocument.parse`` and compiled once
+A mapping document is read once by ``StreamMapping.model_validate`` and compiled once
 by ``compile_mapping`` into a ``CompiledTransform``; ``.run(batch)`` applies it
 to a ``pa.RecordBatch`` synchronously, raising ``TransformationError`` on any
-failure. These tests assert that contract: the token-array path grammar, the
-single-segment target rule, the required value ``kind``, the closed document,
-every expression op, the full function catalog, the conversion-matrix gating,
-fail-loud batch-wide semantics, and the static (compile-time) arity checks.
+failure. These tests assert that contract: the token-array path read, the
+``get``/``pipe`` expressions, the function catalog, the conversion-matrix
+gating, validation rules, and fail-loud batch-wide semantics. Document
+validity is the validator's and is not graded here.
 """
 
 import ast
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
 import pyarrow as pa
-import pyarrow.compute as pc
 import pytest
+from analitiq.contracts.stream import StreamMapping
 
 import src
 from src.engine.batch_policy import ErrorStrategy
 from src.engine.exceptions import TransformationError
 from src.engine.mapping import (
-    _EXPR_NODE_KEYS,
     _FUNCTION_CATALOG,
-    MappingDocument,
     ValidationFailure,
     build_output_schema,
     compile_mapping,
@@ -48,11 +46,6 @@ def _expr(node):
 def _const(value, arrow_type="Utf8"):
     """A constant value block (materialised at the target type)."""
     return {"kind": "constant", "constant": {"value": value, "arrow_type": arrow_type}}
-
-
-def _const_node(value):
-    """An expression-level ``op: const`` node (for use inside other ops)."""
-    return {"op": "const", "value": value}
 
 
 def _rule(rule_type, field="v", **extra):
@@ -80,7 +73,7 @@ def _assignment(name, arrow_type, value, nullable=True, validate=None, **target_
 
 def _document(assignments):
     """Read a list of assignments as a mapping document."""
-    return MappingDocument.parse({"assignments": assignments})
+    return StreamMapping.model_validate({"assignments": assignments})
 
 
 def _compile(assignments, default_strategy=ErrorStrategy.FAIL):
@@ -110,32 +103,14 @@ class TestTokenArrayPaths:
 
     def test_nested_get_inside_pipe_reads_the_nested_field(self):
         batch = pa.record_batch(
-            [pa.array([{"city": "  Berlin "}, {"city": " Kyiv"}])], names=["address"]
+            [pa.array([{"zip": 10115}, {"zip": 1001}])], names=["address"]
         )
         node = {
             "op": "pipe",
-            "args": [_get(["address", "city"]), {"op": "fn", "name": "trim"}],
+            "args": [_get(["address", "zip"]), {"op": "fn", "name": "to_string"}],
         }
-        out = _compile([_assignment("city", "Utf8", _expr(node))]).run(batch)
-        assert out.to_pylist() == [{"city": "Berlin"}, {"city": "Kyiv"}]
-
-    @pytest.mark.parametrize(
-        "node",
-        [
-            {"op": "get", "path": "address.city"},
-            {
-                "op": "pipe",
-                "args": [
-                    {"op": "get", "path": "address.city"},
-                    {"op": "fn", "name": "trim"},
-                ],
-            },
-        ],
-        ids=["at the root", "nested in a pipe"],
-    )
-    def test_a_dotted_string_path_is_refused_not_split(self, node):
-        with pytest.raises(TransformationError, match="array of field-name tokens"):
-            _compile([_assignment("city", "Utf8", _expr(node))])
+        out = _compile([_assignment("zip", "Utf8", _expr(node))]).run(batch)
+        assert out.to_pylist() == [{"zip": "10115"}, {"zip": "1001"}]
 
     def test_a_single_token_reads_a_field_whose_name_contains_a_dot(self):
         batch = pa.record_batch([pa.array(["v"])], names=["a.b"])
@@ -145,10 +120,6 @@ class TestTokenArrayPaths:
 
 class TestTargetIsOneSegment:
     """A target names one field on the destination record root."""
-
-    def test_dotted_target_is_refused_with_the_reason(self):
-        with pytest.raises(TransformationError, match="more than one segment"):
-            _compile([_assignment("address.city", "Utf8", _expr(_get("city")))])
 
     def test_nesting_is_declared_with_object_plus_properties(self):
         schema = build_output_schema(
@@ -164,98 +135,6 @@ class TestTargetIsOneSegment:
             ).assignments
         )
         assert pa.types.is_struct(schema.field("address").type)
-
-
-class TestValueKindIsExplicit:
-    """``kind`` discriminates the value union and has no default."""
-
-    def test_missing_kind_is_refused(self):
-        with pytest.raises(TransformationError, match="discriminator 'kind'"):
-            _compile([_assignment("s", "Utf8", {"expression": _get("s")})])
-
-    def test_unknown_kind_names_the_expected_tags(self):
-        with pytest.raises(TransformationError, match="'expression', 'constant'"):
-            _compile([_assignment("s", "Utf8", {"kind": "expr", "expr": _get("s")})])
-
-
-class TestDocumentIsClosed:
-    """An unknown field is rejected by name, never dropped on the way in."""
-
-    def test_unknown_mapping_field_is_named(self):
-        with pytest.raises(TransformationError, match=r"\bdefaults\b"):
-            compile_mapping(
-                MappingDocument.parse(
-                    {"assignments": [], "defaults": {"on_error": "dlq"}}
-                ),
-                default_strategy=ErrorStrategy.FAIL,
-            )
-
-    def test_unknown_assignment_field_is_named(self):
-        assignment = _assignment("s", "Utf8", _expr(_get("s")))
-        assignment["on_error"] = "dlq"
-        with pytest.raises(TransformationError, match=r"assignments\.0\.on_error"):
-            _compile([assignment])
-
-    def test_unknown_target_field_is_named(self):
-        with pytest.raises(
-            TransformationError, match=r"assignments\.0\.target\.generic_type"
-        ):
-            _compile(
-                [_assignment("s", "Utf8", _expr(_get("s")), generic_type="string")]
-            )
-
-    def test_missing_target_arrow_type_is_named(self):
-        with pytest.raises(
-            TransformationError, match=r"assignments\.0\.target\.arrow_type"
-        ):
-            _compile([{"target": {"path": "s"}, "value": _expr(_get("s"))}])
-
-    def test_non_object_target_is_refused_by_type_not_by_attribute_error(self):
-        """The read boundary reports every bad shape as a named field failure.
-
-        A scalar ``target`` is the one shape that used to reach the dotted-path
-        pre-check as a string and escape as a raw ``AttributeError``.
-        """
-        with pytest.raises(TransformationError, match=r"assignments\.0\.target"):
-            _compile([{"target": "id", "value": _expr(_get("s"))}])
-
-    @pytest.mark.parametrize(
-        "node",
-        [
-            {"op": "get", "path": ["n"], "default": 99},
-            {"op": "const", "value": 1, "cast": "Int64"},
-            {"op": "coalesce", "args": [_get("a")], "strict": True},
-        ],
-        ids=["get", "const", "coalesce"],
-    )
-    def test_unknown_expression_key_is_named(self, node):
-        """Closure reaches inside the AST, which is not a contract model."""
-        with pytest.raises(TransformationError, match=r"unknown key\(s\).*"):
-            _compile([_assignment("v", "Int64", _expr(node))])
-
-    def test_unknown_key_on_a_pipe_fn_stage_is_named(self):
-        node = {
-            "op": "pipe",
-            "args": [_get("v"), {"op": "fn", "name": "to_string", "unknown": 1}],
-        }
-        with pytest.raises(
-            TransformationError, match=r"unknown key\(s\) \['unknown'\]"
-        ):
-            _compile([_assignment("v", "Utf8", _expr(node))])
-
-    def test_every_op_the_compiler_knows_is_closed(self):
-        """The key table covers exactly the ops the compiler dispatches on.
-
-        A new op added to the match without a row here would compile with its
-        keys unchecked -- the gap this closes.
-        """
-        for op in _EXPR_NODE_KEYS:
-            with pytest.raises(TransformationError, match=r"unknown key\(s\)"):
-                _compile([_assignment("v", "Utf8", _expr({"op": op, "bogus_key": 1}))])
-
-    def test_a_non_object_expression_node_is_refused(self):
-        with pytest.raises(TransformationError, match="must be an object"):
-            _compile([_assignment("v", "Utf8", _expr({"op": "not", "args": ["x"]}))])
 
 
 def _splits_on_a_dot(tree: ast.AST) -> list[int]:
@@ -342,321 +221,28 @@ class TestExpressionOps:
         out = _run([{"a": 1}, {"a": 2}], [_assignment("s", "Utf8", _const("X"))])
         assert out == [{"s": "X"}, {"s": "X"}]
 
-    def test_pipe_chains_functions_left_to_right(self):
+    def test_pipe_applies_its_conversion_stage_to_the_seed(self):
         node = {
             "op": "pipe",
-            "args": [
-                _get("e"),
-                {"op": "fn", "name": "trim", "version": 1, "args": []},
-                {"op": "fn", "name": "lower", "version": 1, "args": []},
-            ],
+            "args": [_get("n"), {"op": "fn", "name": "to_string"}],
         }
-        out = _run([{"e": "  Foo@BAR.com "}], [_assignment("e", "Utf8", _expr(node))])
-        assert out == [{"e": "foo@bar.com"}]
-
-    def test_if_eq_select_branch_per_row(self):
-        node = {
-            "op": "if",
-            "args": [
-                {"op": "eq", "args": [_get("active"), _const_node(True)]},
-                _const_node("yes"),
-                _const_node("no"),
-            ],
-        }
-        out = _run(
-            [{"active": True}, {"active": False}],
-            [_assignment("label", "Utf8", _expr(node))],
-        )
-        assert out == [{"label": "yes"}, {"label": "no"}]
-
-    @pytest.mark.parametrize(
-        "op,left,right,expected",
-        [
-            ("eq", 1, 1, True),
-            ("eq", 1, 2, False),
-            ("neq", 1, 2, True),
-            ("neq", 1, 1, False),
-            ("gt", 5, 3, True),
-            ("gt", 3, 5, False),
-            ("gt", 5, 5, False),
-            ("gte", 5, 5, True),
-            ("gte", 3, 5, False),
-            ("lt", 3, 5, True),
-            ("lt", 5, 5, False),
-            ("lte", 3, 3, True),
-            ("lte", 5, 3, False),
-        ],
-    )
-    def test_comparison_ops_return_boolean(self, op, left, right, expected):
-        node = {"op": op, "args": [_const_node(left), _const_node(right)]}
-        out = _run([{"x": 0}], [_assignment("r", "Boolean", _expr(node))])
-        assert out == [{"r": expected}]
-
-    def test_and_or_not_evaluate_eagerly_to_result(self):
-        """and/or/if do NOT short-circuit -- the column result is what matters.
-
-        ``and`` of [true, false] is false; ``or`` of [false, true] is true;
-        ``not`` of true is false -- all computed across the whole column.
-        """
-        and_node = {"op": "and", "args": [_get("a"), _get("b")]}
-        or_node = {"op": "or", "args": [_get("b"), _get("a")]}
-        not_node = {"op": "not", "args": [_get("a")]}
-        records = [{"a": True, "b": False}]
-        assert _run(records, [_assignment("r", "Boolean", _expr(and_node))]) == [
-            {"r": False}
-        ]
-        assert _run(records, [_assignment("r", "Boolean", _expr(or_node))]) == [
-            {"r": True}
-        ]
-        assert _run(records, [_assignment("r", "Boolean", _expr(not_node))]) == [
-            {"r": False}
-        ]
-
-    def test_concat_joins_strings_and_skips_nulls(self):
-        node = {"op": "concat", "args": [_get("a"), _get("b"), _get("c")]}
-        out = _run(
-            [{"a": "hello", "b": None, "c": "world"}],
-            [_assignment("o", "Utf8", _expr(node))],
-        )
-        assert out == [{"o": "helloworld"}]
-
-    def test_coalesce_returns_first_non_null(self):
-        node = {"op": "coalesce", "args": [_get("a"), _get("b")]}
-        out = _run(
-            [{"a": None, "b": "fallback"}], [_assignment("v", "Utf8", _expr(node))]
-        )
-        assert out == [{"v": "fallback"}]
-
-    def test_coalesce_keeps_first_operand_where_present(self):
-        # Two rows make column a concrete string with a partial null, so this
-        # exercises row-wise precedence on a typed column, not null-type adoption.
-        node = {"op": "coalesce", "args": [_get("a"), _get("b")]}
-        out = _run(
-            [{"a": None, "b": "fb"}, {"a": "keep", "b": "fb"}],
-            [_assignment("v", "Utf8", _expr(node))],
-        )
-        assert out == [{"v": "fb"}, {"v": "keep"}]
-
-    def test_coalesce_all_null_stays_null(self):
-        node = {"op": "coalesce", "args": [_get("a"), _get("b")]}
-        out = _run([{"a": None, "b": None}], [_assignment("v", "Utf8", _expr(node))])
-        assert out == [{"v": None}]
-
-    def test_coalesce_mixed_concrete_types_fails_loud(self):
-        # Args of different concrete types share no kernel; the documented
-        # Typed-intermediates divergence is to fail the batch, never to carry
-        # a mixed-type value forward.
-        node = {"op": "coalesce", "args": [_get("a"), _const_node("fallback")]}
-        compiled = _compile([_assignment("v", "Utf8", _expr(node))])
-        with pytest.raises(TransformationError, match="coalesce expression failed"):
-            compiled.run(pa.RecordBatch.from_pylist([{"a": 1}, {"a": None}]))
-
-    def test_unknown_op_raises_at_compile(self):
-        with pytest.raises(TransformationError, match="Unknown expression op"):
-            _compile(
-                [_assignment("o", "Utf8", _expr({"op": "frobnicate", "args": []}))]
-            )
-
-    def test_incompatible_comparison_raises_at_run(self):
-        """Comparing across incompatible Arrow types is a per-batch run failure,
-        not a static one: the operand types are only known once the columns are
-        built."""
-        node = {"op": "gt", "args": [_const_node(5), _const_node("not-a-number")]}
-        compiled = _compile([_assignment("o", "Boolean", _expr(node))])
-        with pytest.raises(TransformationError, match="gt expression cannot compare"):
-            compiled.run(pa.RecordBatch.from_pylist([{"x": 0}]))
-
-
-class TestExpressionArityIsStatic:
-    """Wrong operator arity is a config defect caught at compile time -- before
-    any batch is seen -- because the AST is walked once in ``compile_mapping``.
-    """
-
-    @pytest.mark.parametrize("op", ["eq", "neq", "gt", "gte", "lt", "lte"])
-    def test_binary_ops_require_two_args(self, op):
-        node = {"op": op, "args": [_const_node(1)]}
-        with pytest.raises(
-            TransformationError, match=f"{op} expression requires 2 args"
-        ):
-            _compile([_assignment("o", "Boolean", _expr(node))])
-
-    def test_if_requires_three_args(self):
-        node = {"op": "if", "args": [_const_node(True)]}
-        with pytest.raises(TransformationError, match="if expression requires 3 args"):
-            _compile([_assignment("o", "Utf8", _expr(node))])
-
-    def test_not_requires_one_arg(self):
-        node = {"op": "not", "args": []}
-        with pytest.raises(TransformationError, match="not expression requires 1 args"):
-            _compile([_assignment("o", "Boolean", _expr(node))])
-
-    @pytest.mark.parametrize("op", ["and", "or", "concat", "coalesce", "pipe"])
-    def test_variadic_ops_require_at_least_one_arg(self, op):
-        node = {"op": op, "args": []}
-        with pytest.raises(TransformationError, match="at least 1 arg"):
-            _compile([_assignment("o", "Utf8", _expr(node))])
-
-    @pytest.mark.parametrize("op", ["and", "or"])
-    def test_missing_args_key_is_treated_as_empty(self, op):
-        with pytest.raises(TransformationError, match="at least 1 arg"):
-            _compile([_assignment("o", "Boolean", _expr({"op": op}))])
+        out = _run([{"n": 7}], [_assignment("n", "Utf8", _expr(node))])
+        assert out == [{"n": "7"}]
 
 
 class TestFunctionCatalog:
     """Every catalog kernel maps a ``pa.Array`` to a ``pa.Array``. Kernels are
     exercised directly so the input Arrow type is exact and unambiguous."""
 
-    def _v1(self, name):
-        return _FUNCTION_CATALOG[name][1]
-
-    def test_catalog_has_the_expected_eleven_functions(self):
-        assert set(_FUNCTION_CATALOG) == {
-            "iso_to_date",
-            "iso_to_datetime",
-            "iso_to_timestamp",
-            "trim",
-            "lower",
-            "upper",
-            "to_int",
-            "to_float",
-            "to_string",
-            "abs",
-            "now",
-        }
-
-    def test_trim_lower_upper(self):
-        assert self._v1("trim")(pa.array(["  x  "])).to_pylist() == ["x"]
-        assert self._v1("lower")(pa.array(["AbC"])).to_pylist() == ["abc"]
-        assert self._v1("upper")(pa.array(["AbC"])).to_pylist() == ["ABC"]
-
-    @pytest.mark.parametrize("name", ["trim", "lower", "upper", "to_string", "abs"])
-    def test_null_input_element_stays_null(self, name):
-        """A null row passes through every elementwise kernel as null -- it is
-        never coerced to "" or 0, which would defeat the nullability check."""
-        if name == "abs":
-            array = pa.array([None, -5], pa.int64())
-        else:
-            array = pa.array([None, "a"], pa.string())
-        assert self._v1(name)(array).to_pylist()[0] is None
-
-    def test_to_int_truncates_toward_zero(self):
-        out = self._v1("to_int")(pa.array(["3.9", "-3.9", None])).to_pylist()
-        assert out == [3, -3, None]
-
-    def test_to_int_raises_on_unparseable(self):
-        with pytest.raises(TransformationError, match="to_int"):
-            self._v1("to_int")(pa.array(["abc"]))
-
-    def test_to_float_parses_and_passes_null(self):
-        assert self._v1("to_float")(pa.array(["1.5", None])).to_pylist() == [1.5, None]
-
-    def test_to_float_raises_on_unparseable(self):
-        with pytest.raises(TransformationError, match="to_float"):
-            self._v1("to_float")(pa.array(["xyz"]))
+    def test_null_input_element_stays_null(self):
+        """A null row passes through as null -- never coerced to "", which
+        would defeat the nullability check."""
+        array = pa.array([None, "a"], pa.string())
+        assert _FUNCTION_CATALOG["to_string"](array).to_pylist()[0] is None
 
     def test_to_string_formats_numbers(self):
-        out = self._v1("to_string")(pa.array([1, 2, None], pa.int64())).to_pylist()
-        assert out == ["1", "2", None]
-
-    def test_abs_raises_on_non_numeric(self):
-        with pytest.raises(TransformationError, match="abs"):
-            self._v1("abs")(pa.array(["hello"]))
-
-    def test_iso_to_date_renders_naive_date_part(self):
-        out = self._v1("iso_to_date")(
-            pa.array(["2026-05-12T10:30:00", "2026-05-12", None])
-        ).to_pylist()
-        assert out == ["2026-05-12", "2026-05-12", None]
-
-    def test_iso_to_date_raises_on_unparseable(self):
-        with pytest.raises(TransformationError, match="iso_to_date"):
-            self._v1("iso_to_date")(pa.array(["not-a-date"]))
-
-    @pytest.mark.parametrize("name", ["iso_to_datetime", "iso_to_timestamp"])
-    def test_iso_to_datetime_parses_tz_aware_utc(self, name):
-        out = self._v1(name)(pa.array(["2026-05-12T10:30:00Z"]))
-        assert out.type == pa.timestamp("us", tz="UTC")
-        value = out.to_pylist()[0]
-        assert value.tzinfo is not None
-        assert value.utcoffset().total_seconds() == 0
-
-    @pytest.mark.parametrize("name", ["iso_to_datetime", "iso_to_timestamp"])
-    def test_iso_to_datetime_raises_on_unparseable(self, name):
-        # iso_to_timestamp aliases the iso_to_datetime kernel, so the raised
-        # message names the shared kernel; assert the parse failure itself.
-        with pytest.raises(TransformationError, match="Failed to parse"):
-            self._v1(name)(pa.array(["not-a-timestamp"]))
-
-    def test_now_returns_tz_aware_utc_column(self):
-        """``now`` broadcasts the current UTC instant to every row as a tz-aware
-        timestamp column -- a naive value would corrupt incremental sync."""
-        out = self._v1("now")(pa.array([0, 0, 0]))
-        assert out.type == pa.timestamp("us", tz="UTC")
-        assert len(out) == 3
-        first = out.to_pylist()[0]
-        assert first.tzinfo is not None
-        assert first.utcoffset().total_seconds() == 0
-
-    def test_iso_to_date_accepts_every_iso_form(self):
-        # Regression: a tz-suffixed value (the real Wise 'created' carries 'Z')
-        # must not raise. iso_to_date renders the wall-clock date for a bare
-        # date, a naive datetime, a 'Z' instant, and an offset alike.
-        out = self._v1("iso_to_date")(
-            pa.array(
-                [
-                    "2025-08-16T10:30:00Z",
-                    "2025-08-16T10:30:00+00:00",
-                    "2025-08-16T23:30:00+02:00",
-                    "2025-08-16T10:30:00",
-                    "2025-08-16",
-                    None,
-                ]
-            )
-        ).to_pylist()
-        assert out == ["2025-08-16"] * 5 + [None]
-
-
-class TestFunctionVersionDispatch:
-    """A pipe ``fn`` stage dispatches by ``version`` (default 1). Unknown name
-    or unregistered version is a config defect caught at compile time."""
-
-    def _pipe(self, fn_node):
-        return _expr({"op": "pipe", "args": [_get("v"), fn_node]})
-
-    def test_version_defaults_to_one(self):
-        out = _run(
-            [{"v": "  hi  "}],
-            [_assignment("o", "Utf8", self._pipe({"op": "fn", "name": "trim"}))],
-        )
-        assert out == [{"o": "hi"}]
-
-    def test_explicit_version_one_dispatches(self):
-        out = _run(
-            [{"v": "  hi  "}],
-            [
-                _assignment(
-                    "o",
-                    "Utf8",
-                    self._pipe({"op": "fn", "name": "trim", "version": 1, "args": []}),
-                )
-            ],
-        )
-        assert out == [{"o": "hi"}]
-
-    def test_unregistered_version_raises_naming_registered_versions(self):
-        node = {"op": "fn", "name": "trim", "version": 99, "args": []}
-        with pytest.raises(TransformationError, match=r"version 99.*\[1\]"):
-            _compile([_assignment("o", "Utf8", self._pipe(node))])
-
-    def test_unknown_function_raises(self):
-        node = {"op": "fn", "name": "nonexistent_fn", "version": 1, "args": []}
-        with pytest.raises(TransformationError, match="Unknown function"):
-            _compile([_assignment("o", "Utf8", self._pipe(node))])
-
-    def test_non_fn_op_in_pipe_stage_raises(self):
-        node = _expr({"op": "pipe", "args": [_const_node("x"), _get("y")]})
-        with pytest.raises(TransformationError, match="Expected fn op"):
-            _compile([_assignment("o", "Utf8", node)])
+        out = _FUNCTION_CATALOG["to_string"](pa.array([1, 2, None], pa.int64()))
+        assert out.to_pylist() == ["1", "2", None]
 
 
 class TestConversionMatrix:
@@ -773,19 +359,6 @@ class TestValidationRules:
                 validate={"rules": rules},
             )
         ]
-
-    def test_rule_naming_an_undeclared_target_fails_loud_at_run(self):
-        """Rule-field resolution is the contract's check, made once upstream.
-
-        The engine does not restate it -- a stray rule that slipped past a
-        different pin must still fail loud when its head token misses the
-        built record, never grade nothing and read as a pass.
-        """
-        with pytest.raises(TransformationError, match="the built value does not carry"):
-            _run(
-                [{"v": 1}],
-                self._validated([_rule("not_null", field="some_other_column")]),
-            )
 
     def test_rule_naming_another_declared_target_grades_that_column(self):
         """Rules grade the record the assignments build together.
@@ -961,39 +534,6 @@ class TestValidationRules:
         with pytest.raises(TransformationError, match=r"rows \[0\]"):
             _run([{"lines": None}, {"lines": []}], assignments)
 
-    def test_rule_token_the_target_does_not_declare_fails_loud_at_run(self):
-        """The nested half of the same upstream check: no silent grade.
-
-        A token past the first that the built struct does not carry raises
-        out of the field walk and is classified, never treated as an
-        all-pass rule over nothing.
-        """
-        with pytest.raises(TransformationError, match="the built value does not carry"):
-            _run(
-                [{"address": {"city": "Kyiv"}}],
-                [
-                    _assignment(
-                        "address",
-                        "Object",
-                        _expr(_get("address")),
-                        properties={"city": {"arrow_type": "Utf8"}},
-                        validate={
-                            "rules": [_rule("not_null", field=["address", "zip"])]
-                        },
-                    )
-                ],
-            )
-
-    def test_duplicate_assignment_targets_are_refused(self):
-        """Two assignments building one field would let array position decide."""
-        with pytest.raises(TransformationError, match="duplicate target.path"):
-            _compile(
-                [
-                    _assignment("v", "Int64", _expr(_get("v"))),
-                    _assignment("v", "Int64", _expr(_get("w"))),
-                ]
-            )
-
     def test_range_bounds_come_from_the_rule_value_object(self):
         rules = [_rule("range", value={"min": 1, "max": 5})]
         assert _run([{"v": 1}, {"v": 5}], self._validated(rules)) == [
@@ -1064,16 +604,6 @@ class TestValidationErrorStrategy:
             default=default,
         )
         assert failure.strategy is default
-
-    def test_null_strategy_is_a_document_shape_error(self):
-        """The contract's ``strategy`` is a literal, not nullable: ``null`` is
-        rejected at parse, never read as "unset" and never reaches
-        ``ErrorStrategy``."""
-        with pytest.raises(TransformationError, match="strategy"):
-            _compile(
-                [self._validated([_rule("not_null")], {"strategy": None})],
-                ErrorStrategy.FAIL,
-            )
 
     def test_retry_fields_change_nothing(self):
         """A rule is deterministic; the override's retry fields are not read."""
@@ -1189,120 +719,17 @@ class TestBuildOutputSchema:
 class TestPerRecordParity:
     """Edge semantics that must match the deleted per-record evaluator.
 
-    Vectorized Arrow kernels diverge from Python at the edges (null equality,
-    string truthiness, boolean formatting, all-null fallbacks); each kernel here
-    is steered back to the per-record behavior so existing mappings keep working.
+    Vectorized Arrow kernels diverge from Python at the edges (boolean
+    formatting); each kernel here is steered back to the per-record behavior.
     """
 
-    def _v1(self, name):
-        return _FUNCTION_CATALOG[name][1]
-
     def test_to_string_renders_bool_as_python_str(self):
-        out = self._v1("to_string")(pa.array([True, False, None])).to_pylist()
+        out = _FUNCTION_CATALOG["to_string"](pa.array([True, False, None])).to_pylist()
         assert out == ["True", "False", None]
-
-    def test_string_condition_uses_python_truthiness(self):
-        node = {
-            "op": "if",
-            "args": [_get("s"), _const_node("Y"), _const_node("N")],
-        }
-        out = _run(
-            [{"s": "x"}, {"s": ""}, {"s": None}],
-            [_assignment("r", "Utf8", _expr(node))],
-        )
-        assert out == [{"r": "Y"}, {"r": "N"}, {"r": "N"}]
-
-    def test_eq_treats_two_nulls_as_equal(self):
-        node = {
-            "op": "if",
-            "args": [
-                {"op": "eq", "args": [_get("a"), _const_node(None)]},
-                _const_node("missing"),
-                _const_node("present"),
-            ],
-        }
-        out = _run(
-            [{"a": None}, {"a": 5}],
-            [_assignment("r", "Utf8", _expr(node))],
-        )
-        assert out == [{"r": "missing"}, {"r": "present"}]
-
-    def test_coalesce_op_fills_a_missing_source_column(self):
-        # A missing column infers Arrow null type; it must adopt the fallback's
-        # concrete type instead of failing on a missing kernel.
-        node = {"op": "coalesce", "args": [_get("absent"), _const_node("N/A")]}
-        out = _run([{"x": 1}], [_assignment("v", "Utf8", _expr(node))])
-        assert out == [{"v": "N/A"}]
-
-    def test_iso_to_date_rejects_trailing_junk(self):
-        with pytest.raises(TransformationError, match="iso_to_date"):
-            self._v1("iso_to_date")(pa.array(["2025-08-16not-a-timestamp"]))
-
-    def test_iso_to_date_rejects_out_of_range_time(self):
-        # The date prefix is well-formed but the time is not -- the per-record
-        # fromisoformat rejected the whole value, so this must too.
-        with pytest.raises(TransformationError, match="iso_to_date"):
-            self._v1("iso_to_date")(pa.array(["2025-08-16T99:99:99"]))
-
-    def test_concat_renders_bool_as_python_str(self):
-        node = {"op": "concat", "args": [_get("a"), _get("b")]}
-        out = _run(
-            [{"a": "active=", "b": True}],
-            [_assignment("s", "Utf8", _expr(node))],
-        )
-        assert out == [{"s": "active=True"}]
-
-    def test_top_level_fn_runs_without_a_pipe_seed(self):
-        # A bare fn node as the value (the docs list `fn` as an op); `now` ignores
-        # its input, so every row gets a tz-aware timestamp.
-        node = {"op": "fn", "name": "now", "version": 1, "args": []}
-        out = _run(
-            [{"x": 1}, {"x": 2}],
-            [_assignment("ts", "Timestamp(MICROSECOND, UTC)", _expr(node))],
-        )
-        assert all(row["ts"] is not None for row in out)
-
-    def test_temporal_condition_is_truthy_when_present(self):
-        # Any datetime is truthy in Python; only a missing (null) value is false.
-        node = {"op": "if", "args": [_get("d"), _const_node("Y"), _const_node("N")]}
-        out = _run(
-            [{"d": datetime(2025, 1, 1, tzinfo=timezone.utc)}, {"d": None}],
-            [_assignment("r", "Utf8", _expr(node))],
-        )
-        assert out == [{"r": "Y"}, {"r": "N"}]
-
-    def test_iso_to_date_rejects_fraction_without_seconds(self):
-        with pytest.raises(TransformationError, match="iso_to_date"):
-            self._v1("iso_to_date")(pa.array(["2025-08-16T10:30.5Z"]))
-
-    def test_iso_to_datetime_accepts_naive_and_bare_date(self):
-        out = self._v1("iso_to_datetime")(
-            pa.array(["2026-05-12T10:30:00Z", "2026-05-12T10:30:00", "2026-05-12"])
-        ).to_pylist()
-        assert all(ts is not None and ts.tzinfo is not None for ts in out)
-
-    def test_no_single_pyarrow_cast_accepts_naive_and_offset_forms_together(self):
-        # This is why iso_to_datetime strips the zone marker and stamps UTC
-        # manually instead of casting straight to a timestamp: no single
-        # target admits both spellings, so a raw column mixing naive and
-        # zoned strings has no cast that would decode it in one pass.
-        naive, zoned = "2026-05-12T10:30:00", "2026-05-12T10:30:00Z"
-        with pytest.raises(pa.ArrowInvalid):
-            pc.cast(pa.array([zoned]), pa.timestamp("us"))
-        with pytest.raises(pa.ArrowInvalid):
-            pc.cast(pa.array([naive]), pa.timestamp("us", "UTC"))
-
-    def test_fn_wrong_arity_raises_transformation_error(self):
-        node = {
-            "op": "pipe",
-            "args": [_get("s"), {"op": "fn", "name": "trim", "args": ["extra"]}],
-        }
-        with pytest.raises(TransformationError, match="wrong arguments"):
-            _run([{"s": " x "}], [_assignment("s", "Utf8", _expr(node))])
 
     def test_pattern_validation_matches_python_bool_spelling(self):
         # A `True|False` pattern on a Boolean column must pass: booleans render as
-        # "True"/"False" for validation, matching to_string/concat.
+        # "True"/"False" for validation, matching to_string.
         out = _run(
             [{"b": True}, {"b": False}],
             [

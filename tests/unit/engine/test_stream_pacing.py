@@ -11,9 +11,10 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from analitiq.contracts.stream import StreamMapping
+
 from src.engine.batch_policy import ErrorStrategy
 from src.engine.engine import StreamingEngine
-from src.engine.mapping import MappingDocument
 from src.engine.stream_processor import StreamProcessor
 
 
@@ -91,7 +92,7 @@ class TestProcessStreamForwardsTheGate:
         monkeypatch.setattr("src.engine.engine.StreamProcessor", _Processor)
         gate = asyncio.Semaphore(2)
         await engine._process_stream(
-            "s1", {"mapping": MappingDocument()}, {}, pacing_gate=gate
+            "s1", {"mapping": StreamMapping()}, {}, pacing_gate=gate
         )
         assert captured["pacing_gate"] is gate
 

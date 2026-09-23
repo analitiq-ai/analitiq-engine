@@ -106,30 +106,6 @@ def bind_param_refs(spec: Any, params: Mapping[str, Any]) -> Any:
     return spec
 
 
-def collect_from_input_selectors(spec: Any) -> set:
-    """All ``from_input`` selector strings authored in a body spec.
-
-    Walks the same structure as :func:`bind_record_inputs` (``literal``
-    nodes are opaque) without binding anything — used to validate a body
-    spec against its batching declaration before any record is in flight.
-    """
-    selectors: set = set()
-    if isinstance(spec, Mapping):
-        if "from_input" in spec:
-            selector = spec["from_input"]
-            if isinstance(selector, str):
-                selectors.add(selector)
-            return selectors
-        if "literal" in spec:
-            return selectors
-        for value in spec.values():
-            selectors |= collect_from_input_selectors(value)
-    elif isinstance(spec, list):
-        for item in spec:
-            selectors |= collect_from_input_selectors(item)
-    return selectors
-
-
 def bind_record_inputs(
     spec: Any,
     *,

@@ -13,12 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from analitiq.contracts.endpoints import (
-    ApiEndpointDoc,
-    Batching,
-    Idempotency,
-    WriteOperation,
-)
+from analitiq.contracts.endpoints import ApiEndpointDoc, WriteOperation
 from pydantic import ValidationError
 
 from cdk.api.request import ParamTable, RequestBuilder
@@ -26,9 +21,7 @@ from cdk.api.write_plan import (
     StreamWritePlan,
     body_with_idempotency_key,
     build_write_plan,
-    collect_input_field_names,
     collect_json_fields,
-    idempotency_config_problem,
     retry_verdict,
     write_mode_block,
 )
@@ -266,13 +259,8 @@ class TestModeDispatch:
 
 
 class TestIdempotencyRefusals:
-    """The cross-block rules the per-model contract validation cannot express.
-
-    The header rule is one only this side knows: which headers the
-    connection already sends is a session fact, not a document one. The
-    rest mirror rules the contract also enforces -- kept as a second line
-    of defence, and reached by handing the blocks in directly, precisely
-    because a contract-valid document can no longer carry them.
+    """Which headers the connection already sends is a session fact, not a
+    document one, so it is the one placement rule this side owns.
     """
 
     def test_a_header_the_connection_already_sends_is_refused(self) -> None:
@@ -287,51 +275,6 @@ class TestIdempotencyRefusals:
             resolver=_resolver(),
         )
         assert isinstance(outcome, str) and "collides" in outcome
-
-    def test_batching_and_idempotency_cannot_combine(self) -> None:
-        # A restart re-batches records, so a per-request key over several
-        # of them cannot dedup.
-        problem = idempotency_config_problem(
-            Idempotency.model_validate({"in": "header", "name": "Idempotency-Key"}),
-            Batching.model_validate({"max_records": 10}),
-            StreamWritePlan(),
-            reserved_headers=set(),
-            declared_input_fields=set(),
-        )
-        assert problem is not None and "batching" in problem
-
-    def test_a_body_field_the_record_already_declares_is_refused(self) -> None:
-        # No body template: the record itself is the body, so a declared
-        # field with the reserved name collides on every record -- after
-        # the ack already promised exactly-once.
-        problem = idempotency_config_problem(
-            Idempotency.model_validate({"in": "body", "name": "id"}),
-            None,
-            StreamWritePlan(body_spec=None),
-            reserved_headers=set(),
-            declared_input_fields={"id"},
-        )
-        assert problem is not None and "write input schema" in problem
-
-    def test_a_body_template_field_the_key_reserves_is_refused(self) -> None:
-        problem = idempotency_config_problem(
-            Idempotency.model_validate({"in": "body", "name": "key"}),
-            None,
-            StreamWritePlan(body_spec={"key": {"literal": "x"}}),
-            reserved_headers=set(),
-            declared_input_fields=set(),
-        )
-        assert problem is not None and "request.body already declares" in problem
-
-    def test_a_non_object_body_cannot_carry_a_body_key(self) -> None:
-        problem = idempotency_config_problem(
-            Idempotency.model_validate({"in": "body", "name": "key"}),
-            None,
-            StreamWritePlan(body_spec=[{"from_input": "record"}]),
-            reserved_headers=set(),
-            declared_input_fields=set(),
-        )
-        assert problem is not None and "JSON-object request body" in problem
 
 
 class TestTheRequestTheStreamWillActuallySend:
@@ -741,25 +684,6 @@ class TestTheRequestTheStreamWillActuallySend:
         assert isinstance(outcome, str)
         assert "Authorization" in outcome
 
-    def test_an_idempotency_key_colliding_with_a_declared_header_is_rejected(
-        self,
-    ) -> None:
-        # One reserved set: the engine-owned key must not be layered over a
-        # header this endpoint declares either. Put to the rule directly,
-        # because the contract rejects such a document too -- no document
-        # build_write_plan will parse can carry this collision to the check.
-        plan = StreamWritePlan(headers={"Idempotency-Key": "authored"})
-        problem = idempotency_config_problem(
-            Idempotency.model_validate({"in": "header", "name": "Idempotency-Key"}),
-            None,
-            plan,
-            # The set the caller folds the endpoint's own declared headers
-            # into; nothing connection-owned is needed to make this collide.
-            reserved_headers={name.lower() for name in plan.headers},
-            declared_input_fields=set(),
-        )
-        assert problem is not None and "collides" in problem
-
 
 class TestRetryVerdicts:
     def test_upsert_is_exactly_once_without_a_declared_key(self) -> None:
@@ -811,7 +735,6 @@ class TestFieldCollection:
             }
         )
         assert collect_json_fields(block) == {"blob"}
-        assert collect_input_field_names(block) == {"blob", "id"}
 
 
 class TestBodyKeyInjection:

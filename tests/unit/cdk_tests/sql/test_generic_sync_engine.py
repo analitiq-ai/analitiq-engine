@@ -155,7 +155,6 @@ def _declared_caps(**stage_overrides: Any) -> SqlCapabilities:
             "bulk_load": {},
             "stage": stage,
         },
-        source="<test>",
     )
 
 
@@ -724,7 +723,6 @@ class TestDedicatedStageSchemaPreDdl:
                     "transactional_ddl": True,
                 },
             },
-            source="<test>",
         )
         handler.dialect = _PreDdlDialect(caps)
         handler._capabilities = caps
