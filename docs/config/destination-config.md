@@ -199,7 +199,7 @@ replay dedups while a changed row gets a new key and the provider applies
 the update. `configure_schema` refuses a header key name that collides
 with a header the connection's transport resolved, and, when the key goes
 in the body (`in: body`), a write refuses a resolved request body that is
-not a JSON object. Without the block, API `insert` is at-least-once on a
+not a JSON object or already carries the key's field. Without the block, API `insert` is at-least-once on a
 same-run restart.
 
 ### Stdout

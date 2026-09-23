@@ -9,8 +9,8 @@ The implementation lives in `src/engine/mapping.py`: `compile_mapping` compiles
 the stream's contract `StreamMapping` once into vectorized `pyarrow.compute`,
 which is applied to each Arrow batch. The engine compiles exactly the
 expression forms and conversion functions the contract declares; that match
-is checked at startup, so a contract release that adds one fails the engine
-at startup rather than on the first batch that carries it.
+is checked at import, so a contract release that adds or removes one fails
+the engine at startup rather than on the first batch that carries it.
 
 ## Overview
 
@@ -21,7 +21,7 @@ Target Field (path + arrow_type)  ←  Value (constant | expression)  ←  Optio
 ```
 
 The engine compiles each expression once per stream and evaluates it as
-vectorized Arrow compute over each batch -- the data never leaves Arrow.
+vectorized Arrow compute over each batch.
 
 ## Source Paths
 

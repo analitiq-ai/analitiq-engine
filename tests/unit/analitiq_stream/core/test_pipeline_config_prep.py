@@ -646,7 +646,7 @@ class TestConnectionScopedEndpoints:
     ) -> None:
         """A connection-scoped ref resolves the private endpoint document."""
         prep = PipelineConfigPrep()
-        _, stream_configs, connections, _, _ = prep.create_config()
+        _, stream_configs, _, _, _ = prep.create_config()
 
         dest = stream_configs[0].destinations[0]
         assert dest.endpoint_ref.scope == "connection"

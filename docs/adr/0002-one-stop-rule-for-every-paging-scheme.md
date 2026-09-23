@@ -62,5 +62,6 @@ loop would make advance-before-yield, the empty-page rule and the author's
 stop condition opt-out per connector, and would leave the conformance suite
 able to certify only that a hook returned something.
 
-The strategy union is closed for the same reason: a scheme newer than this
-build raises rather than falling through to another scheme's loop.
+The strategy union is closed for the same reason: the engine refuses to
+import when the contract's pagination schemes and its own adapters differ,
+so no scheme falls through to another scheme's loop.

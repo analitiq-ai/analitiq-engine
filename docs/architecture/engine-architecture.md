@@ -342,9 +342,8 @@ Each connection loaded by `PipelineConfigPrep` becomes a
 
 - Holds the resolved connector definition and the user's connection
   document.
-- Which kinds are runnable is decided by the worker registry
-  (`cdk/cdk/registry.py`), not by a hard-coded set, so
-  registry-discovered connector kinds are not blocked at config time.
+- Which connector class runs is decided by the worker registry
+  (`cdk/cdk/registry.py`), not by config prep.
 - When the connector declares a `transports` block, builds the actual
   transport (SQLAlchemy async engine, aiohttp ClientSession, etc.) via
   `cdk/cdk/transport_factory.py`. The factory keeps resolution and

@@ -1219,14 +1219,14 @@
     },
     "analitiq.contracts.validation_requests.ValidateWorkspaceRequest": {
       "documents": [
-        "src.config.run_workspace:77",
-        "src.config.run_workspace:87"
+        "src.config.run_workspace:79",
+        "src.config.run_workspace:89"
       ]
     },
     "analitiq.contracts.validation_requests.WorkspaceDocumentSet": {
       "root": [
-        "src.config.run_workspace:77",
-        "src.config.run_workspace:87"
+        "src.config.run_workspace:79",
+        "src.config.run_workspace:89"
       ]
     }
   },

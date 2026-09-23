@@ -1,10 +1,9 @@
 # ADR 0004: Capability is derived, never declared
 
-The engine reads no capability declaration. Whether a connector can
-discover schemas, create tables, read, or write is never a static flag —
-it is derived at each of two different moments, from
-two different sources, because "can this connector do X" is actually two
-unrelated questions wearing one name.
+Whether a connector can discover schemas, create tables, read, or write is
+never a static flag the engine reads from a declaration — it is derived at
+each of two different moments, from two different sources, because "can
+this connector do X" is actually two unrelated questions wearing one name.
 
 ## The two questions a capability flag would conflate
 

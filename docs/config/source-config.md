@@ -27,8 +27,7 @@ layering rules are in [`settings-reference.md`](settings-reference.md).
 - **A connection is identified by its directory name.** The engine keys
   each connection by the name of its directory under `connections/`, which
   is what a stream's `endpoint_ref.connection_id` reaches; it does not read
-  the `connection_id` inside `connection.json`, and the pinned validator
-  does not check that the two agree.
+  the `connection_id` inside `connection.json`.
 - **`source.connection_ref` is runtime-computed, never authored.**
   `pipeline_config_prep` copies `endpoint_ref.connection_id` onto the
   source block as a convenience key; it does not appear in the document a

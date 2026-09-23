@@ -86,8 +86,8 @@ Grounding the design in the existing code.
 Consumers load the same connector package, reading different subsets as
 needed. The engine reads only the packages the run's pipeline references; a
 separate control-plane runtime resolves the same package from its own
-registry source. The registry maps the connector's `kind` to a connector
-class.
+registry source. The registry resolves the connector class by
+`connector_id`, falling back to the generic class for its `kind`.
 
 ### Already decoupled — transports and secrets
 
@@ -174,8 +174,8 @@ constructs `ColumnDef`s directly and calls it with no engine orchestration.
 the direction `create_table` DDL needs. `TypeMapper` has two independent
 directions, never one inverted at runtime.
 
-**The engine reads no capability declaration.** Capability is two unrelated
-things (see §4): *protocol conformance*, derived by `isinstance` against the
+**Whether a connector can discover, create, read or write is never
+declared.** Capability is two unrelated things (see §4): *protocol conformance*, derived by `isinstance` against the
 `runtime_checkable` Protocols, and *authorization*, enforced by the database
 from the connection's credentials and grants at runtime.
 
@@ -322,7 +322,8 @@ the shared library**.
 
 ### Capability is not declared
 
-The engine reads no capability declaration. Capability is derived —
+Whether a connector can discover, create, read or write is derived, never
+declared —
 see [ADR 0004](../adr/0004-capability-is-derived-never-declared.md) for
 why it splits into protocol conformance (code-derived, via
 `isinstance(connector, Discoverable)` / `TableCreator`, varying only

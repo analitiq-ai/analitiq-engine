@@ -13,6 +13,7 @@ at its package model's locations, and a secret location is never read.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -20,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import re2
 from analitiq.contracts.connection_package import ConnectionPackage
 from analitiq.contracts.connector_package import ConnectorPackage
 from analitiq.contracts.pipeline_package import PipelinePackage
@@ -199,30 +201,68 @@ def _directories(
     return directories
 
 
+#: How far into a key RE2's bounds are exact; past it they only stay bounds.
+_MAX_KEY_LENGTH = 256
+
+
+@functools.cache
+def _document_key_ranges(
+    model: type[DocumentPackage],
+) -> tuple[tuple[bytes, bytes], ...]:
+    """Bounds on the keys each of ``model``'s readable locations can match.
+
+    RE2 computes them from the contract's own patterns, so which directories
+    can hold a document is never a second, hand-kept table. A bound may admit
+    a key its pattern refuses but never excludes one it accepts, which is all
+    pruning needs.
+    """
+    return tuple(
+        re2.compile(pattern).possiblematchrange(_MAX_KEY_LENGTH)
+        for pattern in model.LOCATIONS.keys() - model.SECRET_LOCATIONS
+    )
+
+
+def _may_hold_document(model: type[DocumentPackage], directory_key: str) -> bool:
+    """Whether a key under ``directory_key`` (ending in ``/``) can be located."""
+    prefix = directory_key.encode()
+    return any(
+        low[: len(prefix)] <= prefix <= high
+        for low, high in _document_key_ranges(model)
+    )
+
+
 def _read_package(
     root: Path, directory: str, model: type[DocumentPackage]
 ) -> dict[str, str]:
     """Every document at one of ``model``'s locations under ``directory``, by key.
 
     An absent directory reads as no documents; the reference to it is the
-    verdict's to report. A link inside a package, to a file or a directory, is
-    refused, so no key's text comes from outside its package.
+    verdict's to report. Only directories a readable location can reach are
+    walked, so a secret location and a checkout's tooling are never entered.
+    Inside those, a link to a file or a directory is refused, so no key's text
+    comes from outside its package.
     """
     package_root = root / directory
     if not package_root.is_dir():
         return {}
     documents: dict[str, str] = {}
     for current, directories, names in os.walk(package_root):
+        walked = Path(current).relative_to(package_root)
+        prefix = "" if walked == Path(".") else f"{walked.as_posix()}/"
+        directories[:] = [
+            name
+            for name in directories
+            if _may_hold_document(model, f"{prefix}{name}/")
+        ]
         for name in directories:
-            path = Path(current) / name
-            if path.is_symlink():
+            if (Path(current) / name).is_symlink():
                 raise WorkspaceLayoutError(
-                    f"{directory}{path.relative_to(package_root).as_posix()} is a "
-                    f"link; a package directory must be inside its package"
+                    f"{directory}{prefix}{name} is a link; a package directory "
+                    f"must be inside its package"
                 )
         for name in names:
             path = Path(current) / name
-            key = path.relative_to(package_root).as_posix()
+            key = f"{prefix}{name}"
             if model.kind_at(key) is None or model.secret_at(key):
                 continue
             if path.is_symlink():

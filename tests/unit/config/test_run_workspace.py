@@ -204,6 +204,26 @@ class TestTheLayoutMustBeReadable:
         with pytest.raises(WorkspaceLayoutError, match="definition/endpoints"):
             _read(workspace_root)
 
+    def test_links_where_no_document_can_sit_are_left_alone(
+        self, workspace_root: Path, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        """A checkout carries tooling no location names -- a nested worktree's
+        linked virtualenv, a linked secrets directory -- and the run reads
+        past it."""
+        outside = tmp_path_factory.mktemp("outside")
+        venv = workspace_root / "connectors/api/.git/wt/1/.venv"
+        venv.mkdir(parents=True)
+        (venv / "lib64").symlink_to(outside)
+        secrets = workspace_root / "connections/src/.secrets"
+        (secrets / "credentials.json").unlink()
+        secrets.rmdir()
+        secrets.symlink_to(outside)
+
+        keys = _read(workspace_root).request.documents.root
+
+        assert "connectors/api/definition/connector.json" in keys
+        assert not any(".secrets" in key or ".git" in key for key in keys)
+
     def test_a_linked_package_directory_is_read(
         self, workspace_root: Path, tmp_path_factory: pytest.TempPathFactory
     ) -> None:

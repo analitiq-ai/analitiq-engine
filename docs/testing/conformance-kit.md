@@ -90,11 +90,12 @@ in a customer pipeline (spec
   the replication cursor, and substitutes the path only once the
   incremental filter has bound; a definition-only run has none of the
   three, so a placeholder bound to a declared param gets a stand-in segment
-  and the drives carry on. Only a placeholder bound to an expression no run
-  fills is a finding — it reads no scope at all, or it reads
-  `secrets`/`auth`, which request-time resolution never supplies (they
-  resolve once, engine-side, at transport materialization). It fails for
-  every connection and every stream. The
+  and the drives carry on. A placeholder is a finding when it
+  is bound to an expression no run fills — it reads no scope at all, or it
+  reads `secrets`/`auth`, which request-time resolution never supplies (they
+  resolve once, engine-side, at transport materialization) — or when the
+  definition settles it to an empty string, which the path substitution
+  refuses. Either fails for every connection and every stream. The
   same shape governs every deferral, with the scope set matched to its
   phase: a request slot defers only what `connection.*` supplies, the
   transport's `base_url` and headers defer what materialization supplies
