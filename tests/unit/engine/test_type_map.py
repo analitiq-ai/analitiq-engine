@@ -7,7 +7,7 @@ Covers every acceptance bullet from GH #28:
 - whitespace / case normalization
 - hard error on unmapped native types
 - SSL mode lookup + canonical-value validation
-- file loading + caching discipline
+- type-map document parsing
 """
 
 from __future__ import annotations
@@ -15,21 +15,20 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from cdk.conformance.fakes import type_map_document
 from cdk.type_map import (
     InvalidTypeMapError,
-    TypeMapNotFoundError,
     TypeMapper,
     UnmappedTypeError,
-    load_connection_type_map,
-    load_type_map,
     normalize_arrow_type,
     normalize_native_type,
     parse_arrow_type,
 )
+from cdk.type_map.loader import parse_type_mapper, read_raw_type_map
 from cdk.type_map.rules import parse_rules, parse_write_rules
 
 # ---------------------------------------------------------------------------
@@ -514,137 +513,56 @@ class TestResolveArrowType:
 # ---------------------------------------------------------------------------
 
 
-def _write_connector(
-    root: Path,
-    slug: str,
-    *,
-    type_map: list | None = None,
-    write_type_map: list | None = None,
-) -> None:
-    definition = root / slug / "definition"
-    definition.mkdir(parents=True, exist_ok=True)
-    (definition / "connector.json").write_text(
-        json.dumps({"connector_id": "x", "slug": slug, "connector_type": "database"})
-    )
-    if type_map is not None or write_type_map is not None:
-        (definition / "type-map.json").write_text(
-            json.dumps(type_map_document(read=type_map, write=write_type_map))
-        )
-
-
-class TestLoaders:
-    def test_type_map_missing_raises(self, tmp_path: Path):
-        _write_connector(tmp_path, "empty")
-        with pytest.raises(InvalidTypeMapError, match="required type-map not found"):
-            load_type_map(tmp_path, "empty")
-
-    def test_document_the_contract_model_rejects_is_invalid(self, tmp_path: Path):
-        _write_connector(tmp_path, "no-rules")
-        (tmp_path / "no-rules" / "definition" / "type-map.json").write_text(
-            json.dumps(type_map_document())
-        )
-        with pytest.raises(InvalidTypeMapError, match="no-rules"):
-            load_type_map(tmp_path, "no-rules")
-
-    def test_type_map_malformed_json(self, tmp_path: Path):
-        _write_connector(tmp_path, "busted")
-        (tmp_path / "busted" / "definition" / "type-map.json").write_text("not json")
-        with pytest.raises(InvalidTypeMapError, match="not valid JSON"):
-            load_type_map(tmp_path, "busted")
-
-    def test_type_map_happy_path(self, tmp_path: Path):
-        _write_connector(
-            tmp_path,
-            "demo",
-            type_map=[{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}],
-        )
-        mapper = load_type_map(tmp_path, "demo")
-        assert mapper.connector_slug == "demo"
-        assert mapper.to_arrow_type("text") == "Utf8"
-
-
-class TestSingleTypeMapDocument:
+class TestParsingATypeMapDocument:
     """One ``type-map.json`` carries the read and write maps, each optional."""
 
     _READ = [{"match": "exact", "native_type": "TEXT", "arrow_type": "Utf8"}]
     _WRITE = [{"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"}]
 
-    def test_both_sections_load_both_maps(self, tmp_path: Path):
-        _write_connector(
-            tmp_path, "both", type_map=self._READ, write_type_map=self._WRITE
+    def _parse(self, **directions: Any) -> TypeMapper:
+        return parse_type_mapper(
+            "demo", type_map_document(**directions), source="type-map.json"
         )
-        mapper = load_type_map(tmp_path, "both")
+
+    def test_both_sections_parse_both_maps(self):
+        mapper = self._parse(read=self._READ, write=self._WRITE)
+        assert mapper.connector_slug == "demo"
         assert mapper.to_arrow_type("text") == "Utf8"
         assert mapper.to_native_type("Int64") == "BIGINT"
 
-    def test_write_only_document_loads_the_write_map(self, tmp_path: Path):
-        _write_connector(tmp_path, "writeonly", write_type_map=self._WRITE)
-        mapper = load_type_map(tmp_path, "writeonly")
+    def test_write_only_document_parses_the_write_map(self):
+        mapper = self._parse(write=self._WRITE)
         assert mapper.has_read_map is False
         assert mapper.to_native_type("Int64") == "BIGINT"
         with pytest.raises(InvalidTypeMapError, match="no read type map"):
             mapper.to_arrow_type("text")
 
-    def test_read_only_document_has_no_write_map(self, tmp_path: Path):
-        _write_connector(tmp_path, "readonly", type_map=self._READ)
-        mapper = load_type_map(tmp_path, "readonly")
+    def test_read_only_document_has_no_write_map(self):
+        mapper = self._parse(read=self._READ)
         assert mapper.has_read_map is True
         assert mapper.has_write_map is False
 
-    def test_connection_write_only_document_loads(self, tmp_path: Path):
-        definition = tmp_path / "my-pg" / "definition"
-        definition.mkdir(parents=True)
-        (definition / "type-map.json").write_text(
-            json.dumps(type_map_document(write=self._WRITE))
-        )
-        mapper = load_connection_type_map(tmp_path, "my-pg")
-        assert mapper is not None
-        assert mapper.to_native_type("Int64") == "BIGINT"
+    def test_document_the_contract_model_rejects_is_invalid(self):
+        with pytest.raises(InvalidTypeMapError, match="type-map.json"):
+            self._parse()
+
+
+class TestReadingARawTypeMap:
+    """The worker-bootstrap read of a definition directory's ``type-map.json``."""
+
+    def test_absent_reads_as_none(self, tmp_path: Path):
+        assert read_raw_type_map(tmp_path, "demo") is None
 
     def test_the_pre_merge_file_names_are_not_read(self, tmp_path: Path):
-        _write_connector(tmp_path, "old-names")
-        definition = tmp_path / "old-names" / "definition"
-        (definition / "type-map-read.json").write_text(
-            json.dumps(type_map_document(read=self._READ))
+        (tmp_path / "type-map-read.json").write_text(
+            json.dumps(type_map_document(read=[]))
         )
-        with pytest.raises(TypeMapNotFoundError, match="required type-map not found"):
-            load_type_map(tmp_path, "old-names")
-
-
-class TestLoadConnectionTypeMap:
-    """Connection-scoped type-map lives under ``connections/{alias}/definition/``."""
-
-    def test_absent_returns_none(self, tmp_path: Path):
-        (tmp_path / "my-pg" / "definition").mkdir(parents=True)
-        assert load_connection_type_map(tmp_path, "my-pg") is None
-
-    def test_happy_path(self, tmp_path: Path):
-        definition = tmp_path / "my-pg" / "definition"
-        definition.mkdir(parents=True)
-        (definition / "type-map.json").write_text(
-            json.dumps(
-                type_map_document(
-                    read=[
-                        {
-                            "match": "exact",
-                            "native_type": "CUSTOM_ENUM",
-                            "arrow_type": "Utf8",
-                        },
-                    ],
-                )
-            )
-        )
-        mapper = load_connection_type_map(tmp_path, "my-pg")
-        assert mapper is not None
-        assert mapper.connector_slug == "connection:my-pg"
-        assert mapper.to_arrow_type("CUSTOM_ENUM") == "Utf8"
+        assert read_raw_type_map(tmp_path, "demo") is None
 
     def test_malformed_json_raises(self, tmp_path: Path):
-        definition = tmp_path / "broken" / "definition"
-        definition.mkdir(parents=True)
-        (definition / "type-map.json").write_text("not json")
+        (tmp_path / "type-map.json").write_text("not json")
         with pytest.raises(InvalidTypeMapError, match="not valid JSON"):
-            load_connection_type_map(tmp_path, "broken")
+            read_raw_type_map(tmp_path, "demo")
 
 
 # ---------------------------------------------------------------------------
@@ -1291,81 +1209,3 @@ class TestToNativeTypeRegex:
 # ---------------------------------------------------------------------------
 # Loader — write-direction document
 # ---------------------------------------------------------------------------
-
-
-class TestWriteMapLoader:
-    def test_sibling_write_map_loaded(self, tmp_path: Path):
-        _write_connector(
-            tmp_path,
-            "demo",
-            type_map=[
-                {"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"}
-            ],
-            write_type_map=[
-                {"match": "exact", "arrow_type": "Int64", "native_type": "BIGINT"}
-            ],
-        )
-        mapper = load_type_map(tmp_path, "demo")
-        assert mapper.has_write_map is True
-        assert mapper.to_native_type("Int64") == "BIGINT"
-
-    def test_absent_write_map_leaves_read_only_mapper(self, tmp_path: Path):
-        _write_connector(
-            tmp_path,
-            "readonly",
-            type_map=[
-                {"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"}
-            ],
-        )
-        mapper = load_type_map(tmp_path, "readonly")
-        assert mapper.has_write_map is False
-        assert mapper.to_arrow_type("BIGINT") == "Int64"
-
-    def test_malformed_write_map_raises_at_load(self, tmp_path):
-        # A present-but-broken write map fails fast (caught by registry CI),
-        # not silently downgraded. It is NOT a TypeMapNotFoundError, so the
-        # connector loader treats it as fatal rather than "no type-map".
-        _write_connector(
-            tmp_path,
-            "busted",
-            type_map=[
-                {"match": "exact", "native_type": "BIGINT", "arrow_type": "Int64"}
-            ],
-        )
-        (tmp_path / "busted" / "definition" / "type-map.json").write_text("nope")
-        with pytest.raises(InvalidTypeMapError, match="not valid JSON") as exc:
-            load_type_map(tmp_path, "busted")
-        assert not isinstance(exc.value, TypeMapNotFoundError)
-
-    def test_no_type_map_documents_raises_not_found(self, tmp_path):
-        # Absence is the benign case the connector loader downgrades to None.
-        _write_connector(tmp_path, "apionly")  # connector.json only, no type-map
-        with pytest.raises(TypeMapNotFoundError, match="required type-map not found"):
-            load_type_map(tmp_path, "apionly")
-
-    def test_connection_scoped_write_map_loaded(self, tmp_path: Path):
-        definition = tmp_path / "my-pg" / "definition"
-        definition.mkdir(parents=True)
-        (definition / "type-map.json").write_text(
-            json.dumps(
-                type_map_document(
-                    read=[
-                        {
-                            "match": "exact",
-                            "native_type": "BIGINT",
-                            "arrow_type": "Int64",
-                        }
-                    ],
-                    write=[
-                        {
-                            "match": "exact",
-                            "arrow_type": "Int64",
-                            "native_type": "BIGINT",
-                        }
-                    ],
-                )
-            )
-        )
-        mapper = load_connection_type_map(tmp_path, "my-pg")
-        assert mapper is not None
-        assert mapper.to_native_type("Int64") == "BIGINT"

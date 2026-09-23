@@ -190,6 +190,20 @@ class TestTheLayoutMustBeReadable:
         with pytest.raises(WorkspaceLayoutError, match="linked.json"):
             _read(workspace_root)
 
+    def test_a_linked_directory_inside_a_package_is_refused(
+        self, workspace_root: Path, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        outside = tmp_path_factory.mktemp("outside")
+        (outside / "e.json").write_text("{}")
+        endpoints = workspace_root / "connectors/api/definition/endpoints"
+        for document in endpoints.iterdir():
+            document.unlink()
+        endpoints.rmdir()
+        endpoints.symlink_to(outside)
+
+        with pytest.raises(WorkspaceLayoutError, match="definition/endpoints"):
+            _read(workspace_root)
+
     def test_a_linked_package_directory_is_read(
         self, workspace_root: Path, tmp_path_factory: pytest.TempPathFactory
     ) -> None:
@@ -200,14 +214,6 @@ class TestTheLayoutMustBeReadable:
         keys = _read(workspace_root).request.documents.root
 
         assert "connectors/api/definition/connector.json" in keys
-
-    def test_a_document_that_is_not_utf8_is_refused(self, workspace_root: Path) -> None:
-        (workspace_root / "connectors/api/definition/endpoints/e.json").write_bytes(
-            b"\xff\xfe"
-        )
-
-        with pytest.raises(WorkspaceLayoutError, match="e.json"):
-            _read(workspace_root)
 
     def test_a_pipeline_outside_the_pipeline_locations_is_refused(
         self, workspace_root: Path
@@ -249,6 +255,28 @@ class TestTheRunIsGatedOnTheVerdict:
 
         assert err.value.findings == [findings[0]]
         assert "advisory only" not in str(err.value)
+
+    def test_the_refusal_names_every_finding_that_cost_the_pass(
+        self, workspace_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from src.config import run_workspace
+
+        findings = [
+            {**_finding("fail", "error", f"defect {n}"), "rule": f"RULE-X-{n:03}"}
+            for n in range(12)
+        ]
+        monkeypatch.setattr(
+            run_workspace,
+            "validate_workspace",
+            lambda request: {"passed": False, "findings": findings},
+        )
+
+        with pytest.raises(WorkspaceRejectedError) as err:
+            gate_run(_read(workspace_root))
+
+        for n in range(12):
+            assert f"RULE-X-{n:03}" in str(err.value)
+            assert f"defect {n}" in str(err.value)
 
     def test_a_passed_verdict_runs_and_logs_what_it_reported(
         self,

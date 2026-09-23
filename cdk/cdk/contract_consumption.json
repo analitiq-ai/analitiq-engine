@@ -2,7 +2,7 @@
   "claims": {
     "analitiq.contracts.connection.ConnectionInput": {
       "connector_id": [
-        "src.engine.pipeline_config_prep:323"
+        "src.engine.pipeline_config_prep:324"
       ],
       "discovered": [
         "cdk.connection_runtime:451"
@@ -40,7 +40,7 @@
         "cdk.connection_runtime:201"
       ],
       "kind": [
-        "src.engine.pipeline_config_prep:420"
+        "src.engine.pipeline_config_prep:421"
       ],
       "transport_defaults": [
         "cdk.transport_factory:290"
@@ -85,7 +85,7 @@
         "cdk.connection_runtime:201"
       ],
       "kind": [
-        "src.engine.pipeline_config_prep:420"
+        "src.engine.pipeline_config_prep:421"
       ],
       "sql_capabilities": [
         "cdk.connection_runtime:191"
@@ -120,7 +120,7 @@
         "cdk.connection_runtime:201"
       ],
       "kind": [
-        "src.engine.pipeline_config_prep:420"
+        "src.engine.pipeline_config_prep:421"
       ],
       "transport_defaults": [
         "cdk.transport_factory:290"
@@ -152,7 +152,7 @@
         "cdk.connection_runtime:201"
       ],
       "kind": [
-        "src.engine.pipeline_config_prep:420"
+        "src.engine.pipeline_config_prep:421"
       ],
       "transport_defaults": [
         "cdk.transport_factory:290"
@@ -184,7 +184,7 @@
         "cdk.connection_runtime:201"
       ],
       "kind": [
-        "src.engine.pipeline_config_prep:420"
+        "src.engine.pipeline_config_prep:421"
       ],
       "transport_defaults": [
         "cdk.transport_factory:290"
@@ -216,7 +216,7 @@
         "cdk.connection_runtime:201"
       ],
       "kind": [
-        "src.engine.pipeline_config_prep:420"
+        "src.engine.pipeline_config_prep:421"
       ],
       "transport_defaults": [
         "cdk.transport_factory:290"
@@ -248,7 +248,7 @@
         "cdk.connection_runtime:201"
       ],
       "kind": [
-        "src.engine.pipeline_config_prep:420"
+        "src.engine.pipeline_config_prep:421"
       ],
       "transport_defaults": [
         "cdk.transport_factory:290"
@@ -872,25 +872,28 @@
     },
     "analitiq.contracts.pipelines.config.PipelineConnections": {
       "destinations": [
-        "src.engine.pipeline_config_prep:503"
+        "src.engine.pipeline_config_prep:506"
       ],
       "source": [
-        "src.engine.pipeline_config_prep:500"
+        "src.engine.pipeline_config_prep:503"
       ]
     },
     "analitiq.contracts.pipelines.config.PipelineInput": {
       "connections": [
-        "src.engine.pipeline_config_prep:500",
-        "src.engine.pipeline_config_prep:503"
+        "src.engine.pipeline_config_prep:503",
+        "src.engine.pipeline_config_prep:506"
       ],
       "display_name": [
-        "src.engine.pipeline_config_prep:522"
+        "src.engine.pipeline_config_prep:525"
+      ],
+      "pipeline_id": [
+        "src.engine.pipeline_config_prep:501"
       ],
       "runtime": [
-        "src.engine.pipeline_config_prep:531"
+        "src.engine.pipeline_config_prep:534"
       ],
       "streams": [
-        "src.engine.pipeline_config_prep:519"
+        "src.engine.pipeline_config_prep:522"
       ]
     },
     "analitiq.contracts.pipelines.config.Runtime": {
@@ -909,10 +912,10 @@
     },
     "analitiq.contracts.stream.ApiStreamDestination": {
       "endpoint_ref": [
-        "src.engine.pipeline_config_prep:565"
+        "src.engine.pipeline_config_prep:568"
       ],
       "write": [
-        "src.engine.pipeline_config_prep:610"
+        "src.engine.pipeline_config_prep:613"
       ]
     },
     "analitiq.contracts.stream.ApiWrite": {
@@ -939,7 +942,7 @@
       "connection_id": [
         "src.config.endpoint_resolver:86",
         "src.config.endpoint_resolver:108",
-        "src.engine.pipeline_config_prep:566"
+        "src.engine.pipeline_config_prep:569"
       ],
       "endpoint_id": [
         "src.config.endpoint_resolver:86",
@@ -955,7 +958,7 @@
       "connection_id": [
         "src.config.endpoint_resolver:86",
         "src.config.endpoint_resolver:102",
-        "src.engine.pipeline_config_prep:566"
+        "src.engine.pipeline_config_prep:569"
       ],
       "endpoint_id": [
         "src.config.endpoint_resolver:86",
@@ -994,10 +997,10 @@
     },
     "analitiq.contracts.stream.DatabaseStreamDestination": {
       "endpoint_ref": [
-        "src.engine.pipeline_config_prep:565"
+        "src.engine.pipeline_config_prep:568"
       ],
       "write": [
-        "src.engine.pipeline_config_prep:610"
+        "src.engine.pipeline_config_prep:613"
       ]
     },
     "analitiq.contracts.stream.Filter": {
@@ -1061,18 +1064,18 @@
     },
     "analitiq.contracts.stream.StreamInput": {
       "destinations": [
-        "src.engine.pipeline_config_prep:597"
+        "src.engine.pipeline_config_prep:600"
       ],
       "mapping": [
-        "src.engine.pipeline_config_prep:617"
+        "src.engine.pipeline_config_prep:620"
       ],
       "source": [
-        "src.engine.pipeline_config_prep:578"
+        "src.engine.pipeline_config_prep:581"
       ],
       "stream_id": [
-        "src.engine.pipeline_config_prep:338",
-        "src.engine.pipeline_config_prep:341",
-        "src.engine.pipeline_config_prep:342"
+        "src.engine.pipeline_config_prep:339",
+        "src.engine.pipeline_config_prep:343",
+        "src.engine.pipeline_config_prep:344"
       ]
     },
     "analitiq.contracts.stream.StreamSource": {
@@ -1081,14 +1084,14 @@
       ],
       "endpoint_ref": [
         "cdk.api.generic:209",
-        "src.engine.pipeline_config_prep:565"
+        "src.engine.pipeline_config_prep:568"
       ],
       "filters": [
         "cdk.api.generic:540",
         "cdk.sql.generic:2128"
       ],
       "primary_keys": [
-        "src.engine.pipeline_config_prep:592"
+        "src.engine.pipeline_config_prep:595"
       ],
       "replication": [
         "cdk.api.generic:573",
@@ -1203,14 +1206,14 @@
     },
     "analitiq.contracts.validation_requests.ValidateWorkspaceRequest": {
       "documents": [
-        "src.config.run_workspace:68",
-        "src.config.run_workspace:76"
+        "src.config.run_workspace:77",
+        "src.config.run_workspace:87"
       ]
     },
     "analitiq.contracts.validation_requests.WorkspaceDocumentSet": {
       "root": [
-        "src.config.run_workspace:68",
-        "src.config.run_workspace:76"
+        "src.config.run_workspace:77",
+        "src.config.run_workspace:87"
       ]
     }
   },

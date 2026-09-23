@@ -4,17 +4,13 @@ import pytest
 from analitiq.contracts.endpoint_identity import derive_db_endpoint_id
 from analitiq.contracts.stream import validate_endpoint_ref
 
-from src.config import load_connection, load_connector_definition, resolve_endpoint_path
+from src.config import resolve_endpoint_path
 from src.config.endpoint_resolver import (
     ConnectionLookup,
     endpoint_ref_label,
     parse_endpoint_ref,
 )
-from src.config.exceptions import (
-    ConfigValidationError,
-    ConnectionConfigError,
-    ConnectorNotFoundError,
-)
+from src.config.exceptions import ConfigValidationError
 from src.models.resolved import dump_endpoint_ref
 
 
@@ -443,39 +439,3 @@ class TestEndpointRefResolver:
         assert (
             resolve_endpoint_path(ref, paths, lookup) == endpoint_dir / "transfers.json"
         )
-
-
-class TestConnectionLoader:
-    """Test suite for connection loading."""
-
-    @pytest.mark.unit
-    def test_load_connection(self, tmp_path):
-        conn_dir = tmp_path / "my-api"
-        conn_dir.mkdir()
-        (conn_dir / "connection.json").write_text(
-            '{"connector_slug": "wise", "host": "https://api.wise.com"}'
-        )
-
-        result = load_connection("my-api", tmp_path)
-        assert result["connector_slug"] == "wise"
-
-    @pytest.mark.unit
-    def test_load_missing_connection_raises(self, tmp_path):
-        with pytest.raises(ConnectionConfigError):
-            load_connection("nonexistent", tmp_path)
-
-    @pytest.mark.unit
-    def test_load_connector_definition(self, tmp_path):
-        connector_dir = tmp_path / "wise" / "definition"
-        connector_dir.mkdir(parents=True)
-        (connector_dir / "connector.json").write_text(
-            '{"connector_type": "api", "slug": "wise"}'
-        )
-
-        result = load_connector_definition("wise", tmp_path)
-        assert result["connector_type"] == "api"
-
-    @pytest.mark.unit
-    def test_load_missing_connector_raises(self, tmp_path):
-        with pytest.raises(ConnectorNotFoundError):
-            load_connector_definition("nonexistent", tmp_path)

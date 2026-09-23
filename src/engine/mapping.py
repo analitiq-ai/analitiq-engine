@@ -2,8 +2,8 @@
 
 This module owns the whole mapping vocabulary -- the path grammar, the
 expression AST, the function catalog, the validation rules and the output
-schema. A stream's mapping document (per ``mapping-and-transformations.md``)
-is parsed once into a :class:`MappingDocument`, compiled once by
+schema. A stream's mapping document is parsed once into a
+:class:`MappingDocument`, compiled once by
 :func:`compile_mapping` into a :class:`CompiledTransform`, and then applied to
 each ``pa.RecordBatch`` with ``pyarrow.compute`` -- the batch never leaves
 Arrow. There is a single transform path: every assignment, every expression

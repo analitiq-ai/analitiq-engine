@@ -21,7 +21,7 @@ import json
 import logging
 from pathlib import Path
 
-from .exceptions import InvalidTypeMapError, TypeMapNotFoundError
+from .exceptions import InvalidTypeMapError
 from .mapper import TypeMapper
 from .rules import parse_type_map
 
@@ -61,29 +61,11 @@ def parse_type_mapper(
     return TypeMapper(mapper_label, parsed.read, parsed.write)
 
 
-def _load_type_mapper(
-    definition_dir: Path, label: str, mapper_label: str
-) -> TypeMapper | None:
-    """Parse *definition_dir*'s ``type-map.json`` into a mapper; ``None`` if absent.
-
-    The document is parsed here, so a broken map fails at load rather than
-    later as an opaque read or create_table error.
-    """
-    document = read_raw_type_map(definition_dir, label)
-    if document is None:
-        return None
-    mapper = parse_type_mapper(
-        mapper_label, document, source=str(definition_dir / TYPE_MAP_FILENAME)
-    )
-    logger.info("Loaded type-map for %s from %s", label, definition_dir)
-    return mapper
-
-
 def build_type_mapper(label: str, document: object) -> TypeMapper:
     """Build a :class:`TypeMapper` from a :func:`read_raw_type_map` document.
 
     The worker-bootstrap path: the worker rebuilds the mapper the trusted
-    shell read, with the same parsing the file loaders apply.
+    shell read.
     """
     return parse_type_mapper(label, document, source=f"{label} (bootstrap)")
 
@@ -91,38 +73,3 @@ def build_type_mapper(label: str, document: object) -> TypeMapper:
 def connector_definition_dir(connectors_dir: Path, slug: str) -> Path:
     """Return the connector's ``definition/`` directory (``{slug}/definition``)."""
     return connectors_dir / slug / "definition"
-
-
-def load_type_map(connectors_dir: Path, slug: str) -> TypeMapper:
-    """Load and parse a connector's ``type-map.json``.
-
-    Raises ``TypeMapNotFoundError`` when the file is absent,
-    ``InvalidTypeMapError`` when it is malformed.
-    """
-    definition = connector_definition_dir(connectors_dir, slug)
-    mapper = _load_type_mapper(definition, f"connector {slug!r}", slug)
-    if mapper is None:
-        raise TypeMapNotFoundError(
-            f"connector {slug!r}: required type-map not found: "
-            f"{definition / TYPE_MAP_FILENAME} does not exist"
-        )
-    return mapper
-
-
-def load_connection_type_map(
-    connections_dir: Path, connection_id: str
-) -> TypeMapper | None:
-    """Load a connection-scoped type map if present.
-
-    Lives under ``connections/{connection_id}/definition/`` and governs type
-    translation for private endpoints under the same
-    ``connections/{connection_id}/definition/endpoints/`` tree. No
-    ``type-map.json`` → ``None``; the caller decides whether that's an error
-    (private endpoints referenced) or fine (pipeline only uses public
-    endpoints from its connector).
-    """
-    return _load_type_mapper(
-        connections_dir / connection_id / "definition",
-        f"connection {connection_id!r}",
-        f"connection:{connection_id}",
-    )

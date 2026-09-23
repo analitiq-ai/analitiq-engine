@@ -45,6 +45,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from analitiq.contracts.connection import ConnectionInput
 from analitiq.contracts.connection_package import ConnectionPackage
@@ -281,8 +282,9 @@ class PipelineConfigPrep:
         The manifest only locates the pipeline; whether it may run is the
         verdict's call, from the pipeline document's own ``status``. The
         manifest is read before the verdict grades it, so it is read
-        leniently: a manifest that locates nothing for PIPELINE_ID refuses the
-        run here, and every other defect in it is the verdict's to report.
+        leniently: a manifest that does not parse, or locates nothing for
+        PIPELINE_ID, refuses the run here; every other defect in it is the
+        verdict's to report.
         """
         manifest_path = self._paths["manifest"]
         if not manifest_path.is_file():
@@ -494,7 +496,9 @@ class PipelineConfigPrep:
         pipeline_doc = PipelineInput.model_validate_json(
             workspace.text(workspace.pipeline_directory + PipelinePackage.ROOT)
         )
-        pipeline_id = self.pipeline_id_input
+        # The verdict requires it (RULE-PIPE-018); ResolvedPipeline refuses an
+        # empty one, so the cast narrows the type without a second check.
+        pipeline_id = cast(str, pipeline_doc.pipeline_id)
 
         source_id = pipeline_doc.connections.source
         # The pipeline contract requires >= 1 destination, so dest_ids is

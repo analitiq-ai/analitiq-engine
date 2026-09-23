@@ -46,11 +46,20 @@ class WorkspaceRejectedError(ConfigError):
 
     def __init__(self, findings: list[Finding]):
         self.findings = findings
-        lines = ["the pipeline's workspace failed validation:"]
-        lines.extend(f"  - {f['path']}: {f['message']}" for f in findings[:10])
-        if len(findings) > 10:
-            lines.append(f"  ... and {len(findings) - 10} more")
-        super().__init__("\n".join(lines))
+        super().__init__(
+            "\n".join(
+                ["the pipeline's workspace failed validation:"]
+                + [f"  - {_describe(f)}" for f in findings]
+            )
+        )
+
+
+def _describe(finding: Finding) -> str:
+    rule = finding.get("rule")
+    return (
+        f"{finding['path']} [{finding['kind']}"
+        f"{f' {rule}' if rule else ''}] {finding['message']}"
+    )
 
 
 @dataclass(frozen=True)
@@ -95,7 +104,7 @@ def read_run_workspace(paths: dict[str, Path], pipeline_directory: str) -> RunWo
             f"{pipeline_directory!r} is not a pipeline package directory the "
             f"workspace locates"
         )
-    documents = {_key(root, paths["manifest"]): _read_text(paths["manifest"])}
+    documents = {_key(root, paths["manifest"]): read_config_text(paths["manifest"])}
     documents |= _read_package(root, pipeline_directory, PipelinePackage)
 
     connection_directories = _directories(
@@ -143,11 +152,7 @@ def gate_run(workspace: RunWorkspace) -> None:
     for finding, costs in zip(verdict["findings"], costs_a_pass):
         if not costs:
             logger.warning(
-                "Workspace %s [%s] %s: %s",
-                workspace.pipeline_directory,
-                finding["kind"],
-                finding["path"],
-                finding["message"],
+                "Workspace %s: %s", workspace.pipeline_directory, _describe(finding)
             )
     if not verdict["passed"]:
         raise WorkspaceRejectedError(
@@ -200,15 +205,21 @@ def _read_package(
     """Every document at one of ``model``'s locations under ``directory``, by key.
 
     An absent directory reads as no documents; the reference to it is the
-    verdict's to report. Links inside a package are never followed: a linked
-    subdirectory is not descended, and a document that is itself a link is
+    verdict's to report. A link inside a package, to a file or a directory, is
     refused, so no key's text comes from outside its package.
     """
     package_root = root / directory
     if not package_root.is_dir():
         return {}
     documents: dict[str, str] = {}
-    for current, _, names in os.walk(package_root):
+    for current, directories, names in os.walk(package_root):
+        for name in directories:
+            path = Path(current) / name
+            if path.is_symlink():
+                raise WorkspaceLayoutError(
+                    f"{directory}{path.relative_to(package_root).as_posix()} is a "
+                    f"link; a package directory must be inside its package"
+                )
         for name in names:
             path = Path(current) / name
             key = path.relative_to(package_root).as_posix()
@@ -219,15 +230,8 @@ def _read_package(
                     f"{directory}{key} is a link; a package document must be "
                     f"a file inside its package"
                 )
-            documents[directory + key] = _read_text(path)
+            documents[directory + key] = read_config_text(path)
     return documents
-
-
-def _read_text(path: Path) -> str:
-    try:
-        return read_config_text(path)
-    except UnicodeDecodeError as err:
-        raise WorkspaceLayoutError(f"{path} is not UTF-8 text: {err}") from err
 
 
 # ---------------------------------------------------------------------------

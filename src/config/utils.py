@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from ..state.error_classification import ErrorCode, FailureStage, tag_failure
+from .exceptions import ConfigValidationError
 
 
 def read_config_text(path: Path) -> str:
@@ -19,6 +20,7 @@ def read_config_text(path: Path) -> str:
     Without the split the runner would report an unreadable volume to the
     customer as "your pipeline configuration is invalid", which they cannot
     act on.
+    A file that is not UTF-8 is a config defect, raised naming the file.
 
     This is the config layer's only ``open()``, so it covers every config
     document the engine reads. It does not cover directory enumeration
@@ -26,6 +28,8 @@ def read_config_text(path: Path) -> str:
     """
     try:
         return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as err:
+        raise ConfigValidationError(f"{path} is not UTF-8 text: {err}") from err
     except OSError as err:
         # Tag then bare-raise: tag_failure returns the same exception, so
         # `raise tag_failure(err) from err` would make err its own __cause__

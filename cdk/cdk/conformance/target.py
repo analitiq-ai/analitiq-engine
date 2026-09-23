@@ -77,8 +77,7 @@ def endpoint_kind_of(model: type[EndpointDocument]) -> str:
 
 
 #: The published endpoint-document variants, by the ``$schema`` each pins.
-#: The document's own ``$schema`` is what selects one, the same fact the
-#: engine validates every artifact against.
+#: The document's own ``$schema`` is what selects one.
 ENDPOINT_MODELS: dict[str, type[EndpointDocument]] = {
     schema_url_of(model): model for model in (ApiEndpointDoc, DatabaseEndpointDoc)
 }
@@ -89,10 +88,10 @@ ENDPOINT_MODELS: dict[str, type[EndpointDocument]] = {
 #: accepts any ``schemas.analitiq.<tld>`` host for one
 #: (:func:`~analitiq.contracts.shared.common.schema_url_pattern`), so a
 #: connector authored against the canonical ``.ai`` URL is the same document
-#: on a ``.dev`` engine. A kit that selected its model by
-#: exact URL would refuse a document the validator passes, which makes tier 1 fail
-#: a connector for the host its author typed. Both sides read the kind
-#: through the contract's own helpers rather than through a second table.
+#: on a ``.dev`` engine. A kit that selected its model by exact URL would
+#: refuse a document the validator passes, which makes tier 1 fail a
+#: connector for the host its author typed. The kind is read through the
+#: contract's own helpers rather than through a second table.
 ENDPOINT_MODELS_BY_PATTERN: tuple[
     tuple[re.Pattern[str], type[EndpointDocument]], ...
 ] = tuple(

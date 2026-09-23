@@ -46,14 +46,3 @@ class EndpointNotFoundError(ConfigError):
         if detail:
             message = f"{message}. {detail}"
         super().__init__(message)
-
-
-class ConnectionConfigError(ConfigError):
-    """Raised when connection configuration is invalid."""
-
-    def __init__(self, connection_ref: str, detail: str = ""):
-        self.connection_ref = connection_ref
-        message = f"Invalid connection configuration: {connection_ref}"
-        if detail:
-            message = f"{message} ({detail})"
-        super().__init__(message)

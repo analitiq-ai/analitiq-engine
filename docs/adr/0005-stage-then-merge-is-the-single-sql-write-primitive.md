@@ -32,10 +32,10 @@ What a target system can do — its merge form, whether it has a usable
 session-temp stage, its bulk-load mechanism — is a fact about that
 system, not something derivable from a well-behaved-looking base class.
 Guessed defaults are exactly the mechanism of the divergence this design
-removes, so every SQL-shape fact a connector needs is validated data in
-`connector.json`: the JSON declares *whether* the system has a shape, and
-a small dialect class renders *how* to write it. A needed-but-undeclared
-capability refuses loudly, at config or handshake time, instead of a base
+removes, so every SQL-shape fact a connector needs is declared data: the
+declaration says *whether* the system has a shape, and a small dialect
+class renders *how* to write it. A needed-but-undeclared capability
+refuses loudly, at handshake or write time, instead of a base
 class quietly filling in a guess.
 
 ## Why the split is facade, cycle, and backend — not two write paths

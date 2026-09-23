@@ -559,6 +559,22 @@ class TestCreateConfigErrorPaths:
         pipeline, _, _, _, _ = PipelineConfigPrep().create_config()
         assert pipeline.pipeline_id == PIPELINE_ID
 
+    def test_the_run_is_identified_by_the_graded_pipeline_document(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The manifest only locates the pipeline; its id is the document's."""
+        root = tmp_path / "project"
+        root.mkdir()
+        _build_tree(root)
+        locator = "00000000-0000-4000-8000-0000000000bb"
+        manifest = _manifest()
+        manifest["pipelines"][0]["pipeline_id"] = locator
+        _write_json(root / "pipelines" / "manifest.json", manifest)
+        monkeypatch.chdir(root)
+        monkeypatch.setenv("PIPELINE_ID", locator)
+        pipeline, _, _, _, _ = PipelineConfigPrep().create_config()
+        assert pipeline.pipeline_id == PIPELINE_ID
+
     def test_an_unreferenced_broken_package_does_not_block_the_run(
         self, pipeline_tree: Path
     ) -> None:

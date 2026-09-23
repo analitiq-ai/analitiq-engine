@@ -11,9 +11,8 @@ for the SQL write primitive see
 protocol see
 [`grpc-streaming-architecture.md`](../architecture/grpc-streaming-architecture.md);
 for the CDK connector contract see
-[`connector-module-architecture.md`](../architecture/connector-module-architecture.md);
-for connection / connector / endpoint schema see
-[`source-config.md`](source-config.md). The environment-variable
+[`connector-module-architecture.md`](../architecture/connector-module-architecture.md).
+The environment-variable
 catalogue is [`src/config/settings.py`](../../src/config/settings.py) (see
 also [README.md](../../README.md#environment-variables)); their
 resolution order and layering rules are
@@ -89,13 +88,7 @@ resolving a class with no read path.
 Externally installed connector packages add themselves through the
 `analitiq.source_connectors` / `analitiq.destination_connectors`
 entry-point groups, registering under their `connector_id` — an entry
-point never introduces a new *kind*, only a class for a kind the contract
-already declares valid. Which `kind` values are valid at all is owned by
-the published connector contract: `validate_connector`
-(`src/engine/pipeline_config_prep.py::_load_connector`) rejects a
-`connector.json` with an unrecognised `kind` before the document ever
-reaches the registry. Which of those contract-valid kinds actually has a
-class to run is a separate, later question the registry alone answers: a
+point never introduces a new *kind*, only a class for an existing one. A
 kind with neither a kind default nor a registry-discovered class fails at
 worker startup with `ConnectorNotRegisteredError` — the registry's set of
 *runnable* kinds is a subset of the contract's set of *valid* ones, never
@@ -111,10 +104,7 @@ a parallel vocabulary to keep in sync.
 | Stdout | No | No | No |
 
 The API handler sends one request per record unless the endpoint's
-`operations.write.<mode>` declares a `batching` block
-(`{"max_records": <int >= 2>}`, the provider's cap per request); a
-`batching` block of any other shape fails the stream at `configure_schema`
-time.
+`operations.write.<mode>` declares batching.
 
 ## Formatters
 
@@ -127,13 +117,7 @@ extra (`pip install "analitiq-cdk[arrow]"`).
 | `csv` | `.csv` | `text/csv` | Header on by default |
 | `parquet` | `.parquet` | `application/vnd.apache.parquet` | Columnar, snappy by default |
 
-## Connection and endpoint shape
-
-Connection, connector, and endpoint document shapes are specified in
-[`source-config.md`](source-config.md) — the shape is the same on source
-and destination sides, only the connector referenced and the endpoints
-used differ. What follows is destination-specific behavior the schema does
-not carry:
+## Destination runtime behavior
 
 - **Storage backend selection (file / s3).** The connector kind picks the
   storage backend that performs the write. Only `file` has one — the
@@ -208,19 +192,14 @@ An API `upsert` is idempotent through the endpoint's own `conflict_keys`.
 For `insert` with a declared `idempotency` block, the guarantee is
 exactly-once **within the provider's replay window** — a retry after the
 provider has expired its idempotency key is not deduped, and may create a
-duplicate. The api-endpoint contract's
-`operations.write.<mode>.idempotency` block (`{"in": "header" | "body",
-"name": "<key>"}`) declares **placement only** — the key value is
-engine-owned, following the write mode's identity semantics: `insert`
+duplicate. The key value is engine-owned, following the write mode's identity semantics: `insert`
 sends the identity-derived `record_id` (first occurrence wins, mirroring
 the SQL anti-join); `upsert` sends a full-content hash, so an identical
 replay dedups while a changed row gets a new key and the provider applies
-the update. The key name must not collide with an engine- or
-connection-owned header or an already-declared body field —
-`configure_schema` rejects those documents. The block cannot combine with
-a `batching` block: a restart re-batches records, and a per-request key
-spanning several records can never dedup. Without the block, API `insert`
-is at-least-once on a same-run restart.
+the update. `configure_schema` refuses a header key name that collides
+with a header the connection's transport resolved, and a write refuses a
+resolved request body that is not a JSON object. Without the block, API
+`insert` is at-least-once on a same-run restart.
 
 ### Stdout
 
@@ -293,7 +272,6 @@ reached its worker, capabilities the worker may not have.
 
 ## See Also
 
-- [`source-config.md`](source-config.md) — source-side config, connection/endpoint schema
 - [`mapping-and-transformations.md`](../data-path/mapping-and-transformations.md) — assignment AST
 - [`sql-write-path.md`](../data-path/sql-write-path.md) — the SQL write primitive
 - [`grpc-streaming-architecture.md`](../architecture/grpc-streaming-architecture.md) — engine ↔ destination protocol

@@ -1,8 +1,8 @@
 # ADR 0004: Capability is derived, never declared
 
-`connector.json` carries no capability block. Whether a connector can
-discover schemas, create tables, read, or write is never a static flag a
-document asserts — it is derived at each of two different moments, from
+The engine reads no capability declaration. Whether a connector can
+discover schemas, create tables, read, or write is never a static flag —
+it is derived at each of two different moments, from
 two different sources, because "can this connector do X" is actually two
 unrelated questions wearing one name.
 
@@ -25,7 +25,7 @@ supports. This is never knowable ahead of the call, so it is never
 declared; it surfaces as a permission error, or is checked with a
 preflight probe.
 
-A single `capabilities` block in `connector.json` would have to answer
+A single declared capability flag would have to answer
 both questions with one static assertion, and neither question is
 actually static: conformance is a property of the shipped code, and
 authorization is a property of a specific connection's grants, checked
@@ -59,7 +59,7 @@ package registers under; the worker invokes the resolved class directly,
 with no Protocol check at that call. A connector package that registers
 under a group it doesn't actually implement fails at first invocation,
 not at selection — the entry-point group is itself a declaration, just
-not a static flag inside `connector.json`.
+not a static capability flag.
 
 This is a different rule from the SQL-shape facts in
 [`sql-write-path.md`](../data-path/sql-write-path.md) §5
