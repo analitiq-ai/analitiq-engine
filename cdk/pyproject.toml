@@ -53,8 +53,10 @@ pydantic = "^2.12"
 # rc series they are not, and this package imports names that accrued over
 # it (DatabaseEndpointDoc, WriteInput.schema_, SingleCursorMapping,
 # validate_endpoint_ref). A lower floor resolves for pip and then fails at
-# import.
-analitiq-contract-models = { version = ">=1.0.0rc25,<2", allow-prereleases = true }
+# import. The CDK no longer re-checks the rules the contract enforces (#533),
+# so the floor is also the only rc its tests run against: the one the root
+# pyproject pins.
+analitiq-contract-models = { version = ">=1.0.0rc26,<2", allow-prereleases = true }
 # Core, on purpose, though only the HTTP transport sends a request: yarl is
 # what aiohttp builds every URL with, so it is the authority on what an
 # endpoint's URL means. Keeping it behind the [api] extra is what forced the
