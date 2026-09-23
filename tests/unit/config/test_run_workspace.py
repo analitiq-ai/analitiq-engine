@@ -8,6 +8,7 @@ references -- never a secret location, never a package it does not reference.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -223,6 +224,24 @@ class TestTheLayoutMustBeReadable:
 
         assert "connectors/api/definition/connector.json" in keys
         assert not any(".secrets" in key or ".git" in key for key in keys)
+
+    def test_a_directory_whose_name_is_not_utf8_is_left_alone(
+        self, workspace_root: Path
+    ) -> None:
+        (workspace_root / "connectors/api" / os.fsdecode(b"bad\xff")).mkdir()
+
+        keys = _read(workspace_root).request.documents.root
+
+        assert "connectors/api/definition/connector.json" in keys
+
+    def test_a_document_whose_name_is_not_utf8_is_refused(
+        self, workspace_root: Path
+    ) -> None:
+        endpoints = workspace_root / "connectors/api/definition/endpoints"
+        (endpoints / os.fsdecode(b"e\xff.json")).write_text("{}")
+
+        with pytest.raises(WorkspaceLayoutError, match="definition/endpoints/e"):
+            _read(workspace_root)
 
     def test_a_linked_package_directory_is_read(
         self, workspace_root: Path, tmp_path_factory: pytest.TempPathFactory

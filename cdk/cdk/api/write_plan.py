@@ -259,10 +259,11 @@ def body_with_idempotency_key(
 ) -> dict[str, Any]:
     """Return the request body with the engine-owned idempotency key added.
 
-    The body is the resolved one, which only the run knows: a record body
-    with no spec, or a spec whose values resolved to a non-object, is
-    refused here. A body already carrying the reserved field is a collision
-    the engine must not silently overwrite.
+    The contract rejects a missing or non-object body spec at document load;
+    this guards the one shape only the run can produce: a ``from_input``
+    body that resolved to a non-object. A body already
+    carrying the reserved field is a collision the engine must not silently
+    overwrite.
     """
     if not isinstance(body, dict):
         raise ValueError(

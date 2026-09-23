@@ -224,11 +224,26 @@ def _document_key_ranges(
 
 def _may_hold_document(model: type[DocumentPackage], directory_key: str) -> bool:
     """Whether a key under ``directory_key`` (ending in ``/``) can be located."""
-    prefix = directory_key.encode()
+    # The name's bytes on disk: os.walk decoded them with surrogateescape, and
+    # a name that is not UTF-8 then falls outside every location's range.
+    prefix = os.fsencode(directory_key)
     return any(
         low[: len(prefix)] <= prefix <= high
         for low, high in _document_key_ranges(model)
     )
+
+
+def _is_utf8(name: str) -> bool:
+    try:
+        name.encode()
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _printable(name: str) -> str:
+    """``name`` with the bytes ``os.walk`` could not decode shown as escapes."""
+    return os.fsencode(name).decode(errors="backslashreplace")
 
 
 def _read_package(
@@ -265,6 +280,11 @@ def _read_package(
             key = f"{prefix}{name}"
             if model.kind_at(key) is None or model.secret_at(key):
                 continue
+            if not _is_utf8(key):
+                raise WorkspaceLayoutError(
+                    f"{_printable(directory + key)} is not a UTF-8 name; a "
+                    f"package document's key must be text"
+                )
             if path.is_symlink():
                 raise WorkspaceLayoutError(
                     f"{directory}{key} is a link; a package document must be "
