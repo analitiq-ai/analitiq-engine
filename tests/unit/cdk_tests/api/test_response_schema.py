@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from analitiq.contracts.endpoints import ResponseExtraction
+from analitiq.contracts.endpoints import ApiEndpointDoc, ResponseExtraction
 from analitiq.contracts.stream import validate_endpoint_ref
 
 from cdk.api.response_schema import (
@@ -79,6 +79,46 @@ class _Mapper:
             raise UnmappedTypeError("test-connector", "read", native) from err
 
 
+_RECORD = {"type": "object", "properties": {"id": {"type": "integer"}}}
+
+#: The records paths the contract resolves through ``$ref``/``allOf``: the
+#: response schema, and the ``records.ref`` that addresses its records.
+_COMPOSED_RECORD_PATHS: list[tuple[str, dict[str, Any], str]] = [
+    (
+        "body_items_by_ref",
+        {"type": "array", "items": {"$ref": "#/$defs/Rec"}, "$defs": {"Rec": _RECORD}},
+        "response.body",
+    ),
+    (
+        "nested_items_by_ref",
+        {
+            "type": "object",
+            "properties": {"data": {"type": "array", "items": {"$ref": "#/$defs/Rec"}}},
+            "$defs": {"Rec": _RECORD},
+        },
+        "response.body.data",
+    ),
+    (
+        "body_by_ref",
+        {
+            "$ref": "#/$defs/Page",
+            "$defs": {
+                "Page": {
+                    "type": "object",
+                    "properties": {"data": {"type": "array", "items": _RECORD}},
+                }
+            },
+        },
+        "response.body.data",
+    ),
+    (
+        "items_by_all_of",
+        {"type": "array", "items": {"allOf": [_RECORD]}},
+        "response.body",
+    ),
+]
+
+
 class TestItemsSchema:
     def test_it_walks_the_declared_ref_to_the_item_properties(self) -> None:
         schema = {
@@ -138,6 +178,32 @@ class TestItemsSchema:
         schema = {"type": "object", "properties": {"data": {"type": "array"}}}
         with pytest.raises(ReadError, match="does not resolve to a record schema"):
             records_items_schema("items", _response(schema))
+
+    @pytest.mark.parametrize(
+        ("schema", "records_ref"),
+        [(schema, ref) for _, schema, ref in _COMPOSED_RECORD_PATHS],
+        ids=[name for name, _, _ in _COMPOSED_RECORD_PATHS],
+    )
+    def test_a_records_path_composed_through_ref_or_all_of_resolves(
+        self, schema: dict[str, Any], records_ref: str
+    ) -> None:
+        response = {"schema": schema, "records": {"ref": records_ref}}
+        document = ApiEndpointDoc.model_validate(
+            {
+                "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
+                "endpoint_id": "items",
+                "operations": {
+                    "read": {
+                        "request": {"method": "GET", "path": "/items"},
+                        "response": response,
+                    }
+                },
+            }
+        )
+        read = document.operations.read
+        assert read is not None
+        items = records_items_schema("items", read.response)
+        assert items["properties"] == {"id": {"type": "integer"}}
 
     def test_items_without_properties_cannot_be_a_record_schema(self) -> None:
         schema = {
