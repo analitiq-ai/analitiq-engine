@@ -144,9 +144,15 @@ silently losing rows.
 2. `PipelineRunner` (`src/runner.py`) instantiates `PipelineConfigPrep`,
    which:
    - discovers project root by locating `pipelines/manifest.json`,
-   - finds the manifest entry matching `PIPELINE_ID` (must be `active`),
-   - loads `pipeline.json` and per-stream files,
-   - loads each `connection.json` + its connector definition,
+   - finds the manifest entry matching `PIPELINE_ID`, which names the
+     pipeline's package directory,
+   - reads the run's workspace -- the manifest, the pipeline package, and
+     the packages of the connections it names and their connectors -- and
+     refuses the run unless the published validator's verdict on it
+     passes (`src/config/run_workspace.py`); the validator is the one gate
+     over every document, including whether the pipeline is `active`,
+   - builds `pipeline.json`, the stream files, each `connection.json` and
+     its connector definition from the texts that verdict graded,
    - builds a `ConnectionRuntime` per connection (with a per-connection
      secrets resolver),
    - resolves every `endpoint_ref` to its endpoint JSON.

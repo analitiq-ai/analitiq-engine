@@ -4,12 +4,7 @@ import pytest
 from analitiq.contracts.endpoint_identity import derive_db_endpoint_id
 from analitiq.contracts.stream import validate_endpoint_ref
 
-from src.config import (
-    load_connection,
-    load_connector_definition,
-    resolve_endpoint_ref,
-    validate_artifact,
-)
+from src.config import load_connection, load_connector_definition, resolve_endpoint_path
 from src.config.endpoint_resolver import (
     ConnectionLookup,
     endpoint_ref_label,
@@ -19,45 +14,8 @@ from src.config.exceptions import (
     ConfigValidationError,
     ConnectionConfigError,
     ConnectorNotFoundError,
-    EndpointNotFoundError,
 )
 from src.models.resolved import dump_endpoint_ref
-
-
-class TestPipelineConfigValidator:
-    """Test suite for pipeline config validation."""
-
-    @pytest.fixture
-    def valid_pipeline(self):
-        return {
-            "$schema": "https://schemas.analitiq.ai/pipeline/latest.json",
-            "display_name": "Test Pipeline",
-            "status": "active",
-            "connections": {
-                "source": "00000000-0000-0000-0000-000000000001",
-                "destinations": ["00000000-0000-0000-0000-000000000002"],
-            },
-            "streams": ["00000000-0000-0000-0000-000000000003"],
-            "schedule": {"type": "manual", "timezone": "UTC"},
-        }
-
-    @pytest.mark.unit
-    def test_missing_connections_fails(self, valid_pipeline):
-        del valid_pipeline["connections"]
-        with pytest.raises(Exception, match="connections"):
-            validate_artifact("pipeline", valid_pipeline)
-
-    @pytest.mark.unit
-    def test_missing_source_fails(self, valid_pipeline):
-        del valid_pipeline["connections"]["source"]
-        with pytest.raises(Exception, match="source"):
-            validate_artifact("pipeline", valid_pipeline)
-
-    @pytest.mark.unit
-    def test_empty_destinations_fails(self, valid_pipeline):
-        valid_pipeline["connections"]["destinations"] = []
-        with pytest.raises(Exception, match="destinations|minItems|too short"):
-            validate_artifact("pipeline", valid_pipeline)
 
 
 class TestEndpointRefModel:
@@ -428,37 +386,37 @@ class TestEndpointRefResolver:
         endpoint_dir = tmp_path / "connectors" / "wise" / "definition" / "endpoints"
         endpoint_dir.mkdir(parents=True)
         endpoint_file = endpoint_dir / "transfers.json"
-        endpoint_file.write_text('{"endpoint": "/v1/transfers", "method": "GET"}')
+        endpoint_file.write_text("{}")
 
         paths = {
             "connectors": tmp_path / "connectors",
             "connections": tmp_path / "connections",
         }
-        result = resolve_endpoint_ref(
+        result = resolve_endpoint_path(
             {"scope": "connector", "connection_id": "wise", "endpoint_id": "transfers"},
             paths,
             lookup,
         )
-        assert result["endpoint"] == "/v1/transfers"
+        assert result == endpoint_file
 
     @pytest.mark.unit
     def test_resolve_connection_endpoint(self, tmp_path, lookup):
         """Test resolving a private connection endpoint (under definition/).
 
         A connection ref carries database_object; the endpoint_id is derived
-        from it, and the bundle writes the doc under that derived handle.
+        from it, and the doc is filed under that derived handle.
         """
         derived_id = derive_db_endpoint_id(None, "public", "users")
         endpoint_dir = tmp_path / "connections" / "prod-pg" / "definition" / "endpoints"
         endpoint_dir.mkdir(parents=True)
         endpoint_file = endpoint_dir / f"{derived_id}.json"
-        endpoint_file.write_text('{"endpoint": "public/users", "method": "DATABASE"}')
+        endpoint_file.write_text("{}")
 
         paths = {
             "connectors": tmp_path / "connectors",
             "connections": tmp_path / "connections",
         }
-        result = resolve_endpoint_ref(
+        result = resolve_endpoint_path(
             {
                 "scope": "connection",
                 "connection_id": "prod-pg",
@@ -467,13 +425,13 @@ class TestEndpointRefResolver:
             paths,
             lookup,
         )
-        assert result["method"] == "DATABASE"
+        assert result == endpoint_file
 
     @pytest.mark.unit
     def test_resolve_accepts_endpoint_ref_instance(self, tmp_path, lookup):
         endpoint_dir = tmp_path / "connectors" / "wise" / "definition" / "endpoints"
         endpoint_dir.mkdir(parents=True)
-        (endpoint_dir / "transfers.json").write_text('{"endpoint": "/v1/transfers"}')
+        (endpoint_dir / "transfers.json").write_text("{}")
 
         paths = {
             "connectors": tmp_path / "connectors",
@@ -482,25 +440,9 @@ class TestEndpointRefResolver:
         ref = validate_endpoint_ref(
             {"scope": "connector", "connection_id": "wise", "endpoint_id": "transfers"}
         )
-        assert resolve_endpoint_ref(ref, paths, lookup)["endpoint"] == "/v1/transfers"
-
-    @pytest.mark.unit
-    def test_resolve_missing_endpoint_raises(self, tmp_path, lookup):
-        """Test that missing endpoint file raises EndpointNotFoundError."""
-        paths = {
-            "connectors": tmp_path / "connectors",
-            "connections": tmp_path / "connections",
-        }
-        with pytest.raises(EndpointNotFoundError):
-            resolve_endpoint_ref(
-                {
-                    "scope": "connector",
-                    "connection_id": "wise",
-                    "endpoint_id": "nonexistent",
-                },
-                paths,
-                lookup,
-            )
+        assert (
+            resolve_endpoint_path(ref, paths, lookup) == endpoint_dir / "transfers.json"
+        )
 
 
 class TestConnectionLoader:

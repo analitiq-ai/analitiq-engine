@@ -77,6 +77,7 @@ from analitiq.contracts.endpoints import (
 from analitiq.contracts.pipelines.config import PipelineInput
 from analitiq.contracts.stream import AssignmentTarget, StreamInput, StreamMapping
 from analitiq.contracts.type_map import TypeMapDoc
+from analitiq.contracts.validation_requests import ValidateWorkspaceRequest
 from mypy import build
 from mypy.main import process_options
 from mypy.nodes import CallExpr
@@ -109,8 +110,9 @@ RUNTIME_MODULES: Final = ("cdk", "src")
 KIT_MODULES: Final = ("cdk.conformance",)
 
 #: The contract documents the engine holds: the authored artifacts it
-#: loads from disk, the two endpoint-document variants they reference, and
-#: the type map a connector ships beside them. Every other model the engine
+#: loads from disk, the two endpoint-document variants they reference, the
+#: type map a connector ships beside them, and the workspace request it
+#: hands the validator before a run. Every other model the engine
 #: reads is reachable from one of these through the contract's own field
 #: annotations; a read on a model unreachable from these fails the render.
 ROOTS: Final[tuple[Any, ...]] = (
@@ -121,6 +123,7 @@ ROOTS: Final[tuple[Any, ...]] = (
     ApiEndpointDoc,
     DatabaseEndpointDoc,
     TypeMapDoc,
+    ValidateWorkspaceRequest,
 )
 
 #: Models the engine consumes as a JSON grammar (``model_dump`` /

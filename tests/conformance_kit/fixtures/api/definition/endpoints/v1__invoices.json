@@ -1,6 +1,6 @@
 {
   "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
-  "endpoint_id": "invoices",
+  "endpoint_id": "v1__invoices",
   "display_name": "Invoices (cursor-paginated)",
   "description": "The provider hands back an opaque token with each page, and the first request carries none: there is nothing to continue from yet.",
   "operations": {

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
-  "endpoint_id": "ledger",
+  "endpoint_id": "v1__ledger__entries",
   "display_name": "Ledger entries (keyset-paginated)",
   "description": "The traversal continues from the last row's ordering value, so a page without one has no next request.",
   "operations": {

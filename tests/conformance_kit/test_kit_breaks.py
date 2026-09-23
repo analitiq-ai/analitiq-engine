@@ -1794,7 +1794,7 @@ class TestApiReadPathBreaks:
         """
         root = tmp_path / "api"
         shutil.copytree(API_REFERENCE_DIR, root)
-        document = root / "definition" / "endpoints" / "widgets.json"
+        document = root / "definition" / "endpoints" / "v1__widgets.json"
         parsed = json.loads(document.read_text())
         parsed["$schema"] = parsed["$schema"].replace("analitiq.ai", "analitiq.dev")
         document.write_text(json.dumps(parsed))
@@ -1804,7 +1804,7 @@ class TestApiReadPathBreaks:
             "a document naming its kind on another environment's host is the "
             "same document; the kit refused what the engine accepts"
         )
-        assert "widgets" in target.endpoints, "the document must still parse"
+        assert "v1__widgets" in target.endpoints, "the document must still parse"
 
     def test_a_schema_url_naming_no_endpoint_kind_is_refused(
         self, tmp_path: Path
@@ -1812,7 +1812,7 @@ class TestApiReadPathBreaks:
         """Host-tolerant is not kind-tolerant: the kind still has to be one."""
         root = tmp_path / "api"
         shutil.copytree(API_REFERENCE_DIR, root)
-        document = root / "definition" / "endpoints" / "widgets.json"
+        document = root / "definition" / "endpoints" / "v1__widgets.json"
         parsed = json.loads(document.read_text())
         parsed["$schema"] = "https://schemas.analitiq.ai/connector/latest.json"
         document.write_text(json.dumps(parsed))
@@ -1832,7 +1832,7 @@ class TestApiReadPathBreaks:
         what keeps a refused document from reading as a clean one.
         """
         target = self._broken(
-            tmp_path, "widgets", lambda read: read["pagination"].update(type="seek")
+            tmp_path, "v1__widgets", lambda read: read["pagination"].update(type="seek")
         )
         report = _report(check_endpoint_documents(target))
         assert "'seek'" in report
@@ -1875,7 +1875,7 @@ class TestApiReadPathBreaks:
                 "stop_when": {"missing": {"ref": "response.body.next_token"}},
             }
 
-        target = self._broken(tmp_path, "widgets", to_cursor)
+        target = self._broken(tmp_path, "v1__widgets", to_cursor)
         report = _report(check_endpoint_documents(target))
         assert "'page_token'" in report
         assert "controlled_by" in report
@@ -1921,7 +1921,7 @@ class TestApiReadPathBreaks:
                 "stop_when": {"missing": {"ref": "response.body.next_token"}},
             }
 
-        target = self._broken(tmp_path, "widgets", to_cursor)
+        target = self._broken(tmp_path, "v1__widgets", to_cursor)
         assert check_endpoint_documents(target) == [], "the contract leaves this one"
         report = _report(check_api_read_compiles(target))
         assert "'response.headers.x-next'" in report
@@ -1937,7 +1937,7 @@ class TestApiReadPathBreaks:
                 "remaining": {"ref": "response.headers.x-rate-limit-remaining"}
             }
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         report = _report(check_api_read_compiles(target))
         assert "response.metadata 'remaining'" in report
         assert "'response.headers.x-rate-limit-remaining'" in report
@@ -1953,7 +1953,7 @@ class TestApiReadPathBreaks:
                 "total": {"function": "no_such_function", "input": {"literal": "x"}}
             }
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         report = _report(check_api_read_compiles(target))
         assert "response.metadata" in report
         assert "unknown derived function 'no_such_function'" in report
@@ -1975,7 +1975,7 @@ class TestApiReadPathBreaks:
                 "budget": {"template": "${secrets.api_key}"}
             }
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         report = _report(check_api_read_compiles(target))
         assert "'secrets.api_key'" in report
         assert "request-time resolution never supplies" in report
@@ -1991,7 +1991,7 @@ class TestApiReadPathBreaks:
                 "budget": {"ref": "secrets.api_token"},
             }
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         report = _report(check_api_read_compiles(target))
         assert "'secrets.api_token'" in report
         assert "request-time resolution never supplies" in report
@@ -2007,7 +2007,7 @@ class TestApiReadPathBreaks:
                 "missing": {"ref": "response.headers.x-next"}
             }
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         report = _report(check_api_read_compiles(target))
         assert "'response.headers.x-next'" in report
         assert "resolves to nothing on every page" in report
@@ -2031,7 +2031,7 @@ class TestApiReadPathBreaks:
         clean.
         """
         target = self._broken(
-            tmp_path, "widgets", lambda read: read["request"].pop("query")
+            tmp_path, "v1__widgets", lambda read: read["request"].pop("query")
         )
         report = _report(check_endpoint_documents(target))
         assert "'limit'" in report, "the report must name the unbound param"
@@ -2049,7 +2049,7 @@ class TestApiReadPathBreaks:
         """
         target = self._broken(
             tmp_path,
-            "widgets",
+            "v1__widgets",
             lambda read: read["pagination"]["offset"].update(increment_by=0),
         )
         report = _report(check_endpoint_documents(target))
@@ -2075,7 +2075,7 @@ class TestApiReadPathBreaks:
                 "input": {"ref": "response.body.links"},
             }
 
-        target = self._broken(tmp_path, "events", bend)
+        target = self._broken(tmp_path, "v1__events", bend)
         report = _report(check_api_read_advances(target))
         assert "must resolve to string or bytes" in report
 
@@ -2092,7 +2092,7 @@ class TestApiReadPathBreaks:
                 }
             }
 
-        target = self._broken(tmp_path, "events", bend)
+        target = self._broken(tmp_path, "v1__events", bend)
         report = _report(check_api_read_stop_condition(target))
         assert "must resolve to string or bytes" in report
 
@@ -2111,7 +2111,7 @@ class TestApiReadPathBreaks:
         def bend(read: dict[str, Any]) -> None:
             read["pagination"]["limit"]["default"] = {"ref": "nosuchscope.size"}
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         report = _report(check_endpoint_documents(target))
         assert "'nosuchscope.size'" in report
         assert (
@@ -2139,7 +2139,7 @@ class TestApiReadPathBreaks:
             read["response"]["schema"]["properties"]["page_size"] = {"type": "integer"}
             read["pagination"]["limit"]["default"] = {"ref": "response.body.page_size"}
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         assert check_endpoint_documents(target) == [], "a real field, read too early"
         report = _report(check_api_read_compiles(target))
         assert "'response.body.page_size'" in report
@@ -2178,7 +2178,7 @@ class TestApiReadPathBreaks:
             # a different defect with a message of its own.
             read["request"]["query"]["tag"] = {"from_param": "tag"}
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         report = _report(check_endpoint_documents(target))
         assert "'nosuchscope.tag'" in report
         assert "not a known resolution scope" in report
@@ -2189,7 +2189,7 @@ class TestApiReadPathBreaks:
     ) -> None:
         target = self._broken(
             tmp_path,
-            "widgets",
+            "v1__widgets",
             lambda read: read["pagination"].update(stop_when={"eq": [1, 2]}),
         )
         report = _report(check_api_read_stop_condition(target))
@@ -2204,7 +2204,7 @@ class TestApiReadPathBreaks:
         only that this endpoint went unassessed.
         """
         target = self._broken(
-            tmp_path, "widgets", lambda read: read["pagination"].pop("stop_when")
+            tmp_path, "v1__widgets", lambda read: read["pagination"].pop("stop_when")
         )
         report = _report(check_endpoint_documents(target))
         assert "stop_when" in report
@@ -2216,7 +2216,7 @@ class TestApiReadPathBreaks:
     ) -> None:
         target = self._broken(
             tmp_path,
-            "events",
+            "v1__events",
             lambda read: read["pagination"].update(
                 stop_when={"lt": [{"ref": "response.body.links.next"}, 5]}
             ),
@@ -2236,7 +2236,7 @@ class TestApiReadPathBreaks:
         """
         target = self._broken(
             tmp_path,
-            "widgets",
+            "v1__widgets",
             lambda read: read["response"]["records"].update(ref="response.body.items"),
         )
         report = _report(check_endpoint_documents(target))
@@ -2247,7 +2247,7 @@ class TestApiReadPathBreaks:
     def test_a_json_type_the_read_map_has_no_rule_for(self, tmp_path: Path) -> None:
         target = self._broken(
             tmp_path,
-            "widgets",
+            "v1__widgets",
             lambda read: read["response"]["schema"]["properties"]["objects"]["items"][
                 "properties"
             ]["id"].update(type="geometry"),
@@ -2294,7 +2294,7 @@ class TestApiReadPathBreaks:
         definition = json.loads(connector.read_text())
         definition["transports"]["files"] = {"transport_type": "http"}
         connector.write_text(json.dumps(definition))
-        document = root / "definition" / "endpoints" / "widgets.json"
+        document = root / "definition" / "endpoints" / "v1__widgets.json"
         parsed = json.loads(document.read_text())
         parsed["operations"]["read"]["request"]["transport_ref"] = "files"
         document.write_text(json.dumps(parsed))
@@ -2302,7 +2302,7 @@ class TestApiReadPathBreaks:
         report = _report(check_read_transport_selection(load_target(root)))
         assert "transport 'files'" in report
         assert "no usable base_url" in report
-        assert "widgets" in report, "the finding must name the reads it stops"
+        assert "v1__widgets" in report, "the finding must name the reads it stops"
 
     def test_a_read_is_judged_against_its_own_transports_headers(
         self, tmp_path: Path
@@ -2323,7 +2323,7 @@ class TestApiReadPathBreaks:
             "headers": {"X-Files-Key": "k"},
         }
         connector.write_text(json.dumps(definition))
-        document = root / "definition" / "endpoints" / "widgets.json"
+        document = root / "definition" / "endpoints" / "v1__widgets.json"
         parsed = json.loads(document.read_text())
         read = parsed["operations"]["read"]
         read["request"]["transport_ref"] = "files"
@@ -2354,7 +2354,7 @@ class TestApiReadPathBreaks:
             "headers": {"X-Files-Key": "k"},
         }
         connector.write_text(json.dumps(definition))
-        document = root / "definition" / "endpoints" / "events.json"
+        document = root / "definition" / "endpoints" / "v1__events.json"
         parsed = json.loads(document.read_text())
         read = parsed["operations"]["read"]
         read["request"]["transport_ref"] = "files"
@@ -2390,13 +2390,13 @@ class TestApiReadPathBreaks:
         }
         connector.write_text(json.dumps(definition))
         # One read dispatches through 'files'...
-        widgets = root / "definition" / "endpoints" / "widgets.json"
+        widgets = root / "definition" / "endpoints" / "v1__widgets.json"
         parsed = json.loads(widgets.read_text())
         parsed["operations"]["read"]["request"]["transport_ref"] = "files"
         widgets.write_text(json.dumps(parsed))
         # ...while a SIBLING link read declares that transport's header name.
         # Its own run never resolves 'files', so nothing collides.
-        events = root / "definition" / "endpoints" / "events.json"
+        events = root / "definition" / "endpoints" / "v1__events.json"
         parsed = json.loads(events.read_text())
         parsed["operations"]["read"]["request"]["headers"] = {
             "X-Files-Key": {"literal": "mine"}
@@ -2427,7 +2427,7 @@ class TestApiReadPathBreaks:
             "base_url": "https://files.example.invalid",
         }
         connector.write_text(json.dumps(definition))
-        document = root / "definition" / "endpoints" / "widgets.json"
+        document = root / "definition" / "endpoints" / "v1__widgets.json"
         parsed = json.loads(document.read_text())
         parsed["operations"]["read"]["request"]["transport_ref"] = "files"
         document.write_text(json.dumps(parsed))
@@ -2449,7 +2449,7 @@ class TestApiReadPathBreaks:
         """
         target = self._broken(
             tmp_path,
-            "widgets",
+            "v1__widgets",
             lambda read: read["request"].update(transport_ref="api"),
         )
         assert check_read_transport_selection(target) == []
@@ -2466,7 +2466,7 @@ class TestApiReadPathBreaks:
         """
         target = self._broken(
             tmp_path,
-            "widgets",
+            "v1__widgets",
             lambda read: read["request"].update(transport_ref="oauth"),
         )
         assert check_read_transport_selection(target) == []
@@ -2492,7 +2492,7 @@ class TestApiReadPathBreaks:
             }
             read["request"]["query"]["region"] = {"from_param": "region"}
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         report = _report(check_api_read_compiles(target))
         assert "region" in report
         assert "enum" in report
@@ -2528,7 +2528,7 @@ class TestApiReadPathBreaks:
             read["request"]["query"]["account"] = {"from_param": "account"}
             read["filters"] = {"name": {"eq": {"from_param": "account"}}}
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         assert check_api_read_compiles(target) == []
 
 
@@ -2548,7 +2548,7 @@ class TestApiScriptedPageTakesTheDeclaredTypes:
         """The declared type wins, so the strategy is handed the real shape."""
         target = self._broken(
             tmp_path,
-            "events",
+            "v1__events",
             lambda read: (
                 read["pagination"]["link"].update(
                     next_url={"ref": "response.body.links"}
@@ -2567,7 +2567,7 @@ class TestApiScriptedPageTakesTheDeclaredTypes:
         """ "returned < requested" is a stop condition, not a defect."""
         target = self._broken(
             tmp_path,
-            "invoices",
+            "v1__invoices",
             lambda read: read["pagination"].update(
                 stop_when={
                     "lt": [
@@ -2588,7 +2588,7 @@ class TestApiScriptedPageTakesTheDeclaredTypes:
                 stop_when={"lt": [{"ref": "response.body.total"}, 5]}
             )
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         report = _report(check_api_read_stop_condition(target))
         assert "cannot compare str with int" in report
 
@@ -2615,7 +2615,7 @@ class TestApiScriptedPageTakesTheDeclaredTypes:
                 stop_when={"gte": [{"ref": "response.body.total"}, 5]}
             )
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         report = _report(check_endpoint_documents(target))
         assert "'response.body.total'" in report
         assert "declares no `type`" in report
@@ -2643,7 +2643,7 @@ class TestApiChecksSayWhenTheyDroveNothing:
         # which is what TestACompileFindingBelongsToTheCheckThatOwnsIt pins.
         target = self._broken(
             tmp_path,
-            "widgets",
+            "v1__widgets",
             lambda read: read["pagination"].update(
                 stop_when={"missing": {"ref": "response.headers.x-next"}}
             ),
@@ -2687,7 +2687,7 @@ class TestACompileFindingBelongsToTheCheckThatOwnsIt:
     def test_a_document_the_contract_refuses_is_never_reported_as_undriven(
         self, tmp_path: Path
     ) -> None:
-        target = self._broken(tmp_path, "invoices", self._stale_cursor_default)
+        target = self._broken(tmp_path, "v1__invoices", self._stale_cursor_default)
         assert "'page_token'" in _report(check_endpoint_documents(target))
         for check in (
             check_api_read_compiles,
@@ -2701,7 +2701,7 @@ class TestACompileFindingBelongsToTheCheckThatOwnsIt:
     def test_a_check_answers_the_same_thing_every_time_it_is_called(
         self, tmp_path: Path
     ) -> None:
-        target = self._broken(tmp_path, "invoices", self._stale_cursor_default)
+        target = self._broken(tmp_path, "v1__invoices", self._stale_cursor_default)
         # Copied as it is answered: a check handing back the cached list
         # itself compares equal to its own later state, which is the one
         # thing this must not read as agreement.
@@ -2723,15 +2723,15 @@ class TestApiStopConditionDecidesAboutTheRightThing:
     @pytest.mark.parametrize(
         ("stem", "stop_when"),
         [
-            ("invoices", {"exists": {"ref": "response.body.meta.next_token"}}),
+            ("v1__invoices", {"exists": {"ref": "response.body.meta.next_token"}}),
             # The ANCESTOR of the continuation: `meta` holds `next_token`,
             # so it is populated exactly when its leaf is -- an exact-path
             # evidence match would let this inverted condition through.
-            ("invoices", {"exists": {"ref": "response.body.meta"}}),
-            ("events", {"exists": {"ref": "response.body.links.next"}}),
-            ("widgets", {"not_empty": {"ref": "response.body.objects"}}),
+            ("v1__invoices", {"exists": {"ref": "response.body.meta"}}),
+            ("v1__events", {"exists": {"ref": "response.body.links.next"}}),
+            ("v1__widgets", {"not_empty": {"ref": "response.body.objects"}}),
             (
-                "ledger",
+                "v1__ledger__entries",
                 {
                     "gte": [
                         {"ref": "response.record_count"},
@@ -2765,7 +2765,7 @@ class TestApiStopConditionDecidesAboutTheRightThing:
         """The resolver hands a literal back untouched, so it reads nothing."""
         target = self._broken(
             tmp_path,
-            "widgets",
+            "v1__widgets",
             lambda read: read["pagination"].update(
                 stop_when={"missing": {"literal": {"ref": "response.body.objects"}}}
             ),
@@ -2793,7 +2793,7 @@ class TestApiOriginGuardCoversEveryLinkDeclaration:
         """``${...}&limit=50`` hands the provider the origin as surely as a ref."""
         target = self._broken(
             tmp_path,
-            "events",
+            "v1__events",
             lambda read: read["pagination"]["link"].update(
                 next_url={"template": "${response.body.links.next}&limit=50"}
             ),
@@ -2813,7 +2813,7 @@ class TestApiOriginGuardCoversEveryLinkDeclaration:
         """
         target = self._broken(
             tmp_path,
-            "events",
+            "v1__events",
             lambda read: read["pagination"]["link"].update(
                 next_url={"template": "/v1/events?after=${response.body.links.next}"}
             ),
@@ -2833,7 +2833,7 @@ class TestApiOriginGuardCoversEveryLinkDeclaration:
         """
         target = self._broken(
             tmp_path,
-            "events",
+            "v1__events",
             lambda read: read["pagination"]["link"].update(
                 next_url={
                     "function": "base64_encode",
@@ -2896,7 +2896,7 @@ class TestApiRefusalDrivesAreArmed:
         monkeypatch.setattr(read_setup, "follow_url", self._following_link)
         target = self._broken(
             tmp_path,
-            "events",
+            "v1__events",
             lambda read: read["pagination"]["link"].update(next_url=next_url),
         )
         report = _report(check_api_read_advances(target))
@@ -2984,7 +2984,7 @@ class TestApiRequestBodyBreaks:
             read["request"]["method"] = "POST"
             read["request"]["body"] = {"ref": "response.body.not_a_request_scope"}
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         report = _report(check_endpoint_documents(target))
         assert "'response.body.not_a_request_scope'" in report
         assert "before the response exists" in report
@@ -3005,7 +3005,7 @@ class TestApiRequestBodyBreaks:
             read["request"]["method"] = "POST"
             read["request"]["body"] = {"ref": f"connection.{subtree}.filter"}
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         assert check_api_read_compiles(target) == []
 
     def test_a_root_body_binding_with_a_default_is_still_driven(
@@ -3029,10 +3029,10 @@ class TestApiRequestBodyBreaks:
                 "default": {"literal": "status:open"},
             }
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         assert check_api_read_compiles(target) == []
         probes, _ = api_read_path._probes(target)
-        widgets = [p for p in probes if p.label == "widgets"]
+        widgets = [p for p in probes if p.label == "v1__widgets"]
         assert widgets and widgets[0].first_sent.body == "status:open"
 
     @pytest.mark.parametrize(
@@ -3059,7 +3059,7 @@ class TestApiRequestBodyBreaks:
             read["request"]["content_type"] = "application/x-www-form-urlencoded"
             read["request"]["body"] = body
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         report = _report(check_api_read_compiles(target))
         assert refusal in report
 
@@ -3071,7 +3071,9 @@ class TestApiRequestBodyBreaks:
             read["request"]["content_type"] = "application/x-www-form-urlencoded"
             read["request"]["body"] = {"grant_type": {"literal": "client_credentials"}}
 
-        assert check_api_read_compiles(self._broken(tmp_path, "widgets", bend)) == []
+        assert (
+            check_api_read_compiles(self._broken(tmp_path, "v1__widgets", bend)) == []
+        )
 
     def test_a_root_binding_a_stream_filter_supplies_defers_through_a_function(
         self, tmp_path: Path
@@ -3097,7 +3099,9 @@ class TestApiRequestBodyBreaks:
             }
             read["filters"] = {"name": {"eq": {"from_param": "filter"}}}
 
-        assert check_api_read_compiles(self._broken(tmp_path, "widgets", bend)) == []
+        assert (
+            check_api_read_compiles(self._broken(tmp_path, "v1__widgets", bend)) == []
+        )
 
     def test_a_root_body_binding_a_stream_filter_supplies_is_deferred(
         self, tmp_path: Path
@@ -3120,7 +3124,7 @@ class TestApiRequestBodyBreaks:
                 "required": False,
             }
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         assert check_api_read_compiles(target) == []
 
     def test_a_body_reading_a_secret_is_not_deferred(self, tmp_path: Path) -> None:
@@ -3135,7 +3139,7 @@ class TestApiRequestBodyBreaks:
             read["request"]["method"] = "POST"
             read["request"]["body"] = {"ref": "secrets.api_key"}
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         report = _report(check_api_read_compiles(target))
         assert "'secrets.api_key'" in report
         assert "request-time resolution never supplies" in report
@@ -3159,7 +3163,7 @@ class TestApiRequestBodyBreaks:
                 "input": {"ref": "connection.parameters.payload"},
             }
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         report = _report(check_api_read_compiles(target))
         assert "unknown derived function 'does_not_exist'" in report
 
@@ -3179,7 +3183,7 @@ class TestApiRequestBodyBreaks:
                 "ref": "connector.api_version"
             }
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         report = _report(check_api_read_compiles(target))
         assert "'connector.api_version'" in report
         assert "request-time resolution never supplies" in report
@@ -3203,7 +3207,7 @@ class TestApiRequestBodyBreaks:
                 "limit": 50,
             }
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         report = _report(check_api_read_compiles(target))
         assert "'secrets.api_key'" in report
         assert "dropped from every request" in report
@@ -3224,7 +3228,7 @@ class TestApiRunWithNothingToDrive:
         shutil.copytree(API_REFERENCE_DIR, root)
         endpoints = root / "definition" / "endpoints"
         for path in list(endpoints.glob("*.json")):
-            if path.stem != "widgets":
+            if path.stem != "v1__widgets":
                 path.unlink()
                 continue
             document = json.loads(path.read_text())
@@ -3953,7 +3957,7 @@ class TestApiPositionlessSchemeBreaks:
     def test_a_cursor_continuing_from_a_constant(self, tmp_path: Path) -> None:
         target = self._broken(
             tmp_path,
-            "invoices",
+            "v1__invoices",
             lambda read: read["pagination"]["cursor"].update(
                 next_cursor={"literal": "same"}
             ),
@@ -3964,7 +3968,7 @@ class TestApiPositionlessSchemeBreaks:
     def test_a_link_continuing_from_a_constant(self, tmp_path: Path) -> None:
         target = self._broken(
             tmp_path,
-            "events",
+            "v1__events",
             lambda read: read["pagination"]["link"].update(
                 next_url={"literal": "/v1/events?after=fixed"}
             ),
@@ -3987,7 +3991,7 @@ class TestApiPositionlessSchemeBreaks:
         """
         target = self._broken(
             tmp_path,
-            "events",
+            "v1__events",
             lambda read: read["pagination"]["link"].update(
                 next_url={
                     "template": "/v1/events#${response.body.links.next}",
@@ -4001,7 +4005,7 @@ class TestApiPositionlessSchemeBreaks:
         """Nothing a definition-only run resolves, so the traversal ends."""
         target = self._broken(
             tmp_path,
-            "events",
+            "v1__events",
             lambda read: read["pagination"]["link"].update(
                 next_url={"ref": "connection.parameters.next_page"}
             ),
@@ -4024,7 +4028,7 @@ class TestApiPositionlessSchemeBreaks:
         """Offset counts rows for itself, so a fixed step is exactly right."""
         target = self._broken(
             tmp_path,
-            "widgets",
+            "v1__widgets",
             lambda read: read["pagination"]["offset"].update(increment_by=50),
         )
         assert check_api_read_advances(target) == []
@@ -4038,7 +4042,7 @@ class TestApiWholeBodyStopConditionBreaks:
     def test_a_stop_condition_on_the_whole_payload(self, tmp_path: Path) -> None:
         target = self._broken(
             tmp_path,
-            "widgets",
+            "v1__widgets",
             lambda read: read["pagination"].update(
                 stop_when={"not_empty": {"ref": "response.body"}}
             ),
@@ -4078,7 +4082,7 @@ class TestApiRequestBodyIsValidatedAroundConnectionValues:
     ) -> None:
         target = self._broken(
             tmp_path,
-            "widgets",
+            "v1__widgets",
             self._post_body(
                 {
                     "scope": {"ref": "connection.parameters.scope"},
@@ -4095,7 +4099,7 @@ class TestApiRequestBodyIsValidatedAroundConnectionValues:
         """That one really does resolve to nothing, for no fault of the connector."""
         target = self._broken(
             tmp_path,
-            "widgets",
+            "v1__widgets",
             self._post_body({"ref": "connection.parameters.filter"}),
         )
         assert check_api_read_compiles(target) == []
@@ -4117,7 +4121,7 @@ class TestApiRequestBodyIsValidatedAroundConnectionValues:
         """
         target = self._broken(
             tmp_path,
-            "widgets",
+            "v1__widgets",
             self._post_body(
                 {
                     "function": "no_such_function",
@@ -4149,10 +4153,10 @@ class TestApiRequestBlockBreaks:
                 "default": {"literal": "acme/eu"},
             }
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         assert check_api_read_compiles(target) == []
         probes, _ = api_read_path._probes(target)
-        widgets = [probe for probe in probes if probe.label == "widgets"]
+        widgets = [probe for probe in probes if probe.label == "v1__widgets"]
         assert widgets, "the bent endpoint is what this tests"
         assert "{" not in widgets[0].url
         # Percent-encoded as one segment: a value carrying '/' would
@@ -4202,7 +4206,7 @@ class TestApiRequestBlockBreaks:
         """
         document = json.loads(
             (
-                API_REFERENCE_DIR / "definition" / "endpoints" / "widgets.json"
+                API_REFERENCE_DIR / "definition" / "endpoints" / "v1__widgets.json"
             ).read_text()
         )
         request = document["operations"]["read"]["request"]
@@ -4242,7 +4246,7 @@ class TestApiRequestBlockBreaks:
 
         document = json.loads(
             (
-                API_REFERENCE_DIR / "definition" / "endpoints" / "widgets.json"
+                API_REFERENCE_DIR / "definition" / "endpoints" / "v1__widgets.json"
             ).read_text()
         )
         document["operations"]["read"]["request"]["headers"] = {header: "0"}
@@ -4278,7 +4282,7 @@ class TestApiRequestBlockBreaks:
 
         document = json.loads(
             (
-                API_REFERENCE_DIR / "definition" / "endpoints" / "widgets.json"
+                API_REFERENCE_DIR / "definition" / "endpoints" / "v1__widgets.json"
             ).read_text()
         )
         document["operations"]["read"]["request"]["headers"] = {"X-A": declared}
@@ -4308,7 +4312,7 @@ class TestApiRequestBlockBreaks:
                 "default": {"literal": ""},
             }
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         report = _report(check_api_read_compiles(target))
         assert "{account_id}" in report
         assert "has no value for the placeholder" in report
@@ -4336,7 +4340,7 @@ class TestApiRequestBlockBreaks:
                 "default": {"literal": ".."},
             }
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         report = _report(check_api_read_compiles(target))
         assert "'..'" in report
         assert "address a different resource" in report
@@ -4367,7 +4371,7 @@ class TestApiRequestBlockBreaks:
                 "account_id": {"ref": "secrets.account_id"}
             }
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         report = _report(check_endpoint_documents(target))
         assert "path_params['account_id']" in report
         assert "from_param" in report
@@ -4393,7 +4397,7 @@ class TestApiRequestBlockBreaks:
             read["request"]["path"] = "/v1/accounts/{account_id}/widgets"
             read["request"]["path_params"] = {"account_id": {"ref": "connection.name"}}
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         report = _report(check_endpoint_documents(target))
         assert "path_params['account_id']" in report
         assert "from_param" in report
@@ -4427,10 +4431,10 @@ class TestApiRequestBlockBreaks:
             }
             read["filters"] = {"name": {"eq": {"from_param": "account"}}}
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         assert check_api_read_compiles(target) == []
         probes, _ = api_read_path._probes(target)
-        widgets = [probe for probe in probes if probe.label == "widgets"]
+        widgets = [probe for probe in probes if probe.label == "v1__widgets"]
         assert widgets, "the bent endpoint is what this tests"
         assert widgets[0].url.endswith(
             f"/v1/accounts/{api_read_path._STAND_IN_PATH_SEGMENT}/widgets"
@@ -4451,7 +4455,7 @@ class TestApiRequestBlockBreaks:
                 "default": {"ref": "connection.parameters.account"},
             }
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         assert check_api_read_compiles(target) == []
 
     def test_a_path_placeholder_the_pagination_loop_owns_is_refused(
@@ -4471,7 +4475,7 @@ class TestApiRequestBlockBreaks:
             read["params"]["offset"].update({"in": "path", "required": True})
             read["request"]["path_params"] = {"offset": {"from_param": "offset"}}
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         assert check_endpoint_documents(target) == [], "coherent, and still impossible"
         report = _report(check_api_read_compiles(target))
         assert "'offset'" in report
@@ -4483,7 +4487,7 @@ class TestApiRequestBlockBreaks:
         """The connection's defaults live on a shared session; nothing deletes one."""
         target = self._broken(
             tmp_path,
-            "widgets",
+            "v1__widgets",
             lambda read: read["request"].update(headers_remove=["Accept"]),
         )
         report = _report(check_api_read_compiles(target))
@@ -4496,7 +4500,7 @@ class TestApiRequestBlockBreaks:
         """The request build sees the session's header names, never their values."""
         target = self._broken(
             tmp_path,
-            "widgets",
+            "v1__widgets",
             lambda read: read["request"].update(headers={"Accept": "text/csv"}),
         )
         report = _report(check_api_read_compiles(target))
@@ -4522,7 +4526,7 @@ class TestApiRequestBlockBreaks:
             "ref": "connection.parameters.tenant"
         }
         path.write_text(json.dumps(definition))
-        document = root / "definition" / "endpoints" / "widgets.json"
+        document = root / "definition" / "endpoints" / "v1__widgets.json"
         parsed = json.loads(document.read_text())
         parsed["operations"]["read"]["request"]["headers"] = {"X-Tenant": "acme"}
         document.write_text(json.dumps(parsed))
@@ -4551,7 +4555,7 @@ class TestApiRequestBlockBreaks:
             }
             read["request"]["headers"] = {"Accept": {"from_param": "media"}}
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         report = _report(check_api_read_compiles(target))
         assert "'Accept'" in report
         assert "transport declares" in report
@@ -4576,7 +4580,7 @@ class TestApiRequestBlockBreaks:
             }
             read["request"]["headers"] = {"X-Accept": {"from_param": "Accept"}}
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         assert check_api_read_compiles(target) == []
 
     def test_a_first_request_a_derived_function_refuses_is_reported(
@@ -4597,7 +4601,7 @@ class TestApiRequestBlockBreaks:
                 "input": {"literal": 5},
             }
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         report = _report(check_api_read_compiles(target))
         assert "must resolve to string or bytes" in report
 
@@ -4625,7 +4629,7 @@ class TestApiRequestBlockBreaks:
                 "map": {"0": "the-first-page", "37": {"ref": "connectio.token"}},
             }
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         report = _report(check_api_read_compiles(target))
         assert "'connectio.token'" in report
         assert "request-time resolution never supplies" in report
@@ -4655,7 +4659,7 @@ class TestApiRequestBlockBreaks:
                 "limit"
             )
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         assert check_endpoint_documents(target) == []
         assert check_api_read_compiles(target) == []
 
@@ -4696,7 +4700,7 @@ class TestApiRequestBlockBreaks:
             read["request"]["query"].pop("pageToken", None)
             read["request"]["body"] = {"cursor": {"from_param": "page_token"}}
 
-        target = self._broken(tmp_path, "invoices", bend)
+        target = self._broken(tmp_path, "v1__invoices", bend)
         assert check_api_read_compiles(target) == []
         report = _report(check_api_read_advances(target))
         assert "flat name/value" in report
@@ -4723,7 +4727,7 @@ class TestApiRequestBlockBreaks:
                 "map": {"0": "the-first-page"},
             }
 
-        target = self._broken(tmp_path, "widgets", bend)
+        target = self._broken(tmp_path, "v1__widgets", bend)
         assert check_api_read_compiles(target) == []
         report = _report(check_api_read_advances(target))
         assert "the request after the first page could not be built" in report

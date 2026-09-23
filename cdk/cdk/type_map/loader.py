@@ -50,9 +50,13 @@ def read_raw_type_map(definition_dir: Path, label: str) -> object | None:
     return document
 
 
-def _build_type_mapper(
+def parse_type_mapper(
     mapper_label: str, document: object, *, source: str
 ) -> TypeMapper:
+    """Build a :class:`TypeMapper` from a parsed ``type-map.json`` document.
+
+    ``source`` names where the document came from in a parse error.
+    """
     parsed = parse_type_map(document, source=source)
     return TypeMapper(mapper_label, parsed.read, parsed.write)
 
@@ -68,7 +72,7 @@ def _load_type_mapper(
     document = read_raw_type_map(definition_dir, label)
     if document is None:
         return None
-    mapper = _build_type_mapper(
+    mapper = parse_type_mapper(
         mapper_label, document, source=str(definition_dir / TYPE_MAP_FILENAME)
     )
     logger.info("Loaded type-map for %s from %s", label, definition_dir)
@@ -81,7 +85,7 @@ def build_type_mapper(label: str, document: object) -> TypeMapper:
     The worker-bootstrap path: the worker rebuilds the mapper the trusted
     shell read, with the same parsing the file loaders apply.
     """
-    return _build_type_mapper(label, document, source=f"{label} (bootstrap)")
+    return parse_type_mapper(label, document, source=f"{label} (bootstrap)")
 
 
 def connector_definition_dir(connectors_dir: Path, slug: str) -> Path:

@@ -89,10 +89,8 @@ ENDPOINT_MODELS: dict[str, type[EndpointDocument]] = {
 #: accepts any ``schemas.analitiq.<tld>`` host for one
 #: (:func:`~analitiq.contracts.shared.common.schema_url_pattern`), so a
 #: connector authored against the canonical ``.ai`` URL is the same document
-#: on a ``.dev`` engine -- and the engine says so, dropping a ``$schema``-only
-#: mismatch and validating against this environment's canonical URL instead
-#: (``src/config/schema_validator.py``). A kit that selected its model by
-#: exact URL would refuse a document the engine runs, which makes tier 1 fail
+#: on a ``.dev`` engine. A kit that selected its model by
+#: exact URL would refuse a document the validator passes, which makes tier 1 fail
 #: a connector for the host its author typed. Both sides read the kind
 #: through the contract's own helpers rather than through a second table.
 ENDPOINT_MODELS_BY_PATTERN: tuple[

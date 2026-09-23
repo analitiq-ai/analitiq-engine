@@ -22,7 +22,7 @@ Configuration is assembled from modular files under `connectors/`, `connections/
 
 `connector_id` is the connector's canonical identifier and repo name (`postgres`, `mysql`, `xero`, `pipedrive`).
 
-Only pipelines with `status: "active"` in the manifest can be executed.
+Only a pipeline whose `pipeline.json` has `status: "active"` can be executed; the validator's verdict on the run's workspace decides it.
 
 ### Endpoint References
 

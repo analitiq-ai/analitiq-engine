@@ -43,17 +43,16 @@ project_root/
     └── definition/endpoints/{endpoint_id}.json  # private endpoint documents
 ```
 
-**Identity is directory-based; an authored `connection_id` must agree with
-it, not replace it.** The directory name under `connections/` is the
-identity a stream reaches through `endpoint_ref.connection_id`.
-`connection_id` is an optional field on `connection.json` — a document
-may omit it, and the directory name is used — but if present it is
-validated against the directory name and rejected on mismatch
-(`PipelineConfigPrep._build_connection_index`,
-`src/engine/pipeline_config_prep.py`); it can never diverge from its own
-directory, authored or not. `manifest.json` is
-authoritative for which pipelines run: only an entry with `status: "active"`
-is executable.
+**Identity is directory-based; the authored `connection_id` must agree with
+it.** The directory name under `connections/` is the identity a stream
+reaches through `endpoint_ref.connection_id`. `connection.json` carries its
+own `connection_id`, and the validator's verdict on the run's workspace
+refuses a connection whose `connection_id` differs from its directory name.
+
+`manifest.json` maps a pipeline id to its package directory. Whether that
+pipeline may run is decided by the `status` in its own `pipeline.json`: the
+validator's verdict on the run's workspace refuses a pipeline that is not
+`active`.
 
 ## Endpoint references
 
@@ -65,10 +64,8 @@ with two scopes, and the scope changes what identifies the endpoint:
 - **`connection`** — a private endpoint (e.g. a database table) that
   belongs to one connection. Its identity is `database_object`
   (catalog/schema/name); `endpoint_id` may be omitted by the author, and
-  the contract validator derives it from `database_object` before the
-  document is accepted (`src/config/endpoint_resolver.py`) — a document
-  carrying no `endpoint_id` at this point is a validator defect, not a
-  client error.
+  the contract derives it from `database_object`; the endpoint document
+  sits at `definition/endpoints/<endpoint_id>.json`.
 
 `connection_id` is always present regardless of scope. Optional `x-*`
 extension keys are accepted verbatim; any other unrecognised key is

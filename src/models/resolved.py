@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Annotated, Any, get_args, get_origin
 
 from analitiq.contracts.connection import ConnectionInput
+from analitiq.contracts.endpoints import ApiEndpointDoc, DatabaseEndpointDoc
 from analitiq.contracts.pipelines.config import ErrorHandling as ContractErrorHandling
 from analitiq.contracts.pipelines.config import PipelineInput
 from analitiq.contracts.stream import (
@@ -37,10 +38,13 @@ from pydantic import BaseModel
 
 from cdk.connection_runtime import ConnectionRuntime
 from src.config import settings
-from src.config.schema_validator import EndpointDocument
 from src.engine.mapping import MappingDocument
 from src.models.state import ReplicationConfig as StateReplicationConfig
 from src.shared.logging_setup import resolve_level
+
+#: The two endpoint-document variants, carried as typed contract models from
+#: the gate onwards (issues #349, #475).
+EndpointDocument = ApiEndpointDoc | DatabaseEndpointDoc
 
 
 def with_effective_safety_window(stream_source: dict[str, Any]) -> dict[str, Any]:
