@@ -1390,7 +1390,7 @@ def check_api_record_schema(target: ConformanceTarget) -> list[Violation]:
     for label, read in read_operations(target):
         try:
             items = records_items_schema(label, read.response)
-            _resolve_arrow_types(items, mapper)
+            _resolve_arrow_types(items, read.response.schema_, mapper)
             SchemaContract(items)
         except _RECORD_FAILURES as err:
             violations.append(
@@ -1403,7 +1403,9 @@ def check_api_record_schema(target: ConformanceTarget) -> list[Violation]:
     return violations
 
 
-def _resolve_arrow_types(items: dict[str, Any], mapper: TypeMapper | None) -> None:
+def _resolve_arrow_types(
+    items: dict[str, Any], response_schema: Any, mapper: TypeMapper | None
+) -> None:
     """Fill each record field's ``arrow_type``, as the read's own walk does.
 
     The engine picks the mapper by the stream's endpoint scope; a
@@ -1423,4 +1425,4 @@ def _resolve_arrow_types(items: dict[str, Any], mapper: TypeMapper | None) -> No
 
     for name, prop in (items.get("properties") or {}).items():
         if isinstance(prop, dict):
-            resolve_field_arrow_type(prop, name, get_mapper)
+            resolve_field_arrow_type(prop, name, get_mapper, response_schema)

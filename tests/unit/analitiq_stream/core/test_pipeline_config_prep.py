@@ -685,6 +685,22 @@ class TestCreateConfigErrorPaths:
         with pytest.raises(ValueError, match="Connection id mismatch"):
             PipelineConfigPrep().create_config()
 
+    def test_versioned_connection_ref_the_pipeline_names_unversioned_rejected(
+        self, pipeline_tree: Path
+    ) -> None:
+        """The validator ties a stream's connection ref to the pipeline's in
+        base form, but the engine loads the connections by the exact ids the
+        pipeline names, so a versioned ref resolves to nothing it loaded."""
+        stream_doc = _stream_doc(STREAM_ID)
+        versioned = f"{CONNECTION_SRC_ID}_v2"
+        stream_doc["source"]["endpoint_ref"]["connection_id"] = versioned
+        _write_json(
+            pipeline_tree / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json",
+            stream_doc,
+        )
+        with pytest.raises(ValueError, match=f"{versioned!r} is not one of"):
+            PipelineConfigPrep().create_config()
+
     def test_stream_document_without_stream_id_rejected(
         self, pipeline_tree: Path
     ) -> None:

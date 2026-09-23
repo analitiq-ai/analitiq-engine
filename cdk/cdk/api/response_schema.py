@@ -18,7 +18,12 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-from analitiq.contracts.endpoints import ResponseExtraction, resolve_read_record_schema
+from analitiq.contracts.endpoints import (
+    ResponseExtraction,
+    find_record_field_properties,
+    materialize_node,
+    resolve_read_record_schema,
+)
 from analitiq.contracts.stream import EndpointRef
 
 from ..exceptions import ReadError
@@ -43,7 +48,11 @@ def records_items_schema(
     The walk is the contract's own :func:`resolve_read_record_schema`,
     the record-locator every consumer of the read contract shares, so a
     path composed through ``$ref``/``$defs``/``allOf`` resolves here exactly
-    as it did at document load.
+    as it did at document load. Each field declaration comes back folded
+    over its ``$ref`` target and ``allOf`` branches by the contract's
+    :func:`find_record_field_properties`, so a field declared by reference
+    carries the type an inline one would. Children below a field are
+    folded as :func:`resolve_field_arrow_type` reaches them.
 
     ``None`` from the locator means the ref addressed nothing resolvable.
     That is a refusal, never the response schema itself: the schema is the
@@ -59,14 +68,16 @@ def records_items_schema(
     protection here.
     """
     records_ref = response_block.records.ref
-    items: Any = resolve_read_record_schema(records_ref, response_block.schema_)
-    if not isinstance(items, dict) or not items.get("properties"):
+    response_schema = response_block.schema_
+    record: Any = resolve_read_record_schema(records_ref, response_schema)
+    if not isinstance(record, dict) or not record.get("properties"):
         raise ReadError(
             f"endpoint {endpoint_id!r}: records.ref {records_ref!r} does not "
             f"resolve to a record schema in the declared response schema "
             f"(no object with 'properties' under the addressed path)"
         )
-    return deepcopy(items)
+    fields = find_record_field_properties(record, response_schema)
+    return deepcopy({**record, "properties": fields})
 
 
 def declared_json_types(field: dict[str, Any]) -> list[str]:
@@ -132,6 +143,7 @@ def record_field_declaration(
 
 def apply_read_type_map(
     items_schema: dict[str, Any],
+    response_schema: Any,
     endpoint_ref: EndpointRef,
     runtime: Any,
 ) -> None:
@@ -177,7 +189,7 @@ def apply_read_type_map(
 
     for name, prop in (items_schema.get("properties") or {}).items():
         if isinstance(prop, dict):
-            resolve_field_arrow_type(prop, name, get_mapper)
+            resolve_field_arrow_type(prop, name, get_mapper, response_schema)
 
 
 def _no_read_type_map(scope: str) -> str:
@@ -191,6 +203,7 @@ def resolve_field_arrow_type(
     field: dict[str, Any],
     name: str,
     get_mapper: Callable[[], TypeMapper],
+    response_schema: Any,
 ) -> None:
     """Fill ``field['arrow_type']`` from the type-map if absent, then recurse.
 
@@ -205,7 +218,23 @@ def resolve_field_arrow_type(
     instead fail a read on a child type the schema build never consults.
     Recursion runs even when a container already carries an ``arrow_type``,
     because a hand-annotated container can still hold children that do not.
+
+    Each child is folded over its ``$ref``/``allOf`` contributors against
+    ``response_schema`` only when the walk descends into it, because the
+    contract lets a ``$defs`` entry refer to itself: folding every child up
+    front would never end on such a document, while a walk gated like the
+    schema build reaches one only under a declared ``Object``/``List``.
     """
+    _resolve_field(field, name, get_mapper, response_schema, ())
+
+
+def _resolve_field(
+    field: dict[str, Any],
+    name: str,
+    get_mapper: Callable[[], TypeMapper],
+    response_schema: Any,
+    enclosing: tuple[dict[str, Any], ...],
+) -> None:
     if not field.get("arrow_type"):
         json_type = next(iter(declared_json_types(field)), None)
         if json_type is not None:
@@ -223,9 +252,42 @@ def resolve_field_arrow_type(
         nested = field.get("properties")
         if isinstance(nested, dict):
             for child_name, child in nested.items():
-                if isinstance(child, dict):
-                    resolve_field_arrow_type(child, f"{name}.{child_name}", get_mapper)
+                nested[child_name] = _resolve_child(
+                    child,
+                    f"{name}.{child_name}",
+                    get_mapper,
+                    response_schema,
+                    enclosing,
+                )
     elif arrow_type == "List":
-        items = field.get("items")
-        if isinstance(items, dict):
-            resolve_field_arrow_type(items, f"{name}[]", get_mapper)
+        field["items"] = _resolve_child(
+            field.get("items"), f"{name}[]", get_mapper, response_schema, enclosing
+        )
+
+
+def _resolve_child(
+    declaration: Any,
+    name: str,
+    get_mapper: Callable[[], TypeMapper],
+    response_schema: Any,
+    enclosing: tuple[dict[str, Any], ...],
+) -> Any:
+    """Fold one child declaration, resolve it, and return it in its place.
+
+    The fold is a copy: a ``$defs`` entry several fields share must not
+    carry the first one's resolution to the rest, or into the document.
+
+    A child declared exactly as one of its enclosing declarations folds to
+    the same node, so the walk below it would repeat forever. That is a
+    record with no Arrow type, refused by name.
+    """
+    if not isinstance(declaration, dict):
+        return declaration
+    if declaration in enclosing:
+        raise ReadError(
+            f"field {name!r} contains itself through a $ref; an Arrow "
+            f"Object/List has no recursive form"
+        )
+    child = deepcopy(materialize_node(declaration, response_schema))
+    _resolve_field(child, name, get_mapper, response_schema, (*enclosing, declaration))
+    return child

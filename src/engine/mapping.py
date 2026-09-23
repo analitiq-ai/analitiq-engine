@@ -376,8 +376,8 @@ def _compile_expr(expr: GetExpression | PipeExpression) -> _ExprFn:
 def _get_path(batch: pa.RecordBatch, path: list[str]) -> pa.Array:
     """Read a source column at *path*; a missing column/segment yields all-nulls.
 
-    Mirrors the per-record ``walk_path``: an absent top-level field or a missing
-    nested segment resolves to ``None`` for every row.
+    An absent top-level field or a missing nested segment resolves to
+    ``None`` for every row.
     """
     if path[0] not in batch.schema.names:
         return pa.nulls(batch.num_rows)
@@ -391,7 +391,7 @@ def _get_path(batch: pa.RecordBatch, path: list[str]) -> pa.Array:
 
 
 def _string_form(column: pa.Array) -> pa.Array:
-    """Render a column as strings the way the per-record ``str()`` did.
+    """Render a column as strings, booleans in Python's ``str()`` form.
 
     Booleans become ``"True"``/``"False"`` rather than Arrow's lowercase
     ``"true"``/``"false"``; everything else uses Arrow's string cast. Shared by
@@ -411,10 +411,9 @@ def _string_form(column: pa.Array) -> pa.Array:
 def _fn_to_string(column: pa.Array) -> pa.Array:
     """Format as string -- the explicit conversion the matrix points authors to.
 
-    Booleans render as ``"True"``/``"False"`` to match the per-record ``str()``
-    the catalog v1 used (via :func:`_string_form`); Arrow's cast would emit
-    lowercase ``"true"``/``"false"`` and silently change every existing
-    boolean-to-string mapping.
+    Booleans render as ``"True"``/``"False"`` (via :func:`_string_form`),
+    the form the documented function catalog promises; Arrow's cast would
+    emit lowercase ``"true"``/``"false"``.
     """
     try:
         return _string_form(column)
@@ -522,8 +521,7 @@ def _rule_errors(built: Mapping[str, pa.Array], rule: ValidationRule) -> list[st
     """Return the error for *rule* over the built record, or ``[]`` on pass.
 
     The rule becomes a boolean failure mask over the addressed values; a null
-    value is exempt from every rule except ``not_null`` (mirroring the
-    per-record ``if value is not None`` guard), and a null LIST ancestor is
+    value is exempt from every rule except ``not_null``, and a null LIST ancestor is
     the same null one level up -- it fails ``not_null`` on the addressed
     field exactly as a null struct parent's propagated null does, and is
     exempt from value rules the same way. A malformed rule (bad regex, type
@@ -586,8 +584,7 @@ def _rule_failure_mask(
 
     try:
         match rule.type:
-            # The only rules a null answers rather than skips (every other
-            # rule mirrors the per-record ``if value is not None`` guard).
+            # The only rules a null answers rather than skips.
             # This arm is the one spelling of that set: `_rule_errors` folds
             # null LIST ancestors into the failures only on its flag.
             case "not_null" | "required":

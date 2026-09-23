@@ -294,7 +294,7 @@ mappings:
         "targetValue": 12.34
       },
       "expect": {
-        "valueDate": "2025-01-01",
+        "created": "2025-01-01T10:00:00Z",
         "amount": 12.34
       }
     }
@@ -302,7 +302,7 @@ mappings:
 }
 ```
 
-Fixtures are not yet enforced by the runtime; treat them as authoring
+The runtime does not run fixtures; treat them as authoring
 discipline that pays off the moment an upstream payload changes.
 
 ## See Also

@@ -491,10 +491,15 @@ class PipelineConfigPrep:
         if connection_id in self._resolved_connections:
             return self._resolved_connections[connection_id]
 
-        # Every id reaching here is indexed: the pipeline's own ids were
-        # indexed above, and the bundle validator ties each stream's
-        # connection ref to one of them.
-        record = self._connection_records[connection_id]
+        # The bundle validator ties a stream's connection ref to the
+        # pipeline's in base form (``pg_v2`` matches ``pg``), but only the
+        # exact ids the pipeline names were loaded.
+        record = self._connection_records.get(connection_id)
+        if record is None:
+            raise ValueError(
+                f"Connection id {connection_id!r} is not one of the connections "
+                f"the pipeline names: {sorted(self._connection_records)}"
+            )
         connector = self._load_connector(record.connector_id)
         # kind is a closed-enum discriminator validated by the connector
         # contract in _load_connector; whether that kind is runnable is the

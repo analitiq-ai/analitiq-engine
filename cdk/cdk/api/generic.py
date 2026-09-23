@@ -510,7 +510,7 @@ class GenericAPIConnector(BaseDestinationHandler):
         endpoint_id, read, stream_source, endpoint_ref = _read_operation(config)
 
         items_schema = records_items_schema(endpoint_id, read.response)
-        apply_read_type_map(items_schema, endpoint_ref, runtime)
+        apply_read_type_map(items_schema, read.response.schema_, endpoint_ref, runtime)
         schema_contract = SchemaContract(items_schema)
 
         request_block = read.request

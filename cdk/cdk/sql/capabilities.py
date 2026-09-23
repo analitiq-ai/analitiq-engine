@@ -9,11 +9,11 @@ dialect class keeps only *rendering*; whether the system has a shape comes
 from this block.
 
 This module is the CDK's typed view of that block. The engine folds the
-declared block into the resolved worker payload (the same channel that
-delivers transport specs), and every side — engine, worker, conformance
-kit — reads it here: the engine and the kit off the validated model, the
-worker off the block the engine folded in, which came from the same
-model. ``None`` (no block declared) is legal; every consumer treats a
+declared block, as authored, into the resolved worker payload (the same
+channel that delivers transport specs), and its two readers parse it here:
+the worker through ``SqlDialect.for_runtime`` off that payload, and the
+conformance kit off the definition under test. ``None`` (no block
+declared) is legal; every consumer treats a
 needed-but-undeclared shape fact as a loud configuration error via
 :func:`undeclared_capability_error` — no base-class default ever fills in
 a guess. The one exception is the ``limits`` member (issue #401), whose
@@ -63,25 +63,26 @@ if _bulk_mechanisms("adbc") != DIALECT_IMPLEMENTED_BULK_MECHANISMS | {"adbc_inge
     )
 
 
-#: The stage-table scopes the stage cycle branches on; typed on the
-#: capability and on the write plan, and checked against the contract below.
+#: The values the consumer sites branch on, one ``Literal`` per shape fact,
+#: typing the fields below. Hand-kept because each records what the branches
+#: were written to handle; deriving them from the contract would make a value
+#: no branch handles look handled. Checked against the contract's ``Literal``
+#: below, so a contract release that adds a value fails at import instead of
+#: falling into an else-branch mid-run.
+Catalog = Literal["none", "read", "full"]
+SessionTargeting = Literal["per_statement", "session_default"]
+MergeForm = Literal["merge", "insert_on_conflict", "insert_on_duplicate_key", "none"]
 StageScope = Literal["temp", "real"]
+StageSchema = Literal["target", "dedicated"]
 
-#: The values the consumer sites branch on, per shape fact. Hand-kept because
-#: each records what the branches were written to handle; deriving them from
-#: the contract would make a value no branch handles look handled. Checked
-#: against the contract's ``Literal`` below, so a contract release that adds
-#: a value fails at import instead of falling into an else-branch mid-run.
 _HANDLED_VALUES: Mapping[tuple[type[BaseModel], str], frozenset[str]] = {
-    (ContractSqlCapabilities, "catalog"): frozenset({"none", "read", "full"}),
+    (ContractSqlCapabilities, "catalog"): frozenset(get_args(Catalog)),
     (ContractSqlCapabilities, "session_targeting"): frozenset(
-        {"per_statement", "session_default"}
+        get_args(SessionTargeting)
     ),
-    (ContractSqlCapabilities, "merge_form"): frozenset(
-        {"merge", "insert_on_conflict", "insert_on_duplicate_key", "none"}
-    ),
+    (ContractSqlCapabilities, "merge_form"): frozenset(get_args(MergeForm)),
     (SqlStageCapabilities, "scope"): frozenset(get_args(StageScope)),
-    (SqlStageCapabilities, "schema_"): frozenset({"target", "dedicated"}),
+    (SqlStageCapabilities, "schema_"): frozenset(get_args(StageSchema)),
 }
 
 for (_model, _fact), _handled in _HANDLED_VALUES.items():
@@ -123,7 +124,7 @@ class StageCapabilities:
     """Declared stage-table shape (``sql_capabilities.stage``)."""
 
     scope: StageScope
-    schema: str
+    schema: StageSchema
     dedicated_schema: str | None
     transactional_ddl: bool
 
@@ -163,9 +164,9 @@ class SqlCapabilities:
     empty mapping declares no bulk mechanism anywhere.
     """
 
-    catalog: str
-    session_targeting: str
-    merge_form: str
+    catalog: Catalog
+    session_targeting: SessionTargeting
+    merge_form: MergeForm
     bulk_load: Mapping[str, str]
     stage: StageCapabilities
     limits: SqlLimits = field(default_factory=SqlLimits.undeclared)
@@ -217,10 +218,9 @@ class SqlCapabilities:
 def parse_declared_capabilities(block: Any) -> SqlCapabilities | None:
     """Read an optional declaration: ``None`` stays ``None`` (undeclared).
 
-    The single entry point every side uses — the engine reading the
-    connector definition, the worker reading its resolved payload, the
-    conformance kit reading the definition under test — so "undeclared"
-    means the same thing everywhere.
+    The single entry point both readers use — the worker reading its
+    resolved payload, the conformance kit reading the definition under
+    test — so "undeclared" means the same thing to both.
     """
     if block is None:
         return None

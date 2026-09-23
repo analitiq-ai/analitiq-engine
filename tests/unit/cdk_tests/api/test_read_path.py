@@ -13,7 +13,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from analitiq.contracts.endpoints import Pagination
+from analitiq.contracts.endpoints import ApiEndpointDoc, Pagination
 from pydantic import TypeAdapter
 
 from cdk.api import GenericAPIConnector
@@ -198,6 +198,34 @@ class TestOnePage:
         session = FakeSession([FakeResponse(body=_rows(2))])
         assert len(await _read(session, endpoint_document())) == 1
         assert len(session.calls) == 1
+
+    async def test_fields_composed_through_ref_and_all_of_read_as_declared(
+        self,
+    ) -> None:
+        document = endpoint_json(
+            record_fields={
+                "code": {"$ref": "#/$defs/Code"},
+                "amount": {"allOf": [{"$ref": "#/$defs/Amount"}]},
+            }
+        )
+        document["operations"]["read"]["response"]["schema"]["$defs"] = {
+            "Code": {"type": "string", "native_type": "text", "arrow_type": "Utf8"},
+            "Amount": {
+                "type": "number",
+                "native_type": "double",
+                "arrow_type": "Float64",
+            },
+        }
+        ApiEndpointDoc.model_validate(document)
+        session = FakeSession(
+            [FakeResponse(body={"records": [{"id": 1, "code": "a", "amount": 2.5}]})]
+        )
+        batches = await _read(session, document)
+        schema = batches[0].schema
+        assert (str(schema.field("code").type), str(schema.field("amount").type)) == (
+            "string",
+            "double",
+        )
 
     async def test_a_202_is_read_as_the_success_it_is(self) -> None:
         # The read path used to fail a whole stream on any status but 200.

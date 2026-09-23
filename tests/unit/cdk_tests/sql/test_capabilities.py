@@ -15,15 +15,19 @@ Three surfaces:
 
 from __future__ import annotations
 
+from typing import get_args, get_type_hints
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from analitiq.contracts.connector import SqlCapabilities as ContractSqlCapabilities
+from analitiq.contracts.connector import SqlStageCapabilities
 from analitiq.contracts.endpoints import DATABASE_ENDPOINT_SCHEMA_URL
 from contract_documents import connection_document, connector_document
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.sql.capabilities import (
     SqlCapabilities,
+    StageCapabilities,
     parse_declared_capabilities,
     undeclared_capability_error,
 )
@@ -74,6 +78,29 @@ class TestParse:
         assert not SqlCapabilities.from_declaration(
             caps_block(merge_form="none")
         ).supports_upsert
+
+
+class TestTypedVocabulary:
+    @pytest.mark.parametrize(
+        ("typed", "field_name", "model", "fact"),
+        [
+            (SqlCapabilities, "catalog", ContractSqlCapabilities, "catalog"),
+            (
+                SqlCapabilities,
+                "session_targeting",
+                ContractSqlCapabilities,
+                "session_targeting",
+            ),
+            (SqlCapabilities, "merge_form", ContractSqlCapabilities, "merge_form"),
+            (StageCapabilities, "scope", SqlStageCapabilities, "scope"),
+            (StageCapabilities, "schema", SqlStageCapabilities, "schema_"),
+        ],
+    )
+    def test_each_shape_fact_is_typed_by_the_values_the_contract_declares(
+        self, typed: type, field_name: str, model: type, fact: str
+    ) -> None:
+        typed_values = get_args(get_type_hints(typed)[field_name])
+        assert set(typed_values) == set(get_args(model.model_fields[fact].annotation))
 
 
 class TestRefusalShape:
