@@ -10,8 +10,8 @@ boundary are the contract documents serialised back to JSON-safe dicts
 source, destination write block) live as explicit typed fields rather than
 ``_runtime`` / ``_endpoint`` magic dict keys. :func:`dump_authored` is where
 the engine serialises a document again (the connection runtime's worker
-payload is the other): the worker bootstrap and the published bundle
-validator parse it back as the same contract model.
+payload is the other): the worker bootstrap parses it back as the same
+contract model.
 """
 
 from __future__ import annotations
@@ -19,17 +19,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Annotated, Any, get_args, get_origin
 
-from analitiq.contracts.connection import ConnectionInput
 from analitiq.contracts.endpoints import ApiEndpointDoc, DatabaseEndpointDoc
 from analitiq.contracts.pipelines.config import ErrorHandling as ContractErrorHandling
-from analitiq.contracts.pipelines.config import PipelineInput
 from analitiq.contracts.stream import (
     ApiWrite,
     DatabaseConflictKeyedWrite,
     DatabaseKeylessWrite,
     EndpointRef,
     Replication,
-    StreamInput,
     StreamMapping,
     StreamSource,
 )
@@ -72,11 +69,8 @@ def with_effective_safety_window(stream_source: dict[str, Any]) -> dict[str, Any
 
 #: The authored documents serialised again for a reader that parses them
 #: back: the endpoint document and stream source the worker bootstrap
-#: carries to the connector, and the run bundle the published validator
-#: checks.
-AuthoredDocument = (
-    EndpointDocument | StreamSource | PipelineInput | StreamInput | ConnectionInput
-)
+#: carries to the connector.
+AuthoredDocument = EndpointDocument | StreamSource
 
 
 def dump_authored(document: AuthoredDocument) -> dict[str, Any]:
@@ -263,8 +257,7 @@ class ResolvedStream:
 
     Carries what the run reads and nothing else: a stream's display name,
     description, status and tags are authoring metadata the engine never
-    acts on (the bundle validator requires an active pipeline with at least
-    one active stream; per-stream status is not acted on by the engine).
+    acts on.
     """
 
     stream_id: str

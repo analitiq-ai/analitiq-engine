@@ -153,8 +153,8 @@ _OPAQUE_MODELS: Final = frozenset(
 )
 
 #: Modules whose ``model_dump`` calls carry a document to a reader that
-#: parses it again as the same contract model: the worker bootstrap and the
-#: published bundle validator (``src.models.resolved``), and the resolved
+#: parses it again as the same contract model: the worker bootstrap
+#: (``src.models.resolved``), and the resolved
 #: connection payload a worker rebuilds its runtime from
 #: (``cdk.connection_runtime``).
 TRANSPORT_MODULES: Final = frozenset({"src.models.resolved", "cdk.connection_runtime"})

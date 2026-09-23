@@ -56,7 +56,8 @@ Per mode, the single statement from stage to target is:
 
 - **`upsert`** — the dialect's declared merge form on the stream's
   `conflict_keys`: `MERGE INTO`, `INSERT … ON CONFLICT DO UPDATE`, or
-  `INSERT … ON DUPLICATE KEY UPDATE` (§5).
+  `INSERT … ON DUPLICATE KEY UPDATE` (§5). Empty `conflict_keys` refuses
+  loudly and never downgrades to insert.
 - **`insert`** — one set-based anti-join
   `INSERT INTO target SELECT … FROM stage WHERE NOT EXISTS (…identity match…)`.
   Identity is the contract primary key, or the synthetic `_record_hash` column
@@ -117,7 +118,8 @@ in-session table.
 ## 3. Facade and backends
 
 `GenericSQLConnector` remains the single **semantic owner**: write modes,
-truncate gating, identity and duplicate rules, statement timeouts, retry verdicts, the exception → `AckStatus` /
+truncate gating, identity and duplicate rules, `conflict_keys` refusal,
+statement timeouts, retry verdicts, the exception → `AckStatus` /
 `FailureCategory` ladder, and readiness gates all stay in the facade,
 defined once. Transport mechanics move behind a backend interface:
 

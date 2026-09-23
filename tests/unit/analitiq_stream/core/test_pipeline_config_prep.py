@@ -48,8 +48,8 @@ ENDPOINT_DST = "dst_endpoint"
 
 # Connection-scoped destination: a private database endpoint. Its endpoint_id
 # is server-derived from database_object (never client-authored for
-# scope="connection"), and the bundle writes the endpoint doc under that
-# derived handle.
+# scope="connection"), and the connection package holds the endpoint doc
+# under that derived handle.
 DST_DATABASE_OBJECT = {"schema": "public", "name": "dst_table"}
 ENDPOINT_DST_CONNECTION = derive_db_endpoint_id(None, "public", "dst_table")
 
@@ -144,7 +144,7 @@ def _database_endpoint_doc(database_object: dict[str, Any]) -> dict[str, Any]:
 def _stream_doc(stream_id: str, *, dst_scope: str = "connector") -> dict[str, Any]:
     if dst_scope == "connection":
         # A connection-scoped ref carries database_object plus the server-derived
-        # endpoint_id (the run bundle carries both, keyed by the derived handle).
+        # endpoint_id.
         dst_endpoint_ref = {
             "scope": "connection",
             "connection_id": CONNECTION_DST_ID,
