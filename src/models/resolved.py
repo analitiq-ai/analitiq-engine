@@ -11,14 +11,13 @@ source, destination write block) live as explicit typed fields rather than
 ``_runtime`` / ``_endpoint`` magic dict keys. :func:`dump_authored` is where
 the engine serialises a document again (the connection runtime's worker
 payload is the other): the worker bootstrap and the published bundle
-validator parse it back as the same contract model, and the stream mapping
-is parsed by the engine's own ``MappingDocument``.
+validator parse it back as the same contract model.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Annotated, Any, get_args, get_origin
+from typing import Any, get_args
 
 from analitiq.contracts.connection import ConnectionInput
 from analitiq.contracts.pipelines.config import ErrorHandling as ContractErrorHandling
@@ -28,7 +27,6 @@ from analitiq.contracts.stream import (
     DatabaseConflictKeyedWrite,
     DatabaseKeylessWrite,
     EndpointRef,
-    Replication,
     StreamInput,
     StreamMapping,
     StreamSource,
@@ -38,7 +36,6 @@ from pydantic import BaseModel
 from cdk.connection_runtime import ConnectionRuntime
 from src.config import settings
 from src.config.schema_validator import EndpointDocument
-from src.engine.mapping import MappingDocument
 from src.models.state import ReplicationConfig as StateReplicationConfig
 from src.shared.logging_setup import resolve_level
 
@@ -70,18 +67,10 @@ def with_effective_safety_window(stream_source: dict[str, Any]) -> dict[str, Any
 
 #: The authored documents serialised again for a reader that parses them
 #: back: the endpoint document and stream source the worker bootstrap
-#: carries to the connector, the run bundle the published validator checks,
-#: and the stream mapping the engine's own
-#: :class:`~src.engine.mapping.MappingDocument` reads (its assignment
-#: targets, constants and validation rules are the contract's models,
-#: parsed from the authored JSON).
+#: carries to the connector, and the run bundle the published validator
+#: checks.
 AuthoredDocument = (
-    EndpointDocument
-    | StreamSource
-    | PipelineInput
-    | StreamInput
-    | ConnectionInput
-    | StreamMapping
+    EndpointDocument | StreamSource | PipelineInput | StreamInput | ConnectionInput
 )
 
 
@@ -89,9 +78,8 @@ def dump_authored(document: AuthoredDocument) -> dict[str, Any]:
     """Serialise an authored document for a reader that parses it back.
 
     The one dump for every document that crosses a boundary whole. The
-    reader parses the JSON back -- into the same contract model, or, for the
-    mapping, into the engine's ``MappingDocument`` reading of that grammar --
-    so ``by_alias`` restores the contract's field names (``$schema``,
+    reader parses the JSON back into the same contract model, so
+    ``by_alias`` restores the contract's field names (``$schema``,
     ``schema``) and ``exclude_unset`` keeps the author's omissions omitted,
     never baking the model's defaults into the wire shape.
     """
@@ -143,31 +131,6 @@ def _contract_literals(model: type[BaseModel], field_name: str) -> frozenset[str
     return frozenset(values)
 
 
-def _variant_literals(annotation: Any, field_name: str) -> frozenset[str]:
-    """Read *field_name*'s vocabulary across every variant of a union annotation.
-
-    Accepts the union bare or wrapped in ``Annotated`` (the contract's
-    discriminated unions carry a ``Field(discriminator=...)``); the wrapper is
-    stripped explicitly rather than by unpacking ``get_args``, so an annotation
-    that stops being a union reaches the error below instead of failing on a
-    bare unpack that names neither the contract nor the cause.
-    """
-    if get_origin(annotation) is Annotated:
-        annotation = get_args(annotation)[0]
-    variants = get_args(annotation)
-    if not variants:
-        raise RuntimeError(
-            f"{annotation!r} is no longer a union of contract variants; this "
-            "reader must follow it"
-        )
-    return frozenset().union(
-        *(_contract_literals(variant, field_name) for variant in variants)
-    )
-
-
-_VALID_REPLICATION_METHODS = _variant_literals(Replication, "method")
-
-
 @dataclass(frozen=True)
 class ReplicationConfig:
     """Source replication policy, typed against the published stream contract.
@@ -181,23 +144,6 @@ class ReplicationConfig:
     method: str
     cursor_field: str | None = None
     tie_breaker_fields: list[str] | None = None
-
-    def __post_init__(self) -> None:
-        if self.method not in _VALID_REPLICATION_METHODS:
-            raise ValueError(
-                f"Unknown replication method {self.method!r}; "
-                f"expected one of {sorted(_VALID_REPLICATION_METHODS)}"
-            )
-        # The contract carries cursor_field as a string on its incremental
-        # replication variant and forbids it on full_refresh, so this engine
-        # view holds a string or None. Fail loud at this boundary if anything
-        # else slips through (e.g. a legacy list), rather than letting it
-        # reach compute_max_cursor as an opaque TypeError.
-        if self.cursor_field is not None and not isinstance(self.cursor_field, str):
-            raise ValueError(
-                "cursor_field must be a string or None; the contract forbids a "
-                f"list, got {type(self.cursor_field).__name__}"
-            )
 
 
 @dataclass
@@ -278,15 +224,9 @@ class ResolvedStream:
     stream_version: int
     source: ResolvedSource
     destinations: list[ResolvedDestination]
-    mapping: MappingDocument
-
-    def __post_init__(self) -> None:
-        if not self.stream_id:
-            raise ValueError("ResolvedStream.stream_id cannot be empty")
+    mapping: StreamMapping
 
     def primary_destination(self) -> ResolvedDestination:
-        if not self.destinations:
-            raise ValueError(f"Stream {self.stream_id!r} has no destinations")
         return self.destinations[0]
 
 
@@ -384,10 +324,6 @@ class PipelineConnections:
 
     source: str
     destinations: list[str] = field(default_factory=list)
-
-    def __post_init__(self) -> None:
-        if not self.source:
-            raise ValueError("PipelineConnections.source cannot be empty")
 
 
 @dataclass

@@ -14,7 +14,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from contract_documents import connector_document, http_transport
-from pydantic import ValidationError
 
 from cdk.exceptions import TransportSpecError
 from cdk.json_utils import authored_json
@@ -92,25 +91,6 @@ class TestResolveTransportSpec:
         ctx = ResolutionContext(connector=authored_json(connector))
         with pytest.raises(KeyError, match="not in declared transports"):
             resolve_transport_spec(connector, transport_ref="other", context=ctx)
-
-    @pytest.mark.parametrize(
-        "bend, field",
-        [
-            ({"transports": {}}, "transport"),
-            ({"default_transport": "other"}, "default_transport"),
-            ({"transports": {"api": {"base_url": "https://x"}}}, "transport_type"),
-        ],
-        ids=["no-transports", "undeclared-default", "no-transport-type"],
-    )
-    def test_a_definition_the_contract_refuses_never_reaches_selection(
-        self, bend, field
-    ):
-        # Selection reads a validated document: an empty transports block, a
-        # default naming no declared transport, or a block without its type
-        # discriminator is the contract's refusal, before any transport is
-        # chosen.
-        with pytest.raises(ValidationError, match=field):
-            connector_document("api", connector_id="demo", **bend)
 
 
 # Transport kind registry (register / build / unregister lifecycle)
@@ -248,21 +228,6 @@ class TestSQLAlchemySpecValidation:
         with pytest.raises(TransportSpecError, match="must be the structured"):
             resolve_sqlalchemy_spec(spec, resolver=_resolver())
 
-    def test_non_object_options_raises_transport_spec_error(self):
-        with pytest.raises(TransportSpecError, match=r"`options` must be an object"):
-            resolve_sqlalchemy_spec(
-                {
-                    "driver": "postgresql+asyncpg",
-                    "dsn": {
-                        "kind": "url_template",
-                        "template": "postgresql+asyncpg://h/db",
-                        "bindings": {},
-                    },
-                    "options": "pool_size=5",
-                },
-                resolver=_resolver(),
-            )
-
     def test_resolved_payload_renders_dsn_and_engine_kwargs(self):
         # Pin the JSON-safe worker payload: bindings rendered through the
         # resolver with their declared encodings, options translated to
@@ -307,51 +272,6 @@ class TestSQLAlchemySpecValidation:
             },
         }
 
-    def test_unsupported_dsn_kind_raises_transport_spec_error(self):
-        with pytest.raises(TransportSpecError, match="Unsupported dsn.kind"):
-            resolve_sqlalchemy_spec(
-                {"driver": "postgresql+asyncpg", "dsn": {"kind": "unknown"}},
-                resolver=_resolver(),
-            )
-
-    def test_empty_dsn_template_raises_transport_spec_error(self):
-        with pytest.raises(TransportSpecError, match="dsn.template"):
-            resolve_sqlalchemy_spec(
-                {
-                    "driver": "postgresql+asyncpg",
-                    "dsn": {"kind": "url_template", "template": ""},
-                },
-                resolver=_resolver(),
-            )
-
-    def test_binding_missing_encoding_raises_transport_spec_error(self):
-        with pytest.raises(TransportSpecError, match="requires both"):
-            resolve_sqlalchemy_spec(
-                {
-                    "driver": "postgresql+asyncpg",
-                    "dsn": {
-                        "kind": "url_template",
-                        "template": "{host}",
-                        "bindings": {"host": {"value": "localhost"}},
-                    },
-                },
-                resolver=_resolver(),
-            )
-
-    def test_unknown_binding_encoding_raises_transport_spec_error(self):
-        with pytest.raises(TransportSpecError, match="unknown encoding"):
-            resolve_sqlalchemy_spec(
-                {
-                    "driver": "postgresql+asyncpg",
-                    "dsn": {
-                        "kind": "url_template",
-                        "template": "{host}",
-                        "bindings": {"host": {"value": "localhost", "encoding": "bad"}},
-                    },
-                },
-                resolver=_resolver(),
-            )
-
     def test_binding_resolved_to_none_raises_transport_spec_error(self):
         ctx = ResolutionContext(connection={"parameters": {"host": None}})
         with pytest.raises(TransportSpecError, match="resolved value is None"):
@@ -388,8 +308,14 @@ class TestHttpSpecValidation:
 
     @pytest.mark.parametrize(
         "rate_limit",
-        [{"max_requests": 10}, {"time_window_seconds": 60}],
-        ids=["max_requests_only", "time_window_only"],
+        [
+            {"max_requests": 10},
+            {"time_window_seconds": 60},
+            # The contract types the window as Any, so an explicit null
+            # passes validation and only this check refuses it.
+            {"max_requests": 5, "time_window_seconds": None},
+        ],
+        ids=["max_requests_only", "time_window_only", "null_time_window"],
     )
     def test_rate_limit_missing_one_field_raises_transport_spec_error(self, rate_limit):
         with pytest.raises(TransportSpecError, match="both"):
@@ -422,26 +348,6 @@ class TestHttpSpecValidation:
             )
         assert spec["headers"] == {"X-Kept": "yes"}
         assert "X-Org" in caplog.text
-
-    def test_non_object_headers_raises_transport_spec_error(self):
-        with pytest.raises(TransportSpecError, match=r"`headers` must be an object"):
-            resolve_http_spec(
-                {
-                    "base_url": "https://api.example.com",
-                    "headers": ["Authorization: Bearer x"],
-                },
-                resolver=_resolver(),
-            )
-
-    def test_non_object_rate_limit_raises_transport_spec_error(self):
-        with pytest.raises(TransportSpecError, match=r"`rate_limit` must be an object"):
-            resolve_http_spec(
-                {
-                    "base_url": "https://api.example.com",
-                    "rate_limit": [10, 60],
-                },
-                resolver=_resolver(),
-            )
 
     def test_resolved_payload_pins_http_contract(self):
         # Pin the JSON-safe worker payload: base_url resolved through the

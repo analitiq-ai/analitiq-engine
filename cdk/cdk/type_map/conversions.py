@@ -163,8 +163,7 @@ def classify_conversion(source_family: str, target_family: str) -> Conversion:
     # rejects the rest, so an auto cast would succeed on some rows of a real
     # column and fail the batch on others -- graded, not asserted, by
     # test_utf8_to_date32_parses_one_spelling_not_every_iso_form in
-    # tests/unit/cdk_tests/test_conversion_matrix.py. An author renders these
-    # with an explicit function (iso_to_date) that accepts every ISO form.
+    # tests/unit/cdk_tests/test_conversion_matrix.py.
 
     # Nested structures never convert to or from a scalar, and one nested shape
     # never becomes another (Object <-> List).

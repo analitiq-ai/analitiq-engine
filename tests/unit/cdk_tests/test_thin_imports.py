@@ -64,6 +64,7 @@ def _run(body: str) -> subprocess.CompletedProcess:
         [sys.executable, "-c", script],
         capture_output=True,
         text=True,
+        check=False,
         env=env,
     )
 
@@ -119,7 +120,7 @@ class TestThinControlPlaneImports:
             for name in (
                 "PageLoop", "Page", "PageRequest", "build_strategy",
                 "resolve_page_size", "evaluate_predicate", "ApiDialect",
-                "UnknownPaginationStrategy", "ConnectorConnectionError",
+                "ConnectorConnectionError",
             ):
                 assert hasattr(cdk.api, name), name
 

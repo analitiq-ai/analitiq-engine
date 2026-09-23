@@ -56,13 +56,12 @@ from analitiq.contracts.stream import (
     EndpointRef,
     IncrementalReplication,
     StreamInput,
+    StreamMapping,
     StreamSource,
 )
 
 from cdk.connection_runtime import ConnectionRuntime
-from cdk.declarations import parse_declared_concurrency, parse_declared_error_map
 from cdk.secrets import SchemeSecretsResolver, SecretsResolver
-from cdk.sql.capabilities import parse_declared_capabilities
 from cdk.type_map import (
     TypeMapNotFoundError,
     TypeMapper,
@@ -86,7 +85,6 @@ from src.config.schema_validator import (
     validate_stream,
 )
 from src.config.utils import author_set, load_json_file
-from src.engine.mapping import MappingDocument
 from src.models.resolved import (
     BatchingConfig,
     ErrorHandlingConfig,
@@ -490,16 +488,18 @@ class PipelineConfigPrep:
 
     def _resolve_connection_by_id(self, connection_id: str) -> ConnectionRuntime:
         """Materialize (or return cached) ConnectionRuntime for a ``connection_id``."""
-        record = self._connection_records.get(connection_id)
-        if record is None:
-            raise ValueError(
-                f"Connection id {connection_id!r} is not present under "
-                f"{self._paths['connections']}; "
-                f"known: {sorted(self._connection_records)}"
-            )
         if connection_id in self._resolved_connections:
             return self._resolved_connections[connection_id]
 
+        # The bundle validator ties a stream's connection ref to the
+        # pipeline's in base form (``pg_v2`` matches ``pg``), but only the
+        # exact ids the pipeline names were loaded.
+        record = self._connection_records.get(connection_id)
+        if record is None:
+            raise ValueError(
+                f"Connection id {connection_id!r} is not one of the connections "
+                f"the pipeline names: {sorted(self._connection_records)}"
+            )
         connector = self._load_connector(record.connector_id)
         # kind is a closed-enum discriminator validated by the connector
         # contract in _load_connector; whether that kind is runnable is the
@@ -515,16 +515,6 @@ class PipelineConfigPrep:
             connector_type_mapper=self._connector_type_mappers.get(record.connector_id),
             connection_type_mapper=self._connection_type_mapper(connection_id),
         )
-        # Parse the declared blocks (sql_capabilities, issue #390; error_map
-        # and concurrency, issue #401) on the trusted side, at config load: a
-        # malformed declaration fails here as a config error, never inside a
-        # spawned worker where a dead pre-serve process would surface as a
-        # connect failure instead. None (no block) is legal; needed-but-
-        # undeclared facts refuse at their consumer sites.
-        source = f"connector {record.connector_id!r}"
-        parse_declared_capabilities(runtime.declared_sql_capabilities, source=source)
-        parse_declared_error_map(runtime.declared_error_map, source=source)
-        parse_declared_concurrency(runtime.declared_concurrency, source=source)
         self._resolved_connections[connection_id] = runtime
         logger.info(
             "Resolved connection: connection_id=%s connector=%s",
@@ -835,18 +825,12 @@ class PipelineConfigPrep:
                 )
             )
 
-        # The mapping crosses as the authored document: the engine's
-        # MappingDocument is its own reading of the contract's mapping
-        # grammar (see src.engine.mapping), parsed from the authored JSON.
-        mapping = document.mapping
         return ResolvedStream(
             stream_id=stream_id,
             stream_version=stream_version,
             source=resolved_source,
             destinations=resolved_destinations,
-            mapping=MappingDocument.parse(
-                dump_authored(mapping) if mapping is not None else {}
-            ),
+            mapping=document.mapping or StreamMapping(),
         )
 
     # ------------------------------------------------------------------

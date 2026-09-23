@@ -1,10 +1,10 @@
 """Where a page's records live in a decoded body, and how to reach them.
 
-``operations.read.response.records.ref`` is one path, read by two pieces of
-code: the payload walk that pulls the records out of a live response, and
-the schema walk that finds the per-record item schema. They parsed the
-anchor separately and could disagree about what a ref meant, so the parse
-is :func:`split_records_ref` and both call it.
+``operations.read.response.records.ref`` is one path. The payload walk
+that pulls the records out of a live response, and the conformance kit,
+parse it with :func:`split_records_ref`; the schema walk that finds the
+per-record item schema resolves it through the contract's
+``resolve_read_record_schema``.
 
 Extraction fails loud. A ref that addresses nothing used to answer zero
 records, and under the loop's empty-page rule zero records ends the
@@ -63,28 +63,16 @@ def walk_path(data: Any, path: list[str]) -> Any:
     return current
 
 
-def split_records_ref(ref: Any) -> list[str]:
+def split_records_ref(ref: str) -> list[str]:
     """Return the field path a records ref addresses under the response body.
 
     ``response.body`` is the body itself (an empty path);
-    ``response.body.<field>[.<field>...]`` is the fields below it. Anything
-    else is an authoring defect and raises naming the ref: the contract
-    anchors records at the response body, and reading an unanchored ref as
-    "nothing found" is what let a mistyped path pass for an empty stream.
+    ``response.body.<field>[.<field>...]`` is the fields below it. The
+    published contract refuses any other ref, so none reaches here.
     """
-    if not isinstance(ref, str) or not ref:
-        raise ReadError(
-            f"records.ref must be a non-empty string anchored at "
-            f"{_ANCHOR!r}; read {ref!r}"
-        )
     if ref == _ANCHOR:
         return []
-    if ref.startswith(_ANCHOR + "."):
-        return ref[len(_ANCHOR) + 1 :].split(".")
-    raise ReadError(
-        f"unsupported records.ref {ref!r}; expected {_ANCHOR!r} or "
-        f"'{_ANCHOR}.<field>[.<field>...]'"
-    )
+    return ref[len(_ANCHOR) + 1 :].split(".")
 
 
 def extract_records(payload: Any, ref: str) -> list[dict[str, Any]]:

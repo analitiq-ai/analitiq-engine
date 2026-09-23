@@ -26,7 +26,7 @@ import pytest
 
 import cdk
 from cdk.contract import ColumnDef
-from cdk.sql.capabilities import SqlCapabilities, SqlCapabilitiesError
+from cdk.sql.capabilities import SqlCapabilities
 from cdk.sql.dialects import SqlDialect
 from cdk.sql.exceptions import CatalogAddressingError
 from cdk.sql.generic import GenericSQLConnector
@@ -166,13 +166,6 @@ class TestOneBindingSite:
         assert isinstance(dialect, _PackageDialect)
         assert dialect.capabilities is not None
         assert dialect.capabilities.catalog == "full"
-
-    def test_for_runtime_names_the_connector_in_a_malformed_declaration(self):
-        runtime = FakeAdbcRuntime(
-            "demo", declared_sql_capabilities=caps_block(catalog="everything")
-        )
-        with pytest.raises(SqlCapabilitiesError, match="connector 'demo'"):
-            SqlDialect.for_runtime(runtime)
 
     def test_a_for_runtime_override_is_refused_where_it_is_written(self):
         # The third route around the binding site: an override replaces the

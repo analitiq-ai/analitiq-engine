@@ -234,12 +234,7 @@ class SqlDialect:
         ``declared_sql_capabilities`` strictly: a runtime object without
         the attribute is a wiring defect, not an undeclared connector.
         """
-        return cls(
-            parse_declared_capabilities(
-                runtime.declared_sql_capabilities,
-                source=f"connector {runtime.connector_id!r}",
-            )
-        )
+        return cls(parse_declared_capabilities(runtime.declared_sql_capabilities))
 
     @property
     def capabilities(self) -> SqlCapabilities | None:

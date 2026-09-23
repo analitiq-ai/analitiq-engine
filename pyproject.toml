@@ -89,8 +89,8 @@ google-re2 = "^1.1"
 #   - validator: cross-document referential integrity of an assembled run
 #     bundle (validate_pipeline_bundle, used in src/engine/pipeline_config_prep).
 # Pinned exactly (release candidates); bump deliberately to adopt a new contract.
-analitiq-contract-models = {version = "1.0.0rc25", allow-prereleases = true}
-analitiq-validator = {version = "1.0.0rc25", allow-prereleases = true}
+analitiq-contract-models = {version = "1.0.0rc26", allow-prereleases = true}
+analitiq-validator = {version = "1.0.0rc26", allow-prereleases = true}
 
 # Configuration and utilities
 python-dotenv = "^1.0.0"

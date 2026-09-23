@@ -11,21 +11,22 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pyarrow as pa
 import pytest
+from analitiq.contracts.stream import StreamMapping
 
 from src.engine.batch_policy import ErrorStrategy
 from src.engine.exceptions import StreamProcessingError
-from src.engine.mapping import MappingDocument, compile_mapping
+from src.engine.mapping import compile_mapping
 from src.engine.stream_processor import SourceBatch, StreamProcessor
 from src.state.error_classification import ErrorCode, FailureStage, read_failure_tag
 
 pytestmark = pytest.mark.unit
 
 
-def _mapping(error_handling: dict | None) -> MappingDocument:
+def _mapping(error_handling: dict | None) -> StreamMapping:
     validate: dict = {"rules": [{"type": "not_null", "field": ["v"]}]}
     if error_handling is not None:
         validate["error_handling"] = error_handling
-    return MappingDocument.parse(
+    return StreamMapping.model_validate(
         {
             "assignments": [
                 {
@@ -53,7 +54,7 @@ def _stream_config(write_mode: str | None) -> dict:
 
 
 def _processor(
-    mapping: MappingDocument, default: str, *, write_mode: str | None = None
+    mapping: StreamMapping, default: str, *, write_mode: str | None = None
 ) -> StreamProcessor:
     processor = StreamProcessor(
         stream_id="s1",

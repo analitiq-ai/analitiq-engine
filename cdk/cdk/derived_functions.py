@@ -4,20 +4,19 @@ These functions are referenced from connector JSON via ``{"function":
 "<name>", "input": ..., ...}``. They are the only escape hatch from the
 declarative model — connector authors cannot embed arbitrary Python.
 
-Adding a new function requires:
-
-1. Implementing it here with a ``DerivedFunction`` signature.
-2. Registering it in :data:`DEFAULT_FUNCTIONS`.
-3. Documenting it in this module's docstring (the registered functions are
-   the canonical list).
+The contract's ``DerivedValue`` union names the functions; each is
+implemented here with a ``DerivedFunction`` signature and registered in
+:data:`DEFAULT_FUNCTIONS`, which is checked against that union at import.
 """
 
 from __future__ import annotations
 
 import base64 as _base64
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, get_args
 from urllib.parse import quote as _url_quote
+
+from analitiq.contracts.connector import DerivedValue
 
 from .exceptions import UnresolvedValueError
 from .resolver import DerivedFunction, Resolver
@@ -147,3 +146,14 @@ DEFAULT_FUNCTIONS: dict[str, DerivedFunction] = {
     "base64_encode": base64_encode_function,
     "url_encode": url_encode_function,
 }
+
+_UNION, _DISCRIMINATOR = get_args(DerivedValue)
+_DERIVED_NAMES = frozenset(
+    get_args(get_args(member)[0].model_fields["function"].annotation)[0]
+    for member in get_args(_UNION)
+)
+if set(DEFAULT_FUNCTIONS) != _DERIVED_NAMES:
+    raise TypeError(
+        f"derived functions {sorted(set(DEFAULT_FUNCTIONS) ^ _DERIVED_NAMES)}: "
+        f"the contract's DerivedValue union and the engine's registry disagree"
+    )

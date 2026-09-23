@@ -7,7 +7,7 @@ conversion matrix. For Arrow type-system and schema-contract internals see
 
 Streams declare their record-shape transformation under `mapping` in
 `pipelines/{id}/streams/{stream_id}.json`. The implementation lives in
-`src/engine/mapping.py`: the document is read once by `MappingDocument`,
+`src/engine/mapping.py`: the contract's validated `StreamMapping` is
 compiled once by `compile_mapping` into vectorized `pyarrow.compute`, and
 applied to each Arrow batch.
 
@@ -24,12 +24,11 @@ users edit assignments through a UI; the engine compiles the AST once per
 stream and evaluates it as vectorized Arrow compute over each batch -- the
 data never leaves Arrow.
 
-The mapping document is **closed**: a key the engine does not compile is
-rejected by name rather than dropped, so a document written against a
-different contract pin fails with the offending field in the message instead
-of silently losing a column. This reaches inside the expression AST — every
-node is closed over the keys its `op` declares, so a stray key on a `get` or
-an `fn` stage fails the same way a stray key on the assignment does.
+The mapping document is validated by the published contract when the stream
+is loaded; the engine compiles exactly the expression forms and conversion
+functions that contract declares. That match is checked when the engine
+starts, so a contract release that adds a form or a function fails the engine
+at startup rather than on the first batch that carries it.
 
 ## Paths Are Token Arrays
 
@@ -43,7 +42,7 @@ batch read:
 A **target** path is different: it is a single segment naming one field on the
 destination record root. Nesting under that field is declared with
 `arrow_type: "Object"` plus `properties` (or `"List"` plus `items`), which is
-also what builds the Arrow struct. A dotted target path is a compile error.
+also what builds the Arrow struct.
 
 ## Stream `mapping` Shape
 
@@ -133,7 +132,7 @@ The column is built at the **target**'s `arrow_type`; the constant's own
 }
 ```
 
-### Pipeline of functions
+### Conversion pipe
 
 ```json
 {
@@ -142,80 +141,36 @@ The column is built at the **target**'s `arrow_type`; the constant's own
     "expression": {
       "op": "pipe",
       "args": [
-        { "op": "get", "path": ["email"] },
-        { "op": "fn", "name": "trim",  "version": 1, "args": [] },
-        { "op": "fn", "name": "lower", "version": 1, "args": [] }
+        { "op": "get", "path": ["id"] },
+        { "op": "fn", "name": "to_string" }
       ]
     }
   },
-  "target": { "path": "email", "arrow_type": "Utf8", "nullable": true }
+  "target": { "path": "reference", "arrow_type": "Utf8", "nullable": false }
 }
 ```
 
-### Conditional
+## Expressions
 
-```json
-{
-  "value": {
-    "kind": "expression",
-    "expression": {
-      "op": "if",
-      "args": [
-        { "op": "eq", "args": [
-          { "op": "get", "path": ["is_active"] },
-          { "op": "const", "value": true }
-        ]},
-        { "op": "const", "value": "active" },
-        { "op": "const", "value": "inactive" }
-      ]
-    }
-  },
-  "target": { "path": "status", "arrow_type": "Utf8", "nullable": false }
-}
-```
-
-## Expression AST
-
-Implemented `op` values:
+The contract publishes two expression forms:
 
 | `op` | Description |
 |------|-------------|
 | `get` | Read from the source record at `path` (token array) |
-| `const` | Inline literal `value` |
-| `pipe` | First arg is the seed, remaining args are `fn` nodes applied left-to-right |
-| `fn` | Apply function `name@version` to the value flowing through `pipe` |
-| `if` | Three-arg ternary: `[condition, then, else]` |
-| `eq`, `neq` | Equality |
-| `gt`, `gte`, `lt`, `lte` | Comparison |
-| `and`, `or`, `not` | Boolean logic |
-| `concat` | String concatenation of evaluated args (None args dropped) |
-| `coalesce` | First non-null evaluated arg |
+| `pipe` | `args[0]` is a `get` seed; every later arg is an `fn` stage applied left-to-right |
 
-Unknown `op` values raise a `TransformationError`. A single expression
-error fails the entire batch and surfaces as a transform-stage stream
-failure — keep authoring tooling honest by validating against this
-list. Because each op is a vectorized column operation, the boolean and
-conditional ops (`and`, `or`, `if`) evaluate every operand over the whole
-batch rather than short-circuiting per row; expressions are pure, so the
-result is unchanged, but a branch that would error only on rows it does
-not feed still fails the batch.
+An `fn` stage names a conversion function. The contract closes the names
+over the functions the conversion matrix declares for `explicit`
+conversions. A failure while evaluating an expression fails the entire
+batch and surfaces as a transform-stage stream failure.
 
 ### Vectorized evaluation: known divergences
 
-The transform is a single Arrow-native path (`compile_mapping`); each op is a
-`pyarrow.compute` kernel applied to a whole column. This is deliberately steered
-back to the former per-record behavior at the edges (null equality, string
-truthiness, boolean/ISO handling), but a few differences are inherent to typed,
-vectorized evaluation and are accepted:
+The transform is a single Arrow-native path (`compile_mapping`); each stage is
+a `pyarrow.compute` kernel applied to a whole column. A few differences from
+Python's per-value behaviour are inherent to vectorized evaluation and are
+accepted:
 
-- **Typed intermediates.** Every sub-expression produces a typed Arrow column,
-  so a value cannot change type mid-expression the way an untyped Python value
-  could. A `coalesce` whose args have *different concrete types* (e.g. a string
-  fallback for a numeric column, resolved only by a later stage) fails loud
-  instead of carrying a mixed-type value forward. Author the fallback at the
-  column's type, or convert first.
-- **Boolean truthiness** covers scalars and strings (non-empty is true); a List
-  or Object condition in `if`/`and`/`or` is not supported and fails loud.
 - **`to_string` of a temporal** uses Arrow's ISO formatting, which can differ in
   notation/precision from Python's `str(datetime)`.
 - **Validation `pattern`** runs on Arrow's RE2 engine (anchored `^(?:...)`),
@@ -223,22 +178,9 @@ vectorized evaluation and are accepted:
 
 ## Function Catalog
 
-Built-in functions:
-
-| Name | Version | Purpose |
-|------|---------|---------|
-| `iso_to_date` | 1 | ISO-8601 timestamp → `YYYY-MM-DD` string |
-| `iso_to_datetime` | 1 | ISO-8601 → datetime (timezone-aware) |
-| `iso_to_timestamp` | 1 | ISO-8601 → timezone-aware UTC timestamp (same kernel as `iso_to_datetime`) |
-| `trim`, `lower`, `upper` | 1 | String normalization |
-| `to_int`, `to_float`, `to_string` | 1 | Type coercion |
-| `abs` | 1 | Numeric absolute value |
-| `now` | 1 | Current UTC datetime |
-
-Function versions are pinned in the AST (`"version": 1`) so the catalog
-can evolve without rewriting existing mappings. New versions must be
-registered alongside the existing ones; do not silently rewrite v1
-behaviour.
+| Name | Purpose |
+|------|---------|
+| `to_string` | Format a value as a string; booleans render as `True`/`False` |
 
 ## Validation
 
@@ -256,9 +198,9 @@ guards. The first token names any `target.path` the mapping declares — rules
 are authored per assignment but grade the record the assignments build
 together — and each later token names a field declared under that target's
 `properties`, descending through `items` for a `List` (a row fails when any
-of its list elements does). A token that resolves to nothing is refused by
-name at parse; a token is one field name, so a `.` inside it is part of that
-name, never nesting.
+of its list elements does). The contract refuses a token that resolves to
+nothing (RULE-STRM-015); a token is one field name, so a `.` inside it is part
+of that name, never nesting.
 
 Implemented rule types, each compiled to a vectorized boolean mask over the
 batch. A null value is exempt from every rule except `not_null`:
@@ -337,18 +279,6 @@ values, materialized by the destination's Arrow schema contract
 (`SchemaContract`, `cdk/cdk/schema_contract.py`), which preserves precision
 across the gRPC boundary.
 
-## Versioning Strategy
-
-End-user mappings need to remain stable for years. The contract is:
-
-1. Functions are versioned (`name@version`).
-2. Every `fn` AST node stores its `version`.
-3. New behavior ships as a new version; the old version stays
-   executable.
-4. When deprecating a version, provide an automatic AST migration plus
-   fixtures, and require fixtures to pass before the migrated mapping
-   is enabled.
-
 ## Stream Fixtures (Recommended)
 
 Fixtures detect schema/type drift and regressions when users edit
@@ -364,7 +294,7 @@ mappings:
         "targetValue": 12.34
       },
       "expect": {
-        "valueDate": "2025-01-01",
+        "created": "2025-01-01T10:00:00Z",
         "amount": 12.34
       }
     }
@@ -372,7 +302,7 @@ mappings:
 }
 ```
 
-Fixtures are not yet enforced by the runtime; treat them as authoring
+The runtime does not run fixtures; treat them as authoring
 discipline that pays off the moment an upstream payload changes.
 
 ## See Also

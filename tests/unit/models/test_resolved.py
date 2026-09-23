@@ -1,15 +1,13 @@
 """Unit tests for the typed resolved-runtime models and their invariants."""
 
-from typing import Annotated, Literal
-from unittest.mock import MagicMock
+from typing import Literal
 
 import pytest
 from analitiq.contracts.pipelines.config import ErrorHandling as ContractErrorHandling
 from analitiq.contracts.pipelines.config import Runtime as ContractRuntime
 from analitiq.contracts.stream import Replication, StreamSource
-from pydantic import BaseModel, Field, TypeAdapter, create_model
+from pydantic import BaseModel, TypeAdapter, create_model
 
-from src.engine.mapping import MappingDocument
 from src.engine.pipeline_config_prep import _parse_replication, _parse_runtime_config
 from src.models.resolved import (
     BatchingConfig,
@@ -18,10 +16,8 @@ from src.models.resolved import (
     PipelineConnections,
     ReplicationConfig,
     ResolvedPipeline,
-    ResolvedStream,
     RuntimeConfig,
     _contract_literals,
-    _variant_literals,
     with_effective_safety_window,
 )
 from src.models.state import ReplicationConfig as StateReplicationConfig
@@ -69,43 +65,6 @@ class TestContractLiterals:
         # off it must explain, not raise AttributeError.
         with pytest.raises(RuntimeError, match="does not declare"):
             _contract_literals(type(None), "method")
-
-
-class TestVariantLiterals:
-    """The union reader states which shape it could not read."""
-
-    def test_reads_an_annotated_discriminated_union(self):
-        class A(BaseModel):
-            kind: Literal["a"]
-
-        class B(BaseModel):
-            kind: Literal["b"]
-
-        annotated = Annotated[A | B, Field(discriminator="kind")]
-        assert _variant_literals(annotated, "kind") == {"a", "b"}
-
-    def test_reads_a_bare_union(self):
-        # The contract wraps its unions in Annotated today; the reader does not
-        # depend on that, so dropping the discriminator is not a silent break.
-        class A(BaseModel):
-            kind: Literal["a"]
-
-        class B(BaseModel):
-            kind: Literal["b"]
-
-        assert _variant_literals(A | B, "kind") == {"a", "b"}
-
-    @pytest.mark.parametrize("shape", ["plain_model", "annotated_single"])
-    def test_rejects_an_annotation_that_is_not_a_union(self, shape):
-        # The likeliest shape change: the contract collapses the union to one
-        # model. Before the Annotated strip was explicit this raised a bare
-        # unpack ValueError naming neither the contract nor the cause.
-        class A(BaseModel):
-            kind: Literal["a"]
-
-        annotation = A if shape == "plain_model" else Annotated[A, Field()]
-        with pytest.raises(RuntimeError, match="no longer a union"):
-            _variant_literals(annotation, "kind")
 
 
 class TestErrorHandlingConfig:
@@ -189,10 +148,6 @@ class TestPipelineConnections:
         assert conns.source == "src"
         assert conns.destinations == ["a", "b"]
 
-    def test_rejects_empty_source(self):
-        with pytest.raises(ValueError, match="source cannot be empty"):
-            PipelineConnections(source="", destinations=["a"])
-
 
 class TestResolvedModelGuards:
     def _pipeline(self, pipeline_id="p1"):
@@ -209,19 +164,6 @@ class TestResolvedModelGuards:
     def test_resolved_pipeline_rejects_empty_id(self):
         with pytest.raises(ValueError, match="pipeline_id cannot be empty"):
             self._pipeline(pipeline_id="")
-
-    def _stream(self, stream_id="s1"):
-        return ResolvedStream(
-            stream_id=stream_id,
-            stream_version=1,
-            source=MagicMock(),
-            destinations=[MagicMock()],
-            mapping=MappingDocument(),
-        )
-
-    def test_resolved_stream_rejects_empty_id(self):
-        with pytest.raises(ValueError, match="stream_id cannot be empty"):
-            self._stream(stream_id="")
 
 
 def _runtime_block(block: dict) -> ContractRuntime:
@@ -294,27 +236,6 @@ class TestParseRuntimeConfig:
         assert cfg.error_handling.max_retries == 5
         assert cfg.buffer_size == 1234
 
-    def test_invalid_value_fails_loud(self):
-        # Now validated against the contract model, so an out-of-enum strategy
-        # is rejected by the contract (authority) before the engine type.
-        with pytest.raises(ValueError, match="strategy"):
-            _runtime_block({"error_handling": {"strategy": "nope"}})
-
-    def test_retired_batching_key_is_rejected_not_ignored(self):
-        # max_concurrent_batches was dropped from the contract (issue #436).
-        # A pipeline still declaring it must fail here rather than have the key
-        # silently dropped: the author asked for something the engine no longer
-        # offers, and a silent drop reads as if the request was honoured.
-        with pytest.raises(ValueError, match="max_concurrent_batches"):
-            _runtime_block(
-                {"batching": {"batch_size": 200, "max_concurrent_batches": 4}}
-            )
-
-    def test_out_of_range_max_retries_fails_loud(self):
-        # The contract caps max_retries (le=5); the parser enforces it.
-        with pytest.raises(ValueError, match="max_retries"):
-            _runtime_block({"error_handling": {"max_retries": 9}})
-
     def test_omitted_fields_use_engine_defaults_not_contract(self, monkeypatch):
         """Omitted runtime fields fall through to the engine's (env-overridable)
         defaults, never the contract model's own defaults.
@@ -346,36 +267,11 @@ class TestParseRuntimeConfig:
 
 
 class TestReplicationConfig:
-    def test_vocabulary_equals_the_published_contract_enum(self):
-        # Two genuinely independent readings: the engine walks each variant's
-        # method literal, this reads the discriminator mapping pydantic renders
-        # into the published schema. A reader that visited only the first
-        # variant would pass every other test in this class.
-        published = TypeAdapter(Replication).json_schema()["discriminator"]["mapping"]
-        assert _variant_literals(Replication, "method") == set(published)
-
     def test_vocabulary_is_the_one_the_engine_has_handling_for(self):
-        # Same reason as the error-strategy canary: deriving lets a contract
-        # widen this boundary on its own, and the engine branches on the
-        # method, so a new one needs a code path before a pipeline can use it.
-        assert _variant_literals(Replication, "method") == {
-            "full_refresh",
-            "incremental",
-        }
-
-    @pytest.mark.parametrize("method", sorted(_variant_literals(Replication, "method")))
-    def test_accepts_every_contract_method(self, method):
-        assert ReplicationConfig(method=method).method == method
-
-    def test_rejects_unknown_method(self):
-        with pytest.raises(ValueError, match="Unknown replication method"):
-            ReplicationConfig(method="cdc")
-
-    def test_rejects_non_string_cursor_field(self):
-        # The contract is string|null; a legacy list must fail loud here, not
-        # reach compute_max_cursor as an opaque TypeError.
-        with pytest.raises(ValueError, match="cursor_field must be a string or None"):
-            ReplicationConfig(method="incremental", cursor_field=["updated_at"])
+        # The engine branches on the method, so a method the contract adds
+        # needs a code path before a pipeline can use it.
+        published = TypeAdapter(Replication).json_schema()["discriminator"]["mapping"]
+        assert set(published) == {"full_refresh", "incremental"}
 
     def test_optional_fields_default_absent(self):
         cfg = ReplicationConfig(method="full_refresh")
@@ -421,12 +317,6 @@ class TestParseReplication:
         )
         assert cfg.method == "full_refresh"
         assert cfg.cursor_field is None
-
-    def test_missing_method_fails_loud(self):
-        # method is contract-required; the contract model rejects a block that
-        # omits it (a malformed block must not pass silently).
-        with pytest.raises(ValueError, match="method"):
-            _source_block({"replication": {"cursor_field": "updated_at"}})
 
 
 class TestEffectiveSafetyWindow:

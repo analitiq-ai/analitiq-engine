@@ -25,7 +25,7 @@ from .dialects import ApiDialect, dialect_overrides
 from .exceptions import ApiConnectorError, ConnectorConnectionError, RequestSpecError
 from .page_loop import Page, PageLoop, PageRequest, PaginationStrategy
 from .predicates import UnknownPredicate, evaluate_predicate
-from .strategies import UnknownPaginationStrategy, build_strategy, resolve_page_size
+from .strategies import build_strategy, resolve_page_size
 
 # The connector is the only module here that needs the HTTP client and
 # Arrow. Keeping it out of the eager import graph is what lets a consumer
@@ -61,7 +61,6 @@ __all__ = [
     "PageRequest",
     "PaginationStrategy",
     "RequestSpecError",
-    "UnknownPaginationStrategy",
     "UnknownPredicate",
     "build_strategy",
     "dialect_overrides",

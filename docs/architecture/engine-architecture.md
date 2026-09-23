@@ -62,7 +62,7 @@ src/
 │   ├── engine.py                # StreamingEngine (fans streams out, aggregates results)
 │   ├── stream_processor.py      # StreamProcessor (one stream: extract -> transform -> load -> checkpoint)
 │   ├── pipeline_config_prep.py  # Loads manifest/pipelines/streams/connections/connectors
-│   ├── mapping.py               # MappingDocument + compile_mapping (mapping AST -> Arrow compute)
+│   ├── mapping.py               # compile_mapping (contract StreamMapping -> Arrow compute)
 │   └── exceptions.py
 │
 ├── worker/                  # Sandboxed connector worker (spawned subprocess)
@@ -189,8 +189,6 @@ Defined in `src/engine/exceptions.py`:
 StreamProcessingError                   (base for runtime stream failures)
 └── TransformationError                 (a mapping defect on a batch)
     └── ValidationFailure               (rows failing a rule; carries the strategy)
-
-ConfigurationError                      (config-time failures)
 ```
 
 Concurrent stream failures are aggregated with Python 3.11+
@@ -269,8 +267,8 @@ Four structured signals cross process boundaries so the tag survives isolation:
   regardless of the `ReadError`/`RuntimeError` wrapper its type collapses into.
 - The source worker's `declared_category` (`ReadError` wire message, issue
   the worker classifies a read failure at its birth site against the
-  connector's declared `error_map` and sends the matched engine-vocabulary
-  category; the engine maps it to the published code
+  connector's declared `error_map` and sends the matched `ErrorCategory`
+  value; the engine maps it to the published code
   (`source_code_for_declared_category`) and tags both deterministic and
   retryable errors with it — a declared `rate_limited` 403 that exhausts
   retries reports `RATE_LIMITED`, and an undeclared one reports the extract
@@ -292,10 +290,9 @@ A connector may declare its driver's failure taxonomy as data — the
 connector's own precedence order, which attributes of its exception carry a
 native error code (or the reserved `"__exception_class__"` to match the
 exception's class name), and `codes` maps whatever native value each
-attribute reads to an engine-owned category (`transient | config | auth |
-unreachable | rate_limited | write_rejected`); `http` maps status codes to
-the same vocabulary, read at the HTTP call site rather than off an
-exception. The engine alone derives the verdicts (`AckStatus`,
+attribute reads to a category from the contract's `ErrorCategory`; `http`
+maps status codes to the same vocabulary, read at the HTTP call site rather
+than off an exception. The engine alone derives the verdicts (`AckStatus`,
 `FailureCategory`, `ErrorCode`) from a declared category; connectors never
 self-declare verdicts. Classification happens at the failure's birth site:
 the boundary that just caught the driver's error (the CDK write ladder, the

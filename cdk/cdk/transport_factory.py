@@ -34,9 +34,9 @@ import ssl as _ssl
 import urllib.parse
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any, Union, get_args
 
-from analitiq.contracts.connector import Connector
+from analitiq.contracts.connector import Connector, DsnBinding
 from sqlalchemy import create_engine, event
 from sqlalchemy import text as _sa_text
 from sqlalchemy.engine import Engine, make_url
@@ -82,6 +82,12 @@ _ENCODING_QUOTES: dict[str, str] = {
     "url_query_key": "",
     "url_query_value": "",
 }
+if set(_ENCODING_QUOTES) != set(
+    get_args(DsnBinding.model_fields["encoding"].annotation)
+):
+    raise TypeError(
+        "DsnBinding.encoding: the contract and the engine's DSN encodings disagree"
+    )
 
 
 def _render_url_template_dsn(dsn_spec: Mapping[str, Any], resolver: Resolver) -> str:
@@ -106,39 +112,16 @@ def _render_url_template_dsn(dsn_spec: Mapping[str, Any], resolver: Resolver) ->
     :class:`Resolver`; the result is converted to a string using the
     declared ``encoding``; the encoded values are then substituted into
     ``template`` using ``str.format_map``-style replacement. Missing
-    placeholders, missing bindings, and unknown encodings are
-    configuration errors, not runtime warnings.
+    placeholders and missing bindings are configuration errors, not runtime
+    warnings; the published contract refuses the rest of the shape.
     """
-    kind = dsn_spec.get("kind")
-    if kind != "url_template":
-        raise TransportSpecError(
-            f"Unsupported dsn.kind {kind!r}; the connector contract currently "
-            f"defines only 'url_template'"
-        )
-    template = dsn_spec.get("template")
-    if not isinstance(template, str) or not template:
-        raise TransportSpecError("dsn.template must be a non-empty string")
+    template: str = dsn_spec["template"]
 
-    raw_bindings = dsn_spec.get("bindings") or {}
-    if not isinstance(raw_bindings, Mapping):
-        raise TransportSpecError("dsn.bindings must be an object")
+    raw_bindings: Mapping[str, Any] = dsn_spec["bindings"]
 
     rendered: dict[str, str] = {}
     for name, entry in raw_bindings.items():
-        if not isinstance(entry, Mapping):
-            raise TransportSpecError(
-                f"dsn.bindings.{name} must be an object with 'value' and 'encoding'"
-            )
-        if "value" not in entry or "encoding" not in entry:
-            raise TransportSpecError(
-                f"dsn.bindings.{name} requires both 'value' and 'encoding'"
-            )
         encoding = entry["encoding"]
-        if encoding not in _ENCODING_QUOTES:
-            raise TransportSpecError(
-                f"dsn.bindings.{name}: unknown encoding {encoding!r}; "
-                f"allowed: {sorted(_ENCODING_QUOTES)}"
-            )
         value = resolver.resolve(entry["value"])
         rendered[name] = _apply_encoding(encoding, value, binding=name)
 
@@ -206,8 +189,6 @@ def _resolve_tls_mode(
     """
     if tls_spec is None:
         return None, None
-    if not isinstance(tls_spec, Mapping):
-        raise TransportSpecError("transports.<ref>.tls must be an object")
 
     raw_mode = tls_spec.get("mode")
     if raw_mode is None:
@@ -299,11 +280,6 @@ def _select_transport(
 ) -> tuple[str, Mapping[str, Any]]:
     """Pick the ``transports[ref]`` block, applying ``transport_defaults``."""
     transports = connector.transports
-    if not transports:
-        raise TransportSpecError(
-            f"Connector {connector.connector_id!r} has no `transports` block; "
-            f"cannot materialize transport"
-        )
     ref = transport_ref or connector.default_transport
     if ref not in transports:
         raise KeyError(
@@ -361,8 +337,6 @@ def resolve_sqlalchemy_spec(
     mode, ca_pem = _resolve_tls_mode(spec.get("tls"), resolver)
 
     options = spec.get("options") or {}
-    if not isinstance(options, Mapping):
-        raise TransportSpecError("sqlalchemy transport `options` must be an object")
     engine_kwargs: dict[str, Any] = {}
     if "pool_size" in options:
         engine_kwargs["pool_size"] = int(options["pool_size"])
@@ -723,8 +697,6 @@ def _resolve_db_kwargs(
     """
     if raw is None:
         return {}
-    if not isinstance(raw, Mapping):
-        raise TransportSpecError("adbc transport `db_kwargs` must be an object")
     out: dict[str, Any] = {}
     for name, value in raw.items():
         try:
@@ -777,19 +749,11 @@ def resolve_adbc_spec(spec: Mapping[str, Any], *, resolver: Resolver) -> dict[st
     present. Drivers that accept all connection state via ``db_kwargs``
     (Snowflake, BigQuery) typically omit ``dsn``.
     """
-    driver = spec.get("driver")
-    if not isinstance(driver, str) or not driver:
-        raise TransportSpecError("adbc transport requires a non-empty `driver`")
-    driver = driver.lower()
+    driver = spec["driver"].lower()
 
     raw_dsn = spec.get("dsn")
     uri: str | None = None
     if raw_dsn is not None:
-        if not isinstance(raw_dsn, Mapping):
-            raise TransportSpecError(
-                "adbc transport `dsn` must be the structured "
-                "{kind: url_template, template, bindings} object"
-            )
         uri = _render_url_template_dsn(raw_dsn, resolver)
 
     db_kwargs = _resolve_db_kwargs(spec.get("db_kwargs"), resolver)
@@ -1012,33 +976,18 @@ def require_http_base_url(base_url: Any) -> str:
 #: a client refusal); the client rejects the rest of the range outright.
 _HEADER_FORBIDDEN_VALUE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
 
-#: An HTTP field name is a token (RFC 9110 §5.1): no separators, no spaces,
-#: no control characters. The client refuses anything else when it builds
-#: the request.
-_HEADER_NAME_TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
-
 
 def require_wire_safe_header(name: str, value: str) -> str:
     """Return *value* if an HTTP client can send it under *name*, or raise.
 
-    Both halves are judged, because both reach the wire: a field name that
-    is not a token and a value carrying a line break are each refused by
-    the client when the request is built -- after connect() reported
-    success -- so every read on the connector fails with the transport
-    already certified. Refused here instead, where the message can still
-    name the header. Shared with the per-request builder and, through
-    :func:`resolve_http_spec`, with the conformance kit, so one rule covers
-    every route a header takes to the wire.
+    A value carrying a line break is refused by the client when the request
+    is built -- after connect() reported success -- so every read on the
+    connector fails with the transport already certified. Refused here
+    instead, where the message can still name the header. Shared with the
+    per-request builder and, through :func:`resolve_http_spec`, with the
+    conformance kit, so one rule covers every route a header takes to the
+    wire.
     """
-    # `fullmatch`, not `match`: Python's `$` also matches before a trailing
-    # newline, so `match` would pass "X-Foo\n" -- the request-splitting
-    # shape this refusal exists for.
-    if not _HEADER_NAME_TOKEN.fullmatch(name):
-        raise TransportSpecError(
-            f"header name {name!r} is not an HTTP token: a field name "
-            f"carries no spaces, separators or control characters, so no "
-            f"HTTP client will send this one."
-        )
     found = _HEADER_FORBIDDEN_VALUE.search(value)
     if found:
         raise TransportSpecError(
@@ -1058,8 +1007,6 @@ def resolve_http_spec(spec: Mapping[str, Any], *, resolver: Resolver) -> dict[st
     base_url = require_http_base_url(resolver.resolve(raw_base))
 
     raw_headers = spec.get("headers") or {}
-    if not isinstance(raw_headers, Mapping):
-        raise TransportSpecError("http transport `headers` must be an object")
     headers: dict[str, str] = {}
     for name, value in raw_headers.items():
         resolved = resolver.resolve(value)
@@ -1084,8 +1031,6 @@ def resolve_http_spec(spec: Mapping[str, Any], *, resolver: Resolver) -> dict[st
     raw_rate_limit = spec.get("rate_limit") or {}
     rate_limit: dict[str, int] | None = None
     if raw_rate_limit:
-        if not isinstance(raw_rate_limit, Mapping):
-            raise TransportSpecError("http transport `rate_limit` must be an object")
         max_requests = raw_rate_limit.get("max_requests")
         time_window = raw_rate_limit.get("time_window_seconds")
         if (max_requests is None) != (time_window is None):
@@ -1295,12 +1240,7 @@ def resolve_transport_spec(
     what a connector worker receives in its launch bootstrap.
     """
     _ref, merged = _select_transport(connector, transport_ref)
-    transport_type = merged.get("transport_type")
-    if not transport_type:
-        raise TransportSpecError(
-            f"Resolved transport spec missing `transport_type`; connector "
-            f"{connector.connector_id!r}, transport {transport_ref!r}"
-        )
+    transport_type = merged["transport_type"]
     kind = _TRANSPORT_KINDS.get(transport_type)
     if kind is None:
         raise NotImplementedError(

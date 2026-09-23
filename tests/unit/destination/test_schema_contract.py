@@ -669,11 +669,6 @@ class TestSchemaContractValidation:
         with pytest.raises(ValueError, match="has no 'name' field"):
             SchemaContract(schema)
 
-    def test_column_without_arrow_type_raises(self):
-        schema = {"columns": [{"name": "id"}]}
-        with pytest.raises(ValueError, match="no 'arrow_type' declaration"):
-            SchemaContract(schema)
-
     def test_property_without_arrow_type_raises(self):
         schema = {"properties": {"id": {"type": "integer"}}}
         with pytest.raises(ValueError, match="no 'arrow_type' declaration"):

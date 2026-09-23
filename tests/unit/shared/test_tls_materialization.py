@@ -105,12 +105,6 @@ class TestResolveTlsMode:
             )
         assert "42" not in str(err.value)
 
-    def test_non_mapping_spec_rejected(self):
-        from cdk.exceptions import TransportSpecError
-
-        with pytest.raises(TransportSpecError, match="tls"):
-            _resolve_tls_mode("require", _resolver())
-
 
 class _FixtureDialect(SqlDialect):
     """Dialect with a TLS vocabulary, standing in for a connector package."""

@@ -14,7 +14,6 @@ import pytest
 
 from src.config import schema_validator
 from src.config.schema_validator import (
-    ARTIFACT_KINDS,
     BundleValidationError,
     ContractValidationError,
     validate,
@@ -115,21 +114,6 @@ class TestValidateFile:
         doc_path.write_text(json.dumps({"$schema": _valid_connection()["$schema"]}))
         with pytest.raises(ContractValidationError):
             validate_file("connection", doc_path)
-
-
-class TestArtifactKinds:
-    def test_full_kind_coverage(self) -> None:
-        """Every artifact kind the engine loads must map to a contract model
-        so the endpoint-resolver dispatch never falls through to 'unknown
-        kind'."""
-        assert set(ARTIFACT_KINDS) == {
-            "connector",
-            "connection",
-            "pipeline",
-            "stream",
-            "api-endpoint",
-            "database-endpoint",
-        }
 
 
 def _finding(severity: str, path: str = "/x", message: str = "boom") -> dict:

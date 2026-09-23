@@ -28,11 +28,15 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
-from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Callable, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, cast, get_args
 
 from analitiq.contracts.connection import ConnectionInput
-from analitiq.contracts.connector import Connector, DatabaseConnector
+from analitiq.contracts.connector import (
+    Connector,
+    ContractInputStorage,
+    DatabaseConnector,
+)
 from pydantic import ValidationError
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -52,6 +56,7 @@ from cdk.resolver import (
 )
 from cdk.secrets.exceptions import PlaceholderExpansionError, SecretNotFoundError
 from cdk.secrets.protocol import SecretsResolver
+from cdk.sql.capabilities import SQL_TRANSPORT_TYPES
 from cdk.sql.exceptions import TlsVerificationError
 from cdk.transport_factory import (
     HTTP_TRANSPORT_TYPE,
@@ -66,6 +71,21 @@ from cdk.type_map import InvalidTypeMapError, TypeMapper, UnmappedTypeError
 from cdk.types import EndpointScope
 
 logger = logging.getLogger(__name__)
+
+#: Where the required-input check reads an input's value, per ``storage`` the
+#: contract lets an input declare: from (connection parameters, secrets).
+_INPUT_STORAGE: Mapping[
+    str, Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]]
+] = {
+    "connection.parameters": lambda parameters, _secrets: parameters,
+    "secrets": lambda _parameters, secrets: secrets,
+}
+if frozenset(_INPUT_STORAGE) != frozenset(get_args(ContractInputStorage)):
+    raise TypeError(
+        f"connection_contract input storage: the contract declares "
+        f"{sorted(get_args(ContractInputStorage))} but the engine reads "
+        f"{sorted(_INPUT_STORAGE)}"
+    )
 
 #: The connection-document fields transport materialization puts in scope --
 #: the ONE statement of this fact. ``_build_resolution_context`` builds the
@@ -89,6 +109,30 @@ MATERIALIZATION_CONNECTION_SUBTREES = REQUEST_CONNECTION_SUBTREES + ("secret_ref
 MATERIALIZATION_SECRET_SCOPES = ("secrets",)
 
 
+def authored_sql_capabilities(connector: Connector | None) -> dict[str, Any] | None:
+    """Return the connector's declared ``sql_capabilities`` as its author wrote it.
+
+    One reader for the one block, so the conformance kit certifies exactly
+    the block the engine folds into the worker payload. Only a database
+    connector declares it.
+    """
+    if not isinstance(connector, DatabaseConnector):
+        return None
+    block: dict[str, Any] | None = authored_json(connector.sql_capabilities)
+    return block
+
+
+def authored_error_map(connector: Connector | None) -> dict[str, Any] | None:
+    """Return the validated ``error_map`` as authored, for the worker payload.
+
+    Every kind may declare it.
+    """
+    if connector is None:
+        return None
+    block: dict[str, Any] | None = authored_json(connector.error_map)
+    return block
+
+
 def _derive_dialect(connector: Connector | None) -> str | None:
     """Return the base SQL dialect (e.g. ``postgresql``) from a definition.
 
@@ -106,7 +150,7 @@ def _derive_dialect(connector: Connector | None) -> str | None:
         return None
     transport = transports[default_ref]
     transport_type = transport.get("transport_type")
-    if transport_type not in ("sqlalchemy", "adbc"):
+    if transport_type not in SQL_TRANSPORT_TYPES:
         return None
     driver = transport.get("driver")
     if not isinstance(driver, str) or not driver:
@@ -187,19 +231,15 @@ class ConnectionRuntime:
         # takes ``sql_dialect`` untyped). Only a database connector declares
         # it. Worker-side runtimes get it restored from the resolved payload
         # in :meth:`from_resolved_payload`.
-        self._declared_sql_capabilities: dict[str, Any] | None = (
-            authored_json(connector.sql_capabilities)
-            if isinstance(connector, DatabaseConnector)
-            else None
-        )
+        self._declared_sql_capabilities: dict[
+            str, Any
+        ] | None = authored_sql_capabilities(connector)
         # Connector-level declared facts (issue #401), carried the same way:
         # ``error_map`` (the driver's failure taxonomy) and ``concurrency``
         # (the system's connection ceiling). ``cdk.declarations`` parses
         # them at consumption; absence is additive — no declared mapping /
         # no declared ceiling.
-        self._declared_error_map: dict[str, Any] | None = (
-            authored_json(connector.error_map) if connector is not None else None
-        )
+        self._declared_error_map: dict[str, Any] | None = authored_error_map(connector)
         self._declared_concurrency: dict[str, Any] | None = (
             authored_json(connector.concurrency) if connector is not None else None
         )
@@ -330,8 +370,8 @@ class ConnectionRuntime:
 
         ``None`` means the connector declares no driver-error taxonomy —
         consumers keep their current heuristics (additive absence, unlike
-        the sql_capabilities shape facts). Parsed at consumption via
-        ``cdk.declarations.parse_declared_error_map``.
+        the sql_capabilities shape facts). The contract validated it at
+        config load; consumers read it via ``cdk.declarations.error_map_for``.
         """
         return (
             copy.deepcopy(self._declared_error_map)
@@ -1133,16 +1173,13 @@ class ConnectionRuntime:
         connector = self._connector
         if connector is None:
             return
-        scopes: dict[str, Mapping[str, Any]] = {
-            "connection.parameters": self._connection.parameters,
-            "secrets": secrets,
-        }
         missing = []
         for name, spec in connector.connection_contract.inputs.items():
             if not spec.required:
                 continue
             storage = spec.storage
-            if scopes[storage].get(name) is None:
+            scope = _INPUT_STORAGE[storage](self._connection.parameters, secrets)
+            if scope.get(name) is None:
                 missing.append(f"{name} ({storage})")
         if missing:
             raise TransportSpecError(

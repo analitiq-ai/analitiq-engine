@@ -19,9 +19,10 @@ refused earlier, by the parse at registration -- but it lands on the same
 ack. Registration runs before the gRPC server exists, so it records the
 parse failure against its stream instead of raising, and the handshake is
 where that stream hears about it while its neighbours sync. The two sets
-are kept apart below so neither quietly stops being tested: one proves the
-contract still decides these documents, the other proves the decision
-reaches one ack rather than the process exit code.
+are kept apart below because the routes differ. Whether the contract still
+decides the second set is not asserted separately -- the ack those tests
+read must name ``ApiEndpointDoc``, so a contract that stopped refusing
+these documents fails them.
 """
 
 from __future__ import annotations
@@ -30,9 +31,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from analitiq.contracts.endpoints import ApiEndpointDoc
 from cdk_tests.api.fakes import FakeSession, runtime_with
-from pydantic import ValidationError
 
 from cdk.api import GenericAPIConnector
 from cdk.types import FailureCategory
@@ -183,13 +182,6 @@ class TestOneStreamsDocumentDefectStaysOnItsOwnAck:
 
 @pytest.mark.parametrize("defect", sorted(_STATIC_DEFECTS), ids=sorted(_STATIC_DEFECTS))
 class TestADocumentDefectTheContractDecidesStillLandsOnOneAck:
-    def test_the_published_schema_refuses_the_document(self, defect: str) -> None:
-        # Nothing about these needs a run: the ack path above is the
-        # residue left once the contract has had its say, and it stays
-        # honest only while the contract keeps catching these four.
-        with pytest.raises(ValidationError):
-            ApiEndpointDoc.model_validate(_document(**_STATIC_DEFECTS[defect]))
-
     @pytest.mark.asyncio
     async def test_registration_does_not_kill_the_worker(self, defect: str) -> None:
         # set_stream_endpoints runs from the worker entry point, before

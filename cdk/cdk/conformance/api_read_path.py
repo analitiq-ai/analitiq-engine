@@ -817,12 +817,7 @@ def _scripted_page(
             _plant(payload, path, continuation)
         elif declared_type(_declared_schema(schema, path)) is None:
             _plant(payload, path, _continuation_value(scheme, key))
-    records_ref = probe.read.response.records.ref
-    try:
-        records_path = split_records_ref(records_ref)
-    except ReadError:
-        # Reported by the record-schema check; the page is still drivable.
-        records_path = []
+    records_path = split_records_ref(probe.read.response.records.ref)
     if records_path:
         _plant(payload, records_path, records)
     return Page(records=records, payload=payload or records)
@@ -884,9 +879,8 @@ def _declared_record(probe: _ReadProbe, *, key: int) -> dict[str, Any] | None:
             records_items_schema(probe.label, probe.read.response), key=key
         )
     except ReadError:
-        # The only failure ``records_items_schema`` raises: a ref that is
-        # not anchored, does not resolve, or reaches something carrying no
-        # records.
+        # The only failure ``records_items_schema`` raises: a ref that does
+        # not resolve, or reaches something carrying no records.
         return None
 
 
@@ -1396,7 +1390,7 @@ def check_api_record_schema(target: ConformanceTarget) -> list[Violation]:
     for label, read in read_operations(target):
         try:
             items = records_items_schema(label, read.response)
-            _resolve_arrow_types(items, mapper)
+            _resolve_arrow_types(items, read.response.schema_, mapper)
             SchemaContract(items)
         except _RECORD_FAILURES as err:
             violations.append(
@@ -1409,7 +1403,9 @@ def check_api_record_schema(target: ConformanceTarget) -> list[Violation]:
     return violations
 
 
-def _resolve_arrow_types(items: dict[str, Any], mapper: TypeMapper | None) -> None:
+def _resolve_arrow_types(
+    items: dict[str, Any], response_schema: Any, mapper: TypeMapper | None
+) -> None:
     """Fill each record field's ``arrow_type``, as the read's own walk does.
 
     The engine picks the mapper by the stream's endpoint scope; a
@@ -1429,4 +1425,4 @@ def _resolve_arrow_types(items: dict[str, Any], mapper: TypeMapper | None) -> No
 
     for name, prop in (items.get("properties") or {}).items():
         if isinstance(prop, dict):
-            resolve_field_arrow_type(prop, name, get_mapper)
+            resolve_field_arrow_type(prop, name, get_mapper, response_schema)

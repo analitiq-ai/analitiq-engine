@@ -24,7 +24,7 @@ from analitiq.contracts.endpoints import Pagination
 from pydantic import TypeAdapter
 
 from cdk.api.page_loop import Page, PageLoop, PageRequest
-from cdk.api.strategies import UnknownPaginationStrategy, build_strategy
+from cdk.api.strategies import build_strategy
 
 pytestmark = pytest.mark.unit
 
@@ -300,31 +300,7 @@ class TestLink:
             s.advance(Page(_rows(2)))
 
 
-class _SchemeFromALaterContract:
-    """A strategy this build cannot walk, which no parse can produce.
-
-    The contract's union is closed, so a sixth scheme is a contract
-    release: the document parses on the newer models and arrives here
-    naming a ``type`` this build has no adapter for. Standing in for that
-    skew is the only way to reach the refusal, and reaching it matters --
-    the alternative to failing loud is a read that walks one page and
-    reports success.
-    """
-
-    type = "time"
-
-
 class TestTheUnionIsClosed:
-    def test_an_unknown_scheme_fails_loud_naming_the_union(self) -> None:
-        with pytest.raises(UnknownPaginationStrategy, match="cursor"):
-            build_strategy(
-                _SchemeFromALaterContract(),
-                url="/things",
-                base_params={},
-                resolve=lambda expr, page: expr,
-                follow_url=_follow,
-            )
-
     def test_every_contract_scheme_builds(self) -> None:
         blocks = [
             {

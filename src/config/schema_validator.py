@@ -32,6 +32,7 @@ from analitiq.contracts.endpoints import ApiEndpointDoc, DatabaseEndpointDoc
 from analitiq.contracts.pipelines.config import PipelineInput
 from analitiq.contracts.shared.common import schema_url_for
 from analitiq.contracts.stream import StreamInput
+from analitiq.contracts.validation_requests import DOCUMENT_SCHEMA_NAMES
 from analitiq.validator import validate_pipeline_bundle
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
@@ -63,6 +64,17 @@ _MODELS: dict[str, Any] = {
 }
 
 ARTIFACT_KINDS = tuple(_MODELS)
+
+# Every kind the contract validates one document of, except ``type-map``: a
+# type map is never loaded here -- the CDK's type-map loader
+# (``cdk.type_map.rules``) validates it against ``TypeMapDoc`` when it builds
+# the mapper.
+_CONTRACT_KINDS = frozenset(DOCUMENT_SCHEMA_NAMES) - {"type-map"}
+if set(_MODELS) != _CONTRACT_KINDS:
+    raise TypeError(
+        f"artifact kinds {sorted(set(_MODELS) ^ _CONTRACT_KINDS)}: the contract "
+        f"and the engine's document validator disagree"
+    )
 
 _ADAPTERS: dict[str, TypeAdapter[Any]] = {
     kind: TypeAdapter(model) for kind, model in _MODELS.items()

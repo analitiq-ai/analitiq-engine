@@ -25,16 +25,15 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
+from .capabilities import StageScope
 from .dialects import TableAddress
 
 if TYPE_CHECKING:
     import pyarrow as pa
 
     from cdk.connection_runtime import ConnectionRuntime
-
-StageScope = Literal["temp", "real"]
 
 _Row = TypeVar("_Row")
 

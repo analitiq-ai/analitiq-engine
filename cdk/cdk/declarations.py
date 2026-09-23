@@ -8,8 +8,8 @@ testable facts in the connector definition:
   declares which of its own exception's attributes carries its native error
   signal (``key_attrs``, e.g. ``"sqlstate"``, ``"vendor_code"``, or the
   reserved ``"__exception_class__"`` sentinel for matching the exception's
-  class name), and a flat map from that native code to one of the engine's
-  six categories (``codes``). A provider whose failures ride an HTTP status
+  class name), and a flat map from that native code to one of the contract's
+  ``ErrorCategory`` values (``codes``). A provider whose failures ride an HTTP status
   declares that separately (``http``), since a status is read from the
   response, never the exception. The engine reads the declared attribute
   generically — it no longer hardcodes which attribute a family reads or in
@@ -35,8 +35,8 @@ missing limit or error mapping cannot block anything — absence means "no
 declared cap / no declared mapping" and current behavior applies. A runtime
 failure caused by an undeclared cap or mapping is a connector defect, fixed
 by declaring it (or implementing ``classify_error``) — never worked around
-in the engine. Declared content is still validated fail-loud: an
-off-vocabulary category or a malformed block is a configuration error.
+in the engine. The published contract validates both blocks at config
+load; this module only reads them.
 
 Both blocks reach the worker via the resolved payload channel
 (``ConnectionRuntime.resolve_spec`` / ``from_resolved_payload``), the same
@@ -46,30 +46,23 @@ channel that delivers the ``sql_capabilities`` block.
 from __future__ import annotations
 
 import logging
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any
+from typing import Any, get_args
+
+from analitiq.contracts.connector import ErrorCategory
 
 from .types import AckStatus, FailureCategory
 
 logger = logging.getLogger(__name__)
 
-# The engine-owned category vocabulary, aligned with the existing
-# FailureCategory and ErrorCode surfaces. The derivation from a category to
-# a verdict is engine-owned too — the per-context tables below are defined
+# The category vocabulary is the contract's. The derivation from a category
+# to a verdict is engine-owned — the per-context tables below are defined
 # once here so every consumer site (write ack ladder, read classification)
 # derives identically. Never in connector.json: connectors declare facts,
 # the engine decides verdicts.
-ERROR_CATEGORY_VALUES = (
-    "transient",
-    "config",
-    "auth",
-    "unreachable",
-    "rate_limited",
-    "write_rejected",
-)
+ERROR_CATEGORY_VALUES: tuple[str, ...] = get_args(ErrorCategory)
 
 # Write context: declared category -> (ack status, failure category).
 # Retryable categories carry WRITE_REJECTED so an exhausted retry classifies
@@ -141,24 +134,11 @@ DECLARED_READ_DETERMINISTIC = MappingProxyType(dict(DECLARED_READ_DETERMINISTIC)
 # computed or nested signal (which is what ``classify_error`` is for).
 CLASS_NAME_SIGNAL = "__exception_class__"
 
-# A ``key_attrs`` entry is either the sentinel above or a plain attribute
-# name (whatever the connector's own driver exposes -- "sqlstate",
-# "pgcode", "vendor_code", "errno", anything). No engine-enforced grammar
-# beyond "a non-empty identifier-shaped string": the attribute's existence
-# and meaning are the connector's own driver's business, not the engine's.
-_KEY_ATTR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-# HTTP status keys are a genuinely universal, fixed-width scalar (unlike a
-# driver attribute name), so this one grammar stays enforced.
-_HTTP_KEY = re.compile(r"^[1-5][0-9]{2}$")
 
+class ErrorCategoryDriftError(RuntimeError):
+    """A :class:`DeclaredMatch` carries a category outside the contract vocabulary.
 
-class ConnectorDeclarationError(ValueError):
-    """A connector-level declared block (``error_map`` / ``concurrency``) is malformed.
-
-    A configuration defect: the connector definition (or the resolved payload
-    built from it) carries a block that does not match the published
-    vocabulary or identifier grammar. Deterministic — retrying cannot
-    succeed; the fix is authoring-side in the connector's ``connector.json``.
+    The engine built it, so this is an engine bug, never a connector one.
     """
 
 
@@ -169,7 +149,7 @@ class DeclaredMatch:
     ``signal``/``value`` name the connector's declared fact (a ``key_attrs``
     entry and the native code read off it, or ``"http"`` and a status) —
     developer-chosen identifiers, safe for logs and failure summaries.
-    ``category`` is the engine-vocabulary value the consumer derives its
+    ``category`` is the ``ErrorCategory`` value the consumer derives its
     verdict from; membership is re-checked here so a match constructed
     outside :class:`ErrorMap` can never smuggle an off-vocabulary category
     into a verdict-table lookup.
@@ -180,24 +160,21 @@ class DeclaredMatch:
     category: str
 
     def __post_init__(self) -> None:
-        # Every construction site (match_http, _match_signal) already ran
-        # this category through _require_category while parsing self.codes
-        # / self.http, so this can never actually fire today -- kept as the
-        # one shared check (require_declared_category, defined below) so a
-        # future construction site can't smuggle an off-vocabulary category
-        # into a verdict-table lookup by skipping that parse-time gate.
+        # Every construction site today reads its category from a block the
+        # contract validated, so this cannot fire; it stops a future site
+        # that builds a match from anything else.
         require_declared_category(self.category, source="DeclaredMatch")
 
 
 def require_declared_category(category: str, *, source: str) -> str:
-    """Validate a category against the engine vocabulary. Raises loud.
+    """Validate a category against the contract's ``ErrorCategory``. Raises loud.
 
     Reserved for contexts where an off-vocabulary value can only mean an
     *engine* bug, never a connector one -- :class:`DeclaredMatch`
-    construction is the one caller: every real construction site already
-    validated its category at parse time (:func:`_require_category`), so
-    a failure here means declarations.py itself built a ``DeclaredMatch``
-    wrong, which should stop the process rather than be routed around.
+    construction is the one caller, and every real construction site reads
+    a category the contract already validated, so a failure here means
+    declarations.py itself built a ``DeclaredMatch`` wrong, which should
+    stop the process rather than be routed around.
 
     A category discovered at *runtime* from connector-authored code (a
     ``classify_error``/``classify()`` hook's return, a birth-site
@@ -207,9 +184,9 @@ def require_declared_category(category: str, *, source: str) -> str:
     to ``"config"`` instead; see :func:`classify_via_hook`.
     """
     if category not in ERROR_CATEGORY_VALUES:
-        raise ConnectorDeclarationError(
+        raise ErrorCategoryDriftError(
             f"{source} classified an error as {category!r}, which is not "
-            f"in the engine vocabulary {list(ERROR_CATEGORY_VALUES)}"
+            f"in the contract vocabulary {list(ERROR_CATEGORY_VALUES)}"
         )
     return category
 
@@ -331,79 +308,6 @@ def birth_site_category(exc: BaseException) -> str | None:
     return declared
 
 
-def _require_category(value: Any, path: str, *, source: str) -> str:
-    if value not in ERROR_CATEGORY_VALUES:
-        raise ConnectorDeclarationError(
-            f"error_map.{path} in {source} is {value!r}; expected one of "
-            f"{list(ERROR_CATEGORY_VALUES)}"
-        )
-    return str(value)
-
-
-def _parse_key_attrs(block: Mapping[str, Any], *, source: str) -> tuple[str, ...]:
-    raw = block.get("key_attrs")
-    if raw is None:
-        return ()
-    if not isinstance(raw, list) or not raw:
-        raise ConnectorDeclarationError(
-            f"error_map.key_attrs in {source} must be a non-empty list of "
-            f"attribute names, got {type(raw).__name__}"
-        )
-    parsed: list[str] = []
-    for entry in raw:
-        if not isinstance(entry, str) or not (
-            entry == CLASS_NAME_SIGNAL or _KEY_ATTR.match(entry)
-        ):
-            raise ConnectorDeclarationError(
-                f"error_map.key_attrs in {source} declares malformed entry "
-                f"{entry!r}; expected an identifier-shaped attribute name "
-                f"or {CLASS_NAME_SIGNAL!r}"
-            )
-        parsed.append(entry)
-    return tuple(parsed)
-
-
-def _parse_codes(block: Mapping[str, Any], *, source: str) -> dict[str, str]:
-    raw = block.get("codes")
-    if raw is None:
-        return {}
-    if not isinstance(raw, Mapping):
-        raise ConnectorDeclarationError(
-            f"error_map.codes in {source} must be an object mapping native "
-            f"codes to categories, got {type(raw).__name__}"
-        )
-    parsed: dict[str, str] = {}
-    for key, value in raw.items():
-        if not isinstance(key, str) or not key:
-            raise ConnectorDeclarationError(
-                f"error_map.codes in {source} declares a malformed key "
-                f"{key!r}; expected a non-empty string -- the connector's "
-                f"own native code, in whatever shape its driver uses"
-            )
-        parsed[key] = _require_category(value, f"codes.{key}", source=source)
-    return parsed
-
-
-def _parse_http(block: Mapping[str, Any], *, source: str) -> dict[int, str]:
-    raw = block.get("http")
-    if raw is None:
-        return {}
-    if not isinstance(raw, Mapping):
-        raise ConnectorDeclarationError(
-            f"error_map.http in {source} must be an object mapping status "
-            f"codes to categories, got {type(raw).__name__}"
-        )
-    parsed: dict[int, str] = {}
-    for key, value in raw.items():
-        if not isinstance(key, str) or not _HTTP_KEY.match(key):
-            raise ConnectorDeclarationError(
-                f"error_map.http in {source} declares malformed status "
-                f"{key!r}; expected the http key grammar ({_HTTP_KEY.pattern})"
-            )
-        parsed[int(key)] = _require_category(value, f"http.{key}", source=source)
-    return parsed
-
-
 @dataclass(frozen=True)
 class ErrorMap:
     """Typed view of a connector's declared ``error_map`` block.
@@ -412,7 +316,7 @@ class ErrorMap:
     which attributes of its exception carry a native error signal (or the
     reserved :data:`CLASS_NAME_SIGNAL` to match the exception's class name).
     ``codes`` maps whatever native value each attribute reads to an
-    engine-vocabulary category, with no engine-enforced shape on the native
+    ``ErrorCategory`` value, with no engine-enforced shape on the native
     code itself -- SQLSTATEs, vendor codes, anything a driver emits are all
     just strings to this lookup. ``http`` is unrelated to the exception
     attributes: a status is read at the HTTP call site, never off a raised
@@ -437,42 +341,18 @@ class ErrorMap:
         object.__setattr__(self, "http", MappingProxyType(dict(self.http)))
 
     @classmethod
-    def from_declaration(
-        cls, block: Mapping[str, Any], *, source: str = "<connector definition>"
-    ) -> ErrorMap:
-        """Parse a declared block, failing loud on any grammar mismatch.
+    def from_declaration(cls, block: Mapping[str, Any]) -> ErrorMap:
+        """Read a declared block the published contract has already validated.
 
-        Every field is optional (absence declares nothing); a declared
-        field's identifiers and categories are validated strictly, and an
-        unknown top-level field fails. The contract refuses the same shapes at
-        config load, but the worker rebuilds this block from its resolved
-        payload (``ConnectionRuntime.from_resolved_payload``), which no
-        contract model reads.
+        Every field is optional; absence declares nothing.
         """
-        if not isinstance(block, Mapping):
-            raise ConnectorDeclarationError(
-                f"error_map in {source} must be an object, "
-                f"got {type(block).__name__}"
-            )
-        known = {"key_attrs", "codes", "http"}
-        unknown = set(block) - known
-        if unknown:
-            raise ConnectorDeclarationError(
-                f"error_map in {source} carries unknown fields "
-                f"{sorted(unknown)}; expected a subset of {sorted(known)}"
-            )
-        key_attrs = _parse_key_attrs(block, source=source)
-        codes = _parse_codes(block, source=source)
-        if bool(key_attrs) != bool(codes):
-            raise ConnectorDeclarationError(
-                f"error_map in {source} declares key_attrs without codes "
-                f"(or codes without key_attrs); both are required together "
-                f"or neither"
-            )
         return cls(
-            key_attrs=key_attrs,
-            codes=codes,
-            http=_parse_http(block, source=source),
+            key_attrs=tuple(block.get("key_attrs") or ()),
+            codes=dict(block.get("codes") or {}),
+            http={
+                int(status): category
+                for status, category in (block.get("http") or {}).items()
+            },
         )
 
     # ------------------------------------------------------------------
@@ -584,62 +464,32 @@ def _birth_site_members(exc: BaseException) -> list[BaseException]:
     return members
 
 
-def parse_declared_error_map(
-    block: Any, *, source: str = "<connector definition>"
-) -> ErrorMap | None:
-    """Parse an optional ``error_map`` declaration: ``None`` stays ``None``.
-
-    The single entry point both sides use — the trusted engine reading the
-    connector definition and the worker reading its resolved payload — so
-    "undeclared" means the same thing everywhere.
-    """
+def parse_declared_error_map(block: Any) -> ErrorMap | None:
+    """Read an optional ``error_map`` declaration: ``None`` stays ``None``."""
     if block is None:
         return None
-    return ErrorMap.from_declaration(block, source=source)
+    return ErrorMap.from_declaration(block)
 
 
 def error_map_for(runtime: Any) -> ErrorMap | None:
-    """Parse a runtime's declared ``error_map`` with the canonical source label.
+    """Read a runtime's declared ``error_map``.
 
     The one call shape every consumer site uses — the SQL facade, the ADBC
-    backend, the API connectors, the source worker — so a new consumer
-    cannot forget the parse or label the error source inconsistently. Reads
+    backend, the API connectors, the source worker. Reads
     ``runtime.declared_error_map`` strictly: a runtime object without the
     attribute is a wiring defect, not an undeclared connector.
     """
-    return parse_declared_error_map(
-        runtime.declared_error_map,
-        source=f"connector {runtime.connector_id!r}",
-    )
+    return parse_declared_error_map(runtime.declared_error_map)
 
 
-def parse_declared_concurrency(
-    block: Any, *, source: str = "<connector definition>"
-) -> int | None:
-    """Parse an optional ``concurrency`` declaration to its connection ceiling.
+def parse_declared_concurrency(block: Any) -> int | None:
+    """Read an optional ``concurrency`` declaration's connection ceiling.
 
-    Returns the declared ``max_connections`` (a positive int), or ``None``
-    when the block is absent — no declared ceiling, current behavior applies.
+    Returns the declared ``max_connections`` (a positive int, as the
+    published contract requires), or ``None`` when the block or the cap is
+    absent — no declared ceiling, current behavior applies.
     """
     if block is None:
         return None
-    if not isinstance(block, Mapping):
-        raise ConnectorDeclarationError(
-            f"concurrency in {source} must be an object, got {type(block).__name__}"
-        )
-    known = {"max_connections"}
-    unknown = set(block) - known
-    if unknown:
-        raise ConnectorDeclarationError(
-            f"concurrency in {source} carries unknown fields {sorted(unknown)}; "
-            f"expected a subset of {sorted(known)}"
-        )
-    value = block.get("max_connections")
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ConnectorDeclarationError(
-            f"concurrency.max_connections in {source} is {value!r}; "
-            f"expected a positive integer"
-        )
-    return int(value)
+    max_connections: int | None = block.get("max_connections")
+    return max_connections

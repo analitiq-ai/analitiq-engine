@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pyarrow as pa
 import pytest
+from analitiq.contracts.stream import StreamMapping
 from sqlalchemy import Column, Integer, MetaData, String, Table, create_engine, select
 from sqlalchemy.pool import StaticPool
 
@@ -28,7 +29,6 @@ from cdk.sql.generic import GenericSQLConnector
 from cdk.sql.generic import _StreamState as SqlStreamState
 from cdk.sql.sqlalchemy_backend import SqlAlchemyBackend
 from src.engine.batch_policy import ErrorStrategy
-from src.engine.mapping import MappingDocument
 from src.engine.stream_processor import (
     SourceBatch,
     StreamProcessor,
@@ -52,7 +52,7 @@ def _make_processor(
     processor = StreamProcessor(
         stream_id="s1",
         stream_config=config,
-        mapping=MappingDocument(),
+        mapping=StreamMapping(),
         pipeline_config={"pipeline_id": "p1"},
         pipeline_id="p1",
         state_manager=state_manager if state_manager is not None else MagicMock(),
@@ -138,8 +138,7 @@ _SQLITE_CAPS = SqlCapabilities.from_declaration(
         "merge_form": "none",
         "bulk_load": {},
         "stage": {"scope": "temp", "schema": "target", "transactional_ddl": True},
-    },
-    source="<test>",
+    }
 )
 
 
