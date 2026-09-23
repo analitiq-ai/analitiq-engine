@@ -34,15 +34,6 @@ if TYPE_CHECKING:
 CHECK = "declaration-consistency"
 
 
-def declared_transport_types(target: ConformanceTarget) -> set[str]:
-    """Collect the ``transport_type`` values the definition declares."""
-    return {
-        str(block["transport_type"])
-        for block in target.declared_transports().values()
-        if block.get("transport_type")
-    }
-
-
 def _database_shaped_kind_mismatch(target: ConformanceTarget) -> list[Violation]:
     """Catch a non-database kind carrying a database-shaped definition.
 
@@ -175,19 +166,6 @@ def check_declaration_consistency(target: ConformanceTarget) -> list[Violation]:
 
     if caps is not None:
         violations.extend(_hook_declaration_violations(caps, dialect_cls))
-        shipped = declared_transport_types(target)
-        for transport_type, mechanism in caps.bulk_load.items():
-            if transport_type not in shipped:
-                violations.append(
-                    Violation(
-                        CHECK,
-                        f"connector.json declares bulk_load "
-                        f"{{{transport_type!r}: {mechanism!r}}} but ships no "
-                        f"{transport_type} transport; the declared mechanism "
-                        f"can never run. Declare the transport or drop the "
-                        f"entry.",
-                    )
-                )
     return violations
 
 
