@@ -212,30 +212,22 @@ def _build_tree(
     root: Path,
     *,
     manifest_status: str = "active",
-    include_stream_file: bool = True,
-    include_manifest: bool = True,
     dst_endpoint_scope: str = "connector",
 ) -> Path:
     """Materialize a complete pipeline tree under ``root``. Returns ``root``.
 
-    Knobs let individual tests inject specific defects (missing manifest,
-    stream-id mismatch) or set the manifest entry's status.
+    ``manifest_status`` sets the manifest entry's status.
     ``dst_endpoint_scope="connection"`` places the destination endpoint
     (plus a connection-scoped type-map) under the destination connection's
     ``definition/`` tree instead of the connector's, and points the stream's
     destination ``endpoint_ref`` at it with ``scope: "connection"``.
     """
-    if include_manifest:
-        _write_json(
-            root / "pipelines" / "manifest.json", _manifest(status=manifest_status)
-        )
+    _write_json(root / "pipelines" / "manifest.json", _manifest(status=manifest_status))
     _write_json(root / "pipelines" / PIPELINE_ID / "pipeline.json", _pipeline_doc())
-    if include_stream_file:
-        stream_doc = _stream_doc(STREAM_ID, dst_scope=dst_endpoint_scope)
-        _write_json(
-            root / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json",
-            stream_doc,
-        )
+    _write_json(
+        root / "pipelines" / PIPELINE_ID / "streams" / f"{STREAM_ID}.json",
+        _stream_doc(STREAM_ID, dst_scope=dst_endpoint_scope),
+    )
 
     for connection_id in (CONNECTION_SRC_ID, CONNECTION_DST_ID):
         _write_json(
