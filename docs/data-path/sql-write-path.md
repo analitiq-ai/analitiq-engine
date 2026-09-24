@@ -523,8 +523,8 @@ SQLAlchemy flavor can enforce it in-band.
 
 ## 8. Batch coalescing
 
-**Not yet implemented.** This section specifies the design; the engine does not
-coalesce, and a declared `write_unit` has no consumer.
+This section specifies the design; the engine does not coalesce, and a
+declared `write_unit` has no consumer.
 
 **The engine coalesces source batches before sending; the wire protocol does
 not change** — the exactly-once unit "one sent batch = one ack = one
@@ -641,8 +641,8 @@ Mechanics:
   / `max_batch_bytes` sizing fields (`src/destination/server.py`,
   `cdk/cdk/base_handler.py`); building this section means retiring those as
   a second declaration channel and reserving their field numbers so a
-  future field can never reuse the tags against a mixed-version peer — not
-  yet done, since the section itself is not yet built.
+  future field can never reuse the tags against a mixed-version peer. The
+  engine does not coalesce, so both fields remain in the proto.
 
 ## 9. Idempotency and retry verdicts
 
