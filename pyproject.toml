@@ -81,16 +81,16 @@ jsonschema = {version = "^4.25", extras = ["format-nongpl"]}
 # project supports, matching the Docker base image -- no source build.
 google-re2 = "^1.1"
 
-# Published Analitiq contract packages (PyPI). The engine validates on-disk
-# artifacts against these offline, so it never fetches a schema at runtime:
+# Published Analitiq contract packages (PyPI). A run's documents are graded
+# against these offline, so no schema is fetched at runtime:
 #   - contract-models: the single source of artifact shape
-#     (connector/connection/pipeline/stream/endpoint). Per-document validity is
-#     the models' job (src/config/schema_validator.py).
-#   - validator: cross-document referential integrity of an assembled run
-#     bundle (validate_pipeline_bundle, used in src/engine/pipeline_config_prep).
+#     (connector/connection/pipeline/stream/endpoint), and the workspace
+#     location tables that pick which files a run's request holds.
+#   - validator: the one gate over a run's documents -- validate_workspace,
+#     called by src/config/run_workspace before anything runs.
 # Pinned exactly (release candidates); bump deliberately to adopt a new contract.
-analitiq-contract-models = {version = "1.0.0rc26", allow-prereleases = true}
-analitiq-validator = {version = "1.0.0rc26", allow-prereleases = true}
+analitiq-contract-models = {version = "1.0.0rc27", allow-prereleases = true}
+analitiq-validator = {version = "1.0.0rc27", allow-prereleases = true}
 
 # Configuration and utilities
 python-dotenv = "^1.0.0"

@@ -1448,21 +1448,21 @@ class TestMappingCompileFailureIsReported:
 
         monkeypatch.setenv("METRICS_ENABLED", "true")
 
-        # A zone the contract's type pattern admits but the engine's type
-        # grammar cannot resolve: the document parses, and compile_mapping is
-        # what refuses it.
+        # A contract-valid document the engine cannot compile: an Int64
+        # constant has no JSON encoding for a Json target, which the constant
+        # broadcast refuses when the transform is built.
         mapping = StreamMapping.model_validate(
             {
                 "assignments": [
                     {
                         "target": {
                             "path": "id",
-                            "arrow_type": "Timestamp(MILLISECOND, Not/AZone)",
+                            "arrow_type": "Json",
                             "nullable": True,
                         },
                         "value": {
-                            "kind": "expression",
-                            "expression": {"op": "get", "path": ["id"]},
+                            "kind": "constant",
+                            "constant": {"value": 5, "arrow_type": "Int64"},
                         },
                     }
                 ]
@@ -1479,7 +1479,7 @@ class TestMappingCompileFailureIsReported:
 
         with caplog.at_level(
             logging.INFO, logger="src.state.log_emitter"
-        ), pytest.raises(TransformationError, match="cannot parse target.arrow_type"):
+        ), pytest.raises(TransformationError, match="Json target requires"):
             await processor.run()
 
         emitted = _emitted_metrics_payloads(caplog)

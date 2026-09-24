@@ -266,7 +266,7 @@ class _StreamState:
     primary_keys: list[str] = field(default_factory=list)
     # Columns used as the ON CONFLICT / MERGE target for upsert. Set at
     # configure_schema time from the ``set_stream_conflict_keys`` map,
-    # which carries the stream's Infra-validated ``write.conflict_keys``
+    # which carries the stream's validator-graded ``write.conflict_keys``
     # verbatim. Empty here means INSERT mode — an upsert always carries
     # an explicit conflict target under the contract.
     conflict_keys: list[str] = field(default_factory=list)
@@ -563,7 +563,7 @@ class GenericSQLConnector(BaseDestinationHandler):
     ) -> None:
         """Register stream_id → upsert conflict keys for each stream.
 
-        The keys are the stream's Infra-validated ``write.conflict_keys``,
+        The keys are the stream's validator-graded ``write.conflict_keys``,
         forwarded verbatim on their own channel (they are stream
         configuration, not part of the contract endpoint document).
         ``configure_schema`` reads them as the ON CONFLICT / MERGE target;
@@ -1128,7 +1128,7 @@ class GenericSQLConnector(BaseDestinationHandler):
         table_name = database_object.name
 
         primary_keys = list(endpoint_doc.primary_keys or [])
-        # The stream's Infra-validated upsert conflict target, forwarded
+        # The stream's validator-graded upsert conflict target, forwarded
         # verbatim via set_stream_conflict_keys(). Absent or empty means
         # no conflict target (INSERT mode); the engine never derives one
         # from ``primary_keys``.

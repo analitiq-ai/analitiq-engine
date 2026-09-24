@@ -30,28 +30,32 @@ that matches the on-disk directory name:
         (connection-scoped refs carry database_object; endpoint_id is
          server-derived from it)
 
-Every artifact is JSON-Schema validated against the published Analitiq
-contract before it is consumed.
+Before anything is built, the pipeline and the packages it references are
+read into one workspace request and gated on the published validator's
+verdict (:mod:`src.config.run_workspace`). The engine checks no document
+itself: its typed models are parsed from the texts that verdict passed.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import cast
 
 from analitiq.contracts.connection import ConnectionInput
+from analitiq.contracts.connection_package import ConnectionPackage
 from analitiq.contracts.connector import Connector
-from analitiq.contracts.endpoints import ApiEndpointDoc, DatabaseEndpointDoc
+from analitiq.contracts.connector_package import ConnectorPackage
+from analitiq.contracts.pipeline_package import PipelinePackage
 from analitiq.contracts.pipelines.config import PipelineInput
 from analitiq.contracts.pipelines.config import Runtime as ContractRuntime
 from analitiq.contracts.stream import (
     ApiStreamDestination,
-    ConnectionEndpointRef,
     DatabaseStreamDestination,
     EndpointRef,
     IncrementalReplication,
@@ -59,34 +63,23 @@ from analitiq.contracts.stream import (
     StreamMapping,
     StreamSource,
 )
+from pydantic import TypeAdapter
 
 from cdk.connection_runtime import ConnectionRuntime
 from cdk.secrets import SchemeSecretsResolver, SecretsResolver
-from cdk.type_map import (
-    TypeMapNotFoundError,
-    TypeMapper,
-    load_connection_type_map,
-    load_type_map,
-)
+from cdk.type_map import TypeMapper
+from cdk.type_map.loader import parse_type_mapper
 from src.config import settings
-from src.config.connection_loader import load_connection_file, load_connector_definition
 from src.config.endpoint_resolver import (
     ConnectionLookup,
     endpoint_ref_label,
-    resolve_endpoint_ref,
+    resolve_endpoint_path,
 )
-from src.config.schema_validator import ContractValidationError, EndpointDocument
-from src.config.schema_validator import validate as validate_artifact
-from src.config.schema_validator import (
-    validate_bundle,
-    validate_connection,
-    validate_connector,
-    validate_pipeline,
-    validate_stream,
-)
+from src.config.run_workspace import RunWorkspace, gate_run, read_run_workspace
 from src.config.utils import author_set, load_json_file
 from src.models.resolved import (
     BatchingConfig,
+    EndpointDocument,
     ErrorHandlingConfig,
     LoggingConfig,
     PipelineConnections,
@@ -96,7 +89,6 @@ from src.models.resolved import (
     ResolvedSource,
     ResolvedStream,
     RuntimeConfig,
-    dump_authored,
 )
 
 logger = logging.getLogger(__name__)
@@ -105,6 +97,11 @@ logger = logging.getLogger(__name__)
 #: kind-tagged destination blocks. Each carries the ``endpoint_ref`` the side
 #: resolves through.
 _StreamSide = StreamSource | ApiStreamDestination | DatabaseStreamDestination
+
+# The two endpoint models each pin their own ``$schema`` URL, so the union
+# selects the document's model without a kind table.
+_CONNECTOR_DOCUMENT: TypeAdapter[Connector] = TypeAdapter(Connector)
+_ENDPOINT_DOCUMENT: TypeAdapter[EndpointDocument] = TypeAdapter(EndpointDocument)
 
 
 def _parse_runtime_config(contract: ContractRuntime) -> RuntimeConfig:
@@ -165,12 +162,6 @@ def _parse_replication(source: StreamSource) -> ReplicationConfig | None:
     )
 
 
-# Matches the endpoint variant name in a $schema URL.
-# The trailing boundary is either "/" or end-of-string so that both
-# "https://schemas.analitiq.ai/api-endpoint/latest.json" and
-# "https://schemas.analitiq.ai/api-endpoint" extract "api-endpoint".
-_ENDPOINT_KIND_RE = re.compile(r"/([A-Za-z][\w-]*-endpoint)(?:/|$)")
-
 # A stream reference in the pipeline's ``streams`` list may carry a trailing
 # version suffix (e.g. ``{uuid}_v2``). The stream document's own ``stream_id``
 # is always bare, so the suffix is split off for the index lookup and the
@@ -211,7 +202,6 @@ class _StreamRecord:
     """One entry in the on-disk stream index, keyed by ``stream_id``."""
 
     stream_id: str
-    file_path: Path
     document: StreamInput
 
 
@@ -231,10 +221,8 @@ class PipelineConfigPrep:
         if not self.pipeline_id_input:
             raise RuntimeError("PIPELINE_ID environment variable is required")
 
-        # Populated during create_config()
-        self._manifest_entry: dict[str, Any] | None = None
-        self._pipeline_dir: Path | None = None
-        self._pipeline_document: PipelineInput | None = None
+        # The run's workspace, read and gated in create_config().
+        self._workspace: RunWorkspace | None = None
 
         # Indexes built once per create_config() call, keyed by id.
         self._connection_records: dict[str, _ConnectionRecord] = {}  # by connection_id
@@ -246,7 +234,7 @@ class PipelineConfigPrep:
         ] = {}  # by connection_id
         self._resolved_endpoints: dict[EndpointRef, EndpointDocument] = {}
         self._loaded_connectors: dict[str, Connector] = {}  # by connector_id
-        self._connector_type_mappers: dict[str, TypeMapper] = {}
+        self._connector_type_mappers: dict[str, TypeMapper | None] = {}
         self._connection_type_mappers: dict[str, TypeMapper | None] = {}
 
         logger.info(
@@ -267,6 +255,8 @@ class PipelineConfigPrep:
             candidate = current / "pipelines" / "manifest.json"
             if candidate.exists():
                 return {
+                    "root": current,
+                    "manifest": candidate,
                     "connectors": current / "connectors",
                     "connections": current / "connections",
                     "pipelines": current / "pipelines",
@@ -280,143 +270,74 @@ class PipelineConfigPrep:
         )
 
     # ------------------------------------------------------------------
-    # Manifest + pipeline document
+    # Manifest + the run's workspace
     # ------------------------------------------------------------------
 
-    def _load_manifest(self) -> dict[str, Any]:
-        manifest_path = self._paths["pipelines"] / "manifest.json"
+    def _pipeline_directory(self) -> str:
+        """Locate the workspace directory of the pipeline PIPELINE_ID names.
+
+        The manifest only locates the pipeline. It is read before the
+        verdict grades it, so it is read leniently: a manifest that does not
+        parse, or locates nothing for PIPELINE_ID, refuses the run here; every
+        other defect in it is the verdict's to report.
+        """
+        manifest_path = self._paths["manifest"]
         if not manifest_path.is_file():
             raise FileNotFoundError(f"Pipeline manifest not found: {manifest_path}")
         manifest = load_json_file(manifest_path)
-        if not isinstance(manifest, Mapping) or "pipelines" not in manifest:
-            raise ValueError("manifest.json missing required key: 'pipelines'")
-        return manifest
-
-    def _find_manifest_entry(self, manifest: dict[str, Any]) -> dict[str, Any]:
-        """Match manifest entry by ``pipeline_id``."""
-        target = self.pipeline_id_input
-        entry: dict[str, Any]
-        for entry in manifest["pipelines"]:
-            if entry.get("pipeline_id") == target:
-                return entry
-        choices = sorted(e.get("pipeline_id") or "?" for e in manifest["pipelines"])
+        entries = manifest.get("pipelines") if isinstance(manifest, Mapping) else None
+        for entry in entries if isinstance(entries, list) else []:
+            if (
+                isinstance(entry, Mapping)
+                and entry.get("pipeline_id") == self.pipeline_id_input
+                and isinstance(entry.get("path"), str)
+            ):
+                path = self._paths["pipelines"] / entry["path"]
+                return f"{path.parent.relative_to(self._paths['root']).as_posix()}/"
         raise ValueError(
-            f"Pipeline id {target!r} not found in manifest. Available: {choices}"
+            f"Pipeline id {self.pipeline_id_input!r} is not located by "
+            f"{manifest_path}"
         )
 
-    def _load_pipeline_document(self) -> PipelineInput:
-        manifest = self._load_manifest()
-        entry = self._find_manifest_entry(manifest)
-        status = entry.get("status", "")
-        if status != "active":
-            raise ValueError(
-                f"Pipeline {self.pipeline_id_input!r} has status {status!r}; "
-                f"only 'active' pipelines can be executed."
-            )
-        path = self._paths["pipelines"] / entry["path"]
-        if not path.is_file():
-            raise FileNotFoundError(f"Pipeline document not found: {path}")
-        document = validate_pipeline(load_json_file(path), source=str(path))
-        self._manifest_entry = dict(entry)
-        self._pipeline_dir = path.parent
-        self._pipeline_document = document
-        logger.info("Loaded pipeline document: %s", path)
-        return document
+    def _gated_workspace(self) -> RunWorkspace:
+        if self._workspace is None:
+            raise RuntimeError("The run's workspace is read in create_config()")
+        return self._workspace
 
     # ------------------------------------------------------------------
-    # On-disk indexes (id -> directory / file)
+    # Typed models, parsed from the texts the verdict passed
     # ------------------------------------------------------------------
 
-    def _build_connection_index(self, referenced_ids: list[str]) -> None:
-        """Index only the connections referenced by the active pipeline.
-
-        Earlier versions scanned every directory under ``connections/`` and
-        validated each, so a single malformed connection from an unrelated
-        pipeline broke startup. We now index just the ids the pipeline names
-        in its ``connections.{source,destinations}``.
-        """
+    def _index_connections(self) -> None:
+        workspace = self._gated_workspace()
         self._connection_records.clear()
-        connections_dir = self._paths["connections"]
-        if not connections_dir.is_dir():
-            raise FileNotFoundError(
-                f"Connections directory not found: {connections_dir}"
-            )
-
-        for connection_id in referenced_ids:
-            if connection_id in self._connection_records:
-                continue
-            child = connections_dir / connection_id
-            if not child.is_dir():
-                raise FileNotFoundError(f"Connection directory not found: {child}")
-            connection_file = child / "connection.json"
-            if not connection_file.is_file():
-                raise FileNotFoundError(f"Connection file not found: {connection_file}")
-
-            document = validate_connection(
-                load_connection_file(connection_file), source=str(connection_file)
-            )
-            # connection_id is server-assigned and optional in the authored
-            # contract; the directory name is the identity when it is absent.
-            doc_connection_id = document.connection_id or child.name
-            if doc_connection_id != child.name:
-                raise ValueError(
-                    f"Connection id mismatch in {connection_file}: "
-                    f"directory={child.name!r} but document "
-                    f"connection_id={doc_connection_id!r}"
-                )
-            self._connection_records[child.name] = _ConnectionRecord(
-                connection_id=child.name,
+        for directory_id, directory in workspace.connection_directories.items():
+            key = directory + ConnectionPackage.ROOT
+            document = ConnectionInput.model_validate_json(workspace.text(key))
+            self._connection_records[directory_id] = _ConnectionRecord(
+                connection_id=directory_id,
                 connector_id=document.connector_id,
                 document=document,
             )
+        logger.info("Indexed %d connection(s)", len(self._connection_records))
 
-        logger.info(
-            "Indexed %d connection(s) under %s",
-            len(self._connection_records),
-            connections_dir,
-        )
+    def _index_streams(self) -> None:
+        """Index every stream of the pipeline's package by its bare ``stream_id``.
 
-    def _build_stream_index(self) -> None:
-        """Scan the active pipeline's ``streams/`` and index every stream.
-
-        Streams are indexed by ``stream_id``.
+        The verdict refuses a stream with no ``stream_id`` and two streams
+        sharing one, so each passed document has exactly one index entry.
         """
+        workspace = self._gated_workspace()
         self._stream_records.clear()
-        if self._pipeline_dir is None:
-            raise RuntimeError(
-                "Pipeline document must be loaded before stream indexing"
-            )
-        streams_dir = self._pipeline_dir / "streams"
-        if not streams_dir.is_dir():
-            raise FileNotFoundError(f"Streams directory not found: {streams_dir}")
-
-        for stream_file in sorted(streams_dir.glob("*.json")):
-            document = validate_stream(
-                load_json_file(stream_file), source=str(stream_file)
-            )
-            stream_id = document.stream_id
-            if not stream_id:
-                raise ValueError(f"Stream document {stream_file} missing 'stream_id'")
-            # Key by the version-stripped base id so the index shares one key
-            # space with pipeline.streams lookup (which strips ``_v{n}``) and the
-            # bundle validator (which matches on base form).
-            base_id = _split_stream_ref(stream_id)[0]
-            if base_id in self._stream_records:
-                raise ValueError(
-                    f"Duplicate stream_id {base_id!r} in {streams_dir} "
-                    f"({self._stream_records[base_id].file_path}, {stream_file})"
-                )
-            self._stream_records[base_id] = _StreamRecord(
-                stream_id=stream_id,
-                file_path=stream_file,
-                document=document,
-            )
-
-        logger.info(
-            "Indexed %d stream(s) under %s",
-            len(self._stream_records),
-            streams_dir,
-        )
+        for text in workspace.texts(workspace.pipeline_directory, "stream").values():
+            document = StreamInput.model_validate_json(text)
+            if document.stream_id:
+                # Key by the version-stripped base id so the index shares one
+                # key space with pipeline.streams lookup (which strips ``_v{n}``).
+                self._stream_records[
+                    _split_stream_ref(document.stream_id)[0]
+                ] = _StreamRecord(stream_id=document.stream_id, document=document)
+        logger.info("Indexed %d stream(s)", len(self._stream_records))
 
     def _connection_lookup(self) -> ConnectionLookup:
         return ConnectionLookup(
@@ -428,6 +349,15 @@ class PipelineConfigPrep:
             },
         )
 
+    def _type_mapper(self, directory: str, label: str) -> TypeMapper | None:
+        """Return the package's type map, or ``None`` when it carries none."""
+        maps = self._gated_workspace().texts(directory, "type-map")
+        if not maps:
+            logger.info("No type-map for %s", label)
+            return None
+        ((key, text),) = maps.items()
+        return parse_type_mapper(label, json.loads(text), source=key)
+
     # ------------------------------------------------------------------
     # Connector + connection materialization (in-memory only)
     # ------------------------------------------------------------------
@@ -435,48 +365,24 @@ class PipelineConfigPrep:
     def _load_connector(self, connector_id: str) -> Connector:
         if connector_id in self._loaded_connectors:
             return self._loaded_connectors[connector_id]
-        connector_file = (
-            self._paths["connectors"] / connector_id / "definition" / "connector.json"
-        )
-        if not connector_file.is_file():
-            raise FileNotFoundError(
-                f"Connector definition not found for {connector_id!r}"
-            )
-        document = validate_connector(
-            load_connector_definition(connector_id, self._paths["connectors"]),
-            source=str(connector_file),
+        workspace = self._gated_workspace()
+        directory = workspace.connector_directories[connector_id]
+        document = _CONNECTOR_DOCUMENT.validate_json(
+            workspace.text(directory + ConnectorPackage.ROOT)
         )
         self._loaded_connectors[connector_id] = document
-
-        # Connector type-map is optional from this layer's perspective. Only a
-        # directory with no read- or write-direction type-map document
-        # (TypeMapNotFoundError) is benign and downgraded to None; a
-        # present-but-malformed read or write map is a real config error and
-        # propagates so CI catches it at load instead of silently dropping the
-        # connector's type resolution.
-        try:
-            self._connector_type_mappers[connector_id] = load_type_map(
-                self._paths["connectors"], connector_id
-            )
-        except TypeMapNotFoundError as err:
-            logger.info(
-                "No connector type-map for %r (%s); native SQL types will not "
-                "be resolvable for this connector",
-                connector_id,
-                err,
-            )
-            self._connector_type_mappers[
-                connector_id
-            ] = None  # type: ignore[assignment]
-
+        self._connector_type_mappers[connector_id] = self._type_mapper(
+            directory, connector_id
+        )
         return document
 
-    def _connection_type_mapper(self, directory: str) -> TypeMapper | None:
-        if directory not in self._connection_type_mappers:
-            self._connection_type_mappers[directory] = load_connection_type_map(
-                self._paths["connections"], directory
+    def _connection_type_mapper(self, connection_id: str) -> TypeMapper | None:
+        if connection_id not in self._connection_type_mappers:
+            directory = self._gated_workspace().connection_directories[connection_id]
+            self._connection_type_mappers[connection_id] = self._type_mapper(
+                directory, f"connection:{connection_id}"
             )
-        return self._connection_type_mappers[directory]
+        return self._connection_type_mappers[connection_id]
 
     def _create_secrets_resolver(self, directory: str) -> SecretsResolver:
         connection_dir = self._paths["connections"] / directory
@@ -491,9 +397,9 @@ class PipelineConfigPrep:
         if connection_id in self._resolved_connections:
             return self._resolved_connections[connection_id]
 
-        # The bundle validator ties a stream's connection ref to the
-        # pipeline's in base form (``pg_v2`` matches ``pg``), but only the
-        # exact ids the pipeline names were loaded.
+        # The verdict ties a stream's connection ref to the pipeline's in
+        # base form (``pg_v2`` matches ``pg``), but only the exact ids the
+        # pipeline names were read.
         record = self._connection_records.get(connection_id)
         if record is None:
             raise ValueError(
@@ -501,10 +407,9 @@ class PipelineConfigPrep:
                 f"the pipeline names: {sorted(self._connection_records)}"
             )
         connector = self._load_connector(record.connector_id)
-        # kind is a closed-enum discriminator validated by the connector
-        # contract in _load_connector; whether that kind is runnable is the
-        # worker registry's job (ConnectorNotRegisteredError). Config prep
-        # neither re-checks the shape nor hard-codes a kind set.
+        # Whether the connector's kind is runnable is the worker registry's
+        # job (ConnectorNotRegisteredError); config prep hard-codes no kind
+        # set.
         runtime = ConnectionRuntime(
             connection=record.document,
             connection_id=connection_id,
@@ -534,58 +439,9 @@ class PipelineConfigPrep:
         # A contract model's own str dumps every field; error text and logs
         # name the endpoint by its on-disk handle instead.
         label = endpoint_ref_label(ref)
-        document = resolve_endpoint_ref(ref, self._paths, self._connection_lookup())
-        # Extract the endpoint variant name from the document's declared
-        # ``$schema`` URL. The variant name is the path segment ending in
-        # ``-endpoint`` (e.g. ``api-endpoint``, ``database-endpoint``).
-        # ``validate_artifact`` then validates against that variant's
-        # contract model; an unrecognised variant name fails loudly there
-        # rather than here.
-        schema_url = document.get("$schema") or ""
-        match = _ENDPOINT_KIND_RE.search(schema_url)
-        if not match:
-            raise ValueError(
-                f"Endpoint {label} has no recognizable endpoint $schema URL "
-                f"({schema_url!r}); $schema must contain an *-endpoint path segment "
-                f"(e.g. api-endpoint, database-endpoint)"
-            )
-        endpoint_kind = match.group(1)
-        try:
-            model = validate_artifact(endpoint_kind, document, source=label)
-        except ContractValidationError:
-            # ContractValidationError already embeds the ref label as its source and
-            # carries structured per-field errors; re-raise as-is to preserve type.
-            raise
-        except ValueError as exc:
-            # validate_artifact raises plain ValueError for unknown artifact
-            # kinds; add ref and $schema URL context which that error omits.
-            raise ValueError(
-                f"Endpoint {label} ($schema={schema_url!r}, "
-                f"kind={endpoint_kind!r}): {exc}"
-            ) from exc
-        if not isinstance(model, ApiEndpointDoc | DatabaseEndpointDoc):
-            # A *-endpoint kind that maps to a non-endpoint contract model is
-            # a wiring defect in the artifact-kind registry, not a document
-            # problem; fail loud rather than carry an unexpected type.
-            raise ValueError(
-                f"Endpoint {label}: artifact kind {endpoint_kind!r} validated "
-                f"to {type(model).__name__}, not an endpoint document model"
-            )
-        # For a connection-scoped ref the endpoint_id is the server-derived
-        # handle over database_object (the table identity the SQL source/
-        # destination consumes). The bundle validator only proves a file named
-        # {endpoint_id}.json exists; guard against a stale/mismatched file whose
-        # contents point at a different table by requiring the loaded document's
-        # own endpoint_id to equal the ref's.
-        if isinstance(ref, ConnectionEndpointRef) and (
-            model.endpoint_id != ref.endpoint_id
-        ):
-            raise ValueError(
-                f"Endpoint {label}: on-disk document declares endpoint_id "
-                f"{model.endpoint_id!r}, which does not match the "
-                f"reference's server-derived {ref.endpoint_id!r}; the endpoint "
-                f"file does not describe the referenced table."
-            )
+        path = resolve_endpoint_path(ref, self._paths, self._connection_lookup())
+        key = path.relative_to(self._paths["root"]).as_posix()
+        model = _ENDPOINT_DOCUMENT.validate_json(self._gated_workspace().text(key))
         self._resolved_endpoints[ref] = model
         logger.info("Resolved endpoint: %s", label)
         return model
@@ -619,39 +475,32 @@ class PipelineConfigPrep:
           typed endpoint documents.
         * ``connectors``: list of connector documents loaded.
         """
-        pipeline_doc = self._load_pipeline_document()
+        workspace = read_run_workspace(self._paths, self._pipeline_directory())
+        gate_run(workspace)
+        self._workspace = workspace
+
+        pipeline_doc = PipelineInput.model_validate_json(
+            workspace.text(workspace.pipeline_directory + PipelinePackage.ROOT)
+        )
+        # The verdict requires it (RULE-PIPE-018); ResolvedPipeline refuses an
+        # empty one, so the cast narrows the type without a second check.
+        pipeline_id = cast(str, pipeline_doc.pipeline_id)
 
         source_id = pipeline_doc.connections.source
-        # The pipeline contract requires >= 1 destination (validated when the
-        # pipeline document was loaded), so dest_ids is non-empty here.
+        # The pipeline contract requires >= 1 destination, so dest_ids is
+        # non-empty here.
         dest_ids = list(pipeline_doc.connections.destinations)
 
-        self._build_connection_index([source_id, *dest_ids])
-        self._build_stream_index()
+        self._index_connections()
+        self._index_streams()
 
         self._resolve_connection_by_id(source_id)
         for dest_id in dest_ids:
             self._resolve_connection_by_id(dest_id)
 
-        # pipeline_id is nullable in the contract: an authored pipeline.json may
-        # omit it and rely on the manifest for executable identity. Fall back to
-        # the manifest/env id (always present) so a schema-valid omitted id is
-        # honored rather than rejected by ResolvedPipeline's guard. This is the
-        # run-bundle identity, so it is what the bundle validator sees.
-        pipeline_id = pipeline_doc.pipeline_id or self.pipeline_id_input
-
-        # Cross-document referential validation (published validator): every
-        # stream/connection/connector/endpoint reference resolves, source and
-        # destination roles are wired correctly, and the pipeline is runnable.
-        # Per-document shape was validated as each artifact was loaded above.
-        validate_bundle(
-            self._assemble_bundle(pipeline_doc, pipeline_id),
-            source=str(self._pipeline_dir),
-        )
-
         # Stream configs. A reference may carry a ``_v{n}`` version suffix; the
         # bare id resolves the stream record (referential soundness is already
-        # guaranteed by validate_bundle) and the version rides onto the emitted
+        # guaranteed by the verdict) and the version rides onto the emitted
         # checkpoint line.
         stream_configs: list[ResolvedStream] = [
             self._build_stream_config(self._stream_records[bare_id], stream_version)
@@ -690,80 +539,6 @@ class PipelineConfigPrep:
         )
 
     # ------------------------------------------------------------------
-    # Bundle assembly (for referential validation)
-    # ------------------------------------------------------------------
-
-    def _assemble_bundle(
-        self, pipeline_doc: PipelineInput, pipeline_id: str
-    ) -> dict[str, Any]:
-        """Assemble the identity-only run bundle the published validator checks.
-
-        ``connectors`` and ``endpoints`` carry identity only (connector ids
-        present; connection-scoped endpoint ``(connection_id, endpoint_id)``) --
-        the validator resolves references between the parsed documents, not their
-        contents. ``pipeline_id`` and each connection's ``connection_id`` are the
-        resolved identities (see :meth:`create_config` and
-        :meth:`_build_connection_index`) so an authored doc that omits its id --
-        connection_id is server-assigned and optional in the authored contract,
-        falling back to the directory name -- still resolves against the
-        pipeline's references instead of being reported as a missing connection.
-
-        ``status`` is forced to ``active``: the engine's execution gate is the
-        manifest entry status (checked in :meth:`_load_pipeline_document`), so
-        by construction this pipeline is being run because the manifest marks it
-        active. The pipeline document's own ``status`` is optional/informational,
-        so feeding the manifest-derived status keeps the validator's
-        runnable-pipeline check aligned with the engine's actual gate rather than
-        rejecting a document that omits or under-states its status.
-        """
-        return {
-            "pipeline": {
-                **dump_authored(pipeline_doc),
-                "pipeline_id": pipeline_id,
-                "status": "active",
-            },
-            "streams": [
-                dump_authored(rec.document) for rec in self._stream_records.values()
-            ],
-            "connections": [
-                {**dump_authored(rec.document), "connection_id": rec.connection_id}
-                for rec in self._connection_records.values()
-            ],
-            "connectors": sorted(self._loaded_connectors),
-            "endpoints": self._connection_scoped_endpoint_identities(),
-        }
-
-    def _connection_scoped_endpoint_identities(self) -> list[dict[str, str]]:
-        """Identify each private endpoint document present on disk.
-
-        Returns ``{scope, connection_id, endpoint_id}`` for every endpoint file
-        under an indexed connection's ``definition/endpoints/``.
-        """
-        identities: list[dict[str, str]] = []
-        for record in self._connection_records.values():
-            endpoints_dir = (
-                self._paths["connections"]
-                / record.connection_id
-                / "definition"
-                / "endpoints"
-            )
-            if not endpoints_dir.is_dir():
-                continue
-            for endpoint_file in sorted(endpoints_dir.glob("*.json")):
-                # Identity is the filename stem: resolution locates the doc as
-                # ``endpoints/{endpoint_id}.json`` (resolve_endpoint_path), so the
-                # stem IS the on-disk endpoint_id. Reading the file is
-                # unnecessary and would let a malformed sibling abort the run.
-                identities.append(
-                    {
-                        "scope": "connection",
-                        "connection_id": record.connection_id,
-                        "endpoint_id": endpoint_file.stem,
-                    }
-                )
-        return identities
-
-    # ------------------------------------------------------------------
     # Stream config construction
     # ------------------------------------------------------------------
 
@@ -773,7 +548,7 @@ class PipelineConfigPrep:
         """Resolve one stream side's ``endpoint_ref`` into its parts.
 
         The ref is contract-validated with the stream and referentially
-        checked by the bundle validator; this resolves it to the connection
+        checked by the workspace verdict; this resolves it to the connection
         runtime and the endpoint document it points at.
         """
         endpoint_ref = block.endpoint_ref

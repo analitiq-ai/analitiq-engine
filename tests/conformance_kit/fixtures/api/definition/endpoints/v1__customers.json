@@ -1,6 +1,6 @@
 {
   "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
-  "endpoint_id": "customers",
+  "endpoint_id": "v1__customers",
   "display_name": "Customers (page-number-paginated)",
   "description": "The provider counts pages rather than rows, and the step is fixed for the whole traversal.",
   "operations": {

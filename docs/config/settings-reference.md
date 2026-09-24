@@ -12,7 +12,7 @@ env var name and built-in default are declared once, beside its accessor.
 | Layer | Location | Scope |
 |---|---|---|
 | Engine + infrastructure defaults | `src/config/settings.py` | Every engine-owned setting, with its environment-variable override, declared once. |
-| Per-pipeline runtime override | `pipelines/{pipeline_id}/pipeline.json` -> `runtime` block | Overrides the *runtime-tuning* subset only (below) for one pipeline. |
+| Per-pipeline runtime override | The pipeline document's `runtime` block | Overrides the *runtime-tuning* subset only (below) for one pipeline. |
 | Connector / formatter defaults | The connector package; the CDK's batch formatters under `cdk/cdk/formatters/` | Connector- and format-specific values (e.g. an API connector's request timeout/retry policy, a formatter's compression). The engine stays connector-agnostic, so these are never centralised in engine settings. |
 
 ## Resolution order
@@ -23,7 +23,7 @@ Settings split into two kinds, resolved differently:
   retry policy) is layered, most-specific wins:
 
   ```
-  pipeline.json runtime block  >  environment variable  >  built-in default
+  pipeline runtime block  >  environment variable  >  built-in default
   ```
 
   A key omitted (or set to `null`) in the pipeline's `runtime` block falls

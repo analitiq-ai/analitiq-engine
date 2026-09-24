@@ -391,7 +391,10 @@ class TestBuildConfigDict:
         assert result["streams"]["orders"]["mapping"] is stream.mapping
         [compiled_assignment] = stream.mapping.assignments
         assert compiled_assignment.target.path == "id"
-        assert compiled_assignment.value.expression.path == ["id"]
+        assert compiled_assignment.value.expression.model_dump() == {
+            "op": "get",
+            "path": ["id"],
+        }
 
     def test_runtime_not_in_config_dict(self):
         pipeline = _make_pipeline(

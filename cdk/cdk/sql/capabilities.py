@@ -3,10 +3,9 @@
 SQL-shape capabilities are facts about the target system — catalog
 addressability, session-targeting regime, merge form, bulk-load mechanism,
 stage shape. They are not derivable from protocol conformance, so they are
-declared as data in the connector definition's ``sql_capabilities`` block
-and validated by the published contract before anything here reads it. The
-dialect class keeps only *rendering*; whether the system has a shape comes
-from this block.
+declared as data in the connector definition's ``sql_capabilities`` block,
+whose shape the published contract owns. The dialect class keeps only
+*rendering*; whether the system has a shape comes from this block.
 
 This module is the CDK's typed view of that block. The engine folds the
 declared block, as authored, into the resolved worker payload (the same
@@ -188,15 +187,9 @@ class SqlCapabilities:
 
     @classmethod
     def from_declaration(cls, block: Mapping[str, Any]) -> SqlCapabilities:
-        """Read a declared block the published contract has already validated.
-
-        The contract requires all five shape facts inside a declared block
-        and closes their vocabularies, so they are read as given. ``limits``
-        (issue #401) is the one additive member: caps are optional facts
-        whose absence means "no declared cap", never a refusal.
-        """
+        """Convert a contract-valid block into its typed view."""
         stage = block["stage"]
-        limits = block.get("limits") or {}
+        limits = block.get("limits")
         return cls(
             catalog=block["catalog"],
             session_targeting=block["session_targeting"],
@@ -208,15 +201,19 @@ class SqlCapabilities:
                 dedicated_schema=stage.get("dedicated_schema"),
                 transactional_ddl=stage["transactional_ddl"],
             ),
-            limits=SqlLimits(
-                max_bind_params=limits.get("max_bind_params"),
-                max_identifier_len=limits.get("max_identifier_len"),
+            limits=(
+                SqlLimits.undeclared()
+                if limits is None
+                else SqlLimits(
+                    max_bind_params=limits.get("max_bind_params"),
+                    max_identifier_len=limits.get("max_identifier_len"),
+                )
             ),
         )
 
 
 def parse_declared_capabilities(block: Any) -> SqlCapabilities | None:
-    """Read an optional declaration: ``None`` stays ``None`` (undeclared).
+    """Convert an optional declaration: ``None`` stays ``None`` (undeclared).
 
     The single entry point both readers use — the worker reading its
     resolved payload, the conformance kit reading the definition under

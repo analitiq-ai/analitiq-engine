@@ -21,6 +21,8 @@ import types
 from pathlib import Path
 
 import pytest
+from analitiq.contracts.validation_requests import ValidateSingleDocumentRequest
+from analitiq.validator import validate_single_document
 
 from cdk.conformance import (
     check_declaration_consistency,
@@ -34,7 +36,6 @@ from cdk.conformance.roundtrip import probe_arrow_types, render_probe
 from cdk.conformance.target import ConformanceTarget
 from cdk.conformance.tier1 import test_definition as kit_definition
 from cdk.type_map.exceptions import UnmappedTypeError
-from src.config.schema_validator import validate_file
 from src.config.utils import load_json_file
 
 from .kit_runner import (
@@ -335,8 +336,7 @@ class TestFixtureConnectorsAreContractValid:
 
     The rule the checks are written against is the contract's, not the
     fixtures', so the fixtures are the side that has to be right. Validation
-    goes through the engine's own ``validate_file``, so this asks the same
-    models the engine loads a connector's documents with.
+    goes through the published validator, the one gate over a document.
     """
 
     def test_the_fixtures_ship_endpoint_documents_to_validate(self) -> None:
@@ -351,7 +351,13 @@ class TestFixtureConnectorsAreContractValid:
     )
     def test_every_fixture_endpoint_document_validates(self, document: Path) -> None:
         kind = load_json_file(document.parents[1] / "connector.json")["kind"]
-        validate_file(f"{kind}-endpoint", document)
+        verdict = validate_single_document(
+            ValidateSingleDocumentRequest(
+                document=document.read_text(encoding="utf-8"),
+                document_kind=f"{kind}-endpoint",
+            )
+        )
+        assert verdict["passed"], verdict["findings"]
 
 
 class TestApiReferencePassesTier1:

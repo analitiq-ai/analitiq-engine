@@ -105,11 +105,17 @@ class TestResolveDbKwargs:
 
 
 class TestResolveAdbcSpec:
-    def test_neither_dsn_nor_db_kwargs_raises(self):
-        with pytest.raises(TransportSpecError, match="at least one of"):
+    def test_db_kwargs_resolving_to_nothing_without_dsn_raises(self):
+        ctx = ResolutionContext(connection={"parameters": {"account": None}})
+        resolver = Resolver(ctx, functions=DEFAULT_FUNCTIONS)
+        with pytest.raises(TransportSpecError, match="resolved no `dsn`"):
             resolve_adbc_spec(
-                {"transport_type": "adbc", "driver": "snowflake"},
-                resolver=_resolver(),
+                {
+                    "transport_type": "adbc",
+                    "driver": "snowflake",
+                    "db_kwargs": {"account": {"ref": "connection.parameters.account"}},
+                },
+                resolver=resolver,
             )
 
     def test_output_is_json_safe_payload(self):

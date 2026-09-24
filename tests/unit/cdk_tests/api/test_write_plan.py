@@ -258,12 +258,8 @@ class TestModeDispatch:
 
 
 class TestIdempotencyRefusals:
-    """The one refusal the per-model contract validation cannot express.
-
-    Which headers the connection already sends is a session fact, not a
-    document one, so only this side can judge it. Every body-side collision
-    the documents can show is the contract's, and the one they cannot is
-    the runtime's.
+    """Which headers the connection already sends is a session fact, not a
+    document one, so it is the one placement rule this side owns.
     """
 
     def test_a_header_the_connection_already_sends_is_refused(self) -> None:
@@ -278,26 +274,6 @@ class TestIdempotencyRefusals:
             resolver=_resolver(),
         )
         assert isinstance(outcome, str) and "collides" in outcome
-
-    def test_a_pass_through_body_keyed_from_input_is_not_a_collision(self) -> None:
-        # The body IS the record (``{"from_input": "record"}``), so
-        # ``from_input`` is the expression marker, not a declared body field.
-        # A real collision with a record field is the contract's rule (it
-        # walks input.schema) and, for a body whose shape it cannot know, the
-        # runtime's in body_with_idempotency_key.
-        doc = _document(
-            body={"from_input": "record"},
-            idempotency={"in": "body", "name": "from_input"},
-        )
-        plan = build_write_plan(
-            doc,
-            _spec(),
-            header_names_for=lambda _ref: set(),
-            transport_problem=lambda _ref: None,
-            resolver=_resolver(),
-        )
-        assert isinstance(plan, StreamWritePlan)
-        assert plan.idempotency_name == "from_input"
 
 
 class TestTheRequestTheStreamWillActuallySend:

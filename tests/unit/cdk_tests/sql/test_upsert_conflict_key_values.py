@@ -46,7 +46,7 @@ def _upsert_handler() -> GenericSQLConnector:
             "merge_form": "merge",
             "bulk_load": {"adbc": "adbc_ingest"},
             "stage": {"scope": "real", "schema": "target", "transactional_ddl": False},
-        }
+        },
     )
     contract = MagicMock()
     # The real cast fills an absent column with typed nulls; mirror that.

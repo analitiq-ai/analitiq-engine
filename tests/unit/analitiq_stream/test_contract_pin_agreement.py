@@ -1,7 +1,7 @@
 """Every manifest that installs a contract package agrees on the version.
 
-The engine validates a connector against ``analitiq-contract-models``
-before its own parsers read the same document, so the contract version is
+The validator grades a run's documents against ``analitiq-contract-models``
+before the engine's own parsers read the same documents, so the contract version is
 part of the engine's behavior, not a build detail. That version is
 declared in more than one manifest — Poetry resolves ``pyproject.toml``,
 the runtime image installs ``docker/requirements.txt``, and the mypy hook
@@ -109,8 +109,8 @@ def test_every_application_manifest_pins_the_same_contract_version(
 ) -> None:
     pins = application_pins(package)
     assert pins, (
-        f"no application manifest pins {package}; the engine validates "
-        f"artifacts against it, so some manifest must name a version"
+        f"no application manifest pins {package}; a run's documents are "
+        f"graded against it, so some manifest must name a version"
     )
     versions = set(pins.values())
     assert len(versions) == 1, (

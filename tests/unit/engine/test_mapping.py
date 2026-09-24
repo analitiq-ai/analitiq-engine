@@ -38,7 +38,7 @@ def _get(path):
 
 
 def _expr(node):
-    """Wrap an expression AST node as an assignment ``value`` block."""
+    """Wrap an expression node as an assignment ``value`` block."""
     return {"kind": "expression", "expression": node}
 
 
@@ -219,6 +219,14 @@ class TestExpressionOps:
     def test_const_value_kind_broadcasts_literal(self):
         out = _run([{"a": 1}, {"a": 2}], [_assignment("s", "Utf8", _const("X"))])
         assert out == [{"s": "X"}, {"s": "X"}]
+
+    def test_pipe_applies_its_conversion_stage_to_the_seed(self):
+        node = {
+            "op": "pipe",
+            "args": [_get("n"), {"op": "fn", "name": "to_string"}],
+        }
+        out = _run([{"n": 7}], [_assignment("n", "Utf8", _expr(node))])
+        assert out == [{"n": "7"}]
 
 
 class TestFunctionCatalog:
@@ -750,8 +758,7 @@ class TestPerRecordParity:
     """Edge semantics that must match the deleted per-record evaluator.
 
     Vectorized Arrow kernels diverge from Python at the edges (boolean
-    formatting); each kernel here is steered back to the per-record behavior
-    so existing mappings keep working.
+    formatting); each kernel here is steered back to the per-record behavior.
     """
 
     def test_to_string_renders_bool_as_python_str(self):

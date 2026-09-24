@@ -226,7 +226,7 @@ async def run_destination_mode() -> None:
     #     destination both load these via PipelineConfigPrep, so handlers
     #     read schema details from this map instead of unpacking them off
     #     the wire.
-    #   - stream_conflict_keys: stream_id -> the stream's Infra-validated
+    #   - stream_conflict_keys: stream_id -> the stream's validator-graded
     #     ``write.conflict_keys``, copied verbatim. Stream configuration,
     #     not endpoint contract, so it travels on its own channel.
     endpoint_refs: dict[str, dict[str, Any]] = {}

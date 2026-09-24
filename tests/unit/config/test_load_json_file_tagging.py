@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from src.config.exceptions import ConfigValidationError
 from src.config.utils import load_json_file
 from src.state.error_classification import (
     ErrorCode,
@@ -80,3 +81,13 @@ def test_the_read_verdict_survives_the_runners_coarser_tag(tmp_path: Path) -> No
         load_json_file(tmp_path / "gone.json")
     tag_failure(caught.value, code=ErrorCode.CONFIG_INVALID, stage=FailureStage.CONFIG)
     assert classify_exception(caught.value) is ErrorCode.INTERNAL
+
+
+def test_a_document_that_is_not_utf8_is_a_config_defect_naming_it(
+    tmp_path: Path,
+) -> None:
+    document = tmp_path / "connection.json"
+    document.write_bytes(b"\xff\xfe")
+
+    with pytest.raises(ConfigValidationError, match="connection.json"):
+        load_json_file(document)

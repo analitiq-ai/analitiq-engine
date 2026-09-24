@@ -3,7 +3,7 @@
 **Scope:** This document defines the destination SQL write primitive — how every SQL
 write lands and commits, on both transports — and everything that hangs off it:
 the facade/backend split inside the CDK, the sanctioned extension surface for
-thick connectors, the dialect-capability block in `connector.json`, stage-table
+thick connectors, how declared dialect capabilities are consumed, stage-table
 lifecycle, transaction boundaries, and engine-side batch coalescing. The
 conformance kit enforces this document: a connector that diverges from it fails
 CI. Section 8 is the exception — engine-side coalescing and the `write_unit`
@@ -37,8 +37,8 @@ Three properties follow, and the rest of this document is their consequence:
   protocol reaches it through the declared `bulk_land` hook (§4), never by
   overriding CDK internals. Contract-less coupling to private methods breaks
   silently on any refactor, which is why the conformance kit fails it (§10).
-- **Declared facts, not guesses.** What a system can do is validated data in
-  `connector.json` (§5); how to render it is a small dialect class. A
+- **Declared facts, not guesses.** What a system can do is declared data
+  (§5); how to render it is a small dialect class. A
   needed-but-undeclared capability refuses loudly instead of defaulting.
 
 Engine-side coalescing (§8) exists for a narrower reason: the wire protocol is
@@ -316,56 +316,11 @@ capabilities are facts about the target system — not derivable from protocol
 conformance, unlike the operation capabilities the connector-module contract
 rightly refuses to declare — so they are declared as data.
 
-A schema-validated block in `connector.json`:
-
-```json
-"sql_capabilities": {
-  "catalog": "none" | "read" | "full",
-  "session_targeting": "per_statement" | "session_default",
-  "merge_form": "merge" | "insert_on_conflict" | "insert_on_duplicate_key" | "none",
-  "bulk_load": {
-    "sqlalchemy": "copy_from" | "load_data_local_infile" | "load_job",
-    "adbc": "adbc_ingest" | "copy_from" | "load_data_local_infile" | "load_job"
-  },
-  "stage": {
-    "scope": "temp" | "real",
-    "schema": "target" | "dedicated",
-    "dedicated_schema": "<name, required iff schema is dedicated>",
-    "transactional_ddl": true | false
-  },
-  "limits": {
-    "max_bind_params": 2100,
-    "max_identifier_len": 63
-  }
-}
-```
-
 `bulk_load` maps each SQL transport family to the mechanism its
 connections land with — the mechanism is a fact about a transport, not
 the connector as a whole (`copy_from` needs the driver's wire
 connection; `adbc_ingest` needs an ADBC cursor). An absent family lands
-via executemany, the declared default; an empty object declares no bulk
-anywhere; a mechanism a family cannot run (`adbc_ingest` under
-`sqlalchemy`) is unrepresentable — the published contract refuses it, so no
-downstream consumer ever meets a declared-but-unrunnable mechanism. A
-dual-transport connector declares both entries (postgres: ADBC
-connections ingest natively, SQLAlchemy connections COPY) instead of
-picking one and silently falling back on the other.
-
-and the connector-level (not SQL-specific) declarations:
-
-```json
-"write_unit": { "rows": 200000, "bytes": 33554432 },
-"concurrency": { "max_connections": 8 },
-"error_map": {
-  "key_attrs": ["sqlstate", "__exception_class__"],
-  "codes": {
-    "08000": "unreachable", "28000": "auth", "23505": "write_rejected",
-    "OperationalError": "transient"
-  },
-  "http": { "429": "rate_limited", "401": "auth" }
-}
-```
+via executemany; an empty object means no bulk anywhere.
 
 `key_attrs` names, in the connector's own precedence order, which attributes
 of its caught exception carry a native error code (or the reserved
@@ -386,8 +341,7 @@ Properties:
   without a declared `bulk_load` mechanism is never called (and fails the
   conformance suite, §10).
 - **One source of truth per fact.** The JSON declares *whether* the system
-  has a shape; the dialect class renders *how* to write it. The
-  `supports_*` class booleans are deleted, not mirrored.
+  has a shape; the dialect class renders *how* to write it.
 - `"load_job"` names the mechanism of systems whose bulk path is a load-job
   API driven through the system's own client rather than the transport
   connection (BigQuery). It lands into the per-batch stage table like every
@@ -395,8 +349,8 @@ Properties:
 - **The block reaches the worker in the resolved payload.** The isolated
   worker never reads `connector.json` — its bootstrap carries only resolved
   values (`build_bootstrap` / `ConnectionRuntime.from_resolved_payload`).
-  The engine validates the capability block and folds it into that payload,
-  the same channel that already delivers type maps and endpoint documents,
+  The engine folds the capability block into that payload, the same
+  channel that delivers type maps and endpoint documents,
   so the facade and backends consume declared capabilities from the runtime
   in the process where writes execute — never a guessed default because the
   definition file was out of reach.
@@ -419,8 +373,6 @@ Properties:
   A `connect()` that fails leaves the handler with no transport at all — it
   refuses every write until a later `connect()` completes, rather than
   serving the new declaration over the previous connection.
-- Validated offline by the published validator like every other contract
-  surface, and visible to any consumer of the connector definition.
 - `write_unit` sits at the connector level because it is not a SQL fact —
   any destination whose write cost is per-write-operation (file/S3 sinks
   included) may declare it, and the engine consumes it transport-agnostically
@@ -428,16 +380,12 @@ Properties:
 - **`error_map`, `limits` and `concurrency` are additive, not
   refuse-don't-guess.** A missing
   `merge_form` blocks an upsert; a missing limit or error mapping cannot
-  block anything — absence means "no declared cap / no declared mapping" and
-  current behavior applies. A runtime failure caused by an undeclared cap or
-  mapping is a connector defect, fixed by declaring it — never worked around
-  in the engine. The published contract validates `error_map`, `limits`
-  and `concurrency` at config load; the engine only reads them
-  (`cdk.declarations` for `error_map` and `concurrency`,
-  `cdk.sql.capabilities` for `limits`).
-- **`error_map` declares facts, never verdicts.** The value vocabulary is
-  the contract's `ErrorCategory`, and the engine alone derives `AckStatus`,
-  `FailureCategory`, and `ErrorCode` from it (the per-context verdict
+  block anything — absence means "no declared cap / no declared mapping". A
+  runtime failure caused by an undeclared cap or mapping is a connector
+  defect, never worked around in the engine.
+- **`error_map` declares facts, never verdicts.** The engine alone derives
+  `AckStatus`, `FailureCategory`, and `ErrorCode` from a declared category
+  (the per-context verdict
   tables in `cdk.declarations`, the same trust rule as retry semantics,
   §9). Matching happens at the failure's birth site against the immediate
   exception (plus at most its single explicit driver link — SQLAlchemy's
@@ -493,20 +441,12 @@ thread future and holds the lock through a cancellation until the thread is
 done. A retry only ever meets a completed or abandoned stage, never a live
 one.
 
-**Scope is declared, temp preferred.** `stage.scope` in the capability block:
+**Scope is declared.**
 
 - **`temp`** — a session-scoped temporary table: invisible to other sessions,
   dropped by the system on disconnect, no DDL in the customer's schema.
-  Declared by systems where a session-temp table is visible to the same
-  connection's mode statement (Postgres, MySQL, Redshift, Snowflake).
-- **`real`** — an ordinary table, for systems without usable session-temp
-  semantics (BigQuery). `stage.schema` places it: `"target"` (the target
-  table's schema) or `"dedicated"` with a named
-  `dedicated_schema`, keeping stage DDL out of customer schemas entirely
-  (the pattern Airbyte's internal schema and Fivetran's staging datasets
-  follow). Real-scope stages should additionally carry the system's
-  expiration mechanism where one exists (BigQuery table expiration), so an
-  orphan is time-bounded even after a process crash.
+- **`real`** — an ordinary table, placed in the target table's schema or in
+  a dedicated schema that keeps stage DDL out of customer schemas.
 
 **Cleanup and poisoning.** These rules are the stage cycle's, so they read
 the same on every transport, and the cleanup rules govern the
@@ -554,12 +494,7 @@ Declared per system as `stage.transactional_ddl`:
 
 - **`true`** — the backend runs create-stage, land, mode statement, and drop
   in **one transaction**: an interrupted batch leaves nothing, not even a
-  stage. Postgres and Redshift support this outright. MySQL does **not**
-  qualify even with `temp` scope: `CREATE TEMPORARY TABLE` avoids the
-  implicit commit of regular DDL, but temporary-table DDL still cannot be
-  rolled back — a failed batch can leave the temp table sitting on the
-  pooled session — so MySQL declares `false` and relies on the pre-flight
-  drop (§6) like every other non-transactional system.
+  stage.
 - **`false`** — systems whose DDL self-commits or whose loads are their own
   commit unit (Snowflake, BigQuery) run the steps with per-step commits.
   Safety then comes from the primitive itself, not atomicity: deterministic
@@ -748,8 +683,8 @@ The contract tier (no live database) certifies this document's surface:
   `insert_on_duplicate_key` form names no keys in the statement at all
   (MySQL reads them from the unique index), and carries no such
   assertion.
-- **Refusals fire.** Upsert with empty `conflict_keys`, upsert against
-  `merge_form: "none"`, and any needed-but-undeclared capability produce the
+- **Refusals fire.** Upsert with empty `conflict_keys` (never downgraded to
+  insert), upsert against `merge_form: "none"`, and any needed-but-undeclared capability produce the
   loud config error, not SQL.
 - **The override surface is the sanctioned one.** A connector may override
   the §4 hooks plus `session_init_sql`, `verify_tls_state`, and the

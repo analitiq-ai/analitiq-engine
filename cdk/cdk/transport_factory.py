@@ -49,7 +49,7 @@ if TYPE_CHECKING:
 from cdk._extras import reraise_for_missing_extra
 from cdk.derived_functions import DEFAULT_FUNCTIONS
 from cdk.exceptions import TransportSpecError, UnresolvedValueError
-from cdk.json_utils import authored_json
+from cdk.json_utils import authored_json, positive_int
 from cdk.rate_limiter import RateLimiter
 from cdk.resolver import ResolutionContext, Resolver
 from cdk.sql.dialects import dialect_overrides
@@ -111,27 +111,16 @@ def _render_url_template_dsn(dsn_spec: Mapping[str, Any], resolver: Resolver) ->
     Each ``bindings[name].value`` is resolved through the active
     :class:`Resolver`; the result is converted to a string using the
     declared ``encoding``; the encoded values are then substituted into
-    ``template`` using ``str.format_map``-style replacement. Missing
-    placeholders and missing bindings are configuration errors, not runtime
-    warnings; the published contract refuses the rest of the shape.
+    ``template`` using ``str.format_map``-style replacement. The recipe's
+    shape is the published contract's; this renders a contract-valid one.
     """
-    template: str = dsn_spec["template"]
-
-    raw_bindings: Mapping[str, Any] = dsn_spec["bindings"]
-
     rendered: dict[str, str] = {}
-    for name, entry in raw_bindings.items():
+    for name, entry in dsn_spec["bindings"].items():
         encoding = entry["encoding"]
         value = resolver.resolve(entry["value"])
         rendered[name] = _apply_encoding(encoding, value, binding=name)
-
-    try:
-        return template.format_map(rendered)
-    except KeyError as err:
-        raise KeyError(
-            f"dsn.template references {err.args[0]!r} but no matching binding "
-            f"was declared (declared: {sorted(raw_bindings)})"
-        ) from None
+    template: str = dsn_spec["template"]
+    return template.format_map(rendered)
 
 
 def _apply_encoding(encoding: str, value: Any, *, binding: str) -> str:
@@ -321,22 +310,24 @@ def resolve_sqlalchemy_spec(
     the computed engine kwargs. Safe to serialize into a worker bootstrap.
     """
     driver = spec.get("driver")
-    if not isinstance(driver, str) or not driver:
+    if not driver:
         raise TransportSpecError(
             "sqlalchemy transport requires `driver` (e.g. 'postgresql+asyncpg')"
         )
 
     raw_dsn = spec.get("dsn")
-    if not isinstance(raw_dsn, Mapping):
+    if raw_dsn is None:
         raise TransportSpecError(
-            "sqlalchemy transport `dsn` must be the structured "
-            "{kind: url_template, template, bindings} object"
+            "sqlalchemy transport requires a `dsn`; the engine builds the "
+            "SQLAlchemy engine from the rendered URL"
         )
     dsn = _render_url_template_dsn(raw_dsn, resolver)
 
     mode, ca_pem = _resolve_tls_mode(spec.get("tls"), resolver)
 
-    options = spec.get("options") or {}
+    options = spec.get("options")
+    if options is None:
+        options = {}
     engine_kwargs: dict[str, Any] = {}
     if "pool_size" in options:
         engine_kwargs["pool_size"] = int(options["pool_size"])
@@ -743,25 +734,21 @@ def _as_adbc_option_value(name: str, value: Any) -> str:
 def resolve_adbc_spec(spec: Mapping[str, Any], *, resolver: Resolver) -> dict[str, Any]:
     """Resolve an adbc transport spec to JSON-safe values (no objects).
 
-    The spec shape matches ``AdbcTransport`` in the published connector
-    schema: ``driver`` is required (the schema enum validates its value),
-    ``dsn`` and ``db_kwargs`` are both optional but at least one must be
-    present. Drivers that accept all connection state via ``db_kwargs``
+    Drivers that accept all connection state via ``db_kwargs``
     (Snowflake, BigQuery) typically omit ``dsn``.
     """
-    driver = spec["driver"].lower()
+    driver = str(spec["driver"]).lower()
 
     raw_dsn = spec.get("dsn")
-    uri: str | None = None
-    if raw_dsn is not None:
-        uri = _render_url_template_dsn(raw_dsn, resolver)
+    uri = None if raw_dsn is None else _render_url_template_dsn(raw_dsn, resolver)
 
     db_kwargs = _resolve_db_kwargs(spec.get("db_kwargs"), resolver)
 
     if uri is None and not db_kwargs:
         raise TransportSpecError(
-            "adbc transport requires at least one of `dsn` or `db_kwargs` "
-            "(schema anyOf constraint)"
+            "adbc transport resolved no `dsn` and no `db_kwargs` entry; every "
+            "declared db_kwargs value resolved to nothing, so the driver has "
+            "nothing to connect with"
         )
 
     return {
@@ -1006,7 +993,9 @@ def resolve_http_spec(spec: Mapping[str, Any], *, resolver: Resolver) -> dict[st
         raise TransportSpecError("http transport `base_url` is required")
     base_url = require_http_base_url(resolver.resolve(raw_base))
 
-    raw_headers = spec.get("headers") or {}
+    raw_headers = spec.get("headers")
+    if raw_headers is None:
+        raw_headers = {}
     headers: dict[str, str] = {}
     for name, value in raw_headers.items():
         resolved = resolver.resolve(value)
@@ -1028,21 +1017,23 @@ def resolve_http_spec(spec: Mapping[str, Any], *, resolver: Resolver) -> dict[st
     if timeout_seconds is None:
         timeout_seconds = 30
 
-    raw_rate_limit = spec.get("rate_limit") or {}
+    raw_rate_limit = spec.get("rate_limit")
     rate_limit: dict[str, int] | None = None
-    if raw_rate_limit:
-        max_requests = raw_rate_limit.get("max_requests")
-        time_window = raw_rate_limit.get("time_window_seconds")
-        if (max_requests is None) != (time_window is None):
-            raise TransportSpecError(
-                "http transport `rate_limit` requires both `max_requests` "
-                "and `time_window_seconds` (or neither)"
+    if raw_rate_limit is not None:
+        # time_window_seconds may be a value-expression, so only its
+        # resolved value can be checked; max_requests is a literal the
+        # contract types as a positive int.
+        try:
+            time_window_seconds = positive_int(
+                resolver.resolve(raw_rate_limit["time_window_seconds"]),
+                field="http transport `rate_limit.time_window_seconds`",
             )
-        if max_requests is not None and time_window is not None:
-            rate_limit = {
-                "max_requests": int(max_requests),
-                "time_window_seconds": int(time_window),
-            }
+        except ValueError as err:
+            raise TransportSpecError(str(err)) from err
+        rate_limit = {
+            "max_requests": int(raw_rate_limit["max_requests"]),
+            "time_window_seconds": time_window_seconds,
+        }
 
     return {
         "transport_type": HTTP_TRANSPORT_TYPE,

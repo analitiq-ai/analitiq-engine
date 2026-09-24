@@ -1,18 +1,9 @@
 # Source Configuration: Design and Semantics
 
-**Scope:** this doc specifies the source + stream + connection config
-*design* — identity rules, scoping, replication semantics, and secret
-resolution. It is not the schema reference: the authoritative field-level
-shape of every document named below is the published JSON Schema at
-`https://schemas.analitiq.ai/<document-type>/latest.json` — the document
-types this doc names are `pipeline`, `stream`, `connector`, `connection`,
-`api-endpoint`, and `database-endpoint` — generated from the Pydantic
-contract models the Connector Builder / Pipeline Builder plugins author —
-and the CDK's own Pydantic models where a document is engine-internal.
-This document exists because the schema alone doesn't carry *why* a
-field resolves the way it does; where this doc and the schema could both
-state a fact, the schema wins and this doc points at it instead of
-repeating it.
+**Scope:** what the engine does at runtime with a source, stream and
+connection once the validator has passed the run's workspace. Document
+shape, layout and validity are the published contract's and
+`analitiq-validator`'s; this doc does not restate them.
 
 For the rest see the siblings: the engine pipeline in
 [`engine-architecture.md`](../architecture/engine-architecture.md), field
@@ -25,60 +16,7 @@ The environment-variable catalogue is
 [README.md](../../README.md#environment-variables)); resolution order and
 layering rules are in [`settings-reference.md`](settings-reference.md).
 
-## File layout
-
-```
-project_root/
-├── pipelines/
-│   ├── manifest.json                  # index of pipelines
-│   └── {pipeline_id}/
-│       ├── pipeline.json              # pipeline-level config
-│       └── streams/{stream_id}.json   # one file per stream
-├── connectors/{connector_id}/definition/
-│   ├── connector.json                 # connector definition
-│   └── endpoints/{endpoint_id}.json   # public endpoint documents
-└── connections/{connection_id}/
-    ├── connection.json                # user-created connection
-    ├── .secrets/credentials.json      # secret values (gitignored)
-    └── definition/endpoints/{endpoint_id}.json  # private endpoint documents
-```
-
-**Identity is directory-based; an authored `connection_id` must agree with
-it, not replace it.** The directory name under `connections/` is the
-identity a stream reaches through `endpoint_ref.connection_id`.
-`connection_id` is an optional field on `connection.json` — a document
-may omit it, and the directory name is used — but if present it is
-validated against the directory name and rejected on mismatch
-(`PipelineConfigPrep._build_connection_index`,
-`src/engine/pipeline_config_prep.py`); it can never diverge from its own
-directory, authored or not. `manifest.json` is
-authoritative for which pipelines run: only an entry with `status: "active"`
-is executable.
-
-## Endpoint references
-
-`endpoint_ref` is always an object — there is no string shorthand form —
-with two scopes, and the scope changes what identifies the endpoint:
-
-- **`connector`** — a public endpoint, resolved from the connection's
-  connector. `endpoint_id` names it directly.
-- **`connection`** — a private endpoint (e.g. a database table) that
-  belongs to one connection. Its identity is `database_object`
-  (catalog/schema/name); `endpoint_id` may be omitted by the author, and
-  the contract validator derives it from `database_object` before the
-  document is accepted (`src/config/endpoint_resolver.py`) — a document
-  carrying no `endpoint_id` at this point is a validator defect, not a
-  client error.
-
-`connection_id` is always present regardless of scope. Optional `x-*`
-extension keys are accepted verbatim; any other unrecognised key is
-rejected — the document is closed, not permissive.
-
 ## Replication semantics
-
-A stream's `source.replication` block declares `method` (`full_refresh` or
-`incremental`) and, when incremental, a `cursor_field`. Three points are
-not derivable from the schema alone:
 
 - **The safety window is engine policy, not connector input.**
   `safety_window_seconds` — subtracted from the stored cursor to cover
@@ -86,11 +24,10 @@ not derivable from the schema alone:
   config crosses to the connector. A connector never invents its own
   default; the value the connector sees is always the engine's resolved
   one.
-- **`database_pagination.order_by_field` is constrained by replication
-  method.** Systems that require an explicit ordering for paged reads
-  (e.g. MSSQL) declare it on full-refresh streams freely; on an incremental
-  stream it must equal `cursor_field`, because cursor checkpointing depends
-  on cursor-ordered pages — any other value is rejected.
+- **A connection is identified by its directory name.** The engine keys
+  each connection by the name of its directory under `connections/`, which
+  is what a stream's `endpoint_ref.connection_id` reaches; it does not read
+  the `connection_id` inside `connection.json`.
 - **`source.connection_ref` is runtime-computed, never authored.**
   `pipeline_config_prep` copies `endpoint_ref.connection_id` onto the
   source block as a convenience key; it does not appear in the document a
@@ -117,23 +54,13 @@ also enforced: no single endpoint can paginate across transports, because a
 traversal that changed host mid-read would have no correct answer for
 which transport's headers apply at the second host.
 
-Connector `kind` is a closed enum (the contract model is authoritative for
-its members); the destination handler registry maps kinds to handler
-classes — see
+The destination handler registry maps connector kinds to handler classes —
+see
 [`connector-module-architecture.md`](../architecture/connector-module-architecture.md)
 and [`destination-config.md`](destination-config.md#handler-registry).
 
 ## API endpoint operations: binding and pagination semantics
 
-The authoritative shape of an endpoint document is the `api-endpoint` JSON
-Schema at `schemas.analitiq.ai`; the engine validates every endpoint
-document against it before the document crosses into the connector
-process. What follows is the *binding and pagination behavior* the schema
-alone does not state:
-
-- Every declared param must be bound exactly once (in `query`, `headers`,
-  or `body`), and every binding must name a declared param — the contract
-  refuses a document that breaks either rule.
 - A `required` param that resolves to nothing fails the read before its
   first request: a read that silently drops the narrowing would return the
   whole collection and report success. A param a pagination or replication
@@ -149,37 +76,27 @@ alone does not state:
   this rather than pulling in every format library transitively. No
   refusal renders the offending value in its message, since a param can
   carry a credential or continuation token.
-- `pagination.type` is a closed union (`offset`, `page`, `cursor`,
-  `keyset`, `link`); an unrecognised value fails loud rather than reading
-  one page. `stop_when` is required on every strategy — there is no
-  default, and no page-size heuristic decides when a read ends. All five
-  strategies run on one loop, `cdk.api.PageLoop`, with one adapter per
-  scheme; see [ADR 0002](../adr/0002-one-stop-rule-for-every-paging-scheme.md)
-  for why the loop, not the scheme, owns termination.
-- `replication.cursor_mappings` maps a stream's `cursor_field` to declared
-  params, and binds both the stored-cursor lower bound and (for a window
-  form) the run's upper bound, rendered in the mapping's declared format.
-  An incremental stream whose `cursor_field` no mapping names fails before
-  its first request, rather than silently re-reading the whole collection
-  every run.
+- Every pagination scheme runs on one loop, `cdk.api.PageLoop`, with one
+  adapter per scheme, and no page-size heuristic decides when a read ends;
+  see [ADR 0002](../adr/0002-one-stop-rule-for-every-paging-scheme.md) for
+  why the loop, not the scheme, owns termination.
+- The engine binds both the stored-cursor lower bound and (for a window
+  form) the run's upper bound through `replication.cursor_mappings`,
+  rendered in the mapping's declared format. An incremental stream whose
+  `cursor_field` no mapping names fails before its first request, rather
+  than silently re-reading the whole collection every run.
 
 ## Secret references
 
-Each `secret_refs.<name>` value carries an explicit scheme naming *where*
-its secret comes from; a bare token (a pasted raw secret) is rejected —
-secret material never belongs in a config file. Schemes: `env:VAR`,
-`file:./path` (scope-checked against the connection directory, so `..`
-cannot escape it), `sidecar:<name>` (an entry in
-`connections/{connection_id}/.secrets/credentials.json`, the local-dev
-flow), and `s3://bucket/key` (lazily imports `boto3`, needs the `[s3]`
-extra, honours `AWS_ENDPOINT_URL_S3` / `AWS_REGION` for an S3-compatible
-store). An unresolvable ref — missing env var, file, object, or sidecar
-entry, or an unsupported scheme — fails loud; the engine never falls back
-to an empty secret. A resolved file or object payload has exactly one
-trailing newline stripped; the value is otherwise verbatim.
-
-Inputs the connector definition declares as secret MUST be supplied via
-`secret_refs`, never `parameters`.
+`SchemeSecretsResolver` (`cdk/cdk/secrets/resolvers/scheme.py`) resolves
+each `secret_refs.<name>` engine-side, by the scheme the contract gives it.
+A `file:` path is scope-checked against the connection directory, so `..`
+cannot escape it. The `s3://` scheme lazily imports `boto3`, needs the
+`[s3]` extra, and honours `AWS_ENDPOINT_URL_S3` / `AWS_REGION` for an
+S3-compatible store. An unresolvable ref (a missing env var, file, object
+or sidecar entry, or an unsupported scheme) fails loud; the engine never
+falls back to an empty secret. A resolved file or object payload has
+exactly one trailing newline stripped; the value is otherwise verbatim.
 
 ## See Also
 

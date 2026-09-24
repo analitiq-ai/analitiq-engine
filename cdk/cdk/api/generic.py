@@ -276,11 +276,11 @@ class GenericAPIConnector(BaseDestinationHandler):
 
         # Write role only.
         self._streams: dict[str, StreamWritePlan] = {}
-        # Parsed, not raw. The engine does validate every document before it
-        # crosses the process boundary, but this process runs untrusted,
-        # AI-authored connector code and re-validating what arrives over
-        # that boundary is defense in depth: the far side is exactly where a
-        # document may no longer be the one the engine checked. The parse is
+        # Parsed, not raw. The validator grades every document before the
+        # run, but this process runs untrusted, AI-authored connector code,
+        # and parsing what arrives over the process boundary is defense in
+        # depth: the far side is exactly where a document may no longer be
+        # the one the validator graded. The parse is
         # also what turns a contract field the engine happens to ignore into
         # an unused attribute a tool can find, rather than a key nobody can
         # prove is unread.

@@ -43,19 +43,13 @@ in a customer pipeline (spec
 - **Declared and implemented agree, both ways.** A declared
   `merge_form` needs `merge_statement_sql`; a `bulk_land` override
   needs a declared `bulk_load` mechanism; a write-capable connector
-  (one whose `type-map.json` has a `write` section) needs `sql_capabilities` and
-  `stage_table_sql`.
+  (a database connector that ships a write type map) needs a
+  `sql_capabilities` block and `stage_table_sql`.
 - **Every connector states its type vocabulary.**
-  The `read` section of `definition/type-map.json` is what the engine maps discovered
-  source types through, whatever the connector's kind: a database maps the
-  `native_type`s discovery returns, an API the JSON `type`/`format` its
-  endpoint fields declare.
-
-  Every literal `arrow_type` a rule names must belong to an `arrow_family`
-  the engine can parse. The kit does not check this separately: the rule
-  loader refuses a foreign `arrow_type` against the pinned contract before
-  a type map is ever assembled, so a document that would fail the check
-  cannot reach it.
+  The read map is what the engine maps discovered source types through,
+  whatever the connector's kind: a database maps the `native_type`s
+  discovery returns, an API the JSON `type`/`format` its endpoint fields
+  declare.
 - **Type maps are round-trip stable.** Every `native_type` the write map
   renders must be readable by the read map (a table the connector
   creates stays discoverable), and one write/read round must reach a
@@ -96,12 +90,12 @@ in a customer pipeline (spec
   the replication cursor, and substitutes the path only once the
   incremental filter has bound; a definition-only run has none of the
   three, so a placeholder bound to a declared param gets a stand-in segment
-  and the drives carry on. Only a placeholder nothing could ever bind is a
-  finding: one with no binding at all, one bound to a param the endpoint
-  does not declare, and one bound to an expression no run fills — it reads
-  no scope at all, or it reads `secrets`/`auth`, which request-time
-  resolution never supplies (they resolve once, engine-side, at transport
-  materialization). Each fails for every connection and every stream. The
+  and the drives carry on. A placeholder is a finding when it
+  is bound to an expression no run fills — it reads no scope at all, or it
+  reads `secrets`/`auth`, which request-time resolution never supplies (they
+  resolve once, engine-side, at transport materialization) — or when the
+  definition settles it to an empty string, which the path substitution
+  refuses. Either fails for every connection and every stream. The
   same shape governs every deferral, with the scope set matched to its
   phase: a request slot defers only what `connection.*` supplies, the
   transport's `base_url` and headers defer what materialization supplies
@@ -124,12 +118,6 @@ in a customer pipeline (spec
   stream reaches its first request without it, while a named one is
   opened by the first read that dispatches through it and stops exactly
   those reads.
-
-  Whether a named `transport_ref` resolves to a transport the sibling
-  connector.json declares is *not* checked here. It is decidable from the
-  two documents alone, which makes it the package validator's
-  `endpoint-transport-ref`; a second, differently worded verdict would
-  give the author two findings for one defect.
 
 **Tier 2 — live tests** (`cdk.conformance.tier2`, the connector's
 system as a CI service container): all three write modes end-to-end
@@ -188,7 +176,7 @@ accurate report.
 ## Wiring a connector repo
 
 The suite needs three inputs: the connector checkout
-(`--connector-dir`, holding `definition/connector.json`), the connector
+(`--connector-dir`), the connector
 class, and — for tier 2 — a live connection document
 (`--live-connection`).
 

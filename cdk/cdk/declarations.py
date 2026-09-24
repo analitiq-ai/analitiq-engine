@@ -35,8 +35,8 @@ missing limit or error mapping cannot block anything — absence means "no
 declared cap / no declared mapping" and current behavior applies. A runtime
 failure caused by an undeclared cap or mapping is a connector defect, fixed
 by declaring it (or implementing ``classify_error``) — never worked around
-in the engine. The published contract validates both blocks at config
-load; this module only reads them.
+in the engine. The blocks' shape is the published contract's; this module
+converts a contract-valid block into its typed view.
 
 Both blocks reach the worker via the resolved payload channel
 (``ConnectionRuntime.resolve_spec`` / ``from_resolved_payload``), the same
@@ -135,13 +135,6 @@ DECLARED_READ_DETERMINISTIC = MappingProxyType(dict(DECLARED_READ_DETERMINISTIC)
 CLASS_NAME_SIGNAL = "__exception_class__"
 
 
-class ErrorCategoryDriftError(RuntimeError):
-    """A :class:`DeclaredMatch` carries a category outside the contract vocabulary.
-
-    The engine built it, so this is an engine bug, never a connector one.
-    """
-
-
 @dataclass(frozen=True)
 class DeclaredMatch:
     """One declared classification: which signal matched and what it declares.
@@ -150,45 +143,12 @@ class DeclaredMatch:
     entry and the native code read off it, or ``"http"`` and a status) —
     developer-chosen identifiers, safe for logs and failure summaries.
     ``category`` is the ``ErrorCategory`` value the consumer derives its
-    verdict from; membership is re-checked here so a match constructed
-    outside :class:`ErrorMap` can never smuggle an off-vocabulary category
-    into a verdict-table lookup.
+    verdict from.
     """
 
     signal: str
     value: str
     category: str
-
-    def __post_init__(self) -> None:
-        # Every construction site today reads its category from a block the
-        # contract validated, so this cannot fire; it stops a future site
-        # that builds a match from anything else.
-        require_declared_category(self.category, source="DeclaredMatch")
-
-
-def require_declared_category(category: str, *, source: str) -> str:
-    """Validate a category against the contract's ``ErrorCategory``. Raises loud.
-
-    Reserved for contexts where an off-vocabulary value can only mean an
-    *engine* bug, never a connector one -- :class:`DeclaredMatch`
-    construction is the one caller, and every real construction site reads
-    a category the contract already validated, so a failure here means
-    declarations.py itself built a ``DeclaredMatch`` wrong, which should
-    stop the process rather than be routed around.
-
-    A category discovered at *runtime* from connector-authored code (a
-    ``classify_error``/``classify()`` hook's return, a birth-site
-    ``declared_category`` stamped on a typed error) is never validated
-    with this function -- raising there would displace the original
-    failure being reported. Those call sites map an off-vocabulary value
-    to ``"config"`` instead; see :func:`classify_via_hook`.
-    """
-    if category not in ERROR_CATEGORY_VALUES:
-        raise ErrorCategoryDriftError(
-            f"{source} classified an error as {category!r}, which is not "
-            f"in the contract vocabulary {list(ERROR_CATEGORY_VALUES)}"
-        )
-    return category
 
 
 def classify_via_hook(owner: Any, attr: str, *args: Any, source: str) -> str | None:
@@ -342,17 +302,17 @@ class ErrorMap:
 
     @classmethod
     def from_declaration(cls, block: Mapping[str, Any]) -> ErrorMap:
-        """Read a declared block the published contract has already validated.
+        """Convert a contract-valid block into its typed view.
 
-        Every field is optional; absence declares nothing.
+        Every field is optional; an absent one declares nothing.
         """
+        key_attrs = block.get("key_attrs")
+        codes = block.get("codes")
+        http = block.get("http")
         return cls(
-            key_attrs=tuple(block.get("key_attrs") or ()),
-            codes=dict(block.get("codes") or {}),
-            http={
-                int(status): category
-                for status, category in (block.get("http") or {}).items()
-            },
+            key_attrs=() if key_attrs is None else tuple(key_attrs),
+            codes={} if codes is None else dict(codes),
+            http={} if http is None else {int(k): v for k, v in http.items()},
         )
 
     # ------------------------------------------------------------------
@@ -465,14 +425,19 @@ def _birth_site_members(exc: BaseException) -> list[BaseException]:
 
 
 def parse_declared_error_map(block: Any) -> ErrorMap | None:
-    """Read an optional ``error_map`` declaration: ``None`` stays ``None``."""
+    """Convert an optional ``error_map`` declaration: ``None`` stays ``None``.
+
+    The single entry point both sides use — the trusted engine reading the
+    connector definition and the worker reading its resolved payload — so
+    "undeclared" means the same thing everywhere.
+    """
     if block is None:
         return None
     return ErrorMap.from_declaration(block)
 
 
 def error_map_for(runtime: Any) -> ErrorMap | None:
-    """Read a runtime's declared ``error_map``.
+    """Convert a runtime's declared ``error_map``.
 
     The one call shape every consumer site uses — the SQL facade, the ADBC
     backend, the API connectors, the source worker. Reads
@@ -483,11 +448,10 @@ def error_map_for(runtime: Any) -> ErrorMap | None:
 
 
 def parse_declared_concurrency(block: Any) -> int | None:
-    """Read an optional ``concurrency`` declaration's connection ceiling.
+    """Convert an optional ``concurrency`` declaration to its connection ceiling.
 
-    Returns the declared ``max_connections`` (a positive int, as the
-    published contract requires), or ``None`` when the block or the cap is
-    absent — no declared ceiling, current behavior applies.
+    Returns the declared ``max_connections``, or ``None`` when the block or
+    the cap is absent — no declared ceiling, current behavior applies.
     """
     if block is None:
         return None

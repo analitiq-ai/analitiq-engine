@@ -1,7 +1,7 @@
 """The stream mapping: one typed document, compiled to Arrow compute.
 
 This module compiles the contract's mapping vocabulary -- the path grammar,
-the expression AST, the function catalog, the validation rules and the output
+the expressions, the function catalog, the validation rules and the output
 schema. A stream's mapping is the contract's :class:`StreamMapping`, read as the
 validated document, compiled once by
 :func:`compile_mapping` into a :class:`CompiledTransform`, and then applied to
@@ -258,7 +258,7 @@ def compile_mapping(
             )
         )
     # Rules are held per transform rather than per step: a rule's `field`
-    # addresses any declared target (checked by the contract), so it is
+    # addresses any declared target (the contract resolves it), so it is
     # resolved against the built record, not its own assignment's column.
     rules = [
         _BoundRule(rule, _rule_strategy(assignment.validation, default_strategy))
@@ -297,7 +297,7 @@ def _compile_value(
 
     Returns ``(build_fn, is_const)``. A constant builds a broadcast column at
     the target type (JSON-encoded for a ``Json`` target); an expression
-    compiles its AST to vectorized compute that produces a column at its
+    compiles to vectorized compute that produces a column at its
     natural type.
     """
     if isinstance(value, ConstantAssignmentValue):
@@ -521,10 +521,10 @@ def _rule_errors(built: Mapping[str, pa.Array], rule: ValidationRule) -> list[st
     """Return the error for *rule* over the built record, or ``[]`` on pass.
 
     The rule becomes a boolean failure mask over the addressed values; a null
-    value is exempt from every rule except ``not_null``, and a null LIST ancestor is
-    the same null one level up -- it fails ``not_null`` on the addressed
-    field exactly as a null struct parent's propagated null does, and is
-    exempt from value rules the same way. A malformed rule (bad regex, type
+    value is exempt from every rule except ``not_null``/``required``, and a
+    null LIST ancestor is the same null one level up -- it fails those rules
+    on the addressed field exactly as a null struct parent's propagated null
+    does, and is exempt from value rules the same way. A malformed rule (bad regex, type
     mismatch, a path into a value that carries no such structure) fails
     loud with a :class:`TransformationError`. When the address crossed a
     ``List``, a batch row fails if any of its elements does.

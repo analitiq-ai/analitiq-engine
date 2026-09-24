@@ -106,7 +106,7 @@ _DECLARED_CAPS = SqlCapabilities.from_declaration(
         "merge_form": "insert_on_conflict",
         "bulk_load": {},
         "stage": {"scope": "temp", "schema": "target", "transactional_ddl": True},
-    }
+    },
 )
 
 

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
-  "endpoint_id": "events",
+  "endpoint_id": "v1__events",
   "display_name": "Events (link-paginated)",
   "description": "The provider puts the next page's URL in each body, so the traversal follows links and the origin guard is the rule that matters.",
   "operations": {

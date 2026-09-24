@@ -71,7 +71,7 @@ and the gate agree. Docstring presence is not mandated (only style, via
 
 ## Coding Guidelines
 
-- Python 3.11+ with Pydantic V2 validation
+- Python 3.11+
 - No backward compatibility code
 - No emojis in code
 - Modular, pythonic code with explicit error paths

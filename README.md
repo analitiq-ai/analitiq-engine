@@ -165,74 +165,29 @@ graph LR
 <details>
 <summary><h2>Configuration Reference</h2></summary>
 
-The pipeline builder plugin generates all of this automatically. This section is for manual inspection or debugging.
-
-### Directory structure
-
-```
-connectors/{connector_id}/      # One installable connector package per system
-  definition/
-    connector.json              # Connector metadata, transports, auth config
-    type-map.json               # "read" (native_type -> arrow_type) and/or "write" (arrow_type -> native_type)
-    manifest.json               # Lists available endpoints
-    endpoints/{name}.json       # Endpoint schemas
-  connector.py                  # Connector class (only when the system is quirky)
-  requirements.txt              # THIS connector's driver only
-  pyproject.toml                # Packaged as analitiq-connector-{connector_id}
-
-connections/{alias}/
-  connection.json               # Host, connector_id, parameters
-  .secrets/credentials.json     # Secret key-value pairs (never committed)
-  definition/
-    endpoints/{name}.json       # Private endpoint schemas (e.g. DB tables)
-
-pipelines/
-  manifest.json                 # Central index of all pipelines
-  {pipeline_id}/
-    pipeline.json               # Pipeline config (connections, runtime settings)
-    streams/
-      {stream_id}.json          # Stream config (source, destinations, mapping)
-```
-
 ### Secrets
 
-A connection's `secret_refs` map declares each secret by a scheme-prefixed
-reference that names *where* the value comes from — resolved at connection time
-(late-binding), not at config load:
+Secret references are resolved at connection time (late-binding), not at
+config load. The engine resolves from:
 
-```json
-"secret_refs": {
-  "password": "env:PG_PASSWORD",
-  "api_token": "sidecar:API_TOKEN"
-}
-```
+- an environment variable;
+- a local file inside the connection directory;
+- a sidecar credentials file beside the connection, the local-development
+  default;
+- an S3 / S3-compatible object, which lazily imports `boto3` under
+  `pip install 'analitiq-core[s3]'`.
 
-| Scheme | Resolves to |
-|--------|-------------|
-| `env:VAR` | environment variable `VAR` |
-| `file:./path` | a local file, relative to the connection directory |
-| `sidecar:<name>` | entry `<name>` in `connections/{alias}/.secrets/credentials.json` |
-| `s3://bucket/key` | an S3 / S3-compatible object (needs the `[s3]` extra) |
-
-`env:`, `file:` and `sidecar:` are built-in and cloud-free; `s3://` lazily
-imports `boto3` under `pip install 'analitiq-core[s3]'`. The `sidecar:` scheme
-reads a flat, gitignored credentials file — the local-development default:
-
-```json
-{ "PG_PASSWORD": "your-password", "API_TOKEN": "your-token" }
-```
-
-An unresolvable reference (missing env var, missing file/object, missing sidecar
-entry, unsupported scheme) fails loud — the connection is never established with
-an empty secret. See [docs/config/source-config.md](docs/config/source-config.md#secret-references)
-for the full reference.
+The first three are built-in and cloud-free. An unresolvable reference
+(missing env var, missing file/object, missing sidecar entry, unsupported
+scheme) fails loud — the connection is never established with an empty
+secret.
 
 ### Configuration and defaults
 
 Every Python-side engine default and its environment-variable override is
 declared once, in [`src/config/settings.py`](src/config/settings.py).
-Per-pipeline overrides go in the `runtime` block of
-`pipelines/{pipeline_id}/pipeline.json`; precedence and resolution order
+Per-pipeline overrides go in the pipeline document's `runtime` block;
+precedence and resolution order
 are specified in
 [docs/config/settings-reference.md](docs/config/settings-reference.md).
 

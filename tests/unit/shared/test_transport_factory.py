@@ -218,15 +218,13 @@ class TestSQLAlchemySpecValidation:
                 resolver=_resolver(),
             )
 
-    @pytest.mark.parametrize("dsn", [None, "postgresql+asyncpg://user:pw@host/db"])
-    def test_non_structured_dsn_raises_transport_spec_error(self, dsn):
-        # A missing dsn and a legacy flat-string dsn hit the same branch:
-        # the contract requires the structured object.
-        spec = {"driver": "postgresql+asyncpg"}
-        if dsn is not None:
-            spec["dsn"] = dsn
-        with pytest.raises(TransportSpecError, match="must be the structured"):
-            resolve_sqlalchemy_spec(spec, resolver=_resolver())
+    def test_missing_dsn_raises_transport_spec_error(self):
+        # The contract leaves `dsn` optional; the engine needs it to build
+        # the SQLAlchemy engine.
+        with pytest.raises(TransportSpecError, match="requires a `dsn`"):
+            resolve_sqlalchemy_spec(
+                {"driver": "postgresql+asyncpg"}, resolver=_resolver()
+            )
 
     def test_resolved_payload_renders_dsn_and_engine_kwargs(self):
         # Pin the JSON-safe worker payload: bindings rendered through the
@@ -306,27 +304,6 @@ class TestHttpSpecValidation:
                 resolver=_resolver(ctx),
             )
 
-    @pytest.mark.parametrize(
-        "rate_limit",
-        [
-            {"max_requests": 10},
-            {"time_window_seconds": 60},
-            # The contract types the window as Any, so an explicit null
-            # passes validation and only this check refuses it.
-            {"max_requests": 5, "time_window_seconds": None},
-        ],
-        ids=["max_requests_only", "time_window_only", "null_time_window"],
-    )
-    def test_rate_limit_missing_one_field_raises_transport_spec_error(self, rate_limit):
-        with pytest.raises(TransportSpecError, match="both"):
-            resolve_http_spec(
-                {
-                    "base_url": "https://api.example.com",
-                    "rate_limit": rate_limit,
-                },
-                resolver=_resolver(),
-            )
-
     def test_a_header_resolving_to_nothing_is_dropped_and_said_out_loud(self, caplog):
         # A transport header is where a credential or an API version lives.
         # Dropped in silence, the provider's 401 maps back to nothing --
@@ -383,10 +360,39 @@ class TestHttpSpecValidation:
             "rate_limit": {"max_requests": 10, "time_window_seconds": 60},
         }
 
+    @pytest.mark.parametrize("window", ["sixty", 1.5, True, None, 0, -5])
+    def test_rate_limit_window_resolving_to_no_positive_integer_is_refused(
+        self, window
+    ):
+        # The contract admits the window as an expression, so only its
+        # resolved value can be checked, and only here. int() alone would
+        # truncate 1.5, read True as 1 and accept a zero window.
+        ctx = ResolutionContext(connection={"parameters": {"window": window}})
+        with pytest.raises(TransportSpecError, match="time_window_seconds"):
+            resolve_http_spec(
+                {
+                    "base_url": "https://api.example.com",
+                    "rate_limit": {
+                        "max_requests": 10,
+                        "time_window_seconds": {"ref": "connection.parameters.window"},
+                    },
+                },
+                resolver=_resolver(ctx),
+            )
 
-# ---------------------------------------------------------------------------
-# SQLAlchemy engine flavour — selected by the dialect's own async capability
-# ---------------------------------------------------------------------------
+    def test_rate_limit_window_accepts_a_value_expression(self):
+        ctx = ResolutionContext(connection={"parameters": {"window": 60}})
+        spec = resolve_http_spec(
+            {
+                "base_url": "https://api.example.com",
+                "rate_limit": {
+                    "max_requests": 10,
+                    "time_window_seconds": {"ref": "connection.parameters.window"},
+                },
+            },
+            resolver=_resolver(ctx),
+        )
+        assert spec["rate_limit"] == {"max_requests": 10, "time_window_seconds": 60}
 
 
 class TestSqlAlchemyEngineFlavour:

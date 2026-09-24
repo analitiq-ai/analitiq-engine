@@ -83,46 +83,11 @@ Grounding the design in the existing code.
 
 ### The connector definition is one shared artifact
 
-Consumers load the **same `connector.json` artifact**, reading different
-subsets as needed. In the engine, `src/engine/pipeline_config_prep.py` loads
-`connectors/{connector_id}/definition/connector.json` **from disk** (only the
-connectors referenced by the active pipeline; no directory scan). A separate
-control-plane runtime resolves the same artifact from its own registry source —
-the shape is identical.
-
-Illustrative top-level shape for a database connector — the transport is
-keyed by its own `transport_type`, and the exact required/optional fields
-are the published `connector` JSON Schema, not this sketch:
-
-```json
-{
-  "$schema": "https://schemas.analitiq.ai/connector/latest.json",
-  "kind": "database",
-  "display_name": "PostgreSQL",
-  "version": "1.0.0",
-  "default_transport": "sqlalchemy",
-  "transports": {
-    "sqlalchemy": {
-      "transport_type": "sqlalchemy",
-      "driver": "postgresql+asyncpg",
-      "dsn": { "kind": "url_template", "template": "...", "bindings": { } }
-    }
-  },
-  "auth": { "type": "none" },
-  "connection_contract": { "inputs": { }, "validation": { } }
-}
-```
-
-Two accuracy notes that matter for this design:
-
-- The top-level discriminator is **`kind`** (`database` / `api` / `file` /
-  `stdout`) — this is the key the registry maps to a connector class.
-- The **type map is NOT referenced inside `connector.json`.** It lives in separate
-  file `connectors/{connector_id}/definition/type-map.json` (its `read` and
-  `write` sections hold the two rule sets — see
-  [arrow-and-transport-strategy.md](../data-path/arrow-and-transport-strategy.md)). The connector's
-  data (definition + type map) is therefore modular and co-located — consumed
-  by both sides.
+Consumers load the same connector package, reading different subsets as
+needed. The engine reads only the packages the run's pipeline references; a
+separate control-plane runtime resolves the same package from its own
+registry source. The registry resolves the connector class by
+`connector_id`, falling back to the generic class for its `kind`.
 
 ### Already decoupled — transports and secrets
 
@@ -141,9 +106,7 @@ class SqlAlchemyTransport:
 @dataclass(frozen=True)
 class AdbcTransport:
     connect: Callable[[], Any]   # call → a fresh DBAPI 2.0 connection (no pool)
-    driver: str                  # e.g. "postgresql", "snowflake", "bigquery" —
-                                 # constrained by the published connector schema's
-                                 # AdbcTransport.driver enum, not by this dataclass
+    driver: str                  # e.g. "postgresql", "snowflake", "bigquery"
 ```
 
 `await runtime.materialize()` builds the transport and exposes it via
@@ -208,16 +171,13 @@ flow: the destination base and the contract speak CDK-native DTOs
 constructs `ColumnDef`s directly and calls it with no engine orchestration.
 
 `TypeMapper` (`cdk/cdk/type_map/mapper.py`) exposes `to_native_type()`,
-driven by a separate `write` rule set in `type-map.json` (`arrow_type` →
-`native_type`), the inverse `create_table` DDL needs. The two directions
-are independent rule sets, never one inverted at runtime.
+the direction `create_table` DDL needs. `TypeMapper` has two independent
+directions, never one inverted at runtime.
 
-**There is no capability declaration, by design.** Capability is never a
-static block in `connector.json`, because it conflates two unrelated things
-(see §4): *protocol conformance* (a property of the connector code, derived
-by `isinstance` against the `runtime_checkable` Protocols) and *authorization*
-(a property of the connection's credentials / DB grants, enforced at
-runtime). Neither is declared.
+**Whether a connector can discover, create, read or write is never
+declared.** Capability is two unrelated things (see §4): *protocol conformance*, derived by `isinstance` against the
+`runtime_checkable` Protocols, and *authorization*, enforced by the database
+from the connection's credentials and grants at runtime.
 
 ## 4. The contract (Connector CDK)
 
@@ -342,8 +302,8 @@ A connector implements **one or more** of these protocols. Crucially, it can do
 so two ways — and the plugin picks based on how well-behaved the database is:
 
 - **Reuse the CDK base** — a well-behaved SQL database subclasses the CDK's
-  generic SQL building block, supplying only its **data** (connector.json,
-  type-map) and **driver**. Almost no new code.
+  generic SQL building block, supplying only its **data** and **driver**.
+  Almost no new code.
 - **Override / bring its own** — a quirky database (unusual dialect SQL, odd
   pagination, exotic types) overrides whatever methods it needs, or implements
   the protocols from scratch. The connector owns this code.
@@ -362,7 +322,8 @@ the shared library**.
 
 ### Capability is not declared
 
-There is **no capabilities block**. Capability is derived, not declared —
+Whether a connector can discover, create, read or write is derived, never
+declared —
 see [ADR 0004](../adr/0004-capability-is-derived-never-declared.md) for
 why it splits into protocol conformance (code-derived, via
 `isinstance(connector, Discoverable)` / `TableCreator`, varying only
@@ -391,14 +352,11 @@ definitions, not a connector-wide flag.)
   requests**, which gives the control plane its isolation.
 - **Type translation lives with the connector.** The CDK's `TypeMapper`
   provides both `to_arrow_type(native)` (read direction) and `to_native_type()`
-  (write direction, `arrow_type` → `native_type`), the latter what
-  `create_table` DDL needs. Read direction is fed by the `read` section of
-  `type-map.json`, write direction by its separate `write` section — the *mappings* are the
-  connector's data, the *mechanism* is the CDK's.
-- **The contract is a versioned package, not an in-document field.** A
-  connector declares its `analitiq-cdk` dependency in its own `pyproject.toml`
-  like any other Python package; there is no separate `cdk_version` field
-  inside `connector.json` for a runtime to check. This is the seam that lets
+  (write direction), the latter what `create_table` DDL needs. The
+  *mappings* are the connector's data, the *mechanism* is the CDK's.
+- **The contract is a versioned package.** A connector declares its
+  `analitiq-cdk` dependency in its own `pyproject.toml` like any other Python
+  package. This is the seam that lets
   the CDK and connectors evolve independently — a breaking contract change is
   the *other* (besides a new transport family) thing that involves engineers.
 
@@ -460,9 +418,6 @@ just declares "use the CDK's generic SQL base."
 
 ```
 connectors/postgresql/
-  definition/
-    connector.json        # kind, transports (no capabilities block — see §4)
-    type-map.json         # "read" section (native_type -> arrow_type)
   connector.py            # ~10 lines: subclass the CDK SQL base, no overrides
   requirements.txt        # this DB's driver only (asyncpg / adbc-driver-postgresql)
   pyproject.toml          # packaged as `analitiq-connector-postgresql`
@@ -474,25 +429,18 @@ DDL, pagination, type quirks). The overrides live **here**, never in the CDK.
 
 ```
 connectors/clickhouse/
-  definition/
-    connector.json
-    type-map.json         # "read" (Clickhouse native_type -> arrow_type) and "write" (arrow_type -> Clickhouse native_type)
   connector.py            # subclass CDK base + override create_table DDL, etc.
   requirements.txt        # clickhouse-connect / clickhouse driver
   pyproject.toml
 ```
 
-> On-disk, the type-map document sits *inside* `definition/`
-> (`connectors/{id}/definition/type-map.json`), co-located with `connector.json`
-> — the engine's existing layout, preserved.
-
 Two complementary distribution forms:
 
 - **Connector repo** (one per connector in the connector registry) — holds
-  **both** the code (`connector.py` + deps) and the data (`definition/`),
+  **both** the code (`connector.py` + deps) and the data,
   versioned together by **git tag** (§8). The installable unit:
   consumers `pip install git+…@vX.Y.Z`.
-- **Registry snapshot** — the `definition/` (connector.json + type-map) can be
+- **Registry snapshot** — the data can be
   snapshotted by a registry source for read paths that only need the data; the
   *code* is pulled from the same repo by tag. No separate package index.
 
@@ -500,22 +448,6 @@ The crucial discipline: **a connector never imports another connector, and
 never imports a runtime.** It depends only on the CDK. That one rule is what
 keeps the system modular instead of a monolith — and what lets the plugin ship a
 new database end-to-end without an engineer.
-
-### What the connector-builder plugin produces
-
-The plugin is a **small-package author**, not a plain JSON author: it emits
-`connector.json`, `type-map.json` (a `read` section, plus a `write` section
-(`arrow_type` → `native_type`) — the inverse `create_table` needs and the
-read section cannot give), and (for API connectors)
-endpoint files, `requirements.txt` (this system's driver — drivers
-are never baked into the engine), `pyproject.toml` (the connector is an
-installable package), and `connector.py` (the code seam: thin — subclass the CDK SQL
-base, no overrides — for a well-behaved system, thick — subclass plus
-override dialect DDL / pagination / type quirks — for a quirky one). The
-plugin still needs no engineer for any of this: for a well-behaved database
-the addition over the write-map is three small boilerplate files; for an
-exotic one it is that plus genuine override code — which is what lets a
-brand-new database ship on an unchanged CDK.
 
 ## 6. Attaching a module to the engine
 
@@ -567,11 +499,7 @@ installed packages are discovered additively.
    capability before trying it (see [ADR 0004](../adr/0004-capability-is-derived-never-declared.md)) —
    not the invocation gate.
 
-3. **User references it by name** in pipeline config (`connector_id:
-   "postgresql"`). Definition + type map are read from the connector's package
-   data (or a mounted `connectors/` dir for local dev).
-
-4. **Discover rides the same install.** Because the registered connector carries
+3. **Discover rides the same install.** Because the registered connector carries
    the `Discoverable` capability, the same CDK code that serves engine reads also
    serves `list_schemas` / `list_tables` / `list_columns` locally — no separate
    implementation.

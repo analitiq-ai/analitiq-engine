@@ -1,6 +1,6 @@
 """End-to-end mapping composition over a realistic document.
 
-A stream's mapping document is the contract ``StreamMapping``,
+A stream's mapping document is read once by ``StreamMapping.model_validate``,
 compiled once by ``compile_mapping``, and applied to a ``pa.RecordBatch`` with
 ``.run``. The per-operator behavior is unit-tested in
 ``tests/unit/engine/test_mapping.py``; this file keeps the one composition no
@@ -70,11 +70,11 @@ _CHECK_ACCOUNT_PROPERTIES = {
 
 class TestMappingComposition:
     def test_wise_to_sevdesk_transformation(self, sample_wise_record):
-        """Complete Wise->SevDesk transformation including the piped
-        to_string reference derived from the integer Wise 'id'."""
+        """Complete Wise->SevDesk transformation including the Utf8
+        reference converted from the numeric Wise 'id'."""
         assignments = [
             _expr_assignment(
-                "paymtReference", "Utf8", _pipe("id", "to_string"), nullable=False
+                "reference", "Utf8", _pipe("id", "to_string"), nullable=False
             ),
             _expr_assignment("amount", "Float64", _get("targetValue"), nullable=False),
             _expr_assignment("paymtPurpose", "Int64", _get("id"), nullable=False),
@@ -91,7 +91,7 @@ class TestMappingComposition:
         out = _compile(assignments).run(batch).to_pylist()
 
         t = out[0]
-        assert t["paymtReference"] == "123456"
+        assert t["reference"] == "123456"
         assert t["amount"] == 100.50
         assert t["paymtPurpose"] == 123456
         assert t["objectName"] == "CheckAccountTransaction"

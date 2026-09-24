@@ -58,7 +58,6 @@ __all__ = [
     "build_write_plan",
     "collect_json_fields",
     "content_idempotency_key",
-    "idempotency_config_problem",
     "reserved_header_names",
     "retry_verdict",
     "write_mode_block",
@@ -219,34 +218,6 @@ def reserved_header_names(transport_header_names: Iterable[str]) -> frozenset[st
     return frozenset(name.lower() for name in transport_header_names)
 
 
-def idempotency_config_problem(
-    idempotency: Idempotency,
-    *,
-    reserved_headers: frozenset[str] | set[str],
-) -> str | None:
-    """Why this ``idempotency`` block cannot work for the stream, or ``None``.
-
-    Judges the one thing the endpoint document alone cannot decide: the
-    header namespace this connection owns. The contract already refuses
-    the rest -- the block's own shape, the batching exclusion, a non-object
-    body, and a collision with the endpoint's declared headers, its body
-    template's own keys, or the record's declared fields. A body whose
-    resolved shape no document can know is judged at run time, in
-    :func:`body_with_idempotency_key`.
-    """
-    target = idempotency.location
-    name = idempotency.name
-    if target == "header" and name.lower() in reserved_headers:
-        # These headers carry the connection's own values (auth and
-        # friends). Layering the key over one would send the record id as
-        # the credential.
-        return (
-            f"idempotency.name {name!r} collides with a header this "
-            f"connection's transport already sends; pick another header"
-        )
-    return None
-
-
 def retry_verdict(mode_key: str, plan: StreamWritePlan) -> RetryVerdict:
     """Retry-safety verdict for one configured stream (issue #286).
 
@@ -383,16 +354,22 @@ def _apply_idempotency(
 ) -> str | None:
     """Record where the engine-owned idempotency key lands, or why it cannot.
 
-    The author declares placement only -- the VALUE is always the
-    engine's -- so what can go wrong is where it would land: a header the
-    connection's transport already sends.
+    Which headers the connection's transport already sends is a session
+    fact no document can know, so a header key layered over one is refused
+    here; every placement rule decidable from the document is the
+    contract's.
     """
     idempotency = mode_block.idempotency
     if idempotency is None:
         return None
-    problem = idempotency_config_problem(idempotency, reserved_headers=reserved)
-    if problem is not None:
-        return problem
+    if idempotency.location == "header" and idempotency.name.lower() in reserved:
+        # Layering the key over a connection-owned header would shadow its
+        # value on every request -- or send the record id as the credential.
+        return (
+            f"idempotency.name {idempotency.name!r} collides with a request "
+            f"header the connection already sends; pick a header the "
+            f"connection does not own"
+        )
     plan.idempotency_in = idempotency.location
     plan.idempotency_name = idempotency.name
     return None

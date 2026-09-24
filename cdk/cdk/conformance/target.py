@@ -74,24 +74,19 @@ def endpoint_kind_of(model: type[EndpointDocument]) -> str:
 
 
 #: The published endpoint-document variants, by the ``$schema`` each pins.
-#: The document's own ``$schema`` is what selects one, the same fact the
-#: engine validates every artifact against.
+#: The document's own ``$schema`` is what selects one.
 ENDPOINT_MODELS: dict[str, type[EndpointDocument]] = {
     schema_url_of(model): model for model in (ApiEndpointDoc, DatabaseEndpointDoc)
 }
 
 #: The same variants, by the contract's own per-kind URL pattern.
 #:
-#: ``$schema`` names the KIND, and only the kind. The contract deliberately
-#: accepts any ``schemas.analitiq.<tld>`` host for one
-#: (:func:`~analitiq.contracts.shared.common.schema_url_pattern`), so a
-#: connector authored against the canonical ``.ai`` URL is the same document
-#: on a ``.dev`` engine -- and the engine says so, dropping a ``$schema``-only
-#: mismatch and validating against this environment's canonical URL instead
-#: (``src/config/schema_validator.py``). A kit that selected its model by
-#: exact URL would refuse a document the engine runs, which makes tier 1 fail
-#: a connector for the host its author typed. Both sides read the kind
-#: through the contract's own helpers rather than through a second table.
+#: The kit reads only the KIND from ``$schema``: the contract's per-kind
+#: pattern (:func:`~analitiq.contracts.shared.common.schema_url_pattern`)
+#: accepts any ``schemas.analitiq.<tld>`` host, so tier 1 does not fail a
+#: connector for the host its author typed. The validator's verdict, not the
+#: kit, decides whether that host is accepted. The kind is read through the
+#: contract's own helpers rather than through a second table.
 ENDPOINT_MODELS_BY_PATTERN: tuple[
     tuple[re.Pattern[str], type[EndpointDocument]], ...
 ] = tuple(
@@ -315,9 +310,9 @@ def _load_endpoints(
 def check_endpoint_documents(target: ConformanceTarget) -> list[Violation]:
     """Certify that every endpoint document the connector ships parses.
 
-    The engine validates each document against the published contract
-    before a stream reads a row, so one it refuses is a connector that
-    cannot run. The kit would otherwise report that as silence: an
+    The validator's workspace verdict grades each document against the
+    published contract before a stream reads a row, so one it refuses is a
+    connector that cannot run. The kit would otherwise report that as silence: an
     unparsed document carries no read operation, no response block and no
     pagination, so every api check passes it by having nothing to drive --
     a green run over an endpoint nothing assessed.
@@ -327,8 +322,7 @@ def check_endpoint_documents(target: ConformanceTarget) -> list[Violation]:
             ENDPOINT_DOCUMENT_CHECK,
             f"endpoint document {stem!r}: {problem}. Every check here drives "
             f"the parsed document, so this endpoint is not assessed at all, "
-            f"and the engine refuses it the same way before its first "
-            f"request.",
+            f"and the validator refuses it too before a run's first request.",
         )
         for stem, problem in sorted(target.endpoint_problems.items())
     ]
@@ -505,7 +499,8 @@ def load_target(
     definition = _load_definition(definition_dir)
 
     # The published contract is the authority on a definition's shape: the
-    # engine refuses a definition it rejects, so the kit cannot certify one.
+    # validator refuses a run over a definition it rejects, so the kit cannot
+    # certify one.
     try:
         connector: Connector = TypeAdapter(Connector).validate_python(definition)
     except ValidationError as err:

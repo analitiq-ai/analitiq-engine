@@ -1,8 +1,9 @@
 """Lookup and verdict-table tests for the connector-level declared facts (#401, #513).
 
-``cdk.declarations`` reads the ``error_map`` and ``concurrency`` blocks the
-contract has already validated: absence is additive, and the engine-owned
-verdict tables cover the whole category vocabulary.
+``cdk.declarations`` is the typed view of the ``error_map`` and
+``concurrency`` blocks: the published contract owns their shape, absence is
+additive, and the engine-owned verdict tables cover the whole category
+vocabulary.
 
 Issue #513 replaced the four closed families (``sqlstate``/``exception``/
 ``vendor_code``, plus the unchanged ``http``) with a single generic
@@ -25,13 +26,11 @@ from cdk.declarations import (
     DECLARED_READ_DETERMINISTIC,
     DECLARED_WRITE_VERDICTS,
     ERROR_CATEGORY_VALUES,
-    ErrorCategoryDriftError,
     ErrorMap,
     birth_site_category,
     classify_via_hook,
     parse_declared_concurrency,
     parse_declared_error_map,
-    require_declared_category,
 )
 from cdk.types import AckStatus, FailureCategory
 
@@ -218,17 +217,6 @@ class TestErrorMapLookup:
 
     def test_unclaimed_exception_matches_nothing(self, error_map):
         assert error_map.match_exception(ValueError("nope")) is None
-
-
-class TestRequireDeclaredCategory:
-    def test_valid_category_passes_through(self):
-        assert require_declared_category("auth", source="test") == "auth"
-
-    def test_off_vocabulary_category_fails_loud(self):
-        with pytest.raises(
-            ErrorCategoryDriftError, match="not in the contract vocabulary"
-        ):
-            require_declared_category("retry_me", source="test")
 
 
 class TestClassifyViaHook:

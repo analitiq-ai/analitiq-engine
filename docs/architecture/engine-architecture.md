@@ -62,7 +62,7 @@ src/
 │   ├── engine.py                # StreamingEngine (fans streams out, aggregates results)
 │   ├── stream_processor.py      # StreamProcessor (one stream: extract -> transform -> load -> checkpoint)
 │   ├── pipeline_config_prep.py  # Loads manifest/pipelines/streams/connections/connectors
-│   ├── mapping.py               # compile_mapping (contract StreamMapping -> Arrow compute)
+│   ├── mapping.py               # compile_mapping (StreamMapping -> Arrow compute)
 │   └── exceptions.py
 │
 ├── worker/                  # Sandboxed connector worker (spawned subprocess)
@@ -82,7 +82,7 @@ src/
 │
 ├── grpc/                    # gRPC client and generated stubs
 ├── models/                  # Engine-side models (resolved config, metrics, state)
-├── config/                  # Endpoint resolver, connection loader, validators
+├── config/                  # Workspace request + validator gate, endpoint resolver, settings
 ├── runner.py                # PipelineRunner (CLI entry from src.main)
 ├── runtime_archive.py       # Runtime config archive loading (local path or URL)
 └── main.py                  # Dual-mode entrypoint (RUN_MODE = source | destination)
@@ -144,9 +144,14 @@ silently losing rows.
 2. `PipelineRunner` (`src/runner.py`) instantiates `PipelineConfigPrep`,
    which:
    - discovers project root by locating `pipelines/manifest.json`,
-   - finds the manifest entry matching `PIPELINE_ID` (must be `active`),
-   - loads `pipeline.json` and per-stream files,
-   - loads each `connection.json` + its connector definition,
+   - finds the manifest entry matching `PIPELINE_ID`, which names the
+     pipeline's package directory,
+   - reads the run's workspace -- the manifest, the pipeline package, and
+     the packages of the connections it names and their connectors -- and
+     refuses the run unless the published validator's verdict on it
+     passes (`src/config/run_workspace.py`),
+   - parses the pipeline, stream, connection and connector documents
+     from the texts that verdict graded,
    - builds a `ConnectionRuntime` per connection (with a per-connection
      secrets resolver),
    - resolves every `endpoint_ref` to its endpoint JSON.
@@ -285,13 +290,8 @@ Four structured signals cross process boundaries so the tag survives isolation:
   category directly (`CONFIG_INVALID` / `DESTINATION_WRITE_FAILED` /
   `INTERNAL`) instead of reading the `failure_summary` prose.
 
-A connector may declare its driver's failure taxonomy as data — the
-`error_map` block in `connector.json`: `key_attrs` names, in the
-connector's own precedence order, which attributes of its exception carry a
-native error code (or the reserved `"__exception_class__"` to match the
-exception's class name), and `codes` maps whatever native value each
-attribute reads to a category from the contract's `ErrorCategory`; `http`
-maps status codes to the same vocabulary, read at the HTTP call site rather
+A connector may declare its driver's failure taxonomy as data, in its
+`error_map`; HTTP status codes are matched at the HTTP call site rather
 than off an exception. The engine alone derives the verdicts (`AckStatus`,
 `FailureCategory`, `ErrorCode`) from a declared category; connectors never
 self-declare verdicts. Classification happens at the failure's birth site:
@@ -342,10 +342,8 @@ Each connection loaded by `PipelineConfigPrep` becomes a
 
 - Holds the resolved connector definition and the user's connection
   document.
-- Requires `connector_type` to be a non-empty string. Which kinds are
-  runnable is decided by the worker registry (`cdk/cdk/registry.py`),
-  not by a hard-coded set, so registry-discovered connector kinds are
-  not blocked at config time.
+- Which connector class runs is decided by the worker registry
+  (`cdk/cdk/registry.py`), not by config prep.
 - When the connector declares a `transports` block, builds the actual
   transport (SQLAlchemy async engine, aiohttp ClientSession, etc.) via
   `cdk/cdk/transport_factory.py`. The factory keeps resolution and
@@ -354,10 +352,8 @@ Each connection loaded by `PipelineConfigPrep` becomes a
   - `resolve_transport_spec` — trusted side. Renders the selected
     transport into a JSON-safe spec (DSN with secrets in place,
     `db_kwargs`, TLS mode + CA PEM, headers, engine kwargs) through a
-    `Resolver` carrying `DEFAULT_FUNCTIONS`. Per-kind resolvers
-    (`resolve_sqlalchemy_spec`, `resolve_http_spec`) validate as they
-    go — `resolve_http_spec` rejects a half-specified `rate_limit`,
-    which needs both `max_requests` and `time_window_seconds`.
+    `Resolver` carrying `DEFAULT_FUNCTIONS`, via the per-kind resolvers
+    `resolve_sqlalchemy_spec` and `resolve_http_spec`.
   - `resolve_transport_specs` — the same, for the whole set a run may
     dispatch through: the default plus every transport an operation's
     `request.transport_ref` names. Resolved together because it is the
@@ -392,14 +388,9 @@ provided by `cdk/cdk/resolver.py`; the `function` registry is in
 `cdk/cdk/derived_functions.py` (`lookup`, `basic_auth`,
 `base64_encode`, `url_encode`).
 
-The other engine-owned closed registry on the request path is query
-serialization (`cdk/cdk/api/query_style.py`). The published schema
-requires `style` and `explode` on a query param typed `array` or
-`object` but types `style` as a plain string, so the set the engine can
-actually spell is closed here: `form`, `spaceDelimited`, `pipeDelimited`
-and `deepObject`, in the explode combinations OpenAPI defines. A style
-outside it — or a combination OpenAPI leaves undefined — is refused with
-the rest of the request block, before a page is fetched.
+The second engine-owned registry on the request path is query
+serialization: `cdk/cdk/api/query_style.py` turns a declared
+`(style, explode)` into its wire spelling.
 
 A declared param's value keywords (`cdk/cdk/api/param_rules.py`) are the
 third. `enum`, `format`, `pattern`, the numeric bounds and the length and
@@ -431,8 +422,8 @@ each is one class serving read and write:
   ADBC transports.
 - `GenericAPIConnector` (`cdk/cdk/api/generic.py`) owns one HTTP round
   trip, one classification of what a response status means, incremental
-  replication over the engine-supplied safety window, and the five paging
-  schemes the endpoint contract declares. Those five run on one loop
+  replication over the engine-supplied safety window, and every paging
+  scheme. They all run on one loop
   (`cdk/cdk/api/page_loop.py`) with one adapter per scheme — see
   [ADR 0002](../adr/0002-one-stop-rule-for-every-paging-scheme.md).
 
@@ -500,7 +491,7 @@ downstream.
 
 | Suite | Location | Notes |
 |-------|----------|-------|
-| Unit | `tests/unit/...` | Default, fast; uses Pydantic validation tests, resolver/transport-factory tests |
+| Unit | `tests/unit/...` | Default, fast; resolver/transport-factory tests |
 | Integration | `tests/integration/...` | Real DB / gRPC integration |
 | End-to-end | `docker compose run --rm source_engine` with a real `PIPELINE_ID` | The canonical contract test |
 

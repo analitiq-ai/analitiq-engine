@@ -20,19 +20,13 @@ from .conversions import (
     load_published_matrix,
     render_conversion_matrix,
 )
-from .exceptions import (
-    InvalidTypeMapError,
-    TypeMapError,
-    TypeMapNotFoundError,
-    UnmappedTypeError,
-)
+from .exceptions import InvalidTypeMapError, TypeMapError, UnmappedTypeError
 from .grammar import (
     GRAMMAR_VERSION,
     build_arrow_type_grammar,
     load_published_grammar,
     render_arrow_type_grammar,
 )
-from .loader import load_connection_type_map, load_type_map
 from .mapper import TypeMapper
 from .rules import (
     TypeMapReadRule,
@@ -85,7 +79,6 @@ __all__ = [
     "GRAMMAR_VERSION",
     "InvalidTypeMapError",
     "TypeMapError",
-    "TypeMapNotFoundError",
     "TypeMapReadRule",
     "TypeMapper",
     "UnmappedTypeError",
@@ -101,8 +94,6 @@ __all__ = [
     "render_conversion_matrix",
     "parse_arrow_type",
     "resolve_arrow_type",
-    "load_connection_type_map",
-    "load_type_map",
     "compile_pattern",
     "normalize_arrow_type",
     "normalized_native",

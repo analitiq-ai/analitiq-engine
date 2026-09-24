@@ -1,6 +1,6 @@
 {
   "$schema": "https://schemas.analitiq.ai/api-endpoint/latest.json",
-  "endpoint_id": "widgets",
+  "endpoint_id": "v1__widgets",
   "display_name": "Widgets (offset-paginated)",
   "description": "Offset pagination reading its own page size back out of the response, the shape a records-counting provider serves.",
   "operations": {

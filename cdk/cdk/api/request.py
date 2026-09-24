@@ -169,9 +169,9 @@ class ParamTable:
         with no entry there narrows nothing: the stream reads the whole
         collection while reporting success, which for a filter is a
         correctness failure rather than a slow read. The stream and the
-        endpoint are separate documents and the pipeline bundle does not
-        carry a connector's endpoints, so the contract cannot check the pair
-        (RULE-STRM-026) -- this is the first place both are in hand.
+        endpoint are separate documents and the pinned validator leaves the
+        pair unchecked (RULE-STRM-026 is unenforced) -- this is the first
+        place both are in hand.
         """
         uncontrolled = {
             name: decl for name, decl in declared.items() if decl.controlled_by is None

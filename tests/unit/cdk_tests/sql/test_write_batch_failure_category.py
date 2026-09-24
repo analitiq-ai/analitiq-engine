@@ -61,7 +61,7 @@ def _ready_handler(write_error: Exception) -> GenericSQLConnector:
             "merge_form": "none",
             "bulk_load": {"adbc": "adbc_ingest"},
             "stage": {"scope": "real", "schema": "target", "transactional_ddl": False},
-        }
+        },
     )
     contract = MagicMock()
     contract.cast_arrow_batch.side_effect = lambda rb: rb
