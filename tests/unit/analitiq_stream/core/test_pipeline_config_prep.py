@@ -219,7 +219,7 @@ def _build_tree(
     """Materialize a complete pipeline tree under ``root``. Returns ``root``.
 
     Knobs let individual tests inject specific defects (missing manifest,
-    inactive status, stream-id mismatch).
+    stream-id mismatch) or set the manifest entry's status.
     ``dst_endpoint_scope="connection"`` places the destination endpoint
     (plus a connection-scoped type-map) under the destination connection's
     ``definition/`` tree instead of the connector's, and points the stream's

@@ -276,12 +276,10 @@ class PipelineConfigPrep:
     def _pipeline_directory(self) -> str:
         """Locate the workspace directory of the pipeline PIPELINE_ID names.
 
-        The manifest only locates the pipeline; whether it may run is the
-        verdict's call, from the pipeline document's own ``status``. The
-        manifest is read before the verdict grades it, so it is read
-        leniently: a manifest that does not parse, or locates nothing for
-        PIPELINE_ID, refuses the run here; every other defect in it is the
-        verdict's to report.
+        The manifest only locates the pipeline. It is read before the
+        verdict grades it, so it is read leniently: a manifest that does not
+        parse, or locates nothing for PIPELINE_ID, refuses the run here; every
+        other defect in it is the verdict's to report.
         """
         manifest_path = self._paths["manifest"]
         if not manifest_path.is_file():
