@@ -5,10 +5,10 @@ destination can never hold more than one unacked batch, and so has
 nothing to coalesce on its own. A source that emits one small batch per
 page walks straight into per-table load-job quotas on warehouse
 destinations. Where merging happens is therefore a real design choice,
-not an implementation detail — and it is specified here (design of
-record) even though the engine does not build it yet; see
-[`sql-write-path.md`](../data-path/sql-write-path.md) §8 for the current
-build status and the full mechanics.
+not an implementation detail — and it is specified here as the design of
+record. The engine does not coalesce; see
+[`sql-write-path.md`](../data-path/sql-write-path.md) §8 for the full
+mechanics.
 
 ## The alternatives this rules out
 

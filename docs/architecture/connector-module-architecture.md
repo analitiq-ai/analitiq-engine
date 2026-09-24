@@ -528,7 +528,8 @@ deps) lives with its JSON definition in the same per-connector repo, one
 repo per connector, code and data versioned together by git tag.
 Consumers install a pinned tag (`pip install git+https://…@vX.Y.Z`); the
 connector-builder plugin commits code and data together and tags a
-release, and the CDK package itself is pinned the same way. See
+release. The CDK is published to PyPI as `analitiq-cdk`, one release per
+`cdk-v*` tag. See
 [ADR 0003](../adr/0003-the-cdk-is-a-toolbox-not-a-gatekeeper.md) for why
 ownership and distribution are shaped this way, including MSSQL's status
 as a first-class module rather than an optional extra.
