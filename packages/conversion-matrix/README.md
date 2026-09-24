@@ -130,8 +130,8 @@ version the artifact declares, manifest written last as the commit point), so
 re-runs and partial failures converge without cutting spurious versions.
 Content that changed without a version bump aborts the run rather than
 overwriting an immutable object; the `verify` job catches that in the pull
-request first. Because the version travels with the bytes, every environment
-publishes the same version for the same content.
+request first. Because the version travels with the bytes, the same content
+carries the same version wherever it is published.
 
 ## Publishing (maintainers)
 
