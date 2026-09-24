@@ -205,8 +205,9 @@ def _read_package(
     """Every document at one of ``model``'s readable locations under ``directory``.
 
     An absent directory reads as no documents; the reference to it is the
-    verdict's to report. No link is followed, so a document behind one is
-    not in the request.
+    verdict's to report. The package directory itself may be a link and is
+    read through it; a link inside the package, or a directory that cannot be
+    opened, is ignored, so nothing behind it is in the request.
     """
     package_root = root / directory
     documents: dict[str, str] = {}
