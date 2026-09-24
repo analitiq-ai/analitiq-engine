@@ -401,8 +401,8 @@ rather than a code one — and a distribution missing one imports cleanly and
 fails on first use, in every consumer at once. The publish workflow therefore
 installs the built wheel into a clean environment and reads every document back
 through the installed package, and checks the sdist carries them too, before a
-release can proceed. The same release publishes the manifest to S3 under
-`contract-consumption/v{cdk.__version__}/`, the coordinate the contract repo
+release can proceed. The same release publishes the manifest as versioned JSON
+under `contract-consumption/v{cdk.__version__}/`, the coordinate the contract repo
 pins it by.
 
 A connector is a **self-contained, independently releasable unit** carrying
