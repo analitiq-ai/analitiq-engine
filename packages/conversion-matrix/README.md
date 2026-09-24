@@ -76,12 +76,11 @@ matrix.version;                    // "2.0.0"
 matrix.conversions.Int64.Utf8;     // { mode: "explicit", fn: "to_string", runtime_checked: false }
 ```
 
-## Versioned JSON on S3
+## Versioned JSON
 
 For consumers that cannot (or should not) pull a private npm package, the
-engine's contract artifacts are published to S3 as versioned JSON, under a
-bucket configured outside this repo — one prefix per artifact, each carrying
-the version the engine declares for it:
+engine's contract artifacts are also published as versioned JSON — one prefix
+per artifact, each carrying the version the engine declares for it:
 
 ```
 conversion-matrix/v{version}/conversion_matrix.json     immutable, one object per version
@@ -115,36 +114,24 @@ read nor unread until it is typed and declared a root. Its `version` is `cdk.__v
 `main`, where the content moves with every PR under an unchanged version.
 
 Each artifact **carries its own version** in a top-level `version` field, so a
-consumer holding the bytes — from S3, from this package, or from an installed
-`analitiq-cdk` wheel — can state which vocabulary it got without asking the
-publisher. The publisher reads that field; it never assigns one.
+consumer holding the bytes — from the versioned JSON, from this package, or
+from an installed `analitiq-cdk` wheel — can state which vocabulary it got
+without asking the publisher. The publisher reads that field; it never assigns
+one.
 
 Pin a version by fetching its immutable object; discover the current one via
 that artifact's `latest.json`. Versions here are **independent of the npm
-package version**: the npm digest covers the shipped TS helpers too, while an
-S3 version changes only when the engine declares a new one for that artifact.
+package version**: the npm digest covers the shipped TS helpers too, while a
+versioned-JSON version changes only when the engine declares a new one for
+that artifact.
 
-CI publishes with short-lived GitHub OIDC credentials (`sync-s3` job in
-`.github/workflows/conversion-matrix.yml`), one leg per target environment
-(`dev`, `prod`). Each GitHub Environment carries its own values for the same
-three variables: `CONVERSION_MATRIX_S3_ROLE_ARN`,
-`CONVERSION_MATRIX_S3_REGION`, and `CONVERSION_MATRIX_S3_BUCKET`; the
-artifact prefixes are fixed in the sync script, not configurable.
-The variables are **environment-scoped**, which is why the not-yet-configured
-gate sits on the job's steps rather than the job (a job-level `if` cannot see
-environment variables): an environment with no role ARN set shows as a green
-leg with skipped steps, and once the role ARN is set the remaining variables
-are required and fail loud when missing. The assumed role needs
-`s3:GetObject` and `s3:PutObject` covering the prefix and `s3:ListBucket` on
-the bucket (so a missing manifest reads as absence rather than Forbidden); it
-needs no delete permissions. The sync reconciles against `latest.json` (sha256
-compare, publish under the version the artifact declares, manifest written
-last as the commit point), so re-runs and partial failures converge without
-cutting spurious versions. Content that changed without a version bump aborts
-the run rather than overwriting an immutable object; the `verify` job catches
-that in the pull request first. Because the version travels with the bytes,
-every environment's bucket publishes the same version for the same content,
-whenever it was enabled.
+Publishing reconciles against `latest.json` (sha256 compare, publish under the
+version the artifact declares, manifest written last as the commit point), so
+re-runs and partial failures converge without cutting spurious versions.
+Content that changed without a version bump aborts the run rather than
+overwriting an immutable object; the `verify` job catches that in the pull
+request first. Because the version travels with the bytes, every environment
+publishes the same version for the same content.
 
 ## Publishing (maintainers)
 
