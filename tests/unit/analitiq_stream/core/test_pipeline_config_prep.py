@@ -537,16 +537,26 @@ class TestCreateConfigErrorPaths:
     def test_a_document_the_verdict_refuses_stops_the_run(
         self, pipeline_tree: Path
     ) -> None:
-        """The wiring: the run is gated on the workspace verdict, which is
-        asked with the pipeline named to run -- so a draft pipeline, whatever
-        its manifest entry says, runs nothing."""
+        """The wiring: the run is gated on the workspace verdict."""
         pipeline = _pipeline_doc()
-        pipeline["status"] = "draft"
+        pipeline["status"] = "not-a-status"
         _write_json(
             pipeline_tree / "pipelines" / PIPELINE_ID / "pipeline.json", pipeline
         )
         with pytest.raises(WorkspaceRejectedError, match="status"):
             PipelineConfigPrep().create_config()
+
+    def test_a_draft_pipeline_is_not_refused_by_the_engine(
+        self, pipeline_tree: Path
+    ) -> None:
+        """Whether a pipeline may run is the launcher's call, not the engine's."""
+        pipeline = _pipeline_doc()
+        pipeline["status"] = "draft"
+        _write_json(
+            pipeline_tree / "pipelines" / PIPELINE_ID / "pipeline.json", pipeline
+        )
+        resolved, _, _, _, _ = PipelineConfigPrep().create_config()
+        assert resolved.pipeline_id == PIPELINE_ID
 
     def test_the_manifest_status_does_not_decide_the_run(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

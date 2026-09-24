@@ -98,9 +98,6 @@ class TestTheRequestHoldsTheRunsPackages:
 
         assert workspace.text(f"{PIPELINE_DIR}streams/s1.json") == authored
 
-    def test_names_the_pipeline_to_run(self, workspace_root: Path) -> None:
-        assert _read(workspace_root).request.run_pipeline == PIPELINE_DIR
-
     def test_never_holds_a_secret_location(self, workspace_root: Path) -> None:
         keys = _read(workspace_root).request.documents.root
 

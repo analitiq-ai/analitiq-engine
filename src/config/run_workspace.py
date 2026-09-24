@@ -131,9 +131,7 @@ def read_run_workspace(paths: dict[str, Path], pipeline_directory: str) -> RunWo
         documents |= _read_package(root, directory, ConnectorPackage)
 
     return RunWorkspace(
-        request=ValidateWorkspaceRequest.model_validate(
-            {"documents": documents, "run_pipeline": pipeline_directory}
-        ),
+        request=ValidateWorkspaceRequest.model_validate({"documents": documents}),
         pipeline_directory=pipeline_directory,
         connection_directories=connection_directories,
         connector_directories=connector_directories,
