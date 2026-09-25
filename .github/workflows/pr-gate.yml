@@ -40,6 +40,6 @@ jobs:
           permission-pull-requests: read
           permission-issues: read
           permission-contents: read
-      - uses: analitiq-ai/.github/.github/actions/pr-gate@b1ef86f37cea086ea21b338229c5c612f0f84429
+      - uses: analitiq-ai/.github/.github/actions/pr-gate@6981918909c81fb2a884588a98512ba0444b697d
         with:
           token: ${{ steps.token.outputs.token }}
