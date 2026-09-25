@@ -1,0 +1,3 @@
+# A workflow can name the `pr-gate` environment, which holds the gate App's
+# key, so every change under .github/ needs the owner's review.
+/.github/ @kirill-andr
