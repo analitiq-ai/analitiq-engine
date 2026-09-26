@@ -1,0 +1,60 @@
+name: publish-image
+
+# Publishes the engine's Docker image to GHCR when an ``engine-v*`` tag is
+# pushed. Authentication is the workflow's own ``GITHUB_TOKEN`` (packages:
+# write) -- no PAT or long-lived secret is stored in this repo.
+#
+# Releasing:
+#   1. merge to main,
+#   2. ``git tag engine-v<version> && git push origin engine-v<version>``.
+# The image is pushed as ``ghcr.io/analitiq-ai/analitiq-engine:<version>`` and
+# ``:<version>-<short sha>``. Infra pins the resulting digest in
+# ``engine-image.lock`` (analitiq-ai/infrastructure); a version bump there is
+# a reviewed infra PR, not an automatic follow-on of this workflow.
+#
+# No AWS account, ARN or other cloud-specific detail belongs in this repo
+# (it is public): the image is mirrored into ECR by the infra repo's build
+# tool, from the digest this workflow produces, never pushed to ECR here.
+
+on:
+  push:
+    tags:
+      - "engine-v*"
+
+jobs:
+  build-and-push:
+    name: build + push to GHCR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive image tags from the pushed tag
+        id: image
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#engine-v}"
+          short_sha="$(git rev-parse --short HEAD)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/analitiq-ai/analitiq-engine:${{ steps.image.outputs.version }}
+            ghcr.io/analitiq-ai/analitiq-engine:${{ steps.image.outputs.version }}-${{ steps.image.outputs.short_sha }}
