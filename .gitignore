@@ -214,7 +214,7 @@ test_data/
 sample_data/
 
 # Claude Code: local state, settings and skills stay private; `rules/` is the
-# exception because docs and tests cite those files by path.
+# exception so clones, the bot and CI load the same authoring rules.
 .claude/*
 !.claude/rules/
 # These three are symlinks into a parent workspace and dangle in a clone.
