@@ -46,6 +46,7 @@ The document is the current design; git holds the previous one.
 - **No `file.py:123` coordinates.** Cite the function, class, or constant. A
   name survives edits above it, and a wrong name is visible where a wrong line
   number is not.
+  Files under `specs/` are exempt: a spec is a working document for one issue.
 - **No private helpers** (`_apply_write_in_txn`). Private names get refactored
   without notice; cite the public entry point.
 - **No file inventories** that duplicate the directory tree. They rot silently
