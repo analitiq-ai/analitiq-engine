@@ -23,3 +23,7 @@ All runtime data (state, logs, dead letters, metrics) uses local filesystem at p
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for coding guidelines, issue workflow, and PR review process.
+
+## Authoring Rules
+
+Documentation and test-ownership rules live in [.claude/rules/](.claude/rules/).

@@ -213,8 +213,14 @@ pipeline_*.state
 test_data/
 sample_data/
 
-# Claude Code
-.claude/
+# Claude Code: local state, settings and skills stay private; `rules/` is the
+# exception because docs and tests cite those files by path.
+.claude/*
+!.claude/rules/
+# These three are symlinks into a parent workspace and dangle in a clone.
+.claude/rules/coding-principles.md
+.claude/rules/github-workflow.md
+.claude/rules/pr-review-loop.md
 TODO.md
 # Documentation under docs/ is published with the engine; only Sphinx build
 # output is ignored (see docs/_build/ above).
