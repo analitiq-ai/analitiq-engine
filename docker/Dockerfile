@@ -74,6 +74,4 @@ ENTRYPOINT ["/entrypoint.sh"]
 # Labels for metadata
 LABEL org.opencontainers.image.title="Analitiq Stream" \
       org.opencontainers.image.description="High-performance, fault-tolerant data streaming framework" \
-      org.opencontainers.image.version="0.1.0" \
-      org.opencontainers.image.vendor="Analitiq" \
-      org.opencontainers.image.source="https://github.com/analitiq/analitiq-stream"
+      org.opencontainers.image.vendor="Analitiq"
