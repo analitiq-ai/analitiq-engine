@@ -1,60 +1,49 @@
 name: publish-image
 
-# Publishes the engine's Docker image to GHCR when an ``engine-v*`` tag is
-# pushed. Authentication is the workflow's own ``GITHUB_TOKEN`` (packages:
-# write) -- no PAT or long-lived secret is stored in this repo.
-#
-# Releasing:
-#   1. merge to main,
-#   2. ``git tag engine-v<version> && git push origin engine-v<version>``.
-# The image is pushed as ``ghcr.io/analitiq-ai/analitiq-engine:<version>`` and
-# ``:<version>-<short sha>``. Infra pins the resulting digest in
-# ``engine-image.lock`` (analitiq-ai/infrastructure); a version bump there is
-# a reviewed infra PR, not an automatic follow-on of this workflow.
-#
-# No AWS account, ARN or other cloud-specific detail belongs in this repo
-# (it is public): the image is mirrored into ECR by the infra repo's build
-# tool, from the digest this workflow produces, never pushed to ECR here.
+# Release: push a tag `engine-v<version>`; the image is published as
+# `ghcr.io/analitiq-ai/analitiq-engine:<version>` and `:<version>-<short sha>`.
+# Provenance and SBOM are off so the push is one image manifest, not an index:
+# consumers pin and copy it by that digest.
 
 on:
   push:
     tags:
       - "engine-v*"
 
+permissions: {}
+
 jobs:
-  build-and-push:
-    name: build + push to GHCR
-    runs-on: ubuntu-latest
+  publish:
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
-      - name: Derive image tags from the pushed tag
+      - name: Image tags
         id: image
         run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#engine-v}"
-          short_sha="$(git rev-parse --short HEAD)"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          echo "version=${GITHUB_REF_NAME#engine-v}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: Build and push
-        uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: docker/Dockerfile
           push: true
+          provenance: false
+          sbom: false
           tags: |
             ghcr.io/analitiq-ai/analitiq-engine:${{ steps.image.outputs.version }}
             ghcr.io/analitiq-ai/analitiq-engine:${{ steps.image.outputs.version }}-${{ steps.image.outputs.short_sha }}
