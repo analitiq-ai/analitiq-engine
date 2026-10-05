@@ -34,13 +34,15 @@ Applies when writing or editing any Markdown document in this repo.
 - **Decision records live in `docs/adr/`** and keep Context, Decision, Options
   considered, and Consequences after the decision ships. They are never
   rewritten into present-tense specs.
-- **An accepted record's decision text is never edited.** Fixing a link or a
-  citation is allowed. A changed decision is a new record that supersedes the
-  old one.
-- **Code, docstrings, and runtime error text cite behavior as `ADR NNNN`**,
-  never a document section number.
-- **Before renaming, superseding, or deleting a record, grep for its id** and
-  repoint every citation in the same commit.
+- **An accepted record's body is never edited**, except to fix a link or a
+  citation. A changed decision is a new record that supersedes the old one.
+- **Code, docstrings, runtime error text, and Markdown cite a record as
+  `ADR NNNN`** (in Markdown, linked to its file), never a section inside it.
+- **Renaming or deleting a record repoints every citation** to it in the same
+  commit; grep for its id first.
+- **Superseding a record keeps its id.** The `supersedes`/`supersededBy` pair
+  and historical mentions keep pointing at it; only citations of behavior the
+  new record now governs move to the new id, in the same commit.
 
 ## Never version the filename
 
@@ -80,6 +82,7 @@ elsewhere in the same document.
 ## Changing a doc means changing what cites it
 
 Before renaming, moving, or renumbering the sections of a document, grep for
-it and its section citations (`§N`, `section N`) across `*.py`, `*.md` and
-tests. The change updates every citation in the same commit — this repo had 29
-citations to one document, including runtime error strings.
+its name across `*.py`, `*.md` and tests, and read every hit for a section
+reference: the repo spells them `§N`, `section N`, and `s.N`. The change
+updates every citation in the same commit — this repo had 29 citations to
+one document, including runtime error strings.
