@@ -161,7 +161,7 @@ FR-011). PR 5 can land any time after PR 4, PR 5b after PR 5; PR 16 lands after 
 
 ### PR 5 — hooks
 
-- [ ] T042 [US3] Edit `.specify/extensions.yml`: flip adrkit's `after_plan` entry to `optional: false` in place; add `before_plan` `speckit.adrkit.context` (extension: adrkit), `before_implement` `speckit.analyze` and `after_implement` `speckit.converge` (extension: project), all `optional: false`; run `/speckit-plan` on a scratch spec touching `cdk/cdk/sql/` and confirm `context` and `check` each run on those paths and name ADR 0005; open PR 5
+- [ ] T042 [US3] Edit `.specify/extensions.yml`: flip adrkit's `after_plan` entry to `optional: false` in place; add `before_plan` `speckit.adrkit.context` (extension: adrkit), `before_implement` `speckit.analyze` and `after_implement` `speckit.converge` (extension: project), all `optional: false`; run `/speckit-plan` on a scratch spec and confirm both plan hooks fire (they run without paths until PR 16 adds gate (e)); open PR 5
 
 ### PR 5b — hook registry guard
 
@@ -169,8 +169,8 @@ FR-011). PR 5 can land any time after PR 4, PR 5b after PR 5; PR 16 lands after 
 
 ### PR 16 — constitution
 
-- [ ] T044 [US3] Amend `.specify/memory/constitution.md` via `/speckit-constitution`: every principle stating an architecture rule cites record ids; add gates (a) a plan contradicts no accepted record governing its paths, (b) superseding requires a new record in the same plan, (c) a plan choosing between real alternatives produces a draft record via `/speckit-adrkit-draft`, (d) flow-forward change model, (e) the planning agent runs `speckit.adrkit.context` on the paths the spec names and `speckit.adrkit.check` on the plan's "Repository paths touched" list; MINOR bump; remove the Sync Impact Report before commit; open PR 16
-- [ ] T045 [US3] Run quickstart.md scenario 5: three throwaway specs contradicting ADR 0005, ADR 0006 and N5; `/speckit-plan` flags all three naming the record (SC-005); discard the specs
+- [ ] T044 [US3] Amend `.specify/memory/constitution.md` via `/speckit-constitution`: every principle stating an architecture rule cites record ids; add gates (a) a plan contradicts no accepted record governing its paths, (b) superseding requires a new record in the same plan, (c) a plan choosing between real alternatives produces a draft record via `/speckit-adrkit-draft`, (d) flow-forward change model, (e) the planning agent runs `speckit.adrkit.context` on the paths the spec names and `speckit.adrkit.check` on the paths in the plan's "Source Code (repository root)" section; MINOR bump; remove the Sync Impact Report before commit; open PR 16
+- [ ] T045 [US3] On a scratch spec touching `cdk/cdk/sql/`, confirm `context` and `check` each run on those paths and name ADR 0005; then run quickstart.md scenario 5: three throwaway specs contradicting ADR 0005, ADR 0006 and N5; `/speckit-plan` flags all three naming the record (SC-005); discard the specs
 
 ---
 

@@ -67,7 +67,7 @@ specs/001-adr-governance/
 └── tasks.md             # /speckit-tasks
 ```
 
-### Repository paths touched
+### Source Code (repository root)
 
 ```text
 .gitignore                      # re-includes for .specify/, .claude/skills/speckit-*, package.json

@@ -12,7 +12,7 @@
   `register_hooks`/`unregister_hooks` only replace entries whose `extension` matches the manifest
   id. The extension user guide documents hand-editing `extensions.yml`.
 - **Paths**: hooks pass no arguments, so the planning agent supplies them (the spec's paths to
-  `context`, the plan's "Repository paths touched" to `check`); without them `context` lists the
+  `context`, the paths in the plan's "Source Code (repository root)" section to `check`); without them `context` lists the
   queue and `check` reads only `plan.md`.
 - **Caveats**: every CLI write re-dumps the YAML (comments are lost), and re-adding adrkit resets
   its `after_plan` entry to optional. A test asserts the four hooks and their flags.

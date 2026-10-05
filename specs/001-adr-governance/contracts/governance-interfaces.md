@@ -15,7 +15,8 @@ schema and is not restated here (see data-model.md).
 Both adrkit commands run on repo paths. Hooks pass no arguments, and with none `context` lists
 the proposal queue and `check` reads only `plan.md`, so no decision governing `cdk/` or `src/` is
 named. The constitution gate therefore has the planning agent pass paths: to `context`, the paths
-the spec names; to `check`, the plan's "Repository paths touched" list.
+the spec names; to `check`, the paths in the plan's "Source Code (repository root)" section, which the plan template
+requires to hold real paths.
 
 A test asserts exactly these four entries and flags, since `specify extension add adrkit` resets
 adrkit's entry to optional and CLI writes drop comments.
