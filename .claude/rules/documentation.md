@@ -82,15 +82,15 @@ elsewhere in the same document.
 
 ## Changing a doc means changing what cites it
 
-Before renaming, moving, or renumbering the sections of a document, search
-`*.py` and `*.md` (tests included) for its filename and for section markers on
-their own:
+Before renaming, moving, or renumbering the sections of a document, run this
+search over `*.py` and `*.md` (tests included), with the document's filename in
+place of `<doc-filename>`:
 
 ```shell
-git grep -niE '§ ?[0-9]|\bsections? [0-9]|\bs\.[0-9]' -- '*.py' '*.md'
+git grep -niE '<doc-filename>|§ ?[0-9]|\bsections? [0-9]|\bs\.[0-9]' -- '*.py' '*.md'
 ```
 
 A citation can leave the document's name out (`ADR s.10`), so match every
-marker hit to the document it cites. The change updates every citation of the
-document in the same commit — this repo had 29 citations to one document,
-including runtime error strings.
+section-marker hit to the document it cites. The change updates every citation
+of the document in the same commit — this repo had 29 citations to one
+document, including runtime error strings.
