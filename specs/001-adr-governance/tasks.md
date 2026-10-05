@@ -50,8 +50,8 @@ Principle VI).
 
 **⚠️ CRITICAL**: No record may be written or migrated until this PR merges.
 
-- [ ] T006 Rewrite the "An ADR stops being an ADR the moment it ships" section of `.claude/rules/documentation.md`: records in `docs/adr/` keep Context/Decision/Options/Consequences after shipping, an accepted record's decision text is never edited (fixing a link or citation is allowed), a changed decision is a new record that supersedes it, and behaviour is cited as `ADR NNNN` rather than a doc section number
-- [ ] T007 Open PR 2 containing only `.claude/rules/documentation.md`
+- [X] T006 Rewrite the "An ADR stops being an ADR the moment it ships" section of `.claude/rules/documentation.md`: records in `docs/adr/` keep Context/Decision/Options/Consequences after shipping, an accepted record's decision text is never edited (fixing a link or citation is allowed), a changed decision is a new record that supersedes it, and behaviour is cited as `ADR NNNN` rather than a doc section number
+- [X] T007 Open PR 2 containing `.claude/rules/documentation.md` and this file's T006–T007 ticks
 
 **Checkpoint**: Records can now be written.
 
