@@ -28,7 +28,7 @@ draft ──> proposed ──> accepted ──> superseded   (only via a new rec
   └───────────┴──> rejected
 ```
 
-- Automation may create `draft` only (FR-012). `proposed → accepted` is a maintainer action.
+- Automation may create `draft` only (FR-012). Every later transition is a maintainer action.
 - An `accepted` record's body is never edited; a changed decision is a new record.
 
 ## Constitution

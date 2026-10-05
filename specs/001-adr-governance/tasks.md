@@ -177,7 +177,7 @@ FR-011). PR 5 can land any time after PR 4, PR 5b after PR 5; PR 16 lands after 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
 - [ ] T046 Run all quickstart.md scenarios against `main`
-- [ ] T047 Ratify: maintainer moves each new record in `docs/adr/` from `proposed → accepted` (FR-012; not automated); `adr lint` stays green
+- [ ] T047 Ratify: maintainer moves each new record in `docs/adr/` from `draft → proposed → accepted` (FR-012; not automated); `adr lint` stays green
 - [ ] T048 Citation resolution (SC-004): `grep -rnoE "ADR ?[0-9]{4}" --include=*.py --include=*.md --include=*.toml .` (excluding `specs/`, `CHANGELOG.md`, `.venv`, `connectors/`, `node_modules/`); every cited id has a file matching `docs/adr/<id>-*.md`; zero misses, and zero remaining `ADR ?§` hits
 - [ ] T049 Update the stale FR-009 note in `specs/001-adr-governance/checklists/requirements.md`; close #570
 
