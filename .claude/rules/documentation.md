@@ -82,12 +82,12 @@ elsewhere in the same document.
 
 ## Changing a doc means changing what cites it
 
-Before renaming, moving, or renumbering the sections of a document, run this
-search over `*.py` and `*.md` (tests included), with the document's filename in
-place of `<doc-filename>`:
+Before renaming, moving, or renumbering the sections of a document, search the
+whole tracked tree with its filename stem (`sql-write-path` for
+`docs/data-path/sql-write-path.md`) in place of `<doc-stem>`:
 
 ```shell
-git grep -niE '<doc-filename>|§ ?[0-9]|\bsections? [0-9]|\bs\.[0-9]' -- '*.py' '*.md'
+git grep -niE '<doc-stem>|§ ?[0-9]|\bsections? [0-9]|\bs\.[0-9]' -- ':!specs' ':!CHANGELOG.md'
 ```
 
 A citation can leave the document's name out (`ADR s.10`), so match every
