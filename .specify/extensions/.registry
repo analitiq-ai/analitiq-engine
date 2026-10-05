@@ -1,0 +1,68 @@
+{
+  "schema_version": "1.0",
+  "extensions": {
+    "adrkit": {
+      "version": "0.1.4",
+      "source": "local",
+      "manifest_hash": "sha256:21d596759a6a949024f2a8ee0d6450032a0ad85279a0c255aab058eb5538a694",
+      "enabled": true,
+      "priority": 10,
+      "registered_commands": {
+        "claude": [
+          "speckit.adrkit.context",
+          "speckit.adrkit.check",
+          "speckit.adrkit.draft"
+        ]
+      },
+      "registered_skills": [],
+      "installed_at": "2026-09-24T07:21:56.577081+00:00"
+    },
+    "assess": {
+      "version": "1.0.0",
+      "source": "local",
+      "manifest_hash": "sha256:6eba1ffbc264c7aa43e31b34303a8312ddad5b979772d2785c808179b402d9f2",
+      "enabled": true,
+      "priority": 10,
+      "registered_commands": {
+        "claude": [
+          "speckit.assess.intake",
+          "speckit.assess.research",
+          "speckit.assess.define",
+          "speckit.assess.shape",
+          "speckit.assess.decide"
+        ]
+      },
+      "registered_skills": [],
+      "installed_at": "2026-10-05T14:48:51.747873+00:00"
+    },
+    "critique": {
+      "version": "1.0.0",
+      "source": "local",
+      "manifest_hash": "sha256:0b63a1835415df730cbd487c90c1252b294980176c10c14a3fa9c31a7cb882e0",
+      "enabled": true,
+      "priority": 10,
+      "registered_commands": {
+        "claude": [
+          "speckit.critique.run"
+        ]
+      },
+      "registered_skills": [],
+      "installed_at": "2026-10-05T14:48:52.030746+00:00"
+    },
+    "grill": {
+      "version": "1.0.1",
+      "source": "local",
+      "manifest_hash": "sha256:7d67e2d0659b1e06353d2f81542b51dd5a53f39e3fc3247afd3dbda70016fc91",
+      "enabled": true,
+      "priority": 10,
+      "registered_commands": {
+        "claude": [
+          "speckit.grill.me",
+          "speckit.grill.with-docs"
+        ]
+      },
+      "registered_skills": [],
+      "installed_at": "2026-10-05T14:48:52.322557+00:00"
+    }
+  }
+}

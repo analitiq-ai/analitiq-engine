@@ -1,0 +1,35 @@
+schema_version: "1.0"
+
+extension:
+  id: "grill"
+  name: "SpecKit Grill Me"
+  version: "1.0.1"
+  description: "Exhaustively clarify specifications and optionally sync canonical domain knowledge."
+  category: "process"
+  effect: "read-write"
+  author: "yoshi1220"
+  repository: "https://github.com/yoshi1220/speckit-grill-me"
+  homepage: "https://github.com/yoshi1220/speckit-grill-me/tree/main/spec-kit-extension"
+  license: "MIT"
+
+requires:
+  speckit_version: ">=0.16.2"
+  tools:
+    - name: "bash"
+      required: true
+
+provides:
+  commands:
+    - name: "speckit.grill.me"
+      file: "commands/me.md"
+      description: "Exhaustively clarify an active feature specification before planning."
+    - name: "speckit.grill.with-docs"
+      file: "commands/with-docs.md"
+      description: "Clarify a feature specification and sync settled canonical domain knowledge."
+
+tags:
+  - "clarification"
+  - "requirements"
+  - "specification"
+  - "elicitation"
+  - "workflow"
