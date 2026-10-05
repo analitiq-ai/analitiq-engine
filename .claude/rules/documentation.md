@@ -24,9 +24,10 @@ Applies when writing or editing any Markdown document in this repo.
   becomes a lie.
 - **Never cross-link a public repo's docs to a private tracker** (`<private-repo>#123`).
   That leaks internal references into public code.
-- **Decision records in `docs/adr/` are exempt from this section.** Each must carry
-  a `date` and state what was true and what was decided on it; the current
-  state is the set of accepted records that nothing supersedes.
+- **Decision records in `docs/adr/` are exempt from the migration and "today"
+  bullets above**, not from the issue-number or private-tracker bans. Each must
+  carry a `date` and state what was true and what was decided on it; the
+  current state is the set of accepted records that nothing supersedes.
 
 ## A decision record keeps its decision after it ships
 
@@ -78,6 +79,7 @@ elsewhere in the same document.
 
 ## Changing a doc means changing what cites it
 
-Before renaming or moving a document, grep for it across `*.py`, `*.md` and
-tests. A rename updates every citation in the same commit — this repo had 29
+Before renaming, moving, or renumbering the sections of a document, grep for
+it and its section citations (`§N`, `section N`) across `*.py`, `*.md` and
+tests. The change updates every citation in the same commit — this repo had 29
 citations to one document, including runtime error strings.
