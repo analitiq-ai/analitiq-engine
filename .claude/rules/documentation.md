@@ -87,7 +87,7 @@ Before renaming, moving, or renumbering the sections of a document, search
 their own:
 
 ```shell
-git grep -nE '§ ?[0-9]|\bsection [0-9]|\bs\.[0-9]' -- '*.py' '*.md'
+git grep -niE '§ ?[0-9]|\bsections? [0-9]|\bs\.[0-9]' -- '*.py' '*.md'
 ```
 
 A citation can leave the document's name out (`ADR s.10`), so match every

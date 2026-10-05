@@ -26,9 +26,10 @@ agent`; `status: draft` (automation creates `draft` only, FR-012); body sections
 Decision, Options considered, Trade-offs, Consequences; no issue numbers, no `file.py:123`.
 
 **Citation rule for every migration task**: before deleting text, run
-`grep -rnE "<doc-filename>|ADR ?§" --include=*.py --include=*.md --include=*.toml .` (excluding
-`specs/`, `CHANGELOG.md`, `.venv`, `connectors/`) and repoint every hit to `ADR NNNN` in the same
-commit, runtime strings included.
+`grep -rniE "<doc-filename>|§ ?[0-9]|\bsections? [0-9]|\bs\.[0-9]" --include=*.py --include=*.md --include=*.toml .` (excluding
+`specs/`, `CHANGELOG.md`, `.venv`, `connectors/`). A citation can omit the filename (`ADR s.10`),
+so match every marker hit to the document it cites, and repoint each hit citing this document to
+`ADR NNNN` in the same commit, runtime strings included.
 
 ## Phase 1: Setup (PR 1)
 
@@ -178,7 +179,7 @@ FR-011). PR 5 can land any time after PR 4, PR 5b after PR 5; PR 16 lands after 
 
 - [ ] T046 Run all quickstart.md scenarios against `main`
 - [ ] T047 Ratify: maintainer moves each new record in `docs/adr/` from `draft → proposed → accepted` (FR-012; not automated); `adr lint` stays green
-- [ ] T048 Citation resolution (SC-004): `grep -rnoE "ADR ?[0-9]{4}" --include=*.py --include=*.md --include=*.toml .` (excluding `specs/`, `CHANGELOG.md`, `.venv`, `connectors/`, `node_modules/`); every cited id has a file matching `docs/adr/<id>-*.md`; zero misses, and zero remaining `ADR ?§` hits
+- [ ] T048 Citation resolution (SC-004): `grep -rnoE "ADR ?[0-9]{4}" --include=*.py --include=*.md --include=*.toml .` (excluding `specs/`, `CHANGELOG.md`, `.venv`, `connectors/`, `node_modules/`); every cited id has a file matching `docs/adr/<id>-*.md`; zero misses, and no section-marker hit of that same search (`§ ?[0-9]|\bsections? [0-9]|\bs\.[0-9]`, case-insensitive) still cites a migrated document
 - [ ] T049 Update the stale FR-009 note in `specs/001-adr-governance/checklists/requirements.md`; close #570
 
 ---
