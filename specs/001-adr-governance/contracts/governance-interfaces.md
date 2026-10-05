@@ -12,6 +12,11 @@ schema and is not restated here (see data-model.md).
 | `before_implement` | `speckit.analyze` | `project` | `false` |
 | `after_implement` | `speckit.converge` | `project` | `false` |
 
+Both adrkit commands run on repo paths. Hooks pass no arguments, and with none `context` lists
+the proposal queue and `check` reads only `plan.md`, so no decision governing `cdk/` or `src/` is
+named. The constitution gate therefore has the planning agent pass paths: to `context`, the paths
+the spec names; to `check`, the plan's "Repository paths touched" list.
+
 A test asserts exactly these four entries and flags, since `specify extension add adrkit` resets
 adrkit's entry to optional and CLI writes drop comments.
 

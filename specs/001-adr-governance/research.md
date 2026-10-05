@@ -11,6 +11,9 @@
   installed extension; the skills render any id (`speckit.analyze` → `/speckit-analyze`).
   `register_hooks`/`unregister_hooks` only replace entries whose `extension` matches the manifest
   id. The extension user guide documents hand-editing `extensions.yml`.
+- **Paths**: hooks pass no arguments, so the planning agent supplies them (the spec's paths to
+  `context`, the plan's "Repository paths touched" to `check`); without them `context` lists the
+  queue and `check` reads only `plan.md`.
 - **Caveats**: every CLI write re-dumps the YAML (comments are lost), and re-adding adrkit resets
   its `after_plan` entry to optional. A test asserts the four hooks and their flags.
 - **Alternatives considered**: a preset that overrides command templates — heavier, fights the
@@ -38,7 +41,8 @@
 ## R3: Frontmatter for the six existing records
 
 - **Decision**: `adr migrate --from madr`, then set per record: quoted `id`, `status: accepted`,
-  real `date` from the commit that added the file, `deciders: ["@Analitiq-Bot-Wonka"]`, and
+  real `date` from the commit that introduced the rule (not the file-add commit: 0003–0006 were
+  added together by a docs move), `deciders: ["@Analitiq-Bot-Wonka"]`, and
   `affects` path globs that match real paths.
 - **Rationale**: dry run migrated all six with only date/status warnings; schema requires `id`,
   `title`, `status`, `date`; accepted requires `deciders`.

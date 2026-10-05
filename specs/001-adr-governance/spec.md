@@ -150,7 +150,7 @@ plan adding a second SQL write shape); the contradiction is reported before impl
 ### Key Entities
 
 - **Decision record**: one architecture decision — context, decision, alternatives considered,
-  consequences; carries id, date, status (draft/proposed/accepted/superseded/rejected), governed
+  consequences; carries id, date, status (draft/proposed/accepted/superseded/deprecated/rejected), governed
   paths, and links to records it supersedes or relates to. Immutable once accepted.
 - **Constitution**: the list of plan-time gates; cites decision records, never restates them.
 - **Orientation overview**: the single prose description of how components fit together; states

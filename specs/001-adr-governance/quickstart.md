@@ -35,4 +35,5 @@ zero hits. Every `ADR NNNN` cited in code resolves to a file in `docs/adr/`.
 Create three throwaway feature specs that contradict ADR 0005 (a direct dialect upsert), ADR 0006
 (destination-side coalescing) and N5 (client keepalive). Run `/speckit-plan` on each.
 
-Expected: the `after_plan` check names the contradicted record in all three. Discard the specs.
+Expected: the `after_plan` check, run on each plan's "Repository paths touched", names the
+contradicted record for one of those source paths in all three. Discard the specs.

@@ -22,7 +22,7 @@ checks off its own tasks in this file, so every branch also changes the spec fol
 `id` "quoted 4-digit string, next free number; never reused"; `title` "the decision as an
 imperative statement, 3–120 chars"; `deciders: ["@Analitiq-Bot-Wonka"]`; `affects` "non-empty list
 of `{type: path, pattern: <glob>}`; every pattern matches a real path"; `provenance.authoredBy:
-agent`; `status: proposed` (automation never sets `accepted`, FR-012); body sections Context,
+agent`; `status: draft` (automation creates `draft` only, FR-012); body sections Context,
 Decision, Options considered, Trade-offs, Consequences; no issue numbers, no `file.py:123`.
 
 **Citation rule for every migration task**: before deleting text, run
@@ -67,7 +67,7 @@ Principle VI).
 
 - [ ] T008 [US1] Add root `package.json` (private, no scripts) with devDependency `@adrkit/cli` pinned exactly to the version the `mbeacom/adrkit` Action release bundles, plus `package-lock.json`; add `!/package.json` and `!/package-lock.json` re-includes to `.gitignore` (global `*.json` rule); run `npm ci` and confirm `./node_modules/.bin/adr --version` matches; document `npm ci` under `CONTRIBUTING.md` "Setup" — the adrkit extension resolves `./node_modules/.bin/adr` with no env var
 - [ ] T009 [US1] Run `./node_modules/.bin/adr migrate --from madr --dir docs/adr` on `docs/adr/0001-*.md` … `docs/adr/0006-*.md`
-- [ ] T010 [P] [US1] In each of `docs/adr/0001-*.md` … `0006-*.md` set `date` to the commit that added the file (`git log --diff-filter=A --format=%ad --date=short -- <file>`), `status: accepted`, `deciders: ["@Analitiq-Bot-Wonka"]` (FR-012: approving PR 3 is the ratification of these six)
+- [ ] T010 [P] [US1] In each of `docs/adr/0001-*.md` … `0006-*.md` set `date` to the commit that introduced the rule (`git log --reverse -S '<rule phrase>' --format=%ad --date=short` over code and docs; not the file-add date, since 0003–0006 were added together by a docs move), `status: accepted`, `deciders: ["@Analitiq-Bot-Wonka"]` (FR-012: approving PR 3 is the ratification of these six)
 - [ ] T011 [P] [US1] Write `affects` for each of the six records from the code each one governs (e.g. 0005 → `cdk/cdk/sql/stage_cycle.py`, `cdk/cdk/sql/*backend.py`, `cdk/cdk/sql/generic.py`; 0002 → the API page loop module) and confirm each with `adr explain <path>`
 - [ ] T012 [US1] Correct `docs/adr/0006-batch-coalescing-is-engine-side.md` and `docs/data-path/sql-write-path.md` §8: a fatally rejected coalesced unit fails the stream whatever the strategy (DLQ writes the unit out), while a unit that exhausts its retries is DLQ'd or skipped, matching `BatchPolicy.run` in `src/engine/batch_policy.py`
 - [ ] T013 [US1] Scope `docs/adr/0002-one-stop-rule-for-every-paging-scheme.md` explicitly to the API read path (SQL read paths stop on a short page)
@@ -161,7 +161,7 @@ FR-011). PR 5 can land any time after PR 4, PR 5b after PR 5; PR 16 lands after 
 
 ### PR 5 — hooks
 
-- [ ] T042 [US3] Edit `.specify/extensions.yml`: flip adrkit's `after_plan` entry to `optional: false` in place; add `before_plan` `speckit.adrkit.context` (extension: adrkit), `before_implement` `speckit.analyze` and `after_implement` `speckit.converge` (extension: project), all `optional: false`; run `/speckit-plan` on a scratch spec and confirm both plan hooks fire; open PR 5
+- [ ] T042 [US3] Edit `.specify/extensions.yml`: flip adrkit's `after_plan` entry to `optional: false` in place; add `before_plan` `speckit.adrkit.context` (extension: adrkit), `before_implement` `speckit.analyze` and `after_implement` `speckit.converge` (extension: project), all `optional: false`; run `/speckit-plan` on a scratch spec touching `cdk/cdk/sql/` and confirm `context` and `check` each run on those paths and name ADR 0005; open PR 5
 
 ### PR 5b — hook registry guard
 
@@ -169,7 +169,7 @@ FR-011). PR 5 can land any time after PR 4, PR 5b after PR 5; PR 16 lands after 
 
 ### PR 16 — constitution
 
-- [ ] T044 [US3] Amend `.specify/memory/constitution.md` via `/speckit-constitution`: every principle stating an architecture rule cites record ids; add gates (a) a plan contradicts no accepted record governing its paths, (b) superseding requires a new record in the same plan, (c) a plan choosing between real alternatives produces a draft record via `/speckit-adrkit-draft`, (d) flow-forward change model; MINOR bump; remove the Sync Impact Report before commit; open PR 16
+- [ ] T044 [US3] Amend `.specify/memory/constitution.md` via `/speckit-constitution`: every principle stating an architecture rule cites record ids; add gates (a) a plan contradicts no accepted record governing its paths, (b) superseding requires a new record in the same plan, (c) a plan choosing between real alternatives produces a draft record via `/speckit-adrkit-draft`, (d) flow-forward change model, (e) the planning agent runs `speckit.adrkit.context` on the paths the spec names and `speckit.adrkit.check` on the plan's "Repository paths touched" list; MINOR bump; remove the Sync Impact Report before commit; open PR 16
 - [ ] T045 [US3] Run quickstart.md scenario 5: three throwaway specs contradicting ADR 0005, ADR 0006 and N5; `/speckit-plan` flags all three naming the record (SC-005); discard the specs
 
 ---
