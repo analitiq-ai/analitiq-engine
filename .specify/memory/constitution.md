@@ -207,8 +207,8 @@ rounds, then the required status checks. Owned by `CONTRIBUTING.md` (CI; Merge R
   questions and are not weakened here; amendments to them happen upstream first and are then re-synced.
 - The source files named in each principle are the source of truth. Where this document and a source
   disagree, the source wins and this document is amended. Under `.claude/`, only
-  `rules/documentation.md` and `rules/test-ownership.md` are tracked in this repository; every other
-  file cited there (`CLAUDE.md`, `rules/coding-principles.md`, `rules/github-workflow.md`,
+  `rules/documentation.md`, `rules/test-ownership.md` and `skills/speckit-*/` are tracked in this
+  repository; every other file cited there (`CLAUDE.md`, `rules/coding-principles.md`, `rules/github-workflow.md`,
   `rules/pr-review-loop.md`) exists only in local working copies.
 - Amending a repo principle: change its source first, in its own PR (Principle VI), then amend this
   document and bump its version — MAJOR for removing or redefining a principle, MINOR for adding a
@@ -216,4 +216,4 @@ rounds, then the required status checks. Owned by `CONTRIBUTING.md` (CI; Merge R
 - Compliance: `/speckit-plan` evaluates every gate in its Constitution Check; a violation MUST be
   justified in the plan's Complexity Tracking table or the plan changes.
 
-**Version**: 1.0.2 | **Ratified**: 2026-09-24 | **Last Amended**: 2026-10-05
+**Version**: 1.0.3 | **Ratified**: 2026-09-24 | **Last Amended**: 2026-10-05

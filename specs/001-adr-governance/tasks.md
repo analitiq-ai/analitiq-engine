@@ -35,11 +35,11 @@ commit, runtime strings included.
 **Purpose**: Governance setup is in git so every clone, the bot and CI see it (FR-001).
 
 - [X] T000 Create three sub-issues of #570 (type Task), one per user story, each with that story's goal and Independent Test from spec.md as acceptance criteria; Setup and Foundational PRs use the US1 sub-issue
-- [X] T001 Add `.gitignore` re-includes so `.specify/` survives the global `*.json`, unanchored `scripts/`, `.cache` and `*.lock` rules, and re-include `.claude/skills/speckit-*/` next to the existing `!.claude/rules/`; ignore `.specify/feature.json`, `.specify/extensions/.cache/`, `.specify/extensions/.backup/` in `.gitignore`
+- [X] T001 Add `.gitignore` re-includes so `.specify/` survives the global `*.json`, and unanchored `scripts/` rules, and re-include `.claude/skills/speckit-*/` next to the existing `!.claude/rules/`; ignore `.specify/feature.json`, `.specify/extensions/.cache/`, `.specify/extensions/.backup/` in `.gitignore`
 - [X] T002 Remove `/.specify/` from `.git/info/exclude` (local only; note it in the PR body so other clones do the same)
 - [X] T003 Strip the Sync Impact Report comment from `.specify/memory/constitution.md` and confirm it states no private or cloud detail
 - [X] T004 Stage `.specify/extensions.yml`, `.specify/extensions/.registry`, `.specify/extensions/{adrkit,assess,critique,grill}/**`, `.specify/integrations/`, `.specify/scripts/`, `.specify/templates/`, `.specify/memory/`, `.specify/workflows/`, `.specify/integration.json`, `.specify/init-options.json`, `.claude/skills/speckit-*/`, `specs/001-adr-governance/`; verify with `git status --ignored` that nothing listed in T001's ignore set is staged
-- [ ] T005 Verify in a fresh clone (`git clone` to scratchpad) that `specify extension list` shows adrkit and `.claude/skills/speckit-plan/SKILL.md` exists; open PR 1
+- [X] T005 Verify in a fresh clone (`git clone` to scratchpad) that `specify extension list` shows adrkit and `.claude/skills/speckit-plan/SKILL.md` exists; open PR 1
 
 ---
 

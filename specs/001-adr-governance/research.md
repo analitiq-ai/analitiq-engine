@@ -57,8 +57,8 @@
   `init-options.json`, and `.claude/skills/speckit-*` (they render the hooks). Ignore
   `feature.json`, `extensions/.cache/`, `extensions/.backup/` (per-extension `local-config.yml` is
   already ignored by Spec Kit's own `.specify/.gitignore`).
-- **Rationale**: the root `.gitignore` ignores `*.json` globally, unanchored `scripts/`, `.cache`,
-  `*.lock`, and `.claude/*`; each needs a re-include. A clone that lists `/.specify/` in its own
+- **Rationale**: the root `.gitignore` ignores `*.json` globally, unanchored `scripts/`, and `.claude/*`;
+  each needs a re-include. A clone that lists `/.specify/` in its own
   `.git/info/exclude` removes that line.
 - **Alternatives considered**: document `specify init` + `specify extension add` as setup — every
   clone re-derives files and may get a different version.
