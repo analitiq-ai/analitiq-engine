@@ -1,0 +1,25 @@
+installed:
+- adrkit
+- assess
+- critique
+- grill
+settings:
+  auto_execute_hooks: true
+hooks:
+  after_plan:
+  - extension: adrkit
+    command: speckit.adrkit.check
+    enabled: true
+    optional: true
+    priority: 10
+    prompt: Check this plan against the decisions that govern it?
+    description: Runs adrkit's read-only check of this plan against the ADR corpus.
+    condition: null
+  - extension: critique
+    command: speckit.critique.run
+    enabled: true
+    optional: true
+    priority: 10
+    prompt: Run spec critique before proceeding to tasks?
+    description: Challenges the spec and plan through product and engineering lenses
+    condition: null

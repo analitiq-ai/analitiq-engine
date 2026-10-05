@@ -213,10 +213,14 @@ pipeline_*.state
 test_data/
 sample_data/
 
-# Claude Code: local state, settings and skills stay private; `rules/` is the
-# exception so clones, the bot and CI load the same authoring rules.
+# Claude Code: local state, settings and skills stay private; `rules/` and the
+# Spec Kit skills are the exception so clones, the bot and CI load the same
+# authoring rules and Spec Kit commands.
 .claude/*
 !.claude/rules/
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/speckit-*/
 # These three are symlinks into a parent workspace and dangle in a clone.
 .claude/rules/coding-principles.md
 .claude/rules/github-workflow.md
@@ -402,6 +406,15 @@ yarn-error.log*
 # Project Specific Exceptions
 # =============================================================================
 /examples
+
+# Spec Kit project config, tracked past the blanket *.json and scripts/
+# ignores so every clone runs the same commands, templates and extensions.
+!/.specify/**/*.json
+!/.specify/**/scripts/
+# Machine-local Spec Kit state.
+/.specify/feature.json
+/.specify/extensions/.cache/
+/.specify/extensions/.backup/
 
 # Keep test fixtures
 !**/tests/**/fixtures/**
