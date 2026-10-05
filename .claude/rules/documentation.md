@@ -38,11 +38,12 @@ Applies when writing or editing any Markdown document in this repo.
   citation. A changed decision is a new record that supersedes the old one.
 - **Code, docstrings, runtime error text, and Markdown cite a record as
   `ADR NNNN`** (in Markdown, linked to its file), never a section inside it.
-- **Renaming or deleting a record repoints every citation** to it in the same
-  commit; grep for its id first.
-- **Superseding a record keeps its id.** The `supersedes`/`supersededBy` pair
-  and historical mentions keep pointing at it; only citations of behavior the
-  new record now governs move to the new id, in the same commit.
+- **A record is never renamed or deleted.** Its id and filename are permanent,
+  so citations to it never break; a withdrawn decision becomes `deprecated` or
+  `superseded`, never a missing file.
+- **Superseding a record moves only the citations of behavior the new record
+  now governs**, in the same commit. The `supersedes`/`supersededBy` pair and
+  historical mentions keep pointing at the old id.
 
 ## Never version the filename
 
@@ -81,8 +82,15 @@ elsewhere in the same document.
 
 ## Changing a doc means changing what cites it
 
-Before renaming, moving, or renumbering the sections of a document, grep for
-its name across `*.py`, `*.md` and tests, and read every hit for a section
-reference: the repo spells them `§N`, `section N`, and `s.N`. The change
-updates every citation in the same commit — this repo had 29 citations to
-one document, including runtime error strings.
+Before renaming, moving, or renumbering the sections of a document, search
+`*.py` and `*.md` (tests included) for its filename and for section markers on
+their own:
+
+```shell
+git grep -nE '§ ?[0-9]|\bsection [0-9]|\bs\.[0-9]' -- '*.py' '*.md'
+```
+
+A citation can leave the document's name out (`ADR s.10`), so match every
+marker hit to the document it cites. The change updates every citation of the
+document in the same commit — this repo had 29 citations to one document,
+including runtime error strings.
