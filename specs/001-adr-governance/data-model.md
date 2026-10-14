@@ -17,12 +17,13 @@ One file `docs/adr/NNNN-slug.md`, flat. Frontmatter schema is owned by adrkit
 | `relatesTo` | records it depends on or refines |
 | `provenance` | `authoredBy: agent` plus `ratifiedBy` for agent-drafted records |
 
-**Governed-paths rule.** A path belongs in `affects` only if the record's rule is defined or
-enforced there, or a test or conformance check there asserts the rule. A file that only carries,
-forwards, aggregates or passes through a value the rule produces does not belong, and neither does
-a sender that uses the vocabulary without applying the rule. A glob is used only when every file
-it matches belongs. The PR that writes the record looks for candidates in three places, keeps each
-one only if it belongs, and confirms each kept path with `adr explain <path>`:
+**Governed-paths rule.** `affects` lists every path where the record's rule is defined or
+enforced and every test or conformance check that asserts it, and no other path. A file that only
+carries, forwards, aggregates or passes through a value the rule produces is not such a path, and
+neither is a sender that uses the vocabulary without applying the rule. A glob is used only when
+every file it matches qualifies. The PR that writes the record looks for candidates in three
+places, keeps every candidate that qualifies and drops the rest, then confirms each kept path with
+`adr explain <path>`:
 
 1. the module that defines the rule's types or entry points;
 2. the `git grep` hits on those entry points;
