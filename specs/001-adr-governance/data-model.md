@@ -12,10 +12,17 @@ One file `docs/adr/NNNN-slug.md`, flat. Frontmatter schema is owned by adrkit
 | `status` | see state transitions below |
 | `date` | date the decision was made; for backfilled records, the commit that introduced the rule |
 | `deciders` | `["@Analitiq-Bot-Wonka"]` |
-| `affects` | non-empty list of `{type: path, pattern: <glob>}`; every pattern matches a real path |
+| `affects` | non-empty list of `{type: path, pattern: <glob>}`; every pattern matches a real path; which paths belong is set by the governed-paths rule below |
 | `supersedes` / `supersededBy` | set as a pair when one record replaces another |
 | `relatesTo` | records it depends on or refines |
 | `provenance` | `authoredBy: agent` plus `ratifiedBy` for agent-drafted records |
+
+**Governed-paths rule.** `affects` names the files where the record's rule is defined or
+enforced: where its types and mappings are declared, where code applies the rule at a boundary,
+and the conformance checks that certify it. A file that only carries, forwards, aggregates or
+passes through a value the rule produces is left out, and so is a sender that uses the
+vocabulary without applying the rule. A glob is used only when the module it names owns the
+mechanism, so that every file it matches meets this rule.
 
 Body sections: Context, Decision, Options considered, Trade-offs, Consequences (including how we
 would know it was wrong). No issue numbers, no `file.py:123` coordinates.
