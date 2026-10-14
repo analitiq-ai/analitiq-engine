@@ -2,20 +2,17 @@
 
 ## R1: Hooks on core commands
 
-- **Decision**: Register `before_plan` → `speckit.adrkit.context`, `before_implement` →
-  `speckit.analyze`, `after_implement` → `speckit.converge` by hand in `.specify/extensions.yml`,
-  all `optional: false`. Label the two core hooks `extension: project` so `specify extension
-  add/remove adrkit` does not delete them. Flip adrkit's own `after_plan` entry to
-  `optional: false` in place; do not add a second entry.
+- **Decision**: Register `before_implement` → `speckit.analyze` and `after_implement` →
+  `speckit.converge` by hand in `.specify/extensions.yml`, both `optional: false`. Label them
+  `extension: project` so `specify extension add/remove adrkit` does not delete them. This feature
+  adds no plan-time hook; adrkit's own optional `after_plan` entry stays as the extension installs
+  it.
 - **Rationale**: Spec Kit 1.0.7 `HookExecutor` never checks that a hook's command belongs to an
   installed extension; the skills render any id (`speckit.analyze` → `/speckit-analyze`).
   `register_hooks`/`unregister_hooks` only replace entries whose `extension` matches the manifest
   id. The extension user guide documents hand-editing `extensions.yml`.
-- **Paths**: hooks pass no arguments, so the planning agent supplies them (the spec's paths to
-  `context`, the paths in the plan's "Source Code (repository root)" section to `check`); without them `context` lists the
-  queue and `check` reads only `plan.md`.
-- **Caveats**: every CLI write re-dumps the YAML (comments are lost), and re-adding adrkit resets
-  its `after_plan` entry to optional. A test asserts the four hooks and their flags.
+- **Caveats**: every CLI write re-dumps the YAML (comments are lost). A test asserts the two
+  hooks and their flags.
 - **Alternatives considered**: a preset that overrides command templates — heavier, fights the
   composition model; leaving hooks optional — agents skip them.
 - **Existing tools**: Spec Kit's own hook system (`.specify/extensions.yml`, `HookExecutor`) and the adrkit extension's
@@ -23,27 +20,27 @@
 
 ## R2: adrkit CLI behaviour and version
 
-- **Decision**: `adr lint` is the blocking CI gate. `adr check` runs via the adrkit GitHub Action,
-  which comments the governing decisions on the PR. Upgrade the local CLI and pin CI to the same
-  adrkit release (the Action's release), one version everywhere. PR 3 adds a root `package.json`
-  with the CLI as a devDependency and commits its `package-lock.json` as the pin; the extension
-  resolves it as `./node_modules/.bin/adr`. The Action tag is bumped together with it.
+- **Decision**: `adr lint` is the blocking CI gate. One adrkit CLI version everywhere: PR 3 adds a
+  root `package.json` with the CLI as a devDependency and commits its `package-lock.json` as the
+  pin; the extension resolves it as `./node_modules/.bin/adr`, and CI runs the same `npm ci`.
+  Records set no `affects`, so no tool reports governing decisions on a PR.
 - **Rationale**: `adr lint` exits 1 on schema errors, unknown keys, broken
   `supersedes`/`supersededBy`/`relatesTo` links, duplicate ids, accepted-without-decider.
-  `adr check` exits 1 only when a changed record is invalid; a governed file never fails it. The
-  Action (`action.yml`, Node 24) posts the governing decisions as a PR comment.
-- **Known gap**: an empty `affects` is advisory, not a lint error. Record review covers it
-  (spec edge case). No second validator is written (one gate per document).
-- **Alternatives considered**: a custom script failing on empty `affects` — a second validator
-  over adrkit's shape; `adr evaluate` with a snapshot bundle — needs bundle tooling, deferred.
-- **Existing tools**: adrkit CLI `lint`/`check`/`explain` and the `mbeacom/adrkit` GitHub Action; no second validator.
+  `affects` is optional in adrkit's schema, and `adr lint` reports nothing when it is empty or
+  absent. adrkit matches a decision to a file only through `affects` or an `@adr NNNN` marker in
+  the file. Most changes (bug fixes, small improvements) are governed by no decision, and a
+  forward-looking decision has no code to point at.
+- **Alternatives considered**: `affects` file lists, with the adrkit GitHub Action commenting the
+  governing decisions on each PR — a hand-kept file list per decision that drifts as code moves;
+  `@adr NNNN` markers in source files — the same list, spread over the files; `adr evaluate` with
+  a snapshot bundle — needs bundle tooling, deferred.
+- **Existing tools**: adrkit CLI `lint`; no second validator.
 
 ## R3: Frontmatter for the six existing records
 
 - **Decision**: `adr migrate --from madr`, then set per record: quoted `id`, `status: accepted`,
   real `date` from the commit that introduced the rule (not the file-add commit: 0003–0006 were
-  added together by a docs move), `deciders: ["@Analitiq-Bot-Wonka"]`, and
-  `affects` per data-model.md's governed-paths rule.
+  added together by a docs move), and `deciders: ["@Analitiq-Bot-Wonka"]`; no `affects` (R2).
 - **Rationale**: dry run migrated all six with only date/status warnings; schema requires `id`,
   `title`, `status`, `date`; accepted requires `deciders`.
 - **Correction folded in**: ADR 0006 says a fatally rejected coalesced unit is "DLQ'd or skipped
@@ -99,16 +96,15 @@
 
 ## R7: CI layout
 
-- **Decision**: a new `adr` workflow job, `name: decision records are valid` (`adr lint`), plus
-  the adrkit Action job for the governing-decisions comment. Added to CONTRIBUTING.md "Merge
+- **Decision**: a new `adr` workflow job, `name: decision records are valid` (`adr lint`).
+  Added to CONTRIBUTING.md "Merge
   Requirements" and to branch protection (outside the repo, by a maintainer). The hooks test runs
   under the existing `pytest` job.
 - **Rationale**: `ci.yml` has no aggregating gate job; each job is its own check, made required by
   branch protection. `conversion-matrix.yml` is the existing `setup-node` pattern.
 - **Pre-existing drift noted**: CONTRIBUTING "Merge Requirements" omits two existing `ci.yml`
   checks; not in scope.
-- **Existing tools**: GitHub Actions with the existing `setup-node` pattern from the conversion-matrix workflow, and the
-  `mbeacom/adrkit` Action.
+- **Existing tools**: GitHub Actions with the existing `setup-node` pattern from the conversion-matrix workflow.
 
 ## R8: Contradictions found during inventory (fixed in the PR that migrates the doc)
 

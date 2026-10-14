@@ -38,6 +38,10 @@ Applies when writing or editing any Markdown document in this repo.
   citation. A changed decision is a new record that supersedes the old one.
 - **Code, docstrings, runtime error text, and Markdown cite a record as
   `ADR NNNN`** (in Markdown, linked to its file), never a section inside it.
+- **A record lists no governed files: `affects` stays unset**, whatever a
+  drafting command asks for. Most changes are governed by no decision, a
+  decision can come before the code it governs, and a file list per decision
+  drifts as the code moves.
 - **A record is never renamed or deleted.** Its id and filename are permanent,
   so citations to it never break; a withdrawn decision becomes `deprecated` or
   `superseded`, never a missing file.

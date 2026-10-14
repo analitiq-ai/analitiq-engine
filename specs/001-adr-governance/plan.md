@@ -8,16 +8,16 @@
 ## Summary
 
 Make decision records (adrkit ADRs in `docs/adr/`) the single home of every architecture rule,
-cut hand-maintained docs from 10 to 2, and gate future work in two layers: Spec Kit hooks that load
-and check governing decisions during planning (agent instructions), and CI (`adr lint` blocking,
-adrkit Action reporting governing decisions on every PR). Delivered as a sequence of small PRs,
+cut hand-maintained docs from 10 to 2, and gate future work in two layers: Spec Kit hooks that
+check spec, plan and tasks against the constitution before implementation and code against them
+after (agent instructions), and CI (`adr lint` blocking). Delivered as a sequence of small PRs,
 governing changes separate from governed content.
 
 ## Technical Context
 
-**Language/Version**: Markdown + YAML; Python 3.11 for the hooks test; Node 24 for the adrkit Action
+**Language/Version**: Markdown + YAML; Python 3.11 for the hooks test; Node 22+ for the adrkit CLI
 
-**Primary Dependencies**: adrkit CLI and GitHub Action (one pinned release), Spec Kit 1.0.7,
+**Primary Dependencies**: adrkit CLI (one pinned release), Spec Kit 1.0.7,
 adrkit Spec Kit extension 0.1.4
 
 **Storage**: files in git (`docs/adr/`, `.specify/`, `.claude/skills/speckit-*`)
@@ -42,7 +42,7 @@ move with their target)
 
 | Gate | Result | Note |
 |---|---|---|
-| I. Contract-first | PASS | Frontmatter is adrkit's schema; no new shape or second validator (empty-`affects` gap accepted, research R2) |
+| I. Contract-first | PASS | Frontmatter is adrkit's schema; no new shape or second validator |
 | II. Ownership & trust | PASS | All changes in this repo; records carry no private detail; vendored adrkit extension keeps LICENSE/NOTICE |
 | III. Fail loud, no workarounds | PASS | No fallbacks; known tool gaps stated, not shimmed |
 | IV. Test-first | PASS | Hooks test written red first; lint gate proven on a broken record before it is required |
@@ -75,7 +75,7 @@ package.json, package-lock.json # pins the adrkit CLI (./node_modules/.bin/adr)
 .specify/                       # tracked: extensions.yml, extensions/adrkit/, scripts/, templates/, memory/
 .claude/skills/speckit-*/       # tracked: render the hooks
 .claude/rules/documentation.md  # ADR clause amended
-.github/workflows/adr.yml       # lint + adrkit Action
+.github/workflows/adr.yml       # lint
 CONTRIBUTING.md                 # Merge Requirements
 README.md                       # env-var table removed
 docs/adr/                       # 6 migrated + new records
@@ -90,7 +90,7 @@ how-to; the other 8 docs are deleted once their rules move.
 
 ## Mechanisms
 
-- Spec Kit planning hooks that load and check governing decisions: R1
+- Spec Kit hooks that check spec, plan, tasks and code around implementation: R1
 - adrkit lint as the blocking CI gate, one pinned adrkit version: R2
 - Migration of the six existing records to adrkit frontmatter: R3
 - Tracking the Spec Kit setup in git: R4
@@ -104,8 +104,8 @@ how-to; the other 8 docs are deleted once their rules move.
 |---|---|---|
 | 1 | Track `.specify/` and `.claude/skills/speckit-*`; `.gitignore` re-includes | setup |
 | 2 | Amend documentation.md: ADRs keep alternatives/consequences, superseded not rewritten | governing |
-| 3 | Pin one adrkit version; migrate ADRs 0001–0006 (dates, accepted, deciders, `affects`); correct 0006 | governed |
-| 4 | CI: `decision records are valid` + adrkit Action; CONTRIBUTING Merge Requirements | governing |
+| 3 | Pin one adrkit version; migrate ADRs 0001–0006 (dates, accepted, deciders); correct 0006 | governed |
+| 4 | CI: `decision records are valid`; CONTRIBUTING Merge Requirements | governing |
 | 5 | Hooks in `.specify/extensions.yml` | governed |
 | 5b | Hook registry test `tests/unit/test_speckit_hooks.py` | governing |
 | 6–15 | One per doc: new records, delete the doc's rule text, repoint citations, fix that doc's contradictions; settings-reference PR also drops the README env table | governed |

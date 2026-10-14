@@ -12,22 +12,10 @@ One file `docs/adr/NNNN-slug.md`, flat. Frontmatter schema is owned by adrkit
 | `status` | see state transitions below |
 | `date` | date the decision was made; for backfilled records, the commit that introduced the rule |
 | `deciders` | `["@Analitiq-Bot-Wonka"]` |
-| `affects` | non-empty list of `{type: path, pattern: <glob>}`; every pattern matches a real path; which paths belong is set by the governed-paths rule below |
+| `affects` | not set (`.claude/rules/documentation.md`) |
 | `supersedes` / `supersededBy` | set as a pair when one record replaces another |
 | `relatesTo` | records it depends on or refines |
 | `provenance` | `authoredBy: agent` plus `ratifiedBy` for agent-drafted records |
-
-**Governed-paths rule.** `affects` lists every path where the record's rule is defined or
-enforced and every test or conformance check that asserts it, and no other path. A file that only
-carries, forwards, aggregates or passes through a value the rule produces is not such a path, and
-neither is a sender that uses the vocabulary without applying the rule. A glob is used only when
-every file it matches qualifies. The PR that writes the record looks for candidates in three
-places, keeps every candidate that qualifies and drops the rest, then confirms each kept path with
-`adr explain <path>`:
-
-1. the module that defines the rule's types or entry points;
-2. the `git grep` hits on those entry points;
-3. the tests and conformance checks that exercise the rule.
 
 Body sections: Context, Decision, Options considered, Trade-offs, Consequences (including how we
 would know it was wrong). No issue numbers, no `file.py:123` coordinates.
@@ -72,7 +60,7 @@ A reference from code, docstring, runtime error text or Markdown to a decision r
 
 ### New (from the rule inventory)
 
-Source doc = the doc whose migration PR lands the record; that PR derives `affects` by the governed-paths rule.
+Source doc = the doc whose migration PR lands the record.
 
 | # | Decision | Source doc |
 |---|---|---|

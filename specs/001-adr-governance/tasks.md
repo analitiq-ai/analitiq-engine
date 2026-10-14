@@ -20,8 +20,7 @@ checks off its own tasks in this file, so every branch also changes the spec fol
 
 **Record rules for every task that writes a record** (data-model.md): file `docs/adr/NNNN-slug.md`;
 `id` "quoted 4-digit string, next free number; never reused"; `title` "the decision as an
-imperative statement, 3–120 chars"; `deciders: ["@Analitiq-Bot-Wonka"]`; `affects` per data-model.md's
-`affects` row and governed-paths rule; `provenance.authoredBy:
+imperative statement, 3–120 chars"; `deciders: ["@Analitiq-Bot-Wonka"]`; no `affects`; `provenance.authoredBy:
 agent`; `status: draft` (automation creates `draft` only, FR-012); body sections Context,
 Decision, Options considered, Trade-offs, Consequences; no issue numbers, no `file.py:123`.
 
@@ -58,16 +57,15 @@ Principle VI).
 
 ## Phase 3: User Story 1 - Existing decisions valid and enforced (Priority: P1) 🎯 MVP
 
-**Goal**: Six records pass validation; every PR is linted and gets its governing decisions reported.
+**Goal**: Six records pass validation; every PR is linted.
 
-**Independent Test**: quickstart.md scenarios 1–3.
+**Independent Test**: quickstart.md scenarios 1–2.
 
 ### PR 3 — migrate records
 
-- [ ] T008 [US1] Add root `package.json` (private, no scripts) with devDependency `@adrkit/cli` pinned exactly to the version the `mbeacom/adrkit` Action release bundles, plus `package-lock.json`; add `!/package.json` and `!/package-lock.json` re-includes to `.gitignore` (global `*.json` rule); run `npm ci` and confirm `./node_modules/.bin/adr --version` matches; document `npm ci` under `CONTRIBUTING.md` "Setup" — the adrkit extension resolves `./node_modules/.bin/adr` with no env var
+- [ ] T008 [US1] Add root `package.json` (private, no scripts) with devDependency `@adrkit/cli` pinned exactly, plus `package-lock.json`; add `!/package.json` and `!/package-lock.json` re-includes to `.gitignore` (global `*.json` rule); run `npm ci` and confirm `./node_modules/.bin/adr --version` matches; document `npm ci` under `CONTRIBUTING.md` "Setup" — the adrkit extension resolves `./node_modules/.bin/adr` with no env var
 - [ ] T009 [US1] Run `./node_modules/.bin/adr migrate --from madr --dir docs/adr` on `docs/adr/0001-*.md` … `docs/adr/0006-*.md`
 - [ ] T010 [P] [US1] In each of `docs/adr/0001-*.md` … `0006-*.md` set `date` to the commit that introduced the rule (`git log --reverse -S '<rule phrase>' --format=%ad --date=short` over code and docs; not the file-add date, since 0003–0006 were added together by a docs move), `status: accepted`, `deciders: ["@Analitiq-Bot-Wonka"]` (FR-012: approving PR 3 is the ratification of these six)
-- [ ] T011 [P] [US1] Write `affects` for each of the six records per data-model.md's governed-paths rule
 - [ ] T012 [US1] Correct `docs/adr/0006-batch-coalescing-is-engine-side.md` and `docs/data-path/sql-write-path.md` §8: a fatally rejected coalesced unit fails the stream whatever the strategy (DLQ writes the unit out), while a unit that exhausts its retries is DLQ'd or skipped, matching `BatchPolicy.run` in `src/engine/batch_policy.py`
 - [ ] T013 [US1] Scope `docs/adr/0002-one-stop-rule-for-every-paging-scheme.md` explicitly to the API read path (SQL read paths stop on a short page)
 - [ ] T014 [US1] Run `./node_modules/.bin/adr lint --dir docs/adr`: exit 0, zero errors; open PR 3
@@ -75,9 +73,9 @@ Principle VI).
 ### PR 4 — CI gate
 
 - [ ] T015 [US1] On a scratch branch, break one record (remove `date`) and run `./node_modules/.bin/adr lint`: confirm exit 1 for the expected `required-field` reason; discard
-- [ ] T016 [US1] Create `.github/workflows/adr.yml` with job `name: decision records are valid` (checkout, `actions/setup-node`, `npm ci && ./node_modules/.bin/adr lint --dir docs/adr`) and a job using `mbeacom/adrkit` at the tag matching `package-lock.json` with `dir: docs/adr` and `pull-requests: write`, following the `setup-node` pattern in `.github/workflows/conversion-matrix.yml`
-- [ ] T017 [US1] Add `decision records are valid` and the adrkit Action check to `CONTRIBUTING.md` "Continuous Integration" and "Merge Requirements"; in the PR body, ask a maintainer to add both to branch protection on `main`
-- [ ] T018 [US1] Open PR 4; confirm the Action posts the governing decisions for a touched governed file (quickstart scenario 2)
+- [ ] T016 [US1] Create `.github/workflows/adr.yml` with job `name: decision records are valid` (checkout, `actions/setup-node`, `npm ci && ./node_modules/.bin/adr lint --dir docs/adr`), following the `setup-node` pattern in `.github/workflows/conversion-matrix.yml`
+- [ ] T017 [US1] Add `decision records are valid` to `CONTRIBUTING.md` "Continuous Integration" and "Merge Requirements"; in the PR body, ask a maintainer to add it to branch protection on `main`
+- [ ] T018 [US1] Open PR 4
 
 **Checkpoint**: US1 complete — SC-001 and SC-006 verifiable.
 
@@ -87,9 +85,9 @@ Principle VI).
 
 **Goal**: Rules move from 10 docs into records; hand-maintained docs drop to 2 (SC-002, SC-003).
 
-**Independent Test**: quickstart.md scenario 4 after each PR.
+**Independent Test**: quickstart.md scenario 3 after each PR.
 
-Each doc PR: write its records (data-model.md "Record catalog"; `affects` per its governed-paths rule), delete the rule text, fold the
+Each doc PR: write its records (data-model.md "Record catalog"), delete the rule text, fold the
 descriptive remainder into `docs/architecture/engine-architecture.md` or delete it, repoint
 citations, update the constitution Source lines that cite the doc (Complexity Tracking), delete the
 doc when empty. A rule already recorded by an earlier PR is only deleted, not re-recorded.
@@ -153,23 +151,23 @@ doc when empty. A rule already recorded by an earlier PR is only deleted, not re
 
 ## Phase 5: User Story 3 - Plans checked before implementation (Priority: P3)
 
-**Goal**: Planning loads and checks governing decisions; constitution gates cite records (FR-010,
-FR-011). PR 5 can land any time after PR 4, PR 5b after PR 5; PR 16 lands after PR 15.
+**Goal**: Spec, plan, tasks and code are checked around implementation; constitution gates cite
+records (FR-010, FR-011). PR 5 can land any time after PR 4, PR 5b after PR 5; PR 16 lands after PR 15.
 
-**Independent Test**: quickstart.md scenario 5.
+**Independent Test**: quickstart.md scenario 4.
 
 ### PR 5 — hooks
 
-- [ ] T042 [US3] Edit `.specify/extensions.yml`: flip adrkit's `after_plan` entry to `optional: false` in place; add `before_plan` `speckit.adrkit.context` (extension: adrkit), `before_implement` `speckit.analyze` and `after_implement` `speckit.converge` (extension: project), all `optional: false`; run `/speckit-plan` on a scratch spec and confirm both plan hooks fire (they run without paths until PR 16 adds gate (e)); open PR 5
+- [ ] T042 [US3] Edit `.specify/extensions.yml`: add `before_implement` `speckit.analyze` and `after_implement` `speckit.converge` (extension: project), both `optional: false`; run `/speckit-implement` on a scratch spec and confirm both hooks fire; open PR 5
 
 ### PR 5b — hook registry guard
 
-- [ ] T043 [US3] Write `tests/unit/test_speckit_hooks.py` asserting exactly the four entries in contracts/governance-interfaces.md; add `pyyaml` to `[tool.poetry.group.dev.dependencies]` in `pyproject.toml` (the test imports it directly; it is only present today as a transitive dev dependency) and commit the `poetry lock` diff; prove it red by running it against the pre-PR-5 file (`git show <PR5-base>:.specify/extensions.yml` into a temp path the test reads via a parameter), then green on `main`; open PR 5b
+- [ ] T043 [US3] Write `tests/unit/test_speckit_hooks.py` asserting the two entries in contracts/governance-interfaces.md and their flags; add `pyyaml` to `[tool.poetry.group.dev.dependencies]` in `pyproject.toml` (the test imports it directly; it is only present today as a transitive dev dependency) and commit the `poetry lock` diff; prove it red by running it against the pre-PR-5 file (`git show <PR5-base>:.specify/extensions.yml` into a temp path the test reads via a parameter), then green on `main`; open PR 5b
 
 ### PR 16 — constitution
 
-- [ ] T044 [US3] Amend `.specify/memory/constitution.md` via `/speckit-constitution`: every principle stating an architecture rule cites record ids; add gates (a) a plan contradicts no accepted record governing its paths, (b) superseding requires a new record in the same plan, (c) a plan choosing between real alternatives produces a draft record via `/speckit-adrkit-draft`, (d) flow-forward change model, (e) the planning agent runs `speckit.adrkit.context` on the paths the spec names and `speckit.adrkit.check` on the paths in the plan's "Source Code (repository root)" section; MINOR bump; remove the Sync Impact Report before commit; open PR 16
-- [ ] T045 [US3] On a scratch spec touching `cdk/cdk/sql/`, confirm `context` and `check` each run on those paths and name ADR 0005; then run quickstart.md scenario 5: three throwaway specs contradicting ADR 0005, ADR 0006 and N5; `/speckit-plan` flags all three naming the record (SC-005); discard the specs
+- [ ] T044 [US3] Amend `.specify/memory/constitution.md` via `/speckit-constitution`: every principle stating an architecture rule cites record ids; add gates (a) a plan contradicts no accepted record, (b) superseding requires a new record in the same plan, (c) a plan choosing between real alternatives produces a draft record via `/speckit-adrkit-draft`, (d) flow-forward change model; MINOR bump; remove the Sync Impact Report before commit; open PR 16
+- [ ] T045 [US3] Run quickstart.md scenario 4: three throwaway specs contradicting ADR 0005, ADR 0006 and N5; `/speckit-plan` flags all three naming the record (SC-005); discard the specs
 
 ---
 
@@ -190,7 +188,7 @@ FR-011). PR 5 can land any time after PR 4, PR 5b after PR 5; PR 16 lands after 
 
 ## Parallel Opportunities
 
-- T010 and T011 touch six separate files and can be split per record
+- T010 touches six separate files and can be split per record
 - PRs 5 and 5b (T042–T043) run in parallel with the US2 migration PRs
 - Within a migration PR, writing separate records is parallel; citation repointing is not (shared files)
 
@@ -202,7 +200,7 @@ Task: "Set date/status/deciders in docs/adr/0005-stage-then-merge-is-the-single-
 
 ## Implementation Strategy
 
-1. MVP = PR 1–4 (US1): valid corpus, lint gate, governing-decision comments.
-2. PR 5 makes planning load and check decisions.
+1. MVP = PR 1–4 (US1): valid corpus, lint gate.
+2. PR 5 checks spec, plan, tasks and code around implementation.
 3. PRs 6–15 drain the docs one at a time; each is independently mergeable.
 4. PR 16 closes the loop in the constitution.

@@ -16,27 +16,23 @@ or AI agent producing a spec, plan and task list), **reviewer** (human or bot re
 
 ### User Story 1 - Existing decisions are valid and enforced on every change (Priority: P1)
 
-The six existing architecture decision records are machine-readable, dated, marked accepted, and
-each declares which parts of the codebase it governs. Every PR is checked against them
-automatically, and the governance setup (constitution, decision tooling configuration) is part of
+The six existing architecture decision records are machine-readable, dated and marked accepted.
+CI validates every record on every PR, and the governance setup (constitution, decision tooling configuration) is part of
 the repository so every clone, the bot and CI see the same rules.
 
 **Why this priority**: Today the decision checks see an empty set because all six records fail
 validation, and the constitution is invisible outside one local working copy. Nothing downstream
 works until this does.
 
-**Independent Test**: Open a PR that changes a file governed by an existing decision; CI reports
-the governing decision. Open a PR that breaks a record's format; CI fails.
+**Independent Test**: Open a PR that breaks a record's format; CI fails.
 
 **Acceptance Scenarios**:
 
 1. **Given** the six existing records, **When** decision validation runs, **Then** all six pass
    with zero errors.
-2. **Given** a PR touching a path covered by a record's governed-paths list, **When** CI runs,
-   **Then** the result names that record.
-3. **Given** a PR introducing a malformed record, **When** CI runs, **Then** the required check
+2. **Given** a PR introducing a malformed record, **When** CI runs, **Then** the required check
    fails and the PR cannot merge.
-4. **Given** a fresh clone, **When** a plan author starts planning, **Then** the constitution and
+3. **Given** a fresh clone, **When** a plan author starts planning, **Then** the constitution and
    decision tooling configuration are present without any local setup.
 
 ---
@@ -67,8 +63,8 @@ every citation of it in code and error text resolves to that record.
 
 ### User Story 3 - Plans are checked against the constitution and decisions before implementation (Priority: P3)
 
-When a plan author plans a feature, the decisions governing the paths it will touch are loaded
-first; the finished plan is checked against those decisions and the constitution; a plan that
+When a plan author plans a feature, the finished plan is checked against the constitution and the
+accepted decisions; a plan that
 makes a new architecture choice produces a draft decision record for a maintainer to ratify.
 After implementation, the code is compared back to the spec, plan and tasks.
 
@@ -80,7 +76,7 @@ plan adding a second SQL write shape); the contradiction is reported before impl
 
 **Acceptance Scenarios**:
 
-1. **Given** a plan that contradicts an accepted decision governing its paths, **When** the plan
+1. **Given** a plan that contradicts an accepted decision, **When** the plan
    check runs, **Then** the contradiction is reported naming the decision.
 2. **Given** a plan that chooses between real alternatives, **When** planning completes, **Then**
    a draft decision record exists with status draft, not accepted.
@@ -93,9 +89,6 @@ plan adding a second SQL write shape); the contradiction is reported before impl
 
 ### Edge Cases
 
-- A record with an empty governed-paths list is never matched to any change. Decision validation
-  treats it as advisory, not an error, so review of each record MUST confirm the list is non-empty
-  and every pattern matches a real path.
 - A superseded record still governs historical context; plans MUST see it as superseded, not as a
   live rule and not as absent.
 - A rule in a prose doc that is not a decision (a description of how something works) stays in the
@@ -114,12 +107,11 @@ plan adding a second SQL write shape); the contradiction is reported before impl
 - **FR-001**: The governance setup (constitution and decision tooling configuration) MUST be
   version-controlled in the repository.
 - **FR-002**: Every decision record MUST carry a decision date taken from repository history, a
-  status, a non-empty list of governed paths, and `@Analitiq-Bot-Wonka` as decider.
+  status, and `@Analitiq-Bot-Wonka` as decider. A record lists no governed paths: most changes
+  (bug fixes, small improvements) are governed by no decision, and a hand-kept file list per
+  decision cannot be maintained. A decision can be forward-looking, with no code behind it yet.
 - **FR-003**: Decision-record validation MUST run as a required check on every PR and fail the PR
   on any invalid record or broken supersede/relation link.
-- **FR-004**: Every PR MUST have the decisions governing its changed files reported on it, so the
-  reviewer judges the change against them. The tooling only names governing decisions; judging a
-  departure is the reviewer's job.
 - **FR-005**: The documentation rule MUST be amended so decision records keep the decision,
   alternatives and consequences after shipping, and are superseded rather than rewritten. This
   amendment MUST land in its own PR before any record is migrated.
@@ -135,12 +127,11 @@ plan adding a second SQL write shape); the contradiction is reported before impl
   in the README is deleted in favour of the settings module. The conformance kit stays as the one
   hand-written how-to and states no rule.
 - **FR-010**: The constitution MUST cite decision records for every architecture rule, and MUST
-  gain gates that (a) a plan contradicts no accepted decision governing its paths, (b) superseding
+  gain gates that (a) a plan contradicts no accepted decision, (b) superseding
   requires a new record in the same plan, (c) a plan that chooses between real alternatives
   produces a draft record, (d) changes follow the flow-forward model (a new spec directory per
   change; durable rules live in decision records).
-- **FR-011**: The planning workflow MUST load governing decisions before planning, check the
-  finished plan against them after planning, check spec/plan/tasks against the constitution before
+- **FR-011**: The workflow MUST check spec/plan/tasks against the constitution before
   implementation, and compare code to spec/plan/tasks after implementation.
 - **FR-012**: Draft decision records MUST NOT be marked accepted by automation; ratification is a
   maintainer action. The six existing records are the exception: they record decisions already in
@@ -150,8 +141,8 @@ plan adding a second SQL write shape); the contradiction is reported before impl
 ### Key Entities
 
 - **Decision record**: one architecture decision — context, decision, alternatives considered,
-  consequences; carries id, date, status (draft/proposed/accepted/superseded/deprecated/rejected), governed
-  paths, and links to records it supersedes or relates to. Immutable once accepted.
+  consequences; carries id, date, status (draft/proposed/accepted/superseded/deprecated/rejected)
+  and links to records it supersedes or relates to. Immutable once accepted.
 - **Constitution**: the list of plan-time gates; cites decision records, never restates them.
 - **Orientation overview**: the single prose description of how components fit together; states
   no rule.
@@ -170,7 +161,7 @@ plan adding a second SQL write shape); the contradiction is reported before impl
 - **SC-004**: 0 broken citations: every reference from code and error text to a rule resolves to
   an existing decision record.
 - **SC-005**: Of 3 deliberately contradicting test plans, 3 are flagged before implementation, each
-  naming the governing decision.
+  naming the decision it contradicts.
 - **SC-006**: A fresh clone runs the planning checks with no local setup beyond installing the
   documented tools.
 
